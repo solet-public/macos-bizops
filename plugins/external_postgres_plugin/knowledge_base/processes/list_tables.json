@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::external_postgres_plugin::list_tables",
+  "display_name": "External Postgres: List Tables",
+  "description": "List the tables and views in a schema of a registered foreign Postgres connection. Requires connection_name and schema. Returns each object's name and kind (BASE TABLE, VIEW, etc.).",
+  "embedding_description": "Introspect one schema of an external/foreign Postgres database registered as a connection, returning the tables and views it contains with each object's name and kind (BASE TABLE, VIEW, MATERIALIZED VIEW, FOREIGN). The schema is passed as a bound parameter, never interpolated. This is the mid level of the read-only introspection surface for the foreign-Postgres 'super Datagrip' — call list_schemas first to pick a schema, then describe_table to see a table's columns. Requires a connection_name and a schema.",
+  "result_processor_customizations": {
+    "action_label": "Foreign Postgres tables listed",
+    "result_type": "external_postgres_list_tables_result",
+    "result_description": "Dict with a tables list of {name, kind} entries.",
+    "presentation_guidance": "List the tables and views with their kind (schema metadata, data_sensitivity 0.1). Suggest describe_table with a table to inspect its columns."
+  },
+  "error_processor_customizations": {
+    "action_context": "List the tables and views in a schema of a registered foreign Postgres connection.",
+    "error_interpretation": "external_pg.invalid_params: missing connection_name or schema. external_pg.connection_unknown: no connection registered under that name. external_pg.auth_failed / external_pg.permission_denied: the registered credential was rejected.",
+    "recovery_guidance": "external_pg.connection_unknown: run list_connections. external_pg.invalid_params: pass both connection_name and schema (use list_schemas to find a schema)."
+  }
+}

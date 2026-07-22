@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Radon maintainability-index gate, coherence-aware edition.
+
+Wraps `radon mi` with the same coherence-aware framing as the reformed
+`quality_gates/god_class_check.py`: before measuring, strips `@platform_process`-
+decorated method bodies + decorator extents + the contract-mandated
+`get_edge_process_definitions` body from the AST, so the MI gate measures
+the **non-process structural surface** rather than penalizing coherent
+plugin growth.
+
+Per `workbench/2026-05-25_plugin_god_class_remediation.md`
+§5–§6: the platform's chosen architecture is "larger plugins organized
+via submodules, bounded by coherence not method count." Textbook MI
+penalizes raw file size (radon's MI formula has a `-16.2·ln(L)` term);
+plugins that concretize use into `@platform_process` methods accumulate
+that LOC by design. The reform parallels the god-class gate.
+
+Default behavior:
+  - Replace every `@platform_process`-decorated method's body with `pass`
+    and drop its decorators (AST manipulation via `ast.unparse`).
+  - Replace `get_edge_process_definitions`'s body with `pass`.
+  - Compute MI on the rewritten source.
+
+The `--raw` flag preserves the textbook counting (no stripping) for
+diagnostic A/B comparisons.
+
+Exit codes:
+  0 — every file ranks A or B
+  2 — one or more files rank C (or worse)
+  64 — usage error (bad arguments / non-existent paths)
+
+Output: one line per file `<path> - <rank> (<value>)`. Failing files are
+also summarized to stderr.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import sys
+from pathlib import Path
+
+from radon.metrics import mi_rank, mi_visit
+
+
+def _has_platform_process_decorator(
+    method: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    """True if the method carries an `@platform_process` decorator (any form).
+
+    Matches the recognition logic in `god_class_check.py` so both gates
+    treat the same surface as platform-process veneer.
+    """
+    for dec in method.decorator_list:
+        target: ast.expr = dec.func if isinstance(dec, ast.Call) else dec
+        if isinstance(target, ast.Name) and target.id == "platform_process":
+            return True
+        if isinstance(target, ast.Attribute) and target.attr == "platform_process":
+            return True
+    return False
+
+
+def _strip_platform_process_surface(source: str) -> str:
+    """Return `source` with every @platform_process method + get_edge_process_definitions
+    body replaced by `pass` and their decorators dropped.
+
+    The rewrite preserves the class structure so radon can still measure
+    the non-process structural surface. Comments and module docstrings are
+    not preserved (`ast.unparse` rewrites from the tree), but radon's MI
+    formula does not differentiate comments from code in a way that affects
+    the result for this gate's purpose.
+    """
+    tree = ast.parse(source)
+    for cls in ast.walk(tree):
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        for stmt in cls.body:
+            if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if _has_platform_process_decorator(stmt) or stmt.name == "get_edge_process_definitions":
+                stmt.decorator_list = []
+                stmt.body = [ast.Pass()]
+    return ast.unparse(tree)
+
+
+def _measure(path: Path, raw: bool) -> tuple[float, str] | None:
+    try:
+        original = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"WARN: cannot read {path}: {exc}", file=sys.stderr)
+        return None
+    if raw:
+        source = original
+    else:
+        try:
+            source = _strip_platform_process_surface(original)
+        except SyntaxError as exc:
+            print(f"WARN: syntax error in {path}: {exc}", file=sys.stderr)
+            return None
+        except RecursionError:
+            # Vendored libraries (sympy, Cython, etc.) sometimes have deeply
+            # nested AST expressions that overflow `ast.unparse`'s recursive
+            # writer. Fall back to raw counting for those files — the
+            # @platform_process strip is irrelevant for vendored code anyway.
+            print(
+                f"WARN: AST unparse recursion exceeded on {path}; "
+                f"measuring raw source",
+                file=sys.stderr,
+            )
+            source = original
+    try:
+        mi = mi_visit(source, multi=True)
+    except SyntaxError as exc:
+        print(f"WARN: post-strip syntax error in {path}: {exc}", file=sys.stderr)
+        return None
+    return mi, mi_rank(mi)
+
+
+def _expand_targets(raw_paths: list[str]) -> list[Path]:
+    out: list[Path] = []
+    for raw in raw_paths:
+        p = Path(raw)
+        if not p.exists():
+            continue
+        if p.is_dir():
+            out.extend(sorted(p.rglob("*.py")))
+        elif p.suffix == ".py":
+            out.append(p)
+    return out
+
+
+def _load_allowlist(path: Path) -> frozenset[str]:
+    """Read a file-path allowlist file (one path per line; `#` comments).
+
+    Paths are matched as POSIX-string suffixes against the candidate
+    file's resolved path — entries can be repo-relative
+    (`plugins/foo/src/foo/plugin.py`) or absolute. The allowlist is a
+    tracked-debt register documenting files whose maintainability fix
+    is deferred (per
+    `workbench/2026-05-25_plugin_god_class_remediation.md`
+    §9.D–§9.Z + Task #74). Allowlisted findings are still printed in
+    the report but do NOT contribute to the exit-2 verdict.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"allowlist file not found: {path}")
+    paths: set[str] = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        paths.add(line)
+    return frozenset(paths)
+
+
+def _path_is_allowlisted(path: Path, allowlist: frozenset[str]) -> bool:
+    """True if `path` ends with any allowlist entry's POSIX suffix."""
+    candidate = path.as_posix()
+    return any(candidate.endswith(entry) for entry in allowlist)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "paths",
+        nargs="+",
+        help="Python files or directories to scan (recursive for dirs).",
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help=(
+            "Restore the textbook counting model: skip the @platform_process "
+            "stripping pass and measure MI on the unmodified source. Use for "
+            "diagnostic A/B comparison; the SKILL gate uses the default "
+            "coherence-aware counting."
+        ),
+    )
+    parser.add_argument(
+        "--allowlist",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a tracked-debt register file listing file paths whose "
+            "MI rank C is acknowledged + deferred (one path per line; blank "
+            "lines and `#` comments ignored). Entries are POSIX-suffix-matched "
+            "against each candidate's path. Allowlisted findings are still "
+            "printed so the gate stays honest; they just do not contribute "
+            "to the exit-2 verdict. Removing an entry from the allowlist is "
+            "the unit of remediation progress. See "
+            "`workbench/2026-05-25_plugin_god_class_remediation.md` "
+            "§9.D–§9.Z + Task #74."
+        ),
+    )
+    return parser
+
+
+def _measure_targets(
+    targets: list[Path], raw: bool, allowlist: frozenset[str],
+) -> list[tuple[Path, float, str, bool]]:
+    """Measure each target and emit per-file output; return the C+ rows."""
+    failures: list[tuple[Path, float, str, bool]] = []
+    for target in targets:
+        result = _measure(target, raw)
+        if result is None:
+            continue
+        mi, rank = result
+        is_allowlisted = _path_is_allowlisted(target, allowlist)
+        marker = " [allowlisted]" if is_allowlisted else ""
+        print(f"{target} - {rank} ({mi:.2f}){marker}")
+        if rank not in ("A", "B"):
+            failures.append((target, mi, rank, is_allowlisted))
+    return failures
+
+
+def _report_failures(
+    failures: list[tuple[Path, float, str, bool]],
+    target_count: int,
+    allowlist_active: bool,
+) -> int:
+    """Print the failure summary + per-file lines; return the exit code."""
+    total = len(failures)
+    blocking = [f for f in failures if not f[3]]
+    if allowlist_active:
+        allowlisted_count = total - len(blocking)
+        print(
+            f"\n{total} file(s) rank C or worse "
+            f"({allowlisted_count} allowlisted; {len(blocking)} still failing).",
+            file=sys.stderr,
+        )
+        for path, mi, rank, is_allowlisted in failures:
+            marker = " [allowlisted]" if is_allowlisted else ""
+            print(f"  {path} - {rank} ({mi:.2f}){marker}", file=sys.stderr)
+        return 2 if blocking else 0
+    print(
+        f"\n{total} file(s) rank C or worse across {target_count} scanned:",
+        file=sys.stderr,
+    )
+    for path, mi, rank, _is_allowlisted in failures:
+        print(f"  {path} - {rank} ({mi:.2f})", file=sys.stderr)
+    return 2
+
+
+def main(argv: list[str]) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    targets = _expand_targets(args.paths)
+    if not targets:
+        print("ERROR: no Python files to scan from given paths.", file=sys.stderr)
+        return 64
+
+    allowlist: frozenset[str] = frozenset()
+    allowlist_active = args.allowlist is not None
+    if allowlist_active:
+        try:
+            allowlist = _load_allowlist(args.allowlist)
+        except FileNotFoundError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 64
+
+    failures = _measure_targets(targets, args.raw, allowlist)
+    if not failures:
+        print(f"\nOK: {len(targets)} file(s) scanned, 0 maintainability violations.")
+        return 0
+    return _report_failures(failures, len(targets), allowlist_active)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -1,0 +1,18 @@
+#!/bin/zsh
+# launch-{{HOMUNCULUS_NAME}} — run {{HOMUNCULUS_NAME}} in the FOREGROUND.
+#
+# This is the debugging path. Normal operation is the LaunchAgent
+# (label: local.homunculus.{{HOMUNCULUS_NAME}}), which starts the homunculus
+# at login and restarts it on failure. To avoid running two instances,
+# stop the LaunchAgent first:
+#   launchctl unload -w ~/Library/LaunchAgents/local.homunculus.{{HOMUNCULUS_NAME}}.plist
+# and re-enable it when done:
+#   launchctl load -w ~/Library/LaunchAgents/local.homunculus.{{HOMUNCULUS_NAME}}.plist
+#
+# After any start, wait for startup to finish before sending queries: poll the
+# newest log under {{CLONE_DIR}}/profile/data/logs/ with
+#   wc -l <logfile> && sleep 5 && wc -l <logfile>
+# and proceed only when the two counts match.
+
+exec env HOMUNCULUS_NAME={{HOMUNCULUS_NAME}} \
+  "{{CLONE_DIR}}/.venv/bin/python3" -m ananta.cli --app-home "{{CLONE_DIR}}/profile"

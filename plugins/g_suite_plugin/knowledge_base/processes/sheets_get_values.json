@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::sheets_get_values",
+  "display_name": "Sheets: Get Values",
+  "description": "Read a cell range (A1 notation, e.g. 'Sheet1!A1:C10') from a spreadsheet as a 2D grid of values. Requires a connected account.",
+  "embedding_description": "Read cell values out of an existing Google Sheets spreadsheet by spreadsheet id and an A1-notation range (for example 'Sheet1!A1:C10' or a bare 'Sheet1' for the whole tab). Returns a 2D grid (list of row lists) exactly as Sheets returns it — empty trailing cells are omitted per Google's convention. This is the read counterpart to sheets_update_values/sheets_append_values. Fails gsuite.not_found if the spreadsheet id does not exist.",
+  "result_processor_customizations": {
+    "action_label": "Spreadsheet values read",
+    "result_type": "g_suite_sheets_get_values_result",
+    "result_description": "Dict with a values 2D grid (list of row lists).",
+    "presentation_guidance": "Summarize the shape of the data (rows/columns) and show a few sample rows. Cell contents may be sensitive corporate data — treat as moderately sensitive."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read a cell range from a Google Sheets spreadsheet.",
+    "error_interpretation": "gsuite.invalid_params: missing id or range. gsuite.not_found: the spreadsheet id or range's sheet name does not exist. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: supply both id and an A1-notation range. gsuite.not_found: verify the spreadsheet id and sheet/tab name. gsuite.not_connected: run connect_account."
+  }
+}

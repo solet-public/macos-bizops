@@ -1,0 +1,18 @@
+{
+  "process_key": "service_interface::scheduling_service::create_cron_schedule",
+  "display_name": "Create Cron Schedule",
+  "description": "Create a recurring wake-up schedule using a cron expression (UTC), keyed by a memory tag (memory_tag). Useful for periodic check-ins, heartbeats, monitoring ticks, and recurring reminders. Stash the follow-up context as a memory tagged with memory_tag, create a cron wake-up, then decide what to do on each run when the wake-up fires.\n\nFor platform liveness, a common pattern is a global heartbeat schedule (for example: tag=heartbeat:global, memory_tag=heartbeat:global). When present, the assistant can rely on periodic wake-ups to send check-ins, monitor long-running jobs, and detect stuck work.",
+  "embedding_description": "Create a recurring wake-up on a cron cadence using memory_tag. Use for heartbeats, periodic monitoring, recurring reminders, and always-on ticks (including a global heartbeat like heartbeat:global). Store follow-up context as a memory tagged with memory_tag; each run retrieves the tagged memory and the model decides what to do. Cancel via clear_scheduled_actions_by_tag.",
+  "result_processor_customizations": {
+    "action_label": "Cron Schedule Created",
+    "result_type": "schedule_created",
+    "result_description": "Confirmation of recurring cron schedule creation with schedule_id and next execution time",
+    "presentation_guidance": "",
+    "output_action_guidance": "A recurring schedule has been created. If this is a user-facing check-in/heartbeat, consider telling the requester what cadence to expect. Retain the schedule_id or tags so you can cancel the schedule once it is no longer needed."
+  },
+  "error_processor_customizations": {
+    "action_context": "Creating a recurring wake-up schedule keyed by memory_tag",
+    "error_interpretation": "ValidationError with 'cron_expression': invalid cron syntax or format. ValidationError with 'memory_tag': memory_tag is missing or invalid. SchedulerError: scheduling service unavailable or failed to register schedule.",
+    "recovery_guidance": "For cron syntax errors: verify cron expression format (minute hour day month weekday). For memory_tag errors: provide a non-empty memory_tag and ensure the follow-up memory is tagged with it. For scheduler errors: verify the scheduling service is running."
+  }
+}

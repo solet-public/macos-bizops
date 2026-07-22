@@ -1,0 +1,90 @@
+# {{HOMUNCULUS_NAME}} — project instructions
+
+This clone is the home of **{{HOMUNCULUS_NAME}}**, a homunculus on the Ananta
+platform: a named, persistent agentic instance with its own PostgreSQL schema,
+memories, knowledge bases, and plugins. You — the Claude Code session reading
+this — are its driving agent. This file governs every session opened in this
+directory.
+
+## 🔍 Step Zero — search the knowledge base first
+
+**Pre-boot exception:** until {{HOMUNCULUS_NAME}}'s MCP bridge is registered
+(the final hydration step — `claude mcp add`), the `mcp__{{HOMUNCULUS_NAME}}__*`
+tools do not exist in your session. In that state, work directly from the
+files in this clone and skip everything in this section; nothing here is
+possible yet, and that is expected, not an error.
+
+Once the bridge is up: before responding to any question or starting any
+non-trivial task, your first tool call is a knowledge-base search:
+
+- `mcp__{{HOMUNCULUS_NAME}}__process_call` with
+  `process_key: service_interface::knowledge_service::search` and
+  `arguments: {"query": "<plain-English description>", "top_k": 8}`,
+  then read the result via `mcp__{{HOMUNCULUS_NAME}}__process_result`.
+
+The platform ships canonical articles on how things are supposed to work —
+plugin architecture, credential storage, memory vs. knowledge, scheduling.
+Building on assumptions when the canonical answer exists produces drift.
+If a search returns nothing relevant, that is information too: confirm the
+gap before inventing a pattern, and add an article documenting what you
+ended up with.
+
+Two carve-outs only: locating a specific known code symbol or file in this
+repo (use grep directly), and questions about what happened / what was
+decided / current status (ask {{HOMUNCULUS_NAME}} first — it is the stateful
+collaborator; raw log inspection is the fallback).
+
+## Startup discipline
+
+After any restart of {{HOMUNCULUS_NAME}} (LaunchAgent reload or foreground
+launch), WAIT for startup to complete before submitting queries: poll the
+newest log under `profile/data/logs/` with
+`wc -l <logfile> && sleep 5 && wc -l <logfile>` and proceed only when the two
+counts match. Querying during startup competes with the embedding rebuild and
+causes inference timeouts.
+
+## Running {{HOMUNCULUS_NAME}}
+
+- Normal mode: the LaunchAgent `local.homunculus.{{HOMUNCULUS_NAME}}` (starts
+  at login, restarts on failure). Stop/start with
+  `launchctl unload -w` / `launchctl load -w` on
+  `~/Library/LaunchAgents/local.homunculus.{{HOMUNCULUS_NAME}}.plist`.
+- Foreground (debugging): `{{CLONE_DIR}}/client/bin/launch-{{HOMUNCULUS_NAME}}`
+  (stop the LaunchAgent first — never run two instances).
+- Named Claude session: `{{CLONE_DIR}}/client/bin/claude-{{HOMUNCULUS_NAME}}`
+  (on PATH if you accepted the shell setup). The launcher never bypasses your
+  tool-permission prompts, by design. The session name it sets shows up in
+  {{HOMUNCULUS_NAME}}'s peer registry (the homunculus's directory of currently
+  connected sessions) so messages can be routed to you by name.
+
+## What to expect from messaging
+
+Messages from {{HOMUNCULUS_NAME}} (scheduled work, peer messages) surface when
+you next interact with a session — not as live interruptions. That is the
+designed behavior, not a bug.
+
+## Governance and the owner relationship
+
+The knowledge base ships a governance set for working with your owner. The
+first-days runbook covers establishing the relationship after hydration; the
+charter template holds what a homunculus is plus the blanks your owner fills;
+the operator decision-brief convention is the mandatory plain-language format
+for anything that asks your owner to decide; and the collaboration-craft
+article distills the working conventions. Find them via Step Zero: search
+"first days owner onboarding", "homunculus charter template", "operator
+decision brief", or "operator collaboration craft".
+
+## Development standards (if you extend the platform)
+
+Python 3.13, full type hints. Fail fast and loudly — no silent fallbacks, no
+defensive layers over broken root causes, no backwards-compatibility shims.
+Prefer an existing library over a hand-rolled implementation. Leave code
+better than you found it. Database access goes through the
+`StateManagementInterface` primitives — never raw SQL from feature code.
+
+## Reference
+
+The genesis ladder that created this homunculus, and the hydration runbook
+that generated this file and the `client/` tooling, live in the knowledge
+base — search "genesis bootstrap ladder" or "hydration operator environment
+setup" via Step Zero above.

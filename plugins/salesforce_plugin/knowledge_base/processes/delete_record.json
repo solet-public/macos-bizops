@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::salesforce_plugin::delete_record",
+  "display_name": "Salesforce: Delete Record",
+  "description": "Permanently delete a record by sobject + id. This is a destructive write action taking an EXPLICIT target — sobject and id are required and there is no bulk form.",
+  "embedding_description": "Delete a single Salesforce record by its object type and id (e.g. remove a Contact or Opportunity). Record deletion is an acceptable-loss class on this connector, unlike database destruction elsewhere in the platform — still a real destructive write, use deliberately. Requires sobject and id.",
+  "result_processor_customizations": {
+    "action_label": "Salesforce record deleted",
+    "result_type": "salesforce_delete_record_result",
+    "result_description": "Dict with success (bool).",
+    "presentation_guidance": "Confirm the deletion; low sensitivity (flag only, data_sensitivity 0.0)."
+  },
+  "error_processor_customizations": {
+    "action_context": "Delete a Salesforce record.",
+    "error_interpretation": "sf.invalid_params: missing sobject or id. sf.not_found: no record with that id exists. sf.permission_denied: the CLI's authenticated user cannot delete this record.",
+    "recovery_guidance": "sf.not_found: verify the id and sobject via soql_query or get_record before retrying. sf.permission_denied: ask the operator to check delete permission for this object."
+  }
+}

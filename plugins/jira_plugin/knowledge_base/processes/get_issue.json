@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::jira_plugin::get_issue",
+  "display_name": "Jira: Get Issue",
+  "description": "Fetch one Jira issue by key: summary, plain-text description, status, assignee, reporter, labels, and attachment metadata (not the attachment bytes). Read action.",
+  "embedding_description": "Retrieve the full detail of a single known Jira issue given its key (e.g. PROJ-123): the one-line summary, the plain-text description body, current workflow status, assignee and reporter display names, labels, and the list of attachment metadata (id, filename, mime type, size) — not the attachment bytes themselves, which download_attachment fetches. Use jql_search to find issue keys first when you don't know one. Distinct from jql_search (many issues, trimmed rows) and list_comments (the issue's comment thread).",
+  "result_processor_customizations": {
+    "action_label": "Jira issue fetched",
+    "result_type": "jira_get_issue_result",
+    "result_description": "One issue's summary, description, status, people, labels, and attachment metadata.",
+    "presentation_guidance": "Summarize the issue's status and key fields. The description body is free-text corporate content (sensitivity 0.6) and assignee/reporter are names (0.3) — surface for the caller but not as public content."
+  },
+  "error_processor_customizations": {
+    "action_context": "Fetch one Jira issue by key.",
+    "error_interpretation": "jira.not_found: no issue with that key exists (or the account cannot see it). jira.permission_denied: the service account lacks browse permission. jira.auth_failed: invalid/expired token. jira.invalid_params: the key argument was missing or empty.",
+    "recovery_guidance": "jira.not_found: verify the issue key (jql_search can locate it). jira.permission_denied: grant the service account project access. jira.auth_failed: rotate the API token per the overview runbook."
+  }
+}

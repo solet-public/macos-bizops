@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::external_postgres_plugin::describe_table",
+  "display_name": "External Postgres: Describe Table",
+  "description": "Describe a table's columns in a registered foreign Postgres connection: name, data type, nullability, and default. Requires connection_name, schema, and table.",
+  "embedding_description": "Introspect the column structure of one table in an external/foreign Postgres database registered as a connection, returning each column's name, data type, whether it is nullable, and its default expression, in ordinal order. Schema and table are passed as bound parameters, never interpolated. This is the leaf level of the read-only introspection surface for the foreign-Postgres 'super Datagrip' — call list_schemas then list_tables to locate a table, then this verb to learn its shape before writing a run_query SELECT. Requires a connection_name, schema, and table.",
+  "result_processor_customizations": {
+    "action_label": "Foreign Postgres table described",
+    "result_type": "external_postgres_describe_table_result",
+    "result_description": "Dict with a columns list of {name, type, nullable, default} entries in ordinal order.",
+    "presentation_guidance": "Present the columns as a compact type list (schema metadata, data_sensitivity 0.1). Use it to help compose a run_query SELECT against the table."
+  },
+  "error_processor_customizations": {
+    "action_context": "Describe a table's columns in a registered foreign Postgres connection.",
+    "error_interpretation": "external_pg.invalid_params: missing connection_name, schema, or table. external_pg.connection_unknown: no connection registered under that name. external_pg.auth_failed / external_pg.permission_denied: the registered credential was rejected. An empty columns list means the schema.table does not exist or is not visible to the connection's role.",
+    "recovery_guidance": "external_pg.connection_unknown: run list_connections. Empty result: verify the schema/table with list_tables. external_pg.invalid_params: pass connection_name, schema, and table."
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::default_blob_storage_plugin::get_blob_metadata",
+  "display_name": "Get Blob Metadata",
+  "description": "Retrieve only metadata for a blob without downloading content. Useful for checking properties.",
+  "embedding_description": "Retrieve only metadata for a blob without downloading content. Use to check size, mime type, filenames, or custom tags before retrieval. Provide namespace and blob_id and receive metadata without transferring content bytes.",
+  "result_processor_customizations": {
+    "action_label": "Blob Metadata Retrieved",
+    "result_type": "metadata_retrieved",
+    "result_description": "Blob metadata including size, type, and custom attributes",
+    "presentation_guidance": "",
+    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+  },
+  "error_processor_customizations": {
+    "action_context": "Retrieving metadata for a blob without downloading content",
+    "error_interpretation": "NotFoundError: Blob with given ID does not exist. StorageError: Failed to read metadata from filesystem. PermissionError: Insufficient permissions to read from storage.",
+    "recovery_guidance": "For not found: verify blob_id is correct and blob exists. For storage errors: check filesystem health. For permission errors: verify storage directory permissions."
+  }
+}

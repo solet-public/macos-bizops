@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::data_query",
+  "display_name": "Zuora: Data Query",
+  "description": "Run a ZOQL query against the configured Zuora tenant and return matching records. Returns records inline (up to max_rows, default 200, capped 1000) or a result_blob_key when the result is large.",
+  "embedding_description": "Execute an ad-hoc ZOQL query against the operator's Zuora billing tenant (accounts, subscriptions, invoices, payments, products) and return the matching records, either inline or spilled to blob storage as a result_blob_key when the result is large. Use get_object/list_subscriptions/list_invoices for typed reads, test_connection to verify reachability.",
+  "result_processor_customizations": {
+    "action_label": "Zuora Data Query run",
+    "result_type": "zuora_data_query_result",
+    "result_description": "Dict with records (a list of field-value dicts) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when the result is large.",
+    "presentation_guidance": "Summarize the row_count and show a few records. Record data and any result_blob_key reference sensitive billing/financial data (data_sensitivity 0.5) — surface for downstream use but never treat as public."
+  },
+  "error_processor_customizations": {
+    "action_context": "Run a ZOQL query against the configured Zuora tenant.",
+    "error_interpretation": "zuora.invalid_params: missing or empty zoql. zuora.query_failed: the ZOQL is invalid or references an unknown object/field. zuora.auth_failed: the OAuth client credentials were rejected. zuora.rate_limited: the tenant's API rate limit was exceeded.",
+    "recovery_guidance": "zuora.query_failed: check the ZOQL syntax and object/field names. zuora.rate_limited: retry after a short delay. zuora.auth_failed: ask the operator to check the OAuth client_id/client_secret."
+  }
+}

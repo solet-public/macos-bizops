@@ -1,0 +1,33 @@
+#!/bin/zsh
+# claude-{{HOMUNCULUS_NAME}} — start a properly-named Claude Code session
+# connected to {{HOMUNCULUS_NAME}}.
+#
+# Usage: claude-{{HOMUNCULUS_NAME}} [label] [model] [effort]
+#   label   session name shown in Claude Code and in {{HOMUNCULUS_NAME}}'s
+#           peer registry (default: Operator)
+#   model   optional Claude model alias; empty = your settings default
+#   effort  optional effort level; empty = your settings default
+#
+# Works standalone by absolute path — no shell integration required.
+#
+# INVARIANT (do not edit this away): this launcher never passes
+# --dangerously-skip-permissions. Your tool-approval flow is the safety
+# boundary between the agent and your machine.
+
+label="${1:-Operator}"
+model="$2"
+effort="$3"
+
+cd "{{CLONE_DIR}}" || exit 1
+
+typeset -a extra_flags
+[[ -n "$model" ]]  && extra_flags+=(--model "$model")
+[[ -n "$effort" ]] && extra_flags+=(--effort "$effort")
+
+# Session label: read by the MCP bridge for peer-registry identity and by the
+# SessionStart hook in .claude/settings.json for the role re-claim.
+# Session id: stable for this whole process tree, so the role binding
+# re-points to this same session across MCP reconnects instead of going stale.
+HOMUNCULUS_AGENT_SESSION_LABEL="$label" \
+HOMUNCULUS_AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
+exec claude --name "$label" "${extra_flags[@]}"

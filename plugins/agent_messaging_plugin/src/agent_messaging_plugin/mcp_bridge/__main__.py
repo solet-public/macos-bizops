@@ -1,0 +1,935 @@
+# pyright: reportUnusedFunction=false
+"""Entry point for the Python MCP stdio bridge subprocess.
+
+Launched by MCP clients via:
+
+    [mcp_servers.<name>]
+    command = "/path/to/<name>/.venv/bin/python3"
+    args    = ["-m", "agent_messaging_plugin.mcp_bridge"]
+
+    [mcp_servers.<name>.env]
+    HOMUNCULUS_NAME = "<homunculus>"
+
+Discovers the homunculus HTTP API via the runtime port file
+(`~/.ananta/runtime/{homunculus_name}.bridge.port`), opens a bridge
+session, registers peer identity, and runs the MCP stdio server loop.
+The poll loop forwards bridge events as `notifications/claude/channel`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import os
+import secrets
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Final
+
+from ananta.core.runtime.port_manager import read_port_file
+from mcp.server.lowlevel import NotificationOptions, Server
+from mcp.server.models import InitializationOptions
+from mcp.server.stdio import stdio_server
+from mcp.types import TextContent, Tool
+
+from .forwarder import Forwarder
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+SERVER_NAME: Final[str] = "homunculus"
+SERVER_VERSION: Final[str] = "1.0.0"
+BRIDGE_SERVICE_NAME: Final[str] = "bridge"
+DEFAULT_AGENT_ID: Final[str] = "claude_code"
+PORT_DISCOVERY_RETRY_S: Final[float] = 2.0
+
+HOMUNCULUS_AGENT_IDENTITY_ENV: Final[str] = "HOMUNCULUS_AGENT_IDENTITY"
+HOMUNCULUS_AGENT_INSTANCE_ID_ENV: Final[str] = "HOMUNCULUS_AGENT_INSTANCE_ID"
+HOMUNCULUS_AGENT_SESSION_LABEL_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_LABEL"
+HOMUNCULUS_AGENT_SESSION_ID_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_ID"
+
+# Discriminator for the Codex agent kind. A Codex session spawns the bridge as
+# its child, so CODEX_THREAD_ID is inherited.
+CODEX_AGENT_ID: Final[str] = "codex"
+
+# Per-agent-kind ordered carriers for the stable logical-session key
+# (`agent_session_id`), highest precedence first. Resolution is keyed on the
+# bridge's agent_id so one agent kind can NEVER adopt another's session id:
+# `refresh_role_binding_cas` re-points roles filtered on `agent_session_id`
+# ALONE, so a bridge nested under a foreign-kind parent that inherited the
+# parent's carrier would re-point the WRONG session's roles (the hazard is
+# bidirectional). A Codex bridge prefers its own `CODEX_THREAD_ID` —
+# authoritative, definitionally this Codex conversation and never stale for a
+# Codex child — then an exported `HOMUNCULUS_AGENT_SESSION_ID`. EVERY OTHER kind
+# uses `HOMUNCULUS_AGENT_SESSION_ID` only and NEVER adopts `CODEX_THREAD_ID`.
+# Unknown agent_ids take the default (non-codex) chain. All-absent → ""
+# preserves the degraded, self-refresh-disabled binding.
+SESSION_ID_ENV_VARS_BY_AGENT: Final[dict[str, tuple[str, ...]]] = {
+    CODEX_AGENT_ID: (
+        "CODEX_THREAD_ID",
+        HOMUNCULUS_AGENT_SESSION_ID_ENV,
+    ),
+}
+DEFAULT_SESSION_ID_ENV_VARS: Final[tuple[str, ...]] = (
+    HOMUNCULUS_AGENT_SESSION_ID_ENV,
+)
+
+SERVER_INSTRUCTIONS: Final[str] = "\n".join(
+    [
+        "Homunculus platform bridge. Use the homunculus as the primary collaborator for active work.",
+        "",
+        "Two surfaces are exposed:",
+        "",
+        "== Platform-call surface ==",
+        "",
+        "The homunculus sends messages back as channel notifications tagged with",
+        '   source "homunculus". These appear as <channel> elements.',
+        "",
+        "Ask the homunculus first for questions about current work, status, blockers,",
+        "decisions, plan changes, or what happened in the active session.",
+        "Use raw DB/log/file inspection for debugging,",
+        "evidence gathering, or discrepancy verification.",
+        "",
+        "Direct process tools (process_search/_schema/_call/_result) let you",
+        "invoke registered homunculus processes without going through inference. Use",
+        "them when you already know which process you want.",
+        "",
+        "== Backend dispatch (agent_thread_open / agent_send) ==",
+        "",
+        "Open a thread with agent_thread_open(backend, ...). Send messages",
+        "with agent_send(thread_id, content). Each send dispatches one",
+        "backend turn asynchronously. Listen for bridge_delivery_result",
+        "channel notifications carrying a structured run_turn payload —",
+        "payload.status in {idle, interrupted, error} discriminates;",
+        "payload.error.code is a stable token on the error path. Read",
+        "history with agent_messages; check live state with agent_status;",
+        "close with agent_close. Bridge-bound: only this MCP session can",
+        "address threads opened through it.",
+        "",
+        "== Peer messaging (peer_send / peer_inbox) ==",
+        "",
+        "Talk to other LIVE MCP-connected agents (humans, Codex, Claude,",
+        "whatever is registered in peer_list). Two delivery modes, gated",
+        "by an explicit marker in the prose:",
+        "",
+        '  - peer_send with prose starting "IMPORTANT" (followed by ":"',
+        "    or whitespace) -> notification fires on the receiver. The",
+        "    marker is stripped before delivery. Use ONLY when you",
+        "    genuinely need the receiver to act: questions, requests,",
+        "    corrections, things that move work forward.",
+        "",
+        "  - peer_send WITHOUT the IMPORTANT marker -> message is",
+        "    persisted in the thread but no notification fires. The",
+        '    receiver only sees it via peer_inbox. Use for FYI updates,',
+        '    acknowledgements, "got it" / "thanks" / wrap-ups, and any',
+        "    message where a reply would not add value.",
+        "",
+        "When you receive a peer_message notification, the sender used",
+        "IMPORTANT. Reply with substance, or stay silent if a reply adds",
+        "no value (silence is allowed even on IMPORTANT messages). Do",
+        'NOT reply with acknowledgements, thanks, or "got it" -- those',
+        "create loops.",
+        "",
+        "Current limits: text-only channel, no attachments on direct calls,",
+        "and reconnect may require briefly restating context if the prior",
+        "bridge session was lost.",
+    ],
+)
+
+# Tool descriptors. Descriptions are lifted from the Node bridges
+# (claude_code_channel/mcp/server.mjs and agent_channel/mcp/server.mjs)
+# verbatim where possible -- they are model-facing and have been tuned.
+
+TOOLS: Final[list[Tool]] = [
+    Tool(
+        name="current_identity",
+        description=(
+            "Return identity and routing metadata for the current MCP session, "
+            "including transport, homunculus_name, agent_id, "
+            "agent_instance_id, agent_session_id, session_label, bridge_id, "
+            "mcp_session_id, roles_held, and identity_trust. Use this to "
+            "answer 'who am I?' or verify routing before peer_register, "
+            "peer_claim_role, peer_send, or Streamable HTTP peer receive work. "
+            "Returns no secrets."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="download",
+        description="Download a blob from homunculus storage to a local file path.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "blob_id": {
+                    "type": "string",
+                    "description": 'Blob ID to download (e.g., "bmd-abc123def456").',
+                },
+                "output_path": {
+                    "type": "string",
+                    "description": "Local file path to write the downloaded file to.",
+                },
+            },
+            "required": ["blob_id", "output_path"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="process_search",
+        description=(
+            "Search the homunculus process registry for processes matching a "
+            "natural-language query."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Natural-language search query."},
+                "max_results": {"type": "integer", "default": 10},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="process_schema",
+        description=(
+            "Retrieve the invocation schema for a single homunculus process by "
+            "its process_key."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "process_key": {
+                    "type": "string",
+                    "description": "provider_type::provider::function_name",
+                },
+            },
+            "required": ["process_key"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="process_call",
+        description=(
+            "Direct invocation of a homunculus process by process_key.  Zero "
+            "inference, deterministic, fast.  THE PREFERRED entry point "
+            "for any known process — knowledge base searches "
+            "(service_interface::knowledge_service::search), memory "
+            "recall (service_interface::memory_service::recall), plugin "
+            "tools (plugin::<plugin>::<function>), everything.  Returns "
+            "action_id + flow_id immediately; the result arrives as a "
+            "bridge_delivery_result channel notification — do not poll.  "
+            "Use process_search first if you don't know the process_key "
+            "and process_schema to confirm the argument shape."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "process_key": {"type": "string"},
+                "arguments": {"type": "object"},
+                "reason": {"type": "string"},
+            },
+            "required": ["process_key", "arguments"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="process_result",
+        description=(
+            "Snapshot read of an action_id's current observable state "
+            "(status, error_message, latest stored raw result row if "
+            "any). This is for diagnostics -- completion is delivered "
+            "via channel notifications, not by polling here."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action_id": {"type": "string"},
+            },
+            "required": ["action_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="agent_thread_open",
+        description=(
+            "Open a durable inter-agent thread targeting a backend "
+            "(codex|claude_code). Optionally include initial_message to "
+            "dispatch a first turn immediately. Returns thread_id + (if "
+            "initial_message) message_id/action_id/flow_id. Async -- turn "
+            "results arrive as bridge_delivery_result channel notifications."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "backend": {
+                    "type": "string",
+                    "enum": ["codex", "claude_code"],
+                    "description": "Backend that owns the thread.",
+                },
+                "working_directory": {
+                    "type": "string",
+                    "description": (
+                        "Filesystem root for the backend; must be inside "
+                        "allowed_working_directory_roots if configured."
+                    ),
+                },
+                "title": {"type": "string", "description": "Optional short label."},
+                "context": {
+                    "type": "object",
+                    "description": "Optional context passed to the backend.",
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "additionalProperties": False,
+                },
+                "initial_message": {
+                    "type": "object",
+                    "description": (
+                        "Optional first message; if present the thread is "
+                        "dispatched immediately."
+                    ),
+                    "properties": {
+                        "content": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string", "enum": ["text"]},
+                                    "text": {"type": "string"},
+                                },
+                                "required": ["type", "text"],
+                                "additionalProperties": False,
+                            },
+                            "minItems": 1,
+                        },
+                        "response_mode": {"type": "string", "enum": ["async"]},
+                        "timeout_seconds": {"type": "integer", "minimum": 1},
+                    },
+                    "required": ["content"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["backend"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="agent_send",
+        description=(
+            "Append a follow-up message to an existing thread and dispatch "
+            "the next turn. Async -- completion arrives as a "
+            "bridge_delivery_result notification with the structured "
+            "payload (payload.status discriminates idle/interrupted/error)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "thread_id": {"type": "string"},
+                "content": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["text"]},
+                            "text": {"type": "string"},
+                        },
+                        "required": ["type", "text"],
+                        "additionalProperties": False,
+                    },
+                    "minItems": 1,
+                },
+                "response_mode": {"type": "string", "enum": ["async"]},
+                "timeout_seconds": {"type": "integer", "minimum": 1},
+            },
+            "required": ["thread_id", "content"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="agent_messages",
+        description=(
+            "Read messages from a thread using cursor pagination. Returns "
+            "messages with cursor strictly greater than after_cursor, "
+            "ordered ascending."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "thread_id": {"type": "string"},
+                "after_cursor": {"type": "integer", "minimum": 0, "default": 0},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 50,
+                },
+            },
+            "required": ["thread_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="agent_status",
+        description=(
+            "Snapshot read of a thread: status "
+            "(open|queued|running|idle|interrupted|error|closed), backend, "
+            "last cursor, active_action_id/active_flow_id if a turn is in "
+            "flight."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"thread_id": {"type": "string"}},
+            "required": ["thread_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="agent_close",
+        description=(
+            "Close a thread terminally. Refuses (HTTP 409 "
+            "agent_thread_running) if the thread has an active turn -- "
+            "wait for it to land or for agent_interrupt support to ship."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"thread_id": {"type": "string"}},
+            "required": ["thread_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="peer_register",
+        description="\n".join(
+            [
+                "Register or relabel this MCP session in the peer registry.",
+                "",
+                "Auto-registration: each transport registers this MCP session",
+                "when it opens. Stdio uses $HOMUNCULUS_AGENT_IDENTITY when set and",
+                "otherwise generates a durable agent_instance_id; Streamable",
+                "HTTP uses the bearer-token claim. Call this tool manually",
+                "only to change agent_id or session_label; the durable",
+                "agent_instance_id stays the same so the registry replaces",
+                "(not duplicates) the existing binding for this session.",
+                "",
+                "session_label is purely a human-facing display field (peer_list,",
+                "envelope text). It is never used as a routing key.",
+                "For identity introspection, use current_identity.",
+            ],
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": (
+                        'Stable handle (e.g. "claude_code", "codex"); regex '
+                        "[A-Za-z0-9._-]{1,64}."
+                    ),
+                },
+                "session_label": {
+                    "type": "string",
+                    "description": (
+                        'Optional human label for this session ("codex on '
+                        'baroque-suite"). Defaults to the auto-inferred label.'
+                    ),
+                },
+            },
+            "required": ["agent_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="peer_list",
+        description="\n".join(
+            [
+                "List currently-registered agent_ids (across all live bridges).",
+                "",
+                "Each instance entry carries agent_instance_id, session_label,",
+                "parent_pid, created_at, and updated_at (all ISO-8601 UTC).",
+                "created_at is the timestamp the bridge connected.",
+                "updated_at advances on every dispatch operation (peer_send,",
+                "peer_inbox, native wake) — it carries 'last active'",
+                "semantics, so the newest updated_at points at the most",
+                "recently active instance when multiple are registered",
+                "concurrently.",
+                "",
+                "registered_at is also present as a deprecated alias for",
+                "created_at; new code should read created_at + updated_at.",
+            ]
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="peer_send",
+        description="\n".join(
+            [
+                "Send a peer message to another live MCP session.",
+                "",
+                "Addressing -- multi-instance:",
+                '  peer_id is the stable agent kind (e.g., "claude_code", "codex").',
+                "  Multiple instances of the same agent_id can be registered",
+                "  concurrently. peer_agent_instance_id picks a specific one:",
+                "    - omit when only one instance of peer_id is registered",
+                "      (single-binding default); the call delivers to it.",
+                "    - supply when multiple are registered; otherwise the call",
+                "      fails with peer_ambiguous, listing the candidate",
+                "      instance_ids and session_labels.",
+                "  Discover candidates via peer_list. For replies, take the",
+                "  sender_agent_instance_id from the inbox entry or the",
+                "  peer_message notification meta and pass it as",
+                "  peer_agent_instance_id here.",
+                "",
+                "Loop-prevention contract:",
+                "  Messages are ALWAYS persisted in the (sender_bridge, peer_instance)",
+                "  agent_thread. They only fire a notification on the receiver if the",
+                '  prose begins with the marker "IMPORTANT" (case-sensitive, followed',
+                '  by ":" or whitespace). The marker is stripped before delivery.',
+                "",
+                "  - With IMPORTANT marker -> notification fires. Claude Code wakes",
+                "    through its registered native adapter; locally patched Codex",
+                "    wakes through notifications/homunculus/peer_message. Use ONLY when",
+                "    you genuinely need a response.",
+                "  - Without marker -> silent persistence. The receiver only sees the",
+                "    message if they explicitly call peer_inbox. Use for acks, status",
+                "    updates, FYI notes -- anything that does not require a response.",
+                "",
+                "Forgetting the marker on a real question means the receiver never sees",
+                "it -- you will need to resend with the marker. That is by design: it",
+                'forces conscious "I want a response" choices and breaks ack loops.',
+                "",
+                "Fails (HTTP 400) if the peer is not currently registered, the",
+                "peer_id is ambiguous without an instance hint (peer_ambiguous),",
+                "or the supplied peer_agent_instance_id has no matching binding",
+                "(peer_unreachable).",
+            ],
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "peer_id": {
+                    "type": "string",
+                    "description": "Target agent_id (must be currently registered).",
+                },
+                "peer_agent_instance_id": {
+                    "type": "string",
+                    "description": (
+                        "Specific instance to address when multiple instances "
+                        "of peer_id are registered. Omit when only one "
+                        "instance exists."
+                    ),
+                },
+                "content": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["text"]},
+                            "text": {"type": "string"},
+                        },
+                        "required": ["type", "text"],
+                        "additionalProperties": False,
+                    },
+                    "minItems": 1,
+                },
+            },
+            "required": ["peer_id", "content"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="peer_inbox",
+        description="\n".join(
+            [
+                "Pull peer messages addressed to your agent_id.",
+                "",
+                "Default behavior: return only messages that were persisted",
+                "silently (no IMPORTANT marker, so no notification fired).",
+                "IMPORTANT-marked messages are excluded by default because they",
+                "already woke the receiver via notification at delivery time;",
+                "re-listing them here would be noise.",
+                "",
+                "Set include_important=true to also return messages whose sender",
+                "used the IMPORTANT marker. Useful when your MCP client did NOT",
+                "auto-surface the live notification between turns and you need to",
+                "catch up on requests-for-action you may have missed.",
+                "",
+                "Spans every peer thread targeting you, regardless of which bridge owns",
+                "the thread. Pagination uses after (ISO-8601 timestamp); pass the previous",
+                "page's next_after_created_at back to read incrementally.",
+                "",
+                "Reading the inbox does NOT obligate you to reply.",
+            ],
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "after": {
+                    "type": "string",
+                    "description": "ISO-8601 high-water mark; omit for full inbox.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 50,
+                },
+                "include_important": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When true, also return messages whose sender used "
+                        "the IMPORTANT marker (otherwise excluded as "
+                        "already-notified). For the role section this is the "
+                        "catch-up view: already-delivered IMPORTANT role "
+                        "messages resurface."
+                    ),
+                },
+                "role_after": {
+                    "type": "string",
+                    "description": (
+                        "Opaque cursor for the role_entries section (messages "
+                        "addressed to a role you hold). Echo back the previous "
+                        "page's next_role_cursor verbatim; omit for the first "
+                        "page. Distinct from 'after' (the instance section)."
+                    ),
+                },
+            },
+            "additionalProperties": False,
+        },
+    ),
+]
+
+
+def _log(msg: str) -> None:
+    """Write to stderr; stdout is reserved for MCP JSON-RPC framing."""
+    print(f"[homunculus-bridge] {msg}", file=sys.stderr, flush=True)
+
+
+def _generate_agent_instance_id() -> str:
+    """Generate a durable per-subprocess routing id (`agi-<hex>`)."""
+    return f"agi-{secrets.token_hex(16)}"
+
+
+def _compute_session_label(agent_id: str) -> str:
+    """Use $HOMUNCULUS_AGENT_SESSION_LABEL when present, else infer from cwd."""
+    explicit = os.environ.get(HOMUNCULUS_AGENT_SESSION_LABEL_ENV)
+    if explicit:
+        return explicit
+    cwd_base = Path.cwd().name
+    if cwd_base:
+        return f"{agent_id} on {cwd_base}"
+    return ""
+
+
+def _resolve_agent_session_id(agent_id: str) -> str:
+    """Resolve the stable logical-session key from this bridge's per-agent-kind
+    carrier chain.
+
+    Keyed on `agent_id` (`SESSION_ID_ENV_VARS_BY_AGENT`, else
+    `DEFAULT_SESSION_ID_ENV_VARS`) so cross-agent id adoption cannot happen:
+    `refresh_role_binding_cas` re-points roles filtered on `agent_session_id`
+    ALONE, so a bridge that adopted a foreign kind's inherited/leaked session id
+    would re-point the WRONG session's roles. A Codex bridge prefers its own
+    `CODEX_THREAD_ID` (authoritative — this Codex conversation, never stale for a
+    Codex child), then `HOMUNCULUS_AGENT_SESSION_ID`; every other kind uses
+    `HOMUNCULUS_AGENT_SESSION_ID` only and NEVER adopts `CODEX_THREAD_ID`. Returns the
+    first non-empty carrier, else `""` — the degraded, self-refresh-disabled
+    binding (server logs the S1.5 warning). The resolved value flows unchanged
+    into `Forwarder` and thus every register POST, so any accepted carrier
+    enables reconnect self-refresh.
+    """
+    carriers = SESSION_ID_ENV_VARS_BY_AGENT.get(agent_id, DEFAULT_SESSION_ID_ENV_VARS)
+    for env_var in carriers:
+        value = os.environ.get(env_var, "")
+        if value:
+            return value
+    return ""
+
+
+async def _discover_port(homunculus_name: str) -> int:
+    """Poll the runtime port file until the homunculus has written it."""
+    attempt = 0
+    while True:
+        attempt += 1
+        port = read_port_file(BRIDGE_SERVICE_NAME, homunculus_name)
+        if port is not None:
+            _log(
+                f"discovered bridge port {port} for homunculus "
+                f"{homunculus_name!r} after {attempt} attempt(s)",
+            )
+            return port
+        if attempt == 1 or attempt % 10 == 0:
+            _log(
+                f"waiting for {homunculus_name}.{BRIDGE_SERVICE_NAME}.port "
+                f"(attempt {attempt})",
+            )
+        await asyncio.sleep(PORT_DISCOVERY_RETRY_S)
+
+
+def _build_server(forwarder: Forwarder) -> Server[Any, Any]:
+    """Construct the lowlevel Server with our 15 tools wired to forwarder."""
+    server: Server[Any, Any] = Server(SERVER_NAME, instructions=SERVER_INSTRUCTIONS)
+
+    @server.list_tools()  # type: ignore[misc, no-untyped-call]
+    async def list_tools() -> list[Tool]:
+        return list(TOOLS)
+
+    @server.call_tool()  # type: ignore[misc]
+    async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        result = await _dispatch_tool(forwarder, name, arguments or {})
+        return [TextContent(type="text", text=_json_dumps(result))]
+
+    return server
+
+
+def _json_dumps(payload: Any) -> str:
+    """Stable JSON encoding for tool responses; matches the Node bridge shape."""
+    return json.dumps(payload, ensure_ascii=False)
+
+
+async def _tool_current_identity(fw: Forwarder, _a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.current_identity()
+
+
+async def _tool_download(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.download(
+        blob_id=str(a["blob_id"]),
+        output_path=str(a["output_path"]),
+    )
+
+
+async def _tool_process_search(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.process_search(
+        query=str(a["query"]),
+        max_results=int(a.get("max_results", 10)),
+    )
+
+
+async def _tool_process_schema(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.process_schema(process_key=str(a["process_key"]))
+
+
+async def _tool_process_call(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.process_call(
+        process_key=str(a["process_key"]),
+        arguments=dict(a.get("arguments") or {}),
+        reason=a.get("reason"),
+    )
+
+
+async def _tool_process_result(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.process_result(action_id=str(a["action_id"]))
+
+
+async def _tool_agent_thread_open(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.agent_thread_open(args=a)
+
+
+async def _tool_agent_send(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    thread_id = str(a["thread_id"])
+    body = {k: v for k, v in a.items() if k != "thread_id"}
+    return await fw.agent_send(thread_id=thread_id, args=body)
+
+
+async def _tool_agent_messages(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.agent_messages(
+        thread_id=str(a["thread_id"]),
+        after_cursor=int(a.get("after_cursor", 0)),
+        limit=int(a.get("limit", 50)),
+    )
+
+
+async def _tool_agent_status(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.agent_status(thread_id=str(a["thread_id"]))
+
+
+async def _tool_agent_close(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.agent_close(thread_id=str(a["thread_id"]))
+
+
+async def _tool_peer_register(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.peer_register(
+        agent_id=str(a["agent_id"]),
+        session_label=a.get("session_label"),
+    )
+
+
+async def _tool_peer_list(fw: Forwarder, _a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.peer_list()
+
+
+async def _tool_peer_send(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.peer_send(
+        peer_id=str(a["peer_id"]),
+        content=list(a.get("content") or []),
+        peer_agent_instance_id=a.get("peer_agent_instance_id"),
+    )
+
+
+async def _tool_peer_inbox(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    return await fw.peer_inbox(
+        after=a.get("after"),
+        limit=a.get("limit"),
+        include_important=bool(a.get("include_important", False)),
+        role_after=a.get("role_after"),
+    )
+
+
+# Single-pass tool dispatch; new tools register here and stay out of any
+# god-function.
+_TOOL_DISPATCH: Final[
+    dict[str, Callable[[Forwarder, dict[str, Any]], Awaitable[dict[str, Any]]]]
+] = {
+    "current_identity": _tool_current_identity,
+    "download": _tool_download,
+    "process_search": _tool_process_search,
+    "process_schema": _tool_process_schema,
+    "process_call": _tool_process_call,
+    "process_result": _tool_process_result,
+    "agent_thread_open": _tool_agent_thread_open,
+    "agent_send": _tool_agent_send,
+    "agent_messages": _tool_agent_messages,
+    "agent_status": _tool_agent_status,
+    "agent_close": _tool_agent_close,
+    "peer_register": _tool_peer_register,
+    "peer_list": _tool_peer_list,
+    "peer_send": _tool_peer_send,
+    "peer_inbox": _tool_peer_inbox,
+}
+
+
+async def _dispatch_tool(
+    forwarder: Forwarder,
+    name: str,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """Route an MCP tool call to the matching Forwarder method."""
+    handler = _TOOL_DISPATCH.get(name)
+    if handler is None:
+        msg = f"Unknown tool: {name}"
+        raise ValueError(msg)
+    return await handler(forwarder, args)
+
+
+async def _run() -> None:
+    """Bridge entry point: discover, connect, register, serve."""
+    homunculus_name = os.environ.get("HOMUNCULUS_NAME")
+    if not homunculus_name:
+        msg = "HOMUNCULUS_NAME env var is required to discover the bridge port"
+        raise RuntimeError(msg)
+    agent_id = os.environ.get(HOMUNCULUS_AGENT_IDENTITY_ENV) or DEFAULT_AGENT_ID
+    # v10 Control #2.D: honor an injected HOMUNCULUS_AGENT_INSTANCE_ID so a managed
+    # spawner (macos bridge_tracker sets it per session) keeps a STABLE
+    # agent_instance_id across bridge reconnects — the registry replaces in
+    # place instead of accreting a fresh id every reconnect. Absent (operator
+    # .mcp.json path) → mint a durable id as before.
+    agent_instance_id = (
+        os.environ.get(HOMUNCULUS_AGENT_INSTANCE_ID_ENV)
+        or _generate_agent_instance_id()
+    )
+    # v10 Control #2.D (read-defensively): the stable logical-session key the
+    # role-binding CAS self-refresh keys on to re-point a rotated
+    # agent_instance_id without an explicit re-claim. Resolved through this
+    # bridge's PER-AGENT-KIND carrier chain (keyed on agent_id): a codex bridge
+    # prefers its own CODEX_THREAD_ID then HOMUNCULUS_AGENT_SESSION_ID; every other kind
+    # uses HOMUNCULUS_AGENT_SESSION_ID only and never adopts CODEX_THREAD_ID (the CAS
+    # filters on agent_session_id alone, so cross-agent adoption would re-point
+    # the wrong session's roles). Absent all → "" → the CAS fails closed to
+    # explicit re-claim (= no worse than today; server logs S1.5). Any carrier
+    # MUST be a per-logical-session id (a launcher-minted UUID, or Codex's own
+    # thread id) — NEVER derived from parent_pid (shared across app-hosted
+    # siblings).
+    agent_session_id = _resolve_agent_session_id(agent_id)
+    session_label = _compute_session_label(agent_id)
+    parent_pid = os.getppid()
+
+    port = await _discover_port(homunculus_name)
+    base_url = f"http://127.0.0.1:{port}"
+    _log(
+        f"starting MCP bridge: agent_id={agent_id} "
+        f"agent_instance_id={agent_instance_id} parent_pid={parent_pid}",
+    )
+
+    # INF-01 §D.9: a coding-agent session serves the sys:autonomic lane
+    # (vertex forwards + completion requests) only if its bridge surfaces
+    # non-native event types into the host conversation. That holds for
+    # Claude Code (claude-channel notifications render in-session); the
+    # patched Codex CLI consumes ONLY notifications/homunculus/peer_message
+    # (forwarder._notification_method_for), so a codex holder would be
+    # deaf — organism turns would park until the serve-timeout sweep.
+    provides_inference = agent_id == DEFAULT_AGENT_ID
+    forwarder = Forwarder(
+        base_url=base_url,
+        homunculus_name=homunculus_name,
+        agent_id=agent_id,
+        agent_instance_id=agent_instance_id,
+        agent_session_id=agent_session_id,
+        session_label=session_label,
+        parent_pid=parent_pid,
+        provides_inference=provides_inference,
+    )
+    server = _build_server(forwarder)
+
+    async with stdio_server() as (read_stream, write_stream):
+        # Capture the write stream so the background poll loop can emit
+        # notifications/claude/channel outside any request context.
+        forwarder.bind_write_stream(write_stream)
+        # Open the bridge against the homunculus concurrently with serving stdio --
+        # MCP clients (Codex in particular) enforce a startup timeout
+        # on the initialize handshake, so we cannot block on the homunculus being
+        # reachable before returning to the client.
+        opener = asyncio.create_task(_open_bridge_safely(forwarder))
+        try:
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name=SERVER_NAME,
+                    server_version=SERVER_VERSION,
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={"claude/channel": {}},
+                    ),
+                    instructions=SERVER_INSTRUCTIONS,
+                ),
+            )
+        finally:
+            opener.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await opener
+            await forwarder.close()
+
+
+async def _open_bridge_safely(forwarder: Forwarder) -> None:
+    """Fire-and-forget bridge open; logs failures rather than propagating."""
+    try:
+        await forwarder.open_bridge()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _log(f"background bridge open failed: {exc}")
+
+
+def main() -> None:
+    """Synchronous entry point for `python -m agent_messaging_plugin.mcp_bridge`."""
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        _log("interrupted; shutting down")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"FATAL: {exc}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

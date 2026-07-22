@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::jira_plugin::test_connection",
+  "display_name": "Jira: Test Connection",
+  "description": "Verify the configured Jira credentials by fetching the authenticated account. Returns ok, the site base_url, and the service account's id and display name. Read action.",
+  "embedding_description": "Confirm that the jira_plugin is correctly configured and can authenticate — fetches the currently authenticated Atlassian account and returns ok, the resolved site base_url, and the service account's account id and display name. Use this as a health check after registering or rotating credentials to confirm the token works and points at the expected site, before relying on the other verbs. Distinct from get_issue (fetch a ticket) and jql_search (find tickets).",
+  "result_processor_customizations": {
+    "action_label": "Jira connection verified",
+    "result_type": "jira_test_connection_result",
+    "result_description": "ok flag, the site base_url, and the authenticated account's id and display name.",
+    "presentation_guidance": "Confirm connectivity and echo the base_url and account so the operator can verify the plugin points at the expected site and service account."
+  },
+  "error_processor_customizations": {
+    "action_context": "Verify the configured Jira credentials.",
+    "error_interpretation": "jira.auth_failed: the token is invalid, expired, or revoked. jira.not_configured: the jira_site address-book entry is missing or incomplete. jira.api_error: the site is unreachable or returned an unexpected error.",
+    "recovery_guidance": "jira.auth_failed: rotate the API token (mint a fresh one, agent-blind vault re-store of jira_api_token, update expires_at) per the overview runbook. jira.not_configured: register the jira_site entry."
+  }
+}

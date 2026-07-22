@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::external_postgres_plugin::export_query",
+  "display_name": "External Postgres: Export Query",
+  "description": "Run a read-only query against a registered foreign Postgres connection and write the full result (up to 50000 rows) as ONE tab-separated .tsv file at an ABSOLUTE output_tsv_path in the operator's workspace; returns the written path, the columns, the row_count, and a truncated flag. The path must lie under an operator-configured export_allowed_roots entry (empty config refuses every export). Same read-only rules as run_query. Requires connection_name, sql, and output_tsv_path.",
+  "embedding_description": "Export the FULL result set of a read-only SQL query against an external/foreign Postgres database (registered as a connection) to a tab-separated .tsv file in the operator's own workspace, returning the written file path rather than inline rows or a blob reference. Unlike run_query, which returns a small inline result, export_query always writes a workspace file and fetches up to 50000 rows (flagging truncation beyond that). The caller passes an absolute output_tsv_path contained under the operator-configured export_allowed_roots; use this to pull bulk business data into files for spreadsheets, cross-system validation, or ad-hoc analysis without routing rows through conversation context.",
+  "result_processor_customizations": {
+    "action_label": "Foreign Postgres query exported to a workspace TSV",
+    "result_type": "external_postgres_export_query_result",
+    "result_description": "Dict with path (the written .tsv file in the operator's workspace), columns, row_count, and truncated.",
+    "presentation_guidance": "Confirm the export: the written path, the row_count, and the column list. The file contains potentially sensitive corporate database content — name the path for downstream use (open it, feed it to create_spreadsheet_from_files, join it with other exports) but do not inline its contents. If truncated is true, warn that the export hit the 50000-row cap."
+  },
+  "error_processor_customizations": {
+    "action_context": "Export a read-only query's full result from a registered foreign Postgres connection to a tab-separated file in the operator's workspace.",
+    "error_interpretation": "external_pg.invalid_params: missing connection_name/sql/output_tsv_path, or the path's parent directory does not exist. external_pg.export_path_refused: the path is not absolute, not a .tsv, or not contained under any operator-configured export_allowed_roots entry (an empty export_allowed_roots refuses every export by default). external_pg.connection_unknown: no connection registered under that name. external_pg.read_only_violation: the statement is a write/DDL or not a permitted read leader.",
+    "recovery_guidance": "external_pg.export_path_refused: pass an ABSOLUTE path ending in .tsv under a configured workspace root; if export_allowed_roots is empty, add the operator's export directory to the external_postgres_plugin config (profile/config/plugins/external_postgres_plugin.json) and reload the plugin config. external_pg.invalid_params with a missing-parent message: create the parent directory first. external_pg.connection_unknown: run list_connections. external_pg.read_only_violation: submit a single read-only statement."
+  }
+}

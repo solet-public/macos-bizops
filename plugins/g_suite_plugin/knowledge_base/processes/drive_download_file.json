@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::drive_download_file",
+  "display_name": "Drive: Download File",
+  "description": "Download a binary Google Drive file (PDF, image, zip, Office doc, etc.) into blob storage and return its file_blob_key, along with the file name and mime type. Google-native docs (Docs/Sheets/Slides) cannot be downloaded this way — use the matching export verb instead. Requires a connected account.",
+  "embedding_description": "Fetch the bytes of a binary Drive file and persist them to platform blob storage, returning a file_blob_key reference (not the bytes themselves) plus name and mime type. Handles arbitrary binary files via Drive's get_media. Google-native document types (application/vnd.google-apps.*) are rejected with a pointer to docs_export / sheets_export / slides_export because native docs must be exported, not downloaded. The returned file_blob_key can be attached to email or handed to other plugins. Fails gsuite.not_found if the id does not exist.",
+  "result_processor_customizations": {
+    "action_label": "Drive file downloaded to blob",
+    "result_type": "g_suite_drive_download_result",
+    "result_description": "Dict with file_blob_key (a blob-storage reference to the downloaded bytes), name, and mime.",
+    "presentation_guidance": "Confirm the file was downloaded and give its name. The file_blob_key references potentially sensitive corporate content — surface it for downstream use but do not treat it as public."
+  },
+  "error_processor_customizations": {
+    "action_context": "Download a binary Drive file into blob storage.",
+    "error_interpretation": "gsuite.invalid_params: missing id, or the file is a Google-native doc that must be exported. gsuite.not_found: the id does not exist. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: pass a valid binary-file id, or use the export verb for native docs. gsuite.not_found: the file may have been deleted. gsuite.not_connected: run connect_account."
+  }
+}

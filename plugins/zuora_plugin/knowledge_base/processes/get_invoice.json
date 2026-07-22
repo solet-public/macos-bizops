@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::get_invoice",
+  "display_name": "Zuora: Get Invoice",
+  "description": "Fetch one invoice by id.",
+  "embedding_description": "Retrieve a single Zuora invoice's fields (amounts, line items, status) by its id. Requires id.",
+  "result_processor_customizations": {
+    "action_label": "Zuora invoice fetched",
+    "result_type": "zuora_get_invoice_result",
+    "result_description": "Dict with invoice: a mapping of field names to values.",
+    "presentation_guidance": "Show the invoice's key fields; reflects sensitive financial/billing content (data_sensitivity 0.5) — surface for downstream use but never treat as public."
+  },
+  "error_processor_customizations": {
+    "action_context": "Fetch one Zuora invoice by id.",
+    "error_interpretation": "zuora.invalid_params: missing id. zuora.object_not_found: no invoice with that id exists. zuora.auth_failed: the OAuth client credentials were rejected.",
+    "recovery_guidance": "zuora.object_not_found: verify the invoice id via list_invoices or data_query."
+  }
+}

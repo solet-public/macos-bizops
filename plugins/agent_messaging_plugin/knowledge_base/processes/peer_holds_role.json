@@ -1,0 +1,19 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::peer_holds_role",
+  "display_name": "Re-check role ownership at act time",
+  "description": "READ-ONLY act-time ownership re-check (role-model v4 §5.0): does the calling session STILL hold the named role right now? Given the role name and the caller's own agent_instance_id, it sources the caller's stable agent_session_id from that session's peer_binding row (never a caller-supplied id), reads the live role_binding holder, and returns holds=true only when the live holder's session id equals the caller's. Resolution is advisory and can go stale between resolve time and act time (another session may have displaced the holder); this verb is the pull-truth check a holder runs at the moment it performs a privileged act. It NEVER writes — do not 're-check' by re-claiming (peer_claim_role is a WRITE that would steal the role back from a legitimate new holder). Primary use: Git-Controller's commit procedure Step 9.5, immediately before mutating git, confirms it still holds Git-Controller.",
+  "embedding_description": "Confirm at act time that this session still owns a role before doing something privileged, without writing anything. Answers 'do I still hold Git-Controller / Coordinator / Architect right now?' by comparing the live role_binding holder's stable session id to the caller's own (sourced server-side from its peer_binding). A read-only ownership re-check that catches a mid-procedure displacement, distinct from claiming (peer_claim_role), releasing (peer_release_role), or sending to a role (peer_send_by_name).",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Role ownership re-checked",
+    "result_type": "peer_holds_role_result",
+    "result_description": "holds (True only when the live role_binding holder's stable agent_session_id equals the caller's — the caller still owns the role), name (the role), and agent_session_id (the caller's stable session id resolved from its peer_binding; empty when the session exported no carrier). holds=False means the role is vacant OR held by a different session — do NOT act on the role's authority.",
+    "presentation_guidance": "Surface the boolean plainly: True → the caller still holds the role and may proceed with the privileged act; False → STOP, the role moved (or the caller never held it). The operator-facing identifier is the role name.",
+    "output_action_guidance": "On holds=True, proceed with the gated act. On holds=False, do NOT re-claim to 'fix' it (that steals the role) — stop and report that ownership moved."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read-only §5.0 act-time ownership re-check. Sources the caller's stable agent_session_id from its own peer_binding row (by agent_instance_id), then compares it to the live role_binding holder via the store-level holds_role. No writes, no address book.",
+    "error_interpretation": "missing_argument: 'name' or 'agent_instance_id' was empty. state_service_unavailable: the state_service is not bound on this homunculus.",
+    "recovery_guidance": "missing_argument: pass a non-empty role name and the caller's own agent_instance_id (from its peer_register response). state_service_unavailable: bind the state_service (postgres_state_management_plugin) in service_bindings.json and restart."
+  }
+}

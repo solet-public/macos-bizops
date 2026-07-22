@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::jira_plugin::list_transitions",
+  "display_name": "Jira: List Transitions",
+  "description": "List the workflow transitions available from a Jira issue's current status (id/name/to_status). Read action.",
+  "embedding_description": "Discover which workflow moves are currently possible for a Jira issue — returns each available transition's id, name, and the target status it leads to, given the issue's present state and the project's workflow. Call this before transition_issue to choose the right transition id (they are workflow-specific, not global). Distinct from transition_issue (actually perform a move) and get_issue (the issue's current status only).",
+  "result_processor_customizations": {
+    "action_label": "Jira transitions listed",
+    "result_type": "jira_list_transitions_result",
+    "result_description": "Available transitions (id/name/to_status) from the issue's current status.",
+    "presentation_guidance": "List the available moves and their target statuses so the caller can pick a transition id for transition_issue. This is workflow metadata (low sensitivity)."
+  },
+  "error_processor_customizations": {
+    "action_context": "List the transitions available from a Jira issue's current status.",
+    "error_interpretation": "jira.not_found: the issue key does not exist. jira.permission_denied: the account cannot view the issue. jira.invalid_params: the key was missing.",
+    "recovery_guidance": "jira.not_found: verify the issue key. jira.permission_denied: grant the service account browse permission. jira.invalid_params: supply the issue key."
+  }
+}

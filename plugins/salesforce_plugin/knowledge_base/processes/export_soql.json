@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::salesforce_plugin::export_soql",
+  "display_name": "Salesforce: Export SOQL",
+  "description": "Run a SOQL query against the registered Salesforce org and write the full result (up to 50000 records) as ONE tab-separated .tsv file at an ABSOLUTE output_tsv_path in the operator's workspace; returns the written path, the columns, the row_count, the org-reported total_size, and a truncated flag. The path must lie under an operator-configured export_allowed_roots entry (empty config refuses every export). Nested relationship objects are serialized as JSON text in their cells. Requires query and output_tsv_path.",
+  "embedding_description": "Export the FULL result set of a Salesforce SOQL query to a tab-separated .tsv file in the operator's own workspace, returning the written file path rather than inline records. Unlike soql_query, which returns a small inline result and fails loud over the caps, export_soql always writes a workspace file and fetches up to 50000 records (flagging truncation beyond that). The caller passes an absolute output_tsv_path contained under the operator-configured export_allowed_roots; use this to pull bulk CRM data — accounts, contacts, opportunities — into files for spreadsheets, cross-system validation against Snowflake or Postgres exports, or ad-hoc analysis without routing records through conversation context.",
+  "result_processor_customizations": {
+    "action_label": "Salesforce SOQL exported to a workspace TSV",
+    "result_type": "salesforce_export_soql_result",
+    "result_description": "Dict with path (the written .tsv file in the operator's workspace), columns, row_count, total_size, and truncated.",
+    "presentation_guidance": "Confirm the export: the written path, the row_count, and the column list. The file contains potentially sensitive CRM content — name the path for downstream use (open it, feed it to create_spreadsheet_from_files, join it with other exports) but do not inline its contents. If truncated is true, warn that the export hit the 50000-record cap or the org reported more rows than were fetched."
+  },
+  "error_processor_customizations": {
+    "action_context": "Export a SOQL query's full result from the registered Salesforce org to a tab-separated file in the operator's workspace.",
+    "error_interpretation": "sf.invalid_params: missing query/output_tsv_path, or the path's parent directory does not exist. sf.export_path_refused: the path is not absolute, not a .tsv, or not contained under any operator-configured export_allowed_roots entry (an empty export_allowed_roots refuses every export by default). sf.malformed_query: Salesforce rejected the SOQL. sf.auth_failed / sf.session_expired: no live CLI session — re-establish with sf org login web.",
+    "recovery_guidance": "sf.export_path_refused: pass an ABSOLUTE path ending in .tsv under a configured workspace root; if export_allowed_roots is empty, add the operator's export directory to the salesforce_plugin config (profile/config/plugins/salesforce_plugin.json) and reload the plugin config. sf.invalid_params with a missing-parent message: create the parent directory first. sf.malformed_query: fix the SOQL and re-run."
+  }
+}

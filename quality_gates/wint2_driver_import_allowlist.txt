@@ -1,0 +1,104 @@
+# W-INT Cycle 2 driver-import gate (W-WINT2-EARLY) tracked-debt register.
+#
+# Format: <check_id>::<scope_qualifier>::<specifier>
+#   check_id        — "D1.1" (driver-import outside state plugins)
+#   scope_qualifier — repo-relative POSIX path to the offending file
+#   specifier       — "<lineno>::<module-root>" OR "*" wildcard
+#
+# Allowlisted findings are STILL printed (with `[allowlisted]`) so the gate
+# stays honest. They do NOT contribute to the blocking verdict.
+#
+# Per CLAUDE.md tracked-debt convention: adding entries without operator
+# approval defeats the gate's purpose. Removing an entry is the unit of
+# remediation progress.
+#
+# Initial population (2026-06-07) from `workbench/2026-06-07_postgres_drift_inventory.md` §1
+# + master plan §1.7 retained sites. Four classes of entries:
+#
+# (1) STATE PLUGIN SOURCE — permanent. The state plugins ARE the
+#     state_service; they OWN runtime psycopg / psycopg_pool. Wildcard.
+# (2) STATE PLUGIN TESTS — permanent. Fixtures that exercise the
+#     postgres backend's Store abstraction.
+# (3) RETAINED RUNTIME SITES per master plan §1.7 + §3.7 — permanent
+#     until the architecture changes. Specifically: midwife
+#     `postgres_init.py` role-DDL thin-call caller (state plugin owns
+#     the implementation; midwife owns the invocation per §3.7.5).
+# (4) CURRENT BYPASS SITES — tracked debt. Each cleanup workstream
+#     removes its entry as work lands. Per-file remediation note keys
+#     each entry to the workstream that closes it.
+#
+# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# (1) STATE PLUGIN SOURCE — postgres_state_management_plugin (local)
+# ===========================================================================
+D1.1::plugins/postgres_state_management_plugin/src/postgres_state_management_plugin/key_value_ops.py::*
+D1.1::plugins/postgres_state_management_plugin/src/postgres_state_management_plugin/plugin.py::*
+D1.1::plugins/postgres_state_management_plugin/src/postgres_state_management_plugin/postgres_backend/adoption.py::*
+D1.1::plugins/postgres_state_management_plugin/src/postgres_state_management_plugin/postgres_backend/database_setup.py::*
+D1.1::plugins/postgres_state_management_plugin/src/postgres_state_management_plugin/postgres_backend/ddl_renderer.py::*
+D1.1::plugins/postgres_state_management_plugin/src/postgres_state_management_plugin/postgres_backend/lifecycle.py::*
+D1.1::plugins/postgres_state_management_plugin/src/postgres_state_management_plugin/postgres_backend/provider.py::*
+D1.1::plugins/postgres_state_management_plugin/src/postgres_state_management_plugin/postgres_backend/schema_diff.py::*
+D1.1::plugins/postgres_state_management_plugin/src/postgres_state_management_plugin/postgres_backend/store_factory.py::*
+
+# ===========================================================================
+# (1) STATE PLUGIN SOURCE — rds_postgres_state_management_plugin (cloud)
+# ===========================================================================
+D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_management_plugin/plugin.py::*
+D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_management_plugin/postgres_backend/adoption.py::*
+D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_management_plugin/postgres_backend/ddl_renderer.py::*
+D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_management_plugin/postgres_backend/lifecycle.py::*
+D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_management_plugin/postgres_backend/provider.py::*
+D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_management_plugin/postgres_backend/rds_pool.py::*
+D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_management_plugin/postgres_backend/schema_diff.py::*
+D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_management_plugin/postgres_backend/store_factory.py::*
+D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_management_plugin/rds_crud.py::*
+D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_management_plugin/rds_db_init.py::*
+D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_management_plugin/rds_schema_ops.py::*
+D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_management_plugin/rds_transaction.py::*
+
+# ===========================================================================
+# (2) STATE PLUGIN TESTS — postgres_state_management_plugin/tests
+# ===========================================================================
+D1.1::plugins/postgres_state_management_plugin/tests/store_abstraction_smoke.py::*
+
+# ===========================================================================
+# (3) RETAINED runtime site per master plan §1.7 + §3.7
+# ===========================================================================
+# Midwife's role-DDL thin-call caller. State plugin owns the
+# `setup_database_with_roles(...)` implementation; midwife owns the
+# birth-time invocation. Master plan §3.7.5 spec'd this retention; the
+# allowlist captures it from day 1 so W-WINT2-FINAL doesn't need a
+# scope-change at flip time.
+D1.1::plugins/macos_midwife_plugin/src/macos_midwife_plugin/postgres_init.py::*
+
+# Note: `ananta/src/ananta/platform/code_generator.py` emits sqlalchemy
+# imports as STRING LITERALS inside generated code; the file itself
+# contains no `import sqlalchemy` / `from sqlalchemy ...` AST node, so
+# no D1.1 finding fires here today. Master plan §1.7 + §6 SC-2 names
+# this site as a permanent exclusion; the allowlist entry future-proofs
+# against a code-gen rewrite that would introduce an inline import.
+D1.1::ananta/src/ananta/platform/code_generator.py::*
+
+# ===========================================================================
+# (4) CURRENT BYPASS sites — tracked debt; removed by named workstreams
+# ===========================================================================
+
+# NOTE (2026-06-20, dead-code sweep): macos_vault + secrets_manager_vault postgres_backend/provider.py
+# entries removed here — macos_vault's provider.py was already deleted (stale entry); secrets_manager_vault's
+# is deleted in this same commit (confirmed-dead, plugin routes through the rds store_factory shim). Both
+# plugins now carry no `import psycopg`. Drops the direct-driver own-backend breaks-at-flip surface (plan §c).
+
+# pgvector_service_plugin postgres_backend — removed by W-VECTOR-LOCAL (Tier 6)
+D1.1::plugins/pgvector_service_plugin/src/pgvector_service_plugin/postgres_backend/vector/provider.py::*
+
+# rds_pgvector_service_plugin postgres_backend — removed by W-VECTOR-CLOUD (Tier 6)
+D1.1::plugins/rds_pgvector_service_plugin/src/rds_pgvector_service_plugin/postgres_backend/rds_pool.py::*
+D1.1::plugins/rds_pgvector_service_plugin/src/rds_pgvector_service_plugin/postgres_backend/vector/provider.py::*
+
+# external_postgres_plugin — the "super Datagrip" read-only connector to FOREIGN
+# Postgres DBs (operator-ratified RATIFY-1, 2026-07-09). psycopg targets external_pg::*
+# address-book DSNs only; assert_foreign_target refuses the platform's own instance
+# (role-independent host+port+dbname) — red-first smoke_containment.py. NOT owner-exempt.
+D1.1::plugins/external_postgres_plugin/src/external_postgres_plugin/connection.py::*

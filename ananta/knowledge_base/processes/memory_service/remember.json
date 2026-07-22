@@ -1,0 +1,18 @@
+{
+  "process_key": "service_interface::memory_service::remember",
+  "display_name": "Remember",
+  "description": "[NON-TERMINAL: Chains to result processor] Store a new episodic memory with vector embedding. Memories decay over time based on ACT-R activation model. Retrieval strengthens memories, keeping useful information accessible.",
+  "embedding_description": "Store a new episodic memory with vector embedding. Save preferences, facts, observations, or session context for later recall. Memories decay over time per ACT-R activation model; retrieval strengthens them. Returns memory_id. Use for 'remember that I like X', 'save this fact for later', 'note this preference'. Distinct from learn (semantic memory) and store_compaction_summary (session-level).",
+  "result_processor_customizations": {
+    "action_label": "Remember",
+    "result_type": "memory_created",
+    "result_description": "Confirmation of new episodic memory creation with memory ID",
+    "presentation_guidance": "",
+    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+  },
+  "error_processor_customizations": {
+    "action_context": "Storing a new episodic memory with vector embedding",
+    "error_interpretation": "EmbeddingError: failed to generate vector embedding for content. DatabaseError: failed to persist memory to storage. ValidationError: content is empty or invalid.",
+    "recovery_guidance": "For embedding errors: verify embedding service is available. For database errors: verify state and vector storage are accessible. For validation errors: ensure content is non-empty and properly formatted."
+  }
+}

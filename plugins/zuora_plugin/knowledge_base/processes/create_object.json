@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::create_object",
+  "display_name": "Zuora: Create Object",
+  "description": "Create an Account/Subscription/Invoice/Payment/Product object with the given fields. Requires type and a non-empty fields object. This is a write action.",
+  "embedding_description": "Create a new Zuora billing object (e.g. a new Account or Subscription) with the supplied field values. Requires type (one of Account, Subscription, Invoice, Payment, Product) and a non-empty fields object. A write action.",
+  "result_processor_customizations": {
+    "action_label": "Zuora object created",
+    "result_type": "zuora_create_object_result",
+    "result_description": "Dict with id (the new object's id) and success (bool).",
+    "presentation_guidance": "Confirm creation and report the new object id; low sensitivity (id only, data_sensitivity 0.0)."
+  },
+  "error_processor_customizations": {
+    "action_context": "Create a Zuora object.",
+    "error_interpretation": "zuora.invalid_params: missing/unsupported type or an empty/missing fields object. zuora.validation_failed: a field value or combination was rejected. zuora.auth_failed: the OAuth client credentials were rejected.",
+    "recovery_guidance": "zuora.validation_failed: check required fields and valid values for that object type. zuora.invalid_params: type must be one of Account, Subscription, Invoice, Payment, Product."
+  }
+}

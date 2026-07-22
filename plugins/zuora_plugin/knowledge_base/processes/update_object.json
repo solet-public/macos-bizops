@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::update_object",
+  "display_name": "Zuora: Update Object",
+  "description": "Apply a non-empty fields object to an existing object by type + id. This is a write action.",
+  "embedding_description": "Update one or more fields on an existing Zuora billing object by its type and id. Requires type, id, and a non-empty fields object of the values to set. A write action.",
+  "result_processor_customizations": {
+    "action_label": "Zuora object updated",
+    "result_type": "zuora_update_object_result",
+    "result_description": "Dict with success (bool).",
+    "presentation_guidance": "Confirm the update was applied; low sensitivity (flag only, data_sensitivity 0.0)."
+  },
+  "error_processor_customizations": {
+    "action_context": "Update a Zuora object's fields.",
+    "error_interpretation": "zuora.invalid_params: missing/unsupported type, id, or an empty/missing fields object. zuora.object_not_found: no object with that id exists. zuora.validation_failed: a field value was rejected.",
+    "recovery_guidance": "zuora.object_not_found: verify the id and type via data_query or get_object. zuora.validation_failed: check valid values for that object type."
+  }
+}

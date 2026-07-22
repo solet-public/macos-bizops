@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::slides_batch_update",
+  "display_name": "Slides: Batch Update",
+  "description": "Apply a list of raw Google Slides API batchUpdate request objects (add slide, insert text/image, etc.) to a presentation. Requires a connected account.",
+  "embedding_description": "Apply one or more raw Google Slides API batchUpdate request objects (for example createSlide, insertText, createImage, updatePageElementTransform) to an existing presentation by id. The requests list is passed through verbatim to the Slides API — this is the low-level structural-edit verb for adding slides, inserting text boxes/images, and repositioning elements. Use slides_get first to find an existing slide's object_id when a request needs to target it. Returns the batchUpdate replies array. Fails gsuite.invalid_params if requests is empty or not a list of request objects.",
+  "result_processor_customizations": {
+    "action_label": "Presentation batch-updated",
+    "result_type": "g_suite_slides_batch_update_result",
+    "result_description": "Dict with replies, the raw batchUpdate response replies array.",
+    "presentation_guidance": "Confirm the edit requests were applied. This is a write action that structurally modifies the presentation."
+  },
+  "error_processor_customizations": {
+    "action_context": "Apply structural edit requests to a Google Slides presentation.",
+    "error_interpretation": "gsuite.invalid_params: missing id, or requests is empty/not a list of dicts, or a request object is malformed per the Slides API. gsuite.not_found: the presentation id or a referenced object_id does not exist. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: supply a non-empty list of valid Slides API request objects. gsuite.not_found: use slides_get to confirm object_ids before referencing them. gsuite.not_connected: run connect_account."
+  }
+}

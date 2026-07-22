@@ -1,0 +1,53 @@
+# Radon cyclomatic-complexity tracked-debt register.
+#
+# Per-function entries whose C/D/E/F cyclomatic complexity the operator
+# has explicitly deferred to the post-AWS-homunculus cycle. Tracking:
+# Task #74. Per
+# `workbench/2026-05-25_plugin_god_class_remediation.md` §9.D–§9.Z.
+#
+# Removing an entry from this list is the unit of remediation progress.
+# Adding new entries without operator approval defeats the gate's purpose.
+#
+# Format: one `<file_path>::<function_name>` per line. File path is
+# POSIX-suffix-matched (so repo-relative entries work); function name is
+# the bare name (no `ClassName.` prefix). Blank lines and `#` comments
+# are ignored.
+
+# Added 2026-05-26 (operator-approved). First-time-in-scope after dev_tools/ elimination
+# Phase 1+2 structurally-moved http_routes.py for docstring path-updates.
+plugins/agent_messaging_plugin/src/agent_messaging_plugin/http_routes.py::_peer_send_impl
+# Added 2026-05-26 (operator-approved). Pure-move-revealed-debt after Phase 4 relocated
+# peer_registry_migration_live_smoke.py (renamed from ..._smoke.py, P6) from dev_tools/ to plugins/agent_messaging_plugin/tests/.
+# Same shape as other allowlisted linear smoke mains (per-check sequences,
+# operator-facing smoke harness with all cases inlined in main, hits D(23) cc, refactorable
+# by extracting _case_* helpers but deferred per Task #74 pattern.
+plugins/agent_messaging_plugin/tests/peer_registry_migration_live_smoke.py::main
+
+# Added 2026-07-07 (operator-ratified, GTE-05 ananta/tests enforcement).
+# The 10 pre-existing C+ functions inventoried by the read-only debt audit
+# at workbench/2026-07-07_ananta_tests_debt_audit.md (§2, snapshot
+# 2026-07-07T04:20:20Z) — seeded so per-file + aggregate cc enforcement
+# over ananta/tests goes green without masking the tracked debt. Removal
+# is the unit of remediation progress; do NOT add new entries here
+# without operator approval. The F(55) entry below is marked RETIRE-FIRST:
+# it is the single largest item and leads the remediation queue.
+# RETIRE-FIRST — CC F(55), the campaign's first target:
+ananta/tests/llm/agent_messaging/repository_migration_smoke.py::main
+# CC D(21):
+ananta/tests/llm/session_ledger/list_sessions_m17_filters_smoke.py::_matches
+# CC C(20):
+ananta/tests/llm/session_ledger/events_window_fold_smoke.py::_matches
+# CC C(15):
+ananta/tests/llm/session_ledger/census_fold_smoke.py::test_per_source_tallies
+# CC C(14):
+ananta/tests/llm/session_ledger/read_migration_active_sessions_live_smoke.py::test_list_active_sessions
+# CC C(12):
+ananta/tests/llm/session_ledger/read_migration_slice6b_live_smoke.py::test_get_session_timeline_cursor_content_json_cap
+# CC C(12):
+ananta/tests/services/vault_service/vault_service_proxy_smoke.py::_subsmoke_parity
+# CC C(12):
+ananta/tests/session_ledger_service/interfaces_split_no_god_class_smoke.py::check_verb_counts
+# CC C(11):
+ananta/tests/llm/session_ledger/deployment_migration_live_smoke.py::test_full_pairing_lifecycle
+# CC C(11):
+ananta/tests/llm/session_ledger/polling_driver_migration_live_smoke.py::test_polling_driver_lifecycle

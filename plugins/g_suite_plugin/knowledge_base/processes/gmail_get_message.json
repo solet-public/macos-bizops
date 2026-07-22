@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::gmail_get_message",
+  "display_name": "Gmail: Get Message",
+  "description": "Fetch one Gmail message by id: the key headers (from/to/cc/subject/date), the plain-text body, a short snippet, and attachment metadata (attachment_id/name/mime/size — not the attachment bytes). Requires a connected account.",
+  "embedding_description": "Read a single Gmail message's content by its message id. Returns parsed headers, the decoded plain-text body, a preview snippet, and a list of attachment descriptors (id, filename, mime type, size) without downloading the attachment bytes. Use after gmail_list_messages to open a specific message. The body is treated as sensitive content. Fails gsuite.not_found if the id does not exist.",
+  "result_processor_customizations": {
+    "action_label": "Gmail message fetched",
+    "result_type": "g_suite_gmail_message_result",
+    "result_description": "Dict with id, thread_id, snippet, headers, body_text, and attachment metadata.",
+    "presentation_guidance": "Summarize sender/subject/date, then the body. The body_text and headers are sensitive — surface them for the operator but do not echo them into unrelated outputs. Mention attachments by name if present."
+  },
+  "error_processor_customizations": {
+    "action_context": "Fetch one Gmail message by id.",
+    "error_interpretation": "gsuite.invalid_params: no message id supplied. gsuite.not_found: the id does not exist. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: pass a valid 'id' from gmail_list_messages. gsuite.not_found: the message may have been deleted. gsuite.not_connected: run connect_account."
+  }
+}

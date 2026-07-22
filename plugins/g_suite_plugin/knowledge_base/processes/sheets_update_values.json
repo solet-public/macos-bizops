@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::sheets_update_values",
+  "display_name": "Sheets: Update Values",
+  "description": "Overwrite a cell range (A1 notation) in a spreadsheet with a 2D grid of values. Requires a connected account.",
+  "embedding_description": "Overwrite cells in an existing Google Sheets spreadsheet: given a spreadsheet id, an A1-notation range, and a 2D grid of values (a list of row lists), writes those values starting at the range's top-left cell using USER_ENTERED input (so formulas and formatted numbers/dates are interpreted, not stored as literal text). Existing cells in the range not covered by the new grid are left untouched. Distinct from sheets_append_values, which adds new rows after the last row of a table instead of overwriting a fixed range. Returns the count of cells updated. Fails gsuite.invalid_params if values is empty or not a list of lists.",
+  "result_processor_customizations": {
+    "action_label": "Spreadsheet values updated",
+    "result_type": "g_suite_sheets_update_values_result",
+    "result_description": "Dict with updated_cells, the count of cells written.",
+    "presentation_guidance": "Confirm how many cells were updated and in which range. This is a write action — be explicit that existing data in the range was overwritten."
+  },
+  "error_processor_customizations": {
+    "action_context": "Overwrite a cell range in a Google Sheets spreadsheet.",
+    "error_interpretation": "gsuite.invalid_params: missing id/range, or values is empty or not a list of row lists. gsuite.not_found: the spreadsheet id does not exist. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: supply a non-empty 2D values grid matching the range. gsuite.not_connected: run connect_account."
+  }
+}

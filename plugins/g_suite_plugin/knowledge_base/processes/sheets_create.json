@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::sheets_create",
+  "display_name": "Sheets: Create Spreadsheet",
+  "description": "Create a new Google Sheets spreadsheet with the given title. Returns its id. Requires a connected account.",
+  "embedding_description": "Create a brand-new, empty Google Sheets spreadsheet with a given title and return its spreadsheet id. That id is then the 'id' argument for every other Sheets verb (sheets_get_values, sheets_update_values, sheets_append_values, sheets_export). Fails gsuite.not_connected if no account is linked.",
+  "result_processor_customizations": {
+    "action_label": "Spreadsheet created",
+    "result_type": "g_suite_sheets_create_result",
+    "result_description": "Dict with the new spreadsheet id.",
+    "presentation_guidance": "Confirm the spreadsheet was created and give its id for follow-up reads/writes."
+  },
+  "error_processor_customizations": {
+    "action_context": "Create a new Google Sheets spreadsheet.",
+    "error_interpretation": "gsuite.invalid_params: missing title. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: supply a title. gsuite.not_connected: run connect_account."
+  }
+}

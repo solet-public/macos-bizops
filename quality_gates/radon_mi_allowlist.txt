@@ -1,0 +1,54 @@
+# Radon-MI tracked-debt register.
+#
+# File paths whose reformed-MI rank C is acknowledged and deferred to
+# the post-AWS-homunculus cycle. Operator decision: 2026-05-25.
+# Tracking: Task #74.
+#
+# Per `workbench/2026-05-25_plugin_god_class_remediation.md`
+# §9.D–§9.Z + §9.K, each entry overlaps with a god-class flag (same
+# file flags both gates) OR is a standalone "pure helper / DSP
+# module" whose MI score reflects size-driven complexity that the
+# coherence-aware strip can't relieve. Removing an entry from this
+# list is the unit of remediation progress.
+#
+# Format: one POSIX-style file path per line (suffix-matched against
+# each candidate's resolved path; repo-relative paths preferred).
+# Blank lines and `#` comments are ignored.
+
+# ------------------------------------------------------------
+# Files currently rank-C under the reformed MI check
+# ------------------------------------------------------------
+
+# §9.E god-class also fails MI rank C.
+ananta/src/ananta/core/actions/action_queue_poller.py
+
+# §9.D-adjacent: ActionProcessor is god-class flagged; same file MI rank C.
+ananta/src/ananta/core/actions/action_processor.py
+
+# §9.I god-class flag (TemplateFunctionRegistry) overlaps with MI rank C.
+ananta/src/ananta/core/templates/template_functions.py
+
+# §9.H follow-on: ACTRMemoryBackend is god-class flagged; MI also rank C.
+plugins/actr_memory_plugin/src/actr_memory_plugin/backend.py
+
+# §9.K standalone: pure DSP module, no @platform_process methods to
+# strip; split by function family (pitch / envelope / spectral).
+plugins/audio_processing_plugin/src/audio_processing_plugin/audio_analysis.py
+
+# ------------------------------------------------------------
+# Files that were rank-C in Git-Controller's earlier gate report
+# (preserved on the list as deferred work; some have since been
+# fixed in working-tree state but kept for operator-stated debt
+# tracking)
+# ------------------------------------------------------------
+
+
+plugins/default_inference_plugin/src/default_inference_plugin/plugin.py
+plugins/default_thinking_plugin/src/default_thinking_plugin/plugin.py
+plugins/macos_vault_plugin/src/macos_vault_plugin/plugin.py
+
+# agent_messaging_plugin is god-class-allowlisted; the GAP-5 STUB-2
+# list_threads interface delegation (FORCED by the new ABC abstractmethod
+# that obligates this nominal subclass) tipped MI B(9.11)->C(8.95).
+# Operator-approved 2026-06-22 (Decision 1).
+plugins/agent_messaging_plugin/src/agent_messaging_plugin/plugin.py

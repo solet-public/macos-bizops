@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::list_subscriptions",
+  "display_name": "Zuora: List Subscriptions",
+  "description": "List an account's subscriptions. Requires account_id.",
+  "embedding_description": "Enumerate all subscriptions belonging to a specific Zuora account, for reviewing a customer's active/past subscriptions. Requires account_id.",
+  "result_processor_customizations": {
+    "action_label": "Zuora subscriptions listed",
+    "result_type": "zuora_list_subscriptions_result",
+    "result_description": "Dict with subscriptions: a list of subscription objects.",
+    "presentation_guidance": "List the subscriptions with key fields; reflects sensitive billing content (data_sensitivity 0.5) — surface for downstream use but never treat as public."
+  },
+  "error_processor_customizations": {
+    "action_context": "List a Zuora account's subscriptions.",
+    "error_interpretation": "zuora.invalid_params: missing account_id. zuora.object_not_found: no account with that id exists. zuora.auth_failed: the OAuth client credentials were rejected.",
+    "recovery_guidance": "zuora.object_not_found: verify the account_id via data_query or get_object."
+  }
+}

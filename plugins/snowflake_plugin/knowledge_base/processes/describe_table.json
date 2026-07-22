@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::describe_table",
+  "display_name": "Snowflake: Describe Table",
+  "description": "Describe a table's columns (name, type, nullability, default) in the configured Snowflake account. Requires database, schema, and table.",
+  "embedding_description": "Get the column schema (names, types, nullability, defaults) of a specific Snowflake table, for understanding a table's shape before querying it. Requires database, schema, and table names.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake table described",
+    "result_type": "snowflake_describe_table_result",
+    "result_description": "Dict with columns: a list of {name, type, nullable, default} objects.",
+    "presentation_guidance": "List the column names and types plainly; low sensitivity (metadata only, data_sensitivity 0.1)."
+  },
+  "error_processor_customizations": {
+    "action_context": "Describe a table's columns in Snowflake.",
+    "error_interpretation": "snowflake.invalid_params: missing database, schema, or table. snowflake.api_error: the table does not exist or another warehouse error occurred.",
+    "recovery_guidance": "snowflake.invalid_params: supply database, schema, and table, from list_tables. snowflake.api_error: verify the table name is spelled correctly and exists in that schema."
+  }
+}

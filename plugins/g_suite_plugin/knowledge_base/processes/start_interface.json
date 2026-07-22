@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::start_interface",
+  "display_name": "Start Google OAuth Callback Server",
+  "description": "Start the FastAPI/uvicorn HTTPS callback server that handles the Google OAuth redirect. Must be running before the operator completes the browser flow. In cloud deployment the ALB routes /oauth/google/* by path rule to this task's port. Returns the bound host, port, and callback URL.",
+  "embedding_description": "Launch the Google Workspace OAuth redirect listener. Binds a uvicorn server that serves GET /oauth/google/callback, validates the state nonce and PKCE verifier, exchanges the authorization code, and writes tokens to vault. Start this before running connect_account so the browser redirect has somewhere to land. Cloud ALB path-routes /oauth/google/* to this port. Returns host, port, callback_url.",
+  "result_processor_customizations": {
+    "action_label": "Google OAuth callback server started",
+    "result_type": "g_suite_interface_start_result",
+    "result_description": "Dict with the bound host, allocated port, and callback URL.",
+    "presentation_guidance": "Confirm the callback server is listening and state the callback_url. Note that connect_account can now be run."
+  },
+  "error_processor_customizations": {
+    "action_context": "Start the Google OAuth callback uvicorn server.",
+    "error_interpretation": "service_not_available: the vault or address-book service the callback needs was not injected at readiness.",
+    "recovery_guidance": "service_not_available: confirm the plugin reached readiness (vault + address_book bound). Check plugin load logs; retry after the platform is fully started."
+  }
+}

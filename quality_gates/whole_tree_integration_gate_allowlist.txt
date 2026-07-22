@@ -1,0 +1,137 @@
+# Whole-tree integration gate tracked-debt register.
+#
+# Format: <check_id>::<scope_qualifier>::<specifier>
+#  - First two `::` separators are structural; specifier captures the rest.
+#  - `*` as the specifier wildcards all findings under (check_id, scope_qualifier).
+#  - `#` starts a comment line; blank lines ignored.
+#
+# Allowlisted findings are STILL printed in gate output (with `[allowlisted]`
+# suffix) so the gate stays honest. They do NOT contribute to the exit-1
+# verdict. Removing an entry is the unit of remediation progress.
+#
+# Per CLAUDE.md tracked-debt convention: adding entries without operator
+# approval defeats the gate's purpose. The initial population below was
+# generated from the first gate run on 2026-06-07 per D-W-INT-7(c).
+#
+# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# C1.7 — orphan service-interface KB JSON
+# ===========================================================================
+# Single tracked-debt item: discovery_service has a get_service_health.json
+# but no @service_interface_process abstract method. Either the method needs
+# to be added to ananta/services/discovery_service/interfaces/public.py OR
+# the JSON should be deleted. Pending operator decision.
+C1.7::discovery_service::get_service_health
+
+# ===========================================================================
+# C2.2 — @platform_process method without companion KB JSON
+# ===========================================================================
+# All 19 prior findings remediated 2026-06-07 (aws_self_deployment_plugin,
+# macos_midwife_plugin, rds_pgvector_service_plugin, schwab_market_data_plugin,
+# secrets_manager_vault_plugin). The original vault `write_state` bug class
+# has no remaining instances under this check. Future findings should land
+# here with a per-entry remediation note rather than wildcard scopes.
+
+# ===========================================================================
+# C2.4 — orphan plugin KB JSON
+# ===========================================================================
+# audio_processing_plugin: 149 ffmpeg_* JSONs are programmatically registered
+# from FFmpeg's filter spec at startup — not via static @platform_process
+# decorators on plugin.py. The gate's structural model doesn't see them.
+# Wildcard the whole scope; refine if a non-ffmpeg orphan appears.
+C2.4::audio_processing_plugin::*
+
+# iterm2_coding_agent_management_plugin: 6 orphan JSONs — likely operator-
+# tooling / migration leftovers. Pending audit.
+C2.4::iterm2_coding_agent_management_plugin::*
+
+# local_restart_plugin: 1 orphan
+C2.4::local_restart_plugin::*
+
+# platform_health_plugin: 1 orphan (likely a removed verb whose JSON survived)
+C2.4::platform_health_plugin::*
+
+# ===========================================================================
+# C3.1 — call-site process_key references that don't resolve in the registry
+# ===========================================================================
+
+# Generic placeholders in docstrings / code-pattern examples. These are
+# template-syntax tokens, not real references. Allowlist by exact specifier.
+C3.1::ananta/src/ananta/core/actions/action_processor.py::plugin::plugin_name::method_name
+C3.1::ananta/src/ananta/core/actions/action_processor.py::service_interface::service_name::method_name
+C3.1::ananta/src/ananta/core/orchestration/action_processor.py::plugin::provider::function_name
+C3.1::ananta/src/ananta/services/discovery_service/service.py::plugin::provider::function_name
+C3.1::ananta/src/ananta/services/discovery_service/service.py::service_interface::provider::function_name
+
+# action_factory docstring example
+C3.1::ananta/src/ananta/core/actions/action_factory.py::service_interface::state_service::generate_unique_string
+
+# invocation_schema_generator references the deprecated jsonrpc plugin in a
+# constant — pending cleanup
+C3.1::ananta/src/ananta/core/process_registry/invocation_schema_generator.py::plugin::jsonrpc_plugin::post_message
+
+# MIGRATED 2026-07-02 to the ``# wint:negative-fixture`` inline marker (the
+# recognized negative-fixture convention): the two self-completing PATTERN
+# strings in queue_completion_is_dispatch_smoke.py now carry the marker in-file,
+# so these two per-key C3.1 entries were REMOVED (entry removal = the unit of
+# remediation progress). The keys MUST keep those exact substrings to exercise
+# ActionQueuePoller._handles_own_completion, so a rename to a sentinel was never
+# an option — the inline marker is what made removal possible. See the KB
+# negative-fixture-convention article.
+
+# memory_service domain_classifier references audio_processing for routing
+C3.1::ananta/src/ananta/services/memory_service/domain_classifier.py::plugin::audio_processing_plugin::generate_audio
+
+# Bridge sessions ledger ingestion verb — pending session_ledger_service
+# adding the `ingest_blob` verb (or removing the call-site)
+C3.1::plugins/agent_messaging_plugin/src/agent_messaging_plugin/bridge_sessions.py::service_interface::session_ledger_service::ingest_blob
+
+# Whole-file synthetic-registry smokes: these three test files are ENTIRELY
+# about synthetic/fixture registries (5–9+ varied fixture keys each, several
+# interleaved with real resolving keys), so they stay as whole-file ``*``
+# wildcards rather than the per-line ``# wint:negative-fixture`` marker. The
+# marker fits a file that mostly tests real things but has 1–2 deliberate
+# negative-fixture keys (queue_completion / authored_registration /
+# pull_execution — migrated above); a whole-file wildcard is the right shape
+# when the whole file IS fixtures. Evaluated for marker-migration 2026-07-02
+# (Reviewer-B) and left as wildcards per that distinction (Coordinator-Day's
+# "migrate the wildcards if cheap, else leave + note").
+# Process registry merge validator smoke uses synthetic fixture refs
+C3.1::ananta/tests/platform/process_registry_merge_validator_smoke.py::*
+
+# Bridge session allowlist smoke tests the security policy — needs fake plugin
+# names (`plugin::evil::ransomware`, etc.) to exercise denial paths
+C3.1::plugins/agent_messaging_plugin/tests/bridge_session_allowlist_smoke.py::*
+
+# Platform health sweep smoke uses fixture process_keys
+C3.1::plugins/platform_health_plugin/tests/sweep_smoke.py::*
+
+# embedding_description_summary_smoke uses fixture process_keys
+# (service_interface::a::foo, service_interface::b::bar, plugin::c::baz)
+C3.1::ananta/tests/core/process_registry/embedding_description_summary_smoke.py::*
+
+# MIGRATED 2026-07-02 to the ``# wint:negative-fixture`` marker: the UNKNOWN_KEY
+# negative fixture in authored_registration_smoke.py carries the marker in-file;
+# this per-key C3.1 entry was REMOVED.
+
+# MIGRATED 2026-07-02 to the ``# wint:negative-fixture`` marker: the
+# "plugin::nope::x" negative fixture in pull_execution_smoke.py carries the
+# marker in-file; this per-key C3.1 entry was REMOVED.
+
+# default_scheduling_plugin: 11 docstring/example process_keys + 4 real
+# refs to a deprecated `asynchronous_jobs` service. Wildcard pending audit.
+C3.1::plugins/default_scheduling_plugin/src/default_scheduling_plugin/plugin.py::*
+
+# default_thinking_plugin: pipeline_resolver + wbs_generation reference
+# programmatically-registered FFmpeg filters. Real references; targets are
+# registered at runtime, not statically.
+C3.1::plugins/default_thinking_plugin/src/default_thinking_plugin/pipeline_resolver.py::*
+C3.1::plugins/default_thinking_plugin/src/default_thinking_plugin/wbs_generation.py::*
+
+# ===========================================================================
+# C3.2 — call-site to bound-plugin namespace (Task #21 surface)
+# ===========================================================================
+# action_factory's docstring example shows the bound-plugin namespace pattern
+# for explanatory purposes; not a real call-site. Allowlist precisely.
+C3.2::ananta/src/ananta/core/actions/action_factory.py::plugin::actr_memory_plugin::remember

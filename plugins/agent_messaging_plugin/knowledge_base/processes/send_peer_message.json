@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::send_peer_message",
+  "display_name": "Send Peer Message",
+  "description": "Deliver a message to a registered peer agent. When important=true the platform prepends 'IMPORTANT: ' to the content, which queues a live turn-triggering event on the recipient's bridge: Claude Code uses the registered native wake adapter; locally patched Codex uses notifications/homunculus/peer_message through its MCP notification sink; other clients must surface the notification or catch up with peer_inbox(include_important=true). Use this as a scheduled action inside execute_in_seconds or create_cron_schedule to implement durable wake-up notifications: the scheduler fires an arbitrary action whose definition is this process, delivering the message via the existing peer_send IMPORTANT path.",
+  "embedding_description": "Send a text message to a registered peer agent by peer_id. Setting important=true prepends IMPORTANT: and queues a live turn-triggering event through the receiver's supported wake path. Primary use case: scheduled wake-up action so a session can notify itself or another peer at a future time.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Peer message delivered",
+    "result_type": "peer_message_delivery_result",
+    "result_description": "Thread id, message id, delivery channel (persisted_silent/queued_notification/queued_wake), and resolved recipient identifiers. A queued_* channel means the event was placed on the recipient's live bridge queue, not that a turn started — REL-06 honest naming.",
+    "presentation_guidance": "Confirm successful delivery to the named peer; surface the delivery channel so the caller can distinguish a queued live event (queued_notification / queued_wake) from a silent persistence (persisted_silent)."
+  },
+  "error_processor_customizations": {
+    "action_context": "Delivers a peer message via the agent_messaging bridge. send_peer_message accepts {peer_id, peer_agent_instance_id?, content, important?}.",
+    "error_interpretation": "bridge.not_running: start_interface has not been called yet. peer_send_failed: the peer is not reachable (peer_unreachable), the recipient bridge is gone (bridge_not_found), or the event queue is full (bridge_queue_full). peer_ambiguous: multiple instances of peer_id are registered and no peer_agent_instance_id was given.",
+    "recovery_guidance": "For bridge.not_running: ensure start_interface has completed before scheduling peer messages. For peer_unreachable: verify the target peer is registered via peer_list before scheduling. For peer_ambiguous: supply peer_agent_instance_id to disambiguate. For bridge_queue_full: retry with a shorter message or after a delay."
+  }
+}

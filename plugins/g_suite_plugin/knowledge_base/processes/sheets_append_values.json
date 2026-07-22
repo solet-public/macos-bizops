@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::sheets_append_values",
+  "display_name": "Sheets: Append Values",
+  "description": "Append a 2D grid of values after the last row of a range's table in a spreadsheet. Requires a connected account.",
+  "embedding_description": "Append new rows to a Google Sheets spreadsheet: given a spreadsheet id, an A1-notation table range, and a 2D grid of values (a list of row lists), Google Sheets finds the last row of data in that table and inserts the new rows immediately after it, using USER_ENTERED input. Distinct from sheets_update_values, which overwrites a fixed range instead of growing a table. Use this for log-style or growing datasets where you do not want to track the current last row yourself. Returns the count of cells updated by the append. Fails gsuite.invalid_params if values is empty or not a list of lists.",
+  "result_processor_customizations": {
+    "action_label": "Spreadsheet rows appended",
+    "result_type": "g_suite_sheets_append_values_result",
+    "result_description": "Dict with updated_cells, the count of cells written by the append.",
+    "presentation_guidance": "Confirm how many rows/cells were appended. This is a write action that grows the sheet's data."
+  },
+  "error_processor_customizations": {
+    "action_context": "Append rows to a Google Sheets spreadsheet table.",
+    "error_interpretation": "gsuite.invalid_params: missing id/range, or values is empty or not a list of row lists. gsuite.not_found: the spreadsheet id does not exist. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: supply a non-empty 2D values grid. gsuite.not_connected: run connect_account."
+  }
+}

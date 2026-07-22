@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::bulk_export",
+  "display_name": "Zuora: Bulk Export",
+  "description": "Run a ZOQL query against the configured Zuora tenant and export the full result (up to 50000 rows) to a csv or json blob; returns a result_blob_key. Requires zoql; format is csv (default) or json.",
+  "embedding_description": "Run a Zuora ZOQL query and export the complete result set as a downloadable csv or json file (blob), for cases where the result is too large or needs to be saved rather than inspected inline. Requires zoql; format defaults to csv.",
+  "result_processor_customizations": {
+    "action_label": "Zuora query exported",
+    "result_type": "zuora_bulk_export_result",
+    "result_description": "Dict with result_blob_key (the exported file), row_count, format, and truncated (true if the export hit the 50000-row cap).",
+    "presentation_guidance": "Report the row_count, format, and truncated flag; the result_blob_key references sensitive billing/financial content (data_sensitivity 0.5) — surface for downstream use but never treat as public."
+  },
+  "error_processor_customizations": {
+    "action_context": "Export a Zuora ZOQL query result to a blob.",
+    "error_interpretation": "zuora.invalid_params: missing zoql or an unsupported format. zuora.query_failed: the ZOQL is invalid. zuora.auth_failed: the OAuth client credentials were rejected.",
+    "recovery_guidance": "zuora.query_failed: fix the ZOQL syntax and object/field names before exporting."
+  }
+}

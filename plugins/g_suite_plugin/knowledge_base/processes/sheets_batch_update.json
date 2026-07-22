@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::sheets_batch_update",
+  "display_name": "Sheets: Batch Update",
+  "description": "Apply a list of raw Google Sheets API batchUpdate request objects (rename/add tabs, cell number formats, column widths, frozen rows, etc.) to a spreadsheet. Requires a connected account.",
+  "embedding_description": "Apply one or more raw Google Sheets API batchUpdate request objects to an existing spreadsheet by id — rename a tab, add or delete a tab, set cell number formats such as financial or percent via repeatCell, resize or auto-fit column widths, freeze or bold the header row. The requests list passes through verbatim to the Sheets API; this is the low-level spreadsheet-structure and cell-formatting verb, complementing the values-only read/write verbs. Returns the batchUpdate replies array. Fails gsuite.invalid_params if requests is empty or not a list of request objects.",
+  "result_processor_customizations": {
+    "action_label": "Spreadsheet batch-updated",
+    "result_type": "g_suite_sheets_batch_update_result",
+    "result_description": "Dict with replies, the raw batchUpdate response replies array (one entry per request; addSheet replies carry the new tab's sheetId).",
+    "presentation_guidance": "Confirm the structural/formatting requests were applied. This is a write action that modifies spreadsheet structure or formatting, not cell values."
+  },
+  "error_processor_customizations": {
+    "action_context": "Apply structural or formatting edit requests to a Google Sheets spreadsheet.",
+    "error_interpretation": "gsuite.invalid_params: missing id, or requests is empty/not a list of dicts, or a request object is malformed per the Sheets API (a common cause: a sheetId that does not exist in this spreadsheet). gsuite.not_found: the spreadsheet id does not exist. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: supply a non-empty list of valid Sheets API request objects; the first tab of a new spreadsheet has sheetId 0, and added tabs report their sheetId in the addSheet reply. gsuite.not_connected: run connect_account."
+  }
+}

@@ -1,0 +1,918 @@
+"""HTTP forwarder for the Python MCP stdio bridge.
+
+The `Forwarder` owns the lifecycle of a single bridge session against
+the homunculus's consolidated `/api/v1/bridge/*` surface:
+
+  - opens a bridge session at startup and remembers `bridge_id`
+  - long-polls `/events` and emits each event as an MCP notification
+  - exposes one async method per MCP tool that issues the matching
+    HTTP request and returns the parsed JSON body
+
+The Node bridges this replaces hardcoded their port; this Forwarder
+takes a `base_url` discovered from `port_manager.read_port_file` so
+multi-homunculus operation works.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import re
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import quote, urlencode
+
+import httpx
+from mcp.shared.message import SessionMessage
+from mcp.types import JSONRPCMessage, JSONRPCNotification
+
+from .owed_delivery import OwedDeliveryCoordinator
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from anyio.streams.memory import MemoryObjectSendStream
+
+# Long-poll timeout for /events. The route holds the connection open
+# until an event arrives or this elapses; on timeout we reconnect with
+# the same cursor and continue.
+EVENTS_POLL_TIMEOUT_S: Final[float] = 25.0
+
+# Backoff after a transient HTTP failure before retrying the poll.
+POLL_RETRY_DELAY_S: Final[float] = 2.0
+
+# Backoff between bridge open/reconnect attempts when the homunculus is unreachable.
+BRIDGE_CONNECT_RETRY_S: Final[float] = 3.0
+
+# Consecutive poll failures tolerated before we attempt to reopen the bridge.
+CONSECUTIVE_POLL_FAILURES_BEFORE_RECONNECT: Final[int] = 3
+
+# Per-request timeout for non-long-poll calls.
+DEFAULT_REQUEST_TIMEOUT_S: Final[float] = 30.0
+
+CLAUDE_CHANNEL_NOTIFICATION_METHOD: Final[str] = "notifications/claude/channel"
+HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD: Final[str] = "notifications/homunculus/peer_message"
+CODEX_NATIVE_PEER_EVENT_TYPES: Final[frozenset[str]] = frozenset(
+    {"peer_message", "post_message"},
+)
+
+
+def _log(msg: str) -> None:
+    """Write to stderr; stdout is reserved for MCP JSON-RPC framing."""
+    print(f"[homunculus-bridge] {msg}", file=sys.stderr, flush=True)
+
+
+# Path pattern for a route addressed at a specific bridge_id (Bridge id
+# prefix is ``agc-`` per agent_messaging_plugin/01_bridge_overview.md). A
+# 404 against such a path means the homunculus doesn't know this bridge anymore —
+# typically because the homunculus restarted and minted a fresh bridge_id pool, so
+# the subprocess's cached id is stale. Anything matching this regex with
+# status 404 should trigger a reconnect.
+_BRIDGE_ID_ROUTE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^/api/v1/bridge/agc-[^/]+(?:/|$)",
+)
+
+
+def _is_bridge_gone(exc: BaseException) -> bool:
+    """True if an HTTP error indicates the bridge session no longer exists.
+
+    Two paths to True:
+
+    * String-based fallback against the exception message — catches the
+      legacy ``BridgeHTTPError`` shapes ("Bridge not found or closed",
+      ``bridge_not_found`` body code, etc.). Kept for compatibility with
+      any exception source that doesn't attach structured attributes.
+    * Structured: ``BridgeHTTPError`` carries ``status_code`` + ``path``
+      attributes (set by :meth:`Forwarder._unwrap`); a 404 against a path
+      matching ``/api/v1/bridge/agc-<bridge_id>/...`` is treated as
+      stale-bridge. Path-matched defensively against the ``agc-`` prefix
+      so 404s on routes that don't address a bridge_id (e.g. a future
+      ``/api/v1/bridge/open`` 404) don't false-positive (2026-06-02
+      Architect's debug session: post-restart MCP was unreachable until
+      a manual ``/mcp`` because the existing string-based check missed
+      the structured 404 path).
+    """
+    status_code = getattr(exc, "status_code", None)
+    path = getattr(exc, "path", None)
+    if (
+        status_code == 404
+        and isinstance(path, str)
+        and _BRIDGE_ID_ROUTE_PATTERN.match(path)
+    ):
+        return True
+    text = str(exc)
+    return (
+        "Bridge not found or closed" in text
+        or "bridge_not_found" in text
+        or "not found" in text
+    )
+
+
+class BridgeHTTPError(RuntimeError):
+    """HTTP call to the homunculus bridge surface failed.
+
+    Carries optional ``status_code`` and ``path`` so :func:`_is_bridge_gone`
+    can discriminate stale-bridge 404s (a 404 on a route addressed to a
+    specific ``agc-`` bridge_id) from legitimate 404s elsewhere.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        path: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.path = path
+
+
+class Forwarder:
+    """Owns the bridge session and forwards MCP tool calls to homunculus HTTP."""
+
+    def __init__(
+        self,
+        base_url: str,
+        homunculus_name: str,
+        *,
+        agent_id: str,
+        agent_instance_id: str,
+        agent_session_id: str = "",
+        session_label: str,
+        parent_pid: int,
+        provides_inference: bool,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._homunculus_name = homunculus_name
+        self._agent_id = agent_id
+        self._agent_instance_id = agent_instance_id
+        # v10 Control #2.D: the stable logical-session key, forwarded on every
+        # peer/register so the server can store it on the BridgeBinding (for the
+        # reconnect self-refresh CAS) + inject it into role-claim verbs. Empty
+        # when no carrier set it (read-defensively → CAS fails closed).
+        self._agent_session_id = agent_session_id
+        self._session_label = session_label
+        self._parent_pid = parent_pid
+        # INF-01 §D.9 client half: declared on EVERY register POST (auto,
+        # reconnect, and manual relabel) — the server's provider-sidecar
+        # populate and the sys:autonomic Trigger-1 vacancy-fill both key
+        # off it, and the sidecar entry does not survive a reconnect, so
+        # the capability must be re-asserted each time.
+        self._provides_inference = provides_inference
+        self._client = httpx.AsyncClient(
+            base_url=self._base_url,
+            timeout=DEFAULT_REQUEST_TIMEOUT_S,
+        )
+        self._bridge_id: str | None = None
+        self._cursor: int = -1
+        self._poll_task: asyncio.Task[None] | None = None
+        self._poll_active: bool = False
+        self._reconnect_lock = asyncio.Lock()
+        self._write_stream: MemoryObjectSendStream[SessionMessage] | None = None
+        # v10 Control #5 + REL-05: client-side at-least-once OWED delivery — role
+        # (live settle + repair drain) AND direct (repair drain). Structurally
+        # satisfies OwedDeliveryTransport via the bridge_ready / running /
+        # emit_event / drain_page / flip_delivered / confirm_direct surface.
+        self._owed_delivery = OwedDeliveryCoordinator(self)
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def bind_write_stream(
+        self,
+        write_stream: MemoryObjectSendStream[SessionMessage],
+    ) -> None:
+        """Attach the MCP write stream so the poll loop can emit notifications."""
+        self._write_stream = write_stream
+
+    @property
+    def bridge_id(self) -> str | None:
+        return self._bridge_id
+
+    async def open_bridge(self) -> str:
+        """Open a bridge session, register identity, start the poll loop."""
+        await self._open_with_retry()
+        await self._register_identity()
+        self._poll_active = True
+        self._poll_task = asyncio.create_task(self._long_poll_loop())
+        self._owed_delivery.start()
+        if self._bridge_id is None:
+            msg = "bridge_id missing after open_with_retry"
+            raise BridgeHTTPError(msg)
+        return self._bridge_id
+
+    async def close(self) -> None:
+        """Stop the poll + repair loops, close the bridge, dispose the client."""
+        self._poll_active = False
+        await self._owed_delivery.stop()
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._poll_task
+        if self._bridge_id is not None:
+            try:
+                await self._post(f"/api/v1/bridge/{self._bridge_id}/close", {})
+            except Exception as exc:  # noqa: BLE001
+                _log(f"close (best-effort) failed: {exc}")
+        await self._client.aclose()
+
+    # ------------------------------------------------------------------
+    # Internal: open + identity
+    # ------------------------------------------------------------------
+
+    async def _open_with_retry(self) -> None:
+        """Retry POST /api/v1/bridge/open until the homunculus accepts the connection."""
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                payload = await self._post(
+                    "/api/v1/bridge/open",
+                    {"parent_pid": self._parent_pid},
+                )
+                bridge_id = payload.get("bridge_id")
+                if not isinstance(bridge_id, str):
+                    msg = f"bridge open returned no bridge_id: {payload!r}"
+                    raise BridgeHTTPError(msg)
+                self._bridge_id = bridge_id
+                self._cursor = -1
+                _log(f"bridge opened (parent_pid={self._parent_pid}): {bridge_id}")
+                return
+            except Exception as exc:  # noqa: BLE001
+                _log(f"waiting for homunculus bridge API (attempt {attempt}): {exc}")
+                await asyncio.sleep(BRIDGE_CONNECT_RETRY_S)
+
+    async def _register_identity(self) -> str | None:
+        """Replace the peer-registry binding for this bridge subprocess.
+
+        Returns the **effective** ``session_label`` from the server's
+        response — the preserve-on-empty path (2026-06-01 §4.2) may
+        restore a previously-stored label even when this subprocess's
+        cached ``self._session_label`` is empty. Returns ``None`` on
+        registration failure (logged) so callers can decide whether
+        to suppress the reconnect announcement.
+        """
+        if self._bridge_id is None:
+            return None
+        try:
+            payload = await self._post(
+                f"/api/v1/bridge/{self._bridge_id}/peer/register",
+                {
+                    "agent_id": self._agent_id,
+                    "agent_instance_id": self._agent_instance_id,
+                    "agent_session_id": self._agent_session_id,
+                    "session_label": self._session_label,
+                    "parent_pid": self._parent_pid,
+                    "provides_inference": self._provides_inference,
+                },
+            )
+            effective_label_raw = payload.get("session_label")
+            effective_label = (
+                str(effective_label_raw)
+                if isinstance(effective_label_raw, str)
+                else ""
+            )
+            _log(
+                f"peer identity registered: {self._agent_id}/{self._agent_instance_id}"
+                f' (label="{effective_label}")',
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log(f"peer identity registration failed: {exc}")
+            return None
+        return effective_label
+
+    async def _reconnect(self) -> None:
+        """Reopen the bridge, re-register identity, announce reconnect.
+
+        After a successful re-register, emit a channel_message so the
+        operator sees ``Homunculus reconnected -- peer_registry restored as
+        <label>`` (2026-06-01 reconnect-UX design §5.1). Slice A's
+        server-side preserve-on-empty contract makes ``<label>`` the
+        operator's last ``/rename`` value automatically; the prose
+        falls back to ``no prior label found`` when no stored label
+        was recovered (first-time peer or post-DB-wipe).
+        """
+        async with self._reconnect_lock:
+            _log("reconnecting bridge...")
+            await self._open_with_retry()
+            effective_label = await self._register_identity()
+            if effective_label is not None:
+                await self._announce_reconnect(effective_label)
+
+    async def _announce_reconnect(self, effective_label: str) -> None:
+        """Emit a channel_message announcing the successful reconnect.
+
+        Best-effort: the announcement is operator UX, not load-bearing
+        for correctness. A missing write stream (very early-startup
+        race) or a send failure both fall through silently with a
+        stderr log — they MUST NOT cause the reconnect itself to
+        retry, since the reconnect already succeeded by the time we
+        get here.
+        """
+        if self._write_stream is None:
+            return
+        suffix = (
+            f"peer_registry restored as {effective_label}"
+            if effective_label
+            else "no prior label found"
+        )
+        content = f"Homunculus reconnected -- {suffix}"
+        # Wire-meta shape MUST match the 5-key contract Claude Code accepts
+        # (see ``_claude_channel_meta`` — empty ``flow_id`` is silently
+        # rejected at the client renderer). The announcement is locally
+        # minted, not a passthrough of a server event, so we synthesize
+        # a stable flow_id token from the bridge_id.
+        bridge_token = self._bridge_id or "no-bridge"
+        meta: dict[str, Any] = {
+            "source": "homunculus",
+            "event_type": "post_message",
+            "source_event_type": "post_message",
+            "flow_id": f"bridge-reconnect-{bridge_token}",
+            "cursor": "",
+        }
+        notification = JSONRPCNotification(
+            jsonrpc="2.0",
+            method=CLAUDE_CHANNEL_NOTIFICATION_METHOD,
+            params={"content": content, "meta": meta},
+        )
+        message = SessionMessage(message=JSONRPCMessage(notification))
+        try:
+            await self._write_stream.send(message)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"reconnect announcement send failed: {exc}")
+
+    # ------------------------------------------------------------------
+    # Internal: long-poll
+    # ------------------------------------------------------------------
+
+    async def _long_poll_loop(self) -> None:
+        """Drain /events forever; emit each as an MCP notification."""
+        consecutive_failures = 0
+        while self._poll_active:
+            if self._bridge_id is None:
+                await asyncio.sleep(0.5)
+                continue
+            try:
+                await self._drain_once(self._bridge_id)
+                consecutive_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                consecutive_failures = await self._handle_poll_failure(
+                    exc,
+                    consecutive_failures,
+                )
+
+    async def _drain_once(self, bridge_id: str) -> None:
+        """Fetch one events page, dispatch each event, advance the cursor.
+
+        The page-level ``next_cursor`` advance is the cursor authority here:
+        when a role event is dedup-suppressed, it skips ``_emit_event`` (and its
+        per-event cursor bump), so this page-level advance is what prevents the
+        suppressed event from being re-fetched on the next poll.
+        """
+        events_payload = await self._fetch_events(bridge_id, self._cursor)
+        events = events_payload.get("events") or []
+        if isinstance(events, list):
+            for event in events:
+                if isinstance(event, dict):
+                    await self._dispatch_incoming_event(event)
+        next_cursor = events_payload.get("next_cursor")
+        if isinstance(next_cursor, int):
+            self._cursor = max(self._cursor, next_cursor - 1)
+
+    async def _dispatch_incoming_event(self, event: dict[str, Any]) -> None:
+        """Emit one event; route a live role delivery through the owed coordinator.
+
+        A role ``peer_message`` (Control #5 meta keys present) is settled via
+        :class:`OwedDeliveryCoordinator` — emitted at most once (dedup) with its
+        ``delivered`` flag re-confirmed (M7). Only ROLE deliveries route here on
+        the live path; a direct IMPORTANT send's original emission is recorded
+        server-side, so its owed rows are handled by the coordinator's repair
+        drain, not this live path. Every other event emits on the normal path.
+        """
+        role_keys = OwedDeliveryCoordinator.role_delivery_keys(event)
+        if role_keys is None:
+            await self._emit_event(event)
+            return
+        external_id, recipient_key = role_keys
+        await self._owed_delivery.settle_live(
+            event=event, external_id=external_id, recipient_key=recipient_key,
+        )
+
+    async def _handle_poll_failure(self, exc: BaseException, failures_so_far: int) -> int:
+        """Decide whether to reconnect or just back off; return updated counter."""
+        failures = failures_so_far + 1
+        bridge_gone = _is_bridge_gone(exc)
+        if bridge_gone or failures >= CONSECUTIVE_POLL_FAILURES_BEFORE_RECONNECT:
+            reason = (
+                "bridge lost during poll"
+                if bridge_gone
+                else f"{failures} consecutive poll failures"
+            )
+            _log(f"{reason}, reconnecting...")
+            try:
+                await self._reconnect()
+                failures = 0
+            except Exception as reconnect_exc:  # noqa: BLE001
+                _log(f"reconnect failed during poll: {reconnect_exc}")
+        else:
+            _log(f"poll error: {exc}")
+        await asyncio.sleep(POLL_RETRY_DELAY_S)
+        return failures
+
+    async def _fetch_events(self, bridge_id: str, after: int) -> dict[str, Any]:
+        """GET /events with long-poll timeout; returns parsed JSON body."""
+        path = f"/api/v1/bridge/{bridge_id}/events"
+        params = {"after": str(after)}
+        response = await self._client.get(
+            path,
+            params=params,
+            timeout=EVENTS_POLL_TIMEOUT_S + 5.0,
+        )
+        return self._unwrap(response, path)
+
+    async def _emit_event(self, event: dict[str, Any]) -> None:
+        """Push one bridge event as a transport-specific MCP notification."""
+        if self._write_stream is None:
+            return
+        source_event_type = str(event.get("event_type") or "post_message")
+        content_raw = event.get("content")
+        content = "" if content_raw is None else str(content_raw)
+        if source_event_type != "post_message":
+            # Preserve the original event_type as a discriminator the
+            # consumer can string-match on, matching the Node bridge.
+            content = f"[{source_event_type}] {content}"
+        method = self._notification_method_for(source_event_type)
+        meta = self._notification_meta_for(event, source_event_type, method)
+        if method == HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD:
+            content = self._homunculus_peer_message_content(
+                content,
+                source_event_type,
+                meta,
+            )
+        notification = JSONRPCNotification(
+            jsonrpc="2.0",
+            method=method,
+            params={"content": content, "meta": meta},
+        )
+        message = SessionMessage(message=JSONRPCMessage(notification))
+        # The poll loop runs outside any request context; the captured
+        # write stream is the same one ServerSession writes to.
+        await self._write_stream.send(message)
+        cursor = event.get("cursor")
+        if isinstance(cursor, int):
+            self._cursor = max(self._cursor, cursor)
+
+    def _notification_method_for(self, source_event_type: str) -> str:
+        """Return the MCP notification method this bridge should emit."""
+        if (
+            self._agent_id == "codex"
+            and source_event_type in CODEX_NATIVE_PEER_EVENT_TYPES
+        ):
+            return HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD
+        return CLAUDE_CHANNEL_NOTIFICATION_METHOD
+
+    def _notification_meta_for(
+        self,
+        event: dict[str, Any],
+        source_event_type: str,
+        method: str,
+    ) -> dict[str, Any]:
+        """Build wire meta for the selected notification method."""
+        raw_meta = event.get("meta")
+        event_meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+        if method == HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD:
+            return self._homunculus_peer_message_meta(event, source_event_type, event_meta)
+        return self._claude_channel_meta(event, source_event_type, event_meta)
+
+    def _claude_channel_meta(
+        self,
+        event: dict[str, Any],
+        source_event_type: str,
+        event_meta: dict[str, Any],
+    ) -> dict[str, Any]:
+        # Wire meta is restricted to the canonical 5-key shape Claude Code
+        # accepts on `notifications/claude/channel` (matches the legacy
+        # Node bridge byte-for-byte).  Extra keys (e.g. thread_id /
+        # message_id from the wake adapter) get silently dropped by the
+        # MCP client renderer — verified during Phase 4 cutover when our
+        # initial 7-key meta caused every wake notification to vanish at
+        # the client.  Bridge-internal metadata (thread_id, message_id)
+        # lives in the channel content envelope itself if a receiver
+        # needs it, not in the wire meta.
+        #
+        # ``flow_id`` lookup order: top-level event field (legacy shape)
+        # → event.meta["flow_id"] (Python QueuedEvent puts it in meta) →
+        # empty string.  Without the meta fallback every wake-adapter
+        # event ships flow_id="" which Claude Code silently rejects.
+        flow_id = self._flow_id_for(event, event_meta)
+        return {
+            "source": "homunculus",
+            "event_type": "post_message",
+            "source_event_type": source_event_type,
+            "flow_id": flow_id,
+            "cursor": str(event.get("cursor", "")),
+        }
+
+    def _homunculus_peer_message_meta(
+        self,
+        event: dict[str, Any],
+        source_event_type: str,
+        event_meta: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Preserve full bridge metadata for Codex's native peer-message sink."""
+        cursor = event.get("cursor", "")
+        meta: dict[str, Any] = dict(event_meta)
+        meta.update(
+            {
+                "source": "homunculus",
+                "event_type": source_event_type,
+                "source_event_type": source_event_type,
+                "flow_id": self._flow_id_for(event, event_meta),
+                "cursor": cursor,
+                "bridge_cursor": cursor,
+                "recipient_agent_id": event_meta.get("to_agent_id") or self._agent_id,
+                "recipient_agent_instance_id": (
+                    event_meta.get("to_agent_instance_id") or self._agent_instance_id
+                ),
+                "trigger_turn": True,
+            },
+        )
+        return meta
+
+    @staticmethod
+    def _flow_id_for(event: dict[str, Any], event_meta: dict[str, Any]) -> str:
+        flow_id_raw = event.get("flow_id")
+        if flow_id_raw is None:
+            flow_id_raw = event_meta.get("flow_id")
+        return "" if flow_id_raw is None else str(flow_id_raw)
+
+    @staticmethod
+    def _homunculus_peer_message_content(
+        content: str,
+        source_event_type: str,
+        meta: dict[str, Any],
+    ) -> str:
+        """Make Codex peer-message content readable without JSON parsing."""
+        if source_event_type != "peer_message":
+            return content
+        prose = content.removeprefix("[peer_message] ").removeprefix("[peer_message]")
+        sender_agent_id = str(meta.get("from_agent_id") or "unknown")
+        sender_label = meta.get("from_session_label")
+        sender_instance = meta.get("from_agent_instance_id")
+        label_part = f' "{sender_label}"' if sender_label else ""
+        instance_part = f" instance={sender_instance}" if sender_instance else ""
+        return f"[peer:{sender_agent_id}{label_part}{instance_part}] {prose}"
+
+    # ------------------------------------------------------------------
+    # Internal: HTTP helpers
+    # ------------------------------------------------------------------
+
+    async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        response = await self._client.post(path, json=body)
+        return self._unwrap(response, path)
+
+    async def _get(self, path: str) -> dict[str, Any]:
+        response = await self._client.get(path)
+        return self._unwrap(response, path)
+
+    @staticmethod
+    def _unwrap(response: httpx.Response, path: str) -> dict[str, Any]:
+        """Parse JSON body; raise BridgeHTTPError on non-2xx.
+
+        On the error path, attaches ``status_code`` and ``path`` to the
+        raised exception so :func:`_is_bridge_gone` can do structured
+        discrimination (404 on an ``agc-``-prefixed bridge route ⇒
+        stale-bridge ⇒ reconnect).
+        """
+        try:
+            parsed = response.json() if response.content else {}
+        except ValueError:
+            parsed = {"raw": response.text}
+        if not response.is_success:
+            message = ""
+            if isinstance(parsed, dict):
+                message = str(parsed.get("message") or "")
+            if not message:
+                message = response.text or response.reason_phrase
+            msg = f"Homunculus {path} failed ({response.status_code}): {message}"
+            raise BridgeHTTPError(
+                msg, status_code=response.status_code, path=path,
+            )
+        if not isinstance(parsed, dict):
+            return {"result": parsed}
+        return parsed
+
+    def _require_bridge(self) -> str:
+        """Return current bridge_id or raise a clear error."""
+        if self._bridge_id is None:
+            msg = "Bridge not ready yet -- waiting for homunculus bridge API to come online."
+            raise BridgeHTTPError(msg)
+        return self._bridge_id
+
+    def _bridge_path(self, suffix: str) -> str:
+        """Build a bridge-scoped path from the current bridge id."""
+        return f"/api/v1/bridge/{self._require_bridge()}{suffix}"
+
+    async def _call_with_reconnect(
+        self,
+        op: str,
+        coroutine_factory: Callable[[], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Run an HTTP coroutine; reconnect once if the bridge is gone."""
+        try:
+            return await coroutine_factory()
+        except BridgeHTTPError as exc:
+            if not _is_bridge_gone(exc):
+                raise
+            _log(f"{op}: bridge gone, reconnecting and retrying once")
+            await self._reconnect()
+            return await coroutine_factory()
+
+    # ------------------------------------------------------------------
+    # OwedDeliveryTransport surface (v10 Control #5)
+    #
+    # The thin slice the OwedDeliveryCoordinator drives. Kept here (not in the
+    # coordinator) because each method needs the bridge session's HTTP client /
+    # cursor / write stream; the coordinator owns only the owed-delivery policy.
+    # ------------------------------------------------------------------
+
+    @property
+    def bridge_ready(self) -> bool:
+        """True once a bridge session is open (a ``bridge_id`` exists)."""
+        return self._bridge_id is not None
+
+    @property
+    def running(self) -> bool:
+        """True while the poll loop is active (cleared on ``close``)."""
+        return self._poll_active
+
+    async def emit_event(self, event: dict[str, Any]) -> None:
+        """Emit one bridge event as an MCP notification (coordinator entry)."""
+        await self._emit_event(event)
+
+    async def drain_page(self, limit: int) -> dict[str, Any]:
+        """POST ``/peer/drain``; return the full payload.
+
+        REL-05: one call returns BOTH owed kinds —
+        ``{"undelivered": [...role], "undelivered_direct": [...direct],
+        "re_emit_cap": N}`` — so the coordinator's repair pass makes one
+        round-trip for role + direct.
+        """
+        async def call() -> dict[str, Any]:
+            return await self._post(self._bridge_path("/peer/drain"), {"limit": limit})
+
+        return await self._call_with_reconnect("peer_drain", call)
+
+    async def flip_delivered(self, *, external_id: str, recipient_key: str) -> None:
+        """POST ``/peer/delivered`` to confirm ``delivered=true`` for a ROLE row."""
+        async def call() -> dict[str, Any]:
+            return await self._post(
+                self._bridge_path("/peer/delivered"),
+                {"external_id": external_id, "recipient_key": recipient_key},
+            )
+
+        await self._call_with_reconnect("peer_delivered", call)
+
+    async def confirm_direct(self, *, message_id: str) -> None:
+        """POST ``/peer/delivered_direct`` to record a DIRECT row's re-emission."""
+        async def call() -> dict[str, Any]:
+            return await self._post(
+                self._bridge_path("/peer/delivered_direct"),
+                {"message_id": message_id},
+            )
+
+        await self._call_with_reconnect("peer_delivered_direct", call)
+
+    # ------------------------------------------------------------------
+    # Tool surface — claude_code_channel half
+    # ------------------------------------------------------------------
+
+    async def current_identity(self) -> dict[str, Any]:
+        async def call() -> dict[str, Any]:
+            return await self._get(self._bridge_path("/current_identity"))
+
+        payload = await self._call_with_reconnect("current_identity", call)
+        payload.update(
+            {
+                "transport": "stdio",
+                "homunculus_name": self._homunculus_name,
+                "agent_session_id": self._agent_session_id,
+                "mcp_session_id": "",
+                "identity_trust": "stdio_bridge",
+                "streamable_no_auth": False,
+            },
+        )
+        return payload
+
+    async def process_search(
+        self,
+        *,
+        query: str,
+        max_results: int = 10,
+    ) -> dict[str, Any]:
+        async def call() -> dict[str, Any]:
+            return await self._post(
+                self._bridge_path("/process/search"),
+                {"query": query, "max_results": max_results},
+            )
+
+        return await self._call_with_reconnect("process_search", call)
+
+    async def process_schema(self, *, process_key: str) -> dict[str, Any]:
+        async def call() -> dict[str, Any]:
+            return await self._post(
+                self._bridge_path("/process/schema"),
+                {"process_key": process_key},
+            )
+
+        return await self._call_with_reconnect("process_schema", call)
+
+    async def process_call(
+        self,
+        *,
+        process_key: str,
+        arguments: dict[str, Any],
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "process_key": process_key,
+            "arguments": arguments,
+        }
+        if reason is not None:
+            body["reason"] = reason
+
+        async def call() -> dict[str, Any]:
+            return await self._post(
+                self._bridge_path("/process/call"),
+                body,
+            )
+
+        return await self._call_with_reconnect("process_call", call)
+
+    async def process_result(self, *, action_id: str) -> dict[str, Any]:
+        async def call() -> dict[str, Any]:
+            path = self._bridge_path(
+                f"/process/result/{quote(action_id, safe='')}",
+            )
+            return await self._get(path)
+
+        return await self._call_with_reconnect("process_result", call)
+
+    async def download(self, *, blob_id: str, output_path: str) -> dict[str, Any]:
+        """Stream a blob to a local file; mirrors the Node bridge's shape."""
+        async def call() -> dict[str, Any]:
+            path = self._bridge_path(f"/download/{quote(blob_id, safe='')}")
+            response = await self._client.get(
+                path,
+                timeout=DEFAULT_REQUEST_TIMEOUT_S * 4,
+            )
+            if not response.is_success:
+                msg = f"Download failed ({response.status_code}): {response.text}"
+                raise BridgeHTTPError(
+                    msg,
+                    status_code=response.status_code,
+                    path=path,
+                )
+            body = response.content
+            # Write to disk synchronously — the file is bounded in size and
+            # the bridge subprocess has no other concurrent work that
+            # benefits from offloading this to a thread.
+            target = Path(output_path)
+            target.write_bytes(body)
+            filename = blob_id
+            disposition = response.headers.get("content-disposition", "")
+            if "filename=" in disposition:
+                raw = disposition.split("filename=", 1)[1].strip()
+                filename = raw.strip('";')
+            return {
+                "status": "downloaded",
+                "filename": filename,
+                "size": len(body),
+                "path": output_path,
+            }
+
+        return await self._call_with_reconnect("download", call)
+
+    # ------------------------------------------------------------------
+    # Tool surface — agent_channel half
+    # ------------------------------------------------------------------
+
+    async def peer_register(
+        self,
+        *,
+        agent_id: str,
+        session_label: str | None = None,
+    ) -> dict[str, Any]:
+        body = {
+            "agent_id": agent_id,
+            "agent_instance_id": self._agent_instance_id,
+            "agent_session_id": self._agent_session_id,
+            "session_label": session_label or self._session_label,
+            "parent_pid": self._parent_pid,
+            "provides_inference": self._provides_inference,
+        }
+
+        async def call() -> dict[str, Any]:
+            return await self._post(self._bridge_path("/peer/register"), body)
+
+        return await self._call_with_reconnect("peer_register", call)
+
+    async def peer_list(self) -> dict[str, Any]:
+        async def call() -> dict[str, Any]:
+            return await self._get(self._bridge_path("/peer/list"))
+
+        return await self._call_with_reconnect("peer_list", call)
+
+    async def peer_send(
+        self,
+        *,
+        peer_id: str,
+        content: list[dict[str, Any]],
+        peer_agent_instance_id: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"peer_id": peer_id, "content": content}
+        if peer_agent_instance_id is not None:
+            body["peer_agent_instance_id"] = peer_agent_instance_id
+
+        async def call() -> dict[str, Any]:
+            return await self._post(self._bridge_path("/peer/send"), body)
+
+        return await self._call_with_reconnect("peer_send", call)
+
+    async def peer_inbox(
+        self,
+        *,
+        after: str | None = None,
+        limit: int | None = None,
+        include_important: bool = False,
+        role_after: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, str] = {}
+        if after is not None:
+            params["after"] = after
+        if limit is not None:
+            params["limit"] = str(limit)
+        if include_important:
+            params["include_important"] = "true"
+        if role_after is not None:
+            params["role_after"] = role_after
+        query = f"?{urlencode(params)}" if params else ""
+
+        async def call() -> dict[str, Any]:
+            return await self._get(self._bridge_path(f"/peer/inbox{query}"))
+
+        return await self._call_with_reconnect("peer_inbox", call)
+
+    async def agent_thread_open(self, *, args: dict[str, Any]) -> dict[str, Any]:
+        async def call() -> dict[str, Any]:
+            return await self._post(self._bridge_path("/agent/thread/open"), args)
+
+        return await self._call_with_reconnect("agent_thread_open", call)
+
+    async def agent_send(
+        self,
+        *,
+        thread_id: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        async def call() -> dict[str, Any]:
+            path = self._bridge_path(f"/agent/{quote(thread_id, safe='')}/send")
+            return await self._post(path, args)
+
+        return await self._call_with_reconnect("agent_send", call)
+
+    async def agent_messages(
+        self,
+        *,
+        thread_id: str,
+        after_cursor: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        params = urlencode({"after_cursor": after_cursor, "limit": limit})
+
+        async def call() -> dict[str, Any]:
+            path = self._bridge_path(
+                f"/agent/{quote(thread_id, safe='')}/messages?{params}",
+            )
+            return await self._get(path)
+
+        return await self._call_with_reconnect("agent_messages", call)
+
+    async def agent_status(self, *, thread_id: str) -> dict[str, Any]:
+        async def call() -> dict[str, Any]:
+            path = self._bridge_path(f"/agent/{quote(thread_id, safe='')}/status")
+            return await self._get(path)
+
+        return await self._call_with_reconnect("agent_status", call)
+
+    async def agent_close(self, *, thread_id: str) -> dict[str, Any]:
+        async def call() -> dict[str, Any]:
+            path = self._bridge_path(f"/agent/{quote(thread_id, safe='')}/close")
+            return await self._post(path, {})
+
+        return await self._call_with_reconnect("agent_close", call)

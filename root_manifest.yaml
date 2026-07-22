@@ -1,0 +1,79 @@
+# Root manifest — per-homunculus declarative root-strictness contract.
+#
+# Source of truth for what is allowed at the repo root.  Three consumers
+# read it, with explicit blocking semantics per layer:
+#
+#   1. .githooks/pre-commit             BLOCKING (drift refused at commit)
+#   2. restart_with_manifest cutover    BLOCKING (drift refused at cutover)
+#   3. ananta.cli startup diagnostic    NEVER BLOCKING (structured log only)
+#
+# Architectural lock 2026-06-15 PT + operator Q&A locks 2026-06-16 PT
+# (Phase A planning §10 + Cycle 10 design memo
+# workbench/2026-06-16_root_manifest_yaml_design.md).
+
+schema_version: 1
+homunculus_name: homunculus
+
+universal:
+  files:
+    - .gitignore
+    - .dockerignore
+    - .mcp.json
+    - AGENTS.md
+    - CLAUDE.md
+    - pyproject.toml
+    - README.md
+    - LICENSE
+    - NOTICE
+    - CONTRIBUTING.md
+    - root_manifest.yaml
+    - bootstrap.py
+  directories:
+    - ananta
+    - plugins
+    - binary_libraries
+    - knowledge_bases
+    - profile
+    - workbench
+    - quality_gates
+    - .githooks
+    - .claude
+
+platform_managed:
+  directories:
+    - .git
+    - .venv
+    - __pycache__
+    - .ruff_cache
+    - .mypy_cache
+    - .pytest_cache
+    - .idea
+
+sanctioned:
+  - path: disabled_plugins
+    reason: "operator-sanctioned plugin retirement holding pen; not drift"
+    operator_approved: "2026-06-15"
+
+  - path: deployment
+    reason: "in-transition during 2026-06-15+ verb-conversion; will empty out per Phase F migration"
+    operator_approved: "2026-06-15"
+    sunset_target: "Phase F-3 + F-4 close"
+
+  - path: initialization
+    reason: "F4 retirement workstream; folds into ananta/src/ananta/profile_loader/"
+    operator_approved: "2026-06-16"
+    sunset_target: "F4 retirement closes"
+
+overrides: []
+
+diagnostic:
+  report_categories:
+    - unknown_root_entries
+    - missing_universal_entries
+    - sunset_overdue
+    - cleanup_overdue
+  ignore_patterns:
+    - "*.swp"
+    - "*.bak"
+    - ".DS_Store"
+    - "Thumbs.db"

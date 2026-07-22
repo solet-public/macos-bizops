@@ -1,0 +1,12 @@
+{
+  "process_key": "service_interface::io_interface_service::post_message",
+  "display_name": "Post Message",
+  "description": "Send a message to the conversation. Delivers answers, status updates, progress information, and final results to the requester. This action communicates only; it does not create executable plan artifacts. Note: in multi-interface deployments, outbound communication is typically provided by an IO plugin as `plugin::<namespace>::post_message`. Use that plugin-provided post_message when available. Use for: answering questions, delivering search results, providing status updates, sharing completed work. For goals requiring multiple coordinated tools, use create_extended_plan to produce a plan artifact instead of describing a plan in a message.",
+  "embedding_description": "Send a message to the conversation. Delivers answers, status updates, progress information, and final results to the requester. Communicates only; does NOT create executable plan artifacts. In multi-interface deployments, prefer the plugin-namespace version (plugin::<X>::post_message) when available. For multi-tool goals, use create_extended_plan instead of describing a plan in a message.",
+  "processor_policy_category": "edge_sink",
+  "error_processor_customizations": {
+    "action_context": "Sends a message to the user's IO interface (console, chat, etc.).",
+    "error_interpretation": "SessionError: Invalid or expired session_id - the user's connection may have dropped. RoutingError: No IO interface found for the session - plugin may not be registered. DeliveryError: Message could not be delivered - interface may be disconnected.",
+    "recovery_guidance": "For session errors: verify the session_id is current and retry. For routing errors: check that an IO interface plugin is active for this session type. For delivery errors: the message was not critical (status only), continue with the task."
+  }
+}

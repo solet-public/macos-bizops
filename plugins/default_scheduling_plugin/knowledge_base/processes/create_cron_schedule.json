@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::default_scheduling_plugin::create_cron_schedule",
+  "display_name": "Create Cron Schedule",
+  "description": "[NON-TERMINAL] Create a recurring wake-up schedule using a cron expression (UTC), keyed by memory_tag. When the schedule fires, the platform retrieves memories with the specified tag and the model decides what to do next.",
+  "embedding_description": "Create a recurring wake-up schedule on a cron cadence using memory_tag. Use for global heartbeats, periodic monitoring loops, recurring reminders, scheduled check-ins, and long-running workflows that need repeat wake-ups. Each run retrieves memories tagged with memory_tag so the model can decide the next action. Cancel or clean up later with clear_scheduled_actions_by_tag.",
+  "result_processor_customizations": {
+    "action_label": "Cron schedule created",
+    "result_type": "schedule_created",
+    "result_description": "Schedule ID with confirmation message",
+    "presentation_guidance": "",
+    "output_action_guidance": "A recurring schedule has been created. Retain the schedule_id or tags so you can cancel the schedule once it is no longer needed."
+  },
+  "error_processor_customizations": {
+    "action_context": "Creating a recurring wake-up schedule using a cron expression",
+    "error_interpretation": "ValidationError with 'cron_expression': invalid format (wrong number of fields, invalid minute/hour/day values). ValidationError with 'memory_tag': missing or empty. ScheduleCreateError: scheduler not initialized or failed to persist schedule.",
+    "recovery_guidance": "For cron expression errors: validate syntax (format: minute hour day month weekday) and suggest valid examples like '*/5 * * * *' (every 5 minutes) or '0 9 * * *' (daily 9am). For memory_tag errors: provide a non-empty memory_tag. For scheduler errors: verify scheduler service is running and state service is accessible."
+  }
+}

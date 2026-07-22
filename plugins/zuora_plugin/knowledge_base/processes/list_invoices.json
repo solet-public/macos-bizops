@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::list_invoices",
+  "display_name": "Zuora: List Invoices",
+  "description": "List an account's invoices. Requires account_id.",
+  "embedding_description": "Enumerate all invoices belonging to a specific Zuora account, for reviewing a customer's billing history. Requires account_id.",
+  "result_processor_customizations": {
+    "action_label": "Zuora invoices listed",
+    "result_type": "zuora_list_invoices_result",
+    "result_description": "Dict with invoices: a list of invoice objects.",
+    "presentation_guidance": "List the invoices with key fields; reflects sensitive financial/billing content (data_sensitivity 0.5) — surface for downstream use but never treat as public."
+  },
+  "error_processor_customizations": {
+    "action_context": "List a Zuora account's invoices.",
+    "error_interpretation": "zuora.invalid_params: missing account_id. zuora.object_not_found: no account with that id exists. zuora.auth_failed: the OAuth client credentials were rejected.",
+    "recovery_guidance": "zuora.object_not_found: verify the account_id via data_query or get_object."
+  }
+}

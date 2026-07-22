@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::salesforce_plugin::list_sobjects",
+  "display_name": "Salesforce: List SObjects",
+  "description": "List the org's sobjects (API name and label). No parameters.",
+  "embedding_description": "Enumerate every Salesforce object (standard and custom) visible to the CLI's authenticated user, as a first step before querying or describing a specific object. No parameters.",
+  "result_processor_customizations": {
+    "action_label": "Salesforce sobjects listed",
+    "result_type": "salesforce_list_sobjects_result",
+    "result_description": "Dict with sobjects: a list of {name, label} objects.",
+    "presentation_guidance": "List the object names and labels plainly; low sensitivity (metadata only, data_sensitivity 0.1)."
+  },
+  "error_processor_customizations": {
+    "action_context": "List the Salesforce org's sobjects.",
+    "error_interpretation": "sf.auth_failed: the sf CLI has no live session for the registered org. sf.api_error: an unexpected org error.",
+    "recovery_guidance": "sf.auth_failed: ask the operator to re-establish the org session with: sf org login web."
+  }
+}

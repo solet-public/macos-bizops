@@ -1,0 +1,196 @@
+# God-class tracked-debt register.
+#
+# 64 distinct class names covering the remaining platform-owned god classes
+# after the D1 gate reform (2026-05-28) cleared 5 entries via the new
+# @service_lifecycle + abstract-implementation strips. Operator decision (2026-05-25): defer to the
+# post-AWS-homunculus cycle. Tracking: Task #74.
+#
+# Per `workbench/2026-05-25_plugin_god_class_remediation.md`
+# §9.D–§9.Z each entry has a documented decomposition recipe (concrete
+# blueprint for the named platform classes in §9.A–§9.G; categorical
+# recipe in §9.H for plugin classes, §9.I for orchestration managers,
+# §9.J for API aggregators).
+#
+# Removing an entry from this list is the unit of remediation
+# progress. Format: one class name per line. Multiple files can share
+# a class name (e.g., several `Plugin` subclasses); one entry covers
+# them all.
+#
+# Do NOT add new entries without operator approval. The reformed gate
+# exists to catch new god classes; adding them to the allowlist
+# defeats its purpose.
+
+# ============================================================
+# §9.A–§9.G — concrete decomposition blueprints (named classes)
+# ============================================================
+
+# §9.A: ProcessRegistryBuilder — DONE (decomposed in this commit).
+#       No allowlist entry needed.
+# §9.B: PluginBase — DONE (slim).
+# §9.C: PluginManager — DONE (3 collaborators extracted).
+
+# §9.D.1: ProcessRegistryManager — deferred (Task #74).
+ProcessRegistryManager
+
+# §9.D.2: EventOrchestrator — deferred. 40 instance attrs.
+EventOrchestrator
+
+# §9.D.3: ServiceManager — deferred. 34 instance attrs.
+ServiceManager
+
+# §9.E: ActionQueuePoller — deferred. 2,760 LOC / 29 attrs / 98 methods.
+ActionQueuePoller
+
+# §9.F: ActionManager — deferred. 1,384 LOC / 25 attrs / 73 methods.
+ActionManager
+
+# §9.G: DefaultThinkingPlugin — deferred. 3,966 LOC / 42 publics / 21 attrs.
+DefaultThinkingPlugin
+
+# ============================================================
+# §9.H — Plugin classes (~25 entries; shared recipe = move private
+# helpers to sibling modules)
+# ============================================================
+
+ACTRMemoryPlugin
+AgentMessagingPlugin
+MacosVaultPlugin
+SecretsManagerVaultPlugin
+# Plugins whose class is literally named `Plugin` (claude_code_agent,
+# codex_agent, default_inference, mock_inference). One allowlist
+# entry covers all four since the matcher is by class name.
+Plugin
+
+# ============================================================
+# §9.H follow-on — plugin sibling modules also flagged
+# ============================================================
+
+ACTRMemoryBackend
+WbsAuthoringService
+ArtifactAuthoringService
+_WBSBuilder
+Forwarder
+PlatformSurface
+PluginSchemaLifecycle
+
+# ============================================================
+# §9.I — Orchestration managers / coordinators / engines / services /
+# repositories (~22 entries; shared recipe = extract collaborators by
+# concern per §9.A pattern)
+# ============================================================
+
+ActionCoordinator
+ActionExecutionEngine
+ActionFactory
+ActionProcessor
+# AgentMessagingRepository — coherent single-responsibility SQL boundary for
+# core__agent_thread/core__agent_message. The SQL-lockdown migration onto the
+# state interface (query_state/query_ordered/transactional typed ops) is
+# net-growing the class past the 500-LOC line (~499 pre-R5); growth is a
+# migration artifact, not a coherence loss. Operator-cleared 2026-06-21.
+AgentMessagingRepository
+AgentMessagingService
+APIStage
+AsyncJobManager
+BlobStorageService
+ContextManagementService
+ContextStage
+DiscoveryService
+ExposurePolicyService
+IOInterfaceService
+LifecycleManagementService
+NewTemplateEngine
+ProcessValidationManager
+ResultProcessingManager
+ServiceLifecycleManager
+StateService
+TemplateFunctionRegistry
+
+# ============================================================
+# §9.I follow-on — provider backends (~3 entries)
+# ============================================================
+
+PostgresProvider
+
+# ============================================================
+# §9.J — API aggregators (13 entries; shared recipe = split into
+# related sub-APIs)
+# ============================================================
+
+AddressBookServiceAPI
+CoreSchemaDefinitions
+LifecycleManagementAPI
+MemoryService
+MemoryServiceAPI
+MemoryServiceInterface
+StateManagementInterface
+StateServiceAdapter
+StateServiceProtocol
+ThinkingProvider
+ThinkingService
+ThinkingServiceAPI
+VaultServiceAPI
+
+# ============================================================
+# Coherent dispatch facades (no domain coupling)
+# ============================================================
+# Operator-approved 2026-06-07 PT under W-VAULT-INTERFACE-EXTEND Phase C.
+# `VaultServiceProxy` is a caller-bound facade with explicit per-method
+# delegation across vault L1 (14 methods) + L2-only (8 methods) +
+# L3 transitional OAuth helpers (4 methods) = 26 dispatched methods +
+# 2 bound-context accessors. The size is by-design: the alternative
+# (raw __getattr__ passthrough) was explicitly rejected by Codex
+# correction #4 because it defeats spoofing protection. Decomposition
+# per [[no-phantom-abstractions]] is wrong here — every method is one
+# layer of the same vault contract; there is no internal cohesion
+# axis to split on.
+
+VaultServiceProxy
+
+# ============================================================
+# Coherent dispatch facade (operator-approved 2026-06-16 PT)
+# ============================================================
+# `MacosSelfDeploymentPlugin` implements TWO service interfaces
+# per D16' strict-tuple-membership (`SelfDeploymentServiceInterface`
+# + `LocalSelfDeploymentServiceInterface`); each verb has a paired
+# direct interface method + `@platform_process` action wrapper
+# (platform convention; cloud sibling `aws_self_deployment_plugin`
+# follows the same shape). Orchestration is already decomposed into
+# 8 sibling modules: `swap_orchestrator`, `heartbeat_lifecycle`,
+# `drain_sentinel`, `stop_self_runner`, `stale_runtime_cleanup`,
+# `autostart_manager`, `router_client`, `blue_green_router/*`. The
+# remaining class body is paired-verb dispatch + lifecycle hooks; no
+# internal cohesion axis remains to split on. Non-process loc=809
+# (god_class_check, 2026-06-30, after the dev-only `hard_reset` method
+# + its `hard_reset_runner` delegator were removed). Allowlist captures
+# the trajectory; revisit during the post-AWS-homunculus cycle per the
+# Task #74 convention.
+
+MacosSelfDeploymentPlugin
+
+# ============================================================
+# Heterogeneous (config classes, dev tools)
+# ============================================================
+
+ConfigProvider
+EnvironmentConfig
+OrchestrationFeatureFlags
+HomunculusProvisioner
+ProvisioningConfig
+
+# ============================================================
+# Interface-faithful test doubles (operator-ratified 2026-07-06)
+# ============================================================
+# StubStateService (ananta/tests/llm/session_ledger/_stub_state_service.py)
+# duck-types the StateManagementInterface verb roster for offline ledger
+# smokes — its public-method breadth is contract-mandated, one coherent
+# responsibility. False-positive class: the gate's abstract-implementation
+# strip can't see it because the stub does NOT inherit the ABC. Ratified
+# per-instance by the operator (2026-07-06, LED-01 session). RETIREMENT
+# PATH: make the stub inherit StateManagementInterface (signature-locks
+# the fake per the B3 _CapturingStore discipline) — the interface strip
+# then applies and this entry gets REMOVED. Currently outside the
+# enforced per-file scope (ananta/tests — the GTE-05 gap); entry
+# forward-proofs the gap's closure.
+
+StubStateService

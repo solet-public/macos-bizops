@@ -1,0 +1,75 @@
+# {{HOMUNCULUS_NAME}}-fleet.zsh — OPTIONAL multi-role session functions.
+# Sourced by <clone>/client/{{HOMUNCULUS_NAME}}.zsh ONLY if the operator
+# accepted the Step 4a fleet-coordination offer in the hydration runbook.
+# Lives in the clone, same as the single-session launcher, so it arrives
+# via `git pull`, never another ~/.zshrc replacement.
+#
+# This is a DIFFERENT trust level than claude-{{HOMUNCULUS_NAME}} (the
+# Step 2 single-session launcher). That launcher NEVER passes
+# --dangerously-skip-permissions (a fixed invariant) --
+# it is the safe default for one operator running one session.
+# The functions below are for an operator who has explicitly chosen to run
+# SEVERAL concurrent named sessions against {{HOMUNCULUS_NAME}} (a
+# coordinator-style fleet) and has been walked through what
+# --dangerously-skip-permissions and --remote-control actually do. Do not
+# render this file, and do not add its `source` line to
+# {{HOMUNCULUS_NAME}}.zsh, without that conversation having happened.
+
+# One shared launcher, parameterized by role. Differences from the Step 2
+# single-session launcher:
+#   --remote-control "$role"   makes this session addressable by Claude
+#                               Code's remote-control feature from another
+#                               session (what lets a coordinator session
+#                               drive/monitor worker sessions).
+#   --dangerously-load-development-channels server:{{HOMUNCULUS_NAME}}
+#                               wires the MCP development-channel bridge
+#                               that gives peer_send its idle-wake path --
+#                               the Step 2 launcher deliberately omits this
+#                               (see the hydration runbook's "What the user
+#                               should expect afterward").
+#   --dangerously-skip-permissions
+#                               opt-in, separately gated below. Skips the
+#                               tool-approval prompt on every action. This
+#                               is what makes multiple concurrently-running
+#                               sessions practical without an operator
+#                               babysitting each one's confirmations, but it
+#                               removes the per-action safety boundary. Set
+#                               {{HOMUNCULUS_NAME}}_FLEET_SKIP_PERMISSIONS=1
+#                               in the environment (or edit the line below)
+#                               only after you understand that tradeoff.
+_claude_for_{{HOMUNCULUS_NAME}}() {
+  local role="$1"
+  local model="$2"    # optional CLI model alias; empty = settings.json default
+  local effort="$3"   # optional effort level; empty = settings.json default
+
+  typeset -a extra_flags
+  [[ -n "$model" ]]  && extra_flags+=(--model "$model")
+  [[ -n "$effort" ]] && extra_flags+=(--effort "$effort")
+  [[ "${{{HOMUNCULUS_NAME}}_FLEET_SKIP_PERMISSIONS:-0}" == "1" ]] && extra_flags+=(--dangerously-skip-permissions)
+
+  HOMUNCULUS_AGENT_SESSION_LABEL="$role" \
+  HOMUNCULUS_AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
+  exec claude \
+      --dangerously-load-development-channels server:{{HOMUNCULUS_NAME}} \
+      --name "$role" \
+      --remote-control "$role" \
+      "${extra_flags[@]}"
+}
+
+# One function per role the operator chose in Step 4a. This is the ONE
+# canonical example (a single "Coordinator" role) -- duplicate this pattern
+# per role, substituting the function name and the role label. Role names
+# are the operator's choice; do not invent additional ones unasked.
+#
+# claude-{{HOMUNCULUS_NAME}}-coordinator() { _claude_for_{{HOMUNCULUS_NAME}} Coordinator }
+#
+# Restart variant (kill any running session under this role label first,
+# then launch fresh in the current pane -- mirrors the single-session
+# launcher's restart shape):
+#
+# claude-{{HOMUNCULUS_NAME}}-restart-coordinator() {
+#   local pids
+#   pids="$(pgrep -f "claude .*--name Coordinator( |\$)" 2>/dev/null)"
+#   [[ -n "$pids" ]] && echo "$pids" | xargs kill 2>/dev/null && sleep 1
+#   _claude_for_{{HOMUNCULUS_NAME}} Coordinator
+# }

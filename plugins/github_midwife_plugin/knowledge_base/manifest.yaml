@@ -1,0 +1,33 @@
+name: github_midwife_plugin
+description: |
+  Knowledge base for the GitHub-genesis midwife plugin (the BIRTH SPINE).
+  Holds the process JSON for the dual-use birth_homunculus verb, the
+  macos-free-homunculus profile template (per-plugin template ownership
+  convention), its checked-in profile_baseline/ per-plugin config
+  templates (genesis has no parent homunculus to read a baseline from —
+  and the seed factory reads these at assemble time, cross-plugin), the
+  hydration_templates/ operator-env bundle (agent-rendered at genesis
+  time — NOT KB articles), and the prose articles: the hydration runbook
+  and the first-days owner-onboarding runbook (promoted into the birth-spine
+  KB 2026-07-20). The seed factory data files (seed_manifest.yaml,
+  capability_bundles.yaml), the seed-README render-source, and the seed
+  publish/licensing articles moved to seed_factory_plugin in the 2026-07-20
+  split.
+content:
+  patterns:
+    # hydration_templates/ holds render-source template files (shell,
+    # JSON, markdown), not articles — ingesting them would pollute
+    # retrieval for every newborn.
+    # The dir is kept FLAT because Path.match has no recursive `**`;
+    # one pattern covers it. Include patterns stay at the platform
+    # default (*.md, *.txt, *.rst).
+    #
+    # parse_manifest REPLACES exclude_patterns rather than merging
+    # (default_knowledge_plugin/kb_indexing.py), so the platform-default
+    # excludes are re-stated here — dropping them would re-admit .git/
+    # .archive/scripts content.
+    exclude:
+      - "**/.git/**"
+      - "**/.archive/**"
+      - "**/scripts/**"
+      - "hydration_templates/*"

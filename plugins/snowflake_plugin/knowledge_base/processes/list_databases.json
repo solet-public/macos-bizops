@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::list_databases",
+  "display_name": "Snowflake: List Databases",
+  "description": "List databases visible to the configured role in the Snowflake account.",
+  "embedding_description": "Enumerate the Snowflake databases the operator's read-only service role can see, as a first step before querying or exploring schemas and tables. No parameters.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake databases listed",
+    "result_type": "snowflake_list_databases_result",
+    "result_description": "Dict with databases: a list of {name} objects.",
+    "presentation_guidance": "List the database names plainly; low sensitivity (metadata only, data_sensitivity 0.1)."
+  },
+  "error_processor_customizations": {
+    "action_context": "List databases visible to the configured Snowflake role.",
+    "error_interpretation": "snowflake.auth_failed: the key-pair JWT was rejected. snowflake.permission_denied: the role has no visible databases. snowflake.api_error: an unexpected warehouse error.",
+    "recovery_guidance": "snowflake.auth_failed/permission_denied: ask the operator to check the connecting user's key and role grants."
+  }
+}

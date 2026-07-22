@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::slides_get",
+  "display_name": "Slides: Get Presentation",
+  "description": "Fetch a Google Slides presentation's slide list — object id and page-element count per slide. Requires a connected account.",
+  "embedding_description": "Fetch an existing Google Slides presentation by id and return a summary of its slides: one row per slide with its object_id (needed to target that slide in slides_batch_update requests) and element_count (how many page elements — text boxes, images, shapes — it contains). This is a structural summary, not full slide content; it is the read counterpart to slides_batch_update (which edits) and slides_export (which spills the rendered deck as pdf/pptx into a blob). Fails gsuite.not_found if the id does not exist.",
+  "result_processor_customizations": {
+    "action_label": "Presentation read",
+    "result_type": "g_suite_slides_get_result",
+    "result_description": "Dict with a slides list ({object_id, element_count}) and a count.",
+    "presentation_guidance": "Summarize how many slides the deck has. Suggest slides_export for a viewable rendered copy."
+  },
+  "error_processor_customizations": {
+    "action_context": "Fetch a Google Slides presentation's slide summary.",
+    "error_interpretation": "gsuite.invalid_params: missing id. gsuite.not_found: the presentation id does not exist. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.not_found: verify the presentation id. gsuite.not_connected: run connect_account."
+  }
+}

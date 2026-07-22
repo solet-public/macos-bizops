@@ -1,0 +1,21 @@
+# Retrieval-test companion for the session-start orientation article.
+# Gated by service_interface::knowledge_service::test_retrieval.
+
+article_path: knowledge_bases/ananta_platform/24_operator_communication/04_session_start_orientation.md
+consumer_profile: both
+
+target_queries:
+  - "session start orientation standing governance documents"
+  - "what documents should a fresh session anchor on"
+  - "where do I find the charter and standing positions at session start"
+  - "is this governance question already settled somewhere"
+
+forbidden_queries:
+  - "operator decision brief format"                  # 01_operator_decision_briefs owns this
+  - "operator collaboration craft working conventions" # 03_collaboration_craft owns this
+  - "recall before work knowledge base first"          # 14_knowledge_retrieval/04_recall_before_work owns this
+
+min_rank: 3
+forbidden_min_rank: 4
+
+process_key_assertions: []

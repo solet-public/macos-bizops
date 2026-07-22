@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::gmail_send",
+  "display_name": "Gmail: Send Message",
+  "description": "Send a plain-text email from the connected account. Optional 'attachments' is a list of blob ids (from blob storage) that are attached by filename + mime type. Returns the sent message id and thread id. Requires a connected account. This is a write action — it delivers real mail.",
+  "embedding_description": "Compose and send an outgoing email through the connected Gmail account. Takes a recipient address, an optional subject and plain-text body, and an optional list of blob-storage ids to attach as files. Builds a MIME message and hands it to Gmail's send API. Returns the created message id and thread id. Distinct from gmail_create_draft (which only saves a draft); this actually delivers. Fails gsuite.not_connected if no account is linked.",
+  "result_processor_customizations": {
+    "action_label": "Gmail message sent",
+    "result_type": "g_suite_gmail_send_result",
+    "result_description": "Dict with the sent message id and thread id.",
+    "presentation_guidance": "Confirm the message was delivered to the recipient and give the message id. Because this delivers real mail, be explicit that it was sent."
+  },
+  "error_processor_customizations": {
+    "action_context": "Send an email from the connected Gmail account.",
+    "error_interpretation": "gsuite.invalid_params: missing 'to' or an unresolvable attachment blob id. gsuite.permission_denied: the granted scope does not allow sending. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: supply a 'to' address and valid attachment blob ids. gsuite.permission_denied: re-run connect_account so gmail.modify is granted. gsuite.not_connected: run connect_account."
+  }
+}

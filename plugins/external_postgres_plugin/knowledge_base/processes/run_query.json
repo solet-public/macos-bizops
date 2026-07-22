@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::external_postgres_plugin::run_query",
+  "display_name": "External Postgres: Run Query",
+  "description": "Run ONE read-only SQL statement against a registered foreign Postgres connection (by connection_name) and return the rows. Read leaders only (SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE) — the connection is read-only at the server, so any write or DDL is refused. Returns rows inline (up to max_rows, default 200, capped 1000); fails loud with external_pg.result_too_large over the inline caps — use export_query for the full result set as a workspace .tsv file. Use list_connections to discover registered names.",
+  "embedding_description": "Execute an ad-hoc read-only SQL SELECT against an external/foreign Postgres database that the operator registered as an external_pg connection, addressed by its connection NAME (never a DSN). Returns the query's columns and rows as a small inline result for interactive inspection; a result too large for the inline caps fails loud rather than spilling. A single statement per call; writes, INSERT/UPDATE/DELETE, DDL and CREATE TEMP are refused because the connection is read-only (SQLSTATE 25006). This is the query surface of the read-only 'super Datagrip' for foreign Postgres databases, distinct from the platform's own state database. Use export_query for the full result set as a workspace .tsv file, list_tables/describe_table to explore the schema first.",
+  "result_processor_customizations": {
+    "action_label": "Foreign Postgres query run",
+    "result_type": "external_postgres_run_query_result",
+    "result_description": "Dict with columns (ordered names) + rows (a list of row ARRAYS parallel to columns, so duplicate column names from a JOIN are preserved) + row_count + spilled=false.",
+    "presentation_guidance": "Summarize the row_count and show a few rows. Row data references potentially sensitive corporate database content (data_sensitivity 0.5) — surface for downstream use but never treat as public."
+  },
+  "error_processor_customizations": {
+    "action_context": "Run a read-only SQL query against a registered foreign Postgres connection.",
+    "error_interpretation": "external_pg.invalid_params: missing connection_name or sql. external_pg.connection_unknown: no connection registered under that name. external_pg.read_only_violation: the statement is a write/DDL or is not a permitted read leader. external_pg.query_failed: a SQL syntax or missing-object error in your query. external_pg.auth_failed / external_pg.permission_denied: the registered credential was rejected. external_pg.timeout: the query exceeded the statement timeout. external_pg.platform_db_refused: the connection targets the platform's own database (refused). external_pg.result_too_large: the result exceeds the inline caps — this verb is for interactive reads only.",
+    "recovery_guidance": "external_pg.connection_unknown: run list_connections to see registered names. external_pg.read_only_violation: submit a single SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE statement — this tool is read-only. external_pg.query_failed: fix the SQL. external_pg.timeout: narrow the query or add a LIMIT. external_pg.auth_failed/permission_denied: ask the operator to re-check the registered connection. external_pg.result_too_large: narrow the query (LIMIT / max_rows) for an interactive answer, or use export_query with an absolute output_tsv_path to land the full result as a workspace TSV."
+  }
+}

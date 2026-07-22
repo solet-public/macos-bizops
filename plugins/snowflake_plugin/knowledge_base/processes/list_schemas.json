@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::list_schemas",
+  "display_name": "Snowflake: List Schemas",
+  "description": "List the schemas in a database of the configured Snowflake account. Requires database.",
+  "embedding_description": "Enumerate the schemas inside a specific Snowflake database, for exploring warehouse structure before writing a query. Requires the database name.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake schemas listed",
+    "result_type": "snowflake_list_schemas_result",
+    "result_description": "Dict with schemas: a list of schema name strings.",
+    "presentation_guidance": "List the schema names plainly; low sensitivity (metadata only, data_sensitivity 0.1)."
+  },
+  "error_processor_customizations": {
+    "action_context": "List schemas in a Snowflake database.",
+    "error_interpretation": "snowflake.invalid_params: missing database. snowflake.api_error: the database does not exist or another warehouse error occurred. snowflake.permission_denied: the role cannot see this database.",
+    "recovery_guidance": "snowflake.invalid_params: supply a database name from list_databases. snowflake.api_error: verify the database name is spelled correctly."
+  }
+}

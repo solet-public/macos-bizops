@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::drive_share",
+  "display_name": "Drive: Share File",
+  "description": "Grant a Google Drive file or folder permission to an email address at a given role (reader, commenter, writer). No notification email is sent. Requires a connected account.",
+  "embedding_description": "Grant Drive sharing access on a specific file or folder id to one email address, at exactly one role: reader (view only), commenter (view + comment), or writer (edit). Sends no notification email to the grantee. Returns an ok flag and the new permission id. This is an access-control write, distinct from every read/export verb in this plugin — use it after drive_upload_file or drive_create_folder to open access to a newly created item. Fails gsuite.invalid_params if role is not one of the three allowed values.",
+  "result_processor_customizations": {
+    "action_label": "Drive permission granted",
+    "result_type": "g_suite_drive_share_result",
+    "result_description": "Dict with ok=true and the new permission_id.",
+    "presentation_guidance": "Confirm which email and role were granted on which file. This is an access-control change — be explicit that access was actually opened."
+  },
+  "error_processor_customizations": {
+    "action_context": "Grant Drive sharing access to an email address.",
+    "error_interpretation": "gsuite.invalid_params: missing id/email/role, or role is not reader/commenter/writer. gsuite.not_found: the file id does not exist. gsuite.permission_denied: the connected account cannot share this file. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: pass role as one of reader/commenter/writer. gsuite.not_found: verify the file id. gsuite.not_connected: run connect_account."
+  }
+}

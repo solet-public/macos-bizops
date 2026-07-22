@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::list_tables",
+  "display_name": "Snowflake: List Tables",
+  "description": "List tables and views in a database.schema of the configured Snowflake account. Requires database and schema.",
+  "embedding_description": "Enumerate the tables and views inside a specific database and schema in Snowflake, for exploring warehouse structure before writing a query or calling describe_table. Requires database and schema names.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake tables listed",
+    "result_type": "snowflake_list_tables_result",
+    "result_description": "Dict with tables: a list of {name, kind} objects.",
+    "presentation_guidance": "List the table names and kinds plainly; low sensitivity (metadata only, data_sensitivity 0.1)."
+  },
+  "error_processor_customizations": {
+    "action_context": "List tables in a Snowflake database.schema.",
+    "error_interpretation": "snowflake.invalid_params: missing database or schema. snowflake.api_error: the schema does not exist or another warehouse error occurred.",
+    "recovery_guidance": "snowflake.invalid_params: supply both database and schema, from list_databases/list_schemas."
+  }
+}

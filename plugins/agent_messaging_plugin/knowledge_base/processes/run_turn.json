@@ -1,0 +1,12 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::run_turn",
+  "display_name": "Execute One Agent Messaging Turn",
+  "description": "Execute a single agent turn for an originator message in core__agent_thread. Submitted exclusively by AgentMessagingService._dispatch_turn after a successful agent_thread_open or agent_send HTTP request — never authored by the model. EDGE action whose result is always bridge-delivered through plugin::agent_messaging_plugin::deliver_result, even when the turn fails: the structured payload carries status='idle'|'interrupted'|'error' and (on failure) error={code, message}. plugin::agent_messaging_plugin::deliver_error is reserved for bridge/platform contract failures and is never produced by run_turn outcomes.",
+  "embedding_description": "Execute one agent turn for an inter-agent thread. Internal runner submitted by AgentMessagingService. Resolves backend, assembles bounded prompt, invokes GuardedAgentInterface.execute_agent, persists agent or system/error message, returns a structured payload (success or status='error') delivered via bridge_delivery_result.",
+  "processor_policy_category": "edge",
+  "error_processor_customizations": {
+    "action_context": "Executes one inter-agent turn against the resolved backend (codex or claude_code).",
+    "error_interpretation": "Turn failures arrive as bridge_delivery_result events whose wrapped payload has status='error' and error.code set. Stable codes: agent_thread_not_found (thread row gone), agent_thread_run_guard (stale/duplicated run_turn against a non-queued thread), agent_thread_transition_failed (status mutation rejected), agent_message_not_found (originator message missing), agent_execution_failed (backend ExecutionResult.error set), agent_messaging_error (catch-all). bridge_delivery_error is reserved for platform-side bridge contract violations and will not surface a turn outcome.",
+    "recovery_guidance": "Inspect payload.error.code in the bridge_delivery_result event to dispatch recovery. agent_thread_not_found / agent_thread_run_guard typically mean the originator should reopen the thread. agent_execution_failed surfaces the underlying CLI/SDK message in payload.error.message; retry with adjusted working_directory or prompt is the typical next step. agent_messaging_error is a fallback that warrants investigating the persisted system/error message row in agent_messages."
+  }
+}

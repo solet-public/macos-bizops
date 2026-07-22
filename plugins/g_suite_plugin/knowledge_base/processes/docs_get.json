@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::docs_get",
+  "display_name": "Docs: Get Document",
+  "description": "Fetch a Google Docs document's title and plain-text body content. Requires a connected account.",
+  "embedding_description": "Fetch an existing Google Docs document by id and return its title plus the plain-text of its body (tables, images, and other non-paragraph structural elements are not included in body_text — only paragraph text runs). This is the read counterpart to docs_batch_update (which edits) and docs_export (which spills the fully-formatted document as pdf/docx/txt into a blob). Use docs_export instead when formatting, tables, or images must be preserved. Fails gsuite.not_found if the id does not exist.",
+  "result_processor_customizations": {
+    "action_label": "Document read",
+    "result_type": "g_suite_docs_get_result",
+    "result_description": "Dict with title and body_text (plain text of the document body).",
+    "presentation_guidance": "Summarize the document's content briefly. body_text may contain sensitive personal or corporate writing — treat as sensitive."
+  },
+  "error_processor_customizations": {
+    "action_context": "Fetch a Google Docs document's content.",
+    "error_interpretation": "gsuite.invalid_params: missing id. gsuite.not_found: the document id does not exist. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.not_found: verify the document id. gsuite.not_connected: run connect_account."
+  }
+}

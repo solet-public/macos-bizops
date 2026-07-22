@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", \"additionalContext\": \"STEP ZERO (only if the mcp__{{HOMUNCULUS_NAME}}__* tools are connected in this session): before any other tool call this turn, run a knowledge-base search via service_interface::knowledge_service::search (mcp__{{HOMUNCULUS_NAME}}__process_call), AND/OR if the question is about what happened / what was decided / status / blockers, ask {{HOMUNCULUS_NAME}} first. The only exception is locating a known code symbol or file in this repo. If those tools are NOT available, the MCP bridge is not registered yet (a fresh clone, pre-registration) — work from the files in this clone, skip this instruction, and see the hydration runbook registration step when ready.\"}}'"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$HOMUNCULUS_AGENT_SESSION_LABEL\" ] && python3 -c \"import json, os; role = os.environ['HOMUNCULUS_AGENT_SESSION_LABEL']; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': 'ROLE RE-CLAIM (SessionStart hook): this session was launched as ' + role + '. Unless this conversation has already re-claimed it, invoke the rename skill NOW (Skill tool, skill: rename, args: ' + role + ') to re-claim the session identity binding — a re-claim re-points stale delivery routes after a /clear, a restart, or an MCP reconnect. Do this before other work in your first turn.'}}))\" || true"
+          }
+        ]
+      }
+    ]
+  }
+}

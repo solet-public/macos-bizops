@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "macos_coding_agent_session_plugin"
+version = "1.0.0"
+description = "macOS-scope MCP bridge subprocess lifecycle owner — spawn / terminate / restart / list bridges and auto-reconnect on router port change."
+authors = [
+    {name = "Ananta Development Team", email = "dev@ananta.ai"},
+]
+license = "Apache-2.0"
+requires-python = "==3.13.*"
+dependencies = [
+    "ananta",
+    "pyobjc-framework-FSEvents>=10.0",
+]
+
+[project.entry-points."ananta.plugins"]
+macos_coding_agent_session_plugin = "macos_coding_agent_session_plugin.plugin:MacosCodingAgentSessionPlugin"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["macos_coding_agent_session_plugin*"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"

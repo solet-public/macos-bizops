@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::gmail_list_messages",
+  "display_name": "Gmail: List Messages",
+  "description": "List Gmail message ids matching a Gmail search query (for example 'from:alice is:unread newer_than:7d'). Returns message + thread ids only; use gmail_get_message to fetch headers and body. Result count is capped (default 25, max 100). Requires a connected account (run connect_account first).",
+  "embedding_description": "Search the connected Gmail mailbox and return matching message identifiers. Accepts a Gmail query string using Gmail's native search operators (from, to, subject, is:unread, has:attachment, newer_than, label). Returns a list of {id, thread_id} plus a count; it does not fetch message content. Pair with gmail_get_message to read a specific message. Fails gsuite.not_connected if no account is linked.",
+  "result_processor_customizations": {
+    "action_label": "Gmail messages listed",
+    "result_type": "g_suite_gmail_list_result",
+    "result_description": "Dict with a messages list of {id, thread_id} and a count.",
+    "presentation_guidance": "Summarize how many messages matched. List a few ids; suggest gmail_get_message to read one. Treat message ids as low-sensitivity."
+  },
+  "error_processor_customizations": {
+    "action_context": "List Gmail messages matching a search query.",
+    "error_interpretation": "gsuite.not_connected: no Google account linked. gsuite.auth_expired: the stored refresh token was revoked. gsuite.rate_limited: Google throttled the request.",
+    "recovery_guidance": "gsuite.not_connected / gsuite.auth_expired: run connect_account to (re)link the account. gsuite.rate_limited: back off and retry."
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::run_query",
+  "display_name": "Snowflake: Run Query",
+  "description": "Run ONE read-only SQL statement against the configured Snowflake account and return the rows. Read leaders only (SELECT/SHOW/DESCRIBE/EXPLAIN/WITH). Returns rows inline (up to max_rows, default 200, capped 1000); fails loud with snowflake.result_too_large over the inline caps — use export_query for the full result set as a workspace .tsv file.",
+  "embedding_description": "Execute an ad-hoc read-only SQL query against the operator's Snowflake data warehouse, returning columns and rows inline for interactive inspection; a result too large for the inline caps fails loud rather than spilling. A single statement per call; the operator-granted role is read-only so writes are expected to fail at the warehouse. Use export_query for the full result set as a workspace .tsv file, list_databases/list_schemas/list_tables/describe_table to explore the warehouse schema first, test_connection to verify reachability and the active role.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake query run",
+    "result_type": "snowflake_run_query_result",
+    "result_description": "Dict with columns (ordered names) + rows (a list of row ARRAYS parallel to columns) + row_count + spilled=false.",
+    "presentation_guidance": "Summarize the row_count and show a few rows. Row data references potentially sensitive corporate warehouse content (data_sensitivity 0.5) — surface for downstream use but never treat as public."
+  },
+  "error_processor_customizations": {
+    "action_context": "Run a read-only SQL query against the configured Snowflake account.",
+    "error_interpretation": "snowflake.invalid_params: missing or empty sql. snowflake.read_only_violation: the statement is not a permitted read leader. snowflake.auth_failed: the key-pair JWT was rejected. snowflake.permission_denied: the role lacks privileges. snowflake.warehouse_suspended: the configured warehouse is suspended. snowflake.timeout: the query exceeded the statement timeout. snowflake.api_error: a query-syntax or other warehouse error. snowflake.result_too_large: the result exceeds the inline caps — this verb is for interactive reads only.",
+    "recovery_guidance": "snowflake.read_only_violation: submit a single SELECT/SHOW/DESCRIBE/EXPLAIN/WITH statement. snowflake.warehouse_suspended: ask the operator to resume the warehouse. snowflake.timeout: narrow the query or add a LIMIT. snowflake.auth_failed/permission_denied: ask the operator to check the connecting user's key and role grants. snowflake.result_too_large: narrow the query (LIMIT / max_rows) for an interactive answer, or use export_query with an absolute output_tsv_path to land the full result as a workspace TSV."
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::test_connection",
+  "display_name": "Snowflake: Test Connection",
+  "description": "Open the configured Snowflake account and confirm it: account, user, role, warehouse, and server version. Use this to verify the connector is reachable and the granted role is what you expect.",
+  "embedding_description": "Verify the Snowflake connector is configured and reachable, and surface the resolved account, user, active role, warehouse, and server version — useful for confirming the operator-granted role is read-only as expected, or diagnosing a connection problem. No parameters.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake connection tested",
+    "result_type": "snowflake_test_connection_result",
+    "result_description": "Dict with ok (bool), account, user, role, warehouse, version.",
+    "presentation_guidance": "Report ok plus the account/user/role/warehouse for the operator's confirmation; low sensitivity (connection metadata, data_sensitivity 0.1)."
+  },
+  "error_processor_customizations": {
+    "action_context": "Test the configured Snowflake connection.",
+    "error_interpretation": "snowflake.not_configured: no snowflake_account address-book entry is registered, or it is incomplete. snowflake.auth_failed: the key-pair JWT was rejected (key revoked or mismatched). snowflake.api_error: an unexpected warehouse error.",
+    "recovery_guidance": "snowflake.not_configured: register the snowflake_account address-book entry per the plugin's KB runbook. snowflake.auth_failed: ask the operator to verify the RSA public key on the connecting Snowflake user is still active."
+  }
+}

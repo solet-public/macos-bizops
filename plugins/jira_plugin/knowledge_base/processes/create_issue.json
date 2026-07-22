@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::jira_plugin::create_issue",
+  "display_name": "Jira: Create Issue",
+  "description": "Create a Jira issue in a project of a given type with a summary and optional plain-text description; optional additional fields merge in. Returns the new issue's key and id. Write action.",
+  "embedding_description": "Open a brand-new Jira issue (ticket) in a project — supply the project key, the issue type name (Task, Bug, Story, ...), a one-line summary, and an optional plain-text description; an optional fields object sets additional Jira fields such as priority, labels, or custom fields. Returns the created issue's key and numeric id. This actually files a ticket. Distinct from update_issue (edit an existing issue), add_comment (annotate an issue), and transition_issue (move it through workflow).",
+  "result_processor_customizations": {
+    "action_label": "Jira issue created",
+    "result_type": "jira_create_issue_result",
+    "result_description": "The new issue's key and id.",
+    "presentation_guidance": "Confirm the issue was created and give its key. Because this files a real ticket, be explicit that it now exists."
+  },
+  "error_processor_customizations": {
+    "action_context": "Create a new Jira issue.",
+    "error_interpretation": "jira.bad_request: a required field is missing or a field value is invalid for this project/issue type (e.g. an unknown issue type or a required custom field). jira.permission_denied: the service account cannot create issues in this project. jira.invalid_params: project, issue_type, or summary was missing.",
+    "recovery_guidance": "jira.bad_request: check the issue_type name and any required fields for the project; pass them in 'fields'. jira.permission_denied: grant the service account create permission. jira.invalid_params: supply project, issue_type, and summary."
+  }
+}

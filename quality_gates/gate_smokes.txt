@@ -1,0 +1,1722 @@
+# Gate-eligible smoke register (run by quality_gates/run_smokes.py).
+#
+# One repo-relative *_smoke.py path per line. A smoke gates the commit only
+# once it is listed here. This is a tracked, growing allowlist (same model as
+# god_class_allowlist.txt / radon_*_allowlist.txt): adding a smoke is an
+# explicit, reviewable act, and the gate never silently broadens to smokes that
+# need a live platform. Every entry MUST pass offline (no live homunculus / LM Studio).
+#
+# Seed set = the blue->green TRANSITION-critical smokes (the cutover must not be
+# confirmed with any of these red). Grow as new gate-relevant smokes land
+# (e.g. the proposed S1 post-transition-invariant + S2 readiness-truth smokes).
+
+plugins/macos_self_deployment_plugin/tests/swap_round_trip_smoke.py
+plugins/macos_self_deployment_plugin/tests/cutover_failure_smoke.py
+plugins/macos_self_deployment_plugin/tests/complete_swap_crash_consistency_smoke.py
+plugins/macos_self_deployment_plugin/tests/rollback_release_smoke.py
+plugins/macos_self_deployment_plugin/tests/schema_preflight_smoke.py
+plugins/macos_self_deployment_plugin/tests/preflight_refusal_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_crash_consistency_smoke.py
+plugins/macos_self_deployment_plugin/tests/supervisor_smoke.py
+plugins/macos_self_deployment_plugin/tests/backstop_loop_integration_smoke.py
+plugins/macos_self_deployment_plugin/tests/drain_sigterm_exit_smoke.py
+plugins/macos_self_deployment_plugin/tests/router_socket_wait_smoke.py
+
+# Phase 0 "freeze current contracts" — substrate-contract guards that must stay
+# green through the coding-agent substrate transition
+# (workbench/2026-07-01_claude_coding_agent_substrate_architecture_and_planning_v2.md).
+# Each fails if a working substrate invariant is regressed or bypassed.
+ananta/tests/core/substrate_contracts/queue_completion_is_dispatch_smoke.py
+ananta/tests/core/substrate_contracts/deterministic_continuation_single_step_smoke.py
+ananta/tests/core/substrate_contracts/wbs_result_processor_kind_required_smoke.py
+ananta/tests/core/substrate_contracts/pre_dispatch_validation_smoke.py
+ananta/tests/core/actions/action_factory_edge_sink_skip_smoke.py
+
+# Phase 2 "context assembly as a process" — the pure agent-context briefing
+# boundary (group_blocks_into_briefing): named-bundle grouping + provenance +
+# answer-contract-as-data + the budget contract. Offline (hand-built blocks).
+ananta/tests/core/context_service/agent_context_briefing_smoke.py
+# assemble_agent_context end-to-end via a fake factory (full envelope + budget +
+# bundle filter + fail-fast on unknown bundle); and EMBEDDING_SERVICE as a
+# declared REQUIRED service (POR §1.3 ◆R2).
+ananta/tests/core/context_service/assemble_agent_context_smoke.py
+ananta/tests/core/context_service/required_services_embedding_smoke.py
+
+# Phase 3 "author-by-value registration" (Seam A) — the 4 thinking_service
+# validate/register verbs for agent-authored WBS documents + joseki cards:
+# Q4 error/warning tiers, hard-fail-before-storage, no-overwrite guards,
+# lifecycle row at draft. Offline (recording stubs; real validators/parser).
+plugins/default_thinking_plugin/tests/authored_registration_smoke.py
+# ABC↔wrapper↔plugin parity for thinking_service: every decorated verb on
+# ThinkingServiceAPI must be callable on the concrete ThinkingService wrapper
+# AND the bound plugin — kills the 4-layer-rule miss caught live 2026-07-02
+# ('ThinkingService' object has no attribute 'validate_authored_joseki').
+ananta/tests/core/thinking_service/wrapper_parity_smoke.py
+
+# validate_all_embedding_descriptions logs ONE aggregate WARNING per finding
+# category (missing / out-of-range) instead of one WARNING per process --
+# ~50 pre-existing gaps were repeating the same lines on every single boot.
+ananta/tests/core/process_registry/embedding_description_summary_smoke.py
+
+# purge_old_logs (7-day log-directory retention sweep, cold-boot-wired in
+# cli.py) deletes files past retention.days recursively, keeps fresh ones,
+# and no-ops on a missing log dir. Offline (tempfile-only, no live platform).
+ananta/tests/cli/log_retention_purge_smoke.py
+
+# Phase 4 "pull-based step engine" (Seam C) — start/get_next/record/advance
+# over durable KB annotations: invalid observations change nothing, Q15
+# auto-safe evaluation, and the ◆R2 EXPLICIT disconnect/resume acceptance
+# case (fresh session resumes from the next unexecuted step, no lost
+# observations). Offline (in-memory durable doubles; real engine/parser).
+plugins/default_thinking_plugin/tests/pull_execution_smoke.py
+
+# Phase 5 "vertex resolver + session providers" (Seam B) — the InferenceService
+# short-circuit that routes MCP-originating flows to their bound session vertex
+# (or DEFERs when the session is absent) BEFORE the default local model. The
+# ◆R2 three-way discriminator (role-resolvability, sharpened to
+# explicit-binding-this-lifetime): PROVIDER / DEFER (role-holder absent OR
+# tombstoned roleless instance — never silent-Qwen) / DEFAULT (unbound /
+# untagged, incl. the v4 §8 streamable-falls-through case). Offline (fake
+# plugin/state/provider for the resolver; RealShapeState for the real role
+# accessors + tombstone lifecycle).
+ananta/src/ananta/services/inference_service/tests/inference_vertex_resolver_smoke.py
+plugins/agent_messaging_plugin/tests/session_inference_provider_smoke.py
+
+# INF-01 sub-slice-2 — sys:autonomic auto-assignment lifecycle (§D.9): Trigger-1
+# vacancy-fill/crash-heal, Trigger-2 grace-delayed succession (reconnect NO-OP /
+# superseded / newest-live-provider-capable successor / leave-vacant), manual-set
+# with §5.4 both-party notices, first-claim drain honesty (retain-without-
+# primitive / hard-delete-on-re-drive) + wiring. Offline (RealShapeState + fake
+# bridge/registry/provider collaborators).
+plugins/agent_messaging_plugin/tests/autonomic_assignment_smoke.py
+
+# INF-01 ★ FLIP-ASSERTION (Day-ruled, sub-slice-2 review centerpiece): a vacant /
+# gone-holder sys:autonomic slot DEFERs the organism's error/result turn into the
+# durable NO-LOSS queue — it must NEVER fall to the local default model (the
+# dead sub-slice-1 interim). Also pins the §D.3 safe floor (plugin-unreachable /
+# lookup-raise stay LOCAL, counted). FAILS if vacancy ever falls LOCAL again.
+ananta/src/ananta/services/inference_service/tests/autonomic_flip_smoke.py
+
+# REL-09 — bridge-lifecycle full cleanup: the idle sweeper (sweep_idle finally
+# DRIVEN) routes every expired bridge through the SAME cleanup as close (sidecar
+# clear + ◆R2 tombstone + Trigger-2 hook + registry unregister — swept ≡ closed),
+# a swept sys:autonomic holder fires grace succession with exactly-one notice,
+# and the startup reconciliation purges pre-restart zombie peer_binding rows.
+plugins/agent_messaging_plugin/tests/bridge_lifecycle_sweep_smoke.py
+
+# Bridge /health readiness-probe gating (Task #11 cloud-boot fix): no probe →
+# unconditional 200 (legacy contract); probe False → 503 starting; flip → 200
+# without router rebuild. Gate-registered at REL-09 after the smoke was found
+# silently rotted (stale kwarg) — registration is what prevents that rot class.
+plugins/agent_messaging_plugin/tests/bridge_health_readiness_probe_smoke.py
+
+# REL-01 Fork 4 — two-way role-addressed delivery: the consume-side lift of the
+# caller's DURABLE role from the flow trigger_data
+# (ActionProcessor._lift_inference_vertex_identity), the sender-stamp fallback
+# ladder (role -> originating instance -> system:scheduler), the role-vs-instance
+# envelope reply-to (_wake_reply_hint), and the persist-first return-leg
+# reconnect survival (queued_for_replay). Role names treated as OPAQUE throughout
+# (arbitrary-role assertions per the operator's binding constraint). Offline stubs.
+plugins/agent_messaging_plugin/tests/role_two_way_reply_smoke.py
+
+# REL-04 — role-claim handover notifications (peer_claim_role): a displaced prior
+# holder bound to a DIFFERENT instance is notified (best-effort); the claim NEVER
+# fails if that holder is unreachable (loud log); the new holder is confirmed so
+# it drains the role backlog. Role names treated as OPAQUE (arbitrary-role
+# assertions). Drives the real _notify_role_handover orchestration + the real
+# best-effort _send_handover_notice (never-raises). Offline stubs.
+plugins/agent_messaging_plugin/tests/role_claim_handover_smoke.py
+
+# S1-S3 agent_session_id splice — reconnect self-refresh for ROLE sends. Drives
+# the REAL /peer/register route END-TO-END (FastAPI TestClient + in-memory state):
+# a reconnect (rotated agent_instance_id, stable agent_session_id) re-points every
+# held role in the agent_role_binding state table (rerouted:n), the reconnected
+# holder's backlog re-delivers, a single session-id CAS re-points ALL held roles,
+# a missing carrier fails LOUD (no_session_key, no mutation), and the response is
+# a STATE token never an address-book one (S3). Plus PEER_BINDING agent_session_id
+# data-capture (current_identity surfaces it; empty stays empty). Offline stubs.
+plugins/agent_messaging_plugin/tests/role_reconnect_self_refresh_smoke.py
+
+# Session-identity carrier resolution, PER-AGENT-KIND (2026-07-16) —
+# _resolve_agent_session_id(agent_id): codex bridges prefer their OWN
+# CODEX_THREAD_ID (authoritative, never stale for a Codex child) then
+# HOMUNCULUS_AGENT_SESSION_ID; every other kind (incl. unknown) uses HOMUNCULUS_AGENT_SESSION_ID
+# ONLY and never adopts the codex carrier (role-refresh CAS keys on
+# agent_session_id alone — cross-agent adoption re-points the wrong session's
+# roles, both nesting directions). Neither carrier → preserved loud-logged "".
+# Pins: codex-both→thread-id-wins; codex-only-neutral falls back; claude_code with
+# leaked CODEX_THREAD_ID→"" NOT adopted (reverse-nesting, load-bearing); unknown
+# kind refuses codex carrier; neither→"" back-compat; structural chain shape.
+# Offline (env-var unit scope).
+plugins/agent_messaging_plugin/tests/session_id_carrier_chain_smoke.py
+
+# Role-model v4 SLICE A (additive foundation) — the two fresh tables (`role`
+# entity + discriminated `role_binding`, holder_kind session|inference_provider,
+# nullable identity cols + holder_identity/properties JSON + claim_epoch), the v4
+# resolver with the §4.6 typed per-holder_kind fail-loud parse + the §4.3
+# ResolvedRole projection (holder_kind/holder_identity/agent_session_id), and the
+# §5.5/§7 entity upsert + best-effort memory ingest. Non-breaking: the live
+# resolve stays on agent_role_binding until the §9 migration (slice-D). Role
+# names OPAQUE throughout. Offline (RealShapeState + in-memory store).
+plugins/agent_messaging_plugin/tests/role_model_v4_slice_a_smoke.py
+
+# Role-model v4 slice-B — the RACE-SAFE claim path + act-time re-check + the
+# REL-07 live heal. §5.1 claim/displace predicated-CAS (first-claim write_state
+# INSERT → inspect the non-completed ActionResult → displace CAS on claim_epoch;
+# a same-session re-claim is an idempotent 'refreshed', never a displace), the
+# load-bearing NO-TOMBSTONE invariant (hard-delete release → re-claim works; a
+# soft-delete tombstone DEADLOCKS the slot), §5.0 holds_role act-time ownership
+# re-check (reference abort after displace), resolve_by_agent_session_id +
+# fail-loud dup policy + agent_session_id_for_instance (claim-source), and the
+# reroute acceptance (a binding WITH a session id → reconnect CAS matches; the
+# pre-fix empty id → matches nothing). Role names OPAQUE. Offline (RealShapeState
+# + a faithful write_state + in-memory store).
+plugins/agent_messaging_plugin/tests/role_model_v4_slice_b_smoke.py
+
+# Role-model v4 slice-C — system slots §6/§6.1/§D.2/§D.6. The reserved 'sys:'
+# keyspace + the slot-declaration registry (slot_name, owner_plugin, holder_kind)
+# + the sys:autonomic constant (session-filled; INF-01 §D.9 consumes it). The
+# §6.1 claim gate on the general peer_claim_role: a normal role passes; a
+# session-filled slot (sys:autonomic) is REJECTED (auto-assigned via §D.9, not
+# this verb); an undeclared sys: name REJECTED; a plugin-owned slot ALLOWED only
+# for the declared owner verified against the SERVER-BUILT CallContext (lifted
+# into state, never spoofable params — fixture owned-slot; fail-closed on missing
+# context). Plus no-vacant-release (peer_release_role rejects sys:*) + the
+# declaration-integrity check (malformed → fail-startup). Offline (pure gate +
+# bare-plugin verb calls; no DB).
+plugins/agent_messaging_plugin/tests/system_slots_smoke.py
+
+# Role-model v4 slice-D Phase-1 — the §9 migration machinery (store-level; the
+# live reader/writer cutover flip is Phase-2, lands last). migrate_agent_role_
+# binding_to_v4 (idempotent copy → role entity + role_binding row, holder_kind=
+# session; a soft-deleted legacy row is NEVER copied [no-tombstone]; a re-run is
+# ON CONFLICT DO NOTHING), verify_migration_parity (legacy ⊆ v4 subset check;
+# a missing binding fails the cutover loud; a v4-only system slot doesn't break
+# it), release_role_binding_v4 (HARD-delete), and the carry-fwd-c reject predicate
+# (a durable session claim requires a non-empty agent_session_id). NO raw SQL.
+# Offline (RealShapeState + a faithful write_state).
+plugins/agent_messaging_plugin/tests/role_migration_smoke.py
+
+# REL-05 / REL-06 — deaf-wake insurance + honest delivery vocabulary.
+#
+# REL-06 hard rename (S6): the mint-site constants carry the new vocabulary
+# (queued_wake / queued_notification), the old identifiers are gone, a grep gate
+# proves ZERO woke_native_channel outside workbench/, and the two role-send
+# process JSONs carry the new values. The two role dispatch smokes' value pins
+# (role_dispatch_smoke / role_delivery_smoke) become the red-first behavioural
+# pins for the rename + the direct-drain generalization.
+plugins/agent_messaging_plugin/tests/rel06_relabel_smoke.py
+plugins/agent_messaging_plugin/tests/role_dispatch_smoke.py
+plugins/agent_messaging_plugin/tests/role_delivery_smoke.py
+#
+# REL-05 direct-wake outbox + consumption-gated re-emit (S1/S2/S3/F3/S7). Against
+# the REAL-shape state fake: an IMPORTANT direct send persists one owed row;
+# model activity AFTER the emission stamps consumed (RED-FIRST: activity before
+# does not); the re-emit window + cap gate re-delivery; the reconciler escalates
+# a past-cap row once + notifies the sender via a post_message (NOT a peer_send —
+# structural loop-prevention pin); role consumption is fenced to the emitted-to
+# instance (F3); and the F2 migration grandfathers delivered history so the new
+# drain predicate cannot flood-re-emit it (RED-FIRST: pre-migration it would).
+plugins/agent_messaging_plugin/tests/direct_wake_outbox_smoke.py
+#
+# REL-05 S4 — model-activity route total-classification: iterate the ACTUAL
+# FastAPI route table + assert every bridge route is in EXACTLY one of
+# {model-initiated, never-stamp}; peer/register is INFRA (F1, from both the
+# open-auto-register and reconnect-re-register angle); touch() does not stamp.
+plugins/agent_messaging_plugin/tests/route_activity_classification_smoke.py
+#
+# REL-05 S5 — client-side direct repair drain: one payload settles role + direct
+# rows on their distinct paths in one pass; concurrent direct settles emit once
+# (single-flight keyed on message_id); a direct re-emit carries the N3
+# [re-emit n/cap ...] marker while a role original (emit_count=0) does not.
+plugins/agent_messaging_plugin/tests/direct_wake_delivery_smoke.py
+#
+# RIDER-1 role terminal-clear — the LIMIT-PAGE STARVATION regression (Rev-A's
+# must-fix). A capped-dormant role IMPORTANT no longer sits in the owed set
+# forever: the reconciler escalates it (escalated=true) so it drops from the
+# consumed=false AND escalated=false drain query, and fires the sender terminal
+# signal. RED-FIRST: cap capped-dormant rows fill a limit-cap drain page + a
+# newer owed row behind them → pre-escalation the newer row is STARVED, post-
+# escalation it is re-emitted. Only exercisable because the shared RealShapeState
+# fake now HONORS query_ordered order_by+limit (a guard test pins that fidelity).
+plugins/agent_messaging_plugin/tests/role_wake_terminal_clear_smoke.py
+#
+# Deaf-wake owed-delivery store-naive vs runtime-aware datetime tz-mismatch fix.
+# State-store DATETIME columns are `timestamp without time zone` → every stored
+# cell (created_at, last_emitted_at) reads back offset-NAIVE UTC, while _clock()
+# and the bridge activity stamp are offset-AWARE UTC. The REL-05/RIDER code
+# compared the two directly, so LIVE the sweep tick (_escalatable) and the
+# IMPORTANT drain (_stamp_consumed_rows 813x, _within_reemit_window) raised
+# TypeError on every fire — the deaf-wake insurance faulted before it could act.
+# Fix: _parse_iso coerces a naive stored cell → aware UTC at the single boundary.
+# RED-FIRST: seeds NAIVE timestamp strings (as the real column returns them) +
+# an AWARE now/activity_at — reverting the coercion raises TypeError at all three
+# sites. (The existing deaf-wake smokes seeded AWARE isoformat strings → the fake
+# never reproduced the naive-on-read the real column produces: the fidelity gap.)
+plugins/agent_messaging_plugin/tests/deaf_wake_naive_datetime_smoke.py
+
+# Phase 6 "lifecycle hardening" (§4.3) — the authored-joseki lifecycle state
+# machine (draft->candidate->proven->superseded->archived) over the
+# thinking_authored_joseki row: validation-gated promotion, run-evidence
+# earning proven, supersession guards + card banner stamp, the raced
+# compare-and-set guard, and knowledge_base_path reconcile (the Phase-3 crumb).
+# DONE-WHEN: build_layered_section_stem validates through the candidate gate.
+# Offline (filter-honouring in-memory row double; real engine/validator/parser).
+plugins/default_thinking_plugin/tests/authored_lifecycle_smoke.py
+# Phase 6 Tier 2 "retire-process" (§4.2) — deprecation-metadata overlay
+# (active_retrieval:false DERIVES is_discoverable:false = demote from
+# process_search but stay callable; malformed block fails loud) + the
+# on-disk reference-scan guard (exact-key match across KB source, symlink
+# dedupe, and the machine-readable corpus honesty: scanned_corpora + an
+# explicit unscanned note for the live DB plan/WBS instances it can't see).
+# Offline (throwaway temp KB tree).
+ananta/tests/core/process_registry/retire_process_smoke.py
+
+# Phase 6 Tier §4.5 "plan template vs instance + fork-by-intent" — the pure
+# core/plans model: a frozen PlanTemplate distinct from a PlanInstance,
+# fork_template_to_instance as a pure transform (frozen => forking cannot
+# mutate the template = the §4.5 done-when), derive_discovery_metadata over
+# both kinds, the fast-fail bindings contract, and render/parse round-trip of
+# the searchable plan-template KB card (so old templates are forkable by
+# intent). Template state is card front-matter, NOT a state table (templates
+# don't run => no run evidence; the Q14 dual applies to joseki/instances).
+# Also covers the SUB-01 pure transition_template state machine: legal-map
+# sanity, draft->active->superseded->archived, draft-not-a-target, illegal
+# source, stray superseded_by, and superseded->archived pointer preservation.
+ananta/tests/core/plans/plan_templates_smoke.py
+# Phase 6 Tier §4.5 — the plan-template KB ARTICLE CLASS is searchable: a
+# rendered card driven through default_knowledge_plugin's real indexing
+# (metadata extraction + chunking + preamble build) surfaces the plan_template
+# role, Layer 2, facet tags, and the discovery-by-intent language in the
+# embedded surface. Searchable-by-construction; test_retrieval-style ranking
+# needs a plan-template KB + example card ingested first = §4.6, not deployable today.
+plugins/default_knowledge_plugin/tests/plan_template_retrieval_smoke.py
+# SUB-01 (POR §4.5 GOAL) — the verb-backed plan-template curation-lifecycle
+# transition machine driven through the REAL plugin delegates
+# (transition_plan_template / get_plan_template) over an in-memory plan_templates
+# KB double. State is card front-matter, NOT a state table: a transition is a
+# read->parse->apply->render->write with NO compare-and-set and NO retirement
+# banner (the Template State line + state: tag are the searchable signal).
+# Covers draft->active->superseded->archived, idempotent no-op, draft-not-a-target,
+# supersession guards (missing/self/unregistered/archived replacement), identity
+# mismatch rejection, and the DONE-WHEN front-matter round-trip. Cards seeded via
+# render_template_card (no register verb — out of SUB-01 scope). Offline.
+plugins/default_thinking_plugin/tests/plan_template_lifecycle_smoke.py
+
+# DEP-01 Phase-2b (2026-07-03) — the extended-plan engine (create_task /
+# continue_task) and the planning vertex (process_planning_results) route
+# internal reasoning through inference_service.generate_completion via the
+# _generate_thinking_completion seam (request-shape pinned with a recording
+# fake). Code-truth: generate_completion is a plain delegation to the BOUND
+# provider (the vacancy→DEFER flip lives only on the _route_vertex paths), so
+# B/C serve on the bound provider — interim, operator-D.1-consistent; INF-02
+# tracks an autonomic-routed completion surface. Contract-shape error /
+# non-completed / empty envelopes raise typed inference_unusable; live
+# provider failures RAISE and propagate loud. AST pins: B/C call the seam; NO
+# _invoke_thinking_model / _strip_think_block / chat-completions endpoint /
+# qwen model literal remains (TMO-02's subject is deleted — this entry
+# replaces the retired timeout_wiring_smoke that pinned the deleted private
+# POST's timeout). Offline (recording fakes; static ast).
+plugins/default_thinking_plugin/tests/inference_rehome_smoke.py
+
+# System-prompt shipped default (found during the v9/v10 seed-birth
+# verification): profile/config/ is excluded from every seed, so every
+# newborn silently ran with an empty planning prompt. Ships a plugin-owned
+# default at knowledge_base/prompts/; operator override still wins if set.
+plugins/default_thinking_plugin/tests/system_prompt_shipped_default_smoke.py
+
+# Phase 6 §4.6 "per-type KB lifecycles" (A) — get_process_schema now projects the
+# deprecation tombstone (replacement_key/superseded_date/migration_note/
+# active_retrieval) so a migrating agent sees the replacement; None when not
+# deprecated; pre-existing projected fields + invalid-key error unchanged.
+# Offline (stub state + in-memory processes; the REAL get_process_schema runs).
+ananta/src/ananta/services/discovery_service/tests/get_process_schema_deprecation_smoke.py
+# Phase 6 §4.6 "per-type KB lifecycles" (B) — the live-refresh path honors process
+# deprecation like restart: build_refresh_updates folds apply_deprecation so
+# active_retrieval:false DERIVES is_discoverable:false into the refresh updates
+# (subsequent discovery rebuild demotes from process_search), default-true stays
+# surfaced, no block leaks nothing, malformed fails loud. Offline (pure fn).
+plugins/default_knowledge_plugin/tests/refresh_deprecation_honoring_smoke.py
+
+# SoundCloud upload blob-resolution contract (2026-07-02, Where It Rests publish):
+# upload_track was impossible to call — resolve_blob_to_path requires the
+# blob:// URL form while _resolve_blob_filename's metadata lookup is keyed by
+# the bare bmd- id, called with the SAME argument. Fix strips the prefix for
+# the metadata lookup only; the smoke guards BOTH directions (red-first
+# verified against the pre-fix code). Offline (temp-dir stub with the real
+# default_blob_storage_plugin resolution semantics).
+plugins/soundcloud_artist_studio_plugin/tests/upload_blob_resolution_smoke.py
+
+# Address-book / vault namespace-collision fix (2026-07-02, Approach B): the
+# OAuth client_secret is chain-consumed through the address book, so its vault
+# key must live in the RESOLVER's namespace (default_address_book_plugin) — the
+# resolver retrieves under its own identity and post-06-07 enforce_namespace
+# demands the key's <plugin> segment equal the caller. The owner plugin must
+# NOT declare it as an owned required/declared key (the launch-key shape
+# validator fatally rejects a foreign-namespace declaration). Both smokes are
+# red-first against the pre-fix owner-namespace key + declarations. Offline
+# (pure constants + bare-instance declaration methods + rendered error template).
+plugins/soundcloud_artist_studio_plugin/tests/vault_key_namespace_smoke.py
+plugins/schwab_market_data_plugin/tests/vault_key_namespace_smoke.py
+
+# Singleton drain-until-empty auto-summarizer (2026-07-02): the M6 cron became a
+# heartbeat that submits ONE background drainer (BoundedSemaphore(1) singleton
+# guard) which loops list_quiescent_sessions → summarize in series until empty.
+# Pins: drain-until-empty + next-fire no-op, the attempted-set termination that
+# stops a persistent-skip infinite loop, sentinel exclusion, per-session error
+# isolation, the singleton guard (second overlapping fire no-ops), and WI-0
+# (no summarization on the calling thread — runtime + static). Offline (stub
+# repo/writer/inference; real BoundedSummaryExecutor for the threading cases).
+ananta/tests/llm/session_ledger/quiescent_drain_smoke.py
+ananta/tests/llm/session_ledger/startup_smoke.py
+
+# LED-01 event-content embedding producer + search (2026-07-06). Pins: the
+# operator scope filter incl. the Codex reasoning-subtype EXCLUSION (red-first:
+# neutralizing the subtype check flips it) and worklog INCLUSION; window+overlap
+# chunking coverage; deterministic {event_id}:{chunk_index} external_ids with
+# chunk-0-first ordering + same-id delete-before-store (idempotent retry,
+# red-first proven); the chunk-0 presence discriminator on the newest-first
+# paged drain with (event_at, id) row-value cursor; production-shape ANN
+# envelope (distance → 1-distance similarity, red-first proven) + __event
+# join-back; service-layer clamps + vendor ← session_vendor public envelope +
+# fail-closed on missing embedding/vector bindings. Offline (stub state /
+# embedding / vector services mirroring the real data.result envelope shapes).
+ananta/tests/llm/session_ledger/event_embeddings_smoke.py
+
+# REL-03 swap-window terminated-flow guard (2026-07-02): a failed flow's
+# already-queued process_error/process_results siblings, dequeued mid blue-green
+# cutover, each re-hit _resolve_io_process_key (empty source_namespace) and
+# re-terminate the dead flow — the observed burst. _terminate_flow now tombstones
+# the flow_id and _process_action drops any later result/error-PROCESSING sibling
+# of a tombstoned flow BEFORE execution (marked failed, NOT re-routed). Pins:
+# doomed process_error AND process_results siblings never reach execute_action,
+# tombstone-miss executes normally, and a terminal EDGE_SINK delivery of a failed
+# flow still executes (scope does not swallow the failure signal) + bounded-FIFO
+# cap. Offline (spy action_processor; real _terminate_flow / gate / drop).
+ananta/tests/core/substrate_contracts/swap_window_terminated_flow_guard_smoke.py
+
+# SUB-04(b) call-site wiring (2026-07-02): the Phase-0 contract smokes freeze the
+# validation LOGIC (deterministic-continuation + pre-dispatch step-contract) by
+# calling the validators directly, so a deleted PRODUCTION call site would stay
+# green. These AST assertions pin the two seams against call-site removal:
+# coordinator._handle_deterministic CALLS validate_deterministic_continuation
+# (imported from result_processing.contracts), and inference_transaction._run_pipeline
+# CALLS module-level _validate_step_contract. Each seam has a localizing negative
+# control. Offline (static ast over the real source via inspect.getfile).
+ananta/tests/core/substrate_contracts/call_site_wiring_smoke.py
+
+# DEP-01 Phase-2a authored-by-value conversion (2026-07-03): the Class-A
+# artifact-authoring verbs no longer reach the qwen thinking model. Poison
+# model/prompt collaborators prove the push path is dead; content-absent
+# invocation raises the typed authored_content_required error BEFORE any
+# storage side effect (no silent fallback); the downstream section-size
+# validation now polices the AUTHORED content. Offline (recording stubs;
+# real ArtifactAuthoringService + plugin delegate).
+plugins/default_thinking_plugin/tests/authored_by_value_conversion_smoke.py
+# DEP-01 Phase-2a fix round (2026-07-03, Rev-C blocker): every projected
+# continuation tail — non-joseki authored_register_wbs (phases 2/3), the
+# deterministic phase-1 boundary, the joseki tail, and the terminal phase —
+# must reference ONLY live thinking_service verbs; a projected step naming a
+# de-registered process key (the _append_legacy_wbs_continuation miss) fails
+# at dispatch. Blanket assertion over the six DEP-01-retired keys plus
+# positive routing pins per tail shape. Offline (pure text projection).
+ananta/tests/core/plans/projection_continuation_smoke.py
+
+# ChatGPT-tunnel / streamable-MCP surface (landed 2026-07-04, operator-directed):
+# OAuth discovery metadata (static + origin-following dynamic routers,
+# oauth_resource_aliases validation), router implicit-session allocation +
+# session-header-on-every-response, and the blue-green stable MCP ingress +
+# tunnel supervisor (ingress re-resolves router.port per connection; supervisor
+# restarts tunnel-client on ingress-port change). All offline; the
+# agent_messaging pair needs HOMUNCULUS_NAME set (vault-scoped constants).
+plugins/agent_messaging_plugin/tests/oauth_security_smoke.py
+plugins/agent_messaging_plugin/tests/streamable_no_auth_mount_smoke.py
+# Task #53 HMAC bearer-token verification (BearerVerifier + _issue_access_token):
+# roundtrip, tampered/wrong-key/alg-confusion/expired rejections, constant-time
+# compare, forged-sealed-claim rejection, PLUS B1 Q2 (exp scopes the issued_at
+# skew — red-first) + client_exists_check + audience-binding rejections. Offline;
+# needs HOMUNCULUS_NAME (vault-scoped constants imported at module load).
+plugins/agent_messaging_plugin/tests/hmac_bearer_token_smoke.py
+# B1 Finding-B operator-access preservation: a VERIFIED operator_equivalent OAuth
+# client keeps operator authority (for_operator_equivalent) after the no-auth
+# flip. Pins the propagation chain is_operator_equivalent → trigger-data stamp →
+# _build_call_context (red-first on the stamp); default client → for_external;
+# stdio bridge unaffected; resolver degrade-safe.
+plugins/agent_messaging_plugin/tests/operator_equivalent_propagation_smoke.py
+plugins/macos_self_deployment_plugin/tests/blue_green_router/mcp_ingress_smoke.py
+plugins/macos_self_deployment_plugin/tests/blue_green_router/tunnel_supervisor_smoke.py
+
+# INF-03 provider-vacancy (2026-07-04): declared-VACANT inference_service is
+# a first-class bootable state — constructs without a binding, typed
+# 'inference_service_vacant' on provider touch, vertex turns still DEFER
+# durably, structural fault edge goes loud-typed (never silent), bound-name
+# and env-override behavior unchanged. Offline fakes.
+ananta/src/ananta/services/inference_service/tests/provider_vacancy_smoke.py
+
+# INF-03 fix round (Reviewer-A B1, 2026-07-05): boot-INTEGRATION coverage the
+# isolation smoke structurally misses — runs the real _create_service_wrappers
+# startup step with a vacant inference binding end-to-end (Discovery threshold
+# from VACANT_PROVIDER_CONTEXT_CONFIG, ContextService constructed, no inference
+# plugin resolution). Offline fakes.
+ananta/src/ananta/services/inference_service/tests/vacant_boot_wrappers_smoke.py
+
+# INF-02 autonomic-routed completions (2026-07-05): the durable
+# request/response queue behind InferenceService.submit_completion_request —
+# session-PRIMARY routing precedence (live sys:autonomic holder → forward;
+# vacant → durable DEFER; provider fallback OPT-IN only, never outranking a
+# live holder; INF-03 vacancy interplay), predicated-CAS lifecycle (stamp /
+# serve-idempotency / requeue / terminal-fail at the attempts cap), real-shape
+# state fake schema-enforced for the NEW core__inference_completion_request
+# table. Offline fakes.
+ananta/src/ananta/services/inference_service/tests/completion_request_smoke.py
+
+# INF-02 agent_messaging half (2026-07-05): the per-type completion drain
+# handlers on AutonomicAssignment (claim-time reconcile: forward unassigned +
+# holder-death requeue; serve-timeout sweep riding the bridge-lifecycle
+# sweeper cadence), the submit_autonomic_completion serve verb (CAS win →
+# resume continuation action_def, typed rejections), the forwarder's typed
+# inference_completion_request bridge event, and the sweeper on_tick rider
+# fault containment. Offline fakes.
+plugins/agent_messaging_plugin/tests/autonomic_completion_smoke.py
+
+# INF-02 thinking half (2026-07-05): process_planning_results routes via
+# submit_completion_request (awaiting_completion on session/deferred verdicts;
+# sync bound-provider path only on the operator-opted provider_fallback) and
+# resume_thinking_completion re-enters the loop from the served durable row
+# (OUTPUT event + RPK-override actions / finalize; typed rejections for
+# unknown/unserved/foreign/incomplete rows; AST pins on the shared
+# post-completion path). Offline fakes.
+plugins/default_thinking_plugin/tests/planning_completion_resume_smoke.py
+
+# EDGE processor-customizations contract. RELAXED 2026-07-15 (frontier-first
+# consolidation): customizations + field_sensitivities are now OPTIONAL on
+# EDGE processes — the kb_overlay_loader post-merge both-blocks FATAL and the
+# registration-validator customizations/sensitivity FATALs were dropped, so
+# edge_customizations_smoke.py (which statically mirrored the deleted boot
+# check) retired with them. What remains contract: decorated<->declared
+# parity, covered by edge_definition_customizations_smoke.py below, which
+# also proves the relax red-first (a no-customizations definition validates).
+ananta/tests/core/process_registry/edge_definition_customizations_smoke.py
+plugins/default_thinking_plugin/tests/joseki_run_driver_smoke.py
+
+# B3 Half-2 quality_service (GTE-02) — the run_joseki C1 card's gate surface.
+# quality_run_gate: run_gate is allowlist-only (unknown / coherence-only name =
+# typed rejection — the RED-FIRST security pin), argv is server-fixed (no caller
+# flags), output is bounded with an explicit truncation marker (no silent cap),
+# and a real fast gate (service_interface_ast) runs end-to-end. quality_list_and_test:
+# list_gates maps the REAL gate registry + gate_smokes.txt register, run_test is
+# allowlist-only against that register (RED-FIRST), and one registered smoke runs
+# through the server-side argv. Offline (real subprocess to the repo venv).
+plugins/platform_dev_surface_plugin/tests/quality_run_gate_smoke.py
+plugins/platform_dev_surface_plugin/tests/quality_list_and_test_smoke.py
+
+# B3 Half-2 DEPLOY-FIX (2026-07-06 fatality class-pin): repo_root must anchor at
+# APP_HOME, not __file__ — the platform runs from a materialized release copy
+# (~/.ananta/releases/.../code/) with NO .git but WITH a quality_gates/ snapshot,
+# so a __file__ walk fail-louded at green boot (observed) or would silently gate
+# the frozen snapshot. Smoke imports the locator from a relocated copy OUTSIDE the
+# worktree and asserts it still resolves the WORKTREE via app_home; fail-loud on a
+# no-repo app_home (cloud path). Red-first = the __file__-anchored shape.
+plugins/platform_dev_surface_plugin/tests/repo_root_release_copy_smoke.py
+
+# B3 Half-1 repo_service (read-only repo primitives) — the 5 §5 security smokes.
+# The confinement boundary is the app_home-resolved WORKTREE root which CONTAINS
+# profile/ (secrets) + the git dir, so the denylist is LOAD-BEARING (Rev-A ASK-4).
+# confinement: traversal/symlink-escape/absolute-outside typed-rejected (root-
+# parameterized, release-safe). secret_exclusion: denylist TYPED-reject (not empty)
+# + planted-canary read-refuse (Q2) + search-snippet redaction. bounded_output:
+# read_file line/byte cap + search cap with explicit truncated marker. readonly_git:
+# git_status/git_diff live + STRUCTURAL pin (no mutating git verb reachable; apply
+# only with --check). propose_patch_artifact: stores artifact + apply-check flag,
+# escaping-path rejected, and NO apply verb exists across interface/public/ops.
+plugins/platform_dev_surface_plugin/tests/repo_path_confinement_smoke.py
+plugins/platform_dev_surface_plugin/tests/repo_secret_exclusion_smoke.py
+plugins/platform_dev_surface_plugin/tests/repo_bounded_output_smoke.py
+plugins/platform_dev_surface_plugin/tests/repo_readonly_git_smoke.py
+plugins/platform_dev_surface_plugin/tests/propose_patch_artifact_smoke.py
+
+# REL-11 get_focused dict-envelope dispatch contract (2026-07-06): the
+# service_interface::memory_service::get_focused verb was dead over process_call
+# since registration — list[dict] return vs the dispatch contract's dict-only
+# rule (action_processor _execute_standard_service_method). Fix = the recall-
+# style {"memories": [...], "count": N} envelope across ABC/wrapper/plugin +
+# unwraps at every in-process consumer. Pins: registration shape (OBJECT schema,
+# memories/count sensitivities), the real plugin envelope wrap, the act-time
+# dispatch through the REAL _execute_service_interface_action (red-first: the
+# pre-fix list shape raises FrameworkError there), a bare-list negative control,
+# and the advancement consumer seam (whose except-guard would silently mask a
+# missed unwrap). Offline (stand-in at the plugin's internal backend seam).
+ananta/tests/core/substrate_contracts/memory_get_focused_dispatch_contract_smoke.py
+
+# GTE-06 L2 fresh-source manifest-preflight probe (2026-07-06). S1 harness:
+# A5a never-raise + A5b conjunction classification (timeout group-kill, garbage/
+# empty-failures/version-mismatch/exit-disagreement envelopes, truncation,
+# Popen-failure containment) against REAL subprocesses. S4 orchestrator gate:
+# RED probe ⇒ PROBE_FAILED before any spawn; raising seam contained; schema
+# preflight short-circuits first; GREEN passes through to spawn. S2 the
+# class-ender discriminator: in-process preflight PASSES on a cache-poisoned
+# broken edit (the documented limit), the probe subprocess CATCHES it. S5
+# release-context fidelity: the verdict follows the PROBED tree, not a
+# divergent sibling. S3 core plumbing: probe_failed ⇒ byte-identical manifest
+# rollback, A1 CAS-guarded no-stomp on concurrent commit, OSError branch, Q5
+# success evidence on the applied envelope. S6 A2 placement: EntryPointMissing
+# defers at the L1 call site ONLY (probe + shared function still reject).
+plugins/macos_self_deployment_plugin/tests/preflight_probe_harness_smoke.py
+plugins/macos_self_deployment_plugin/tests/probe_gate_orchestrator_smoke.py
+ananta/tests/lifecycle_management_service/preflight_probe_cache_poison_smoke.py
+ananta/tests/lifecycle_management_service/preflight_probe_release_context_smoke.py
+ananta/tests/lifecycle_management_service/apply_manifest_probe_rollback_smoke.py
+ananta/tests/lifecycle_management_service/preflight_entry_point_deferral_smoke.py
+
+# JOS-02 session-scoped plan focus (2026-07-07). 13 cases / 37 checks: schema
+# column pin vs DEFINITIONS; per-session isolation + cap-20 (F2); the
+# LOAD-BEARING resolver keying (completed action's session picks the plan —
+# red = `del completed`); advancement + cursor-seam keying; per-card kickoff
+# concurrency + same-card typed busy; whole-buffer terminal release (R1);
+# vertex-assembly keying; BOTH process_results gate sites threaded (F1) +
+# V-5 no-session skip branches; V-2 server-state always-overwrites; migration
+# loud-delete idempotence; F3 boot invariant; DCP session preservation (V-8 seam).
+ananta/tests/core/plans/focus_session_scoping_smoke.py
+
+# g_suite_plugin Phase 1 reference vertical (OAuth core + Gmail, 2026-07-08).
+# smoke_oauth (16 checks): PKCE-S256 consent URL with access_type=offline +
+# prompt=consent (the params that force a Google refresh token); refresh stored
+# before access; cache hit skips refresh; force-refresh w/o token ->
+# gsuite.not_connected; the LOAD-BEARING Google semantic — a plain refresh
+# rewrites ONLY the access token and does NOT rotate the durable refresh token
+# (red if _refresh_and_persist copies Schwab's rotate-refresh-first); invalid_grant
+# -> gsuite.auth_expired. smoke_gmail (15 checks): list row shape + max clamp to
+# 100; get_message header/body-decode/attachment-metadata parse; missing id ->
+# ValueError; send_message text-only + blob-attachment MIME round-trip through the
+# base64url raw. Hermetic (fake vault, patched Google refresh, fake gmail service).
+plugins/g_suite_plugin/tests/smoke_oauth.py
+plugins/g_suite_plugin/tests/smoke_gmail.py
+# smoke_drive (39 checks): the worked BLOB-SPILL example — list row shape + query
+# passthrough + pageSize clamp; download_file drives get-metadata -> get_media bytes
+# -> blob writer -> file_blob_key (the *_blob_key whose field_sensitivities entry is
+# the FATAL edge_process_mismatch trap the Phase-2 export verbs replicate);
+# Google-native docs rejected with a pointer to the export verb (get_media NOT
+# called); missing id -> ValueError. Phase 2 additions: upload_file from a blob_key
+# (reuses the gmail attachment_loader) or a local absolute path (rejects relative
+# paths, rejects neither/both source given); create_folder mime type + parent
+# passthrough; share_file permission body shape + invalid-role rejection (no
+# notification email sent); the shared export_media_to_blob/resolve_export_mime
+# helpers sheets/docs/slides_export all delegate to (non-bytes export rejected,
+# case-insensitive format lookup). Hermetic (fake drive service, fake blob writer,
+# real temp file for the local-path upload case).
+plugins/g_suite_plugin/tests/smoke_drive.py
+# smoke_sheets (17 checks, Phase 2, 2026-07-08): create_spreadsheet id + title
+# passthrough; get_values grid shape + missing-values-> [] default; update_values
+# valueInputOption=USER_ENTERED + range/body passthrough + non-grid values rejected;
+# append_values reads updated_cells from the nested `updates` dict Sheets returns for
+# append (vs update's top-level updatedCells); export_spreadsheet drives the SAME
+# shared drive_actions.export_media_to_blob as docs/slides (Drive's export_media, NOT
+# get_media/the sheets service) — default csv mime, xlsx mime override, unsupported
+# format + non-bytes content rejected. Hermetic (fake sheets/drive services).
+plugins/g_suite_plugin/tests/smoke_sheets.py
+# smoke_docs (14 checks, Phase 2, 2026-07-08): create_document title-only vs
+# content triggering an insertText batchUpdate at index 1; get_document walks
+# body.content[].paragraph.elements[].textRun.content into body_text, SKIPPING
+# non-paragraph structural elements (tables) — the regression this pins; missing id
+# -> ValueError; batch_update requests passthrough + replies returned + empty
+# requests rejected; export_document via the shared export helper — default pdf
+# mime, docx mime override, non-bytes content rejected. Hermetic (fake docs/drive
+# services).
+plugins/g_suite_plugin/tests/smoke_docs.py
+# smoke_slides (14 checks, Phase 2, 2026-07-08): create_presentation id + title
+# passthrough; get_presentation slide-row shape (object_id + element_count from
+# pageElements length, including the empty-pageElements-> 0 case) + count; missing
+# id -> ValueError; batch_update requests passthrough + replies returned + empty
+# requests rejected; export_presentation via the shared export helper — default pdf
+# mime, pptx mime override, non-bytes content rejected. Hermetic (fake
+# slides/drive services).
+plugins/g_suite_plugin/tests/smoke_slides.py
+
+# github_midwife_plugin genesis Slice A (2026-07-08) — the macos-free-
+# homunculus profile template + checked-in profile_baseline/ per-plugin
+# config templates. Binding-satisfaction (every service_bindings value is
+# an allowlisted plugin; inference_service/self_deployment_service
+# asserted ABSENT — the declared-vacant/opt-in shape), no orphan
+# starting_actions, and public-safe (no /Users/... operator path or
+# secret-shaped key anywhere in the profile YAML or any profile_baseline
+# JSON; every baseline file is valid JSON). Offline (pure yaml/json parse).
+plugins/github_midwife_plugin/tests/macos_free_profile_smoke.py
+
+# github_midwife_plugin genesis Slice B (2026-07-09) — profile-driven
+# fail-loud allowlist install. Pins the contract inversion vs
+# macos_midwife_plugin.venv_setup.install_target_tree (which swallows
+# per-plugin pip failures, warn-and-continue): the FIRST failure raises
+# ProfileInstallError immediately and no later package is attempted
+# (fail-fast pin: mocked-subprocess call-count stops exactly at the
+# failing package). Also covers missing-directory / missing-pyproject.toml
+# / missing-venv-python raises, and load_plugin_allowlist parsing
+# (incl. loading the real Slice A profile template). Offline
+# (subprocess.run mocked throughout; no real pip/network).
+plugins/github_midwife_plugin/tests/profile_install_faildloud_smoke.py
+
+# github_midwife_plugin genesis Slice C (2026-07-09, RISKY — flagged for a
+# Codex/Rev pass before commit) — first-run scram db_password seed.
+# Constructs macos_vault_plugin.keychain.SystemKeychain DIRECTLY (design
+# doc §6.5 rider — a post-boot vault_service::store call would deadlock
+# against state startup, which is itself waiting on this credential).
+# Key-shape verified against the live reader: postgres_state_management_plugin
+# resolves vault_service.retrieve(key=f"{homunculus}.postgres_state_management_plugin.db_password"),
+# which macos_vault_plugin's _parse_scoped_key splits into the exact
+# (plugin_name, credential) pair this module writes via store_credential —
+# no mismatch. Pins: fresh-seed generate+ALTER ROLE+store+round-trip-verify;
+# idempotent skip when the role already authenticates with the stored pw;
+# rotate-BOTH (never one without the other) when the stored pw is stale;
+# inconsistent-Keychain-state and round-trip-mismatch both raise;
+# HOMUNCULUS_NAME required; the generated password is proven absent from
+# captured stdout/stderr; both psql-invoking helpers pass the password via
+# stdin/PGPASSWORD env, never argv (ps-visible). Needs HOMUNCULUS_NAME set
+# even to import (macos_vault_plugin's package init resolves vault-scoped
+# constants eagerly — same class as hmac_bearer_token_smoke.py); the smoke
+# self-defaults it to the selected homunculus name if absent. Offline (FakeKeychain; subprocess.run
+# and secrets.token_urlsafe mocked; no real Postgres/Keychain touched).
+plugins/github_midwife_plugin/tests/credential_seed_smoke.py
+
+# github_midwife_plugin genesis Slice D (2026-07-09) — no-parent config
+# materialization + the 4-step genesis step machine. Coordinator-Dawn
+# ratified scope (validate_name -> resolve_target -> materialize_configs
+# -> write_manifest_marker, dropping clone_and_copy/knowledge_base_symlinks/
+# venv_setup/asset_downloads from the birther.py reference — see steps.py
+# module docstring for the full adjudication). Pins: manifest.yaml +
+# service_bindings.json + starting_action_definitions.json shape;
+# profile_baseline per-plugin configs copied + filtered to the profile's
+# plugin allowlist (an out-of-allowlist baseline file is proven excluded);
+# plugin_config_overrides merges on top of (not instead of) the baseline;
+# missing-profile raises; run_steps executes the 4-step sequence end-to-end
+# and stops at the first failure (invalid name / incomplete clone-shape
+# each proven to halt before the next step runs, with no side effects
+# past the failure point); step_runners is proven genuinely injectable
+# (the composability rider) via a custom single-step sequence overriding
+# the genesis default. Offline (tmp-dir fixtures; no real Postgres/pip/
+# network).
+plugins/github_midwife_plugin/tests/config_materialize_smoke.py
+
+# github_midwife_plugin genesis Slice E (2026-07-09) — bootstrap.py (Layer 0,
+# repo-root, STRICTLY stdlib). Pins: an AST scan proves zero non-stdlib
+# imports (+ a negative control fabricating a real `import requests` line,
+# proving the scan isn't vacuously true); the 7-step sequence
+# (homebrew/postgres/pgvector/role_and_db/lm_server/venv_and_seed/handoff)
+# dry-runs end-to-end with subprocess/confirm/HTTP all injected fakes — an
+# all-healthy fixture reports every step skipped except the terminal
+# handoff; a Homebrew-absent fixture stops immediately at step 1
+# (needs_user_action, never auto-piping an installer); a forced venv-creation
+# failure is caught as a 'failed' step record (not an uncaught exception)
+# and halts before handoff. Adaptive host-state per build spec §10.2: each
+# probe reports a named enum state (e.g. postgres: absent |
+# running_healthy_compatible | running_wrong_version | present_not_running |
+# non_homebrew_install), never force-fixes a divergent state. Offline
+# (subprocess.run/confirm/http_get all mocked; no real brew/psql/pip/network).
+plugins/github_midwife_plugin/tests/bootstrap_stdlib_only_smoke.py
+
+# kb_git managed-branch rename (operator-identity parameterization, 2026-07-11,
+# Claude-C) — the local KB-management branch is the operator-identity-free
+# 'managed' (renamed from an old fleet-specific default that leaked into a shipped seed). Drives
+# git_setup_branch / fetch_and_merge_git against REAL tmp git repos (no-mock, the
+# subprocess wrappers ARE the substrate): (1) fresh clone forks 'managed' from the
+# default tip, (2) a legacy repo on the old default branch self-migrates — 'managed' forks from
+# the old branch TIP (history preserved) and the old branch still EXISTS
+# (never-delete-branches invariant), (3) an existing 'managed' is checked out
+# idempotently, (4) fetch_and_merge on 'managed' still merges origin/<default>
+# cleanly (the rename didn't break the update path). Offline (local tmp repos).
+plugins/default_knowledge_plugin/tests/kb_git_smoke.py
+
+# github_midwife_plugin genesis Slice F (2026-07-09, RISKY — flagged for a
+# Codex/Rev pass before commit) — the simple LaunchAgent plist renderer.
+# Own-copy fork of macos_self_deployment_plugin/autostart_manager.py's
+# simple form (drops the supervisor/current-release/PathState machinery —
+# genesis has no blue-green rotation). Pins every build-spec §6.2
+# load-bearing plist field: Label=local.homunculus.<name>;
+# EnvironmentVariables sets HOMUNCULUS_NAME (boot fast-fails without it);
+# WorkingDirectory is home_dir/.ananta/runtime/<name> — deliberately NOT
+# ananta.core.runtime.get_runtime_dir() (verified 2026-07-09: that helper
+# returns one SHARED ~/.ananta/runtime dir with no per-name segment despite
+# accepting a homunculus_name param); ProgramArguments launches ananta.cli
+# directly (no supervisor) via the clone's own absolute .venv/bin/python3 +
+# absolute --app-home profile dir (never a bare "profile" string, which
+# would resolve against the runtime dir instead); RunAtLoad=true;
+# KeepAlive is the SIMPLE crash-restart form ({SuccessfulExit: false}), not
+# an unconditional <true/>. Also pins install/uninstall/status idempotency
+# (unload-before-reload on a stale plist, absent-uninstall is a no-op
+# success, a launchctl failure raises AutostartError). Offline (tmpfs
+# plist_dir + home_dir; launchctl fully mocked via an injected run callable
+# — no real /bin/launchctl, filesystem writes outside tmp, or
+# ~/Library/LaunchAgents touched).
+#
+# Codex F must-fix (2026-07-09, folded post-review): the launchctl-list
+# PROBE no longer coerces "execution failed" into "not loaded" — only the
+# documented not-found signal (stderr contains "Could not find service")
+# maps to False; an execution failure (OSError/timeout) or any other
+# unrecognized nonzero-exit shape raises LaunchctlObservationError instead
+# of guessing. Pins: (a) status() raises/surfaces the failure rather than
+# reporting a fabricated not_installed; (b) uninstall() REFUSES to act on
+# an unobservable state — no unload attempt, plist left in place, so a
+# transient list failure can never orphan a live launchd job with no
+# backing plist; (c) the discrimination boundary itself — an unrecognized
+# nonzero exit is not silently re-widened back into "not loaded".
+plugins/github_midwife_plugin/tests/autostart_render_smoke.py
+
+# github_midwife_plugin genesis Slice G (2026-07-09) — plugin.py (dual-use
+# birth_homunculus EDGE verb) + genesis.py (Layer 1 entrypoint composing
+# B/C/D/F). edge_parity_smoke: entry-point resolution, EDGE-parity (the
+# create-process skill's FATAL trap — every EDGE @platform_process needs a
+# matching EdgeProcessDefinition with field_sensitivities), return_value_schema
+# matches the ACTUAL _birth_result_to_dict keys exactly (no drift), genesis.py
+# entrypoints importable, KB process JSON exists + process_key matches the
+# runtime registration. genesis_integration_smoke (build spec §8): drives
+# run_genesis() end-to-end against a tmp clone + FakeKeychain + tmpfs
+# plist_dir/home_dir + fake launchctl — asserts the materialized profile
+# config, the attempt marker, the seeded credential, and the rendered plist
+# are all coherent, AND that the generated password never appears anywhere
+# in captured stdout/stderr across the whole run; plus a resolve_target
+# failure surfaces as a named GenesisError. Offline (subprocess.run globally
+# mocked for pip; every credential/autostart dependency explicitly injected;
+# no real Postgres/Keychain/LaunchAgents/network).
+plugins/github_midwife_plugin/tests/edge_parity_smoke.py
+plugins/github_midwife_plugin/tests/genesis_integration_smoke.py
+
+# github_midwife_plugin Workstream A (2026-07-20, Claude-B) — git-init of the
+# born homunculus worktree at genesis. A seed never ships `.git` (the "no
+# contaminated history travels" invariant), so a seed-born tree is a plain source
+# dir and `platform_dev_surface_plugin` readiness (`git rev-parse
+# --is-inside-work-tree`) fail-louds. The new git_init post-spine phase gives the
+# born tree a FRESH EMPTY history (its own, never the source tree's) + a `.gitignore` + a
+# LOCAL identity + one initial commit. Drives git_init_worktree with REAL git on
+# a throwaway tmp tree: the readiness probe returns true, exactly one commit on
+# `main`, gitignored runtime/secret/venv paths stay OUT while source is tracked,
+# and idempotent re-run skips (never re-commits, never clobbers the .gitignore).
+# Offline (tmp tree outside the fleet worktree; real git subprocesses).
+plugins/github_midwife_plugin/tests/git_init_smoke.py
+
+# kb_symlinks materialize step (2026-07-12, Claude-C) — the genesis step that
+# DERIVES + idempotently repairs knowledge_bases/ discovery symlinks for a
+# seed-born clone (the MINT assemble bans symlinks, so the seed ships none →
+# dead KB). Derive-don't-declare: each plugins/<x>/knowledge_base*/ +
+# ananta/knowledge_bases/* + ananta/knowledge_base with a manifest.yaml →
+# knowledge_bases/<its-own-manifest-name> as a RELATIVE symlink. The FIRST check
+# is the data-loss safety wall (a real content dir at a target name survives
+# untouched — the MINT path never triggers this branch, so it MUST be tested on
+# its own fixture); plus the 4 repair branches (absent/skip/rewrite/protect),
+# dangling-symlink repair, the manifest-name≠dir-name discriminator (thinking
+# trio: thinking_plans/authored_joseki/plan_templates), idempotent no-op, and the
+# pruned-MINT-tree E2E. Offline (tmpfs fixtures only).
+plugins/github_midwife_plugin/tests/kb_symlinks_smoke.py
+
+# root_manifest seed step (2026-07-12, Coordinator-Dawn) — the genesis spine
+# step that rewrites a seed-born clone's root_manifest.yaml homunculus_name:
+# line from the MINTING homunculus's name to the newborn's (the seed ships the
+# minting tree's file verbatim; without this step every seed-born newborn
+# carries the minter's identity — the exact pollution the seed factory exists
+# to prevent). Pins: byte-exact single-line rewrite (regex must not inject a
+# blank line — the macOS original's \s*+appended-\n shape did, fixed in both
+# own-copies), idempotency, fail-loud missing-file / missing-line refusals
+# with the refused file left untouched, and first-line-only semantics.
+# Offline (tmpfs fixtures only).
+plugins/github_midwife_plugin/tests/root_manifest_seed_smoke.py
+
+# github_midwife_plugin genesis venv-provision + newborn self-seed
+# (venv_provision.py; acquisition mode retired 2026-07-18). Pins: birth
+# requires an EXISTING clone (_require_existing_clone — absent/empty is
+# refused, acquisition retired; a fully-formed clone passes; an
+# occupied-but-invalid dir raises rather than guessing) and the verb-level
+# retire (birth against an absent target fails loud); the §7 provision_venv
+# birth variant (True → create_venv_and_install_seed EXPLICIT + UNCONDITIONAL
+# before genesis; False → never called, standard mode skips venv). Pins the
+# per-homunculus credential self-seed: the newborn subprocess env sets
+# HOMUNCULUS_NAME to the NEWBORN's name, nothing is piped on stdin (no
+# cross-namespace credential copy), a self-seed subprocess failure surfaces
+# its (secret-free) diagnostic, and the pre-seed scram VERIFY runs before the
+# self-seed against the parent sibling db (derived from the running
+# HOMUNCULUS_NAME, not hardcoded). Offline (subprocess.run fully mocked; no
+# real git/pip/network/Keychain).
+plugins/github_midwife_plugin/tests/venv_provision_smoke.py
+
+# github_midwife_plugin name-validation regression (2026-07-19) — the shared
+# constants.is_valid_homunculus_name (fullmatch, so a $-before-newline name
+# cannot slip through) and the FOUR name-derivation boundaries it now guards:
+# steps.validate_name, credential_seed + venv_provision (Layer 1), and
+# bootstrap.py (Layer 0, validated at import before any admin psql/REVOKE/
+# createuser call). Closes the unvalidated-name -> SQL/libpq-conninfo injection
+# class (Codex BLOCKER + Reviewer-A F1/F2/F3). Offline (pure predicates + a fresh
+# in-process bootstrap load; no Postgres/Keychain).
+plugins/github_midwife_plugin/tests/name_validation_smoke.py
+
+# github_midwife_plugin genesis human-intake fixes (2026-07-11, Claude-C) —
+# closes the three pre-start provisioning gaps verb-mode genesis structurally
+# skipped (overnight runbook §11): F8 (a stock py3.13 venv lacks setuptools →
+# --no-build-isolation editable installs fail BackendUnavailable; both venv
+# seams now pre-install pip/setuptools/wheel — covered by venv_provision_smoke +
+# profile_install_faildloud_smoke), F9 (the newborn's mandatory openai_
+# embeddings address-book entry is now materialized to entries.json from the
+# profile template so the address-book plugin auto-seeds it at boot — covered
+# by config_materialize_smoke incl. a seed_loader parity assertion), and F10
+# (the vault passphrase file is seeded write-if-absent, mode 0600, never
+# regenerated/leaked). vault_passphrase_seed_smoke pins the module in
+# isolation (write-if-absent, never-clobber operator/prior files, 0600,
+# no-leak); the genesis_integration_smoke additions pin the wiring (the
+# passphrase file is materialized during genesis and its value never leaks to
+# stdout/stderr or the return). Offline (no vault/Keychain/network).
+plugins/github_midwife_plugin/tests/vault_passphrase_seed_smoke.py
+
+# github_midwife_plugin genesis SEED-06 router-at-birth (2026-07-18,
+# Coordinator-Dawn) — genesis installs the per-homunculus blue-green router
+# right after the main autostart LaunchAgent, so a seed-born homunculus comes
+# up blue-green-capable with zero operator action (design §4 D1, Q1 RULED).
+# router_install_smoke pins the helper's branches in isolation: a free-tier
+# newborn (no macos_self_deployment_plugin in the profile allowlist) SKIPS and
+# never invokes the installer; a blue-green-capable newborn invokes the shipped
+# installer via its OWN venv python with argv [venv python, install_router.py,
+# name]; and every fail-loud path (missing installer, missing venv, non-zero
+# exit, unrunnable) raises RouterInstallError so a birth never proceeds
+# believing in a router that is not there. The end-to-end wiring (skip branch +
+# install branch, both faked) is pinned by genesis_integration_smoke, and the
+# real router *.template assets surviving the real seed_manifest prune is pinned
+# by assemble_smoke (§6#2). Offline (fake Runner; no launchctl/port/subprocess).
+plugins/github_midwife_plugin/tests/router_install_smoke.py
+
+# github_midwife_plugin no-MCP-first command launcher (2026-07-21,
+# Coordinator-Dawn) — genesis installs `<bin_dir>/<name>` on the operator's
+# PATH as a bare symlink to the newborn venv's generic `homunculus` console
+# script (agent_messaging_plugin local_cli); identity resolves by install
+# location, so the command pins its own homunculus and reaches no sibling.
+# command_launcher_smoke pins the helper contract in isolation (install /
+# idempotent re-run / stale-symlink repoint / non-symlink fail-loud refusal /
+# missing-console-script refusal / invalid-name refusal); the end-to-end wiring
+# (phase record + marker + sandboxed bin_dir symlink) is pinned by
+# genesis_integration_smoke. Offline (tmpfs dirs only).
+plugins/github_midwife_plugin/tests/command_launcher_smoke.py
+
+# jira_plugin (Lane C of the Enterprise Connector Suite, 2026-07-09, Claude-C) —
+# hermetic connector smokes (faked address_book_service, faked JIRA client +
+# JIRAError, in-memory ProcessExportPolicy; no network/credentials). Each smoke
+# carries paired positive+negative red-first controls.
+#
+# smoke_config.py (JIR-A): config resolution (jira_site entries -> JiraAppConfig;
+# missing/incomplete/malformed-expires_at fail loud AT LOAD; naive expires_at
+# coerced to aware UTC), client construction (basic_auth (email,token) + pinned
+# rest_api_version=2), token-expiry awareness (check_token_expiry: within-N-days
+# -> typed jira.token_expiring warning / well-future -> None / expired ->
+# negative days; message carries NO site host), and process-export
+# deny-effectiveness (live-mirrored allow=('plugin::*::*',) + the plugin's deny
+# constant -> is_allowed False for all 12 verbs; drop the deny -> True red
+# baseline; deny-only is vacuous, proving the allow is load-bearing).
+plugins/jira_plugin/tests/smoke_config.py
+# smoke_issues.py (JIR-B): jql_search trimmed rows + 100-cap + assignee-None
+# guard + over-byte-cap spill; get_issue .raw parse; create/update/delete
+# (issue().delete()); JIRAError classification (401/403/429 generic, 404/400
+# detail from exc.text); TOPOLOGY-LEAK red-first (site host in JIRAError.url is
+# absent from the classified message on BOTH generic AND detail paths, and from
+# the _run broad-except path); _run error routing.
+plugins/jira_plugin/tests/smoke_issues.py
+# smoke_comments.py (JIR-C): add_comment id; list_comments .raw parse + cap;
+# list_transitions list-of-dict -> {id,name,to_status}; transition_issue invokes
+# the transition + re-fetches new_status; None-safe author flattening.
+plugins/jira_plugin/tests/smoke_comments.py
+# smoke_attachments.py (JIR-D): download_attachment attachment(id).get() ->
+# blob writer -> attachment_blob_key + meta (non-bytes rejected); add_attachment
+# blob-only (loader bytes -> BytesIO upload, filename override); BLOB-ONLY
+# red-first (the verb schema exposes NO path/file param, only blob_key; a
+# path-only call is refused and the loader — the only byte source — never fires,
+# so no local file is read).
+plugins/jira_plugin/tests/smoke_attachments.py
+
+# external_postgres_plugin — Wave-1 Lane A, the read-only "super Datagrip" over
+# FOREIGN Postgres DBs (EPG-A..E, 2026-07-09). FIVE HERMETIC smokes cover the full
+# logic without a database: smoke_config (per-connection resolve + JDBC-URL parse +
+# password-never-logged repr/scrub/error), smoke_containment (§8.4 platform-instance
+# guard, role-independent host+port+dbname, red-first incl. a fixture superuser case
+# + /-socket + blank-port), smoke_guard (read-leader +
+# sqlparse single-statement belt), smoke_query (read verbs + bound-param introspection
+# + TOPOLOGY-LEAK red-first at both classify + plugin level + EDGE-parity via the real
+# validate_edge_process_provider), smoke_spill (run_query fail-loud overflow
+# red-firsts — over-cap raises result_too_large naming export_query, A4 no-spill —
+# + export_query workspace-TSV write via the REAL containment gate: outside-root/
+# empty-roots/misconfigured-root/relative-path/suffix red-firsts + truncated flag).
+# (smoke_export_deny retired 2026-07-15 — process_export_deny_patterns emptied by
+# operator ruling: the deny layer was friction, not security, on a single-user
+# substrate. See workbench/2026-07-15_result_error_processing_architecture_deep_dive.md.)
+plugins/external_postgres_plugin/tests/smoke_config.py
+plugins/external_postgres_plugin/tests/smoke_containment.py
+plugins/external_postgres_plugin/tests/smoke_guard.py
+plugins/external_postgres_plugin/tests/smoke_query.py
+plugins/external_postgres_plugin/tests/smoke_spill.py
+
+# external_postgres_plugin LIVE read-only proof (the load-bearing 25006 proof a
+# MagicMock cannot give). GATE-SAFE: both self-skip (exit 0) when the local scratch
+# Postgres fixture (epg_smoke_scratch on the Homebrew cluster — NEVER a production DB) is
+# unreachable, and run for real (createdb+seed via psql, connect as the dw trust
+# superuser) where it is. smoke_readonly proves conn.read_only + SHOW
+# transaction_read_only=on in the SAME txn as the user query + 25006 on every write
+# incl. first-statement/no-window; smoke_multistatement proves the parser-bypass
+# defense-in-depth (a 2-stmt write still 25006). See the completion report's flag on
+# whether these live-DB smokes stay registered (GTE-09 lesson).
+plugins/external_postgres_plugin/tests/smoke_readonly.py
+plugins/external_postgres_plugin/tests/smoke_multistatement.py
+
+# snowflake_plugin — Wave-2 Lane A, the read-only Snowflake warehouse connector
+# (SNW-A..E, 2026-07-13, built from the ratified-but-never-built umbrella design's
+# wave-2 slot). FIVE hermetic smokes: smoke_config (snowflake_account resolve incl.
+# a REAL RSA-2048 PEM round-trip through the resolver + eager fail-loud parse of a
+# flattened key + repr redaction + statement/login timeout bounds), smoke_guard
+# (the read-leader belt — FAST-FAIL ONLY, no session-level read-only flag exists
+# for Snowflake unlike Postgres, so the guard cannot itself stop a write; the true
+# boundary is the operator-granted read-only role, documented not exercised here),
+# smoke_query (read verbs + TOPOLOGY-LEAK red-first at classify + plugin level +
+# EDGE-parity), smoke_spill (run_query fail-loud overflow red-first + export_query
+# workspace-TSV write via the REAL containment gate, same red-first family as the
+# external_postgres note above + truncated flag). (smoke_export_deny retired
+# 2026-07-15 — see external_postgres note above.)
+plugins/snowflake_plugin/tests/smoke_config.py
+plugins/snowflake_plugin/tests/smoke_guard.py
+plugins/snowflake_plugin/tests/smoke_query.py
+plugins/snowflake_plugin/tests/smoke_spill.py
+
+# salesforce_plugin — Wave-2 Lane C, the full-CRUD-including-delete Salesforce
+# connector (SFC-A..D, 2026-07-13, same provenance as snowflake_plugin above).
+# THREE hermetic smokes: smoke_config (salesforce_org resolve, login_url->domain
+# mapping incl. custom test. subdomains, repr redaction, EDGE-parity), smoke_soql
+# (capped query/query_more paging that NEVER calls query_all, max_records clamp,
+# fail-loud overflow red-first naming export_soql, export_soql workspace-TSV write
+# via the REAL containment gate with the full refusal red-first family,
+# attributes-key stripping), smoke_records (get/describe/list/create/
+# update/delete CRUD, TOPOLOGY-LEAK red-first on auth/session-expired/permission
+# classes, is_expired_session/is_auth_failed duck-typing on the exact simple_salesforce
+# class names, and the plugin-level ONE re-mint-and-retry-on-expiry path).
+# (smoke_export_deny retired 2026-07-15 — see external_postgres note above.)
+plugins/salesforce_plugin/tests/smoke_config.py
+plugins/salesforce_plugin/tests/smoke_soql.py
+plugins/salesforce_plugin/tests/smoke_records.py
+
+# zuora_plugin — subscription-billing REST connector (2026-07-13). Predates the
+# 2026-07-09 umbrella hardening pass (explicitly out of scope there — "not in the
+# operator's four") but built applying that pass's security posture on top of the
+# older 2026-06-20 design: topology-safe generic error messages, chain-consumed
+# client_secret, sync verb shape (the export deny was part of that posture until
+# its 2026-07-15 retirement — see the external_postgres note above) (not the design
+# appendix's async sketch). No delete verb exists (billing records are
+# voided/cancelled through Zuora's own workflow). Pure REST — no SQL-shaped
+# strings anywhere, so the SQL-lockdown gate is silent for src/ (only the test
+# fixtures' ZOQL-shaped strings need the standard false-positive allowlisting).
+# THREE hermetic smokes (httpx.MockTransport, no network): smoke_auth (tenant
+# config resolve, repr redaction, bearer-token caching-until-near-expiry, a 401
+# triggering exactly ONE re-fetch-and-retry, a failed token mint raising
+# ZuoraAuthError), smoke_data_query (data_query row/byte-cap spill, bulk_export
+# csv/json + truncated flag, non-2xx raising ZuoraResponseError with the correct
+# is_query flag), smoke_objects (get/create/update_object CRUD, list_subscriptions/
+# get_invoice/list_invoices reads, TOPOLOGY-LEAK red-first on auth/rate-limit
+# classes vs. response-body detail on not-found/validation-failed).
+# (smoke_export_deny retired 2026-07-15 — see external_postgres note above.)
+plugins/zuora_plugin/tests/smoke_auth.py
+plugins/zuora_plugin/tests/smoke_data_query.py
+plugins/zuora_plugin/tests/smoke_objects.py
+
+# trigger_poll dispatch-offload (2026-07-10 fleet-wide dispatch-wedge fix): the cron
+# heartbeat trigger_poll now SUBMITS the whole importer pass to a single-slot
+# BoundedSummaryExecutor (_poll_executor) and returns {"poller": started|already_running}
+# in milliseconds — the 3rd instance of the reviewed heartbeat/drainer pattern — instead
+# of running poll_once() INLINE on the action-queue thread (an inline ~1.2M-event first
+# pass parked fleet-wide process_call dispatch: the serial _poll_once loop awaits each
+# dispatch to completion). Pins (red-first): AST guard (trigger_poll delegates via
+# start_importer_poll_drain with NO inline poll_once; the poll_once lives in
+# run_importer_poll_drain), fast-return-while-blocked + off-thread execution, the
+# singleton guard (second fire → already_running), and slot-release-on-exception (a
+# raising pass still frees the slot). Offline (blocking-stub importer; real
+# BoundedSummaryExecutor for the threading cases).
+ananta/tests/llm/session_ledger/trigger_poll_offloads_drain_smoke.py
+
+# Lane-2 smoke-remediation Packet L2-P2 (2026-07-11) — two previously-UNREGISTERED
+# enforcement smokes that had silently gone red (the LED-01 "enforcement existed
+# but ungated" class); fixed to full-green and registered here so they gate.
+#
+# vault_service_proxy_smoke (6 subsmokes): VaultServiceProxy parity + ActionProcessor
+# call_context spoofing-negative + proxy call-context binding + oauth-registry
+# passthrough + operator-only-method-list parity (MIRRORS the live
+# OPERATOR_ONLY_METHODS constant — W-VAULT-CALLER-ENFORCE sub-2 promotions, all
+# more-restrictive) + the no-direct-get_service AST gate (Phase D-2: no plugin CALLS
+# get_service("vault_service"); AST-precise so documentation prose is ignored, with a
+# planted-violation negative control proving the tightened scan is non-vacuous).
+ananta/tests/services/vault_service/vault_service_proxy_smoke.py
+# w_vault_local_keychain_smoke (13 SC-* subsmokes): Keychain-native vault surface incl.
+# operator-ingest namespace disjointness (fixture-pinned HOMUNCULUS_NAME, not runner-env
+# floated) and the SC-16 surviving-`default_vault_plugin`-refs sweep (allowlist covers the
+# sanctioned retained SQL namespace — audit + OAuth tables — per KB 11_vault_and_address_book).
+plugins/macos_vault_plugin/tests/w_vault_local_keychain_smoke.py
+
+# Lane-2 smoke-remediation Packet L2-P5 (2026-07-11) — the 3 escalation smokes
+# from §6.4/§9.7, fixed to full-green + registered so they gate.
+#
+# policy_lockstep_smoke (4 scenarios): the D35' aws_midwife IAM renderer<->JSON
+# lockstep gate (newborn_self_deployment_role.json re-rendered via the checker's
+# own path — the D32' SelfDeploymentConfigBucket grant), plugin-load + interface
+# declaration, a hermetic env_config VALIDATION-REJECTION test (empty env ->
+# ValidationError; AWS-call-free: validate_environment_config precedes any
+# AssumeRole/boto3), and the @platform_process missing-arg error envelope.
+plugins/aws_midwife_plugin/tests/policy_lockstep_smoke.py
+# profile_lockstep_smoke: D37' byte-equality between the operator profile
+# initialization/profiles/local.yaml and the macos_midwife plugin mirror copy
+# (the mirror was re-synced whole-file to close the drift).
+plugins/macos_midwife_plugin/tests/profile_lockstep_smoke.py
+# birth_homunculus_smoke (3 cases): macos_midwife 8-step birth (postgres_schema
+# retired 2026-06-09) — dry_run planned-steps, live success + per-step status, and
+# idempotency via the BURIED marker (constants.MANIFEST_MARKER_PATH, imported not
+# re-hardcoded; rewritten atomic tmp+rename each run — non-empty + differs across
+# runs while the idempotency_key matches).
+plugins/macos_midwife_plugin/tests/birth_homunculus_smoke.py
+
+# Lane-2 smoke-remediation Packet L2-P1 (2026-07-11, Claude-B) — 5 §6.4 unregistered
+# reds fixed to full-green + registered so they gate (red-first; ruff/pyright 0/0 each).
+#
+# bridge_session_allowlist_smoke: _build_process_call_trigger_data signature drift
+# (now requires inference_vertex_role + operator_equivalent) + a Boy-Scout assertion
+# that operator_equivalent propagates into authenticated_principal.
+plugins/agent_messaging_plugin/tests/bridge_session_allowlist_smoke.py
+# current_identity_smoke: Forwarder.__init__ provides_inference (INF-01) + a masked
+# v3->v4 role-seed drift (reseeded via claim_role_binding_v4/HolderClaim; the route
+# reads roles_held via the v4 list_roles_for_agent_instance, not the v3 claim).
+plugins/agent_messaging_plugin/tests/current_identity_smoke.py
+# delete_all_in_namespace_smoke: pgvector module reorg (config/provider/constants moved
+# under postgres_backend/vector/) + PGVectorProvider ctor signature drift (plugin_namespace
+# + kw-only pool_builder/state_service) + qualified_table now double-quotes (assertion
+# updated; _no_pool guard proves the delete path never opens the pool).
+plugins/pgvector_service_plugin/tests/delete_all_in_namespace_smoke.py
+# s3_blob_storage_smoke: stale FakeStateService (no write_state) -> InMemoryMetadataState
+# faithful full-mirror (§9.1 fallback; write->data.result.generated_id, read->data.records)
+# + S3ByteIO byte-path injection + hex content assertion + search_blobs test-5.
+plugins/s3_blob_storage_plugin/tests/s3_blob_storage_smoke.py
+# task19_action_factory_lazy_orchestrator_smoke: APP_HOME env-fragility -> hermetic
+# os.environ.setdefault (guard order verified: only scenarios 1&2 reach the release-mgr path).
+plugins/macos_self_deployment_plugin/tests/task19_action_factory_lazy_orchestrator_smoke.py
+
+# Lane-2 smoke-remediation Packet L2-P3 (2026-07-11, Claude-A) — 5 §6.4 unregistered
+# reds fixed to full-green + registered so they gate (red-first; ruff/pyright 0/0 each).
+#
+# claude_code_vendor_recency_smoke: vendor-recency parser 2-case unknown-type contract —
+# an event-shape line with an unrecognized 'type' RAISES "unrecognized event-shape line
+# 'type'"; a non-event-shape line is TOLERATED (→ 0 events), not raised.
+plugins/claude_code_filesystem_session_source_plugin/tests/claude_code_vendor_recency_smoke.py
+# claude_code_filesystem_session_source_smoke: removed a stale SQL-substring-priming-stub
+# e2e block (dead post-cutover; §9.14 build-recipe) + its driver call + 7 unused imports.
+plugins/claude_code_filesystem_session_source_plugin/tests/claude_code_filesystem_session_source_smoke.py
+# core_slice4_schema_manager_unit_smoke: REQUIRED_SERVICES grew EMBEDDING_SERVICE (POR
+# §1.3 ◆R2) — the fixture binds it so plugin_schema_service is the SOLE missing service
+# the first validate_required_services names.
+ananta/tests/llm/core_slice4/core_slice4_schema_manager_unit_smoke.py
+# role_inbox_smoke: §9 v4 role_binding cutover — seed TABLE_ROLE_BINDING + holder_kind
+# ='session' (not the legacy agent_role_binding) + REL-05 owed-delivery columns
+# (consumed / escalated / emit_count / last_emitted_at).
+ananta/tests/llm/agent_messaging/role_inbox_smoke.py
+# smoke_auth (schwab): W-PLUGIN-LAUNCH-KEYS scoped vault key — assert the store key ==
+# VAULT_KEY_REFRESH_TOKEN (was the flat pre-migration "schwab_refresh_token" literal).
+plugins/schwab_market_data_plugin/tests/smoke_auth.py
+
+# Lane-2 smoke-remediation Packet L2-P6 (2026-07-11, Claude-B) — 23 registrations:
+# 1 P6-greened fix (vpc_endpoints) + 5 §6.2b hermetic-green register-candidates +
+# the 17-file §6.3 lead tranche (the 22 non-vpc files are already-on-master, green,
+# UNCHANGED; measured +~3s on baseline). Per §9.3/§9.15; hermeticity-screened, rc=0 each.
+#
+# --- P6-greened (fixed this packet, red-first) ---
+# vpc_endpoints_smoke: AwsClients codebuild+ecr fixture + 5->7 endpoint-count rot-proofed.
+plugins/aws_midwife_plugin/tests/vpc_endpoints_smoke.py
+# --- §6.2b hermetic-green register-candidates (stub-driven; boundary-mock only) ---
+ananta/src/ananta/core/orchestration/tests/postgres_authorization_guard_smoke.py
+plugins/aws_account_admin_plugin/tests/aws_account_admin_smoke.py
+plugins/aws_midwife_plugin/tests/build_and_push_stub_smoke.py
+plugins/aws_self_deployment_plugin/tests/slice4_5_stop_self_stub_smoke.py
+plugins/secrets_manager_vault_plugin/tests/secrets_manager_vault_smoke.py
+# --- §6.3 lead tranche (platform-invariant / cross-plugin-contract guards; interfaces_split = LED-01) ---
+ananta/tests/session_ledger_service/interfaces_split_no_god_class_smoke.py
+ananta/tests/session_ledger_service/parse_iso_timezone_smoke.py
+ananta/tests/platform/process_registry_builder_wiring_smoke.py
+ananta/tests/platform/process_registry_merge_validator_smoke.py
+ananta/tests/platform/state_service_write_state_registration_smoke.py
+ananta/tests/platform/homunculus_name_smoke.py
+ananta/tests/platform/binary_libraries_smoke.py
+ananta/tests/platform/root_manifest_smoke.py
+ananta/tests/platform/launch_path_choice_y_smoke.py
+ananta/tests/lifecycle_management_service/apply_manifest_binding_rebind_smoke.py
+ananta/tests/lifecycle_management_service/manifest_preflight_smoke.py
+ananta/tests/core/plugins/set_active_smoke.py
+ananta/tests/services/state_service/query_ordered_facade_smoke.py
+ananta/tests/services/inference_service/create_inference_error_response_smoke.py
+quality_gates/tests/service_interface_ast_check_smoke.py
+quality_gates/tests/sql_access_gate_smoke.py
+quality_gates/tests/wint2_vault_key_launch_keys_smoke.py
+
+# Lane-2 smoke-remediation Packet L2-P8 (2026-07-11, Claude-A) — 1 rotted §9.14-item-1
+# smoke migrated to the v4 role_binding surface + registered (red-first was a file-level
+# crash: it seeded the legacy table but resolved v4; the dead claim_role_binding v3 is
+# removed from src in the same commit).
+plugins/agent_messaging_plugin/tests/role_binding_store_smoke.py
+
+# ── seed_factory_plugin (the origin-only seed factory; 2026-07-20 split of
+#    github_midwife_plugin — the birth spine STAYS shipped, the factory moved
+#    here). EDGE parity for the 3 factory verbs + the import-direction pin
+#    (factory MAY import the birth spine; the birth spine NEVER imports the
+#    factory — a seed-born clone has no factory, so the shipping half cannot
+#    depend on the non-shipping half).
+plugins/seed_factory_plugin/tests/edge_parity_smoke.py
+plugins/seed_factory_plugin/tests/import_direction_smoke.py
+
+# seed_factory_plugin SF-A (2026-07-11, Claude-B) — the pure capability resolver
+# (capabilities -> plugin set + template + baseline subset, O-3 named-bundle OR
+# explicit-list) + its two data files (seed_manifest.yaml, capability_bundles.yaml).
+# Offline, no git/network: named-bundle==template-allowlist lockstep, explicit
+# passthrough+dedupe, the BORNABLE force-include of the birth spine, the NO-FACTORY
+# fail-loud when seed_factory_plugin is named, unknown/empty raises, data-file
+# structure. Red-first proven by dropping the ship-invariant (explicit-list
+# assertions + the NO-FACTORY negatives go red).
+plugins/seed_factory_plugin/tests/seed_resolver_smoke.py
+
+# github_midwife_plugin seed factory SF-B (2026-07-11, Claude-B) — the assemble
+# engine (git archive @ committed ref -> extract -> post-archive prune ->
+# STRUCTURAL validation). Driven against REAL fixture git repos (no mocks;
+# hermetic tempdirs; never live HEAD, never ~/.ananta). Covers: happy-path
+# extracted-set equality + envelope, the manifest-vs-archive DIFF teeth (a
+# committed export-ignore drop fails closed), path-in-ref preflight, boot-
+# coherence refusal, never-clobber. Red-first proven by skipping the prune
+# (the DIFF then flags the 6 excluded files as extra).
+plugins/seed_factory_plugin/tests/assemble_smoke.py
+plugins/seed_factory_plugin/tests/assemble_repo_root_resolution_smoke.py
+
+# github_midwife_plugin seed factory SF-C (2026-07-11, Claude-B, RISKY —
+# security-critical, Rev-C CONCUR-WITH-RIDERS) — the clean-by-construction
+# CONTENT validator (§4.2), the credential-free LOCAL SEALING verb (rev-D B3),
+# and the public-safe seed-README generator. All hermetic (fixture bundle trees,
+# real git in tempdirs, injected identity — never the box's runtime identity,
+# never the shared worktree). seed_content_validator: the discriminating pair
+# (under one injected fleet/operator identity, sanctioned placeholders
+# /Users/alice + HOMUNCULUS_NAME=<name> PASS while the injected operator home
+# path + fleet-name + psql-as-operator markers
+# REFUSE) proves bounded-context matching + placeholder-passes; plus secret
+# filename denylist (incl. UPPERCASE, R4) + PEM/AWS/OpenAI/GitHub/Slack/Bearer
+# content (R2), symlink/.git/profile-config, from_runtime fail-closed, and a
+# self-ship guard over the REAL shipped SF-C source. seal: neutral author+
+# committer with a red-first ambient-leak control, ls-tree==validated
+# (.gitignore-drop teeth), enclosing-worktree + existing-.git + missing-target
+# guards, planted-secret refuses with NO .git, point-in-time tree_hash.
+# seed_readme: the generated README passes §4.2 by construction + hydration
+# pointer (GAP-5 read-as-file) + token substitution.
+plugins/seed_factory_plugin/tests/seed_content_validator_smoke.py
+plugins/seed_factory_plugin/tests/seal_smoke.py
+plugins/seed_factory_plugin/tests/seed_readme_smoke.py
+# github_midwife_plugin seed factory SF-D (2026-07-18, Claude-B, RISKY —
+# publish procedure). The mint_seed / mint_and_birth_local authored joseki
+# cards encode the §5 rev-D ladder: seal (VERB) before any gh, gh repo create
+# WITHOUT --push then a separate git push, private-default; and the local card
+# chains assemble_seed -> birth_homunculus(provision_venv=True) — the explicit
+# §7 venv seam (acquisition-mode clone-of-pinned-upstream retired same slice).
+plugins/seed_factory_plugin/tests/seed_joseki_cards_smoke.py
+# github_midwife_plugin seed factory §12 LICENSING (2026-07-18, Claude-B, RISKY
+# — seal-gate on the SF-C security module). Fail-closed: a seed missing its root
+# LICENSE / NOTICE / README license section, or a shipped pyproject declaring a
+# non-Apache (stale MIT) license, is REFUSED before any git op. Also pins the
+# TIGHT generated-README exception in assemble (only README.md is exempt from
+# the provenance + manifest-vs-archive-diff checks; any other stray still fails
+# closed) and the single-source COPYRIGHT_HOLDER (holder-only — no product mark)
+# enforcement.
+plugins/seed_factory_plugin/tests/license_gate_smoke.py
+# github_midwife_plugin seed factory SF-PUBLISH (2026-07-19, Claude-B) — the
+# network publish_seed verb, driven through the PUBLIC API against a FAKE gh CLI
+# backed by REAL local bare repos, so git ls-remote/fetch/push (incl. real
+# fast-forward rejection) run for real with zero network and zero credential.
+# HERMETIC (only the gh subprocess seam is faked). Pins the create->update->
+# unchanged outcome ladder (append-only re-mint grafted onto the prior remote
+# HEAD, both commits neutral), empty-repo recovery, never-clobber
+# (existing_repo_not_a_seed / visibility_mismatch), seal re-verification (wrong
+# sha / dirty tree / non-neutral HEAD all refuse not_sealed), target safety
+# (non-git dir + enclosing-worktree refuse publish_target_unsafe), input+auth
+# preflight (repo_name/visibility invalid, gh unavailable/unauthenticated/
+# network), and the direct-helper edges (remote_moved non-ff, verification_failed).
+plugins/seed_factory_plugin/tests/publish_smoke.py
+# seed_factory_plugin PROVENANCE stamp (2026-07-20, Claude-C — design §8.8) — the
+# deterministic PII-free lineage stamp end-to-end, hermetic (real fixture git +
+# real local bare remotes; only the gh seam faked). Pins ENGINE + ASSEMBLE
+# determinism (byte-identical stamp ⇒ publish `unchanged` survives), ancestry
+# (§7a: generation-zero empty, two-generation chain, malformed-birth fails
+# closed), lineage (§7: predecessor chaining + errors), the TRIPLE seal-identity
+# recognition (target/interim/legacy — append onto a legacy- AND interim-sealed
+# remote verifies), publish lineage_mismatch (red-first) + the pre-provenance
+# compat rung, the content-validator passing a real stamp, and the origin_id
+# singleton (§8.7: generate-once, read-same, fail-loud on a non-persisting write).
+plugins/seed_factory_plugin/tests/provenance_smoke.py
+# hydration_templates: every *.template file (incl. the new Step 4a
+# fleet_functions.zsh.template) renders with no undocumented {{TOKEN}}
+# surviving, zsh-shaped templates parse under `zsh -n`, the settings.json
+# template parses as JSON, and TEMPLATE_VARS.md's file map matches disk.
+plugins/github_midwife_plugin/tests/hydration_templates_render_smoke.py
+
+# hydration_guidance.md convention (Step 4b generalized, 2026-07-13): any plugin
+# needing hydration-time operator setup ships its own knowledge_base/hydration_guidance.md
+# (Pitch + Setup sections, proper headers). This smoke enforces the shape so a future
+# plugin author's file is actually processable by the runbook's generic discovery step.
+plugins/github_midwife_plugin/tests/hydration_guidance_convention_smoke.py
+
+# agent_messaging deaf-wake Fork-1a (2026-07-11) — direct-wake recipient-session
+# re-home + role-inbox session-visibility smokes, landing with the Fork-1a
+# packet (Rev-B CLEAR; see the Fork-1a land record for coverage detail).
+plugins/agent_messaging_plugin/tests/direct_wake_rehome_smoke.py
+plugins/agent_messaging_plugin/tests/peer_inbox_session_visibility_smoke.py
+
+# D11 (2026-07-13) — router-less bridge port discovery (Architect ruling,
+# workbench/2026-07-13_d11_bridge_port_discovery_routerless_ruling.md):
+# manifest-declared router-presence predicate + write_routerless_bridge_port_file
+# conditional write in start_interface, the unchanged generic bridge-write
+# guard, R3 self-heal on restart, and the R1 fail-loud contract.
+plugins/agent_messaging_plugin/tests/d11_routerless_bridge_port_discovery_smoke.py
+
+# Workbench KB registration, Option B (2026-07-16) — the title_block chunking
+# strategy + fast-fail dispatch (W1/W2/W3), the per-KB write_posture /
+# require_metadata_block / archive_subdir manifest fields (W4/W6), the
+# default-scope exclusion + explicit-name bypass (W5), the archive_file lifecycle
+# verb (W11), and hash-preconditioned edit + prior-version snapshot (W12).
+# Plan: workbench/2026-07-16_workbench_kb_option_b_implementation_plan.md.
+plugins/default_knowledge_plugin/tests/chunk_title_block_smoke.py
+plugins/default_knowledge_plugin/tests/workbench_manifest_smoke.py
+plugins/default_knowledge_plugin/tests/file_ops_posture_smoke.py
+plugins/default_knowledge_plugin/tests/search_exclusion_bypass_smoke.py
+# Phase-2 fix (2026-07-16): search `name` scoping published through the
+# decorated service-interface surface + process JSON (it existed only on the
+# plugin layer, so MCP silently dropped it and the W5 name= bypass was
+# unreachable). Asserts decorated params declare name, wrapper forwards it.
+plugins/default_knowledge_plugin/tests/search_name_scope_smoke.py
+
+# Unified-memory-passthrough Slice 1 (2026-07-16) — agent_memory projection
+# records get the same consolidation+purge protection as knowledge:official
+# (1a); export_memories tags ALL-filter + origin isolation (1b); tag-preserving
+# upsert_memory_by_tag + duplicate-slot reconciliation (1c); export/import
+# workspace-root containment, refuse-all default (1d); and the tags-param live
+# schema parity that Slice 2's process_call drain/hydrate depends on (1e).
+# Plan: workbench/2026-07-16_unified_memory_passthrough_design_v2.md.
+plugins/actr_memory_plugin/tests/actr_memory_agent_memory_protection_smoke.py
+plugins/actr_memory_plugin/tests/actr_memory_export_tag_filter_smoke.py
+plugins/actr_memory_plugin/tests/actr_memory_upsert_tag_union_smoke.py
+plugins/actr_memory_plugin/tests/actr_memory_export_import_root_gate_smoke.py
+plugins/actr_memory_plugin/tests/actr_memory_tags_param_schema_parity_smoke.py
+
+# Unified-memory-passthrough Slice 2 (2026-07-16) — the Claude-only loop-prover's
+# LOCAL mechanics (hermetic, no live homunculus): PostToolUse capture + echo-break, the
+# drain upsert-payload (slot + provenance tags), the hydrate renderer (verbatim
+# byte-identical round-trip + MEMORY.md + hash stamping), fail-loud on invalid
+# frontmatter, the drain watermark, and the local-delete-vs-forget skip.
+.claude/hooks/memory_passthrough/tests/passthrough_loop_smoke.py
+
+# Frontier-first B5 (2026-07-17) — the SINGLE ActionFactory result/error-processor
+# merge that assembles a local-inference (process_results / process_error) prompt
+# from the inference base template ⊕ a process's customizations survived the
+# Track-B deletions (B1 ProcessorPolicyService, B2 exposure filter, B4
+# field_sensitivities). HERMETIC (no live homunculus / LM Studio, per this register's
+# offline contract): the real merge preserves the base output_schema (decode
+# contract), inherits base arguments, injects the customization guidance,
+# preserves the <<RESULT>> observation plumbing, and the inference kind routes
+# through it while bridge_delivery/None are unaffected. The live LM-Studio
+# end-to-end run is the SEPARATE (non-gate-registered) acceptance evidence.
+# Plan: workbench/2026-07-15_connector_and_frontier_first_execution_plan.md B5.
+ananta/tests/core/actions/action_factory_result_processor_merge_smoke.py
+
+# Postgres unique-flip DDL capability (2026-07-18) — toggling a column's UNIQUE
+# constraint (True<->False) is a supported active-update migration: the
+# single-axis _is_unique_only_change branch emits DROP/ADD CONSTRAINT and
+# ddl_renderer builds the Postgres-default constraint name (<full_table>_<col>_key).
+# HERMETIC (schema-diff level, no live DB): asserts the e2e diff produces exactly
+# the DROP CONSTRAINT op for a name-unique removal and single-axis discipline.
+# Enables the address-book surrogate-key redesign to drop its name-unique
+# constraint via the sanctioned metadata-DDL path (no hand-DDL, no execute_sql).
+plugins/postgres_state_management_plugin/tests/schema_diff_unique_flip_smoke.py
+
+# Address-book memory_id back-link capture (2026-07-18) — register auto-ingests
+# the address to the memory service and the memory IS created, but the returned
+# memory_id must be read from the actr backend's TOP-LEVEL shape
+# (result["memory_id"]) not result["data"]["memory_id"], else the address->memory
+# back-link is never stored (register returned memory_id=null; systemic; orphaned
+# memory on delete). HERMETIC (faked memory service): 4 cases — real top-level id
+# returns id, auto_ingest disabled -> None + no remember() call, None service,
+# missing/legacy-data/None result -> None.
+plugins/default_address_book_plugin/tests/test_memory_integration.py
+
+# Address-book surrogate-key redesign: idempotent register + HARD delete
+# (2026-07-18) — name is a lookup index only (not a DB unique key; the surrogate
+# id is the identity), so register is an idempotent upsert (replace in place, same
+# id) and delete is HARD (soft_delete=False on both the address and its
+# address_entry rows), designing out the tombstone-holds-unique-name deadlock and
+# fixing the entry-orphan leak. HERMETIC (in-memory backend): 17 cases across the
+# upsert-in-place and hard-delete-both-tables invariants.
+plugins/default_address_book_plugin/tests/test_upsert_and_hard_delete.py
+
+# INF-06 reliability carve — forwarded-vertex holder-forward recoverability
+# (2026-07-18). A died/timed-out sys:autonomic holder that was forwarded a
+# Surface-1 action-decode vertex now re-drives instead of silent-stalling. The
+# durable core__inference_deferred_vertex row gains a lifecycle STATE
+# (deferred|forwarded|failed) + forwarded_at + a monotone attempts counter; the
+# forward MINTS a 'forwarded' serve-anchor durability-FIRST (record_forwarded_vertex
+# before provider.process_*; a flow_id-absent forward RAISES, a store failure
+# propagates loud — never an anchorless fire-and-forget). The core half: the mint
+# fail-loud contract, the sweep/drain read+write helpers (forwarded_before /
+# live_rows_in_state / increment_attempts monotone / mark_terminal_failed /
+# attempts_of), and the ★ Architect §6-bis freshness gate — a forwarded
+# process_error turn does NOT advance the plan (should_skip_advancement guard,
+# RED-FIRST control on process_results), so the failed step keeps its [>] current
+# marker and the re-driven FRESH decode is not blind to the failure.
+ananta/src/ananta/services/inference_service/tests/forward_vertex_queue_smoke.py
+# The plugin half: the REAL AutonomicAssignment forwarded riders + the REAL
+# AgentMessagingPlugin._resubmit_vertex (SUB-05 RESUBMIT) primitive. The
+# serve-timeout SWEEP re-drives a past-window forwarded row (attempts++ AT
+# sweep-fire) WITHOUT hard-deleting — the re-mint upsert PRESERVES the monotone
+# attempts (a delete-then-reset would defeat the cap); at the cap it flips terminal
+# 'failed'. RESUBMIT is method-agnostic + fresh-decode NOT replay: a process_error
+# row re-drives as a FRESH process_results initial vertex (observation stripped,
+# instructions emptied — never the recorded decode), returns False + never raises
+# on an unknown flow / missing collaborator (per-row sweep/drain isolation). The
+# first-claim DRAIN re-drives forwarded rows (dark-lane holder-transition) +
+# deferred rows (the pre-existing §D.9 inert-drain gap this closes) and HARD-deletes
+# them, SKIPPING terminal 'failed' rows; a GC sweep reaps aged 'failed' rows.
+plugins/agent_messaging_plugin/tests/forward_vertex_redrive_smoke.py
+
+# Structural-drain hook (2026-07-18) — the deaf-wake / Root-B turn-start lever
+# (.claude/hooks/drain_owed_important.py). HERMETIC (no live homunculus / DB, via the
+# PROBE_FILE count seam + STATE_DIR marker override): the SessionStart /
+# UserPromptSubmit hook COUNTs owed unconsumed IMPORTANT rows and injects a
+# peer_inbox(include_important=true) directive only while owed rows exist. All 7
+# §7 cases — RED->GREEN, same-turn dedupe, no-resurface-after-reconciliation,
+# no-noise, durable-source (probe keys on the STABLE recipient_agent_session_id,
+# never the rotating instance id), the load-bearing §7.6 anti-silent-drop
+# (ignored directive re-injects next turn — kills the watermark design), and
+# §7.7 probe-failure (inject anyway + loud stderr).
+# Plan: workbench/2026-07-18_structural_drain_fix_lever_packet.md.
+.claude/hooks/tests/drain_owed_important_smoke.py
+
+# code_vetting_plugin (W3-A, 2026-07-20, Claude-B) — the AI code-vetting suite
+# promoted from quality_gates/vetting/ into the shipping plugin. Two hermetic L1
+# smokes relocated with the tree (no live homunculus / LM Studio; verified offline from
+# the new plugin path). l1_scanners: pure-Python scanners emit the right F1
+# dimension/constraint on crafted fixtures + a tool-absent path records a
+# coverage gap rather than silently passing. secrets_downgrade: the gitleaks
+# low-confidence path-class downgrade stays honest — a safe-path hit downgrades
+# to advisory/not-shown, the same rule on real source stays HIGH, and a
+# specific-provider rule stays HIGH even on a fixture path. Requires the
+# code_vetting_plugin package installed (pip install -e). Record:
+# workbench/2026-07-20_w3a_plugin_birth_record.md.
+plugins/code_vetting_plugin/tests/l1_scanners_smoke.py
+plugins/code_vetting_plugin/tests/secrets_downgrade_smoke.py
+
+# code_vetting_plugin verb surface (W3-A A2, 2026-07-20, Claude-B) — the two EDGE
+# verbs' (vet_codebase / scan_quality_guidelines) invariants that running the real
+# minutes-long scanners cannot hermetically pin: EDGE decorated<->declared parity
+# (red-first guard against the process_registry.edge_process_mismatch startup
+# FATAL), the mandatory result-envelope shape, deploy-invariant worktree anchoring
+# (the APP_HOME walk + fail-loud off the worktree), and the bounded-report cap.
+# Pure Python — no live homunculus / LM Studio / subprocess / mocks.
+plugins/code_vetting_plugin/tests/verb_surface_smoke.py
+
+# code_vetting_plugin dispatch security (W3-B B1, 2026-07-20, Claude-B) — the two
+# SECURITY-critical invariants of the inference-substrate/dispatch layer, as build-time
+# guards: RIDER-1 redaction (sensitive-dimension evidence + the raw code pack withheld
+# from an OFF-OPERATOR forward; locus preserved; the LOCAL substrate keeps full evidence),
+# and the A0-R3 metered-key ban made STRUCTURAL (no transport/dispatcher/selector field
+# and no verb param accepts an api_key/token/secret — a red-first scan). Pure Python — no
+# live homunculus / LM Studio / subprocess / mocks.
+plugins/code_vetting_plugin/tests/dispatch_security_smoke.py
+
+# code_vetting_plugin live state adapter (W3-B B2, 2026-07-20, Claude-B) — the
+# production StateWriter binding for the vetting_runs metrics trail, driven
+# against a FAKE synchronous state_service. Pins the async-over-sync bridge +
+# the state-interface arg mapping: upsert{table,record,conflict_columns=[run_id]},
+# query_ordered{order_by:[[started,asc],[run_id,asc]],limit}→data.records,
+# delete_records{filters,soft_delete:False} HARD-delete prune; ActionResult unwrap
+# fail-loud on non-COMPLETED; MetricsWriter runs UNCHANGED + enforces retention
+# end-to-end; the `substrate` provenance field round-trips; the declarative
+# vetting_runs SchemaDefinition shape; and ONLY the 3 sanctioned verbs are ever
+# called (no raw SQL / execute_sql / foreign namespace). Offline (in-memory fake).
+plugins/code_vetting_plugin/tests/live_state_smoke.py
+
+# code_vetting_plugin foreign-target vetting (W3-B FT-1, 2026-07-20, Claude-B) —
+# the read-only `target_path` de-anchor on vet_codebase (Architect foreign-target
+# ruling A + C). Pins: _resolve_target self-vet default + the fail-loud refusals
+# (relative / non-existent / non-dir / inside-own-worktree, red-first); the
+# read-only structural from_walk fallback (curated junk excludes, symlink skip,
+# enumeration='walk' + foreign=True — NOT gitignore emulation); _build_tree
+# git-preferred (ref=HEAD) vs walk-fallback (ref=''); and the scanner-applicability
+# ledger invariant — on a FOREIGN tree the self_only platform-canon scanners
+# (code_quality/sql_access/orphan_kb/prior_pass) do NOT execute but stay in the
+# roster as not_applicable records (scanners_total unchanged). Offline (tmp trees;
+# real git for the git-mode build_tree; run_all over a tiny foreign tree).
+plugins/code_vetting_plugin/tests/foreign_target_smoke.py
+
+# code_vetting_plugin test-coverage integration (coverage micro-slice, 2026-07-20,
+# Claude-A spec / Claude-B applied; Architect foreign-target ruling §D1-D3) — the
+# test_reach dimension + the ## Test Coverage report section. Pins: Dimension.TEST_REACH
+# registered; TestCoverageReport.from_harness_artifact round-trips + renders the owner
+# rollup with NO percentage (evidence, not a bar); the ## Coverage -> ## Scanner Coverage
+# rename + the ## Test Coverage placeholder both present on an unpopulated render;
+# build_test_reach_findings emits ONE advisory L1 finding for a verb-owner with 0 executed
+# src (and none for a covered owner); zero_reach_targets exposes the critic aiming list.
+# Hermetic (synthetic harness artifact; no coverage tool needed).
+plugins/code_vetting_plugin/tests/test_coverage_integration_smoke.py
+
+# code_vetting_plugin foreign-scanner scoping (W3-B FT-1.1, 2026-07-20, Claude-B) —
+# defects 1+2 from the first LIVE foreign vet. Pins: pip-audit NEVER runs its
+# environment-audit mode on a foreign target (no python manifest -> not_applicable;
+# manifest present -> a deferred Phase-2 gap) so this engine's venv CVEs are never
+# mis-attributed to the target; bandit's no-targets branch + semgrep on a no-python
+# quality-surface record an honest coverage GAP (ran=False) instead of reading as
+# 'ran clean' (ran=True/0 files). Gated on an empty python surface so a self-vet is
+# byte-unaffected (positive python-tree cases prove the gate stays off). Hermetic
+# (tmp walk-trees; tool-independent gap logic + tool-guarded reason assertions).
+plugins/code_vetting_plugin/tests/foreign_scanner_scope_smoke.py
+
+# code_vetting_plugin report accounting (W3-B FT-1.1 defect 3, 2026-07-20, Claude-B) —
+# the ## What was filtered footer now partitions every emitted finding into exactly one
+# mutually-exclusive bucket (confirmed / zero-FP-promoted / refuted / downgraded-secret /
+# unverified-candidate) so rendered + filtered == emitted, and reports the collapsed-
+# duplicate delta so rendered-unique reconciles with rendered-raw. Pins the reconciliation
+# invariant + the exact footer text on a crafted one-per-bucket scenario incl. a duplicate
+# finding-id. Hermetic (synthetic findings; no tools).
+plugins/code_vetting_plugin/tests/report_accounting_smoke.py
+
+# code_vetting_plugin inference-dispatch SEAM (W3-B B3c, 2026-07-20, Claude-B) — the
+# staged wiring of the B1 substrate (selector + inference dispatcher + off-operator
+# redaction) into the VettingDriver, driven END-TO-END so the seam is tested-not-dead:
+# a driver whose L3 is the substrate-selected inference verifier (RecordedTransport)
+# stamps a routed candidate + records the substrate on the metrics row; an OFF_MACHINE
+# transport => off_operator=True => the forwarded prompt withholds a SENSITIVE finding's
+# raw evidence but keeps its locus (RIDER-1); PRIVACY hard-refuses an off-machine transport;
+# assemble_inference_driver records the substrate + wires the L3 adapter; the plugin seam
+# factories build the transports + driver over a fake inference_service (vacant => fail-loud).
+# Hermetic (RecordedTransport / fake infer_fn / capturing test-double; no live inference/subprocess).
+plugins/code_vetting_plugin/tests/inference_wiring_smoke.py
+
+# code_vetting_plugin verb import-closure guard (W3-B B3c, 2026-07-20, Claude-B) — pins the
+# A0 R6 invariant Reviewer-C verified by grep into a PERMANENT gate: importing the verb
+# surface (code_vetting_plugin.plugin) must NOT transitively import the inference subsystem
+# (verify/* transports, inference_wiring, the driver/l3_adapter L3 path). Holds because the
+# B3c seam imports those function-locally + under TYPE_CHECKING. Runs in its own process so
+# the observed sys.modules IS the verb surface's first-import closure. Non-vacuous (asserts
+# the plugin module itself loaded). Hermetic.
+plugins/code_vetting_plugin/tests/verb_import_closure_smoke.py
+
+# code_vetting_plugin policy-tier rendering (W3-B FT-2, 2026-07-20, Claude-B; Architect
+# foreign-target ruling §36-40) — makes the DO-NOT-FLAG screen + L3 POLICY refute directive
+# target-class-aware so a foreign multi-tenant target's real RLS/session-isolation finding is
+# not dispositively refuted as a single-user category error. Pins: active_tiers derives
+# the stack from the class (self=both, foreign=universal-only); the self-vet POLICY directive
+# is BYTE-IDENTICAL to the pre-FT-2 text while the foreign render DROPS the project-local clauses
+# (multi-tenant category-error / absence-of-raw-SQL / RB-SCOPE); the assembled skeptic prompt
+# omits them on a foreign stack; every keyword DNF rule is tagged project-local so the whole
+# keyword screen disables on foreign — end-to-end, the heuristic POLICY pre-screen UPHOLDs
+# (not dispositive-refutes) a real multi-tenant finding on a foreign target. Hermetic.
+plugins/code_vetting_plugin/tests/policy_tier_smoke.py
+
+# code_vetting_plugin stack detection + applicability spine (R7-1, 2026-07-21, Claude-B;
+# design workbench/2026-07-20_ts_native_deterministic_adapter_design.md §3/§4/§9). Pins the
+# multi-ecosystem spine: detect_stacks (enumeration-driven; .d.ts + root tsconfig count as TS;
+# pure-py/TS/mixed/pure-JS fixtures map to the expected Stack sets); the R2 __post_init__
+# (stacks non-empty IFF applicability is STACK); the R2 INTERSECTION gate (eslint-like {TS,JS}
+# applicable on pure-JS while tsc-like {TS} is not — a single-stack field would false-skip
+# eslint); run_all's STACK branch end-to-end (not_applicable record on a no-matching-stack tree,
+# executes when the stack is present, roster never forks); and the report header Stacks line.
+# Hermetic (tmp walk-trees + a no-op probe scanner; no tools). No STACK scanner ships in R7-1's
+# roster yet — tsc/eslint land in R7-4; this pins the machinery they plug into.
+plugins/code_vetting_plugin/tests/stack_detection_smoke.py
+
+# code_vetting_plugin semgrep multi-stack ruleset (R7-2, 2026-07-21, Claude-B; design §5.4 —
+# FT-D2 proper). Pins (HERMETIC, no live registry hit): pack-per-detected-stack selection
+# (PYTHON→p/python, TS→p/typescript, JS→p/javascript; additive sorted union; no mapped stack
+# → ()); scan-target/exclude construction (self-vet → quality-surface top-level dirs; foreign
+# → '.' + a --exclude per curated WALK_EXCLUDE_DIRS dir, closing the materialized-junk residual);
+# files_examined from semgrep's own paths.scanned (ground truth, hardens the FT-D2 'ran clean over
+# 0 files' failure); the no-pack GAP (unmapped-stack tree → honest not_applicable, returns before
+# any subprocess); and the findings parse. The live TS positive-control is build-verify only
+# (registry flake stays a runtime gap, never a gate red). Supersedes FT-1.1's semgrep no-python
+# gap (a TS tree now selects p/typescript) — that assertion was removed from foreign_scanner_scope.
+plugins/code_vetting_plugin/tests/semgrep_multistack_smoke.py
+
+# code_vetting_plugin osv per-lockfile SCA (R7-3, 2026-07-21, Claude-B; design §5.3). Pins
+# (HERMETIC, no live OSV.dev call): _osv_lockfiles (npm + pinned-python lockfiles poetry/pipfile/
+# uv/requirements*.txt; a bare pyproject/setup is NOT a lockfile; no lockfile → ()); the CLI-version
+# shape-match (_osv_major + _osv_argv — v2 'scan source --lockfile', v1 bare '--lockfile', unparseable
+# → None = a loud gap not a guess); per-lockfile ATTRIBUTION (findings anchor to the source.path
+# lockfile, NOT _declaring_pyproject which would mis-attribute an npm CVE to a python-env marker);
+# and the no-lockfile not_applicable gap (returns before any subprocess). Enumeration-driven per-
+# lockfile invocation replaces `-r <root>` (never traverses a materialized node_modules); files_examined
+# = lockfiles scanned (was wrongly len(pyproject_files())). Live OSV.dev SCA = build-verify only.
+plugins/code_vetting_plugin/tests/osv_lockfile_smoke.py
+
+# ts_toolchain tsc + eslint target-toolchain scanners (R7-4, 2026-07-21) — the
+# materialized-deps tier. HERMETIC/absence-tolerant: roster wiring (17 scanners;
+# tsc STACK/{TS}, eslint STACK/{TS,JS}, both executes_target_code); the R1 opt-in
+# gate BOTH new branches (node_modules present + flag off → opt-in gap [returns
+# before any tool touch]; flag on + no node_modules → materialization/node gap,
+# absence-tolerant on host node); canned tsc/eslint parse (TYPE_COVERAGE/
+# CODE_QUALITY, sev map, null-ruleId → eslint:fatal, node_modules-anchored
+# diagnostics DROPPED with count); flood cap (>200 → first 200) + disclosure;
+# R3 ran-with-disclosure (a ran=True cap-disclosure record is NOT a coverage_gap
+# and renders ran=yes); read-only invariant (target tree byte-identical before/
+# after a full run_all, flag on and off). Live tsc/eslint run = build-verify only
+# (needs a materialized node_modules). Design:
+# workbench/2026-07-20_ts_native_deterministic_adapter_design.md §5.1/§5.2/§6/§8.
+plugins/code_vetting_plugin/tests/ts_toolchain_smoke.py
+
+# python_type_check foreign-Python type-checker (R9-E, 2026-07-21) — the R7-4
+# mirror: ONE UNIVERSAL... STACK/{PYTHON} scanner, executes_target_code=True,
+# behind the existing execute_target_toolchain opt-in (roster now 19). HERMETIC +
+# absence-tolerant: THREE distinct gap classes red-first (no config → no-contract
+# not_applicable; config + flag unset → opt-in gap; config + flag set + no
+# {.venv,venv} → materialization gap — all return before any tool touch); canned
+# pyright --outputjson parse (0-indexed line +1, error→MED/warning→LOW,
+# constraint pyright:<rule>, message newline-flattened) + canned mypy text parse
+# (mypy:<code>, error→MED/note→LOW); env/site-packages-anchored diagnostics
+# DROPPED with count; checker version rides provenance; per-tool flood cap;
+# TYPE_COVERAGE dim (zero-FP-promoted); SELF finding rows SUPPRESSED (the pyright
+# --strict gate is sole self authority, R8 §C) vs FOREIGN emit (live end-to-end
+# absence-tolerant on host pyright/mypy). Never installs / never materializes a
+# venv. Live positive-control (both checkers on a configured target) = build-verify.
+# Ruling: §R9-E workbench/2026-07-21_architect_r9_foreign_parity_ruling.md.
+plugins/code_vetting_plugin/tests/python_type_check_smoke.py
+
+# structural_metrics multi-language complexity scanner (R8-1, 2026-07-21) — ONE
+# UNIVERSAL parse-only scanner (roster now 18) backed by lizard==1.23.0 (pinned
+# in-process lib). HERMETIC + EXACT: pins per-function CCN/NLOC/params/nesting-depth
+# on a TS+Python fixture to deterministic probed values (nesting via the `nd`
+# extension + a fresh analyzer per file — the `ns` extension over-counts and
+# accumulates across a shared analyzer); pinned-version + supported-language-set
+# (ts/tsx/js/python present, dart absent — a lizard upgrade that changes coverage
+# turns it red); universal-tier band findings on FOREIGN (CCN>30 MEDIUM /
+# params>8, nesting>6 LOW; ceiling MEDIUM; COMPLEXITY dimension, zero-FP-promoted)
+# vs project-local-tier SUPPRESSION of finding rows on self (same payload, no rows);
+# the `## Structural Quality Metrics` section (distribution + worst-offenders +
+# the fixed radon-vs-lizard provenance note, NO A-F rank); payload round-trip onto
+# the run record + vetting_runs schema column; >1MB size-cap skip disclosed on a
+# ran=True row. Design: workbench/2026-07-21_architect_r8_structural_metrics_ruling.md.
+plugins/code_vetting_plugin/tests/structural_metrics_smoke.py
+
+# dead-code scanner rebuild — in-process pinned vulture 2.16 (R9-A, 2026-07-21).
+# Replaces the bare-PATH LOW-everything stub with a TWO-LAYER scanner. HERMETIC:
+# pins the EXACT probed vulture confidences per class (import=90, unreachable=100,
+# function/class/variable/method=60 — an upgrade shifting semantics fails loud);
+# findings ONLY for the provable classes (unreachable→MEDIUM, unused-import→LOW,
+# emitted verdict=CONFIRMED so they render without dimension-promotion), __init__.py
+# imports NEVER a finding; the 60% family → capped candidate-dead-symbols payload
+# (section + L2 targeting evidence, NEVER findings); per-class self emission
+# (imports SUPPRESSED under F401, unreachable EMITTED, @platform_process dropped
+# from the self candidate table via project-local-tier ignore-decorators but present
+# on foreign); dim=DEAD_CODE (out of the zero-FP registry); candidate-table cap
+# disclosure; payload round-trip onto the run record + vetting_runs schema column.
+# Ruling: §A workbench/2026-07-21_architect_r9_foreign_parity_ruling.md.
+plugins/code_vetting_plugin/tests/dead_code_smoke.py
+
+# duplication disjoint-by-language dispatch (R8-2, 2026-07-21) — ONE UNIVERSAL
+# registry slot, internal per-language dispatch per the §A.4 REVISED ruling
+# (Option A + riders). HERMETIC: Python exact-block lane (dup:exact_block,
+# source=gate:duplication) BYTE-IDENTICAL zero-regression with and without
+# non-Python files present; non-Python token-clone lane (dup:token_clone,
+# source=lizard, -Eduplicate cross_file_process → get_duplicates at
+# min_duplicate_tokens=70) finds a TS clone fixture; DISJOINT proof — a
+# python-only tree yields ZERO token_clone rows (lanes never co-report on the
+# same file); distinct finding ids + provenance per lane; the coverage row
+# ALWAYS discloses the per-language split (mechanism + file counts + threshold
+# + per-mechanism dropped — rider 3). Named honest gaps (Python renamed-var
+# token-clones = L2; foreign-Python exact-dup out of exact-block's
+# self-quality-surface scope) are ruling-recorded, not smoke-tested.
+# Ruling: §A.4 REVISED in workbench/2026-07-21_architect_r8_structural_metrics_ruling.md.
+plugins/code_vetting_plugin/tests/duplication_disjoint_smoke.py
+
+# assembled hash-pinned rulebook (W3-C C1a, 2026-07-21, Claude-B; Architect Q1/Q2 in
+# workbench/2026-07-21_architect_w3c_turnkey_ruling.md). Pins the committed-artifact +
+# three-level manifest (per-source/per-tier/whole-artifact hashes) + fail-loud loader:
+# the assembler is a pure function of its sources (deterministic; the COMMITTED
+# assembled_rulebook.json matches a fresh re-assembly — never stale), a tampered/corrupt
+# artifact raises at verify_artifact (the runtime never seeds skeptics against a broken
+# moat), the self-vet POLICY directive renders BYTE-IDENTICAL through the assembled stack
+# (the FT-2 regression bar — clauses stored verbatim), and §40 tier-filtering drops the
+# project-local preamble sections + directive clauses on a foreign target (a real foreign
+# finding is never pre-refuted). Design:
+# workbench/2026-07-21_w3c_turnkey_ai_critic_design.md.
+plugins/code_vetting_plugin/tests/rulebook_assembler_smoke.py
+
+# rulebook-integrity scanner (W3-C C1b, 2026-07-21, Claude-B; Architect Q2 in
+# workbench/2026-07-21_architect_w3c_turnkey_ruling.md). Pins the self-policing lane that keeps
+# the moat honest — the 20th roster scanner (self_only, parse-only). Two failure modes collapse to
+# ONE stale_rulebook HIGH code_quality finding: a CORRUPT committed artifact (content no longer
+# matches its own pinned whole-artifact hash — caught by the shared verify_artifact fail-loud) and a
+# STALE one (a source edited without rebuilding drifts ahead — caught by re-assembling and comparing;
+# the per-source hashes localize the drifted anchor). HIGH is deliberately above the R8 metric ceiling
+# — a stale/corrupt rulebook breaks the run's whole trust chain. The report renders a RULEBOOK
+# INTEGRITY WARNING banner in the title block iff the run carries the finding (byte-absent on a clean
+# run). Red-first: a freshly-assembled tree is CLEAN; a drifted guidance source turns it red; a
+# hand-edited artifact turns it red via the corrupt path. Design:
+# workbench/2026-07-21_w3c_turnkey_ai_critic_design.md.
+plugins/code_vetting_plugin/tests/rulebook_sync_smoke.py
+
+# get_vetting_run read-verb (W3-C C3a, 2026-07-21, Claude-B; Architect Q3 + Dusk fork-ruling Option A
+# in workbench/2026-07-21_w3c_c3a_get_vetting_run_design.md). The run_id READ-VERB the joseki card's
+# payload routing is gated on (the ruling routes L2/L3 payloads by run_id through read-verbs ONLY —
+# deterministic steps cannot pipe a prior step's runtime result). Pins: read_vetting_run reads a
+# persisted vetting_runs row by run_id via the SYNC single-namespace query_state equality filter (own
+# namespace, no join, no raw SQL — asserted on the recorded call shape) and returns None for an unknown
+# id; a run persisted with report + dead_symbols + structural_metrics round-trips at the joseki's field
+# paths (report, dead_symbols.candidates[], structural_metrics.literals[]); the get_vetting_run verb
+# returns a COMPLETED envelope with the row for a known id, a typed run_not_found ERROR envelope for an
+# unknown id (fail-loud, never an empty success), and invalid_run_id for an empty id. HERMETIC (a fake
+# StateServiceProtocol; no live homunculus/DB). The report column is added to the vetting_runs schema +
+# RunMetrics + persisted in the driver (R8-1 column pattern). Design:
+# workbench/2026-07-21_w3c_c3a_get_vetting_run_design.md.
+plugins/code_vetting_plugin/tests/get_vetting_run_smoke.py
+
+# vet_codebase persist opt-in (W3-C persist micro-slice, 2026-07-21, Claude-B; Dusk GO on the ACKed
+# design). The joseki's step-1 pin needs a PERSISTED run to read by run_id; the bare vet_codebase verb
+# returned inline and did not persist. Adds an opt-in persist:true param (default false, return payload
+# byte-identical — persist is a pure side-effect) that writes an L1-only run (substrate='heuristic',
+# layers_run=[L1_deterministic]) via a SYNC persist_run_sync beside MetricsWriter (state_service is sync
+# from the executor thread; shares the retention decision _prune_targets with the async writer so the
+# bound cannot drift). Pins: sync write + bounded-retention prune (round-trips report + structural_metrics.
+# literals[] + dead_symbols.candidates[] via read_vetting_run; retention=2 over 3 rows drops the oldest);
+# the _run persist GATE red-first (persist=False writes NOTHING + payload key set unchanged; persist=True
+# writes exactly one row); vet_codebase param WIRING red-first (reads persist, threads it to _run). A
+# foreign target's allowlist_delta is empty (allowlist_totals is a self-vet concept — no fail-loud on the
+# absent quality_gates/ files). HERMETIC (a fake StateServiceProtocol + a stub scan_fn; no real scanners).
+plugins/code_vetting_plugin/tests/vet_persist_smoke.py
+
+# scheduled self-vet heartbeat (W3-C W3C-3, 2026-07-21, Claude-B; Architect ruling Q4 + Dusk GO). The
+# program's LAST slice: a NEW EDGE_SINK verb trigger_scheduled_self_vet fires the DAILY L1-only self-vet
+# on a single-slot background executor (the slot IS the lease) and returns a fast started/already_running
+# receipt — a full L1 self-vet is MINUTES so it must NOT run inline (action-queue fast-return contract).
+# The background run goes through the PERSISTING L1 path (a vetting_runs row per run = the R9-3 trend
+# baseline; substrate=heuristic) and queues a REGRESSION-ONLY memory note (tag
+# code_vetting:self_vet_regression) when its blocker/high counts worsen vs the prior run (else silent —
+# trend-not-nag). Pins: single-slot lease (in-flight → already_running; frees after the run); the verb
+# FAST-RETURNS touching NO state/memory (the R6/boundary is smoke-visible via a raising service + a
+# non-running executor); EDGE_SINK registration (processor_policy_category=edge_sink + NOT in
+# get_edge_process_definitions, else edge_process_mismatch FATAL); the is_regression predicate (blocker
+# OR high worsens → True; medium/low churn silent); the background body persists a row + queues the note
+# only on a worse run. HERMETIC (fake create-before-upsert StateServiceProtocol + fake memory + a stub
+# scan; no real scanners / live homunculus). Cron REGISTRATION is a post-deploy create_cron_schedule step (out
+# of this slice). Design: workbench/2026-07-21_w3c3_trigger_scheduled_self_vet_design.md.
+plugins/code_vetting_plugin/tests/scheduled_self_vet_smoke.py
+
+# local-invocation CLI (2026-07-18, v1) — the non-MCP local client over
+# the localhost bridge surface, for clients whose MCP-server allowlist blocks the
+# stdio bridge. HERMETIC (httpx.MockTransport; self-defaults HOMUNCULUS_NAME):
+# health/search/call happy paths + JSON output; `call` polls process/result until
+# terminal; one-shot invocation NEVER registers a peer identity (no registry
+# pollution — the load-bearing design pin); exit-code mapping for
+# not-running/non-completed/bad-args. Design:
+# workbench/2026-07-18_mcp_free_local_invocation_cli_design.md.
+plugins/agent_messaging_plugin/tests/local_cli_smoke.py
+
+# F-AISLOP timestamp-fragility unification (2026-07-20) — the AI code-vetting
+# suite's ai_slop lens found ONE lexical ISO-8601 timestamp idiom copy-pasted
+# across 3 durable-queue serve-timeout/GC sites (false-mirror docstrings + a
+# diverged missing-stamp default). All 3 now value-compare via
+# ananta.core.domain.timestamps.to_naive_utc (no lexical fallback) and fail LOUD
+# on an unparseable stamp. HERMETIC (pure predicate calls + one integrated
+# gc_terminal_rows drive against the REAL-SHAPE state fake; no live homunculus/LM
+# Studio/DB; self-defaults HOMUNCULUS_NAME). RED-FIRST: a NAIVE stored stamp
+# equal to the tz-aware cutoff instant discriminates value-vs-lexical, so
+# reverting any site to the lexical compare turns its boundary + fail-loud cases
+# red. Sites: forwarded_vertex_reconcile.terminal_row_aged (GC, never-delete-on-
+# unknown-age) + deferred_vertex_queue.forwarded_before + completion_request_queue
+# .forwarded_before (both sweeps, surface-on-anomaly). Record:
+# workbench/2026-07-20_faislop_timestamp_unification_record.md.
+plugins/agent_messaging_plugin/tests/timestamp_value_compare_smoke.py

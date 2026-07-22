@@ -1,0 +1,11 @@
+{
+  "process_key": "service_interface::io_interface_service::deliver_artifact",
+  "display_name": "Deliver Artifact",
+  "description": "Capability-aware artifact delivery. Checks if the target IO interface supports file/image upload and delivers appropriately - either as a file attachment or as a text reference with blob IDs. Use this when delivering generated images, files, or other artifacts from async jobs.",
+  "embedding_description": "",
+  "error_processor_customizations": {
+    "action_context": "Delivers generated artifacts to the user's IO interface.",
+    "error_interpretation": "SessionError: Invalid or expired session_id. JobNotFound: The job_result_ref does not exist or has no artifacts. DeliveryError: Artifact could not be delivered to the interface.",
+    "recovery_guidance": "For session errors: verify the session_id is current. For job errors: verify the job completed successfully. For delivery errors: the artifact may still be accessible via blob reference."
+  }
+}

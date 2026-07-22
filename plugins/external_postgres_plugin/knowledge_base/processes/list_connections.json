@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::external_postgres_plugin::list_connections",
+  "display_name": "External Postgres: List Connections",
+  "description": "List the registered foreign-Postgres connection names (the external_pg::* address-book entries). Returns names only — never hosts, users, or passwords. Use a returned name as the connection_name argument to the other verbs.",
+  "embedding_description": "Enumerate the external/foreign Postgres databases that have been registered as connections for this plugin, returning just the connection NAMES (the bare labels the operator assigned, with the external_pg:: prefix stripped). No hosts, ports, usernames, sslmodes, or passwords are ever returned. This is the discovery/catalog verb for the read-only foreign-Postgres 'super Datagrip' — call it first to find out which databases you can query, then pass a name to run_query, list_schemas, list_tables, describe_table, export_query, or test_connection. Adding a new connection is a one-time operator registration action, not something this verb does.",
+  "result_processor_customizations": {
+    "action_label": "Foreign Postgres connections listed",
+    "result_type": "external_postgres_list_connections_result",
+    "result_description": "Dict with a connections list of registered connection names (strings only).",
+    "presentation_guidance": "List the available connection names. These are non-secret labels (data_sensitivity 0.1); if none are present, tell the operator no external_pg::* connections are registered yet."
+  },
+  "error_processor_customizations": {
+    "action_context": "List the registered foreign Postgres connection names.",
+    "error_interpretation": "external_pg.not_configured: the plugin is not ready (no address-book binding). external_pg.api_error: the connection registry could not be read.",
+    "recovery_guidance": "external_pg.not_configured: confirm the plugin loaded with an address_book_service. external_pg.api_error: retry; if it persists, ask the operator to check the address book."
+  }
+}

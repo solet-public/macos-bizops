@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::jira_plugin::transition_issue",
+  "display_name": "Jira: Transition Issue",
+  "description": "Move a Jira issue through a workflow transition (by transition id from list_transitions), optionally adding a comment. Returns the new status. Write action.",
+  "embedding_description": "Advance a Jira issue through its workflow — for example from To Do to In Progress, or to Done/Closed — by applying a specific transition id (obtained from list_transitions), optionally attaching a comment as you move it. Returns the issue's resulting status. Transition ids are workflow-specific, so call list_transitions first. Distinct from update_issue (edit fields without changing status) and delete_issue (remove the issue entirely).",
+  "result_processor_customizations": {
+    "action_label": "Jira issue transitioned",
+    "result_type": "jira_transition_issue_result",
+    "result_description": "Confirmation and the issue's new status after the transition.",
+    "presentation_guidance": "Confirm the issue moved and state its new status. This changes a real ticket's workflow state."
+  },
+  "error_processor_customizations": {
+    "action_context": "Move a Jira issue through a workflow transition.",
+    "error_interpretation": "jira.bad_request: the transition id is not valid from the issue's current status, or a transition screen requires a field you did not supply. jira.not_found: the issue key does not exist. jira.invalid_params: key or transition_id was missing. jira.permission_denied: the account cannot transition this issue.",
+    "recovery_guidance": "jira.bad_request: call list_transitions to get a currently-valid transition id (they depend on the current status). jira.invalid_params: supply both key and transition_id. jira.not_found: verify the issue key."
+  }
+}

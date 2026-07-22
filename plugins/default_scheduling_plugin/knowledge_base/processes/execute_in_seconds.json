@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::default_scheduling_plugin::execute_in_seconds",
+  "display_name": "Execute in Seconds",
+  "description": "[NON-TERMINAL] Schedule a one-time wake-up after a delay. Two modes: (1) action_definitions — provide a list of {process_key, arguments} objects to execute at fire time; (2) memory_tag — the platform retrieves memories with that tag and the model decides what to do next. For scheduled peer notifications use action_definitions with plugin::agent_messaging_plugin::send_peer_message and important=true so the wake fires via the native IMPORTANT path.",
+  "embedding_description": "Schedule a one-time delayed wake-up after N seconds. Use action_definitions (list of {process_key, arguments}) for direct action dispatch at fire time, or memory_tag for the recall-and-decide pattern. Returns schedule_id and run_at. Use for check-ins, retries, peer wake-ups, and watchdog timeouts.",
+  "result_processor_customizations": {
+    "action_label": "Delayed execution scheduled",
+    "result_type": "schedule_created",
+    "result_description": "Schedule ID with delay_seconds and run_at timestamp",
+    "presentation_guidance": "",
+    "output_action_guidance": "A delayed execution schedule has been created. Consider whether you should inform the requester when the check-in will occur, and retain the schedule_id or tags so it can be cancelled once work completes."
+  },
+  "error_processor_customizations": {
+    "action_context": "Scheduling a one-time delayed wake-up keyed by memory_tag",
+    "error_interpretation": "ParameterError with 'seconds': value must be a positive integer greater than 0. ParameterError with 'memory_tag': missing or empty. ScheduleCreateError: scheduler not initialized or failed to save schedule.",
+    "recovery_guidance": "For seconds errors: ensure value is a positive integer. For memory_tag errors: provide a non-empty memory_tag. For scheduler errors: verify scheduler service is running and state service is accessible for persistence."
+  }
+}

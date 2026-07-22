@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::sheets_create_from_files",
+  "display_name": "Sheets: Create Spreadsheet From Files",
+  "description": "Create a new spreadsheet with one tab per entry, each tab's values loaded from a local .csv or .tsv file (delimiter from extension). Returns id, per-tab {name, sheet_id} pairs, and total cells written. Requires a connected account.",
+  "embedding_description": "Create a multi-tab Google spreadsheet in one call from an array of local delimited files: each tabs entry names a tab and points at an absolute .csv or .tsv file path whose rows become that tab's cell values, parsed with the delimiter implied by the extension and written as user-entered values so numbers, dates, currency, and percentages coerce to real types. All files are validated and parsed before anything is created, so a bad path, duplicate tab name, or unsupported extension fails without a half-built document. Returns the new spreadsheet id, each tab's name paired with its Google-assigned numeric sheetId ready for follow-on batchUpdate formatting, and the total updated cell count.",
+  "result_processor_customizations": {
+    "action_label": "Spreadsheet created from files",
+    "result_type": "g_suite_sheets_create_from_files_result",
+    "result_description": "Dict with id (the new spreadsheet), tabs (ordered {name, sheet_id} dicts as created; sheet_id is the numeric tab id that sheets_batch_update requests address), and updated_cells (total cells written across all tabs).",
+    "presentation_guidance": "Report the new spreadsheet's link built from its id (https://docs.google.com/spreadsheets/d/<id>) and the tab names. Keep each tab's sheet_id on hand for follow-on sheets_batch_update formatting requests — no addSheet-reply lookup is needed. This is a write action that creates a new document in the connected account's My Drive root."
+  },
+  "error_processor_customizations": {
+    "action_context": "Create a multi-tab Google spreadsheet from local csv/tsv files.",
+    "error_interpretation": "gsuite.invalid_params: missing title; tabs empty or not a list of {name, file_path} dicts; duplicate tab names; a file_path that is not absolute, does not exist, is empty, or has an extension other than .csv/.tsv. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: the error message names the offending tab entry — fix the path/extension/name and re-dispatch; nothing was created, so a retry is clean. gsuite.not_connected: run connect_account."
+  }
+}

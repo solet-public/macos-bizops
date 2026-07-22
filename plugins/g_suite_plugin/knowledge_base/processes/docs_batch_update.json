@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::docs_batch_update",
+  "display_name": "Docs: Batch Update",
+  "description": "Apply a list of raw Google Docs API batchUpdate request objects (insert/replace text, formatting, etc.) to a document. Requires a connected account.",
+  "embedding_description": "Apply one or more raw Google Docs API batchUpdate request objects (for example insertText, replaceAllText, updateTextStyle, insertTable) to an existing document by id. The requests list is passed through verbatim to the Docs API — this is the low-level structural-edit verb, more powerful but less convenient than docs_create's simple initial-content option. Returns the batchUpdate replies array. Fails gsuite.invalid_params if requests is empty or not a list of request objects.",
+  "result_processor_customizations": {
+    "action_label": "Document batch-updated",
+    "result_type": "g_suite_docs_batch_update_result",
+    "result_description": "Dict with replies, the raw batchUpdate response replies array.",
+    "presentation_guidance": "Confirm the edit requests were applied. This is a write action that structurally modifies the document."
+  },
+  "error_processor_customizations": {
+    "action_context": "Apply structural edit requests to a Google Docs document.",
+    "error_interpretation": "gsuite.invalid_params: missing id, or requests is empty/not a list of dicts, or a request object is malformed per the Docs API. gsuite.not_found: the document id does not exist. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: supply a non-empty list of valid Docs API request objects. gsuite.not_connected: run connect_account."
+  }
+}

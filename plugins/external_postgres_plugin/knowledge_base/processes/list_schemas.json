@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::external_postgres_plugin::list_schemas",
+  "display_name": "External Postgres: List Schemas",
+  "description": "List the non-system schemas in a registered foreign Postgres connection. Requires connection_name. System schemas (pg_catalog, information_schema, pg_toast) are excluded.",
+  "embedding_description": "Introspect the schema namespace of an external/foreign Postgres database registered as a connection, returning the names of its user schemas. Excludes the internal system schemas (pg_catalog, information_schema, pg_toast). This is the top level of the read-only introspection surface for the foreign-Postgres 'super Datagrip' — use it to see what schemas exist before drilling into list_tables for a schema and describe_table for a table. Requires only a connection_name; composes a bound information_schema query against the read-only connection.",
+  "result_processor_customizations": {
+    "action_label": "Foreign Postgres schemas listed",
+    "result_type": "external_postgres_list_schemas_result",
+    "result_description": "Dict with a schemas list of user schema names.",
+    "presentation_guidance": "List the schema names (schema metadata, data_sensitivity 0.1). Suggest list_tables with a schema to go deeper."
+  },
+  "error_processor_customizations": {
+    "action_context": "List the non-system schemas of a registered foreign Postgres connection.",
+    "error_interpretation": "external_pg.invalid_params: missing connection_name. external_pg.connection_unknown: no connection registered under that name. external_pg.auth_failed / external_pg.permission_denied: the registered credential was rejected. external_pg.platform_db_refused: the connection targets the platform's own database.",
+    "recovery_guidance": "external_pg.connection_unknown: run list_connections. external_pg.auth_failed/permission_denied: ask the operator to re-check the registered connection."
+  }
+}

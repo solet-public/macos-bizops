@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::jira_plugin::add_comment",
+  "display_name": "Jira: Add Comment",
+  "description": "Add a plain-text comment to a Jira issue. Returns the new comment id. Write action.",
+  "embedding_description": "Post a plain-text comment onto an existing Jira issue's comment thread — for example a status note, a question, or a hand-off message — by giving the issue key and the comment body. Returns the id of the newly created comment. Distinct from list_comments (read the existing comments), update_issue (change the issue's own fields), and transition_issue (which can also attach a comment while moving the issue).",
+  "result_processor_customizations": {
+    "action_label": "Jira comment added",
+    "result_type": "jira_add_comment_result",
+    "result_description": "The new comment's id.",
+    "presentation_guidance": "Confirm the comment was posted to the named issue and give the comment id. This adds visible content to a real ticket."
+  },
+  "error_processor_customizations": {
+    "action_context": "Add a comment to a Jira issue.",
+    "error_interpretation": "jira.not_found: the issue key does not exist. jira.permission_denied: the account cannot comment on this issue. jira.invalid_params: key or body was missing or empty.",
+    "recovery_guidance": "jira.not_found: verify the issue key. jira.permission_denied: grant the service account comment permission on the project. jira.invalid_params: supply both key and a non-empty body."
+  }
+}

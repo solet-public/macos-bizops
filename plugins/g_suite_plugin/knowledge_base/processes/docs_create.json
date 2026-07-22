@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::docs_create",
+  "display_name": "Docs: Create Document",
+  "description": "Create a new Google Docs document with the given title and optional initial plain-text content. Returns its id. Requires a connected account.",
+  "embedding_description": "Create a brand-new Google Docs document with a given title, optionally seeding it with plain-text content inserted at the very start of the body. Returns the created document's id, which is then the 'id' argument for docs_get, docs_batch_update, and docs_export. Fails gsuite.not_connected if no account is linked.",
+  "result_processor_customizations": {
+    "action_label": "Document created",
+    "result_type": "g_suite_docs_create_result",
+    "result_description": "Dict with the new document id.",
+    "presentation_guidance": "Confirm the document was created and give its id for follow-up edits or export."
+  },
+  "error_processor_customizations": {
+    "action_context": "Create a new Google Docs document.",
+    "error_interpretation": "gsuite.invalid_params: missing title. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: supply a title. gsuite.not_connected: run connect_account."
+  }
+}

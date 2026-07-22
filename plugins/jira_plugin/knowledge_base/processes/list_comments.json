@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::jira_plugin::list_comments",
+  "display_name": "Jira: List Comments",
+  "description": "List a Jira issue's comments (id/author/body/created), capped at 'max' (default 50, cap 100). Read action.",
+  "embedding_description": "Read the comment thread on a Jira issue — returns each comment's id, author display name, plain-text body, and created timestamp, up to a cap. Use this to review the discussion or hand-off notes on a ticket. Distinct from add_comment (post a new comment), get_issue (the issue's own summary/description), and jql_search (find issues).",
+  "result_processor_customizations": {
+    "action_label": "Jira comments listed",
+    "result_type": "jira_list_comments_result",
+    "result_description": "Comment rows (id/author/body/created).",
+    "presentation_guidance": "Summarize the discussion. Comment bodies are free-text corporate content (sensitivity 0.6) — surface for the caller but do not treat as public."
+  },
+  "error_processor_customizations": {
+    "action_context": "List a Jira issue's comments.",
+    "error_interpretation": "jira.not_found: the issue key does not exist. jira.permission_denied: the account cannot view this issue's comments. jira.invalid_params: the key was missing.",
+    "recovery_guidance": "jira.not_found: verify the issue key. jira.permission_denied: grant the service account browse permission. jira.invalid_params: supply the issue key."
+  }
+}

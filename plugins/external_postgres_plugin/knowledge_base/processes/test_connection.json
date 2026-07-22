@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::external_postgres_plugin::test_connection",
+  "display_name": "External Postgres: Test Connection",
+  "description": "Open a registered foreign Postgres connection and confirm it: returns ok plus the resolved host it actually connected to, the server version, the current role, and the read-only flag (always true for this tool). Use it to verify a connection points where you expect (the host you registered) before trusting it. Requires connection_name.",
+  "embedding_description": "Health-check and identity-confirm a registered external/foreign Postgres connection: actually opens a read-only connection to the database and returns whether it succeeded (ok), the resolved host it connected to (so you can confirm the connection points at the database you expect and catch a mis-registration), the server's PostgreSQL version string, the current_user role the registered credential connects as, and the read_only flag (always true — this tool cannot write). Use it to verify that a connection resolves to the host, database, and role you expect (for example, to confirm the operator registered the right host and a read-only user) before running queries against it. Requires only a connection_name. Distinct from list_connections, which lists names without connecting.",
+  "result_processor_customizations": {
+    "action_label": "Foreign Postgres connection tested",
+    "result_type": "external_postgres_test_connection_result",
+    "result_description": "Dict with ok, host (the resolved host connected to), server_version, current_user, and read_only (always true).",
+    "presentation_guidance": "Report ok, the resolved host it connected to, the server version, the connecting role (current_user), and that read_only is true. The host lets the operator confirm the connection points where they expect (connection metadata, data_sensitivity 0.1); the rest are operational metadata (0.0). Flag it if the host or role looks different from what was intended (e.g. the role looks more privileged than a read-only user should be)."
+  },
+  "error_processor_customizations": {
+    "action_context": "Open and confirm a registered foreign Postgres connection.",
+    "error_interpretation": "external_pg.invalid_params: missing connection_name. external_pg.connection_unknown: no connection registered under that name. external_pg.auth_failed: the registered credential was rejected. external_pg.platform_db_refused: the connection targets the platform's own database instance (refused). external_pg.api_error: the database could not be reached.",
+    "recovery_guidance": "external_pg.connection_unknown: run list_connections. external_pg.auth_failed: ask the operator to re-check the registered credential. external_pg.api_error: verify the database is reachable from this host."
+  }
+}

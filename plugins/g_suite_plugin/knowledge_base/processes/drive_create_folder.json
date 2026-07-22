@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::drive_create_folder",
+  "display_name": "Drive: Create Folder",
+  "description": "Create a Google Drive folder, optionally nested under a parent folder id. Returns the new folder's id. Requires a connected account.",
+  "embedding_description": "Create a new folder (a Drive file with the google-apps.folder mime type) in Google Drive, optionally as a child of an existing parent folder id. Returns the created folder's id, which can then be passed as the parent argument to drive_upload_file or drive_create_folder for nested structure, or as the id argument to drive_share to grant access to the whole folder. Fails gsuite.not_connected if no account is linked.",
+  "result_processor_customizations": {
+    "action_label": "Drive folder created",
+    "result_type": "g_suite_drive_create_folder_result",
+    "result_description": "Dict with the new folder's id.",
+    "presentation_guidance": "Confirm the folder was created and give its id for follow-up uploads or sharing."
+  },
+  "error_processor_customizations": {
+    "action_context": "Create a folder in Google Drive.",
+    "error_interpretation": "gsuite.invalid_params: missing name. gsuite.not_found: the given parent folder id does not exist. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: supply a folder name. gsuite.not_found: verify the parent id with drive_list_files. gsuite.not_connected: run connect_account."
+  }
+}

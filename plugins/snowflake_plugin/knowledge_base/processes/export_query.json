@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::export_query",
+  "display_name": "Snowflake: Export Query",
+  "description": "Run a read-only query against the configured Snowflake account and write the full result (up to 50000 rows) as ONE tab-separated .tsv file at an ABSOLUTE output_tsv_path in the operator's workspace; returns the written path, the columns, the row_count, and a truncated flag. The path must lie under an operator-configured export_allowed_roots entry (empty config refuses every export). Same read-only rules as run_query. Requires sql and output_tsv_path.",
+  "embedding_description": "Export the FULL result set of a read-only Snowflake warehouse query to a tab-separated .tsv file in the operator's own workspace, returning the written file path rather than inline rows or a blob reference. Unlike run_query, which returns a small inline result, export_query always writes a workspace file and fetches up to 50000 rows (flagging truncation beyond that). The caller passes an absolute output_tsv_path contained under the operator-configured export_allowed_roots; use this to pull bulk warehouse data into files for spreadsheets, cross-system validation against Salesforce or Postgres exports, or ad-hoc analysis without routing rows through conversation context.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake query exported to a workspace TSV",
+    "result_type": "snowflake_export_query_result",
+    "result_description": "Dict with path (the written .tsv file in the operator's workspace), columns, row_count, and truncated.",
+    "presentation_guidance": "Confirm the export: the written path, the row_count, and the column list. The file contains potentially sensitive corporate warehouse content — name the path for downstream use (open it, feed it to create_spreadsheet_from_files, join it with other exports) but do not inline its contents. If truncated is true, warn that the export hit the 50000-row cap."
+  },
+  "error_processor_customizations": {
+    "action_context": "Export a read-only Snowflake query's full result to a tab-separated file in the operator's workspace.",
+    "error_interpretation": "snowflake.invalid_params: missing sql/output_tsv_path, or the path's parent directory does not exist. snowflake.export_path_refused: the path is not absolute, not a .tsv, or not contained under any operator-configured export_allowed_roots entry (an empty export_allowed_roots refuses every export by default). snowflake.read_only_violation: the statement is not a permitted read leader. snowflake.warehouse_suspended: the warehouse must be resumed by an operator-side admin.",
+    "recovery_guidance": "snowflake.export_path_refused: pass an ABSOLUTE path ending in .tsv under a configured workspace root; if export_allowed_roots is empty, add the operator's export directory to the snowflake_plugin config (profile/config/plugins/snowflake_plugin.json) and reload the plugin config. snowflake.invalid_params with a missing-parent message: create the parent directory first. snowflake.read_only_violation: submit a single read-only statement."
+  }
+}

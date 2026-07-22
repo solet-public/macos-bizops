@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::peer_claim_role",
+  "display_name": "Claim or refresh an agent role",
+  "description": "Claim-or-replace the agent_role_binding state-table row that binds a role name (Coordinator, Architect, Git-Controller, etc.) to a peer session's current routing fields (agent_id, agent_instance_id, agent_session_id, session_label) plus claimed_at. v10 Control #2 made agent_role_binding the sole writable resolution + CAS authority, retiring the former address-book agent_role entries. The write is a full-row upsert keyed on external_id='role:{name}' (one row per role, UNIQUE), so a re-claim by the same name overwrites the routing tuple in place — including replacing a backfilled UNCLAIMED agent_session_id with the real one. peer_send_by_name resolves the name against this row at send time. The operator /rename skill calls this with the caller's (agent_id, agent_instance_id) taken from the peer_register response.",
+  "embedding_description": "Claim or refresh the agent_role_binding row binding a durable role name (Coordinator, Architect, Git-Controller) to a peer session's routing fields so peer_send_by_name can resolve the name at send time. Operator /rename calls it; a full-row upsert on external_id='role:{name}' replaces any prior binding in place. Returns action='claimed'. Sibling to peer_release_role. v10 state-table authority that replaced the address book.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Agent role claimed or refreshed",
+    "result_type": "peer_claim_role_result",
+    "result_description": "action ('claimed'), name (the role), agent_instance_id (the instance the role now routes to). The write is an upsert keyed on external_id='role:{name}', so a re-claim replaces the prior routing tuple in place.",
+    "presentation_guidance": "Confirm which role was claimed and the bound agent_instance_id. The operator-facing identifier is the name; agent_instance_id is for routing/log correlation."
+  },
+  "error_processor_customizations": {
+    "action_context": "Upserts the agent_role_binding state-table row (one row per role, keyed on external_id='role:{name}') that backs peer_send_by_name resolution. Writes via the StateManagementInterface (upsert_state); no address book.",
+    "error_interpretation": "missing_argument: name, agent_id, or agent_instance_id was empty or missing. state_service_unavailable: the state_service is not bound on this homunculus.",
+    "recovery_guidance": "missing_argument: supply non-empty values for all three required fields. state_service_unavailable: bind the state_service (postgres_state_management_plugin) in service_bindings.json and restart."
+  }
+}

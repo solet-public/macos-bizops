@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::jira_plugin::jql_search",
+  "display_name": "Jira: JQL Search",
+  "description": "Search Jira issues with a JQL query. Returns trimmed rows (key/summary/status/assignee/updated) and the total match count; large result sets spill to a blob. Read action.",
+  "embedding_description": "Find or list Jira issues by running a JQL (Jira Query Language) search across a project or the whole site — for example issues assigned to someone, in a given status, updated recently, or matching a text term. Returns a compact row per matching issue (key, summary, current status, assignee display name, last-updated timestamp) plus the total number of matches; when the rows exceed the inline size cap they are written to blob storage and a result_blob_key is returned instead. Use get_issue for the full body/description of one issue. Distinct from get_issue (one issue by key) and list_comments (a single issue's comments).",
+  "result_processor_customizations": {
+    "action_label": "Jira issues found",
+    "result_type": "jira_jql_search_result",
+    "result_description": "Trimmed issue rows (or a result_blob_key when spilled) plus the total match count and a spilled flag.",
+    "presentation_guidance": "Lead with the total match count, then summarize the returned rows. Issue summaries and assignee names are corporate data (sensitivity 0.3) — surface for the caller's use but do not treat as public."
+  },
+  "error_processor_customizations": {
+    "action_context": "Search Jira issues with a JQL query.",
+    "error_interpretation": "jira.bad_request: the JQL is malformed (unknown field, bad operator, unbalanced quotes) — this is the most common failure on this verb. jira.auth_failed / jira.permission_denied: the service account's token is invalid/expired or lacks browse permission on the project. jira.not_configured: the jira_site address-book entry is missing or incomplete.",
+    "recovery_guidance": "jira.bad_request: fix the JQL (check field names and quoting) and retry. jira.auth_failed: the API token may have expired — rotate it (see the jira_plugin overview runbook). jira.not_configured: register the jira_site entry with base_url, email, api_token (vault-ref), and expires_at."
+  }
+}

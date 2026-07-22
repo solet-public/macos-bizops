@@ -1,0 +1,59 @@
+---
+name: rename
+description: Take ownership of a session role name — update BOTH the platform-side peer/role binding in {{HOMUNCULUS_NAME}} AND the local Claude Code session label, keeping the two in lock-step. Use on /rename <Role-Name>, and on SessionStart re-claim prompts.
+---
+
+The user (or the SessionStart hook) supplied a role name as the argument —
+call it `$ROLE` below. Take ownership of it for this session. This updates
+BOTH the local Claude Code session label AND the platform-side role binding
+that backs message routing; the two must stay in lock-step.
+
+Step 0 — probe: if the `mcp__{{HOMUNCULUS_NAME}}__*` tools are NOT available
+in this session, the MCP bridge is not registered yet (the hydration
+runbook's registration step hasn't run). Report that plainly and stop —
+this is expected pre-registration state, not an error. Do not attempt the
+steps below without the tools.
+
+Steps:
+
+1. Call `mcp__{{HOMUNCULUS_NAME}}__peer_register` with
+   `agent_id="claude_code"` and `session_label="$ROLE"`. Capture BOTH
+   `agent_instance_id` AND `parent_pid` from the response.
+
+2. Call `mcp__{{HOMUNCULUS_NAME}}__process_call` with:
+   - `process_key`: `plugin::agent_messaging_plugin::peer_claim_role`
+   - `arguments`: `{"name": "$ROLE", "agent_id": "claude_code",
+     "agent_instance_id": "<from step 1>", "session_label": "$ROLE"}`
+   - `reason`: brief explanation of the rename.
+
+3. Read the result (`mcp__{{HOMUNCULUS_NAME}}__process_result` with the
+   returned `action_id`, or the bridge notification). Confirm `action` is
+   `registered` (first claim), `updated` (refresh), or `displaced`
+   (re-pointed from a stale binding — normal after a restart or /clear).
+
+4. Update the local session label by patching
+   `~/.claude/sessions/<parent_pid>.json` — set its top-level `name` field
+   to `$ROLE`. Use python3 with an atomic rename:
+   ```bash
+   python3 - <<'EOF'
+   import json, os, pathlib
+   p = pathlib.Path.home() / ".claude" / "sessions" / "<parent_pid>.json"
+   data = json.loads(p.read_text())
+   data["name"] = "$ROLE"
+   tmp = p.with_suffix(".json.tmp")
+   tmp.write_text(json.dumps(data))
+   os.replace(tmp, p)
+   EOF
+   ```
+   Substitute the actual `parent_pid` and `$ROLE` literally.
+
+5. Report in one short sentence: which role you now hold and whether it was
+   a new claim, a refresh, or a displacement. Note that the visible terminal
+   session indicator is bound to the launch-time `--name` argument and only
+   changes after restarting Claude Code (e.g. via
+   `claude-{{HOMUNCULUS_NAME}} $ROLE`); the platform-side claim and the
+   session-file name are effective immediately.
+
+If any step fails, surface the error verbatim — don't paper over it. If the
+role was held by another live session, the claim still succeeds and displaces
+the prior holder; only run one session per role name at a time.

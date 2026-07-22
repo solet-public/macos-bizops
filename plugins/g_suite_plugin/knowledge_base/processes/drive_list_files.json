@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::drive_list_files",
+  "display_name": "Drive: List Files",
+  "description": "List Google Drive files matching a Drive search query (for example \"name contains 'budget' and mimeType='application/pdf'\"), newest first. Returns id, name, mime type, modified time, and size per file. Requires a connected account (run connect_account first).",
+  "embedding_description": "Search the connected Google Drive and return matching file descriptors. Accepts a Drive query using Drive's search grammar (name contains, mimeType, modifiedTime, trashed, parents in folder). Returns a list of files with id, name, mimeType, modifiedTime and size, ordered newest first, plus a count. Pair with drive_download_file to fetch a binary file's bytes. Fails gsuite.not_connected if no account is linked.",
+  "result_processor_customizations": {
+    "action_label": "Drive files listed",
+    "result_type": "g_suite_drive_list_result",
+    "result_description": "Dict with a files list ({id, name, mime, modified, size}) and a count.",
+    "presentation_guidance": "Summarize how many files matched and list a few by name. Suggest drive_download_file with an id to fetch a binary file. File names may reveal content — treat as moderately sensitive."
+  },
+  "error_processor_customizations": {
+    "action_context": "List Google Drive files matching a search query.",
+    "error_interpretation": "gsuite.not_connected: no account linked. gsuite.auth_expired: the refresh token was revoked. gsuite.rate_limited: Google throttled the request.",
+    "recovery_guidance": "gsuite.not_connected / gsuite.auth_expired: run connect_account. gsuite.rate_limited: back off and retry."
+  }
+}

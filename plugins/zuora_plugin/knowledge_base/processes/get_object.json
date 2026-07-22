@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::get_object",
+  "display_name": "Zuora: Get Object",
+  "description": "Fetch one Account/Subscription/Invoice/Payment/Product object by type + id. Requires type and id.",
+  "embedding_description": "Retrieve a single Zuora billing object's fields by its object type (Account, Subscription, Invoice, Payment, or Product) and id. Requires type and id.",
+  "result_processor_customizations": {
+    "action_label": "Zuora object fetched",
+    "result_type": "zuora_get_object_result",
+    "result_description": "Dict with object: a mapping of field names to values.",
+    "presentation_guidance": "Show the requested fields; object data reflects sensitive billing/financial content (data_sensitivity 0.5) — surface for downstream use but never treat as public."
+  },
+  "error_processor_customizations": {
+    "action_context": "Fetch one Zuora object by type and id.",
+    "error_interpretation": "zuora.invalid_params: missing or unsupported type, or missing id. zuora.object_not_found: no object with that id exists for that type. zuora.auth_failed: the OAuth client credentials were rejected.",
+    "recovery_guidance": "zuora.object_not_found: verify the id and type are correct, e.g. via data_query. zuora.invalid_params: type must be one of Account, Subscription, Invoice, Payment, Product."
+  }
+}

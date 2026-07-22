@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::salesforce_plugin::soql_query",
+  "display_name": "Salesforce: SOQL Query",
+  "description": "Run a SOQL query against the configured Salesforce org and return matching records inline. Capped at max_records (default 200, capped 1000) — never an unbounded fetch. Fails loud with sf.result_too_large when the result exceeds the inline byte cap; use export_soql for the full result set as a workspace .tsv file.",
+  "embedding_description": "Execute an ad-hoc SOQL query against the operator's Salesforce org (e.g. accounts, contacts, opportunities) and return the matching records inline for interactive inspection — counts, lookups, small result sets. A single SOQL statement per call, capped by max_records; a result too large to return inline fails loud rather than spilling. Use export_soql for the full result set as a workspace .tsv file, get_record/describe_sobject/list_sobjects to explore object shape first, test_connection to verify reachability.",
+  "result_processor_customizations": {
+    "action_label": "Salesforce SOQL query run",
+    "result_type": "salesforce_soql_query_result",
+    "result_description": "Dict with records (a list of field-value dicts), total_size, row_count, and spilled=false.",
+    "presentation_guidance": "Summarize the row_count and show a few records. Record data references potentially sensitive CRM content (data_sensitivity 0.3) — surface for downstream use but never treat as public."
+  },
+  "error_processor_customizations": {
+    "action_context": "Run a SOQL query against the configured Salesforce org.",
+    "error_interpretation": "sf.invalid_params: missing or empty query. sf.result_too_large: the result exceeds the inline byte cap — this verb is for interactive reads only. sf.malformed_query: the SOQL is invalid or references an unknown field. sf.auth_failed: the sf CLI has no live session for the registered org. sf.session_expired: rare under full CLI delegation (the CLI refreshes its own credential per invocation) — indicates the org itself rejected an in-flight call. sf.permission_denied: the CLI's authenticated user lacks access. sf.rate_limited: the org's API request limit was exceeded.",
+    "recovery_guidance": "sf.result_too_large: narrow the query (WHERE/LIMIT or lower max_records) for an interactive answer, or use export_soql with an absolute output_tsv_path to land the full result as a workspace TSV. sf.malformed_query: fix the SOQL syntax or field names (use describe_sobject to check). sf.rate_limited: retry after a short delay. sf.auth_failed/session_expired/permission_denied: ask the operator to re-establish the org session with: sf org login web."
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::jira_plugin::update_issue",
+  "display_name": "Jira: Update Issue",
+  "description": "Apply a non-empty fields object (summary, description, assignee, labels, custom fields, ...) to an existing Jira issue by key. Write action.",
+  "embedding_description": "Edit an existing Jira issue's fields in place — change its summary, rewrite the description, reassign it, add or remove labels, or set custom fields — by passing the issue key and a non-empty object of Jira fields to set. Does not change workflow status (use transition_issue for that) and does not add a comment (use add_comment). Distinct from create_issue (make a new issue) and transition_issue (move through workflow states).",
+  "result_processor_customizations": {
+    "action_label": "Jira issue updated",
+    "result_type": "jira_update_issue_result",
+    "result_description": "Confirmation the field update was applied.",
+    "presentation_guidance": "Confirm which issue was updated. This mutates a real ticket's fields, so be explicit that the change was saved."
+  },
+  "error_processor_customizations": {
+    "action_context": "Update fields on an existing Jira issue.",
+    "error_interpretation": "jira.bad_request: a field name/value is invalid for this issue (unknown field, wrong shape, or a value the screen does not allow). jira.not_found: the issue key does not exist. jira.invalid_params: 'fields' was missing or empty. jira.permission_denied: the account cannot edit this issue.",
+    "recovery_guidance": "jira.bad_request: verify field names and value shapes (Jira fields are often nested objects). jira.invalid_params: pass a non-empty 'fields' object. jira.not_found: confirm the issue key."
+  }
+}
