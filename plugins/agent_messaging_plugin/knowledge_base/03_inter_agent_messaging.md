@@ -84,8 +84,11 @@ receive contract in one command:
 3. **Drain** — reads `peer_inbox(include_important=true)` once, emitting
    messages that arrived while unwatched.
 4. **Stream** — long-polls `/events` from cursor `-1`, one JSON line per
-   delivery, nothing while idle. On bridge rotation (blue-green swap 404) or
-   idle-reap it silently reconnects and re-runs 1–4.
+   delivery, nothing while idle, and re-asserts `peer/register` on a ~60s
+   heartbeat: the binding can be dropped server-side while the bridge stays
+   healthy (empty 200s, no error signal), and the idempotent re-register
+   bounds that silent-delivery outage to one interval. On bridge rotation
+   (blue-green swap 404) or idle-reap it silently reconnects and re-runs 1–4.
 
 Every emitted line is a JSON object tagged `"watch": "armed" | "inbox" |
 "event"`; the armed line carries the claim result and the

@@ -346,6 +346,15 @@ def _register_bridge_lifecycle_routes(
             )
         except BridgeNotFoundError:
             return _bridge_not_found(bridge_id)
+        # An actively long-polling registered client (the no-MCP watcher) is
+        # alive — bump its binding so "last active" liveness agrees with the
+        # delivery path, same as peer_inbox does. Without this, a watcher that
+        # only ever long-polls looks inactive to binding-liveness consumers
+        # while its bridge keeps answering, one half of the persisted_silent
+        # black hole (Dax Part 13).
+        binding = _lookup_binding_for_bridge(peer_registry, bridge_id)
+        if binding is not None:
+            peer_registry.touch_binding(binding.agent_instance_id)
         next_cursor = events[-1].cursor if events else after
         return JSONResponse(
             content={

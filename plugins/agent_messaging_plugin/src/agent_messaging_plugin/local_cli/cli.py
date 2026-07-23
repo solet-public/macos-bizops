@@ -37,6 +37,13 @@ from .client import (
 WATCH_RECONNECT_DELAY_S: Final[float] = 2.0
 # The events long-poll holds ~25s server-side; give the HTTP client margin.
 WATCH_REQUEST_TIMEOUT_S: Final[float] = 35.0
+# Heartbeat re-register cadence (Dax Part 13): the peer BINDING can be dropped
+# server-side (post-swap purge, registry eviction) while the BRIDGE stays
+# healthy and keeps answering the events long-poll with empty 200s — no error
+# ever reaches the client, so without a heartbeat the watcher becomes a
+# permanent persisted_silent black hole. Registration is idempotent, so
+# re-asserting it bounds the outage to one interval.
+WATCH_REREGISTER_INTERVAL_S: Final[float] = 60.0
 WATCH_INBOX_DRAIN_LIMIT: Final[int] = 100
 WATCH_CLAIM_PROCESS_KEY: Final[str] = (
     "plugin::agent_messaging_plugin::peer_claim_role"
@@ -286,7 +293,7 @@ def _arm_and_stream(client: BridgeClient, identity: WatchIdentity) -> None:
     claim = _register_and_claim(client, identity)
     _emit_line({"watch": "armed", "role": identity.role, "claim": claim})
     _drain_inbox(client)
-    _stream_events(client)
+    _stream_events(client, identity)
 
 
 def _register_and_claim(
@@ -338,9 +345,18 @@ def _drain_inbox(client: BridgeClient) -> None:
             _emit_line({"watch": "inbox", "section": section, "entry": entry})
 
 
-def _stream_events(client: BridgeClient) -> None:
-    """Long-poll one armed bridge, one JSON line per event, until it drops."""
+def _stream_events(client: BridgeClient, identity: WatchIdentity) -> None:
+    """Long-poll one armed bridge, one JSON line per event, until it drops.
+
+    Re-asserts ``peer/register`` on a heartbeat cadence: the server can drop
+    the peer binding while this bridge stays healthy (the events long-poll
+    then returns empty 200s with no error signal), which would otherwise
+    black-hole deliveries as persisted_silent forever. Registration is
+    idempotent server-side, so the heartbeat rebuilds a dropped binding
+    within one interval — no restart, no operator action.
+    """
     cursor = -1
+    last_register = time.monotonic()
     while True:
         payload = client.events(after=cursor)
         events = payload.get("events", [])
@@ -350,6 +366,14 @@ def _stream_events(client: BridgeClient) -> None:
             _emit_line({"watch": "event", "event": event})
         next_cursor = payload.get("next_cursor", cursor)
         cursor = next_cursor if isinstance(next_cursor, int) else cursor
+        if time.monotonic() - last_register >= WATCH_REREGISTER_INTERVAL_S:
+            client.peer_register(
+                agent_id=identity.agent_id,
+                agent_instance_id=identity.agent_instance_id,
+                session_label=identity.role,
+                agent_session_id=identity.agent_session_id,
+            )
+            last_register = time.monotonic()
 
 
 def _emit_line(payload: dict[str, Any]) -> None:
