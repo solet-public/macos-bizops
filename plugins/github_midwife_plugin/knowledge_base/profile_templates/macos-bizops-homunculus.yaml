@@ -198,15 +198,13 @@ address_book_entries:
 # boot-coherence check enforces exactly this).
 #
 # Session-source filesystem registration is deliberately NOT a boot
-# starting-action (matching the free profile, which omitted session-source
-# ingest as opt-in). register_source of a filesystem root_uri is denied at a
-# FRESH homunculus boot by the secure-default authz gate (P1.1.E) — it requires
-# an operator-configured `ledger_allowed_roots` entry, absent in a fresh seed —
-# so declaring these here only fails noisily. The platform's boot auto-register
-# (`_init_session_ledger_service`) already registers every plugin-declared
-# pulling source and now SKIPS the denied ones gracefully; the operator opts
-# filesystem sources in during consented hydration by populating
-# `ledger_allowed_roots` in profile/config/plugins/session_ledger_service.json.
+# starting-action. The bizops profile pre-populates `ledger_allowed_roots` for
+# the three Claude Code local-history paths because those sources are expected
+# during hydration, but `service_interface::session_ledger_service::register_source`
+# still remains the operator-consented wiring step for sources that do not
+# advertise a default root. Do NOT add `session_ledger_service` to
+# service_bindings.json: the ledger is constructed by startup from state/blob
+# services plus this plugin config, not bound as a `ServiceName`.
 starting_actions:
   - name: start_agent_messaging_interface
     process_key: plugin::agent_messaging_plugin::start_interface

@@ -8,7 +8,7 @@ Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:t
 
 Article Tags: planning-stage:agent-to-agent-coordination, planning-stage:tool-discovery, evidence-category:peer-messaging-contracts, evidence-category:identity-model, domain:agent-messaging, domain:inter-agent-routing
 
-Embedding Description: How live MCP-connected agents talk through the homunculus — the three identity concepts, the IMPORTANT-marker loop-prevention contract, silent vs queued delivery (persisted_silent / queued_notification / queued_wake), peer_inbox catch-up semantics, multi-instance addressing, Claude Code native-channel wake routing, and the locally patched Codex peer-wake path.
+Embedding Description: How live agent sessions talk through the homunculus — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the IMPORTANT-marker loop-prevention contract, silent vs queued delivery (persisted_silent / queued_notification / queued_wake), peer_inbox catch-up semantics, multi-instance addressing, Claude Code native-channel wake routing, and the locally patched Codex peer-wake path.
 
 ## Purpose
 
@@ -56,6 +56,44 @@ A fourth value, `parent_pid`, exists as live-routing metadata only —
 it identifies which OS process owns the bridge for native wake
 routing (today, the Claude Code MCP host). It is never persisted as
 identity and never used to address peer sends.
+
+## No-MCP terminal receive pattern — `<name> watch` (the default)
+
+The DEFAULT receive path for terminal coding-agent sessions (Claude Code and
+similar) is the local CLI's registered-presence watcher — zero MCP:
+
+```bash
+<name> watch                 # role from $HOMUNCULUS_AGENT_SESSION_LABEL
+<name> watch --role <Role>   # explicit role
+```
+
+Run as a persistent background process per session, it performs the whole
+receive contract in one command:
+
+1. **Register** — opens a bridge and POSTs `peer/register` with a stable
+   identity derived from the launcher-exported environment:
+   `agent_session_id` = `$HOMUNCULUS_AGENT_SESSION_ID` (the per-logical-
+   session carrier; watch fails loud when it is absent rather than register
+   a degraded binding), `session_label` = the role, and a deterministic
+   `agent_instance_id` (`agi-watch-<sha256(session_id) prefix>`) so a
+   reconnect REPLACES the binding instead of minting a sibling.
+2. **Claim** — dispatches `plugin::agent_messaging_plugin::peer_claim_role`
+   over that same registered bridge (REL-07: the server sources the binding's
+   session id from the caller's live peer binding, never from claim args) and
+   fails loud on a terminal rejection.
+3. **Drain** — reads `peer_inbox(include_important=true)` once, emitting
+   messages that arrived while unwatched.
+4. **Stream** — long-polls `/events` from cursor `-1`, one JSON line per
+   delivery, nothing while idle. On bridge rotation (blue-green swap 404) or
+   idle-reap it silently reconnects and re-runs 1–4.
+
+Every emitted line is a JSON object tagged `"watch": "armed" | "inbox" |
+"event"`; the armed line carries the claim result and the
+`agent_instance_id`. Ground truth for "is my role claimed" is
+`peer_holds_role` with the role name AND that `agent_instance_id` — an entry
+in raw peer-list output is connection presence, not a claim. The optional MCP
+bridge below is an alternative holder of the same registered presence for
+operators who explicitly chose MCP; it is required for nothing.
 
 ## Streamable HTTP peer receive pattern
 

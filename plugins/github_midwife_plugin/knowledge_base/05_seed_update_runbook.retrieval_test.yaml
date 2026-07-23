@@ -1,0 +1,18 @@
+# Retrieval-test companion for the seed-update runbook. Gated by
+# service_interface::knowledge_service::test_retrieval (W7). Until the gate is
+# live, run each query through service_interface::knowledge_service::search and
+# confirm this article ranks at or above min_rank for targets.
+
+article_path: knowledge_bases/github_midwife_plugin/05_seed_update_runbook.md
+consumer_profile: both
+
+target_queries:
+  - "update a live homunculus from a newer seed release"
+  - "seed update runbook git pull fast forward re-mint"
+  - "do I need to rebuild the venv after pulling a seed update"
+  - "apply a new seed version without losing homunculus state"
+min_rank: 3
+
+forbidden_queries:
+  - "birth a brand new homunculus from a seed for the first time"
+forbidden_min_rank: 1

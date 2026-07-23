@@ -24,10 +24,10 @@ typeset -a extra_flags
 [[ -n "$model" ]]  && extra_flags+=(--model "$model")
 [[ -n "$effort" ]] && extra_flags+=(--effort "$effort")
 
-# Session label: read by the MCP bridge for peer-registry identity and by the
+# Session label: read by the optional peer bridge for role identity and by the
 # SessionStart hook in .claude/settings.json for the role re-claim.
 # Session id: stable for this whole process tree, so the role binding
-# re-points to this same session across MCP reconnects instead of going stale.
+# re-points to this same session across reconnects instead of going stale.
 HOMUNCULUS_AGENT_SESSION_LABEL="$label" \
 HOMUNCULUS_AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
 exec claude --name "$label" "${extra_flags[@]}"

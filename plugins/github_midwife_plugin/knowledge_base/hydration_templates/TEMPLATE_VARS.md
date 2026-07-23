@@ -32,8 +32,8 @@ runbook
 | `claude_launcher.template` | `<clone>/client/bin/claude-<name>` | 0755 |
 | `launch.template` | `<clone>/client/bin/launch-<name>` | 0755 |
 | `CLAUDE.md.template` | `<clone>/CLAUDE.md` | 0644 |
-| `claude_settings.json.template` | `<clone>/.claude/settings.json` | 0644 |
-| `rename_skill_SKILL.md.template` | `<clone>/.claude/skills/rename/SKILL.md` | 0644 |
+| `claude_settings.json.template` | `~/.claude/settings.json` (USER scope, structural merge — operator ruling 2026-07-22: fleet sessions start in other repos, and project-scope hooks never fire there) | 0644 |
+| `rename_skill_SKILL.md.template` | `~/.claude/skills/rename/SKILL.md` (USER scope, same ruling — the role-reclaim hook invokes it from any repo) | 0644 |
 | `fleet_functions.zsh.template` | `<clone>/client/<name>-fleet.zsh` (ONLY on accepted Step 4a offer — see runbook) | 0644 |
 
 This directory stays **FLAT** — the KB manifest's single exclude pattern
@@ -42,12 +42,13 @@ This directory stays **FLAT** — the KB manifest's single exclude pattern
 ## Homunculus agent environment contract
 
 Generated launchers export neutral per-session variables consumed by the
-MCP bridge. These names are part of the seed contract and should not be
-renamed casually:
+SessionStart hook and by optional peer-bridge registration when policy permits
+it. These names are part of the seed contract and should not be renamed
+casually:
 
 | Var | Occurrences |
 |---|---|
-| `HOMUNCULUS_AGENT_SESSION_LABEL` | `claude_launcher.template` (export); `claude_settings.json.template` (SessionStart hook guard + read); `fleet_functions.zsh.template` (export) |
+| `HOMUNCULUS_AGENT_SESSION_LABEL` | `claude_launcher.template` (export); `claude_settings.json.template` (guard on BOTH hooks + SessionStart read — load-bearing at user scope: unlabeled sessions must get zero output); `fleet_functions.zsh.template` (export) |
 | `HOMUNCULUS_AGENT_SESSION_ID` | `claude_launcher.template` (export); `fleet_functions.zsh.template` (export) |
 | `HOMUNCULUS_AGENT_IDENTITY` | none here — lives in the root README's `claude mcp add` reference form, cited by the hydration runbook's mcp-add step |
 

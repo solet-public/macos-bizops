@@ -20,13 +20,8 @@
 #   --remote-control "$role"   makes this session addressable by Claude
 #                               Code's remote-control feature from another
 #                               session (what lets a coordinator session
-#                               drive/monitor worker sessions).
-#   --dangerously-load-development-channels server:{{HOMUNCULUS_NAME}}
-#                               wires the MCP development-channel bridge
-#                               that gives peer_send its idle-wake path --
-#                               the Step 2 launcher deliberately omits this
-#                               (see the hydration runbook's "What the user
-#                               should expect afterward").
+#                               drive/monitor worker sessions). Claude Code
+#                               feature, no MCP involved.
 #   --dangerously-skip-permissions
 #                               opt-in, separately gated below. Skips the
 #                               tool-approval prompt on every action. This
@@ -37,6 +32,15 @@
 #                               {{HOMUNCULUS_NAME}}_FLEET_SKIP_PERMISSIONS=1
 #                               in the environment (or edit the line below)
 #                               only after you understand that tradeoff.
+#
+# Peer messaging and role binding need NO flag here: each session's
+# SessionStart hook invokes the rename skill, which arms the
+# `{{HOMUNCULUS_NAME}} watch` registered-presence watcher (register + claim
+# + receive, zero MCP). If — and only if — the operator explicitly wants the
+# optional MCP development-channel wake instead and policy permits MCP, set
+# {{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS=1 to add
+# --dangerously-load-development-channels server:{{HOMUNCULUS_NAME}}.
+# Default is OFF; do not suggest it unprompted.
 _claude_for_{{HOMUNCULUS_NAME}}() {
   local role="$1"
   local model="$2"    # optional CLI model alias; empty = settings.json default
@@ -46,11 +50,11 @@ _claude_for_{{HOMUNCULUS_NAME}}() {
   [[ -n "$model" ]]  && extra_flags+=(--model "$model")
   [[ -n "$effort" ]] && extra_flags+=(--effort "$effort")
   [[ "${{{HOMUNCULUS_NAME}}_FLEET_SKIP_PERMISSIONS:-0}" == "1" ]] && extra_flags+=(--dangerously-skip-permissions)
+  [[ "${{{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS:-0}" == "1" ]] && extra_flags+=(--dangerously-load-development-channels server:{{HOMUNCULUS_NAME}})
 
   HOMUNCULUS_AGENT_SESSION_LABEL="$role" \
   HOMUNCULUS_AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
   exec claude \
-      --dangerously-load-development-channels server:{{HOMUNCULUS_NAME}} \
       --name "$role" \
       --remote-control "$role" \
       "${extra_flags[@]}"

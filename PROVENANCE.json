@@ -4,12 +4,20 @@
     "name": "bizops_standard",
     "platform": "local"
   },
-  "lineage": [],
-  "manifest_sha256": "bf601d205891b501d18bb6940bea2c362af1f56f2c1ca9523250226949f23fa5",
+  "lineage": [
+    {
+      "manifest_sha256": "bf601d205891b501d18bb6940bea2c362af1f56f2c1ca9523250226949f23fa5",
+      "origin_id": "31bfa93c-fe20-4988-b019-f8186684e88e",
+      "seed_id": "20f1ce46-0a79-5b94-a2cb-4f05ad08431b",
+      "source_commit": "ca9fe1fdc4597d52b403affc1e8d9ceffb1f6dc6",
+      "source_date": "2026-07-22T13:21:39-07:00"
+    }
+  ],
+  "manifest_sha256": "fc07bc6440ed6a8a99b928a0d1ff2d184278fa7dc21d2642497758dd20a8783d",
   "origin_id": "31bfa93c-fe20-4988-b019-f8186684e88e",
   "schema_version": 1,
-  "seed_id": "20f1ce46-0a79-5b94-a2cb-4f05ad08431b",
+  "seed_id": "98d44386-73c3-5f7b-b96a-851394f6d470",
   "signature": null,
-  "source_commit": "ca9fe1fdc4597d52b403affc1e8d9ceffb1f6dc6",
-  "source_date": "2026-07-22T13:21:39-07:00"
+  "source_commit": "9f31030504434b331c732696596d6076aa85745b",
+  "source_date": "2026-07-22T18:42:45-07:00"
 }

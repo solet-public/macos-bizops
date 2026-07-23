@@ -258,6 +258,57 @@ class BridgeClient:
         """Read the bridge health endpoint (no open bridge required)."""
         return self._get(f"{API_PREFIX}/health")
 
+    def events(self, after: int) -> dict[str, Any]:
+        """Long-poll the bridge event queue for events after ``after`` (cursor).
+
+        Blocks server-side up to the bridge's ``long_poll_timeout_seconds``
+        (~25s), returning immediately when events arrive or an empty batch on
+        timeout. Returns ``{"events": [...], "next_cursor": <int>}``; a watcher
+        re-issues with ``next_cursor`` to stream continuously. Server cursors
+        start at 0 and the route returns events with ``cursor > after``, so a
+        fresh stream starts at ``-1`` to not drop the first event.
+        """
+        bridge_id = self._require_bridge()
+        return self._get(f"{API_PREFIX}/{bridge_id}/events?after={after}")
+
+    def peer_register(
+        self,
+        *,
+        agent_id: str,
+        agent_instance_id: str,
+        session_label: str,
+        agent_session_id: str,
+    ) -> dict[str, Any]:
+        """Register this bridge as a peer identity (the receive prerequisite).
+
+        Peer/channel messages deliver to REGISTERED identities only; an
+        anonymous bridge long-polls an empty queue. ``agent_session_id`` is the
+        stable per-logical-session carrier the reconnect self-refresh and
+        ``peer_claim_role`` key on (REL-07) — pass the launcher-exported value,
+        never a PID.
+        """
+        bridge_id = self._require_bridge()
+        return self._post(
+            f"{API_PREFIX}/{bridge_id}/peer/register",
+            {
+                "agent_id": agent_id,
+                "agent_instance_id": agent_instance_id,
+                "session_label": session_label,
+                "parent_pid": os.getpid(),
+                "agent_session_id": agent_session_id,
+            },
+        )
+
+    def peer_inbox(
+        self, *, include_important: bool, limit: int,
+    ) -> dict[str, Any]:
+        """Read this registered identity's durable inbox (catch-up on start)."""
+        bridge_id = self._require_bridge()
+        return self._get(
+            f"{API_PREFIX}/{bridge_id}/peer/inbox"
+            f"?include_important={str(include_important).lower()}&limit={limit}",
+        )
+
     def _require_bridge(self) -> str:
         if self._bridge_id is None:
             raise BridgeCallError("bridge not open; call open() first")

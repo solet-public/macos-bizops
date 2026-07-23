@@ -1,59 +1,55 @@
 ---
 name: rename
-description: Take ownership of a session role name — update BOTH the platform-side peer/role binding in {{HOMUNCULUS_NAME}} AND the local Claude Code session label, keeping the two in lock-step. Use on /rename <Role-Name>, and on SessionStart re-claim prompts.
+description: Take ownership of a session role name — arm the {{HOMUNCULUS_NAME}} watch registered-presence watcher so this session holds the platform-side role binding and receives role-addressed messages, keeping the platform claim and the local Claude Code session label in lock-step. No MCP involved. Use on /rename <Role-Name> and on SessionStart re-claim prompts.
 ---
 
 The user (or the SessionStart hook) supplied a role name as the argument —
-call it `$ROLE` below. Take ownership of it for this session. This updates
-BOTH the local Claude Code session label AND the platform-side role binding
-that backs message routing; the two must stay in lock-step.
-
-Step 0 — probe: if the `mcp__{{HOMUNCULUS_NAME}}__*` tools are NOT available
-in this session, the MCP bridge is not registered yet (the hydration
-runbook's registration step hasn't run). Report that plainly and stop —
-this is expected pre-registration state, not an error. Do not attempt the
-steps below without the tools.
+call it `$ROLE` below. Take ownership of it for this session: the platform-side
+role binding that backs message routing, kept in lock-step with what this
+session was launched as.
 
 Steps:
 
-1. Call `mcp__{{HOMUNCULUS_NAME}}__peer_register` with
-   `agent_id="claude_code"` and `session_label="$ROLE"`. Capture BOTH
-   `agent_instance_id` AND `parent_pid` from the response.
-
-2. Call `mcp__{{HOMUNCULUS_NAME}}__process_call` with:
-   - `process_key`: `plugin::agent_messaging_plugin::peer_claim_role`
-   - `arguments`: `{"name": "$ROLE", "agent_id": "claude_code",
-     "agent_instance_id": "<from step 1>", "session_label": "$ROLE"}`
-   - `reason`: brief explanation of the rename.
-
-3. Read the result (`mcp__{{HOMUNCULUS_NAME}}__process_result` with the
-   returned `action_id`, or the bridge notification). Confirm `action` is
-   `registered` (first claim), `updated` (refresh), or `displaced`
-   (re-pointed from a stale binding — normal after a restart or /clear).
-
-4. Update the local session label by patching
-   `~/.claude/sessions/<parent_pid>.json` — set its top-level `name` field
-   to `$ROLE`. Use python3 with an atomic rename:
+1. Start the registered-presence watcher as a persistent background process
+   (Claude Code: a background Bash task; keep it running for the session's
+   lifetime; if a previous watcher from this conversation is running for a
+   different role, stop it first):
    ```bash
-   python3 - <<'EOF'
-   import json, os, pathlib
-   p = pathlib.Path.home() / ".claude" / "sessions" / "<parent_pid>.json"
-   data = json.loads(p.read_text())
-   data["name"] = "$ROLE"
-   tmp = p.with_suffix(".json.tmp")
-   tmp.write_text(json.dumps(data))
-   os.replace(tmp, p)
-   EOF
+   {{HOMUNCULUS_NAME}} watch --role "$ROLE"
    ```
-   Substitute the actual `parent_pid` and `$ROLE` literally.
+   On arming it registers this session in the peer registry (identity from the
+   launcher-exported `HOMUNCULUS_AGENT_SESSION_ID`), claims `$ROLE` as the
+   durable role binding, drains messages that arrived while unwatched, then
+   streams one JSON line per delivery — and nothing while idle. It reconnects
+   and re-claims automatically across homunculus restarts and blue-green
+   swaps. If it exits immediately complaining about a missing session id, the
+   session was not started via the `claude-{{HOMUNCULUS_NAME}}` launcher or
+   fleet functions — say so rather than inventing an id.
 
-5. Report in one short sentence: which role you now hold and whether it was
-   a new claim, a refresh, or a displacement. Note that the visible terminal
-   session indicator is bound to the launch-time `--name` argument and only
-   changes after restarting Claude Code (e.g. via
-   `claude-{{HOMUNCULUS_NAME}} $ROLE`); the platform-side claim and the
-   session-file name are effective immediately.
+2. Verify from the watcher's first output line: `"watch": "armed"` with the
+   claim result (`claimed`/`updated`/`displaced` — displacement from a stale
+   binding is normal after a restart or /clear) and note the
+   `agent_instance_id` it printed. Ground truth on demand:
+   `{{HOMUNCULUS_NAME}} call plugin::agent_messaging_plugin::peer_holds_role`
+   with `{"name": "$ROLE", "agent_instance_id": "<from the armed line>"}` —
+   an entry in raw peer-list output is presence, not a claim.
+
+3. Report in one short sentence: which role this session now holds and
+   whether it was a fresh claim, a refresh, or a displacement. Check the
+   watcher's output when returning to the conversation: new JSON lines are
+   deliveries (peer messages, role-addressed sends) that arrived since you
+   last looked — treat them like any peer message. The visible terminal
+   session indicator follows the launch-time `--name` argument and only
+   changes after restarting via the launcher; the platform-side claim is
+   effective immediately and is the one that matters for routing.
 
 If any step fails, surface the error verbatim — don't paper over it. If the
 role was held by another live session, the claim still succeeds and displaces
 the prior holder; only run one session per role name at a time.
+
+Optional MCP note — do not raise unprompted: if this session happens to have
+`mcp__{{HOMUNCULUS_NAME}}__*` tools connected (the operator explicitly set up
+the optional MCP bridge), `mcp__{{HOMUNCULUS_NAME}}__peer_register` followed
+by a `peer_claim_role` process call is an equivalent alternative to the
+watcher. It is never required; do not troubleshoot or suggest MCP to make
+renaming work.

@@ -98,16 +98,45 @@ Knowledge-base access without MCP, for example:
 <name> call service_interface::knowledge_service::search '{"query": "hydration runbook", "top_k": 8}'
 ```
 
-Async results are pulled with `<name> result <id> --wait`. (Push
-notifications — the homunculus waking your session unprompted — currently ride
-the optional MCP bridge below; a no-MCP watcher is designed and coming.)
+Async results are pulled with `<name> result <id> --wait`. For push — peer
+and role-addressed messages reaching your session unprompted, with no MCP —
+run the registered-presence watcher under a persistent monitor:
 
-## Optional: register the MCP bridge where policy permits
+```bash
+<name> watch                        # register + claim this session's role,
+                                    # then stream messages as JSON lines
+```
 
-If your environment permits MCP servers, you can register the bridge with
-Claude Code for tool-native access and push notifications. In managed
-environments where MCP is restricted by policy, skip this section; the `<name>`
-command above is the supported primary interface. Genesis does not register
+`watch` reads the launcher-exported `HOMUNCULUS_AGENT_SESSION_LABEL` /
+`HOMUNCULUS_AGENT_SESSION_ID` (or pass `--role`), registers the session in the
+peer registry, claims the role as its durable binding, drains messages that
+arrived while unwatched, then prints one JSON line per delivery and nothing
+while idle. It reconnects and re-claims automatically across restarts and
+blue-green swaps. The optional MCP bridge below provides the same wake path
+tool-natively where policy permits MCP; neither is a prerequisite for the
+other.
+
+## Updating later
+
+Seed releases are append-only commits to this same repository, so an update
+never rewrites history and never touches what your homunculus has become
+(database, memories, credentials). The short form: `git pull --ff-only` in
+the clone, restart the homunculus, wait for startup to finish. The complete
+procedure — including when the venv needs attention and which setup steps to
+re-run — is the seed-update runbook in your homunculus's own knowledge base:
+
+```bash
+<name> call service_interface::knowledge_service::search '{"query": "seed update runbook", "top_k": 3}'
+```
+
+## Optional: register the MCP bridge (not needed for anything above)
+
+You do not need this section — everything above, including push via
+`<name> watch`, works with zero MCP, and that is the default way to run. If
+you specifically want tool-native `mcp__<name>__*` access and your
+environment permits MCP servers, you can additionally register the bridge
+with Claude Code. In managed environments where MCP is restricted by policy,
+there is nothing to miss: skip this section entirely. Genesis does not register
 anything into your Claude Code configuration itself — that config is *yours*,
 on the operator's side of the genesis boundary, not something newborn-venv code
 should reach across and mutate. To register:

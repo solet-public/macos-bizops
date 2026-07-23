@@ -8,9 +8,13 @@ Errors go to stderr with a mapped exit code.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import time
 from collections.abc import Callable
-from typing import Any, NoReturn
+from dataclasses import dataclass
+from typing import Any, Final, NoReturn
 
 import click
 import httpx
@@ -26,6 +30,33 @@ from .client import (
     HomunculusNotRunningError,
     resolve_base_url,
 )
+
+# watch: reconnect backoff after a transient bridge error / homunculus-down /
+# bridge rotation (blue-green swap 404, idle-reap). Kept short so a swap gap is
+# a blip, not a stall; the loop is silent while waiting, so it wakes no model.
+WATCH_RECONNECT_DELAY_S: Final[float] = 2.0
+# The events long-poll holds ~25s server-side; give the HTTP client margin.
+WATCH_REQUEST_TIMEOUT_S: Final[float] = 35.0
+WATCH_INBOX_DRAIN_LIMIT: Final[int] = 100
+WATCH_CLAIM_PROCESS_KEY: Final[str] = (
+    "plugin::agent_messaging_plugin::peer_claim_role"
+)
+# Deterministic per-session instance id: re-registering after a bridge drop
+# REPLACES the binding instead of minting a sibling, so the durable role
+# binding keeps pointing at this watcher across reconnects.
+WATCH_AGENT_INSTANCE_PREFIX: Final[str] = "agi-watch-"
+WATCH_SESSION_LABEL_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_LABEL"
+WATCH_SESSION_ID_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_ID"
+
+
+@dataclass(frozen=True)
+class WatchIdentity:
+    """The registered-presence identity a `watch` run holds for its session."""
+
+    role: str
+    agent_id: str
+    agent_session_id: str
+    agent_instance_id: str
 
 
 def _emit(payload: dict[str, Any]) -> None:
@@ -162,6 +193,168 @@ def health() -> None:
     finally:
         client.close()
     _emit(payload)
+
+
+@cli.command()
+@click.option(
+    "--role",
+    default=None,
+    help=f"Role to register and claim (default: ${WATCH_SESSION_LABEL_ENV}).",
+)
+@click.option(
+    "--agent-id",
+    "agent_id",
+    default="claude_code",
+    show_default=True,
+    help="Peer kind this session registers as.",
+)
+def watch(role: str | None, agent_id: str) -> None:
+    """Hold this session's REGISTERED PRESENCE and stream its messages (no MCP).
+
+    Registers a stable peer identity for the wrapping session, claims ROLE as
+    its durable role binding, drains the durable inbox (catch-up on messages
+    that arrived while unwatched), then long-polls the registered bridge and
+    prints one JSON line per delivered event — and NOTHING while idle. Run it
+    under a persistent monitor: it wakes the session only on a real event, at
+    zero idle token cost. Auto-reconnects and re-claims across bridge rotation
+    (blue-green swap) and idle-reap. Stop with Ctrl-C; the durable role
+    binding remains, so role-addressed messages queue for the next start.
+    """
+    identity = _resolve_watch_identity(role, agent_id)
+    try:
+        _watch_forever(identity)
+    except HomunculusIdentityError as exc:
+        _die(str(exc), ExitCodes.CONNECTION_ERROR)
+    except KeyboardInterrupt:
+        raise SystemExit(0) from None
+
+
+def _resolve_watch_identity(role: str | None, agent_id: str) -> WatchIdentity:
+    """Build the watcher's stable identity from the launcher-exported env.
+
+    The session id carrier must be per-logical-session (the launcher's
+    ``ases-...`` export) — never a PID, which app-hosted siblings share. The
+    reconnect self-refresh and `peer_claim_role` (REL-07) key on it, so watch
+    fails loud rather than registering a degraded, self-refresh-disabled
+    binding.
+    """
+    resolved_role = role or os.environ.get(WATCH_SESSION_LABEL_ENV, "")
+    if not resolved_role:
+        _die(
+            f"watch needs a role: pass --role or export {WATCH_SESSION_LABEL_ENV} "
+            "(the claude-<name> launcher and fleet functions do this)",
+            ExitCodes.UNKNOWN_ERROR,
+        )
+    session_id = os.environ.get(WATCH_SESSION_ID_ENV, "")
+    if not session_id:
+        _die(
+            f"watch needs the stable session id: export {WATCH_SESSION_ID_ENV} "
+            "(the claude-<name> launcher and fleet functions do this); "
+            "a PID is not an acceptable substitute",
+            ExitCodes.UNKNOWN_ERROR,
+        )
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
+    return WatchIdentity(
+        role=resolved_role,
+        agent_id=agent_id,
+        agent_session_id=session_id,
+        agent_instance_id=f"{WATCH_AGENT_INSTANCE_PREFIX}{digest}",
+    )
+
+
+def _watch_forever(identity: WatchIdentity) -> NoReturn:
+    """Reconnect loop: (re)discover the bridge, re-arm, and stream until drop."""
+    while True:
+        try:
+            base_url = resolve_base_url()
+        except HomunculusNotRunningError:
+            time.sleep(WATCH_RECONNECT_DELAY_S)
+            continue
+        try:
+            with BridgeClient(
+                base_url, request_timeout_s=WATCH_REQUEST_TIMEOUT_S,
+            ) as client:
+                _arm_and_stream(client, identity)
+        except (httpx.HTTPError, BridgeCallError, BridgeResultTimeoutError):
+            # bridge rotated (swap 404), idle-reaped, or a transient error:
+            # back off briefly (silent — no model wake) and re-arm from scratch.
+            time.sleep(WATCH_RECONNECT_DELAY_S)
+
+
+def _arm_and_stream(client: BridgeClient, identity: WatchIdentity) -> None:
+    """One bridge lifetime: register, claim, drain catch-up, then long-poll."""
+    claim = _register_and_claim(client, identity)
+    _emit_line({"watch": "armed", "role": identity.role, "claim": claim})
+    _drain_inbox(client)
+    _stream_events(client)
+
+
+def _register_and_claim(
+    client: BridgeClient, identity: WatchIdentity,
+) -> dict[str, Any]:
+    """Register the presence, then claim the durable role binding through it.
+
+    The claim is dispatched over THIS registered bridge because the server
+    sources the binding's stable session id from the caller's live peer
+    binding, never from claim args (REL-07). A terminal non-completed claim is
+    a permanent rejection (e.g. a reserved role name) and dies loud; transport
+    errors propagate to the reconnect loop.
+    """
+    client.peer_register(
+        agent_id=identity.agent_id,
+        agent_instance_id=identity.agent_instance_id,
+        session_label=identity.role,
+        agent_session_id=identity.agent_session_id,
+    )
+    payload = client.call_and_wait(
+        WATCH_CLAIM_PROCESS_KEY,
+        {
+            "name": identity.role,
+            "agent_id": identity.agent_id,
+            "agent_instance_id": identity.agent_instance_id,
+            "session_label": identity.role,
+        },
+        reason="no-MCP registered-presence watcher claiming its session role",
+    )
+    if str(payload.get("status")) != "completed":
+        _die(
+            f"role claim for {identity.role!r} was rejected: "
+            f"{json.dumps(payload, sort_keys=True)}",
+            ExitCodes.EXTERNAL_ERROR,
+        )
+    return payload
+
+
+def _drain_inbox(client: BridgeClient) -> None:
+    """Emit durable messages that arrived while unwatched (instance + role)."""
+    page = client.peer_inbox(
+        include_important=True, limit=WATCH_INBOX_DRAIN_LIMIT,
+    )
+    for section in ("entries", "role_entries"):
+        items = page.get(section, [])
+        if not isinstance(items, list):
+            raise BridgeCallError(f"inbox section {section!r} malformed: {page!r}")
+        for entry in items:
+            _emit_line({"watch": "inbox", "section": section, "entry": entry})
+
+
+def _stream_events(client: BridgeClient) -> None:
+    """Long-poll one armed bridge, one JSON line per event, until it drops."""
+    cursor = -1
+    while True:
+        payload = client.events(after=cursor)
+        events = payload.get("events", [])
+        if not isinstance(events, list):
+            raise BridgeCallError(f"events response malformed: {payload!r}")
+        for event in events:
+            _emit_line({"watch": "event", "event": event})
+        next_cursor = payload.get("next_cursor", cursor)
+        cursor = next_cursor if isinstance(next_cursor, int) else cursor
+
+
+def _emit_line(payload: dict[str, Any]) -> None:
+    """One compact JSON line per delivery — the monitor-facing stream format."""
+    click.echo(json.dumps(payload, sort_keys=True))
 
 
 def main() -> None:

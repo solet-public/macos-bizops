@@ -1,26 +1,41 @@
 # {{HOMUNCULUS_NAME}} — project instructions
 
+<!-- BEGIN HOMUNCULUS HYDRATION -->
+
 This clone is the home of **{{HOMUNCULUS_NAME}}**, a homunculus on the Ananta
 platform: a named, persistent agentic instance with its own PostgreSQL schema,
 memories, knowledge bases, and plugins. You — the Claude Code session reading
-this — are its driving agent. This file governs every session opened in this
-directory.
+this — are its driving agent. This managed block governs homunculus
+connectivity and operating rhythm for sessions opened in this directory.
+Existing project instructions still apply; if they conflict with how to reach
+{{HOMUNCULUS_NAME}}, follow this block for homunculus access and ask the
+operator about the conflict.
 
-## 🔍 Step Zero — search the knowledge base first
+## 🔍 Step Zero — ask {{HOMUNCULUS_NAME}} first, no MCP required
 
-**Pre-boot exception:** until {{HOMUNCULUS_NAME}}'s MCP bridge is registered
-(the final hydration step — `claude mcp add`), the `mcp__{{HOMUNCULUS_NAME}}__*`
-tools do not exist in your session. In that state, work directly from the
-files in this clone and skip everything in this section; nothing here is
-possible yet, and that is expected, not an error.
+Before responding to any question or starting any non-trivial task, ask
+{{HOMUNCULUS_NAME}} through the local command installed by genesis:
 
-Once the bridge is up: before responding to any question or starting any
-non-trivial task, your first tool call is a knowledge-base search:
+```bash
+{{HOMUNCULUS_NAME}} call service_interface::knowledge_service::search '{"query": "<plain-English description>", "top_k": 8}'
+```
 
-- `mcp__{{HOMUNCULUS_NAME}}__process_call` with
-  `process_key: service_interface::knowledge_service::search` and
-  `arguments: {"query": "<plain-English description>", "top_k": 8}`,
-  then read the result via `mcp__{{HOMUNCULUS_NAME}}__process_result`.
+This is the primary process-call path. It talks to {{HOMUNCULUS_NAME}} over the
+local host bridge and waits for the result; it does NOT require an MCP server,
+`claude mcp add`, or any `mcp__{{HOMUNCULUS_NAME}}__*` tools. Do not register,
+debug, or search for MCP just because you need knowledge-base or process access.
+MCP is optional tooling only where the operator's policy permits it.
+
+For questions about what happened before, what was decided, current status, or
+blockers, search the session ledger after history ingestion is enabled:
+
+```bash
+{{HOMUNCULUS_NAME}} call service_interface::session_ledger_service::search_event_content '{"query": "<topic>", "limit": 8}'
+```
+
+If the ledger is empty or the operator asks why past sessions are missing, offer
+the session-history hydration guidance; do not treat absent MCP tools as the
+problem.
 
 The platform ships canonical articles on how things are supposed to work —
 plugin architecture, credential storage, memory vs. knowledge, scheduling.
@@ -29,10 +44,26 @@ If a search returns nothing relevant, that is information too: confirm the
 gap before inventing a pattern, and add an article documenting what you
 ended up with.
 
+Implementation and debugging work has the same rule. Before editing code,
+changing config, or explaining a subsystem, search {{HOMUNCULUS_NAME}}'s own
+knowledge base for the current design record, runbook, and recent implementation
+notes using the actual nouns from the request. Do not start from local code
+search alone and then reconstruct the architecture from fragments. Examples:
+
+```bash
+{{HOMUNCULUS_NAME}} call service_interface::knowledge_service::search '{"query": "router bridge blue-green local deployment architecture", "top_k": 8}'
+{{HOMUNCULUS_NAME}} call service_interface::knowledge_service::search '{"query": "session history ingestion session ledger hydration current notes", "top_k": 8}'
+```
+
+If the operator tells you to look at {{HOMUNCULUS_NAME}}'s knowledge base, do it
+immediately through this command. Do not argue from source files, MCP tool
+availability, or a guessed architecture.
+
 Two carve-outs only: locating a specific known code symbol or file in this
-repo (use grep directly), and questions about what happened / what was
-decided / current status (ask {{HOMUNCULUS_NAME}} first — it is the stateful
-collaborator; raw log inspection is the fallback).
+repo (use grep directly), and repairing a not-running `{{HOMUNCULUS_NAME}}`
+command (`{{HOMUNCULUS_NAME}} health`, launchd state, logs). If the optional
+MCP tools are already present, they are an acceptable equivalent to the local
+command; they are not the prerequisite.
 
 ## Startup discipline
 
@@ -53,15 +84,76 @@ causes inference timeouts.
   (stop the LaunchAgent first — never run two instances).
 - Named Claude session: `{{CLONE_DIR}}/client/bin/claude-{{HOMUNCULUS_NAME}}`
   (on PATH if you accepted the shell setup). The launcher never bypasses your
-  tool-permission prompts, by design. The session name it sets shows up in
-  {{HOMUNCULUS_NAME}}'s peer registry (the homunculus's directory of currently
-  connected sessions) so messages can be routed to you by name.
+  tool-permission prompts, by design. It exports the session label and stable
+  session id that the rename skill's `{{HOMUNCULUS_NAME}} watch` watcher
+  registers with {{HOMUNCULUS_NAME}} — that registration is what makes this
+  session addressable by role name, with no MCP involved.
+
+## Router vs. bridge (and the other layers people conflate)
+
+The router and bridge are different surfaces. Several distinct layers get
+loosely called "the bridge" in older docs and comments; when reasoning about
+connectivity, name the layer you actually mean:
+
+- The **bridge** is the homunculus's local HTTP process-call surface. The
+  `{{HOMUNCULUS_NAME}} call ...` command uses it internally and is the primary
+  no-MCP way to ask the homunculus for KB, process, and session-ledger results.
+- The optional **MCP bridge** is only a Claude Code client registration that
+  exposes `mcp__{{HOMUNCULUS_NAME}}__*` tools when policy permits it. It is
+  required for NOTHING — process calls, KB search, session history, role
+  claiming, and message receive all work without it. Never suggest setting it
+  up unprompted; if you notice policy permits MCP, you may mention once that
+  it exists as an option and move on.
+- The **blue-green router** exists only for profiles that ship
+  `macos_self_deployment_plugin` (for example bizops/standard). It is a separate
+  LaunchAgent that keeps a stable public bridge port while blue and green
+  homunculus instances swap behind it during `apply_manifest`.
+- The **development channel** (`--dangerously-load-development-channels
+  server:{{HOMUNCULUS_NAME}}`) is optional MCP-transport idle wake, gated OFF
+  by default in the fleet launcher ({{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS=1
+  to enable). Sessions receive messages through the `{{HOMUNCULUS_NAME}}
+  watch` watcher instead; this flag is only for operators who explicitly
+  choose MCP where policy permits it.
+- Claude Code **remote-control** (`--remote-control <role>`) is a Claude Code
+  feature that lets one session drive another. It is not part of the
+  homunculus at all.
+
+If you are confused about any router/bridge behavior, search
+{{HOMUNCULUS_NAME}}'s knowledge base for `router bridge blue-green` before
+touching files.
+
+## Peer registry vs. role binding — "am I registered?"
+
+Two different stores answer this, and only one of them counts:
+
+- The **peer registry** is ephemeral, per-connection presence: who is connected
+  right now. An entry there (for example in raw peer-list output) is presence,
+  NOT a claim.
+- The **durable role binding** is the state row that `peer_send_by_name` and
+  `peer_holds_role` resolve against. Only it makes a session reachable by role
+  name.
+
+Ground truth: `{{HOMUNCULUS_NAME}} call
+plugin::agent_messaging_plugin::peer_holds_role` with the role name AND the
+`agent_instance_id` (the watcher's armed line prints it). Claiming a binding
+requires a live registered peer connection, and the default holder of that
+connection is the `{{HOMUNCULUS_NAME}} watch` registered-presence watcher —
+the rename skill arms it as a background process (register, claim, drain
+missed messages, then stream deliveries as JSON lines). No MCP is involved
+anywhere in this path. The one-shot `{{HOMUNCULUS_NAME}}` command handles
+everything else (capability calls, KB search, outbound peer sends) without
+holding anything open. Do not chase MCP registration to make roles work; if
+the optional MCP bridge happens to be connected, it is an equivalent holder,
+nothing more.
 
 ## What to expect from messaging
 
-Messages from {{HOMUNCULUS_NAME}} (scheduled work, peer messages) surface when
-you next interact with a session — not as live interruptions. That is the
-designed behavior, not a bug.
+With the watcher armed (the rename skill does this), peer and role-addressed
+messages from {{HOMUNCULUS_NAME}} stream into the watch task's output as JSON
+lines — check that output when returning to the conversation. Messages
+surface when the session next looks, not as live interruptions; that is the
+designed behavior, not a bug. Without a watcher armed, messages queue durably
+and are drained the next time one arms.
 
 ## Governance and the owner relationship
 
@@ -88,3 +180,5 @@ The genesis ladder that created this homunculus, and the hydration runbook
 that generated this file and the `client/` tooling, live in the knowledge
 base — search "genesis bootstrap ladder" or "hydration operator environment
 setup" via Step Zero above.
+
+<!-- END HOMUNCULUS HYDRATION -->

@@ -8,13 +8,13 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Agent-facing runbook for setting up the user's own environment around a homunculus birth, covering wizard step one per-homunculus role and database provisioning before a verb-mode or same-machine birth (create the homunculus's own non-superuser role, its database, the pgvector extension, the PUBLIC-connect revoke, the one-time default-scram pg_hba block, and the negative-auth and isolation probes — no cross-homunculus credential copy, and shared-vs-separate Postgres instance as the driving agent's topology decision), then after genesis the shell launcher for a properly named Claude Code session, optional multi-role fleet setup, additive shell integration with recoverable backups, install-all-now configure-on-first-use plugin hydration guidance, generated project CLAUDE.md and settings hooks, no-MCP primary command-line operation through the per-homunculus `<name>` command, optional MCP bridge registration only where policy permits, and the homunculus-alive verification checklist.
+Embedding Description: Agent-facing runbook for setting up the user's own environment around a homunculus birth, covering wizard step one per-homunculus role and database provisioning before a verb-mode or same-machine birth (create the homunculus's own non-superuser role, its database, the pgvector extension, the PUBLIC-connect revoke, the one-time default-scram pg_hba block, and the negative-auth and isolation probes — no cross-homunculus credential copy, and shared-vs-separate Postgres instance as the driving agent's topology decision), then after genesis the shell launcher for a properly named Claude Code session, optional multi-role fleet setup, additive shell integration with recoverable backups, install-all-now configure-on-first-use plugin hydration guidance, generated project CLAUDE.md and settings hooks, no-MCP default command-line operation through the per-homunculus `<name>` command including the `<name> watch` registered-presence watcher that claims each session's role and receives role-addressed messages, MCP as a strictly optional add-on offered only on explicit operator request, a connectivity glossary separating the bridge, the blue-green router, MCP registration, development channels, and peer-registry presence versus the durable role binding, and the homunculus-alive verification checklist.
 
 ## When to use this runbook
 
 Run this ladder after genesis completes and the newborn homunculus boots, when the user's own environment still lacks the launch tooling. Genesis provisions the homunculus side only, so a fresh clone gives the user no command to start a named Claude Code session, no project CLAUDE.md, and no Claude Code hooks. This runbook is written TO the driving coding agent, the same audience as the genesis section of the seed README. Everything here follows the genesis ladder shape: probe first, offer, act only under the user's normal tool-approval flow, verify, and stop and ask rather than guess.
 
-Hydration is deliberately NOT genesis code. The files this ladder writes belong to the user's side of the genesis boundary, exactly like the `claude mcp add` registration step: the agent performs them with its own tools, in conversation, under the user's approval.
+Hydration is deliberately NOT genesis code. The files this ladder writes belong to the user's side of the genesis boundary, just like optional client registration does: the agent performs them with its own tools, in conversation, under the user's approval.
 
 ## Three fixed rules
 
@@ -23,6 +23,58 @@ These rules are operator requirements, not tunable defaults. Every step below is
 1. Shell startup files may be inspected to understand structure, but never echo, transmit, summarize, or persist secret-looking values. Treat tokens, keys, passwords, tenant URLs, and private hostnames as sensitive: if they appear, say only that secret-looking or private values were present and avoided. Integrate additively when possible; whole-file replacement is the fallback, not the default.
 2. Any user-owned shell change is an OFFER, but the analysis is not optional. Before asking, inspect the current startup file, the shipped `zshrc.template`, the rendered `<clone>/client/<name>.zsh`, and any existing local launcher/fleet pattern you find. Then recommend a concrete plan in plain language. Do not ask the user to choose between raw implementation details before doing that review.
 3. The user always ends up with a command-line way to start Claude Code with a properly named session, whether or not they accepted shell integration.
+
+## Connectivity stance — no-MCP primary path
+
+Treat the operator's machine policy as authoritative. If the operator says MCP
+servers are restricted, the bridge is unavailable, or Claude Code cannot use
+MCP, do not inspect `.mcp.json`, run `claude mcp`, search for `mcp__<name>__*`
+tools, or try to prove the operator wrong. The primary interface is the
+genesis-installed `<name>` command:
+
+```bash
+<name> health
+<name> call service_interface::knowledge_service::search '{"query": "hydration runbook", "top_k": 8}'
+```
+
+That command uses the homunculus's localhost bridge internally, but it is not an
+MCP server and needs no client-side MCP registration. Use it for knowledge-base
+search, process calls, session-history setup, and — via `<name> watch` — peer
+registration, role claiming, and message receive. The no-MCP path is the
+DEFAULT and the complete path on every machine, not a managed-machine fallback.
+Never pitch MCP proactively during hydration: if you notice the environment
+permits MCP, you may mention once that an optional MCP bridge exists, and act
+on it only if the operator explicitly asks for it.
+
+## Glossary — distinct layers that all get called "the bridge"
+
+Sessions repeatedly get lost by conflating these. When you explain or debug
+connectivity, name the layer you mean:
+
+- **Bridge** — the homunculus's localhost HTTP process-call surface; what the
+  `<name>` command talks to. Needs no MCP.
+- **Blue-green router** — a separate KeepAlive LaunchAgent (blue-green-capable
+  profiles only) holding the stable public port while homunculus instances swap
+  behind it. Not a message path; a port-stability device.
+- **MCP bridge registration** — the optional `claude mcp add` client wiring
+  that exposes `mcp__<name>__*` tools where policy permits MCP.
+- **Development channel / remote-control** — fleet-launcher flags: the
+  development channel is optional MCP-transport idle-wake (gated OFF by
+  default in the fleet template; only for operators who explicitly want MCP);
+  Claude Code remote-control lets one session drive another and involves no
+  MCP at all.
+- **Peer registry vs. durable role binding** — the registry is ephemeral
+  connection presence; the role binding is the durable state row that
+  `peer_send_by_name` / `peer_holds_role` resolve against. "Am I registered?"
+  is answered by `peer_holds_role` resolution (role name + agent_instance_id),
+  never by an entry in raw peer-list output. Claiming a binding requires a
+  live registered peer connection; the DEFAULT holder is the
+  `<name> watch` registered-presence watcher (register + claim + drain missed
+  messages + stream deliveries, zero MCP), which the generated rename skill
+  arms per session. The one-shot `<name>` command opens and closes a
+  connection per command, so it invokes capabilities and sends outbound but
+  never holds a role — that is the watcher's job. The optional MCP bridge is
+  merely an alternative holder where an operator chose it.
 
 ## Render contract
 
@@ -62,13 +114,31 @@ Full derivation and rationale: the sequence relocated out of `github_midwife_plu
 Check each expected-good state read-only before writing anything.
 
 - `<clone>/client/` absent means hydration has not run; present means a re-run, so compare intended content before overwriting and prefer updating over clobbering.
-- `<clone>/.claude/settings.json` and `<clone>/CLAUDE.md` may exist from a prior hydration; same re-run rule.
+- `<clone>/CLAUDE.md` may exist from a prior hydration; same re-run rule. Probe `~/.claude/settings.json` for the `HOMUNCULUS_STEP_ZERO_HOOK=` / `HOMUNCULUS_ROLE_RECLAIM_HOOK=` markers (this homunculus's or another's) and `~/.claude/skills/rename/SKILL.md` for prior installs; a pre-2026-07-22 hydration may have left hook copies in `<clone>/.claude/settings.json` — migrate those to user scope on a re-run rather than leaving both.
 - Read the shell templates that drive the integration: `zshrc.template`, `homunculus.zsh.template`, and any fleet/sample launcher file referenced by the clone or already present in the operator's startup file. Then inspect `~/.zshrc` or the active shell's startup file only far enough to classify its structure and choose an additive integration point. Do not print or copy secret-looking values into the transcript or generated files.
 - Confirm genesis actually finished: the newborn's LaunchAgent plist exists and the manifest marker `<clone>/profile/data/github_midwife/attempt.json` is present. If not, stop; hydration follows genesis, it does not replace it.
 
-## Step 2 — install the clone-side artifacts
+## Step 2 — install the clone-side and user-scope artifacts
 
-Render and write the six in-clone artifacts; none of them touch a dotfile. Writing inside the clone needs no offer beyond the user's normal tool-approval flow.
+Render six artifacts. Four live inside the clone; two install at USER scope
+(`~/.claude/`) by operator ruling 2026-07-22. The reason for user scope is
+load-bearing, so understand it before deviating: Claude Code loads project
+settings and skills from the directory a session starts in, and sessions that
+coordinate through the homunculus routinely start in OTHER repos (a work repo,
+a knowledge-base repo). Hooks installed only in the clone never fire for those
+sessions — verified in the field: a fleet session in another repo got no
+role-reclaim prompt and its role binding sat vacant with nobody told. User
+scope fires from any directory; both hooks guard on
+`HOMUNCULUS_AGENT_SESSION_LABEL` (set by the launchers), so sessions not
+started through a homunculus launcher get zero output and zero errors.
+
+Writing inside the clone needs no offer beyond the user's normal tool-approval
+flow. The two user-scope writes touch the user's own Claude configuration:
+back up an existing `~/.claude/settings.json` before first modification, and
+merge structurally — never whole-file-replace it. If a destination path is
+absent, write the rendered template directly. If `CLAUDE.md` or
+`~/.claude/settings.json` already exists, do the guided merge below instead of
+skipping the file or replacing the whole thing.
 
 | Template | Destination | Mode |
 |---|---|---|
@@ -76,12 +146,38 @@ Render and write the six in-clone artifacts; none of them touch a dotfile. Writi
 | `claude_launcher.template` | `<clone>/client/bin/claude-<name>` | 0755 |
 | `launch.template` | `<clone>/client/bin/launch-<name>` | 0755 |
 | `CLAUDE.md.template` | `<clone>/CLAUDE.md` | 0644 |
-| `claude_settings.json.template` | `<clone>/.claude/settings.json` | 0644 |
-| `rename_skill_SKILL.md.template` | `<clone>/.claude/skills/rename/SKILL.md` | 0644 |
+| `claude_settings.json.template` | `~/.claude/settings.json` (structural merge) | 0644 |
+| `rename_skill_SKILL.md.template` | `~/.claude/skills/rename/SKILL.md` | 0644 |
+
+Known limitation, state it rather than papering over it: on a machine running
+MORE THAN ONE homunculus, each homunculus's hooks coexist in
+`~/.claude/settings.json` (the per-name marker strings keep them separately
+identifiable and mergeable), and every labeled session sees every homunculus's
+Step Zero hook; the user-scope `rename` skill is a singleton, so the LAST
+hydrated homunculus owns it. Single-homunculus machines — the normal case —
+are unaffected. If the operator runs several homunculi and this bites, surface
+it as a decision rather than inventing a scheme ad hoc.
+
+**Existing `CLAUDE.md` guidance.** The rendered `CLAUDE.md.template` contains a homunculus-owned block bounded by:
+
+```markdown
+<!-- BEGIN HOMUNCULUS HYDRATION -->
+...
+<!-- END HOMUNCULUS HYDRATION -->
+```
+
+If `<clone>/CLAUDE.md` already exists, preserve its project-specific instructions and insert or update only that managed block. On a re-run, replace the existing block exactly. On a first merge, insert the block after the first top-level heading when one exists; otherwise insert it at the top. Leave the rest of the file in place. Do not decide that an existing `CLAUDE.md` is "probably fine" and leave it untouched: the homunculus operating block is how future Claude Code sessions learn the no-MCP Step Zero path, the implementation/debugging requirement to search the homunculus's own knowledge base first, the router-vs-bridge distinction, the session-ledger recall path, and the hook expectations.
+
+**Existing `~/.claude/settings.json` guidance.** If the user-scope settings file already exists, back it up first (same collision-probed backup naming as Step 3's zshrc backup), then parse the existing file and the rendered `claude_settings.json.template` as JSON and merge structurally. Preserve unrelated top-level settings, unrelated hook events, and unrelated hook commands — this file governs ALL of the user's Claude Code sessions, not just homunculus work. For the two homunculus hooks, use the marker strings in the rendered commands as the agent-readable identity:
+
+- `HOMUNCULUS_STEP_ZERO_HOOK=<name>`
+- `HOMUNCULUS_ROLE_RECLAIM_HOOK=<name>`
+
+For each relevant hook event, remove any existing command hook containing the same marker, then append the rendered hook object for that event. Keep existing non-homunculus hook objects (and other homunculi's marker-bearing hooks) in their current order. Create `~/.claude/` if needed, write valid pretty JSON, and validate it with a JSON parser before moving on. This is guidance for the driving agent, not hidden genesis automation: the point is to make the edit obvious and repeatable while preserving the user's configuration.
 
 The launcher invariant is non-negotiable: `claude-<name>` never passes `--dangerously-skip-permissions`. The user's tool-approval flow is the safety boundary of the whole client-deployment pattern, and a generated launcher that bypasses it deletes that boundary. Do not add the flag on request without pointing the user at this paragraph first.
 
-The settings hooks no-op silently for bare sessions. A user who runs plain `claude` instead of the launcher has no session-label environment variable set, and the SessionStart hook must produce zero output and zero errors in that case. The shipped template already guards this; keep the guard if you edit.
+The settings hooks no-op silently for bare sessions, and at user scope this guard is load-bearing for the user's ENTIRE Claude Code use: a plain `claude` session anywhere on the machine has no session-label environment variable set, and BOTH hooks must produce zero output and zero errors in that case. The shipped template guards both; keep the guards if you edit.
 
 ## Step 3 — review, recommend, then offer shell integration
 
@@ -100,12 +196,12 @@ Before asking for approval, prepare these facts for yourself:
 The user-facing offer should be specific and plain. Use this shape, adapted to the facts you found:
 
 ```
-I checked your shell startup file and the Dax shell template. I recommend adding
-a small managed block to ~/.zshrc that loads Dax's launcher from this clone. I
-will save a backup first, will not print or change any existing secrets or
-unrelated settings, and existing aliases/functions will stay in place. After
-that, new terminals can run claude-dax directly. Should I make that additive
-change?
+I checked your shell startup file and the <name> shell template. I recommend
+adding a small managed block to ~/.zshrc that loads <name>'s launcher from this
+clone. I will save a backup first, will not print or change any existing
+secrets or unrelated settings, and existing aliases/functions will stay in
+place. After that, new terminals can run claude-<name> directly. Should I make
+that additive change?
 ```
 
 If the startup file is missing, say that and recommend creating the minimal file. If the file is complex or already has a conflicting managed block, explain only the structure and the consequence, then ask the narrow decision you cannot safely make. Act only on an explicit yes.
@@ -127,6 +223,36 @@ Requirement 3 is satisfied by the launcher that step 2 installed on the user's m
 
 ## Step 4a — offer: multi-role fleet coordination (optional)
 
+Fleet coordination needs NO MCP anywhere: each session's SessionStart hook
+invokes the rename skill, which arms that session's `<name> watch`
+registered-presence watcher — register, claim the role as the durable
+binding, drain missed messages, stream deliveries. Sessions are then
+addressable by role name (`peer_send_by_name`) and receive role-addressed
+messages, on any machine, including MCP-policy-blocked ones. Do not attempt
+`claude mcp add` against policy and do not build ad-hoc registration
+mechanisms — the watcher is the mechanism.
+
+**Target work repos get the guidance too.** Launcher-started sessions carry
+the homunculus guidance from the user-scope hooks in every prompt, from any
+directory — but a BARE `claude` session in a work repo gets nothing (the
+label guard is deliberate). So when the operator names the repos the fleet
+will work in, OFFER the same managed-block merge Step 2 does for the clone's
+`CLAUDE.md` into EACH target repo's `CLAUDE.md` (same
+`BEGIN/END HOMUNCULUS HYDRATION` markers, same insert-or-update rule,
+preserve everything else in the file). That block is what tells any future
+session in that repo — launcher-started or not — that the homunculus exists,
+how to reach it (`<name> call`, `<name> watch`), and that MCP is not needed.
+
+Hook scope matters for fleets and is already settled (operator ruling
+2026-07-22): Step 2 installs the Step Zero and role-reclaim hooks at USER
+scope (`~/.claude/settings.json`), guarded on the session-label environment
+variable, precisely so fleet sessions working in OTHER repos still get them —
+Claude Code loads project settings from the directory a session starts in, so
+clone-local hooks would never fire there. If you find the hooks only in the
+clone's `.claude/settings.json`, that is a pre-ruling install: migrate them to
+user scope per Step 2 rather than debugging why fleet sessions get no
+role-reclaim prompt.
+
 Everything through Step 4 gives the operator ONE properly-named session. Some operators want to run SEVERAL Claude Code (and/or Codex) sessions concurrently against the same homunculus, each independently addressable — a coordinator session, a session that owns all git mutations, an architect/reviewer session, worker sessions. This is exactly the pattern this platform's own development runs on (see this repo's own `.zshrc` and `.claude/settings.json` for a live, battle-tested example — `claude-coordinator-dawn`, `claude-git-controller`, `claude-architect`, and so on). Offer this explicitly; do not build it unasked, and do not build it as part of the Step 2 baseline.
 
 **Ask first, don't prescribe.** "Do you want to run just one session with {{HOMUNCULUS_NAME}}, or several at once, each with its own role?" If several: "How many, and what should each be called?" Offer this platform's own roster as a concrete starting point, scaled to what the operator actually needs — most operators need far fewer than this repo's ~14 roles:
@@ -140,11 +266,11 @@ Let the operator pick names and count; do not invent roles they did not ask for.
 
 **What accepting builds.** Render `fleet_functions.zsh.template` to `<clone>/client/{{HOMUNCULUS_NAME}}-fleet.zsh` and add `source "<clone>/client/{{HOMUNCULUS_NAME}}-fleet.zsh"` to `<clone>/client/{{HOMUNCULUS_NAME}}.zsh` (the file Step 2 already installed). The template gives one shared `_claude_for_{{HOMUNCULUS_NAME}}(role, model, effort)` launcher plus ONE example role function to copy per role the operator chose (a restart variant is included in the same comment block). This is a genuinely different trust level than the Step 2 launcher — read the template's own header comment and carry that reasoning into the conversation with the operator, don't just render it silently:
 
-- `--remote-control "$role"` makes the session addressable by Claude Code's remote-control feature from another session — what lets a coordinator drive or monitor workers.
-- `--dangerously-load-development-channels server:{{HOMUNCULUS_NAME}}` wires the MCP development-channel bridge that gives `peer_send` its idle-wake path. The Step 2 launcher deliberately omits this (see "What the user should expect afterward" below); a fleet needs it so sessions can wake each other.
+- `--remote-control "$role"` makes the session addressable by Claude Code's remote-control feature from another session — what lets a coordinator drive or monitor workers. A Claude Code feature; no MCP involved.
 - `--dangerously-skip-permissions` is opt-in and separately gated in the template (an env var the operator sets, not a hardcoded flag). It removes the per-action tool-approval prompt — necessary for several sessions to run without an operator babysitting each confirmation, but it removes the safety boundary Step 2's invariant exists to protect. State this tradeoff to the operator in plain language and let them decide; do not default it on.
+- Peer messaging and role binding come from each session's watcher (armed by the SessionStart hook → rename skill), not from any launcher flag. The optional MCP development-channel flag (`{{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS=1`) exists in the template gated OFF; it is only for an operator who explicitly asks for MCP-native wake and whose policy permits MCP — never suggest it unprompted.
 
-**Git safety when more than one session shares a clone — an OPTIONAL, nameable gate you must NOT default on.** If the operator is choosing more than one role, ask directly: will more than one of these sessions ever run git commands (commit, push, checkout, stash, branch) against the SAME clone? If yes, concurrent mutating git from multiple sessions is a real collision risk (a stash or checkout from one session can silently clobber another session's in-progress work). There is an OPTIONAL gate for exactly this, and the operator names it themselves: designate ONE role — **any name they choose** (`Git-Controller`, `gitops`, whatever) — as the sole git-mutator, and every other session is then blocked from mutating git. The reference implementation is `.claude/hooks/git_controller_gate.py` (with `_git_controller_lex.py` + `_git_controller_walker.py`), enabled by setting `HOMUNCULUS_GIT_CONTROLLER_NAME=<chosen-role>` on the gate's `PreToolUse` command in `.claude/settings.json` — see `deployment/scripts/setup_clone.sh` step 3 for the exact wiring. **Default is OFF, and state the tradeoff up front, plainly:** enabling the gate BLOCKS the Task tool (Anthropic subagents) for every non-controller session — **and that block is the gate's PRIMARY PURPOSE, not a side effect.** Those subagents spawn their own git worktrees and run git, which is exactly how in-progress work gets lost — the very collision the gate exists to prevent. So the choice is honest and either-way: an operator who runs several git-mutating sessions against one clone enables the gate (names a controller, gives up subagents); an operator who wants Anthropic's subagents leaves the gate OFF and works some other way (separate clones per session, or a single git-mutating session). Do NOT default it on; do NOT skip this conversation when more than one session will share a clone.
+**Git safety when more than one session shares a clone — an OPTIONAL, nameable gate you must NOT default on.** If the operator is choosing more than one role, ask directly: will more than one of these sessions ever run git commands (commit, push, checkout, stash, branch) against the SAME clone? If yes, concurrent mutating git from multiple sessions is a real collision risk (a stash or checkout from one session can silently clobber another session's in-progress work). There is an OPTIONAL gate for exactly this, and the operator names it themselves: designate ONE role — **any name they choose** (`Git-Controller`, `gitops`, whatever) — as the sole git-mutator, and every other session is then blocked from mutating git. The reference implementation lives in the PLATFORM ORIGIN repository (`.claude/hooks/git_controller_gate.py` with `_git_controller_lex.py` + `_git_controller_walker.py`, enabled by setting `HOMUNCULUS_GIT_CONTROLLER_NAME=<chosen-role>` on the gate's `PreToolUse` command; the origin's `deployment/scripts/setup_clone.sh` step 3 shows the exact wiring) — **the seed does NOT ship these files.** On a seed-born deployment, be honest about that: if the operator wants the gate, obtaining or re-authoring those hook scripts is explicit fleet-setup work, not something already present in the clone. Do not cite paths to the operator as if they exist locally. **Default is OFF, and state the tradeoff up front, plainly:** enabling the gate BLOCKS the Task tool (Anthropic subagents) for every non-controller session — **and that block is the gate's PRIMARY PURPOSE, not a side effect.** Those subagents spawn their own git worktrees and run git, which is exactly how in-progress work gets lost — the very collision the gate exists to prevent. So the choice is honest and either-way: an operator who runs several git-mutating sessions against one clone enables the gate (names a controller, gives up subagents); an operator who wants Anthropic's subagents leaves the gate OFF and works some other way (separate clones per session, or a single git-mutating session). Do NOT default it on; do NOT skip this conversation when more than one session will share a clone.
 
 **Operational guidance: leave sessions running, use `/clear`.** Once a role's session is started, tell the operator to leave it running in its own iTerm2 (or other terminal) tab rather than closing it between conversations. Quitting a session loses its process and its role's live identity until it is manually relaunched; the `/clear` slash command instead resets the conversation while the process (and its stable `HOMUNCULUS_AGENT_SESSION_ID`) keeps running — the SessionStart hook's `matcher` already covers `clear` (Step 2's `claude_settings.json.template`), so the role re-claim fires automatically and the session is addressable again within moments. This is the operational rhythm this platform runs on: long-lived tabs, `/clear` between tasks, restart only when a session is genuinely stuck.
 
@@ -162,9 +288,19 @@ Some plugins still need real operator-specific setup before first useful invocat
 
 **Authoring convention, for the next plugin that needs this:** a `hydration_guidance.md` is a normal KB article (proper `Article Layer`/`Article Role: hydration_guidance`/`Article Tags`/`Embedding Description` header, so it is also findable by normal KB search once the plugin is active). Keep `## Setup` concrete enough that a first-use agent can run it without rediscovering the plugin's credential model.
 
-## Step 5 — optional MCP bridge, only where policy permits
+## Step 5 — optional MCP bridge, ONLY on explicit operator request
 
-If the operator's environment permits MCP servers, follow the seed README's registration ladder to connect the newborn's MCP bridge to Claude Code. If policy restricts MCP servers, skip this step. Skipping MCP is not a degraded or unsupported state; the `<name>` command is the primary interface on managed work machines. Reference form when permitted: `claude mcp add --scope user -e HOMUNCULUS_NAME=<name> -e HOMUNCULUS_AGENT_IDENTITY=claude_code <name> -- <clone>/.venv/bin/python3 -m agent_messaging_plugin.mcp_bridge`. Probe `claude mcp add --help` before trusting that form; CLI flags drift.
+Skip this step by default — it is not part of baseline hydration on any
+machine. Nothing requires MCP: process calls, knowledge-base search,
+session-history ingestion, role claiming, and message receive all run through
+the `<name>` command (`<name> call`, `<name> watch`). If you notice the
+environment permits MCP, you may mention once that an optional MCP bridge
+exists for tool-native access, then move on; act only if the operator
+explicitly asks for it. When asked: follow the seed README's registration
+ladder. Reference form: `claude mcp add --scope user -e HOMUNCULUS_NAME=<name>
+-e HOMUNCULUS_AGENT_IDENTITY=claude_code <name> --
+<clone>/.venv/bin/python3 -m agent_messaging_plugin.mcp_bridge`. Probe
+`claude mcp add --help` before trusting that form; CLI flags drift.
 
 ## Step 6 — verify
 
@@ -181,9 +317,14 @@ Then, that the no-MCP command and session tooling work:
 - `<name> health` answers.
 - `<name> call service_interface::knowledge_service::search '{"query": "hydration runbook", "top_k": 3}'` returns a successful action/result path.
 - A fresh session started via `claude-<name>` carries the intended label and can use the `<name>` command without a venv activation.
-- The SessionStart hook fires in that session and the rename skill claims the session's role binding (the registry entry that routes messages addressed to that session name); the claim result reads `registered`, `updated`, or `displaced`.
-- A bare `claude` session in an unrelated directory starts with no hook errors.
-- If MCP was registered because policy permits it, `claude mcp list` shows `<name>` and a fresh Claude Code session can see `mcp__<name>__*` tools and call one.
+- `CLAUDE.md` contains the `BEGIN HOMUNCULUS HYDRATION` / `END HOMUNCULUS HYDRATION` block, including the no-MCP Step Zero command, the implementation/debugging KB-first rule, and the router-vs-bridge distinction.
+- `~/.claude/settings.json` parses as JSON and contains exactly one `HOMUNCULUS_STEP_ZERO_HOOK=<name>` command and exactly one `HOMUNCULUS_ROLE_RECLAIM_HOOK=<name>` command; `~/.claude/skills/rename/SKILL.md` exists.
+- The UserPromptSubmit hook in that session points the agent at `<name> call`, not MCP.
+- A bare `claude` session in an unrelated directory starts with no hook errors and no injected homunculus context (the label guard covers both hooks).
+- A LABELED session started in a different repo (not the clone) DOES receive the Step Zero and role-reclaim context — this is the fleet case the user-scope ruling exists for.
+- In a labeled session, the rename skill arms `<name> watch` and its first output line is `"watch": "armed"` with a `claimed`/`updated`/`displaced` result — role-addressed receive is live with zero MCP.
+- Role-claim ground truth: `<name> call plugin::agent_messaging_plugin::peer_holds_role` with the role name and the watcher's `agent_instance_id` resolves the claim to this session. An entry in raw peer-list output is connection presence, not a claim — never verify registration from a peer list.
+- Only if the operator explicitly requested MCP in Step 5: `claude mcp list` shows `<name>` and a fresh session can call one `mcp__<name>__*` tool. Absence of MCP is not a finding.
 
 ## Your blue-green router (auto-installed at birth)
 
@@ -207,7 +348,7 @@ This is what lets `platform_dev_surface_plugin` come ready (its readiness probe 
 
 ## What the user should expect afterward
 
-Messages from the homunculus surface when the user next interacts with a session, not as live interruptions. The launcher deliberately omits the development-channel wiring that gives the operator fleet its idle-wake path, so this is designed behavior, not a defect; the generated CLAUDE.md states the same expectation to the user directly.
+With a session's watcher armed (the rename skill does this at session start), peer and role-addressed messages stream into the watch task's output and surface when the session next looks at it — not as live interruptions. Without a watcher, messages queue durably and drain when one next arms. This is designed behavior, not a defect; the generated CLAUDE.md states the same expectation to the user directly.
 
 ## Reference
 
@@ -217,5 +358,6 @@ Messages from the homunculus surface when the user next interacts with a session
 - `knowledge_bases/ananta_platform/17_client_deployment_pattern/01_pattern_overview.md` — the platform pattern hydration instantiates: in-clone package, agent-installed, zero secrets.
 - `knowledge_bases/ananta_platform/13_homunculus_setup/08_macos_homunculus_birth_runbook.md` — the birth runbook whose genesis this runbook follows.
 - `plugin::github_midwife_plugin::birth_homunculus` — the genesis verb that precedes hydration.
-- `service_interface::knowledge_service::search` — the Step Zero search the generated CLAUDE.md instructs the newborn's driving agent to run.
-- `plugin::agent_messaging_plugin::peer_claim_role` — the role-claim process the generated rename skill invokes.
+- `service_interface::knowledge_service::search` — the Step Zero search the generated CLAUDE.md instructs the newborn's driving agent to run through `<name> call`.
+- `<name> watch` (`plugins/agent_messaging_plugin/src/agent_messaging_plugin/local_cli/cli.py`) — the registered-presence watcher the generated rename skill arms: register, claim, drain, stream, reconnect.
+- `plugin::agent_messaging_plugin::peer_claim_role` — the role-claim process the watcher dispatches over its registered bridge.
