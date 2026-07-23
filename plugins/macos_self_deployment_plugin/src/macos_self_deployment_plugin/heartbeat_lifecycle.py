@@ -249,6 +249,18 @@ def _run_steady_state_heartbeat(
 ) -> None:
     """Heartbeat every ``DEFAULT_HEARTBEAT_INTERVAL_SECONDS``; re-register on miss.
 
+    A HEALTHY heartbeat also re-asserts activation via
+    ``_ensure_active_color`` (Dax Part 15): a plain platform restart can
+    wedge the router at ``no_active_color`` forever — the new instance
+    registers while the outgoing instance is still active (so the one-shot
+    cold-start auto-activate correctly declines), then the router's
+    heartbeat GC drops the outgoing instance and clears the active binding,
+    and no later path ever re-checked. Re-asserting on every healthy tick
+    heals that within one heartbeat interval. It cannot steal authority:
+    router activation is atomic (``activate`` swaps directly, so a live
+    swap never exposes an ``active_color=None`` window), and the helper
+    activates only when the router reports NO active color.
+
     Also runs the B2 pending-finisher backstop each tick on this (active)
     color: if a prior cutover's ``complete_swap`` enqueue failed after a
     durable swap (a StateService/session-row failure), no action will ever
@@ -268,6 +280,13 @@ def _run_steady_state_heartbeat(
                 _register_and_activate_if_needed(
                     client=client,
                     port=port,
+                    self_color=self_color,
+                    self_instance_id=self_instance_id,
+                    logger=logger,
+                )
+            else:
+                _ensure_active_color(
+                    client=client,
                     self_color=self_color,
                     self_instance_id=self_instance_id,
                     logger=logger,
@@ -539,6 +558,15 @@ def _ensure_active_color(
     other color is already active (blue-green steady state with two
     registrants or a hot-swap mid-flight), this is a no-op — the
     helper must never steal authority from a live color.
+
+    Also called on every HEALTHY steady-state heartbeat tick (Dax
+    Part 15): the cold-start probe is one-shot and races the router's
+    heartbeat-timeout GC on the outgoing instance after a plain restart
+    — register lands while the old instance is still active (probe sees
+    a color, declines), the GC then drops the old instance and clears
+    the active binding, and the router sits at ``no_active_color``
+    forever. The steady-state re-assert makes the same conservative
+    activation self-healing instead of one-shot.
     """
     try:
         snapshot = client.status()
@@ -562,7 +590,7 @@ def _ensure_active_color(
         )
         return False
     logger.info(
-        "%s: auto-activated color=%s instance_id=%s on cold-start",
+        "%s: auto-activated color=%s instance_id=%s (router had no active color)",
         PLUGIN_NAME, self_color, self_instance_id,
     )
     return True

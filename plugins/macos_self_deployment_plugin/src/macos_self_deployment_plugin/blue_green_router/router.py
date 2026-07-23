@@ -315,7 +315,12 @@ async def _write_503(writer: asyncio.StreamWriter, reason: str) -> None:
     body = (
         f"local_blue_green_router: no active color available "
         f"({reason}). The router is up but no homunculus child is currently "
-        "active.\r\n"
+        "active. The platform itself may be healthy on its own ephemeral "
+        "port (probe /api/v1/bridge/health there); if so, the platform's "
+        "steady-state heartbeat re-asserts activation within ~10s on "
+        "current builds — on older builds, restart the platform "
+        "LaunchAgent once more to re-trigger cold-start activation. Leave "
+        "the router itself running.\r\n"
     ).encode()
     response = (
         b"HTTP/1.1 503 Service Unavailable\r\n"

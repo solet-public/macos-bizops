@@ -100,21 +100,26 @@ Knowledge-base access without MCP, for example:
 
 Async results are pulled with `<name> result <id> --wait`. For push — peer
 and role-addressed messages reaching your session unprompted, with no MCP —
-run the registered-presence watcher under a persistent monitor:
+the seed ships both halves of the receive path:
 
 ```bash
 <name> watch                        # register + claim this session's role,
                                     # then stream messages as JSON lines
+<name> wake                         # Stop-hook waker: blocks on the watch
+                                    # spool, wakes an idle session on delivery
 ```
 
 `watch` reads the launcher-exported `HOMUNCULUS_AGENT_SESSION_LABEL` /
 `HOMUNCULUS_AGENT_SESSION_ID` (or pass `--role`), registers the session in the
 peer registry, claims the role as its durable binding, drains messages that
 arrived while unwatched, then prints one JSON line per delivery and nothing
-while idle. It reconnects and re-claims automatically across restarts and
-blue-green swaps. The optional MCP bridge below provides the same wake path
-tool-natively where policy permits MCP; neither is a prerequisite for the
-other.
+while idle — teeing each delivery into a per-session spool. `wake` is wired
+as a Claude Code `Stop` hook by hydration: it blocks on that spool at zero
+token cost and turns the next delivery into a session turn, on any inference
+provider (it is a shell hook, not an inference channel). Both reconnect and
+re-claim automatically across restarts and blue-green swaps. The optional MCP
+bridge below provides a tool-native wake where policy permits MCP; neither is
+a prerequisite for the other.
 
 ## Updating later
 

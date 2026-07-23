@@ -48,8 +48,8 @@ casually:
 
 | Var | Occurrences |
 |---|---|
-| `HOMUNCULUS_AGENT_SESSION_LABEL` | `claude_launcher.template` (export); `claude_settings.json.template` (guard on BOTH hooks + SessionStart read — load-bearing at user scope: unlabeled sessions must get zero output); `fleet_functions.zsh.template` (export) |
-| `HOMUNCULUS_AGENT_SESSION_ID` | `claude_launcher.template` (export); `fleet_functions.zsh.template` (export) |
+| `HOMUNCULUS_AGENT_SESSION_LABEL` | `claude_launcher.template` (export); `claude_settings.json.template` (guard on ALL THREE hooks + SessionStart read — load-bearing at user scope: unlabeled sessions must get zero output); `fleet_functions.zsh.template` (export) |
+| `HOMUNCULUS_AGENT_SESSION_ID` | `claude_launcher.template` (export); `fleet_functions.zsh.template` (export); consumed (not referenced textually) by the Stop hook's `<name> wake`, which derives the per-session watch spool path from it — the same derivation `<name> watch` uses, so the pair meets with no flags |
 | `HOMUNCULUS_AGENT_IDENTITY` | none here — lives in the root README's `claude mcp add` reference form, cited by the hydration runbook's mcp-add step |
 
 ## Invariant

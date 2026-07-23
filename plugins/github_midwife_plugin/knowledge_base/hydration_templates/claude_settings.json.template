@@ -20,6 +20,18 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ": HOMUNCULUS_WAKE_HOOK={{HOMUNCULUS_NAME}}; [ -n \"$HOMUNCULUS_AGENT_SESSION_LABEL\" ] && exec {{HOMUNCULUS_NAME}} wake; exit 0",
+            "asyncRewake": true,
+            "timeout": 86400
+          }
+        ]
+      }
     ]
   }
 }

@@ -1720,3 +1720,5 @@ plugins/agent_messaging_plugin/tests/local_cli_smoke.py
 # .forwarded_before (both sweeps, surface-on-anomaly). Record:
 # workbench/2026-07-20_faislop_timestamp_unification_record.md.
 plugins/agent_messaging_plugin/tests/timestamp_value_compare_smoke.py
+plugins/agent_messaging_plugin/tests/wake_hook_smoke.py
+plugins/macos_self_deployment_plugin/tests/steady_state_reassert_activation_smoke.py

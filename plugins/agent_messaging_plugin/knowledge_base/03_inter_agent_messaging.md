@@ -8,7 +8,7 @@ Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:t
 
 Article Tags: planning-stage:agent-to-agent-coordination, planning-stage:tool-discovery, evidence-category:peer-messaging-contracts, evidence-category:identity-model, domain:agent-messaging, domain:inter-agent-routing
 
-Embedding Description: How live agent sessions talk through the homunculus — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the IMPORTANT-marker loop-prevention contract, silent vs queued delivery (persisted_silent / queued_notification / queued_wake / queued_watcher), what IMPORTANT means for a watcher-held recipient (pull, surfaced on next look, consumed on events-ack — never a live interrupt), peer_inbox catch-up semantics, multi-instance addressing, Claude Code native-channel wake routing, and the locally patched Codex peer-wake path.
+Embedding Description: How live agent sessions talk through the homunculus — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the `<name> wake` Stop-hook waker that turns a delivery to an idle watcher-held session into a session turn (spool tee + hook exit-2 wake, MCP-free and provider-agnostic), the IMPORTANT-marker loop-prevention contract, silent vs queued delivery (persisted_silent / queued_notification / queued_wake / queued_watcher), what IMPORTANT means for a watcher-held recipient (delivered into the watch stream, wakes an idle hooked session, next-look for a busy one, consumed on events-ack), peer_inbox catch-up semantics, multi-instance addressing, Claude Code native-channel wake routing, and the locally patched Codex peer-wake path.
 
 ## Purpose
 
@@ -189,18 +189,25 @@ IMPORTANT send until it provably enters a turn.
 
 ### What IMPORTANT means for a watcher-held recipient
 
-An MCP-free fleet session receives through a `<name> watch` subprocess, and a
-watcher is a PULL consumer: the queued event streams into the watch task's
-output and the session sees it **when it next looks at that output** — no turn
-starts, because nothing on a no-MCP machine can start one. `queued_watcher`
-names that truthfully so a sender never reads a watcher delivery as a live
+An MCP-free fleet session receives through a `<name> watch` subprocess. The
+watcher itself is a PULL consumer: the queued event streams into the watch
+task's output. What turns that delivery into a TURN is the `<name> wake`
+Stop hook (hydration installs it at user scope): watch tees each delivery
+into a per-session spool, and when the session goes idle the wake hook
+blocks on that spool at zero token cost and wakes the session when a
+delivery lands — a shell hook, so it is MCP-free and works identically on
+Anthropic-direct and Bedrock. `queued_watcher` names the transport
+truthfully so a sender never reads a watcher delivery as a guaranteed live
 interrupt. Expectations to plan around:
 
 - The message IS delivered (durable + streamed into the watch output within
   one long-poll cycle). It is not lost, and no resend is needed.
-- The recipient acts on it at its next look — for a heads-down or idle
-  session, that is its next prompt or its next check of the watch output.
-  If you need action NOW, reach the operator or drive the session directly.
+- An IDLE recipient with the wake hook installed starts a turn on the
+  delivery (within the wake hook's ~1s spool poll). A recipient mid-turn,
+  or one running without hook support, acts on it at its next look — its
+  next prompt, its next Stop, or its next check of the watch output. If you
+  need action NOW and no turn starts, reach the operator or drive the
+  session directly.
 - Consumption is the watcher's events-ack, not model activity: when the
   watcher's long-poll cursor moves past the delivered event (it printed the
   line), the platform stamps the message consumed, so an armed watcher never
@@ -273,8 +280,10 @@ instead of waiting for the next user input, and `peer_send` reports
 `delivery="queued_wake"` (the event is queued on the recipient's live bridge —
 the platform cannot observe whether the wake became a turn; REL-06). When the
 resolved recipient binding is a `<name> watch` subprocess, the same queued
-event reports `delivery="queued_watcher"` instead — pull semantics, no turn
-(see the IMPORTANT-marker section above).
+event reports `delivery="queued_watcher"` instead — the platform-side
+transport is pull, and the recipient's local `<name> wake` Stop hook (when
+installed and the session is idle) is what converts the delivery into a
+turn (see the IMPORTANT-marker section above).
 
 The pairing key is `parent_pid`: the bridge and the host MCP
 session share the same OS parent process. The native wake adapter

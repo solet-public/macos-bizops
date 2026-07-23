@@ -184,8 +184,10 @@ POST /api/v1/bridge/{bridge_id}/peer/send
   # NOT confirmed by this field (REL-06). Consumption is tracked separately by
   # the REL-05 direct-wake outbox, which re-queues an unconsumed IMPORTANT send.
   # queued_watcher = the recipient is a no-MCP `<name> watch` binding: the same
-  # queued event streams into the watch output (pull — surfaced on next look,
-  # never a live turn), and the watcher's /events cursor ack stamps it consumed.
+  # queued event streams into the watch output (an idle session with the
+  # `<name> wake` Stop hook installed starts a turn on it; a busy or hook-less
+  # one sees it at its next look), and the watcher's /events cursor ack stamps
+  # it consumed.
 
 GET  /api/v1/bridge/{bridge_id}/peer/inbox?include_important=false
   resp: { "messages": [ {sender_agent_id, sender_agent_instance_id,

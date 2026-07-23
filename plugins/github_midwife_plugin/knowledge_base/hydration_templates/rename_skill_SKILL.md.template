@@ -13,13 +13,17 @@ Steps:
 1. Start the registered-presence watcher as a persistent background process
    (Claude Code: a background Bash task; keep it running for the session's
    lifetime; if a previous watcher from this conversation is running for a
-   different role, stop it first). If the harness offers a monitor-style
-   waker for background output (wake-on-output over a background task), run
-   the watcher under it — deliveries then interrupt instead of waiting for
-   the next look; a plain background task is the floor, not the ceiling:
+   different role, stop it first):
    ```bash
    {{HOMUNCULUS_NAME}} watch --role "$ROLE"
    ```
+   The watcher also tees each delivery into a per-session spool consumed by
+   the `{{HOMUNCULUS_NAME}} wake` Stop hook (installed at user scope by
+   hydration): when this session goes idle, that hook blocks at zero token
+   cost and turns the next delivery into a session turn — no MCP, and it
+   works the same on any inference provider. If the hook is absent (a
+   harness without hook support), deliveries wait in the watch output for
+   the next look; that is the floor, not the ceiling.
    On arming it registers this session in the peer registry (identity from the
    launcher-exported `HOMUNCULUS_AGENT_SESSION_ID`), claims `$ROLE` as the
    durable role binding, drains messages that arrived while unwatched, then

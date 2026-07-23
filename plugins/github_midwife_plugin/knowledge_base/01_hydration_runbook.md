@@ -8,7 +8,7 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Agent-facing runbook for setting up the user's own environment around a homunculus birth, covering wizard step one per-homunculus role and database provisioning before a verb-mode or same-machine birth (create the homunculus's own non-superuser role, its database, the pgvector extension, the PUBLIC-connect revoke, the one-time default-scram pg_hba block, and the negative-auth and isolation probes — no cross-homunculus credential copy, and shared-vs-separate Postgres instance as the driving agent's topology decision), then after genesis the shell launcher for a properly named Claude Code session, optional multi-role fleet setup, additive shell integration with recoverable backups, install-all-now configure-on-first-use plugin hydration guidance, generated project CLAUDE.md and settings hooks, no-MCP default command-line operation through the per-homunculus `<name>` command including the `<name> watch` registered-presence watcher that claims each session's role and receives role-addressed messages, MCP as a strictly optional add-on offered only on explicit operator request, a connectivity glossary separating the bridge, the blue-green router, MCP registration, development channels, and peer-registry presence versus the durable role binding, and the homunculus-alive verification checklist.
+Embedding Description: Agent-facing runbook for setting up the user's own environment around a homunculus birth, covering wizard step one per-homunculus role and database provisioning before a verb-mode or same-machine birth (create the homunculus's own non-superuser role, its database, the pgvector extension, the PUBLIC-connect revoke, the one-time default-scram pg_hba block, and the negative-auth and isolation probes — no cross-homunculus credential copy, and shared-vs-separate Postgres instance as the driving agent's topology decision), then after genesis the shell launcher for a properly named Claude Code session, optional multi-role fleet setup, additive shell integration with recoverable backups, install-all-now configure-on-first-use plugin hydration guidance, generated project CLAUDE.md and settings hooks, no-MCP default command-line operation through the per-homunculus `<name>` command including the `<name> watch` registered-presence watcher that claims each session's role and receives role-addressed messages and the `<name> wake` Stop-hook waker that turns deliveries to an idle session into session turns on any inference provider, MCP as a strictly optional add-on offered only on explicit operator request, a connectivity glossary separating the bridge, the blue-green router, MCP registration, development channels, and peer-registry presence versus the durable role binding, and the homunculus-alive verification checklist.
 
 ## When to use this runbook
 
@@ -60,9 +60,12 @@ connectivity, name the layer you mean:
   that exposes `mcp__<name>__*` tools where policy permits MCP.
 - **Development channel / remote-control** — fleet-launcher flags: the
   development channel is optional MCP-transport idle-wake (gated OFF by
-  default in the fleet template; only for operators who explicitly want MCP);
-  Claude Code remote-control lets one session drive another and involves no
-  MCP at all.
+  default in the fleet template; the flag alone is inert — it also needs a
+  registered MCP server via `claude mcp add` AND Anthropic-direct auth, so
+  it cannot function on Bedrock or on an MCP-blocked machine; the default
+  wake path is the `<name> wake` Stop hook, which needs neither); Claude
+  Code remote-control lets a human drive a session from another device via
+  claude.ai — it is not a session-to-session wake transport.
 - **Peer registry vs. durable role binding** — the registry is ephemeral
   connection presence; the role binding is the durable state row that
   `peer_send_by_name` / `peer_holds_role` resolve against. "Am I registered?"
@@ -128,9 +131,17 @@ coordinate through the homunculus routinely start in OTHER repos (a work repo,
 a knowledge-base repo). Hooks installed only in the clone never fire for those
 sessions — verified in the field: a fleet session in another repo got no
 role-reclaim prompt and its role binding sat vacant with nobody told. User
-scope fires from any directory; both hooks guard on
+scope fires from any directory; all three hooks guard on
 `HOMUNCULUS_AGENT_SESSION_LABEL` (set by the launchers), so sessions not
 started through a homunculus launcher get zero output and zero errors.
+
+The third hook is the wake half of messaging: a `Stop` hook running
+`<name> wake` (`asyncRewake` shape — it arms in the background when a
+labeled session goes idle, blocks at zero token cost on the watcher's
+delivery spool, and exits with the hook wake code when a message lands, so
+the delivery becomes a session turn). This is what closes the loop on
+`queued_watcher` deliveries without MCP and independent of inference
+provider; without it an idle session only sees messages at its next look.
 
 Writing inside the clone needs no offer beyond the user's normal tool-approval
 flow. The two user-scope writes touch the user's own Claude configuration:
@@ -168,16 +179,17 @@ it as a decision rather than inventing a scheme ad hoc.
 
 If `<clone>/CLAUDE.md` already exists, preserve its project-specific instructions and insert or update only that managed block. On a re-run, replace the existing block exactly. On a first merge, insert the block after the first top-level heading when one exists; otherwise insert it at the top. Leave the rest of the file in place. Do not decide that an existing `CLAUDE.md` is "probably fine" and leave it untouched: the homunculus operating block is how future Claude Code sessions learn the no-MCP Step Zero path, the implementation/debugging requirement to search the homunculus's own knowledge base first, the router-vs-bridge distinction, the session-ledger recall path, and the hook expectations.
 
-**Existing `~/.claude/settings.json` guidance.** If the user-scope settings file already exists, back it up first (same collision-probed backup naming as Step 3's zshrc backup), then parse the existing file and the rendered `claude_settings.json.template` as JSON and merge structurally. Preserve unrelated top-level settings, unrelated hook events, and unrelated hook commands — this file governs ALL of the user's Claude Code sessions, not just homunculus work. For the two homunculus hooks, use the marker strings in the rendered commands as the agent-readable identity:
+**Existing `~/.claude/settings.json` guidance.** If the user-scope settings file already exists, back it up first (same collision-probed backup naming as Step 3's zshrc backup), then parse the existing file and the rendered `claude_settings.json.template` as JSON and merge structurally. Preserve unrelated top-level settings, unrelated hook events, and unrelated hook commands — this file governs ALL of the user's Claude Code sessions, not just homunculus work. For the three homunculus hooks, use the marker strings in the rendered commands as the agent-readable identity:
 
 - `HOMUNCULUS_STEP_ZERO_HOOK=<name>`
 - `HOMUNCULUS_ROLE_RECLAIM_HOOK=<name>`
+- `HOMUNCULUS_WAKE_HOOK=<name>`
 
 For each relevant hook event, remove any existing command hook containing the same marker, then append the rendered hook object for that event. Keep existing non-homunculus hook objects (and other homunculi's marker-bearing hooks) in their current order. Create `~/.claude/` if needed, write valid pretty JSON, and validate it with a JSON parser before moving on. This is guidance for the driving agent, not hidden genesis automation: the point is to make the edit obvious and repeatable while preserving the user's configuration.
 
 The launcher invariant is non-negotiable: `claude-<name>` never passes `--dangerously-skip-permissions`. The user's tool-approval flow is the safety boundary of the whole client-deployment pattern, and a generated launcher that bypasses it deletes that boundary. Do not add the flag on request without pointing the user at this paragraph first.
 
-The settings hooks no-op silently for bare sessions, and at user scope this guard is load-bearing for the user's ENTIRE Claude Code use: a plain `claude` session anywhere on the machine has no session-label environment variable set, and BOTH hooks must produce zero output and zero errors in that case. The shipped template guards both; keep the guards if you edit.
+The settings hooks no-op silently for bare sessions, and at user scope this guard is load-bearing for the user's ENTIRE Claude Code use: a plain `claude` session anywhere on the machine has no session-label environment variable set, and ALL THREE hooks must produce zero output and zero errors in that case (the wake hook exits 0 immediately when the label is absent). The shipped template guards all three; keep the guards if you edit.
 
 ## Step 3 — review, recommend, then offer shell integration
 
@@ -268,7 +280,7 @@ Let the operator pick names and count; do not invent roles they did not ask for.
 
 - `--remote-control "$role"` makes the session addressable by Claude Code's remote-control feature from another session — what lets a coordinator drive or monitor workers. A Claude Code feature; no MCP involved.
 - `--dangerously-skip-permissions` is opt-in and separately gated in the template (an env var the operator sets, not a hardcoded flag). It removes the per-action tool-approval prompt — necessary for several sessions to run without an operator babysitting each confirmation, but it removes the safety boundary Step 2's invariant exists to protect. State this tradeoff to the operator in plain language and let them decide; do not default it on.
-- Peer messaging and role binding come from each session's watcher (armed by the SessionStart hook → rename skill), not from any launcher flag. The optional MCP development-channel flag (`{{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS=1`) exists in the template gated OFF; it is only for an operator who explicitly asks for MCP-native wake and whose policy permits MCP — never suggest it unprompted.
+- Peer messaging, role binding, AND idle wake come from each session's watcher (armed by the SessionStart hook → rename skill) plus the user-scope `<name> wake` Stop hook — not from any launcher flag. The optional MCP development-channel flag (`{{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS=1`) exists in the template gated OFF; the flag alone is inert (it also needs a registered MCP server via `claude mcp add` AND Anthropic-direct auth — unusable on Bedrock, impossible on an MCP-blocked machine), and it is only for an operator who explicitly asks for MCP-native wake and whose policy permits MCP — never suggest it unprompted.
 
 **Git safety when more than one session shares a clone — an OPTIONAL, nameable gate you must NOT default on.** If the operator is choosing more than one role, ask directly: will more than one of these sessions ever run git commands (commit, push, checkout, stash, branch) against the SAME clone? If yes, concurrent mutating git from multiple sessions is a real collision risk (a stash or checkout from one session can silently clobber another session's in-progress work). There is an OPTIONAL gate for exactly this, and the operator names it themselves: designate ONE role — **any name they choose** (`Git-Controller`, `gitops`, whatever) — as the sole git-mutator, and every other session is then blocked from mutating git. The reference implementation lives in the PLATFORM ORIGIN repository (`.claude/hooks/git_controller_gate.py` with `_git_controller_lex.py` + `_git_controller_walker.py`, enabled by setting `HOMUNCULUS_GIT_CONTROLLER_NAME=<chosen-role>` on the gate's `PreToolUse` command; the origin's `deployment/scripts/setup_clone.sh` step 3 shows the exact wiring) — **the seed does NOT ship these files.** On a seed-born deployment, be honest about that: if the operator wants the gate, obtaining or re-authoring those hook scripts is explicit fleet-setup work, not something already present in the clone. Do not cite paths to the operator as if they exist locally. **Default is OFF, and state the tradeoff up front, plainly:** enabling the gate BLOCKS the Task tool (Anthropic subagents) for every non-controller session — **and that block is the gate's PRIMARY PURPOSE, not a side effect.** Those subagents spawn their own git worktrees and run git, which is exactly how in-progress work gets lost — the very collision the gate exists to prevent. So the choice is honest and either-way: an operator who runs several git-mutating sessions against one clone enables the gate (names a controller, gives up subagents); an operator who wants Anthropic's subagents leaves the gate OFF and works some other way (separate clones per session, or a single git-mutating session). Do NOT default it on; do NOT skip this conversation when more than one session will share a clone.
 
@@ -318,7 +330,7 @@ Then, that the no-MCP command and session tooling work:
 - `<name> call service_interface::knowledge_service::search '{"query": "hydration runbook", "top_k": 3}'` returns a successful action/result path.
 - A fresh session started via `claude-<name>` carries the intended label and can use the `<name>` command without a venv activation.
 - `CLAUDE.md` contains the `BEGIN HOMUNCULUS HYDRATION` / `END HOMUNCULUS HYDRATION` block, including the no-MCP Step Zero command, the implementation/debugging KB-first rule, and the router-vs-bridge distinction.
-- `~/.claude/settings.json` parses as JSON and contains exactly one `HOMUNCULUS_STEP_ZERO_HOOK=<name>` command and exactly one `HOMUNCULUS_ROLE_RECLAIM_HOOK=<name>` command; `~/.claude/skills/rename/SKILL.md` exists.
+- `~/.claude/settings.json` parses as JSON and contains exactly one `HOMUNCULUS_STEP_ZERO_HOOK=<name>` command, exactly one `HOMUNCULUS_ROLE_RECLAIM_HOOK=<name>` command, and exactly one `HOMUNCULUS_WAKE_HOOK=<name>` command (the `Stop` entry, `asyncRewake` shape); `~/.claude/skills/rename/SKILL.md` exists.
 - The UserPromptSubmit hook in that session points the agent at `<name> call`, not MCP.
 - A bare `claude` session in an unrelated directory starts with no hook errors and no injected homunculus context (the label guard covers both hooks).
 - A LABELED session started in a different repo (not the clone) DOES receive the Step Zero and role-reclaim context — this is the fleet case the user-scope ruling exists for.
@@ -350,7 +362,7 @@ This is what lets `platform_dev_surface_plugin` come ready (its readiness probe 
 
 With a session's watcher armed (the rename skill does this at session start), peer and role-addressed messages stream into the watch task's output and surface when the session next looks at it — not as live interruptions. Without a watcher, messages queue durably and drain when one next arms. This is designed behavior, not a defect; the generated CLAUDE.md states the same expectation to the user directly.
 
-Senders see it named honestly: an IMPORTANT send to a watcher-held session returns `delivery="queued_watcher"` — delivered into the watch output, acted on at the recipient's next look, never a live turn. The watcher's own event-stream ack marks the message consumed platform-side, so armed watchers do not generate deaf-wake escalations; if a `deaf_wake_escalation` names a watcher-held role, that watcher is dead or its output is never being read — re-arm it (`/rename <Role>` or a fresh `<name> watch`) and resend. Where the driving harness supports a monitor-style waker (wake-on-output over a background task), run `<name> watch` under it — that is the cheapest near-interrupt upgrade, with zero platform change.
+Senders see it named honestly: an IMPORTANT send to a watcher-held session returns `delivery="queued_watcher"` — delivered into the watch output; an idle recipient with the Step 2 wake hook installed picks it up as a fresh turn (the `<name> wake` Stop hook blocks on the watcher's delivery spool and wakes the session), a busy one at its next look. The watcher's own event-stream ack marks the message consumed platform-side, so armed watchers do not generate deaf-wake escalations; if a `deaf_wake_escalation` names a watcher-held role, that watcher is dead or its output is never being read — re-arm it (`/rename <Role>` or a fresh `<name> watch`) and resend. On a harness without hook support, a plain background `<name> watch` task still receives everything; deliveries then wait for the next look — that is the floor, and the wake hook is the shipped upgrade, MCP-free and provider-agnostic.
 
 ## Reference
 

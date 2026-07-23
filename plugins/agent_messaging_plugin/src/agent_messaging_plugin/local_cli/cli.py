@@ -8,12 +8,12 @@ Errors go to stderr with a mapped exit code.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final, NoReturn
 
 import click
@@ -32,7 +32,16 @@ from .client import (
     HomunculusIdentityError,
     HomunculusNotRunningError,
     resolve_base_url,
+    resolve_homunculus_name,
 )
+from .spool import (
+    WATCH_SESSION_ID_ENV,
+    WATCH_SESSION_LABEL_ENV,
+    default_spool_path,
+    spool_append,
+    watch_instance_digest,
+)
+from .wake import wake
 
 # watch: reconnect backoff after a transient bridge error / homunculus-down /
 # bridge rotation (blue-green swap 404, idle-reap). Kept short so a swap gap is
@@ -51,14 +60,13 @@ WATCH_INBOX_DRAIN_LIMIT: Final[int] = 100
 WATCH_CLAIM_PROCESS_KEY: Final[str] = (
     "plugin::agent_messaging_plugin::peer_claim_role"
 )
-# Deterministic per-session instance id (prefix shared with the server via
+# The deterministic per-session instance id (digest + env contract shared with
+# the wake hook via ``.spool``; prefix shared with the server via
 # ``..models.WATCH_AGENT_INSTANCE_PREFIX``): re-registering after a bridge drop
 # REPLACES the binding instead of minting a sibling, so the durable role
 # binding keeps pointing at this watcher across reconnects — and the server
 # recognises the binding as a pull watcher (queued_watcher delivery labelling,
 # events-ack consumption).
-WATCH_SESSION_LABEL_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_LABEL"
-WATCH_SESSION_ID_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_ID"
 
 
 @dataclass(frozen=True)
@@ -220,21 +228,47 @@ def health() -> None:
     show_default=True,
     help="Peer kind this session registers as.",
 )
-def watch(role: str | None, agent_id: str) -> None:
+@click.option(
+    "--spool",
+    "spool_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Wake-hook spool file (default: this session's derived path).",
+)
+@click.option(
+    "--no-spool",
+    is_flag=True,
+    default=False,
+    help="Disable the wake-hook spool tee (the `wake` hook then never fires).",
+)
+def watch(
+    role: str | None,
+    agent_id: str,
+    spool_path: Path | None,
+    no_spool: bool,
+) -> None:
     """Hold this session's REGISTERED PRESENCE and stream its messages (no MCP).
 
     Registers a stable peer identity for the wrapping session, claims ROLE as
     its durable role binding, drains the durable inbox (catch-up on messages
     that arrived while unwatched), then long-polls the registered bridge and
-    prints one JSON line per delivered event — and NOTHING while idle. Run it
-    under a persistent monitor: it wakes the session only on a real event, at
-    zero idle token cost. Auto-reconnects and re-claims across bridge rotation
-    (blue-green swap) and idle-reap. Stop with Ctrl-C; the durable role
-    binding remains, so role-addressed messages queue for the next start.
+    prints one JSON line per delivered event — and NOTHING while idle.
+    Message-bearing lines are also teed to a per-session spool consumed by
+    `wake`, the shipped Stop-hook waker that turns a delivery into a session
+    turn (zero idle token cost; see the hydration settings template).
+    Auto-reconnects and re-claims across bridge rotation (blue-green swap)
+    and idle-reap. Stop with Ctrl-C; the durable role binding remains, so
+    role-addressed messages queue for the next start.
     """
     identity = _resolve_watch_identity(role, agent_id)
     try:
-        _watch_forever(identity)
+        spool = None if no_spool else (
+            spool_path
+            or default_spool_path(
+                resolve_homunculus_name(), identity.agent_instance_id,
+            )
+        )
+        _watch_forever(identity, spool)
     except HomunculusIdentityError as exc:
         _die(str(exc), ExitCodes.CONNECTION_ERROR)
     except KeyboardInterrupt:
@@ -265,7 +299,7 @@ def _resolve_watch_identity(role: str | None, agent_id: str) -> WatchIdentity:
             "a PID is not an acceptable substitute",
             ExitCodes.UNKNOWN_ERROR,
         )
-    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
+    digest = watch_instance_digest(session_id)
     return WatchIdentity(
         role=resolved_role,
         agent_id=agent_id,
@@ -274,7 +308,7 @@ def _resolve_watch_identity(role: str | None, agent_id: str) -> WatchIdentity:
     )
 
 
-def _watch_forever(identity: WatchIdentity) -> NoReturn:
+def _watch_forever(identity: WatchIdentity, spool: Path | None) -> NoReturn:
     """Reconnect loop: (re)discover the bridge, re-arm, and stream until drop."""
     while True:
         try:
@@ -286,19 +320,25 @@ def _watch_forever(identity: WatchIdentity) -> NoReturn:
             with BridgeClient(
                 base_url, request_timeout_s=WATCH_REQUEST_TIMEOUT_S,
             ) as client:
-                _arm_and_stream(client, identity)
+                _arm_and_stream(client, identity, spool)
         except (httpx.HTTPError, BridgeCallError, BridgeResultTimeoutError):
             # bridge rotated (swap 404), idle-reaped, or a transient error:
             # back off briefly (silent — no model wake) and re-arm from scratch.
             time.sleep(WATCH_RECONNECT_DELAY_S)
 
 
-def _arm_and_stream(client: BridgeClient, identity: WatchIdentity) -> None:
-    """One bridge lifetime: register, claim, drain catch-up, then long-poll."""
+def _arm_and_stream(
+    client: BridgeClient, identity: WatchIdentity, spool: Path | None,
+) -> None:
+    """One bridge lifetime: register, claim, drain catch-up, then long-poll.
+
+    The armed line is deliberately NOT spooled: waking a session because its
+    own watcher (re)armed is noise, not a delivery.
+    """
     claim = _register_and_claim(client, identity)
     _emit_line({"watch": "armed", "role": identity.role, "claim": claim})
-    _drain_inbox(client)
-    _stream_events(client, identity)
+    _drain_inbox(client, spool)
+    _stream_events(client, identity, spool)
 
 
 def _register_and_claim(
@@ -337,7 +377,7 @@ def _register_and_claim(
     return payload
 
 
-def _drain_inbox(client: BridgeClient) -> None:
+def _drain_inbox(client: BridgeClient, spool: Path | None) -> None:
     """Emit durable messages that arrived while unwatched (instance + role)."""
     page = client.peer_inbox(
         include_important=True, limit=WATCH_INBOX_DRAIN_LIMIT,
@@ -347,10 +387,14 @@ def _drain_inbox(client: BridgeClient) -> None:
         if not isinstance(items, list):
             raise BridgeCallError(f"inbox section {section!r} malformed: {page!r}")
         for entry in items:
-            _emit_line({"watch": "inbox", "section": section, "entry": entry})
+            _emit_line(
+                {"watch": "inbox", "section": section, "entry": entry}, spool,
+            )
 
 
-def _stream_events(client: BridgeClient, identity: WatchIdentity) -> None:
+def _stream_events(
+    client: BridgeClient, identity: WatchIdentity, spool: Path | None,
+) -> None:
     """Long-poll one armed bridge, one JSON line per event, until it drops.
 
     Re-asserts ``peer/register`` on a heartbeat cadence: the server can drop
@@ -368,7 +412,7 @@ def _stream_events(client: BridgeClient, identity: WatchIdentity) -> None:
         if not isinstance(events, list):
             raise BridgeCallError(f"events response malformed: {payload!r}")
         for event in events:
-            _emit_line({"watch": "event", "event": event})
+            _emit_line({"watch": "event", "event": event}, spool)
         next_cursor = payload.get("next_cursor", cursor)
         cursor = next_cursor if isinstance(next_cursor, int) else cursor
         if time.monotonic() - last_register >= WATCH_REREGISTER_INTERVAL_S:
@@ -381,9 +425,19 @@ def _stream_events(client: BridgeClient, identity: WatchIdentity) -> None:
             last_register = time.monotonic()
 
 
-def _emit_line(payload: dict[str, Any]) -> None:
-    """One compact JSON line per delivery — the monitor-facing stream format."""
-    click.echo(json.dumps(payload, sort_keys=True))
+def _emit_line(payload: dict[str, Any], spool: Path | None = None) -> None:
+    """One compact JSON line per delivery — the monitor-facing stream format.
+
+    With a spool, the line is also appended there for the `wake` Stop hook —
+    stdout is the session-facing stream, the spool is the wake channel.
+    """
+    line = json.dumps(payload, sort_keys=True)
+    click.echo(line)
+    if spool is not None:
+        spool_append(spool, line)
+
+
+cli.add_command(wake)
 
 
 def main() -> None:

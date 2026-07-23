@@ -111,12 +111,18 @@ connectivity, name the layer you actually mean:
 - The **development channel** (`--dangerously-load-development-channels
   server:{{HOMUNCULUS_NAME}}`) is optional MCP-transport idle wake, gated OFF
   by default in the fleet launcher ({{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS=1
-  to enable). Sessions receive messages through the `{{HOMUNCULUS_NAME}}
-  watch` watcher instead; this flag is only for operators who explicitly
-  choose MCP where policy permits it.
+  to enable). The flag alone is inert: it also needs a registered MCP server
+  named {{HOMUNCULUS_NAME}} (`claude mcp add`) and Anthropic-direct auth
+  (unavailable on Bedrock) — on an MCP-blocked machine there is no provider
+  setting under which it works, and that is fine: sessions receive through
+  the `{{HOMUNCULUS_NAME}} watch` watcher and are woken by the
+  `{{HOMUNCULUS_NAME}} wake` Stop hook, which need neither MCP nor a
+  specific provider.
 - Claude Code **remote-control** (`--remote-control <role>`) is a Claude Code
-  feature that lets one session drive another. It is not part of the
-  homunculus at all.
+  feature that lets a HUMAN drive a session from another device via
+  claude.ai. It is not part of the homunculus at all, and it is NOT a
+  session-to-session wake transport — do not reach for it to make messaging
+  work.
 
 If you are confused about any router/bridge behavior, search
 {{HOMUNCULUS_NAME}}'s knowledge base for `router bridge blue-green` before
@@ -150,15 +156,19 @@ nothing more.
 
 With the watcher armed (the rename skill does this), peer and role-addressed
 messages from {{HOMUNCULUS_NAME}} stream into the watch task's output as JSON
-lines — check that output when returning to the conversation. Messages
-surface when the session next looks, not as live interruptions; that is the
-designed behavior, not a bug. Without a watcher armed, messages queue durably
-and are drained the next time one arms.
+lines — check that output when returning to the conversation. While a session
+sits idle, the user-scope Stop hook runs `{{HOMUNCULUS_NAME}} wake`, which
+blocks at zero token cost on the watcher's delivery spool and turns the next
+delivery into a session turn — so an idle session with the watcher armed and
+the hook installed DOES wake on real messages, on any inference provider,
+with no MCP. During an active turn (or where the hook is absent), messages
+wait in the watch output for the next look. Without a watcher armed, messages
+queue durably and are drained the next time one arms.
 
 The same contract from the sender's side: an IMPORTANT send to a
 watcher-held session returns `delivery="queued_watcher"` — the message IS
-delivered (it is in that session's watch output) and will be acted on at the
-recipient's next look; do not expect an immediate reply turn, and do not
+delivered (it is in that session's watch output; an idle session with the
+wake hook picks it up as a fresh turn, a busy one at its next look); do not
 resend. The watcher's own stream-ack marks the message consumed, so armed
 watchers never trigger deaf-wake escalations; if an escalation names a
 watcher-held role, that watcher is dead or unread — re-arm it and resend.

@@ -33,14 +33,21 @@
 #                               in the environment (or edit the line below)
 #                               only after you understand that tradeoff.
 #
-# Peer messaging and role binding need NO flag here: each session's
-# SessionStart hook invokes the rename skill, which arms the
+# Peer messaging, role binding, AND idle wake need NO flag here: each
+# session's SessionStart hook invokes the rename skill, which arms the
 # `{{HOMUNCULUS_NAME}} watch` registered-presence watcher (register + claim
-# + receive, zero MCP). If — and only if — the operator explicitly wants the
-# optional MCP development-channel wake instead and policy permits MCP, set
-# {{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS=1 to add
-# --dangerously-load-development-channels server:{{HOMUNCULUS_NAME}}.
-# Default is OFF; do not suggest it unprompted.
+# + receive, zero MCP), and the user-scope Stop hook runs
+# `{{HOMUNCULUS_NAME}} wake`, which turns deliveries into session turns on
+# any provider. The optional MCP development-channel wake
+# ({{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS=1 adds
+# --dangerously-load-development-channels server:{{HOMUNCULUS_NAME}}) is
+# opt-in and needs BOTH halves to function: this flag AND a registered MCP
+# server named {{HOMUNCULUS_NAME}} (`claude mcp add`, hydration's
+# explicit-request-only step) — the flag alone is inert. It also requires
+# Anthropic-direct auth (DELIVER_IMMEDIATELY channels are unavailable on
+# Bedrock), so on a machine whose policy blocks MCP there is NO provider
+# setting under which it works. Default is OFF; do not suggest it
+# unprompted.
 _claude_for_{{HOMUNCULUS_NAME}}() {
   local role="$1"
   local model="$2"    # optional CLI model alias; empty = settings.json default

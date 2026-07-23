@@ -100,6 +100,18 @@ everything else alone.
 
 - `<name> health` answers and a KB search returns content from the new
   release (search for a phrase the release notes mention).
+
+Known post-restart state on blue-green-router profiles: `<name> health`
+returns HTTP 503 `no_active_color` through the router while the platform
+itself is healthy (a direct `curl` of the platform's own ephemeral bridge
+port answers `200`). That is the router activation race: the new instance
+registered before the router's 30s heartbeat GC expired the outgoing one,
+so the one-shot cold-start auto-activate declined, and the GC then cleared
+the active binding. On releases carrying the steady-state re-assert fix
+(2026-07-23 and later) this heals itself within ~10 seconds — just re-probe.
+On earlier releases, bounce `local.homunculus.<name>.plist` once more (the
+second boot sees no active binding and self-activates); leave the router
+LaunchAgent alone either way.
 - A labeled session's rename skill arms `<name> watch`; its first line is
   `"watch": "armed"`. Ground truth for the role claim:
   `<name> call plugin::agent_messaging_plugin::peer_holds_role` with the role
