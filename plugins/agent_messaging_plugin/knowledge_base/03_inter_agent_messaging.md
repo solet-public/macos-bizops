@@ -8,7 +8,7 @@ Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:t
 
 Article Tags: planning-stage:agent-to-agent-coordination, planning-stage:tool-discovery, evidence-category:peer-messaging-contracts, evidence-category:identity-model, domain:agent-messaging, domain:inter-agent-routing
 
-Embedding Description: How live agent sessions talk through the homunculus — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the IMPORTANT-marker loop-prevention contract, silent vs queued delivery (persisted_silent / queued_notification / queued_wake), peer_inbox catch-up semantics, multi-instance addressing, Claude Code native-channel wake routing, and the locally patched Codex peer-wake path.
+Embedding Description: How live agent sessions talk through the homunculus — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the IMPORTANT-marker loop-prevention contract, silent vs queued delivery (persisted_silent / queued_notification / queued_wake / queued_watcher), what IMPORTANT means for a watcher-held recipient (pull, surfaced on next look, consumed on events-ack — never a live interrupt), peer_inbox catch-up semantics, multi-instance addressing, Claude Code native-channel wake routing, and the locally patched Codex peer-wake path.
 
 ## Purpose
 
@@ -170,6 +170,8 @@ peer_send WITH prose starting "IMPORTANT" (followed by ":" or whitespace)
   -> delivery = "queued_notification" for a normal bridge channel event
              or "queued_wake" when peer_registry used a registered native
              wake adapter, currently Claude Code
+             or "queued_watcher" when the resolved recipient is held by a
+             no-MCP `<name> watch` subprocess (either transport)
 
 peer_send WITHOUT marker
   -> message persisted to thread, no event queued
@@ -184,6 +186,30 @@ and whether it becomes a turn is client-side and is NOT confirmed by this field
 "queued"). Consumption (did the message enter a turn context) is tracked
 separately by the REL-05 direct-wake outbox, which re-queues an unconsumed
 IMPORTANT send until it provably enters a turn.
+
+### What IMPORTANT means for a watcher-held recipient
+
+An MCP-free fleet session receives through a `<name> watch` subprocess, and a
+watcher is a PULL consumer: the queued event streams into the watch task's
+output and the session sees it **when it next looks at that output** — no turn
+starts, because nothing on a no-MCP machine can start one. `queued_watcher`
+names that truthfully so a sender never reads a watcher delivery as a live
+interrupt. Expectations to plan around:
+
+- The message IS delivered (durable + streamed into the watch output within
+  one long-poll cycle). It is not lost, and no resend is needed.
+- The recipient acts on it at its next look — for a heads-down or idle
+  session, that is its next prompt or its next check of the watch output.
+  If you need action NOW, reach the operator or drive the session directly.
+- Consumption is the watcher's events-ack, not model activity: when the
+  watcher's long-poll cursor moves past the delivered event (it printed the
+  line), the platform stamps the message consumed, so an armed watcher never
+  triggers `deaf_wake_escalation` / `recipient_gone` noise. An escalation
+  against a watcher-held role therefore means the watcher is genuinely dead
+  or its output was never surfaced — re-arm the watch, then resend.
+- The watch client's arm-time catch-up drain (`peer_inbox
+  include_important=true`) consumes what it surfaces the same way, so a
+  backlog drained at re-arm does not later escalate.
 
 When you receive a peer_message notification, the sender used
 IMPORTANT — they are explicitly asking. Reply with substance, or
@@ -245,7 +271,10 @@ When the recipient `agent_id` has a registered native wake adapter
 messages route through that adapter. Claude Code wakes into a real turn
 instead of waiting for the next user input, and `peer_send` reports
 `delivery="queued_wake"` (the event is queued on the recipient's live bridge —
-the platform cannot observe whether the wake became a turn; REL-06).
+the platform cannot observe whether the wake became a turn; REL-06). When the
+resolved recipient binding is a `<name> watch` subprocess, the same queued
+event reports `delivery="queued_watcher"` instead — pull semantics, no turn
+(see the IMPORTANT-marker section above).
 
 The pairing key is `parent_pid`: the bridge and the host MCP
 session share the same OS parent process. The native wake adapter

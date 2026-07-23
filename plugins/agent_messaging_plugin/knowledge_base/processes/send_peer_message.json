@@ -7,8 +7,8 @@
   "result_processor_customizations": {
     "action_label": "Peer message delivered",
     "result_type": "peer_message_delivery_result",
-    "result_description": "Thread id, message id, delivery channel (persisted_silent/queued_notification/queued_wake), and resolved recipient identifiers. A queued_* channel means the event was placed on the recipient's live bridge queue, not that a turn started — REL-06 honest naming.",
-    "presentation_guidance": "Confirm successful delivery to the named peer; surface the delivery channel so the caller can distinguish a queued live event (queued_notification / queued_wake) from a silent persistence (persisted_silent)."
+    "result_description": "Thread id, message id, delivery channel (persisted_silent/queued_notification/queued_wake/queued_watcher), and resolved recipient identifiers. A queued_* channel means the event was placed on the recipient's live bridge queue, not that a turn started — REL-06 honest naming. queued_watcher means the recipient is a no-MCP watch subprocess: the message streams into its watch output and surfaces when that session next looks, never as a live interrupt.",
+    "presentation_guidance": "Confirm successful delivery to the named peer; surface the delivery channel so the caller can distinguish a queued live event (queued_notification / queued_wake), a pull delivery to a watcher-held session (queued_watcher — surfaced on the recipient's next look, no turn starts), and a silent persistence (persisted_silent)."
   },
   "error_processor_customizations": {
     "action_context": "Delivers a peer message via the agent_messaging bridge. send_peer_message accepts {peer_id, peer_agent_instance_id?, content, important?}.",

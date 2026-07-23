@@ -33,6 +33,7 @@ from ananta.llm.agent_messaging.schema import (
     META_KEY_RECIPIENT_KEY,
     META_KEY_RECIPIENT_KIND,
     RECIPIENT_KIND_ROLE,
+    ROLE_THREAD_PREFIX,
 )
 from ananta.llm.agent_messaging.service import role_message_external_id
 
@@ -55,6 +56,11 @@ logger = logging.getLogger(__name__)
 # ``EVENT_PEER_MESSAGE`` re-export it still publishes.
 EVENT_PEER_MESSAGE: Final[str] = "peer_message"
 
+# Channel event type the claude_code native wake adapter rides (its wake IS an
+# ``append_event`` on the recipient's bridge queue — v10 Q3-revised). Named so
+# the events route can recognise acked wake deliveries without a magic string.
+EVENT_POST_MESSAGE: Final[str] = "post_message"
+
 
 # Matches the leading "IMPORTANT" marker (with ":" or whitespace tail)
 # that gates the wake-vs-silent dispatch path.  Stripped from the
@@ -75,9 +81,17 @@ IMPORTANT_MARKER_RE: Final[re.Pattern[str]] = re.compile(
 # channel event. Emission to the client happens at the forwarder's next drain;
 # whether it becomes a turn is client-side and NOT confirmed by this field —
 # consumption is tracked separately (REL-05 direct-wake outbox).
+#
+# Dax Part 14 (wake semantics, 2026-07-23): a recipient bound by a no-MCP
+# ``watch`` subprocess is a PULL recipient — the queued event streams into a
+# background task's output and surfaces when the session next looks; no turn
+# starts. ``queued_watcher`` names that truthfully so senders never read a
+# watcher delivery as a live wake. Consumption for these rides the watcher's
+# events-ack (the /events route), not model activity.
 DELIVERY_PERSISTED_SILENT: Final[str] = "persisted_silent"
 DELIVERY_QUEUED_NOTIFICATION: Final[str] = "queued_notification"
 DELIVERY_QUEUED_WAKE: Final[str] = "queued_wake"
+DELIVERY_QUEUED_WATCHER: Final[str] = "queued_watcher"
 # v10 Control #4: an IMPORTANT role message whose authoritative envelope was
 # persisted (delivered=false) but whose current holder could not be reached
 # (no live binding / wake failure / queue full). NOT a failure — the row sits
@@ -226,7 +240,13 @@ def dispatch_peer_send(
                 f"native wake failed for {peer_id}: {exc}",
                 peer_agent_id=peer_id,
             ) from exc
-        delivery_kind = DELIVERY_QUEUED_WAKE
+        # Dax Part 14: a watcher-held recipient is a pull consumer — the same
+        # queued event, but no turn starts. Label truthfully.
+        delivery_kind = (
+            DELIVERY_QUEUED_WATCHER
+            if recipient.is_watcher
+            else DELIVERY_QUEUED_WAKE
+        )
         delivered_bridge = str(delivered_to_bridge_id)
     else:
         meta = build_peer_message_meta(
@@ -247,7 +267,11 @@ def dispatch_peer_send(
             delivered_prose,
             meta,
         )
-        delivery_kind = DELIVERY_QUEUED_NOTIFICATION
+        delivery_kind = (
+            DELIVERY_QUEUED_WATCHER
+            if recipient.is_watcher
+            else DELIVERY_QUEUED_NOTIFICATION
+        )
         delivered_bridge = recipient.bridge_id
     # REL-05: insure this IMPORTANT direct send. The outbox row records the
     # ORIGINAL emission just performed (emit_count=1, last_emitted_at=now); if the
@@ -292,9 +316,11 @@ class RoleSendOutcome:
     ``delivery`` is one of ``persisted_silent`` (silent role message — inbox
     only), ``queued_wake`` / ``queued_notification`` (the role event was QUEUED
     on the live holder's bridge; ``delivered`` is flipped by the holder's forwarder
-    on confirmed emission, NOT at send — v10 Q3-revised), or
-    ``queued_for_replay`` (persisted but the holder was unreachable; the repair
-    loop re-delivers).
+    on confirmed emission, NOT at send — v10 Q3-revised), ``queued_watcher``
+    (the holder is a no-MCP watcher: the event streams into its watch output
+    and surfaces when the session next looks — no turn starts; consumption is
+    the watcher's events-ack), or ``queued_for_replay`` (persisted but the
+    holder was unreachable; the repair loop re-delivers).
     """
 
     thread_id: str
@@ -339,9 +365,11 @@ def _deliver_important_to_binding(
     Returns ``(delivery_kind, delivered_to_bridge_id)``: native wake adapter if
     one is registered for the recipient's ``agent_id`` (``queued_wake``),
     else a ``peer_message`` channel event on the recipient's bridge
-    (``queued_notification``). Raises :class:`NativeWakeError` if a registered
-    adapter fails — the loop-prevention contract treats IMPORTANT delivery as a
-    hard promise.
+    (``queued_notification``). Either transport reports ``queued_watcher``
+    when the resolved holder is a no-MCP watcher binding (pull recipient — the
+    event surfaces in the watch output, no turn starts). Raises
+    :class:`NativeWakeError` if a registered adapter fails — the
+    loop-prevention contract treats IMPORTANT delivery as a hard promise.
 
     Role-only (called solely from :func:`dispatch_role_send`), so the v10
     Control #5 role-delivery meta keys (``recipient_kind`` / ``recipient_key`` /
@@ -385,6 +413,9 @@ def _deliver_important_to_binding(
                 f"native wake failed for {recipient.agent_id}: {exc}",
                 peer_agent_id=recipient.agent_id,
             ) from exc
+        if recipient.is_watcher:
+            # Dax Part 14: pull recipient — same queued event, no turn starts.
+            return DELIVERY_QUEUED_WATCHER, str(delivered_to_bridge_id)
         return DELIVERY_QUEUED_WAKE, str(delivered_to_bridge_id)
     meta = build_peer_message_meta(
         sender_agent_id=sender_agent_id,
@@ -417,6 +448,8 @@ def _deliver_important_to_binding(
     bridge_manager.append_event(
         recipient.bridge_id, EVENT_PEER_MESSAGE, hinted_prose, meta,
     )
+    if recipient.is_watcher:
+        return DELIVERY_QUEUED_WATCHER, recipient.bridge_id
     return DELIVERY_QUEUED_NOTIFICATION, recipient.bridge_id
 
 
@@ -473,7 +506,7 @@ def dispatch_role_send(
         important=important,
         content=content,
     )
-    thread_id = f"role:{role_name}"
+    thread_id = f"{ROLE_THREAD_PREFIX}{role_name}"
     if not important:
         return RoleSendOutcome(
             thread_id=thread_id,
@@ -611,7 +644,9 @@ __all__ = [
     "DELIVERY_PERSISTED_SILENT",
     "DELIVERY_QUEUED_FOR_REPLAY",
     "DELIVERY_QUEUED_WAKE",
+    "DELIVERY_QUEUED_WATCHER",
     "EVENT_PEER_MESSAGE",
+    "EVENT_POST_MESSAGE",
     "IMPORTANT_MARKER_RE",
     "NativeWakeError",
     "PeerSendOutcome",

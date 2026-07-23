@@ -17,7 +17,16 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Final, Protocol
+
+# Instance-id prefix minted by the no-MCP `<name> watch` client (registered-
+# presence receive). A binding whose ``agent_instance_id`` carries this prefix
+# is held by a WATCHER subprocess — a pull recipient that long-polls ``/events``
+# and streams into a background task's output, never running model turns. The
+# prefix is the single watcher discriminator the server reads (delivery-status
+# labelling + events-ack consumption); the watch CLI imports it from here so
+# client and server can never drift.
+WATCH_AGENT_INSTANCE_PREFIX: Final[str] = "agi-watch-"
 
 
 class NativeWakeAdapter(Protocol):
@@ -121,6 +130,17 @@ class BridgeBinding:
     # surfaces via current_identity. Empty for sessions launched without
     # HOMUNCULUS_AGENT_SESSION_ID exported (streamable / older clients) -> no self-refresh.
     agent_session_id: str = ""
+
+    @property
+    def is_watcher(self) -> bool:
+        """True when this binding is held by a no-MCP ``watch`` subprocess.
+
+        A watcher is a PULL recipient: IMPORTANT deliveries are queued on its
+        bridge and surface when its long-poll streams them — no model turn
+        starts. Dispatch labels such deliveries ``queued_watcher`` and the
+        events route treats the watcher's long-poll ack as consumption.
+        """
+        return self.agent_instance_id.startswith(WATCH_AGENT_INSTANCE_PREFIX)
 
 
 @dataclass(slots=True)
@@ -239,13 +259,24 @@ class BridgeSessionState:
             self.next_event_id += 1
             return event
 
-    def events_after(self, after: int) -> list[QueuedEvent]:
-        """Return undelivered events; drain those the client already saw."""
+    def events_after(
+        self, after: int,
+    ) -> tuple[list[QueuedEvent], list[QueuedEvent]]:
+        """Return ``(acked, pending)`` for a client cursor.
+
+        ``acked`` are the events the client's ``after`` cursor acknowledges
+        (cursor <= after) — they were returned by an earlier call and the
+        client has provably received them, so they are drained here exactly
+        once. The events route reads ``acked`` as the watcher consumption
+        signal (a pull recipient acking a wake event HAS surfaced it).
+        ``pending`` are the still-undelivered events (cursor > after).
+        """
         with self._events_lock:
+            acked = [e for e in self.pending_events if e.cursor <= after]
             self.pending_events = [
                 e for e in self.pending_events if e.cursor > after
             ]
-            return list(self.pending_events)
+            return acked, list(self.pending_events)
 
     def pending_event_count(self) -> int:
         with self._events_lock:
@@ -253,6 +284,7 @@ class BridgeSessionState:
 
 
 __all__ = [
+    "WATCH_AGENT_INSTANCE_PREFIX",
     "BridgeBinding",
     "BridgeSessionState",
     "NativeWakeAdapter",

@@ -20,6 +20,9 @@ import click
 import httpx
 from ananta.constants import ExitCodes
 
+# The parent package __init__ is lazy (PEP 562) and ``models`` is stdlib-only,
+# so this import keeps the console script's bare-PATH contract intact.
+from ..models import WATCH_AGENT_INSTANCE_PREFIX
 from . import __version__
 from .client import (
     DEFAULT_POLL_TIMEOUT_S,
@@ -48,10 +51,12 @@ WATCH_INBOX_DRAIN_LIMIT: Final[int] = 100
 WATCH_CLAIM_PROCESS_KEY: Final[str] = (
     "plugin::agent_messaging_plugin::peer_claim_role"
 )
-# Deterministic per-session instance id: re-registering after a bridge drop
+# Deterministic per-session instance id (prefix shared with the server via
+# ``..models.WATCH_AGENT_INSTANCE_PREFIX``): re-registering after a bridge drop
 # REPLACES the binding instead of minting a sibling, so the durable role
-# binding keeps pointing at this watcher across reconnects.
-WATCH_AGENT_INSTANCE_PREFIX: Final[str] = "agi-watch-"
+# binding keeps pointing at this watcher across reconnects — and the server
+# recognises the binding as a pull watcher (queued_watcher delivery labelling,
+# events-ack consumption).
 WATCH_SESSION_LABEL_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_LABEL"
 WATCH_SESSION_ID_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_ID"
 

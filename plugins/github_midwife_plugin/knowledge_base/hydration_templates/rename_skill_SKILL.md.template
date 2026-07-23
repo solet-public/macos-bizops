@@ -13,7 +13,10 @@ Steps:
 1. Start the registered-presence watcher as a persistent background process
    (Claude Code: a background Bash task; keep it running for the session's
    lifetime; if a previous watcher from this conversation is running for a
-   different role, stop it first):
+   different role, stop it first). If the harness offers a monitor-style
+   waker for background output (wake-on-output over a background task), run
+   the watcher under it — deliveries then interrupt instead of waiting for
+   the next look; a plain background task is the floor, not the ceiling:
    ```bash
    {{HOMUNCULUS_NAME}} watch --role "$ROLE"
    ```

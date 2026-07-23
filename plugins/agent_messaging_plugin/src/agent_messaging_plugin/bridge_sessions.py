@@ -266,7 +266,14 @@ class BridgeSessionManager:
         bridge_id: str,
         after_cursor: int,
         timeout_s: float | None = None,
-    ) -> list[QueuedEvent]:
+    ) -> tuple[list[QueuedEvent], list[QueuedEvent]]:
+        """Long-poll one bridge queue; return ``(acked, pending)``.
+
+        ``acked`` are the events the caller's cursor acknowledges — drained
+        exactly once by the first state read (the post-wakeup re-read drains
+        nothing new for the same cursor). The events route feeds ``acked`` to
+        the watcher consumption reconcile; MCP-transport pumps ignore it.
+        """
         bridge = self.get(bridge_id)
         if bridge is None:
             raise BridgeNotFoundError(bridge_id)
@@ -283,18 +290,19 @@ class BridgeSessionManager:
         # wait() starts (returns immediately).
         wakeup = self._ensure_wakeup(bridge_id)
         wakeup.clear()
-        events = bridge.events_after(after_cursor)
+        acked, events = bridge.events_after(after_cursor)
         if events:
-            return events
+            return acked, events
         deadline = timeout_s if timeout_s is not None else self._long_poll_timeout_s
         try:
             await asyncio.wait_for(wakeup.wait(), timeout=deadline)
         except TimeoutError:
-            return []
+            return acked, []
         # Wakeup fired — either a new event landed or the bridge closed.
         if bridge.closed:
-            return []
-        return bridge.events_after(after_cursor)
+            return acked, []
+        _, late_events = bridge.events_after(after_cursor)
+        return acked, late_events
 
     # ------------------------------------------------------------------
     # Wakeup plumbing

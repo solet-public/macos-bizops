@@ -71,6 +71,12 @@ COL_EMITTED_TO_AGENT_INSTANCE_ID = "emitted_to_agent_instance_id"
 RECIPIENT_KIND_ROLE = "role"
 RECIPIENT_KIND_INSTANCE = "instance"
 
+# Synthetic role-channel thread handle prefix ("role:{recipient_key}") —
+# display-only, never dereferenced as a live thread. Named so readers that
+# recover the role name from an inbox entry's thread_id (the watcher-ack
+# consumption path) cannot drift from the writers that compose it.
+ROLE_THREAD_PREFIX = "role:"
+
 _RECIPIENT_KIND_VALUES = (RECIPIENT_KIND_ROLE, RECIPIENT_KIND_INSTANCE)
 
 # v10 Control #5 role-delivery wire contract — the channel-event ``meta`` keys
@@ -813,6 +819,7 @@ __all__ = [
     "NAMESPACE",
     "RECIPIENT_KIND_INSTANCE",
     "RECIPIENT_KIND_ROLE",
+    "ROLE_THREAD_PREFIX",
     "TABLE_AGENT_DIRECT_WAKE",
     "TABLE_AGENT_MESSAGE",
     "TABLE_AGENT_ROLE_MESSAGE",

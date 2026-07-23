@@ -132,6 +132,7 @@ from .mcp_streamable.oauth import (
 from .mcp_streamable.router import STREAMABLE_ALIAS_PATH, STREAMABLE_PATH
 from .message_important_backfill import backfill_message_important
 from .peer_dispatch import (
+    EVENT_POST_MESSAGE,
     NativeWakeError,
     build_wake_reply_hint,
     dispatch_peer_send,
@@ -2882,7 +2883,9 @@ class AgentMessagingPlugin(
         # forwarder recognises the role delivery on /events and confirms it.
         if delivery_meta:
             meta.update(delivery_meta)
-        manager.append_event(bridge.bridge_id, "post_message", envelope, meta=meta)
+        manager.append_event(
+            bridge.bridge_id, EVENT_POST_MESSAGE, envelope, meta=meta,
+        )
         manager.touch(bridge.bridge_id)
         return bridge.bridge_id
 

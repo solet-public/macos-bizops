@@ -350,6 +350,8 @@ This is what lets `platform_dev_surface_plugin` come ready (its readiness probe 
 
 With a session's watcher armed (the rename skill does this at session start), peer and role-addressed messages stream into the watch task's output and surface when the session next looks at it — not as live interruptions. Without a watcher, messages queue durably and drain when one next arms. This is designed behavior, not a defect; the generated CLAUDE.md states the same expectation to the user directly.
 
+Senders see it named honestly: an IMPORTANT send to a watcher-held session returns `delivery="queued_watcher"` — delivered into the watch output, acted on at the recipient's next look, never a live turn. The watcher's own event-stream ack marks the message consumed platform-side, so armed watchers do not generate deaf-wake escalations; if a `deaf_wake_escalation` names a watcher-held role, that watcher is dead or its output is never being read — re-arm it (`/rename <Role>` or a fresh `<name> watch`) and resend. Where the driving harness supports a monitor-style waker (wake-on-output over a background task), run `<name> watch` under it — that is the cheapest near-interrupt upgrade, with zero platform change.
+
 ## Reference
 
 - `bootstrap.py` (repo root) — the canonical reference implementation of the step 0 sequence, in its `role_and_db` step.

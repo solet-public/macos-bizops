@@ -155,6 +155,14 @@ surface when the session next looks, not as live interruptions; that is the
 designed behavior, not a bug. Without a watcher armed, messages queue durably
 and are drained the next time one arms.
 
+The same contract from the sender's side: an IMPORTANT send to a
+watcher-held session returns `delivery="queued_watcher"` — the message IS
+delivered (it is in that session's watch output) and will be acted on at the
+recipient's next look; do not expect an immediate reply turn, and do not
+resend. The watcher's own stream-ack marks the message consumed, so armed
+watchers never trigger deaf-wake escalations; if an escalation names a
+watcher-held role, that watcher is dead or unread — re-arm it and resend.
+
 ## Governance and the owner relationship
 
 The knowledge base ships a governance set for working with your owner. The

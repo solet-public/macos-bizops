@@ -91,7 +91,9 @@ async def stream_session_events(
     try:
         while True:
             try:
-                events = await bridge_manager.events_after(
+                # The acked half is the watcher consumption signal — an MCP
+                # transport confirms consumption via /peer/drain instead.
+                _, events = await bridge_manager.events_after(
                     session.bridge_id,
                     cursor,
                     timeout_s=_LONG_POLL_TIMEOUT_S,

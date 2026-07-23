@@ -97,7 +97,12 @@ POST /api/v1/bridge/open
 GET  /api/v1/bridge/{bridge_id}/events?after={cursor}
   long-poll; returns queued events in cursor order. Each event is
   one of: channel_message (post_message), bridge_delivery_result,
-  bridge_delivery_error, peer_message, agent_message.
+  bridge_delivery_error, peer_message, agent_message. The cursor also
+  ACKS: events at or below `after` are drained server-side, the caller's
+  peer binding is touched (liveness), and — when the registered binding is
+  a no-MCP watcher (`agi-watch-*`) — acked IMPORTANT deliveries are
+  stamped consumed (their REL-05 re-emit/escalation insurance retires;
+  the pull recipient has provably streamed them).
 
 POST /api/v1/bridge/{bridge_id}/close
   body: {}
@@ -170,13 +175,17 @@ POST /api/v1/bridge/{bridge_id}/peer/send
   body: { "peer_id": "claude_code",
           "peer_agent_instance_id"?: "agi-...",   # required if N>1
           "content": "IMPORTANT: please review ..." }
-  resp: { "delivery": "queued_notification" | "queued_wake" | "persisted_silent",
+  resp: { "delivery": "queued_notification" | "queued_wake"
+                    | "queued_watcher" | "persisted_silent",
           "thread_id": "...", "message_id": "..." }
   # A queued_* delivery means the platform placed a turn-triggering event on the
   # recipient's live bridge queue; emission to the client happens at the
   # forwarder's next drain, and whether it becomes a turn is client-side and is
   # NOT confirmed by this field (REL-06). Consumption is tracked separately by
   # the REL-05 direct-wake outbox, which re-queues an unconsumed IMPORTANT send.
+  # queued_watcher = the recipient is a no-MCP `<name> watch` binding: the same
+  # queued event streams into the watch output (pull — surfaced on next look,
+  # never a live turn), and the watcher's /events cursor ack stamps it consumed.
 
 GET  /api/v1/bridge/{bridge_id}/peer/inbox?include_important=false
   resp: { "messages": [ {sender_agent_id, sender_agent_instance_id,

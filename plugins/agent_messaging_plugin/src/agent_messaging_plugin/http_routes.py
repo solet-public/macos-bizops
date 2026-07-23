@@ -40,7 +40,15 @@ from ananta.llm.agent_messaging.models import (
     SendAgentMessageRequest,
     TextPart,
 )
-from ananta.llm.agent_messaging.service import AgentMessagingError
+from ananta.llm.agent_messaging.schema import (
+    META_KEY_DELIVERY_EXTERNAL_ID,
+    RECIPIENT_KIND_ROLE,
+    ROLE_THREAD_PREFIX,
+)
+from ananta.llm.agent_messaging.service import (
+    AgentMessagingError,
+    role_message_external_id,
+)
 from ananta.llm.agent_messaging.state_results import StateOperationError
 from fastapi import Body, FastAPI
 from fastapi.responses import JSONResponse, Response
@@ -54,6 +62,7 @@ from .bridge_sessions import (
 )
 from .peer_dispatch import (
     EVENT_PEER_MESSAGE,
+    EVENT_POST_MESSAGE,
     IMPORTANT_MARKER_RE,
     NativeWakeError,
     dispatch_peer_send,
@@ -71,9 +80,17 @@ from .role_binding_store import (
 )
 
 if TYPE_CHECKING:
-    from .models import BridgeBinding
+    from .models import BridgeBinding, QueuedEvent
 
 logger = logging.getLogger(__name__)
+
+
+# Bridge-event types that carry an IMPORTANT peer/role delivery (the native
+# wake rides ``post_message``; the no-adapter path rides ``peer_message``).
+# The watcher-ack consumption reconcile only inspects these.
+_WATCHER_DELIVERY_EVENT_TYPES: Final[frozenset[str]] = frozenset(
+    {EVENT_POST_MESSAGE, EVENT_PEER_MESSAGE},
+)
 
 
 API_PREFIX: Final[str] = "/api/v1/bridge"
@@ -248,6 +265,7 @@ def register_routes(
         app,
         bridge_manager=bridge_manager,
         peer_registry=peer_registry,
+        agent_messaging_service=agent_messaging_service,
         long_poll_timeout_s=long_poll_timeout_s,
         inference_provider_clear=inference_provider_clear,
         autonomic_on_close=autonomic_on_close,
@@ -291,6 +309,7 @@ def _register_bridge_lifecycle_routes(
     *,
     bridge_manager: BridgeSessionManager,
     peer_registry: PeerRegistry,
+    agent_messaging_service: Any,
     long_poll_timeout_s: int,
     inference_provider_clear: Callable[[str], int] | None = None,
     autonomic_on_close: Callable[[str], str] | None = None,
@@ -341,7 +360,7 @@ def _register_bridge_lifecycle_routes(
         bridge_id: str, after: int = -1,
     ) -> JSONResponse:
         try:
-            events = await bridge_manager.events_after(
+            acked, events = await bridge_manager.events_after(
                 bridge_id, after, timeout_s=long_poll_timeout_s,
             )
         except BridgeNotFoundError:
@@ -355,6 +374,16 @@ def _register_bridge_lifecycle_routes(
         binding = _lookup_binding_for_bridge(peer_registry, bridge_id)
         if binding is not None:
             peer_registry.touch_binding(binding.agent_instance_id)
+            # Dax Part 14: a watcher's cursor ack proves the acked events
+            # streamed into its watch output — the pull equivalent of entering
+            # a turn. Retire the acked deliveries' re-emit/escalation insurance
+            # so an armed watcher never escalates recipient_gone. MCP-transport
+            # bridges confirm via /peer/drain instead — never here (their
+            # forwarder drains events without the model having read them).
+            if binding.is_watcher and acked:
+                _consume_watcher_acked_events(
+                    agent_messaging_service, binding, acked,
+                )
         next_cursor = events[-1].cursor if events else after
         return JSONResponse(
             content={
@@ -817,6 +846,15 @@ def _register_peer_routes(
         # The bridge calling peer_inbox is alive — bump its binding so
         # peer_list shows recent activity even if no peer_send has run.
         peer_registry.touch_binding(sender_binding.agent_instance_id)
+        # Dax Part 14: the watch client's arm-time catch-up drain prints every
+        # returned entry into the watch output — those exact rows are surfaced,
+        # so their re-emit/escalation insurance retires here. Watcher-only:
+        # an MCP session's consumption authority stays the /peer/drain
+        # reconcile.
+        if sender_binding.is_watcher and include_important:
+            _consume_watcher_inbox_page(
+                agent_messaging_service, sender_binding, page,
+            )
         return JSONResponse(
             content=_serialize_peer_inbox(page, sender_binding),
             status_code=200,
@@ -1474,6 +1512,63 @@ def _lookup_binding_for_bridge(
             if binding.bridge_id == bridge_id:
                 return binding
     return None
+
+
+def _consume_watcher_acked_events(
+    agent_messaging_service: Any,
+    binding: BridgeBinding,
+    acked: list[QueuedEvent],
+) -> None:
+    """Stamp watcher-acked IMPORTANT deliveries consumed (Dax Part 14).
+
+    Role deliveries are recognised by the Control #5 ``delivery_external_id``
+    meta key (stamped on both the native-wake and channel-event transports);
+    direct wakes by their ``message_id`` meta. Both marks are predicated
+    (``consumed=false``) and the direct mark is fenced to the acking binding's
+    own instance, so a re-ack or a non-delivery event is a no-op.
+    """
+    for event in acked:
+        if event.event_type not in _WATCHER_DELIVERY_EVENT_TYPES:
+            continue
+        external_id = str(event.meta.get(META_KEY_DELIVERY_EXTERNAL_ID) or "")
+        if external_id:
+            agent_messaging_service.mark_role_consumed_on_ack(
+                external_id=external_id,
+            )
+            continue
+        message_id = str(event.meta.get("message_id") or "")
+        if message_id:
+            agent_messaging_service.mark_direct_consumed_on_ack(
+                message_id=message_id,
+                recipient_agent_instance_id=binding.agent_instance_id,
+            )
+
+
+def _consume_watcher_inbox_page(
+    agent_messaging_service: Any,
+    binding: BridgeBinding,
+    page: Any,
+) -> None:
+    """Stamp watcher catch-up-drained IMPORTANT rows consumed (Dax Part 14).
+
+    The instance section's entries map to direct-wake rows by ``message_id``
+    (silent messages have no outbox row — the fenced mark is a no-op). Role
+    entries recover their role name from the synthetic ``role:`` thread handle
+    and re-derive the deterministic delivery external_id; the predicated mark
+    skips silent and already-consumed rows.
+    """
+    for entry in page.entries:
+        agent_messaging_service.mark_direct_consumed_on_ack(
+            message_id=str(entry.message.id),
+            recipient_agent_instance_id=binding.agent_instance_id,
+        )
+    for entry in page.role_entries:
+        role_name = str(entry.thread_id).removeprefix(ROLE_THREAD_PREFIX)
+        agent_messaging_service.mark_role_consumed_on_ack(
+            external_id=role_message_external_id(
+                RECIPIENT_KIND_ROLE, role_name, str(entry.message.id),
+            ),
+        )
 
 
 def _config_int(config: Any, key: str, default: int) -> int:

@@ -93,6 +93,7 @@ from .schema import (
     COL_LAST_EMITTED_AT,
     ESCALATION_REASON_GONE,
     RECIPIENT_KIND_ROLE,
+    ROLE_THREAD_PREFIX,
     TABLE_AGENT_DIRECT_WAKE,
     TABLE_AGENT_ROLE_MESSAGE,
 )
@@ -822,7 +823,7 @@ class AgentMessagingService:
             "sender_session_label": sender_session_label,
             # Synthetic, deterministic role-channel handle — display only,
             # never dereferenced as a live thread.
-            "thread_id": f"role:{recipient_key}",
+            "thread_id": f"{ROLE_THREAD_PREFIX}{recipient_key}",
             "important": important,
             "delivered": False,
             # REL-05 (Q5): a fresh role message is un-consumed. Written EXPLICITLY
@@ -1021,6 +1022,37 @@ class AgentMessagingService:
             TABLE_AGENT_ROLE_MESSAGE,
             require_records(result),
             activity_at=activity_at,
+        )
+
+    def mark_role_consumed_on_ack(self, *, external_id: str) -> bool:
+        """Watcher events-ack consumption for ONE role row (Dax Part 14).
+
+        A no-MCP watcher acknowledged the bridge event carrying this role
+        delivery — its long-poll cursor moved past it, so the bytes are
+        provably streamed into the watch output. That is the pull-recipient
+        equivalent of entering a turn: stamp ``consumed`` (drops the row from
+        the owed drain and the escalation sweep) and flip ``delivered`` (the
+        ack IS the emission confirm a forwarder would otherwise POST).
+        Predicated on ``important=true AND consumed=false`` so re-acks and
+        silent rows are no-ops. Returns True when a row was stamped.
+        """
+        return 0 < require_updated(
+            self._state.update_state(
+                _ROLE_NAMESPACE,
+                {
+                    "table": TABLE_AGENT_ROLE_MESSAGE,
+                    "filters": {
+                        "external_id": external_id,
+                        "important": True,
+                        COL_CONSUMED: False,
+                    },
+                },
+                {
+                    "delivered": True,
+                    COL_CONSUMED: True,
+                    COL_CONSUMED_AT: self._clock().isoformat(),
+                },
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -1248,6 +1280,36 @@ class AgentMessagingService:
             TABLE_AGENT_DIRECT_WAKE,
             require_records(result),
             activity_at=activity_at,
+        )
+
+    def mark_direct_consumed_on_ack(
+        self, *, message_id: str, recipient_agent_instance_id: str,
+    ) -> bool:
+        """Watcher events-ack consumption for ONE direct row (Dax Part 14).
+
+        The direct sibling of :meth:`mark_role_consumed_on_ack`: the watcher's
+        long-poll acked the queued wake event for this message, so it is
+        provably surfaced in the watch output. Fenced to the row's FIXED
+        recipient instance (the acking bridge's own binding) and predicated on
+        ``consumed=false`` — a re-ack or a foreign message_id is a no-op.
+        Returns True when a row was stamped.
+        """
+        return 0 < require_updated(
+            self._state.update_state(
+                _ROLE_NAMESPACE,
+                {
+                    "table": TABLE_AGENT_DIRECT_WAKE,
+                    "filters": {
+                        "external_id": message_id,
+                        "recipient_agent_instance_id": recipient_agent_instance_id,
+                        COL_CONSUMED: False,
+                    },
+                },
+                {
+                    COL_CONSUMED: True,
+                    COL_CONSUMED_AT: self._clock().isoformat(),
+                },
+            ),
         )
 
     def list_escalatable_direct(
