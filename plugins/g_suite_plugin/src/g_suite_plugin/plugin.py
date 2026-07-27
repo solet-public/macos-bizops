@@ -55,6 +55,7 @@ from .constants import (
     ERROR_NOT_FOUND,
     ERROR_PERMISSION_DENIED,
     ERROR_RATE_LIMITED,
+    ERROR_SERVER_START_FAILED,
     ERROR_VAULT_NOT_AVAILABLE,
     PLUGIN_NAME,
     RESULT_TYPE_CONNECT,
@@ -88,7 +89,7 @@ from .constants import (
 )
 from .gmail_actions import OutgoingAttachment
 from .oauth.app_config import AppConfigLoader
-from .oauth.http_server import OAuthServer, build_start_result
+from .oauth.http_server import OAuthServer, OAuthServerStartError, build_start_result
 from .oauth.oauth_client import build_authorization_request
 from .oauth.service_factory import GoogleServiceFactory
 from .oauth.token_store import TokenStore, TokenStoreError
@@ -490,13 +491,16 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
             app_config_loader = self._require_app_config_loader()
         except RuntimeError as exc:
             return self._error("service_not_available", str(exc))
-        port = self._oauth_server.start(
-            host=host,
-            preferred_port=preferred_port,
-            token_store=token_store,
-            app_config_loader=app_config_loader,
-            pending_states=self._pending_states,
-        )
+        try:
+            port = self._oauth_server.start(
+                host=host,
+                preferred_port=preferred_port,
+                token_store=token_store,
+                app_config_loader=app_config_loader,
+                pending_states=self._pending_states,
+            )
+        except OAuthServerStartError as exc:
+            return self._error(ERROR_SERVER_START_FAILED, str(exc))
         return self._success(build_start_result(port, host))
 
     @platform_process(
