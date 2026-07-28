@@ -28,7 +28,8 @@ on the boot path):
     path directly instead.
   * `ProgramArguments`: `[<clone>/.venv/bin/python3, -m, ananta.cli,
     --app-home, <clone>/profile]` — full absolute paths, matching the
-    canonical invocation (CLAUDE.md). A bare `"profile"` argument (the
+    canonical invocation in the paired root bootstrap files. A bare
+    `"profile"` argument (the
     build spec's shorthand) would resolve against `WorkingDirectory`
     (the runtime dir), not the clone — wrong; this renders the
     absolute path instead.

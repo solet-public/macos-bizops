@@ -40,7 +40,7 @@ where filename_stem is the SUBDIR's UUID. The importer's
 ``_persist_normalized_for_session`` short-circuits duplicates by
 ``(session_id, vendor_event_id)``.
 
-Failure policy (CLAUDE.md fast-fail): any malformed JSON in a task file
+Failure policy (KB "Critical Development Guidelines v2"): any malformed JSON in a task file
 raises ``ValueError`` from the parser; the importer's per-session catch
 (``importer._poll_one_pulling_source``) marks the offending session as
 skipped and continues. NUL strip is handled at the repository TEXT-write

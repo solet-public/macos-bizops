@@ -1293,13 +1293,21 @@ class AgentMessagingPlugin(
         The v4 outcome carries ``prior`` (a ``ResolvedRole``) for the notify ONLY — it
         is NOT json-serializable, so it MUST NOT reach the public ActionResult (result
         persistence json.dumps would TypeError on a real displace — Codex BLOCKER-1).
-        A plain, schema-shaped ``{action, name, agent_instance_id}`` is returned.
+        A plain, schema-shaped ``{action, name, agent_instance_id, agent_session_id}``
+        is returned. Every property the verb's ``return_value_schema`` declares MUST
+        be present here: ``ExecutionContext.store_result`` raises
+        ``PlaceholderResolutionError`` on a declared-but-absent property, which fails
+        the action AFTER the binding write already landed — reporting a bogus failure
+        for a claim that actually succeeded. ``agent_session_id`` is the RESOLVED id
+        (the caller may omit it and have it sourced from ``peer_binding``), so echoing
+        it is what tells the claimant which session id its role is now keyed on.
         """
         action = str(outcome.get("action") or "")
         public: dict[str, Any] = {
             "action": action,
             "name": outcome.get("name"),
             "agent_instance_id": outcome.get("agent_instance_id"),
+            "agent_session_id": agent_session_id,
         }
         if action == "refreshed":
             public["action"] = "updated"  # /rename refresh contract; no wake
@@ -1332,6 +1340,15 @@ class AgentMessagingPlugin(
                 required=True,
                 type=ParameterType.STRING,
             ),
+            "agent_session_id": ParameterMetadata(
+                description=(
+                    "Stable logical session id for reconnect-safe role binding. "
+                    "When omitted, the plugin sources it from the claimant's "
+                    "live peer_binding row."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
             "session_label": ParameterMetadata(
                 description=(
                     "Display label as of the claim. May or may not match "
@@ -1353,6 +1370,7 @@ class AgentMessagingPlugin(
                 "action": ParameterMetadata(type=ParameterType.STRING),
                 "name": ParameterMetadata(type=ParameterType.STRING),
                 "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "agent_session_id": ParameterMetadata(type=ParameterType.STRING),
             },
         ),
     )

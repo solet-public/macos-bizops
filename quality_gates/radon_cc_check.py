@@ -9,8 +9,9 @@ and the platform-process methods themselves can perfectly well be A/B.
 The reform here is solely the allowlist mechanism that mirrors
 `god_class_check.py` and `radon_mi_check.py`.
 
-Per CLAUDE.md: "Cyclomatic Complexity: A or B only" — any function
-ranked C, D, E, or F that isn't in the allowlist fails the gate.
+Per the KB "Critical Development Guidelines v2", cyclomatic complexity is A
+or B only — any function ranked C, D, E, or F that isn't in the allowlist
+fails the gate.
 
 The `--allowlist <path>` file is a tracked-debt register: one
 `<file_path>::<function_name>` per line. Operator decision 2026-05-25:

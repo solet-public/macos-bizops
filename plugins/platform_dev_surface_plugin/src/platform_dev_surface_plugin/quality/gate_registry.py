@@ -14,8 +14,9 @@ Two runnability classes:
 * ``directly_runnable=False`` — the per-file coherence trio (god_class /
   radon_cc / radon_mi). These require the canonical per-file scope path list
   (``code_quality_check._per_file_gate_paths``). We deliberately do NOT
-  re-derive that scope here — a fourth copy of the scope definition would drift
-  from CLAUDE.md's single source. They are ENUMERATED for discovery and run as
+  re-derive that scope here — a fourth copy would drift from
+  ``code_quality_check._per_file_gate_paths`` and the KB "Peer Pre-Completion
+  Gate Procedure". They are ENUMERATED for discovery and run as
   part of the aggregate ``code_quality`` gate, which applies the canonical
   scope. ``list_gates`` marks them ``run_via: code_quality``.
 """

@@ -276,6 +276,30 @@ def _result_records(result: object) -> list[dict[str, object]]:
 DEFAULT_RE_EMIT_WINDOW_S = 300.0
 DEFAULT_RE_EMIT_CAP = 3
 
+# REL-05 QUIET-GAP: how long a session must have been free of model-initiated
+# activity BEFORE an emission for that emission to count as the thing that
+# started the next turn. Activity strictly after an emission is NOT proof the
+# emission was surfaced — a turn already in flight makes its next call within
+# seconds, which marked every wake to a BUSY session consumed on its first emit
+# and retired it from the owed set unseen (the silent-loss class). Sized above a
+# working session's inter-call spacing so a mid-turn arrival cannot clear it.
+TURN_BOUNDARY_QUIET_S = 45.0
+
+
+def _emitted_after_turn_boundary(
+    emitted: datetime, prev_activity_at: datetime | None,
+) -> bool:
+    """True when ``emitted`` landed in a quiet gap long enough to be a turn start.
+
+    ``prev_activity_at`` is the model-activity stamp immediately preceding the one
+    being reconciled, so ``emitted - prev_activity_at`` is exactly the idle span
+    the emission arrived in. ``None`` (no prior activity on this session) means the
+    entire session so far was quiet — the gap is unbounded, so it qualifies.
+    """
+    if prev_activity_at is None:
+        return True
+    return (emitted - prev_activity_at).total_seconds() >= TURN_BOUNDARY_QUIET_S
+
 
 def _parse_iso(value: object) -> datetime | None:
     """Parse a stored ISO-8601 timestamp cell to an aware (UTC) datetime, or ``None``.
@@ -650,11 +674,9 @@ class AgentMessagingService:
                     "peer_agent_id": request.peer_agent_id,
                     "peer_agent_instance_id": request.peer_agent_instance_id,
                     # ``important`` discriminates wake-bound messages
-                    # (sender used the IMPORTANT marker) from silent
-                    # FYIs.  peer_inbox uses this to return only
-                    # silent messages by default — the wake-bound ones
-                    # already surfaced as a notification at delivery
-                    # time, so re-listing them in the inbox is noise.
+                    # (sender used the IMPORTANT marker) from silent FYIs.
+                    # peer_inbox uses it for explicit silent-only filters while
+                    # leaving the public default as durable catch-up.
                     "important": request.important,
                 },
             ),
@@ -995,12 +1017,19 @@ class AgentMessagingService:
         return merge_undelivered_oldest_first(per_role, limit)
 
     def reconcile_role_consumption(
-        self, *, agent_instance_id: str, activity_at: datetime,
+        self,
+        *,
+        agent_instance_id: str,
+        activity_at: datetime,
+        prev_activity_at: datetime | None = None,
     ) -> list[str]:
         """Stamp ``consumed`` on role rows this instance provably entered a turn on.
 
         REL-05 (§4.3 + F3): a role message counts as consumed when the instance
-        it was EMITTED TO performs model-initiated activity AFTER the emission.
+        it was EMITTED TO performs model-initiated activity AFTER the emission
+        AND that emission landed in a turn-boundary quiet gap (QUIET-GAP; see
+        :meth:`_stamp_consumed_rows` — activity after an emission does not prove
+        a turn SURFACED it when a turn was already running).
         Marks every un-consumed role row whose ``emitted_to_agent_instance_id``
         is ``agent_instance_id`` and whose ``last_emitted_at`` precedes
         ``activity_at``; returns the external_ids stamped. Fenced to the
@@ -1022,6 +1051,7 @@ class AgentMessagingService:
             TABLE_AGENT_ROLE_MESSAGE,
             require_records(result),
             activity_at=activity_at,
+            prev_activity_at=prev_activity_at,
         )
 
     def mark_role_consumed_on_ack(self, *, external_id: str) -> bool:
@@ -1257,14 +1287,19 @@ class AgentMessagingService:
         return True
 
     def reconcile_direct_consumption(
-        self, *, agent_instance_id: str, activity_at: datetime,
+        self,
+        *,
+        agent_instance_id: str,
+        activity_at: datetime,
+        prev_activity_at: datetime | None = None,
     ) -> list[str]:
         """Stamp ``consumed`` on direct rows this recipient entered a turn on.
 
         Direct rows are F3-immune (fixed recipient), so the fence is simply
         ``recipient_agent_instance_id == agent_instance_id``. Marks every
-        un-consumed direct row emitted BEFORE ``activity_at``; returns the
-        message_ids stamped.
+        un-consumed direct row emitted BEFORE ``activity_at`` that also landed in
+        a turn-boundary quiet gap (QUIET-GAP; see :meth:`_stamp_consumed_rows`);
+        returns the message_ids stamped.
         """
         result = self._state.query_state(
             _ROLE_NAMESPACE,
@@ -1280,6 +1315,7 @@ class AgentMessagingService:
             TABLE_AGENT_DIRECT_WAKE,
             require_records(result),
             activity_at=activity_at,
+            prev_activity_at=prev_activity_at,
         )
 
     def mark_direct_consumed_on_ack(
@@ -1420,22 +1456,38 @@ class AgentMessagingService:
         rows: list[dict[str, object]],
         *,
         activity_at: datetime,
+        prev_activity_at: datetime | None,
     ) -> list[str]:
-        """Mark ``consumed`` on each row emitted BEFORE ``activity_at``.
+        """Mark ``consumed`` on each row whose emission STARTED the next turn.
 
-        A row counts as consumed only if it was already emitted
-        (``last_emitted_at`` set) and that emission PRECEDES the model activity —
-        a turn that began before an emission cannot have surfaced it (the §4.3
-        false-negative, accepted: costs one redundant re-emit, never a
-        false-positive loss). One ``update_state`` per row by ``external_id``
-        (equality); the ``last_emitted_at < activity_at`` inequality is the
-        Python guard the state filter cannot do. Returns the external_ids stamped.
+        Two guards, both Python (the state filter expresses neither):
+
+        1. ``last_emitted_at < activity_at`` — a turn that began before an
+           emission cannot have surfaced it.
+        2. ``last_emitted_at - prev_activity_at >= TURN_BOUNDARY_QUIET_S`` — the
+           emission must have landed in a QUIET GAP long enough to be a turn
+           boundary. Guard 1 alone was unsound in the direction that loses
+           messages: a session already mid-turn issues its next model-initiated
+           call within seconds, satisfying guard 1 and retiring the row from the
+           owed set on its FIRST emit, unseen and never re-emitted. That made the
+           silent-loss rate scale with how BUSY a session is — worst exactly for
+           a coordinator, the session peers most need to reach. A row that fails
+           guard 2 stays owed and re-emits (costing at most a visibly-marked
+           duplicate), which is the §4.3 posture the contract always claimed:
+           tolerate a redundant re-emit, never a false-positive loss.
+
+        ``prev_activity_at`` of ``None`` means this is the session's FIRST
+        model-initiated call, so the whole preceding session is the quiet gap and
+        guard 2 passes. One ``update_state`` per row by ``external_id``
+        (equality). Returns the external_ids stamped.
         """
         stamped: list[str] = []
         consumed_at = activity_at.isoformat()
         for row in rows:
             emitted = _parse_iso(row.get(COL_LAST_EMITTED_AT))
             if emitted is None or emitted >= activity_at:
+                continue
+            if not _emitted_after_turn_boundary(emitted, prev_activity_at):
                 continue
             external_id = str(row.get("external_id") or "")
             if not external_id:
@@ -1477,13 +1529,13 @@ class AgentMessagingService:
         ``query_ordered`` over ``agent_role_message``, k-way merges into the
         global top-``limit``, and pages by an opaque scope-bound cursor.
 
-        ``include_important=False`` (default) returns the silent bucket only
-        (loop prevention: IMPORTANT rows already woke the receiver).
-        ``include_important=True`` is the catch-up/recovery view — it OMITS
-        both the ``important`` and ``delivered`` filters so already-delivered
-        IMPORTANT rows resurface (there is deliberately no ``core__agent_message``
-        projection to fall back on). Returns ``((), None)`` for a holder with
-        no roles. Re-readable + durable (rows are never consumed on read).
+        Default ``include_important=True`` is the catch-up/recovery view: it
+        OMITS both the ``important`` and ``delivered`` filters so already-
+        delivered IMPORTANT rows resurface (there is deliberately no
+        ``core__agent_message`` projection to fall back on).
+        ``include_important=False`` is an explicit silent-only status view.
+        Returns ``((), None)`` for a holder with no roles. Re-readable +
+        durable (rows are never consumed on read).
         """
         held_roles = self._enumerate_held_roles(agent_instance_id)
         if not held_roles:

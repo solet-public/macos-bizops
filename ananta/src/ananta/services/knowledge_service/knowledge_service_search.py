@@ -1,9 +1,10 @@
 """Knowledge-service wrapper sub-mixin for KB search + retrieval-testing delegates (W5.S).
 
-Four delegates satisfying the W5.R-decomposed :class:`KnowledgeSearchInterface`:
-``search``, ``search_planning_references``, ``test_retrieval``, and
-``audit_retrieval_corpus``. Lifted byte-for-byte from the W5.S-pre-decomposition
-``KnowledgeService.__init__.py``.
+Delegates satisfying the W5.R-decomposed :class:`KnowledgeSearchInterface`:
+``search``, ``search_planning_references``, ``test_retrieval``,
+``audit_retrieval_corpus``, and its 2026-07-26 EDGE_SINK cron sibling
+``audit_retrieval_corpus_cron``. The first four are lifted byte-for-byte from
+the W5.S-pre-decomposition ``KnowledgeService.__init__.py``.
 
 Surface-only note (per W5.R C5 + W5.S surface-only flag): the existing
 ``search_planning_references`` delegate forwards to ``self._get_backend().search(...)``
@@ -91,3 +92,6 @@ class KnowledgeSearchWrapper:
             active_knowledge_bases=active_knowledge_bases,
             fail_fast=fail_fast,
         )
+
+    def audit_retrieval_corpus_cron(self) -> dict[str, Any]:
+        return self._get_backend().audit_retrieval_corpus_cron()

@@ -47,7 +47,17 @@ ledger_search_required: <list of plain-English queries the peer MUST run via
 
 `expected_completion_signal` is the peer-side commitment. For peer-to-peer dispatches it is almost always: `peer_send IMPORTANT to Coordinator (agi-<id>) with verdict + before/after counts`. For dispatches that produce a file, the file path serves the same role (existence-check at wake-up).
 
-`kb_search_required` is the **non-negotiable Step Zero gate per CLAUDE.md**. The dispatch enumerates the searches the peer must run before opening the editor — typically 3–6 queries spanning (a) the platform mechanism the work touches, (b) any canonical pattern the work might be reinventing, (c) the contract surface the work integrates with. The peer's completion report should cite which articles surfaced and how they shaped the implementation. **Coordinator dispatches that omit this field have produced demonstrable rework** — source-pointer-only briefs let peers skip Step Zero and reinvent a documented convention, which then surfaces as a stack of corrections during review. The field exists to make the discipline structural rather than aspirational.
+`kb_search_required` is the **non-negotiable Step Zero gate in the paired
+AGENTS.md / CLAUDE.md bootstrap contract**. The dispatch enumerates the searches
+the peer must run before opening the editor — typically 3–6 queries spanning
+(a) the platform mechanism the work touches, (b) any canonical pattern the
+work might be reinventing, and (c) the contract surface the work integrates
+with. The peer's completion report should cite which articles surfaced and how
+they shaped the implementation. **Coordinator dispatches that omit this field
+have produced demonstrable rework** — source-pointer-only briefs let peers skip
+Step Zero and reinvent a documented convention, which then surfaces as a stack
+of corrections during review. The field exists to make the discipline
+structural rather than aspirational.
 
 `ledger_search_required` is the same pre-flight logic pointed at the conversation record rather than the knowledge base. `kb_search_required` catches a peer reinventing a documented convention; `ledger_search_required` catches a peer rebuilding something an earlier session already built, where the only trace is the verbatim message text now searchable via `service_interface::session_ledger_service::search_event_content` (LED-01). The dispatch enumerates the plain-English queries the peer must run through the event-content search — and through `search_sessions` where summary granularity suffices — before opening the editor, and the completion report cites what the recall surfaced and how it shaped the work, exactly as `kb_search_required` already asks. The full four-surface recall discipline this field enforces is specified in `knowledge_bases/ananta_platform/14_knowledge_retrieval/04_recall_before_work.md`.
 

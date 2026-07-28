@@ -48,6 +48,7 @@ HOMUNCULUS_AGENT_IDENTITY_ENV: Final[str] = "HOMUNCULUS_AGENT_IDENTITY"
 HOMUNCULUS_AGENT_INSTANCE_ID_ENV: Final[str] = "HOMUNCULUS_AGENT_INSTANCE_ID"
 HOMUNCULUS_AGENT_SESSION_LABEL_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_LABEL"
 HOMUNCULUS_AGENT_SESSION_ID_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_ID"
+HOMUNCULUS_AGENT_ROLE_ENV: Final[str] = "HOMUNCULUS_AGENT_ROLE"
 
 # Discriminator for the Codex agent kind. A Codex session spawns the bridge as
 # its child, so CODEX_THREAD_ID is inherited.
@@ -475,6 +476,13 @@ TOOLS: Final[list[Tool]] = [
             [
                 "Send a peer message to another live MCP session.",
                 "",
+                "Operator management:",
+                "  For fleet/task management, prefer peer_send_by_name with a durable",
+                "  role name such as Coordinator, Coordinator-Dusk, Architect, or",
+                "  Git-Controller. Use raw peer_send only for replies to a specific",
+                "  sender instance or when the operator explicitly names a live",
+                "  session. Do not fan one task out to many peer_list entries.",
+                "",
                 "Addressing -- multi-instance:",
                 '  peer_id is the stable agent kind (e.g., "claude_code", "codex").',
                 "  Multiple instances of the same agent_id can be registered",
@@ -547,21 +555,64 @@ TOOLS: Final[list[Tool]] = [
         },
     ),
     Tool(
+        name="peer_send_by_name",
+        description="\n".join(
+            [
+                "Send a peer message to the current holder of a durable homunculus role.",
+                "",
+                "Use this for ChatGPT/operator fleet management. The role binding is",
+                "resolved at send time, so reconnects and bridge churn do not require",
+                "ChatGPT to choose an agent_instance_id from peer_list.",
+                "",
+                "Examples of role names are Coordinator, Coordinator-Dusk, Architect,",
+                "Git-Controller, and Codex-Reviewer, depending on which roles are",
+                "currently claimed in the homunculus.",
+                "",
+                "Loop-prevention contract:",
+                "  Prefix content with \"IMPORTANT: \" only when the role holder should",
+                "  wake and act now. Without IMPORTANT the message is persisted for the",
+                "  holder's role inbox but does not wake a live session.",
+                "",
+                "This is the preferred task-assignment tool. Use peer_send only for",
+                "direct replies or an operator-requested exact live instance.",
+            ],
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Durable role name registered in the homunculus role binding "
+                        "table, such as Coordinator-Dusk or Architect."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "Message text. Prefix with 'IMPORTANT: ' to wake the "
+                        "current role holder."
+                    ),
+                },
+            },
+            "required": ["name", "content"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
         name="peer_inbox",
         description="\n".join(
             [
                 "Pull peer messages addressed to your agent_id.",
                 "",
-                "Default behavior: return only messages that were persisted",
-                "silently (no IMPORTANT marker, so no notification fired).",
-                "IMPORTANT-marked messages are excluded by default because they",
-                "already woke the receiver via notification at delivery time;",
-                "re-listing them here would be noise.",
+                "Default behavior: return silent and IMPORTANT-marked messages",
+                "as a durable catch-up view. Use an `after` timestamp when polling",
+                "during an active incident so old IMPORTANT history does not flood",
+                "the context window.",
                 "",
-                "Set include_important=true to also return messages whose sender",
-                "used the IMPORTANT marker. Useful when your MCP client did NOT",
-                "auto-surface the live notification between turns and you need to",
-                "catch up on requests-for-action you may have missed.",
+                "Set include_important=false only for intentional silent-only",
+                "status checks where previously-notified IMPORTANT messages would",
+                "be noise.",
                 "",
                 "Spans every peer thread targeting you, regardless of which bridge owns",
                 "the thread. Pagination uses after (ISO-8601 timestamp); pass the previous",
@@ -585,13 +636,12 @@ TOOLS: Final[list[Tool]] = [
                 },
                 "include_important": {
                     "type": "boolean",
-                    "default": False,
+                    "default": True,
                     "description": (
-                        "When true, also return messages whose sender used "
-                        "the IMPORTANT marker (otherwise excluded as "
-                        "already-notified). For the role section this is the "
-                        "catch-up view: already-delivered IMPORTANT role "
-                        "messages resurface."
+                        "When true, return the durable catch-up view including "
+                        "messages whose sender used the IMPORTANT marker. "
+                        "Default true. Set false only for intentional "
+                        "silent-only status checks."
                     ),
                 },
                 "role_after": {
@@ -628,6 +678,25 @@ def _compute_session_label(agent_id: str) -> str:
     cwd_base = Path.cwd().name
     if cwd_base:
         return f"{agent_id} on {cwd_base}"
+    return ""
+
+
+def _compute_session_role(session_label: str) -> str:
+    """Resolve the standing role this bridge must claim after registration.
+
+    An explicit role may differ from the human-readable session label. When a
+    launcher supplies only ``HOMUNCULUS_AGENT_SESSION_LABEL``, that explicit
+    label is also the role by convention. Cwd-inferred labels never claim roles.
+    """
+    explicit_role = os.environ.get(HOMUNCULUS_AGENT_ROLE_ENV)
+    if explicit_role is not None:
+        role = explicit_role.strip()
+        if not role:
+            msg = f"{HOMUNCULUS_AGENT_ROLE_ENV} must be non-empty when set"
+            raise RuntimeError(msg)
+        return role
+    if os.environ.get(HOMUNCULUS_AGENT_SESSION_LABEL_ENV):
+        return session_label
     return ""
 
 
@@ -776,11 +845,20 @@ async def _tool_peer_send(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+async def _tool_peer_send_by_name(
+    fw: Forwarder, a: dict[str, Any],
+) -> dict[str, Any]:
+    return await fw.peer_send_by_name(
+        name=str(a["name"]),
+        content=str(a["content"]),
+    )
+
+
 async def _tool_peer_inbox(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
     return await fw.peer_inbox(
         after=a.get("after"),
         limit=a.get("limit"),
-        include_important=bool(a.get("include_important", False)),
+        include_important=bool(a.get("include_important", True)),
         role_after=a.get("role_after"),
     )
 
@@ -804,6 +882,7 @@ _TOOL_DISPATCH: Final[
     "peer_register": _tool_peer_register,
     "peer_list": _tool_peer_list,
     "peer_send": _tool_peer_send,
+    "peer_send_by_name": _tool_peer_send_by_name,
     "peer_inbox": _tool_peer_inbox,
 }
 
@@ -851,6 +930,7 @@ async def _run() -> None:
     # siblings).
     agent_session_id = _resolve_agent_session_id(agent_id)
     session_label = _compute_session_label(agent_id)
+    session_role = _compute_session_role(session_label)
     parent_pid = os.getppid()
 
     port = await _discover_port(homunculus_name)
@@ -877,6 +957,7 @@ async def _run() -> None:
         session_label=session_label,
         parent_pid=parent_pid,
         provides_inference=provides_inference,
+        session_role=session_role,
     )
     server = _build_server(forwarder)
 

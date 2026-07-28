@@ -17,7 +17,7 @@ at `ananta/src/ananta/platform/code_generator.py`). Each subsequent
 cleanup workstream removes its allowlist entry as work lands. Mode flips
 warn→fail at W-WINT2-FINAL (Tier 7, post-W-DB-LOCKDOWN).
 
-Scope (mirrors CLAUDE.md "Per-file gate scope"):
+Scope (mirrors the KB "Peer Pre-Completion Gate Procedure"):
   - ananta/src/
   - plugins/*/src/
   - plugins/*/tests/
@@ -46,7 +46,7 @@ Allowlist format mirrors the Cycle 1 register:
 
 Allowlisted findings are STILL printed (prefixed `[allowlisted]`) so the
 gate stays honest; they do NOT contribute to the exit-1 verdict. Per
-CLAUDE.md tracked-debt convention: adding entries without operator
+the KB "Gate Allowlist Conventions", adding entries without operator
 approval defeats the gate's purpose. Removing an entry is the unit of
 remediation progress.
 
@@ -85,7 +85,7 @@ _SCAN_ROOTS = (
 )
 
 # `plugins/<X>/{research,tools,migrations,parity_tests}/...` segments
-# are operator-tooling per CLAUDE.md "Per-file gate scope" — skipped.
+# are operator-tooling per the KB "Peer Pre-Completion Gate Procedure" — skipped.
 _OPERATOR_TOOLING_PLUGIN_SEGMENTS = frozenset({
     "research", "tools", "migrations", "parity_tests",
 })

@@ -7,6 +7,7 @@ name = "macos-vault-plugin"
 version = "0.1.0"
 description = "Secure credential storage plugin for Ananta (macOS Keychain + dual-write SQL)"
 authors = [{name = "Ananta Development Team"}]
+license = "Apache-2.0"
 requires-python = "==3.13.*"
 dependencies = [
     "ananta",

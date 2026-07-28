@@ -47,8 +47,8 @@ def _require_drainer_id() -> str:
 
     ``HOMUNCULUS_NAME`` is a required runtime invariant (``launch.py`` sets it);
     a drainer with no stable id cannot own a cursor, so a missing value is a fatal
-    misconfiguration — fail fast and loud, never invent a default (CLAUDE.md
-    fast-fail / no-fallback policy)."""
+    misconfiguration — fail fast and loud, never invent a default (KB
+    "Critical Development Guidelines v2")."""
     drainer_id = os.environ.get(_HOMUNCULUS_NAME_ENV)
     if not drainer_id:
         raise RuntimeError(

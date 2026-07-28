@@ -9,7 +9,7 @@
 # self-deployment, local inference, the Claude-family session-ledger source
 # family (so multi-session peer-coordination work is searchable), dev tooling
 # (code vetting, platform dev surface, coding-agent session management), and
-# the five business-system connectors + Google Workspace. github_midwife_plugin still ships (the seed
+# the six business-system connectors + Google Workspace. github_midwife_plugin still ships (the seed
 # factory's fractal invariant forces it into every seed — see
 # capability_bundles.yaml's own header comment) but is expected to be REMOVED
 # from the steady-state manifest (and its source directory deleted) after
@@ -33,8 +33,9 @@ description: |
   cross-machine pushed-source/shipper pair — enabling the same multi-session
   peer-coordination workflow used to build this seed), dev tooling (the AI
   code-vetting suite, the read-only platform dev surface, and coding-agent
-  session management), and five business-system connectors (Jira, Snowflake,
-  Salesforce, Zuora, read-only external Postgres) plus Google Workspace.
+  session management), and six business-system connectors (Jira, Snowflake,
+  Salesforce, Zuora, Marketo Engage, read-only external Postgres) plus Google
+  Workspace.
   Excludes: every homunculus-cloning/AWS-hosting plugin (macos/aws midwife,
   aws undertaker, aws self-deployment, aws account admin, and the four
   AWS-managed-alternative split-service plugins), the full audio/media/
@@ -113,6 +114,7 @@ plugins:
   - snowflake_plugin
   - salesforce_plugin
   - zuora_plugin
+  - marketo_plugin
   - external_postgres_plugin
   - g_suite_plugin
 
@@ -147,10 +149,11 @@ plugin_config_overrides:
 # are templated here (openai_embeddings, pgvector_service_db — identical to
 # the free profile, both mandatory for the same reasons documented there).
 #
-# The five business connectors + Google Workspace are DELIBERATELY NOT
+# The six business connectors + Google Workspace are DELIBERATELY NOT
 # templated with address-book entries here: each needs an operator-specific,
 # real-world value (a Jira site URL, a Snowflake account identifier, a
-# Salesforce Connected App, a Zuora tenant, a Google Cloud OAuth client) that
+# Salesforce Connected App, a Zuora tenant, a Marketo LaunchPoint custom
+# service, a Google Cloud OAuth client) that
 # genesis cannot fabricate or default. Per-connector setup is a hydration-time
 # operator action — see the hydration runbook's connector-activation section,
 # which mirrors the existing schwab_market_data_plugin / g_suite_plugin
@@ -248,4 +251,4 @@ notes:
   transient:
     github_midwife_plugin: The seed factory's own fractal invariant force-includes this in every seed (a seed can mint further seeds). Remove it from the steady-state manifest via apply_manifest AFTER genesis completes, and delete plugins/github_midwife_plugin/ from the newborn's tree entirely — unloading alone leaves the clone-capable source on disk. See the hydration runbook's post-genesis cleanup step.
   operator_setup_required:
-    jira_plugin, snowflake_plugin, salesforce_plugin, zuora_plugin, g_suite_plugin: Each needs a real-world address-book entry (site/account/org identifiers) plus a vault-backed credential completed post-genesis — genesis cannot fabricate operator-specific tenant identity. external_postgres_plugin needs at least one external_pg::<name> address-book entry registered before its verbs are useful, but ships with zero entries safely (read-only, hard-refuses the platform's own DB regardless).
+    jira_plugin, snowflake_plugin, salesforce_plugin, zuora_plugin, marketo_plugin, g_suite_plugin: Each needs a real-world address-book entry (site/account/org identifiers) plus a vault-backed credential completed post-genesis — genesis cannot fabricate operator-specific tenant identity. external_postgres_plugin needs at least one external_pg::<name> address-book entry registered before its verbs are useful, but ships with zero entries safely (read-only, hard-refuses the platform's own DB regardless).

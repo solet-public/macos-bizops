@@ -141,7 +141,7 @@ class ConversationPayload:
 def _parse_iso(value: str) -> datetime:
     """Parse Claude.ai's ISO-8601 timestamps (UTC-anchored with Z suffix).
 
-    Raises ``ValueError`` on naïve / unparseable input (CLAUDE.md fast-fail).
+    Raises ``ValueError`` on naïve / unparseable input (KB "Critical Development Guidelines v2").
     """
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::describe_lead_fields",
+  "display_name": "Marketo: Describe Lead Fields",
+  "description": "Fetch the full lead field metadata list (id, displayName, name, dataType, length) for the configured Marketo instance's Lead Database schema.",
+  "embedding_description": "Retrieve the Marketo Lead Database's own field schema/metadata catalog — every available lead field's API name, display name, and data type — for discovering what fields exist BEFORE building get_leads filters or create_or_update_leads payloads. This is schema discovery, not lead data itself; use get_leads to fetch actual lead records.",
+  "result_processor_customizations": {
+    "action_label": "Marketo lead field schema fetched",
+    "result_type": "marketo_describe_lead_fields_result",
+    "result_description": "Dict with records (a list of field descriptor dicts: id, displayName, name, dataType, length) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when the schema is large.",
+    "presentation_guidance": "Summarize the row_count (field count) and list a handful of field names/types; point to result_blob_key for the full schema."
+  },
+  "error_processor_customizations": {
+    "action_context": "Fetch the Marketo lead field schema.",
+    "error_interpretation": "marketo.auth_failed: the OAuth credentials were rejected. marketo.permission_denied: the API user's Role lacks a required Access API permission (e.g. Read-Only Person). marketo.rate_limited: the instance's API rate limit was exceeded.",
+    "recovery_guidance": "marketo.rate_limited: retry after a short delay. marketo.auth_failed: ask the operator to check the OAuth client_id/client_secret. marketo.permission_denied: run check_setup to see the exact missing Role permission."
+  }
+}

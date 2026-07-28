@@ -25,8 +25,8 @@ the git-controller-commit SKILL should treat exit 5 as a non-allowlisted
 blocking-gate block — the gap that let PluginBase 16-public-method
 regression land in master without Step 7 catching it (2026-06-03).
 
-Per CLAUDE.md "Per-file gate scope": gates run against the platform's
-quality surface only — `ananta/src`, `ananta/tests` (operator-ruled
+Per the KB "Peer Pre-Completion Gate Procedure", gates run against the
+platform's quality surface only — `ananta/src`, `ananta/tests` (operator-ruled
 2026-07-07, GTE-05), `plugins/*/src`, `plugins/*/tests`, and
 `quality_gates`. Operator-tooling (research/tools/migrations/
 parity_tests/, workbench, deployment, top-level utilities) is excluded.
@@ -69,7 +69,7 @@ _WRAPPER_USAGE_ERROR = 64
 # Per-file gate scope: the platform's quality surface, mirroring the
 # SKILL Step 6 SCOPE regex and the radon_cc/mi allowlists' coverage.
 # Operator-tooling (research/tools/migrations/parity_tests, workbench,
-# deployment) lives outside this scope per CLAUDE.md.
+# deployment) lives outside this scope per that KB contract.
 _PER_FILE_GATE_TOP_LEVEL = (Path("ananta/src"), Path("ananta/tests"), Path("quality_gates"))
 _PER_FILE_GATE_PLUGIN_GLOBS = ("plugins/*/src", "plugins/*/tests")
 
@@ -366,7 +366,7 @@ _W_WINT2_VAULT_KEY_GATE = _GateSpec(
 
 
 def _per_file_gate_paths(project_root: Path) -> list[Path]:
-    """Enumerate every in-scope `.py` file (CLAUDE.md "Per-file gate scope").
+    """Enumerate every in-scope `.py` file (KB "Peer Pre-Completion Gate Procedure").
 
     Walks each scope root recursively, returning concrete `.py` paths and
     pruning any directory whose name starts with `.venv` (bundled venvs

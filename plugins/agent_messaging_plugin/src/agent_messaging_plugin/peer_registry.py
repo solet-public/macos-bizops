@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 from ananta.services.store import Store, open_store
 
+from .role_binding_store import UNCLAIMED_SESSION_ID
 from .schema import (
     PEER_BINDING_NAMESPACE,
     get_peer_binding_schema,
@@ -42,6 +43,33 @@ if TYPE_CHECKING:
     from .models import BridgeBinding, NativeWakeAdapter
 
 logger = logging.getLogger(__name__)
+
+
+def _is_known_agent_session_id(agent_session_id: str) -> bool:
+    return bool(agent_session_id) and agent_session_id != UNCLAIMED_SESSION_ID
+
+
+def _preserve_on_empty_text(
+    *,
+    incoming: str,
+    existing: dict[str, object] | None,
+    key: str,
+) -> str:
+    if incoming or existing is None:
+        return incoming
+    stored = str(existing.get(key) or "")
+    return stored or incoming
+
+
+def _preserve_on_empty_agent_session_id(
+    *,
+    incoming: str,
+    existing: dict[str, object] | None,
+) -> str:
+    if _is_known_agent_session_id(incoming) or existing is None:
+        return incoming
+    stored = str(existing.get("agent_session_id") or "")
+    return stored if _is_known_agent_session_id(stored) else incoming
 
 
 class PeerAmbiguousError(LookupError):
@@ -169,14 +197,16 @@ class PeerRegistry:
         because both ``bridge_id`` and ``agent_instance_id`` are
         new on the claiming session.  Then insert the fresh row.
 
-        Preserve-on-empty (2026-06-01 §4.2): if the incoming
-        ``binding.session_label`` is empty and a stored row for this
-        ``agent_instance_id`` already carries a non-empty label, the
-        stored label flows into the new row. The auto-reconnect path's
-        ``_register_identity`` always sends the subprocess's stale
-        empty cache; the operator's last ``/rename`` is the authority.
-        A non-empty incoming label overwrites (explicit beats
-        implicit; matches address_book most-recent-claim semantics).
+        Preserve-on-empty (2026-06-01 §4.2, extended 2026-07-26):
+        if the incoming ``binding.session_label`` or
+        ``binding.agent_session_id`` is empty and a stored row for this
+        ``agent_instance_id`` already carries a non-empty value, the
+        stored value flows into the new row. The auto-reconnect path's
+        ``_register_identity`` may send the subprocess's stale empty
+        cache; the operator's last ``/rename`` and the bridge's known
+        logical-session id are the authority. A non-empty incoming value
+        overwrites (explicit beats implicit; matches address_book
+        most-recent-claim semantics).
 
         The read + two deletes + one insert are not atomic at the
         store level. Two threads racing to register the same bridge
@@ -185,15 +215,18 @@ class PeerRegistry:
         A future iteration can add a store-level ``replace_by``
         primitive if profiling shows it.
         """
-        effective_label = binding.session_label
-        if not effective_label:
-            existing = self._bindings.read_one(
-                {"agent_instance_id": binding.agent_instance_id},
-            )
-            if existing is not None:
-                stored = str(existing.get("session_label") or "")
-                if stored:
-                    effective_label = stored
+        existing = self._bindings.read_one(
+            {"agent_instance_id": binding.agent_instance_id},
+        )
+        effective_label = _preserve_on_empty_text(
+            incoming=binding.session_label,
+            existing=existing,
+            key="session_label",
+        )
+        effective_agent_session_id = _preserve_on_empty_agent_session_id(
+            incoming=binding.agent_session_id,
+            existing=existing,
+        )
         self._bindings.delete(
             {"bridge_id": binding.bridge_id}, soft_delete=False,
         )
@@ -217,7 +250,7 @@ class PeerRegistry:
                 "bridge_id": binding.bridge_id,
                 "session_label": effective_label,
                 "parent_pid": binding.parent_pid,
-                "agent_session_id": binding.agent_session_id,
+                "agent_session_id": effective_agent_session_id,
             },
         )
         logger.info(

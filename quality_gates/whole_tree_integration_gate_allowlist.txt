@@ -9,7 +9,7 @@
 # suffix) so the gate stays honest. They do NOT contribute to the exit-1
 # verdict. Removing an entry is the unit of remediation progress.
 #
-# Per CLAUDE.md tracked-debt convention: adding entries without operator
+# Per the KB "Gate Allowlist Conventions": adding entries without operator
 # approval defeats the gate's purpose. The initial population below was
 # generated from the first gate run on 2026-06-07 per D-W-INT-7(c).
 #

@@ -32,7 +32,7 @@ editor temp files) are filtered out at the source-plugin layer via
 ``*.json`` glob, NOT here — the parser is glob-blind so smokes can feed
 arbitrary paths.
 
-Failure policy (CLAUDE.md fast-fail): malformed JSON or shape mismatch
+Failure policy (KB "Critical Development Guidelines v2"): malformed JSON or shape mismatch
 raises ``ValueError``. Missing required fields raise ``ValueError`` —
 the importer wraps in a per-session catch (importer.py:228) so one bad
 task file doesn't kill the whole batch.

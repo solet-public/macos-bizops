@@ -421,3 +421,34 @@ class KnowledgeSearchAPI(ABC):
         active_knowledge_bases: list[str] | None = None,
         fail_fast: bool = False,
     ) -> dict[str, Any]: ...
+
+    @service_interface_process(
+        name="audit_retrieval_corpus_cron",
+        is_discoverable=False,  # cron-fired only; not model-discoverable
+        provider="knowledge_service",
+        # EDGE_SINK terminal-action shape — action_queue_poller short-circuits
+        # at the EDGE_SINK_SKIP branch (result_processor_kind is None and
+        # result_processor is None -> no dispatch). No inference scaffold fires.
+        # The submit-to-background-executor body additionally satisfies the
+        # fast-return contract (21_scheduling_service/02_action_queue_fast_return_
+        # contract.md): the actual corpus walk (~14s/article, several minutes for
+        # the full corpus) runs on a daemon thread, off the queue.
+        processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
+        parameters={},
+        return_value_schema=ReturnValueSchema(
+            description="Background-submission receipt",
+            type=ParameterType.OBJECT,
+            properties={
+                "audit": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="'started' if this fire began a new background "
+                    "audit pass, 'already_running' if a prior pass is still in "
+                    "flight (no-op)",
+                ),
+            },
+        ),
+        # No result_processor_customizations / error_processor_customizations
+        # per the canonical EDGE_SINK contract.
+    )
+    @abstractmethod
+    def audit_retrieval_corpus_cron(self) -> dict[str, Any]: ...

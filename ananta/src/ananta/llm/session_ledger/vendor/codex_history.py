@@ -26,7 +26,7 @@ NUL strip semantics: the repository's ``_strip_nuls`` helper handles this at
 the TEXT-write seam (KB ``19_session_ledger_02_nul_byte_sanitization_seam.md``),
 so the parser leaves raw ``text`` alone.
 
-Failure policy: per CLAUDE.md fast-fail, malformed JSON or non-dict object
+Failure policy: per the KB "Critical Development Guidelines v2", malformed JSON or non-dict object
 is a ``ValueError``. Lines missing ``text`` or ``ts`` are skipped with a
 warning; raising blocks ingest on a single bad line in a 3K-row file.
 """

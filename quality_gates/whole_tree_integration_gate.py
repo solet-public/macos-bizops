@@ -49,7 +49,7 @@ Allowlist file format (one entry per line, `#` comments + blank lines OK):
 
 The first two `::` separators are structural; the specifier captures
 the rest of the line verbatim (so embedded `::` in process keys works
-cleanly). Per CLAUDE.md tracked-debt convention: allowlisted findings
+cleanly). Per the KB "Gate Allowlist Conventions": allowlisted findings
 are STILL printed (prefixed `[allowlisted]`) so the gate stays honest;
 they do not contribute to the exit-1 verdict.
 
@@ -101,7 +101,7 @@ _CALL_SITE_ROOTS = (
 _CALL_SITE_PRUNE_DIRS = frozenset({"__pycache__", ".mypy_cache", ".pytest_cache"})
 _CALL_SITE_BUNDLED_VENV_PREFIX = ".venv"
 
-# Operator-tooling segments excluded per CLAUDE.md "Per-file gate scope".
+# Operator-tooling segments excluded per "Peer Pre-Completion Gate Procedure".
 # Matches a path-segment EQUALITY check inside `plugins/<X>/<segment>/...`.
 _OPERATOR_TOOLING_PLUGIN_SEGMENTS = frozenset({
     "research", "tools", "migrations", "parity_tests",
@@ -260,7 +260,7 @@ def _walk_python_files(root: Path) -> Iterator[Path]:
 def _is_operator_tooling_path(path: Path) -> bool:
     """Match `plugins/<X>/{research,tools,migrations,parity_tests}/...` paths.
 
-    CLAUDE.md "Per-file gate scope": operator-tooling under per-plugin
+    The KB "Peer Pre-Completion Gate Procedure": operator-tooling under per-plugin
     research/tools/migrations/parity_tests is excluded from the platform's
     quality surface. The gate respects that — findings inside those
     segments would be noise from sketch / replay / debug code that is not

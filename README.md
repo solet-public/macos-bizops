@@ -168,6 +168,16 @@ knowledge base exists, the file IS the runbook) to set up the shell launcher, a
 properly-named Claude Code session, no-MCP command-line operation, and
 first-use connector credential guidance.
 
+Hydration also materializes both `AGENTS.md` and `CLAUDE.md` at the clone
+root (an existing file gets a managed block merged in, never overwritten
+wholesale), so any driving coding agent — Claude Code or an
+AGENTS.md-reading agent such as Codex — starts from the same Step Zero
+instruction regardless of which convention it follows: search this
+homunculus's own knowledge base first, over the no-MCP `<name> call` path
+described above, which is the universal default. The MCP bridge (see below)
+is an optional alternative access profile the operator may choose where
+policy permits it — never a hard dependency.
+
 For shell startup integration, the driving agent should inspect the user's
 startup file and the shipped shell templates first, without printing
 secret-looking values. It should then recommend a concrete plain-English plan

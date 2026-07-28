@@ -42,8 +42,8 @@ SANCTIONED stop-and-ask, not a failure — never auto-"fixed" by force
 healthy compatible install rather than force a parallel one).
 
 Invocation: `python3.13 bootstrap.py`. Layer -1 already confirmed the
-interpreter is 3.13 before this file ever runs; per CLAUDE.md ("always
-assume Python 3.13; no version checks or compatibility code for older
+interpreter is 3.13 before this file ever runs; per the KB "Critical
+Development Guidelines v2" ("always assume Python 3.13; no version checks or compatibility code for older
 Python"), this file does not re-check or re-exec for that precondition.
 """
 

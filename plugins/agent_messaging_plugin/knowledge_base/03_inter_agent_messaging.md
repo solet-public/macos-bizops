@@ -135,6 +135,14 @@ common receive pattern is:
    poll-based receive path; no native wake is implied for generic
    streamable clients.
 
+For the local stdio bridge, an explicitly configured
+`HOMUNCULUS_AGENT_SESSION_LABEL` is also claimed as the standing role after
+registration and every reconnect. `HOMUNCULUS_AGENT_ROLE` overrides that
+default when the display label and routable role differ. Inferred cwd labels
+are display-only and do not claim roles. Registration/relabeling and role
+claiming remain distinct server operations; the bridge performs both so a
+session cannot appear correctly labeled while remaining unroutable.
+
 Security note for `streamable_no_auth=True`: the permissive verifier
 uses the synthetic `agent_id` / `agent_instance_id` sentinel
 `tunnel_passthrough`. That mode is only appropriate behind an outer
@@ -228,19 +236,15 @@ anyone replies.
 ## peer_inbox semantics
 
 ```
-mcp__<server-name>__peer_inbox()                          # default: silent-only
-mcp__<server-name>__peer_inbox(include_important=True)    # silent + IMPORTANT (catch-up mode)
+mcp__<server-name>__peer_inbox(after="<recent ISO time>")                  # default: catch-up mode
+mcp__<server-name>__peer_inbox(include_important=False)                    # intentional silent-only
 ```
 
-- Default returns only messages whose sender omitted the IMPORTANT
-  marker. IMPORTANT-marked messages are excluded by default because
-  they already woke the receiver via notification at delivery time;
-  re-listing them is noise.
-- `include_important=True` returns silent + IMPORTANT. Use this when
-  your MCP client did not auto-surface the relevant live notification
-  between turns. This remains the catch-up path for unpatched Codex,
-  misconfigured Codex, disconnected bridges, and any future MCP client
-  that logs notifications instead of feeding them to the model.
+- Default returns silent + IMPORTANT messages as the durable catch-up
+  view. Use a recent `after` timestamp during incident polling; otherwise
+  old IMPORTANT history can flood the context window.
+- `include_important=False` is an explicit silent-only status view. Do
+  not use it as a recovery poll after missed wakes.
 - Each entry exposes `sender_agent_id`, `sender_agent_instance_id`,
   and `sender_session_label`. Use the `sender_agent_instance_id` as
   the reply's `peer_agent_instance_id` to target the original sender

@@ -12,8 +12,8 @@
 #   specifier       — "<lineno>::<verb>::<key-or-marker>" OR "*" wildcard
 #
 # Removing an entry is the unit of remediation progress. Adding entries
-# without operator approval defeats the gate's purpose (per CLAUDE.md
-# tracked-debt convention).
+# without operator approval defeats the gate's purpose (per the KB
+# "Gate Allowlist Conventions").
 #
 # Initial seed (sub-1 landing 2026-06-07):
 #

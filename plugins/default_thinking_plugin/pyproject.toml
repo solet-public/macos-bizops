@@ -7,6 +7,7 @@ name = "default_thinking_plugin"
 version = "0.1.0"
 description = "Structured reasoning plugin using local LLM for planning, analysis, and deliberation"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = "==3.13.*"
 
 [tool.setuptools.packages.find]

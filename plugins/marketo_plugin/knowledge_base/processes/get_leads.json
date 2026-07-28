@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::get_leads",
+  "display_name": "Marketo: Get Leads",
+  "description": "Query actual lead records by filter_type (id/email/cookie/twitterId/facebookId/linkedInId/sfdcAccountId/sfdcContactId/sfdcLeadId/sfdcOpptyId) and filter_values (up to 300). Optional fields list restricts returned columns; next_page_token continues a prior page.",
+  "embedding_description": "Fetch actual lead/person records from Marketo by matching a filter type such as email or id against up to 300 filter values — the read verb for real lead data (name, email, custom fields), as opposed to describe_lead_fields (schema metadata only). Supports paging via next_page_token for large result sets.",
+  "result_processor_customizations": {
+    "action_label": "Marketo leads fetched",
+    "result_type": "marketo_get_leads_result",
+    "result_description": "Dict with records (a list of lead field-value dicts) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large, plus next_page_token and more_result for continuing the query.",
+    "presentation_guidance": "Summarize the row_count and show a few lead records. If more_result is true, mention next_page_token can continue the query."
+  },
+  "error_processor_customizations": {
+    "action_context": "Query leads by filter from the configured Marketo instance.",
+    "error_interpretation": "marketo.invalid_params: missing/invalid filter_type or filter_values, or more than 300 values. marketo.object_not_found: no leads matched the filter (Marketo code 702). marketo.auth_failed: OAuth credentials rejected. marketo.permission_denied: the API user's Role lacks Read-Only/Read-Write Person. marketo.partition_access_denied: the API user isn't assigned to the workspace/partition these leads live in. marketo.rate_limited: API rate limit exceeded.",
+    "recovery_guidance": "marketo.object_not_found: confirm the filter_type/filter_values actually match a lead. marketo.rate_limited: retry after a short delay. marketo.auth_failed: ask the operator to check the OAuth client_id/client_secret. marketo.permission_denied / marketo.partition_access_denied: run check_setup to see the exact gap and which admin screen fixes it."
+  }
+}

@@ -44,8 +44,9 @@ plugins, NOT allowlisted). The single inline ``StateServiceAdapter`` forwarder
 that no dir-prefix can cleanly catch carries one line-level ``# false-positive:``
 allowlist entry instead.
 
-Scope (mirrors CLAUDE.md "Per-file gate scope" + the radon/god-class/wint2
-gates): ``ananta/src/``, ``plugins/*/src/``, ``plugins/*/tests/``,
+Scope (mirrors the KB "Peer Pre-Completion Gate Procedure" plus the
+radon/god-class/wint2 gates): ``ananta/src/``, ``plugins/*/src/``,
+``plugins/*/tests/``,
 ``quality_gates/``. Operator-tooling (research/tools/migrations/parity_tests,
 workbench, deployment) is out of scope. The gate excludes its own source (its
 keyword tables) and ``quality_gates/tests/`` (detector fixtures) from self-scan.
@@ -77,7 +78,7 @@ category):
 
 Allowlisted findings are ALWAYS printed (prefixed ``[allowlisted]``) so the gate
 stays honest; they do NOT contribute to the exit-1 verdict. Adding entries
-without operator approval defeats the gate (CLAUDE.md tracked-debt convention).
+without operator approval defeats the gate (the KB "Gate Allowlist Conventions").
 Removing an entry is the unit of remediation progress.
 """
 

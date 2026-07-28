@@ -8,7 +8,7 @@ Embedding Description: The house convention for how the AI code-vetting suite pr
 
 **When you need this**: assembling a vetting scan into a shareable report or a Google Doc; deciding what sections a suite report carries and in what order; writing one finding so it reads the same as every other finding; choosing severity colors that survive a colorblind reader or a black-and-white print; framing a report on a repo the operator does not own; explaining why the report reports what it could NOT inspect, not only what it found.
 
-The full specification — the section architecture, the verbatim card template, the native-Docs hex palette, and the adopt/reject ledger — is `workbench/2026-07-21_vetting_report_format_spec.md`. This article is the canonical house-convention capture of it. Four principles distinguish this format from a tool dashboard.
+The full specification — the section architecture, the verbatim card template, the native-Docs hex palette, and the adopt/reject ledger — is `workbench/archive/2026-07-21_vetting_report_format_spec.md`. This article is the canonical house-convention capture of it. Four principles distinguish this format from a tool dashboard.
 
 ## Dual audience, one document
 

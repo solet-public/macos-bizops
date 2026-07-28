@@ -93,6 +93,7 @@ class BearerClaim:
     agent_id: str
     agent_instance_id: str
     issued_at: datetime
+    agent_session_id: str = ""
     session_label: str = ""
     audience: str = ""
     client_id: str = ""
@@ -351,6 +352,9 @@ def _payload_to_bearer_claim(payload: dict[str, Any]) -> BearerClaim:
     agent_instance_id = _require_nonempty_str(
         payload.get("agent_instance_id"), "agent_instance_id",
     )
+    agent_session_id = _require_str(
+        payload.get("agent_session_id") or "", "agent_session_id",
+    )
     issued_at_raw = _require_nonempty_str(
         payload.get("issued_at"), "issued_at",
     )
@@ -367,6 +371,7 @@ def _payload_to_bearer_claim(payload: dict[str, Any]) -> BearerClaim:
     return BearerClaim(
         agent_id=agent_id,
         agent_instance_id=agent_instance_id,
+        agent_session_id=agent_session_id,
         issued_at=issued_at,
         session_label=session_label,
         audience=audience,

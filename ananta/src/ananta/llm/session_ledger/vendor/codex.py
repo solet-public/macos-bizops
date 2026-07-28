@@ -147,7 +147,7 @@ def read_session_meta(path: Path) -> CodexSessionMeta:
     """Read the FIRST line of ``path`` as the session_meta header.
 
     Raises ``ValueError`` if the first line is missing the expected shape
-    (no fallback to mtime-derived metadata — fail-fast per CLAUDE.md).
+    (no fallback to mtime-derived metadata — see KB "Critical Development Guidelines v2").
     """
     with path.open("r", encoding="utf-8") as fh:
         first = fh.readline()

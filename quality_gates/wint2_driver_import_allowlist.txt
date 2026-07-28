@@ -8,7 +8,7 @@
 # Allowlisted findings are STILL printed (with `[allowlisted]`) so the gate
 # stays honest. They do NOT contribute to the blocking verdict.
 #
-# Per CLAUDE.md tracked-debt convention: adding entries without operator
+# Per the KB "Gate Allowlist Conventions": adding entries without operator
 # approval defeats the gate's purpose. Removing an entry is the unit of
 # remediation progress.
 #

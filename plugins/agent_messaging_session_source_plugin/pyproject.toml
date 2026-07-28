@@ -2,6 +2,7 @@
 name = "agent_messaging_session_source_plugin"
 version = "1.0.0"
 description = "LLM session ledger source for the agent_messaging thread/message tables."
+license = "Apache-2.0"
 requires-python = "==3.13.*"
 dependencies = []
 

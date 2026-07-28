@@ -291,6 +291,19 @@ ananta/tests/core/plans/plan_templates_smoke.py
 # embedded surface. Searchable-by-construction; test_retrieval-style ranking
 # needs a plan-template KB + example card ingested first = §4.6, not deployable today.
 plugins/default_knowledge_plugin/tests/plan_template_retrieval_smoke.py
+# 2026-07-26 retrieval-audit instrument repair (B-M5) — discover_test_files now
+# traverses symlinks and matches the dot- and underscore-separated glob variants,
+# and parse_article_path normalizes the symlink-relative + two real-path dialects
+# fixtures declare. Regression-proves 10/45 -> 44/44 addressable fixtures discovered
+# with zero parse errors against the real corpus on disk.
+plugins/default_knowledge_plugin/tests/retrieval_audit_fixture_discovery_smoke.py
+# 2026-07-26 retrieval-audit instrument repair (defect 3 + B-M6) — the new
+# EDGE_SINK cron-target sibling audit_retrieval_corpus_cron: dual-layer ABC
+# coverage (KnowledgeSearchInterface abstractmethod + both concrete
+# implementers), the EDGE_SINK/is_discoverable=False decorator contract, and
+# the fast-return + singleton-drainer behavior (submits to a background
+# executor, returns immediately, overlapping fires are a no-op).
+plugins/default_knowledge_plugin/tests/audit_retrieval_corpus_cron_smoke.py
 # SUB-01 (POR §4.5 GOAL) — the verb-backed plan-template curation-lifecycle
 # transition machine driven through the REAL plugin delegates
 # (transition_plan_template / get_plan_template) over an in-memory plan_templates
@@ -1013,6 +1026,36 @@ plugins/zuora_plugin/tests/smoke_auth.py
 plugins/zuora_plugin/tests/smoke_data_query.py
 plugins/zuora_plugin/tests/smoke_objects.py
 
+# marketo_plugin — marketing-automation REST connector (2026-07-28), same
+# auth-simplicity class as zuora_plugin (OAuth 2.0 client-credentials,
+# chain-consumed client_secret) but with a materially different fault model:
+# Marketo returns HTTP 200 with a JSON envelope (success: false + errors[])
+# for almost every API-level fault, so MarketoClient decodes and classifies
+# on the envelope, not the HTTP status — a 601/602 (invalid/expired token)
+# envelope triggers exactly ONE re-mint-and-retry instead of a real 401.
+# Unlike zuora_plugin, this connector DOES expose a delete verb
+# (delete_leads) — Marketo natively supports lead deletion. Partial-batch
+# results (create_or_update_leads/delete_leads/add_leads_to_list/
+# remove_leads_from_list) stay success:true with per-record skipped/failed
+# entries — not classified as an error. No async Bulk Extract job flow in v1
+# (get_leads covers ad-hoc reads with the same inline-or-spill envelope the
+# other connectors use). Pure REST — no SQL-shaped strings anywhere, so the
+# SQL-lockdown gate is silent for this plugin (verified: zero findings).
+# THREE hermetic smokes (httpx.MockTransport / faked client, no network):
+# smoke_auth (instance config resolve, repr redaction, GET-based bearer-token
+# caching-until-near-expiry, a 601 envelope triggering exactly ONE
+# re-mint-and-retry, a failed token mint raising MarketoAuthError, EDGE
+# parity), smoke_leads (describe_lead_fields/get_leads inline-vs-spill shape,
+# create_or_update_leads/delete_leads batch validation + tallies proving
+# partial-batch success is not an error, classify_marketo_envelope across the
+# sourced 601/606/702/1005/unmapped code spread), smoke_campaigns_lists
+# (list_campaigns/trigger_campaign/list_static_lists/add_leads_to_list
+# validation, remove_leads_from_list proving the DELETE-with-JSON-body path
+# uses delete_json, not post_json or httpx.Client.delete()).
+plugins/marketo_plugin/tests/smoke_auth.py
+plugins/marketo_plugin/tests/smoke_leads.py
+plugins/marketo_plugin/tests/smoke_campaigns_lists.py
+
 # trigger_poll dispatch-offload (2026-07-10 fleet-wide dispatch-wedge fix): the cron
 # heartbeat trigger_poll now SUBMITS the whole importer pass to a single-slot
 # BoundedSummaryExecutor (_poll_executor) and returns {"poller": started|already_running}
@@ -1136,6 +1179,11 @@ ananta/tests/platform/homunculus_name_smoke.py
 ananta/tests/platform/binary_libraries_smoke.py
 ananta/tests/platform/root_manifest_smoke.py
 ananta/tests/platform/launch_path_choice_y_smoke.py
+
+# Root agent-instruction bootstrap (2026-07-27): AGENTS.md and CLAUDE.md are
+# thin companion entrypoints with the same no-MCP local KB/session-ledger
+# commands, no stale MCP-first routing, and the pre-retrieval safety rules.
+ananta/tests/platform/agent_instruction_bootstrap_smoke.py
 ananta/tests/lifecycle_management_service/apply_manifest_binding_rebind_smoke.py
 ananta/tests/lifecycle_management_service/manifest_preflight_smoke.py
 ananta/tests/core/plugins/set_active_smoke.py
@@ -1374,19 +1422,6 @@ ananta/src/ananta/services/inference_service/tests/forward_vertex_queue_smoke.py
 # them, SKIPPING terminal 'failed' rows; a GC sweep reaps aged 'failed' rows.
 plugins/agent_messaging_plugin/tests/forward_vertex_redrive_smoke.py
 
-# Structural-drain hook (2026-07-18) — the deaf-wake / Root-B turn-start lever
-# (.claude/hooks/drain_owed_important.py). HERMETIC (no live homunculus / DB, via the
-# PROBE_FILE count seam + STATE_DIR marker override): the SessionStart /
-# UserPromptSubmit hook COUNTs owed unconsumed IMPORTANT rows and injects a
-# peer_inbox(include_important=true) directive only while owed rows exist. All 7
-# §7 cases — RED->GREEN, same-turn dedupe, no-resurface-after-reconciliation,
-# no-noise, durable-source (probe keys on the STABLE recipient_agent_session_id,
-# never the rotating instance id), the load-bearing §7.6 anti-silent-drop
-# (ignored directive re-injects next turn — kills the watermark design), and
-# §7.7 probe-failure (inject anyway + loud stderr).
-# Plan: workbench/2026-07-18_structural_drain_fix_lever_packet.md.
-.claude/hooks/tests/drain_owed_important_smoke.py
-
 # code_vetting_plugin (W3-A, 2026-07-20, Claude-B) — the AI code-vetting suite
 # promoted from quality_gates/vetting/ into the shipping plugin. Two hermetic L1
 # smokes relocated with the tree (no live homunculus / LM Studio; verified offline from
@@ -1443,6 +1478,28 @@ plugins/code_vetting_plugin/tests/live_state_smoke.py
 # roster as not_applicable records (scanners_total unchanged). Offline (tmp trees;
 # real git for the git-mode build_tree; run_all over a tiny foreign tree).
 plugins/code_vetting_plugin/tests/foreign_target_smoke.py
+
+# code_vetting_plugin foreign source-role/platform-variant attribution
+# (Cultivar proving wedge, 2026-07-27). Pins the foreign-only, doctrine-backed
+# prefix override contract; repo-risk non-suppressibility; exhaustive dimension
+# policy; product/non-product/unconfirmed surface partition; bounded candidate
+# and platform evidence; exact reconciliation; target-JSON persistence; and
+# byte-compatible self-vet omission. Offline (tempfile target + state fake).
+plugins/code_vetting_plugin/tests/source_roles_smoke.py
+
+# code_vetting_plugin foreign technology fingerprint + capability routing
+# (Wedge 2A, 2026-07-26). Pins the additive target.technology_fingerprint:
+# fixed/reconciled enumerated-file probes with bounded strict JSON reads and
+# visible malformed/duplicate/oversize/symlink/JSONC gaps; per-package and Deno
+# scope isolation; direct vs co-scoped resolved vs lock-only component evidence
+# (including scoped npm names); confirmed non-product visibility without product
+# routing; bounded Expo Router paths grouped only by confirmed overrides;
+# separate Deno/Supabase topology; deterministic capability keys/statuses whose
+# execution_status is always not_run_by_fingerprint; markdown ordering/escaping;
+# no CoverageRecord mutation; self omission; inline + persisted target-JSON
+# round-trip. Hermetic (temporary target + state fake; no network/subprocess/tool
+# execution).
+plugins/code_vetting_plugin/tests/technology_fingerprint_smoke.py
 
 # code_vetting_plugin test-coverage integration (coverage micro-slice, 2026-07-20,
 # Claude-A spec / Claude-B applied; Architect foreign-target ruling §D1-D3) — the
@@ -1722,3 +1779,11 @@ plugins/agent_messaging_plugin/tests/local_cli_smoke.py
 plugins/agent_messaging_plugin/tests/timestamp_value_compare_smoke.py
 plugins/agent_messaging_plugin/tests/wake_hook_smoke.py
 plugins/macos_self_deployment_plugin/tests/steady_state_reassert_activation_smoke.py
+
+# Bridge peer-identity registration retry (2026-07-25). `_open_with_retry` loops
+# unbounded but `_register_identity` had ONE attempt and swallowed failures into a
+# log line, leaving a half-alive session: process calls work, the session is
+# invisible to peer_list/peer_send and cannot read peer_inbox. Hit three sessions
+# in one evening, each presenting as "that agent is ignoring me". Hermetic —
+# scripted _post, patched backoff, no bridge or network.
+plugins/agent_messaging_plugin/tests/register_identity_retry_smoke.py

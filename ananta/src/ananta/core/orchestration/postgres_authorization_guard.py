@@ -23,8 +23,8 @@ Authorized substrate-providing plugins
 Platform code (``ananta.*``) is also allowed — the platform itself reaches
 through state_service abstractions which are tested separately. Operator
 tooling under ``plugins/<x>/tools/*`` is allowed because its scope is
-explicitly excluded from the runtime gates per CLAUDE.md per-file gate
-scope (operator-managed quality surface).
+explicitly excluded from the runtime gates by the KB "Peer Pre-Completion
+Gate Procedure" (operator-managed quality surface).
 
 Everything else — vault, midwife, knowledge, blob, sound effects, etc.,
 including any future plugin — must route through ``state_service`` or

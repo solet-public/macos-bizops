@@ -3,9 +3,8 @@
 Implements `MidwifeServiceInterface` for the GitHub-genesis source axis
 (mirrors `macos_midwife_plugin.plugin` / `aws_midwife_plugin.plugin` so
 callers branching on the interface contract see identical shapes across
-substrates — CLAUDE.md: "the interface contract... is shared across
-implementations; only the dispatch is per-plugin", no exclusive
-`midwife_service` binding).
+substrates — see the GitHub/macOS/AWS midwife overview articles; there is no
+exclusive `midwife_service` binding.
 
 BIRTH-ONLY since the 2026-07-20 split ruling: the seed FACTORY verbs
 (`assemble_seed`/`validate_and_seal_seed_bundle`/`publish_seed`) moved to the

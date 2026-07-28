@@ -27,6 +27,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import re
+import secrets
 from datetime import datetime as _dt
 from typing import TYPE_CHECKING, Any, Final
 
@@ -66,6 +67,7 @@ from .peer_dispatch import (
     IMPORTANT_MARKER_RE,
     NativeWakeError,
     dispatch_peer_send,
+    dispatch_role_send,
 )
 from .peer_registry import (
     PeerAmbiguousError,
@@ -75,8 +77,11 @@ from .peer_registry import (
 from .platform_surface import BridgeError, PlatformSurface
 from .role_binding_store import (
     UNCLAIMED_SESSION_ID,
+    ResolvedRole,
+    RoleBindingVacantError,
     list_roles_for_agent_instance,
     refresh_role_binding_cas,
+    resolve_role_binding,
 )
 
 if TYPE_CHECKING:
@@ -172,6 +177,11 @@ class PeerSendBody(BaseModel):
     peer_id: str
     peer_agent_instance_id: str | None = None
     content: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PeerSendByNameBody(BaseModel):
+    name: str
+    content: str
 
 
 class PeerDrainBody(BaseModel):
@@ -603,6 +613,26 @@ def _direct_wake_self_refresh(
     return "no_owed"
 
 
+def _effective_registration_agent_session_id(
+    peer_registry: PeerRegistry,
+    *,
+    agent_instance_id: str,
+    incoming_agent_session_id: str,
+) -> str:
+    """Preserve a known logical-session key across empty auto-registers."""
+    if (
+        incoming_agent_session_id
+        and incoming_agent_session_id != UNCLAIMED_SESSION_ID
+    ):
+        return incoming_agent_session_id
+    stored_agent_session_id = peer_registry.agent_session_id_for_instance(
+        agent_instance_id,
+    )
+    if stored_agent_session_id and stored_agent_session_id != UNCLAIMED_SESSION_ID:
+        return stored_agent_session_id
+    return incoming_agent_session_id
+
+
 def _register_peer_routes(
     app: FastAPI,
     *,
@@ -637,6 +667,11 @@ def _register_peer_routes(
         bridge.agent_instance_id = agent_instance_id
         if body.parent_pid is not None:
             bridge.parent_pid = body.parent_pid
+        effective_agent_session_id = _effective_registration_agent_session_id(
+            peer_registry,
+            agent_instance_id=agent_instance_id,
+            incoming_agent_session_id=body.agent_session_id,
+        )
         # Import here to avoid a circular import at module load time;
         # models is pulled in via TYPE_CHECKING for the type hints.
         from .models import BridgeBinding  # noqa: PLC0415
@@ -646,7 +681,7 @@ def _register_peer_routes(
             agent_instance_id=agent_instance_id,
             session_label=body.session_label,
             parent_pid=body.parent_pid,
-            agent_session_id=body.agent_session_id,
+            agent_session_id=effective_agent_session_id,
         )
         # ``register`` returns the EFFECTIVE label — the preserve-on-empty
         # path (2026-06-01 §4.2) restores a stored label when the incoming
@@ -678,7 +713,7 @@ def _register_peer_routes(
                 )
         self_refresh_action = _state_table_self_refresh(
             state_service,
-            agent_session_id=body.agent_session_id,
+            agent_session_id=effective_agent_session_id,
             new_agent_instance_id=agent_instance_id,
         )
         # Fork-1a: re-home this session's owed DIRECT-wake rows off the rotated
@@ -686,7 +721,7 @@ def _register_peer_routes(
         # self-refresh above; same loud-but-non-fatal one-shot posture).
         direct_rehome_action = _direct_wake_self_refresh(
             agent_messaging_service,
-            agent_session_id=body.agent_session_id,
+            agent_session_id=effective_agent_session_id,
             new_agent_instance_id=agent_instance_id,
         )
         # INF-01 Trigger-1 (§D.9): fill a vacant / dead-holder sys:autonomic
@@ -701,7 +736,7 @@ def _register_peer_routes(
                 autonomic_action = autonomic_on_register(
                     agent_id=agent_id,
                     agent_instance_id=agent_instance_id,
-                    agent_session_id=body.agent_session_id,
+                    agent_session_id=effective_agent_session_id,
                     session_label=effective_label,
                     provides_inference=body.provides_inference,
                 )
@@ -716,6 +751,7 @@ def _register_peer_routes(
             content={
                 "agent_id": agent_id,
                 "agent_instance_id": agent_instance_id,
+                "agent_session_id": effective_agent_session_id,
                 "session_label": effective_label,
                 "parent_pid": body.parent_pid,
                 "bridge_id": bridge_id,
@@ -804,12 +840,25 @@ def _register_peer_routes(
             agent_messaging_service=agent_messaging_service,
         )
 
+    @app.post(f"{API_PREFIX}/{{bridge_id}}/peer/send_by_name")
+    async def peer_send_by_name_route(
+        bridge_id: str, body: PeerSendByNameBody,
+    ) -> JSONResponse:
+        return _peer_send_by_name_impl(
+            bridge_id=bridge_id,
+            body=body,
+            bridge_manager=bridge_manager,
+            peer_registry=peer_registry,
+            agent_messaging_service=agent_messaging_service,
+            state_service=state_service,
+        )
+
     @app.get(f"{API_PREFIX}/{{bridge_id}}/peer/inbox")
     async def peer_inbox_route(
         bridge_id: str,
         after: str | None = None,
         limit: int = 50,
-        include_important: bool = False,
+        include_important: bool = True,
         role_after: str | None = None,
     ) -> JSONResponse:
         bridge = bridge_manager.get(bridge_id)
@@ -885,13 +934,23 @@ def _register_peer_routes(
         agent_instance_id = sender_binding.agent_instance_id
         limit = max(1, min(body.limit, 100))
         activity_at = _parse_iso_after(bridge.last_model_activity_at or None)
+        # QUIET-GAP: the reconcilers also need the stamp PRECEDING this one, so
+        # they can require the emission to have landed in a turn-boundary quiet
+        # gap. Without it, a session already mid-turn consumes every arriving
+        # wake on its first emit (its next call satisfies "activity after the
+        # emission") and the row leaves the owed set unseen.
+        prev_activity_at = _parse_iso_after(bridge.prev_model_activity_at or None)
         try:
             if activity_at is not None:
                 agent_messaging_service.reconcile_role_consumption(
-                    agent_instance_id=agent_instance_id, activity_at=activity_at,
+                    agent_instance_id=agent_instance_id,
+                    activity_at=activity_at,
+                    prev_activity_at=prev_activity_at,
                 )
                 agent_messaging_service.reconcile_direct_consumption(
-                    agent_instance_id=agent_instance_id, activity_at=activity_at,
+                    agent_instance_id=agent_instance_id,
+                    activity_at=activity_at,
+                    prev_activity_at=prev_activity_at,
                 )
             rows = agent_messaging_service.list_undelivered_for_instance(
                 agent_instance_id=agent_instance_id,
@@ -1207,6 +1266,114 @@ def _peer_send_impl(
         return JSONResponse(
             content={"code": "native_wake_failed", "message": str(exc)},
             status_code=502,
+        )
+    except AgentMessagingError as exc:
+        return _agent_messaging_error_response(exc)
+    return JSONResponse(content=outcome.to_payload(), status_code=200)
+
+
+def _peer_send_by_name_sender(
+    *,
+    bridge_id: str,
+    body: PeerSendByNameBody,
+    bridge_manager: BridgeSessionManager,
+    peer_registry: PeerRegistry,
+    state_service: Any | None,
+) -> BridgeBinding | JSONResponse:
+    """Validate the send envelope, returning the sender binding or an error response."""
+    bridge = bridge_manager.get(bridge_id)
+    if bridge is None or bridge.closed:
+        return _bridge_not_found(bridge_id)
+    sender_binding = _lookup_binding_for_bridge(peer_registry, bridge_id)
+    if sender_binding is None:
+        return _validation_error(
+            "identity_not_registered",
+            "this bridge has not registered an agent_id; "
+            "POST /peer/register first",
+        )
+    if not body.name.strip():
+        return _validation_error(
+            "missing_name",
+            "peer_send_by_name requires a non-empty role 'name'.",
+        )
+    if not body.content:
+        return _validation_error(
+            "missing_content",
+            "peer_send_by_name requires non-empty content.",
+        )
+    if state_service is None:
+        return _state_unavailable(
+            "state_service is not bound; cannot resolve role bindings.",
+        )
+    return sender_binding
+
+
+def _resolve_role_for_send(
+    state_service: Any, role_name: str,
+) -> ResolvedRole | JSONResponse:
+    """Resolve ``role_name`` to a routable target, or return an error response."""
+    try:
+        role = resolve_role_binding(state_service, role_name)
+    except RoleBindingVacantError as exc:
+        return JSONResponse(
+            content={
+                "code": "peer_role_vacant",
+                "message": str(exc),
+                "name": role_name,
+            },
+            status_code=404,
+        )
+    except StateOperationError as exc:
+        return _state_unavailable(str(exc))
+    if not role.agent_instance_id:
+        return _validation_error(
+            "peer_role_malformed",
+            (
+                f"role binding for {role_name!r} is missing agent_instance_id; "
+                "re-claim the role first"
+            ),
+        )
+    return role
+
+
+def _peer_send_by_name_impl(
+    *,
+    bridge_id: str,
+    body: PeerSendByNameBody,
+    bridge_manager: BridgeSessionManager,
+    peer_registry: PeerRegistry,
+    agent_messaging_service: Any,
+    state_service: Any | None,
+) -> JSONResponse:
+    """Resolve a durable role name and dispatch from the current bridge identity."""
+    sender = _peer_send_by_name_sender(
+        bridge_id=bridge_id,
+        body=body,
+        bridge_manager=bridge_manager,
+        peer_registry=peer_registry,
+        state_service=state_service,
+    )
+    if isinstance(sender, JSONResponse):
+        return sender
+    role_name = body.name.strip()
+    role = _resolve_role_for_send(state_service, role_name)
+    if isinstance(role, JSONResponse):
+        return role
+    try:
+        outcome = dispatch_role_send(
+            bridge_manager=bridge_manager,
+            peer_registry=peer_registry,
+            agent_messaging_service=agent_messaging_service,
+            role_name=role_name,
+            role=role,
+            sender_bridge_id=bridge_id,
+            sender_agent_id=sender.agent_id,
+            sender_agent_instance_id=sender.agent_instance_id,
+            sender_session_label=sender.session_label,
+            sender_parent_pid=sender.parent_pid,
+            content=[TextPart(type="text", text=body.content)],
+            message_id=f"arm-{secrets.token_hex(16)}",
+            reply_to_role="",
         )
     except AgentMessagingError as exc:
         return _agent_messaging_error_response(exc)

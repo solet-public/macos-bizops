@@ -30,6 +30,7 @@ from ananta.core.domain.enums import ActionStatus
 from ananta.core.domain.types import ActionResult
 from ananta.core.plugins.plugin_base import ServicePlugin
 from ananta.interfaces.knowledge_service_interface import KnowledgeServiceInterface
+from ananta.services.session_ledger_service.summary_executor import BoundedSummaryExecutor
 from ananta.types.schema_types import SchemaDefinition
 
 from ._file_ops_plugin_mixin import KnowledgeFileOpsPluginMixin
@@ -98,6 +99,9 @@ class DefaultKnowledgePlugin(
         self._embedding_service: Any = None
         self._address_book_service: Any = None
         self._kb_root: Path | None = None
+        # Single-slot background executor for audit_retrieval_corpus_cron
+        # (B-M6 fast-return-contract fix). See _search_plugin_mixin.py.
+        self._kb_audit_executor = BoundedSummaryExecutor(name="kb-retrieval-audit")
 
     def get_schema_definitions(self) -> list[SchemaDefinition]:
         return [get_knowledge_schema()]

@@ -7,6 +7,7 @@ name = "default_scheduling_plugin"
 version = "0.1.0"
 description = "Default scheduling plugin for Ananta AI Assistant"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = "==3.13.*"
 authors = [
     {name = "Ananta AI Team"},

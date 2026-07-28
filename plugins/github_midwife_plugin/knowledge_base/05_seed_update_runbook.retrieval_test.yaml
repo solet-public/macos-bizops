@@ -11,6 +11,7 @@ target_queries:
   - "seed update runbook git pull fast forward re-mint"
   - "do I need to rebuild the venv after pulling a seed update"
   - "apply a new seed version without losing homunculus state"
+  - "seed update added a new plugin but it is not active"
 min_rank: 3
 
 forbidden_queries:

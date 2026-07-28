@@ -2,6 +2,7 @@
 name = "claude_code_cloud_session_source_plugin"
 version = "1.0.0"
 description = "LLM session ledger source for Claude Code on the web (api.anthropic.com Managed Agents API)."
+license = "Apache-2.0"
 requires-python = "==3.13.*"
 dependencies = []
 

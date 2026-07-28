@@ -1,13 +1,22 @@
 """DefaultKnowledgePlugin search + retrieval-quality sub-Mixin (W5.T).
 
-Four KSI search/retrieval-quality methods plus one private helper:
+Five KSI search/retrieval-quality methods plus one private helper:
 search / search_planning_references / test_retrieval / audit_retrieval_corpus /
-_run_single_audit. Lifted byte-for-byte from the W5.T-pre-decomposition
+audit_retrieval_corpus_cron / _run_single_audit. The first four (plus the
+helper) are lifted byte-for-byte from the W5.T-pre-decomposition
 ``DefaultKnowledgePlugin``. Inherited via MI from the residual class.
 
 Audit-report path helpers (_AUDIT_REPORT_DIR, _AUDIT_REPORT_STEM_FORMAT,
 _resolve_repo_relative) are co-located with the audit_retrieval_corpus method
 that uses them — Search-only per the W5.T inventory cross-mixin scan.
+
+``audit_retrieval_corpus_cron`` (2026-07-26, B-M6) is the EDGE_SINK
+scheduler-fired sibling: it submits the corpus walk to the plugin's
+single-slot background executor (``self._kb_audit_executor``, a
+``BoundedSummaryExecutor`` owned by ``DefaultKnowledgePlugin.__init__``) and
+returns a started/already-running receipt in milliseconds, so a cron fire
+never parks the serial action-queue poll loop for the walk's multi-minute
+duration (KB ``21_scheduling_service/02_action_queue_fast_return_contract.md``).
 """
 
 from __future__ import annotations
@@ -50,11 +59,16 @@ class KnowledgeSearchPluginMixin:
     """KB search + retrieval-quality verb implementations. Inherited via MI."""
 
     if TYPE_CHECKING:
+        from ananta.services.session_ledger_service.summary_executor import (
+            SummaryExecutor,
+        )
+
         # Service-state attributes owned by DefaultKnowledgePlugin.__init__ + prepare_for_readiness.
         # orchestrator_ref is inherited from PluginBase on the residual class.
         _kb_root: Path | None
         _memory_service: Any
         _state_service: Any
+        _kb_audit_executor: SummaryExecutor
         orchestrator_ref: Any
 
     def search(
@@ -173,6 +187,7 @@ class KnowledgeSearchPluginMixin:
             parse_test_file(path)
             for path in discover_test_files(corpus_path)
         ]
+        total_fixtures_discovered = len(cases)
         cases = filter_cases_to_active(
             cases, get_active_names(self._state_service), active_knowledge_bases,
         )
@@ -196,6 +211,7 @@ class KnowledgeSearchPluginMixin:
                 corpus_root=str(corpus_path),
                 report_path=str(report_path),
                 duration_seconds=duration_seconds,
+                total_fixtures_discovered=total_fixtures_discovered,
             ),
             encoding="utf-8",
         )
@@ -205,6 +221,7 @@ class KnowledgeSearchPluginMixin:
             "data": {
                 "ran_at": ran_at,
                 "corpus_root": str(corpus_path),
+                "total_fixtures_discovered": total_fixtures_discovered,
                 "total_articles_audited": aggregate.total_articles_audited,
                 "passed": aggregate.passed,
                 "failed": aggregate.failed,
@@ -214,6 +231,21 @@ class KnowledgeSearchPluginMixin:
                 "report_path": str(report_path),
                 "duration_seconds": duration_seconds,
             },
+        }
+
+    def audit_retrieval_corpus_cron(self) -> dict[str, Any]:
+        """Scheduler-fired EDGE_SINK sibling of ``audit_retrieval_corpus``.
+
+        Submits the default-corpus walk to the single-slot background
+        executor and returns immediately; the walk itself runs
+        ``audit_retrieval_corpus`` with its schema defaults on the daemon
+        worker thread. A fire that lands while a prior pass is still running
+        is a no-op (``already_running``) — see ``BoundedSummaryExecutor``.
+        """
+        accepted = self._kb_audit_executor.submit(self.audit_retrieval_corpus)
+        return {
+            "status": "success",
+            "data": {"audit": "started" if accepted else "already_running"},
         }
 
     def _run_single_audit(self, case: AuditCase) -> dict[str, Any]:
