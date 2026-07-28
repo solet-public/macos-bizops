@@ -20,6 +20,8 @@ from .run_record import CoverageRecord, RunTarget
 from .scanners.dead_code import DeadSymbolsReport, render_candidate_dead_symbols_section
 from .scanners.rulebook_sync import STALE_RULEBOOK_CONSTRAINT
 from .scanners.structural_metrics import StructuralMetricsReport, render_structural_metrics_section
+from .source_roles import render_source_role_section
+from .technology_fingerprint import render_technology_fingerprint_section
 from .test_coverage import TestCoverageReport, render_test_coverage_section
 
 # Most-severe first. The report ranks findings by this order.
@@ -170,14 +172,26 @@ class ReportRenderer:
         banner = _INTEGRITY_BANNER if _has_stale_rulebook(findings) else ""
         blocks = [
             self._header(run_id, target, context_profile, generated_at, preamble, enumeration, file_count, stacks, banner),
-            self._summary(selected),
-            self._findings_section(selected),
-            self._coverage_section(coverage),
-            render_structural_metrics_section(structural_metrics),
-            render_candidate_dead_symbols_section(dead_symbols),
-            render_test_coverage_section(test_coverage),
-            self._footer(findings, selected),
         ]
+        if target.technology_fingerprint is not None:
+            # Keep the routing evidence before Summary/Findings so the bounded
+            # inline report preserves it when later detail is truncated.
+            blocks.append(
+                render_technology_fingerprint_section(target.technology_fingerprint)
+            )
+        blocks.extend(
+            (
+                self._summary(selected),
+                self._findings_section(selected),
+                self._coverage_section(coverage),
+                render_structural_metrics_section(structural_metrics),
+                render_candidate_dead_symbols_section(dead_symbols),
+                render_test_coverage_section(test_coverage),
+            )
+        )
+        if target.source_role_partition is not None:
+            blocks.append(render_source_role_section(target.source_role_partition))
+        blocks.append(self._footer(findings, selected))
         return "\n\n".join(blocks) + "\n"
 
     def _header(

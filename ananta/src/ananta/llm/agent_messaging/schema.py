@@ -367,8 +367,8 @@ def get_agent_messaging_schema() -> SchemaDefinition:
                     "True iff the sender used the IMPORTANT marker (a "
                     "first-class projection of metadata.important). Gates the "
                     "silent peer-inbox: silent_only=True returns important=False "
-                    "rows only — IMPORTANT messages already woke the receiver at "
-                    "delivery, so re-listing them in the default inbox is noise. "
+                    "rows only; the public peer_inbox default is the catch-up "
+                    "view that includes IMPORTANT messages. "
                     "Additive column (SQL-lockdown GAP-2): replaces the raw "
                     "metadata->>'important' JSONB predicate the state interface "
                     "cannot express."
@@ -523,6 +523,13 @@ def get_agent_role_message_schema() -> SchemaDefinition:
             COL_CONSUMED_AT: ColumnDefinition(
                 type=ColumnType.DATETIME,
                 description="When consumption was stamped (audit; NULL = still owed).",
+            ),
+            COL_LAST_EMITTED_AT: ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description=(
+                    "When the last emission was confirmed to the holder (NULL "
+                    "until the first). The re-emit window is measured from here."
+                ),
             ),
             COL_EMIT_COUNT: ColumnDefinition(
                 type=ColumnType.INTEGER,

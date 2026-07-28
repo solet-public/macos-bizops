@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::check_setup",
+  "display_name": "Marketo: Check Setup",
+  "description": "Probe the configured API user's READ-ONLY capabilities (lead field schema, lead query, campaign listing, static list listing) and report which Access API Role permission is missing for any that fail. PARTIAL by design — write/execute verbs cannot be safely probed.",
+  "embedding_description": "Check WHICH capabilities the Marketo API user's Access API Role actually grants — runs four safe read-only probes and names the exact missing Role permission (e.g. 'Read-Write Person', 'Read-Only Campaign') for any that fail, rather than a generic auth error. Distinct from test_connection (which only proves the client_id/client_secret mint a token, saying nothing about what the Role can do). Use this after registering marketo_instance, or whenever a verb returns marketo.permission_denied, to see the full picture of what's missing before walking the operator through a Role/User/LaunchPoint fix. Does NOT verify write or campaign-trigger permissions — those are reported as writes_unverified and only surface on first real use.",
+  "result_processor_customizations": {
+    "action_label": "Marketo setup checked",
+    "result_type": "marketo_check_setup_result",
+    "result_description": "Dict with reads_verified (bool, READ capabilities only — NOT the whole setup), checks (a list of {capability, verb, status, error_code?, error_message?, guidance?} per probe), writes_unverified (verb names whose permissions can't be probed safely), writes_unverified_note.",
+    "presentation_guidance": "If reads_verified is false, lead with the specific failed capability + its guidance (exact Role permission to add, or the correct admin screen for a partition/credential problem) rather than a generic 'setup incomplete'. Always mention writes_unverified so the operator knows write/trigger permission gaps can still surface later even when reads_verified=true."
+  },
+  "error_processor_customizations": {
+    "action_context": "Check which capabilities the configured Marketo API user's Role actually grants.",
+    "error_interpretation": "marketo.not_configured: no marketo_instance address-book entry registered yet — nothing to check.",
+    "recovery_guidance": "marketo.not_configured: register the marketo_instance address-book entry first (see hydration_guidance.md), then run check_setup."
+  }
+}

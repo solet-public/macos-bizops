@@ -56,9 +56,9 @@ Allowlist format mirrors the Cycle 1 register:
     specifier       — "<lineno>::<key-or-marker>" OR "*" wildcard
 
 Allowlisted findings STILL print (prefixed ``[allowlisted]``); they do
-NOT contribute to the exit verdict. Per CLAUDE.md tracked-debt
-convention: adding entries without operator approval defeats the
-gate's purpose.
+NOT contribute to the exit verdict. Under the KB "Gate Allowlist
+Conventions", adding entries without operator approval defeats the gate's
+purpose.
 
 Exit codes (mirror wint2_driver_import_check.py):
   0  — clean, all findings allowlisted, OR ``--warn-only`` mode

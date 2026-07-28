@@ -62,8 +62,15 @@ from .run_record import (
 from .runner import L1ReportData, run_all
 from .scanners import dead_code, platform_gates
 from .scheduled_vet import REGRESSION_MEMORY_TAG, SingleSlotVetExecutor, is_regression
+from .source_roles import (
+    RoleOverride,
+    RoleOverrideValidationError,
+    build_source_role_partition,
+    parse_role_overrides,
+)
 from .stacks import detect_stacks, render_stacks
 from .targets import TargetTree
+from .technology_fingerprint import build_technology_fingerprint
 
 if TYPE_CHECKING:
     # Annotation-only imports for the B3c inference SEAM. The inference subsystem is
@@ -82,11 +89,58 @@ _GET_RUN_RESULT_TYPE = "code_vetting_run_record"
 _REPORT_CHAR_CAP = 24000
 # The substrate string for an L1-only (no-inference) persisted run — matches VettingDriver's default.
 _L1_SUBSTRATE = "heuristic"
+_ROLE_OVERRIDES_ABSENT = object()
 
 # A scan step: (target tree, run id) -> (findings, coverage, L1ReportData). Both the full L1
 # pipeline (run_all) and the quality-gate subset share this shape; the gate subset carries an empty
 # L1ReportData (no report-supplementary payloads), the full pipeline carries the R8-1/R9-A payloads.
 ScanFn = Callable[[TargetTree, str], tuple[list[Finding], list[CoverageRecord], L1ReportData]]
+
+
+def _run_target(
+    *,
+    root: Path,
+    ref: str,
+    scope: str,
+    tree: TargetTree,
+    findings: list[Finding],
+    overrides: tuple[RoleOverride, ...],
+    overall_by_dimension: dict[str, int],
+    foreign: bool,
+) -> RunTarget:
+    """Build the self-compatible target or the additive foreign partition."""
+
+    if not foreign:
+        return RunTarget(repo=root.name, ref=ref, scope=scope)
+    return RunTarget(
+        repo=root.name,
+        ref=ref,
+        scope=scope,
+        source_role_partition=build_source_role_partition(
+            tree=tree,
+            findings=findings,
+            overrides=overrides,
+            overall_by_dimension=overall_by_dimension,
+        ),
+        technology_fingerprint=build_technology_fingerprint(
+            tree=tree,
+            overrides=overrides,
+        ),
+    )
+
+
+def _foreign_inventory(
+    tree: TargetTree, foreign: bool
+) -> tuple[str | None, int | None, str]:
+    if foreign:
+        return tree.enumeration, len(tree.all_files()), "foreign"
+    return None, None, "self"
+
+
+def _run_allowlist_delta(root: Path, foreign: bool) -> AllowlistDelta:
+    if foreign:
+        return AllowlistDelta(totals={})
+    return AllowlistDelta(totals=allowlist_totals(root))
 
 
 def locate_worktree_root(app_home: Path) -> Path:
@@ -150,7 +204,13 @@ def _vetting_data_schema() -> ReturnValueSchema:
             "run_id": ParameterMetadata(type=ParameterType.STRING, description="Unique run id (vr-<tag>-<ref>-<stamp>)."),
             "target": ParameterMetadata(
                 type=ParameterType.OBJECT,
-                description="What was examined: {repo, ref, scope}. ref is empty in walk-enumeration mode (no invented provenance).",
+                description=(
+                    "What was examined: {repo, ref, scope}; a foreign run also carries "
+                    "the bounded source_role_partition and technology_fingerprint "
+                    "(scoped declarations/topology plus deterministic capability needs; "
+                    "routing is not execution). ref is empty in walk-enumeration mode "
+                    "(no invented provenance)."
+                ),
             ),
             "target_class": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -269,12 +329,27 @@ _PERSIST_PARAM = ParameterMetadata(
     ),
 )
 
+_ROLE_OVERRIDES_PARAM = ParameterMetadata(
+    type=ParameterType.LIST,
+    required=False,
+    description=(
+        "Optional foreign-target-only source-role declarations. At most 32 objects, "
+        "each exactly {path_prefix, role, doctrine_locator, declaring_session}. "
+        "path_prefix is a literal normalized tree-relative path and must match an enumerated file; role "
+        "is product | test | docs | examples_reference | vendored | build_tooling. "
+        "Longest boundary-aware prefix wins. Overrides partition only surface-quality "
+        "findings; repository risks such as secrets and dependencies remain repo-wide. "
+        "Path-convention candidates never move findings."
+    ),
+)
+
 
 def _vet_codebase_params() -> dict[str, ParameterMetadata]:
-    """vet_codebase params — scope label, optional foreign target_path, target-toolchain opt-in, persist opt-in."""
+    """vet_codebase params — scope, target, role attribution, target toolchain, persistence."""
     return {
         **_scope_param("whole-tree self-vet"),
         "target_path": _TARGET_PATH_PARAM,
+        "role_overrides": _ROLE_OVERRIDES_PARAM,
         "execute_target_toolchain": _EXECUTE_TOOLCHAIN_PARAM,
         "persist": _PERSIST_PARAM,
     }
@@ -302,7 +377,14 @@ def _vetting_run_record_schema() -> ReturnValueSchema:
         description="One persisted vetting run: the bounded metrics row (severity/dimension histograms, coverage, substrate) + the structural-metrics and candidate-dead-symbols evidence payloads + the severity-ranked markdown report.",
         properties={
             "run_id": ParameterMetadata(type=ParameterType.STRING, description="Unique run id (the read key)."),
-            "target": ParameterMetadata(type=ParameterType.OBJECT, description="What was examined: {repo, ref, scope}."),
+            "target": ParameterMetadata(
+                type=ParameterType.OBJECT,
+                description=(
+                    "What was examined: {repo, ref, scope}; persisted foreign runs "
+                    "also carry the bounded source_role_partition and "
+                    "technology_fingerprint in this existing JSON object."
+                ),
+            ),
             "started": ParameterMetadata(type=ParameterType.STRING, description="ISO-8601 UTC run start."),
             "finished": ParameterMetadata(type=ParameterType.STRING, description="ISO-8601 UTC run finish."),
             "substrate": ParameterMetadata(type=ParameterType.STRING, description="Which inference engine reviewed/refuted: heuristic | local_inference | subscription."),
@@ -409,23 +491,56 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
             return TargetTree.from_git(root, foreign=foreign), git_head(root)
         return TargetTree.from_walk(root), ""
 
-    def _run(self, scan_fn: ScanFn, *, scope: str, tag: str, target_path: str | None = None, persist: bool = False) -> dict[str, Any]:
+    def _run(
+        self,
+        scan_fn: ScanFn,
+        *,
+        scope: str,
+        tag: str,
+        target_path: str | None = None,
+        role_overrides: object = _ROLE_OVERRIDES_ABSENT,
+        persist: bool = False,
+    ) -> dict[str, Any]:
         """Resolve the target, build its TargetTree, run ``scan_fn``, pack the payload.
 
         ``persist`` (default false, the vet_codebase opt-in) writes the run to the vetting_runs trail as a
         pure SIDE-EFFECT (substrate 'heuristic', L1-only) so get_vetting_run can read it back by run_id; the
         returned payload is byte-identical whether or not it persists.
+
+        Every foreign run receives an additive source-role partition. Validated
+        overrides are report-stage attribution only: scanners and the overall
+        dimension histogram are unchanged.
         """
         root, foreign = self._resolve_target(target_path)
         tree, ref = self._build_tree(root, foreign=foreign)
+        overrides_provided = role_overrides is not _ROLE_OVERRIDES_ABSENT
+        parsed_overrides = parse_role_overrides(
+            role_overrides,
+            tree,
+            foreign=foreign,
+            provided=overrides_provided,
+        )
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         run_id = f"vr-{tag}-{ref or tree.enumeration}-{stamp}"
         started = system_clock()
         findings, coverage, report_data = scan_fn(tree, run_id)
         finished = system_clock()
-        target = RunTarget(repo=root.name, ref=ref, scope=scope)
+        overall_by_dimension = counts_by_dimension(findings)
+        target = _run_target(
+            root=root,
+            ref=ref,
+            scope=scope,
+            tree=tree,
+            findings=findings,
+            overrides=parsed_overrides,
+            overall_by_dimension=overall_by_dimension,
+            foreign=foreign,
+        )
         file_count = len(tree.all_files())
         stacks = detect_stacks(tree)
+        report_enumeration, report_file_count, target_class = _foreign_inventory(
+            tree, foreign
+        )
         report = ReportRenderer().render(
             run_id=run_id,
             target=target,
@@ -433,8 +548,8 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
             generated_at=finished,
             findings=findings,
             coverage=coverage,
-            enumeration=tree.enumeration if foreign else None,
-            file_count=file_count if foreign else None,
+            enumeration=report_enumeration,
+            file_count=report_file_count,
             stacks=render_stacks(stacks),
             structural_metrics=report_data.structural_metrics,
             dead_symbols=report_data.dead_symbols,
@@ -442,12 +557,12 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
         if persist:
             # allowlist_totals reads the platform's OWN tracked-debt files (a self-vet concept); a foreign target
             # has none, so its delta is empty rather than fail-loud on the absent quality_gates/ files.
-            allowlist_delta = AllowlistDelta(totals={} if foreign else allowlist_totals(root))
+            allowlist_delta = _run_allowlist_delta(root, foreign)
             self._persist_run(run_id, target, started, finished, findings, coverage, report_data, report, allowlist_delta)
         return {
             "run_id": run_id,
             "target": target.to_dict(),
-            "target_class": "foreign" if foreign else "self",
+            "target_class": target_class,
             "enumeration": tree.enumeration,
             "files_enumerated": file_count,
             "stacks": sorted(stack.value for stack in stacks),
@@ -455,7 +570,7 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
             "finished": finished,
             "total_findings": len(findings),
             "counts_by_severity": counts_by_severity(findings),
-            "counts_by_dimension": counts_by_dimension(findings),
+            "counts_by_dimension": overall_by_dimension,
             "scanners_ran": sum(1 for record in coverage if record.ran),
             "scanners_total": len(coverage),
             "coverage_gaps": coverage_gaps(coverage),
@@ -585,17 +700,38 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
         scope = str(params.get("scope") or "whole-tree self-vet")
         target_path_raw = params.get("target_path")
         target_path = str(target_path_raw).strip() if target_path_raw and str(target_path_raw).strip() else None
+        role_overrides = (
+            params["role_overrides"]
+            if "role_overrides" in params
+            else _ROLE_OVERRIDES_ABSENT
+        )
         execute_target_toolchain = bool(params.get("execute_target_toolchain"))
         persist = bool(params.get("persist"))
         self.logger.info(
-            "%s.vet_codebase scope=%s target=%s execute_toolchain=%s persist=%s",
-            _PLUGIN_NAME, scope, target_path or "self", execute_target_toolchain, persist,
+            "%s.vet_codebase scope=%s target=%s role_overrides=%s execute_toolchain=%s persist=%s",
+            _PLUGIN_NAME,
+            scope,
+            target_path or "self",
+            len(role_overrides) if isinstance(role_overrides, list) else 0,
+            execute_target_toolchain,
+            persist,
         )
         scan_fn = partial(run_all, execute_target_toolchain=execute_target_toolchain)
         try:
-            return self._envelope(self._run(scan_fn, scope=scope, tag="l1", target_path=target_path, persist=persist))
+            return self._envelope(
+                self._run(
+                    scan_fn,
+                    scope=scope,
+                    tag="l1",
+                    target_path=target_path,
+                    role_overrides=role_overrides,
+                    persist=persist,
+                )
+            )
         except TargetValidationError as err:
             return self._error_envelope("invalid_target_path", str(err))
+        except RoleOverrideValidationError as err:
+            return self._error_envelope("invalid_role_overrides", str(err))
 
     @platform_process(
         name="scan_quality_guidelines",

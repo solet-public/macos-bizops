@@ -48,8 +48,38 @@ BRIDGE_CONNECT_RETRY_S: Final[float] = 3.0
 # Consecutive poll failures tolerated before we attempt to reopen the bridge.
 CONSECUTIVE_POLL_FAILURES_BEFORE_RECONNECT: Final[int] = 3
 
+# Attempts at the peer/register POST before giving up. Bounded, unlike the
+# unbounded bridge-open retry, because an open bridge that never registers is
+# still useful for process calls -- so this must not block startup forever --
+# but a SINGLE attempt loses the peer identity permanently on any transient
+# error, leaving a session that works for process_call and is invisible to
+# every peer. That half-alive state presents to operators as "that agent is
+# ignoring me", never as a registration error.
+REGISTER_IDENTITY_ATTEMPTS: Final[int] = 5
+
+# The bridge process-call route is asynchronous. Role claims are tiny EDGE
+# actions, so wait briefly for their action_id to reach a terminal result rather
+# than declaring the initial `queued` receipt a failed claim.
+ROLE_CLAIM_RESULT_ATTEMPTS: Final[int] = 50
+ROLE_CLAIM_RESULT_RETRY_S: Final[float] = 0.1
+
+# Successful /events drains between steady-state re-assertions of the peer
+# binding. Registration at open/reconnect is necessary but not sufficient: the
+# binding can go missing underneath a perfectly healthy bridge (server-side
+# idle sweep reaping a bridge whose registry row outlived it, a competing
+# registration under the same label, a reconnect whose re-register lost a race).
+# The session cannot detect any of that -- process calls keep working, so the
+# first symptom is a peer_send from someone ELSE returning peer_unreachable,
+# which the unreachable session never sees. Re-asserting is idempotent (the
+# server replaces the binding for this agent_instance_id), so a periodic
+# re-assert converts a permanent silent outage into at most one lost window.
+# Same shape as the router's steady-state activation re-assert (Dax Part 15).
+# 8 drains x ~25s long-poll ~= one cheap POST every few minutes.
+REGISTER_REASSERT_EVERY_N_POLLS: Final[int] = 8
+
 # Per-request timeout for non-long-poll calls.
 DEFAULT_REQUEST_TIMEOUT_S: Final[float] = 30.0
+UNCLAIMED_AGENT_SESSION_ID: Final[str] = "__unclaimed__"
 
 CLAUDE_CHANNEL_NOTIFICATION_METHOD: Final[str] = "notifications/claude/channel"
 HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD: Final[str] = "notifications/homunculus/peer_message"
@@ -109,6 +139,17 @@ def _is_bridge_gone(exc: BaseException) -> bool:
     )
 
 
+def _role_claim_succeeded(payload: dict[str, Any]) -> bool:
+    """Return whether a process-call result confirms a completed role claim."""
+    result = payload.get("result")
+    return (
+        payload.get("status") == "completed"
+        and isinstance(result, dict)
+        and result.get("action_status") == "completed"
+        and result.get("success") is True
+    )
+
+
 class BridgeHTTPError(RuntimeError):
     """HTTP call to the homunculus bridge surface failed.
 
@@ -143,6 +184,7 @@ class Forwarder:
         session_label: str,
         parent_pid: int,
         provides_inference: bool,
+        session_role: str = "",
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._homunculus_name = homunculus_name
@@ -154,6 +196,7 @@ class Forwarder:
         # when no carrier set it (read-defensively → CAS fails closed).
         self._agent_session_id = agent_session_id
         self._session_label = session_label
+        self._session_role = session_role
         self._parent_pid = parent_pid
         # INF-01 §D.9 client half: declared on EVERY register POST (auto,
         # reconnect, and manual relabel) — the server's provider-sidecar
@@ -195,7 +238,9 @@ class Forwarder:
     async def open_bridge(self) -> str:
         """Open a bridge session, register identity, start the poll loop."""
         await self._open_with_retry()
-        await self._register_identity()
+        effective_label = await self._register_identity()
+        if effective_label is not None:
+            await self._claim_session_role()
         self._poll_active = True
         self._poll_task = asyncio.create_task(self._long_poll_loop())
         self._owed_delivery.start()
@@ -257,6 +302,64 @@ class Forwarder:
         """
         if self._bridge_id is None:
             return None
+        body = {
+            "agent_id": self._agent_id,
+            "agent_instance_id": self._agent_instance_id,
+            "agent_session_id": self._agent_session_id,
+            "session_label": self._session_label,
+            "parent_pid": self._parent_pid,
+            "provides_inference": self._provides_inference,
+        }
+        for attempt in range(1, REGISTER_IDENTITY_ATTEMPTS + 1):
+            try:
+                payload = await self._post(
+                    f"/api/v1/bridge/{self._bridge_id}/peer/register",
+                    body,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log(
+                    "peer identity registration failed "
+                    f"(attempt {attempt}/{REGISTER_IDENTITY_ATTEMPTS}): {exc}",
+                )
+                if attempt == REGISTER_IDENTITY_ATTEMPTS:
+                    _log(
+                        "PEER IDENTITY UNREGISTERED after "
+                        f"{REGISTER_IDENTITY_ATTEMPTS} attempts: this session can "
+                        "call processes but is INVISIBLE to peer_list/peer_send "
+                        "and cannot receive peer messages. Recover with the "
+                        "peer_register tool.",
+                    )
+                    return None
+                await asyncio.sleep(BRIDGE_CONNECT_RETRY_S)
+                continue
+            effective_label_raw = payload.get("session_label")
+            effective_label = (
+                str(effective_label_raw)
+                if isinstance(effective_label_raw, str)
+                else ""
+            )
+            self._cache_effective_agent_session_id(payload)
+            _log(
+                f"peer identity registered: {self._agent_id}/{self._agent_instance_id}"
+                f' (label="{effective_label}")',
+            )
+            return effective_label
+        return None
+
+    async def _reassert_identity(self) -> None:
+        """Steady-state re-assert of the peer binding from the poll loop.
+
+        Single attempt, deliberately: this runs every few minutes forever, so a
+        retry storm here would be worse than the missed window it papers over —
+        the next tick is the retry. Failure is logged and otherwise ignored; the
+        bridge stays useful for process calls either way, and `_handle_poll_failure`
+        owns the reconnect decision.
+
+        Silent on the happy path. Logging every few minutes would bury the
+        `peer identity registered` line that actually matters at open/reconnect.
+        """
+        if self._bridge_id is None:
+            return
         try:
             payload = await self._post(
                 f"/api/v1/bridge/{self._bridge_id}/peer/register",
@@ -269,20 +372,88 @@ class Forwarder:
                     "provides_inference": self._provides_inference,
                 },
             )
-            effective_label_raw = payload.get("session_label")
-            effective_label = (
-                str(effective_label_raw)
-                if isinstance(effective_label_raw, str)
-                else ""
-            )
-            _log(
-                f"peer identity registered: {self._agent_id}/{self._agent_instance_id}"
-                f' (label="{effective_label}")',
-            )
+            self._cache_effective_agent_session_id(payload)
+            await self._claim_session_role()
         except Exception as exc:  # noqa: BLE001
-            _log(f"peer identity registration failed: {exc}")
-            return None
-        return effective_label
+            _log(f"steady-state peer identity re-assert failed (will retry): {exc}")
+
+    async def _claim_session_role(self) -> bool:
+        """Claim the configured standing role for this registered bridge identity."""
+        if not self._session_role:
+            return True
+        if self._bridge_id is None:
+            return False
+        if not self._agent_session_id:
+            _log(
+                f'ROLE UNCLAIMED: "{self._session_role}" requires a non-empty '
+                "agent_session_id",
+            )
+            return False
+
+        try:
+            payload = await self._post(
+                f"/api/v1/bridge/{self._bridge_id}/process/call",
+                {
+                    "process_key": (
+                        "plugin::agent_messaging_plugin::peer_claim_role"
+                    ),
+                    "arguments": {
+                        "name": self._session_role,
+                        "agent_id": self._agent_id,
+                        "agent_instance_id": self._agent_instance_id,
+                        "agent_session_id": self._agent_session_id,
+                        "session_label": self._session_label,
+                    },
+                    "reason": "Restore the bridge session's configured role binding.",
+                },
+            )
+            payload = await self._wait_for_role_claim_result(payload)
+        except Exception as exc:  # noqa: BLE001
+            _log(f'ROLE UNCLAIMED: "{self._session_role}" claim failed: {exc}')
+            return False
+
+        if not _role_claim_succeeded(payload):
+            _log(
+                f'ROLE UNCLAIMED: "{self._session_role}" claim returned '
+                f"{payload!r}",
+            )
+            return False
+        _log(
+            f'peer role claimed: "{self._session_role}" '
+            f"for {self._agent_id}/{self._agent_instance_id}",
+        )
+        return True
+
+    async def _wait_for_role_claim_result(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve the asynchronous process-call receipt for a role claim."""
+        action_id_raw = payload.get("action_id")
+        if not isinstance(action_id_raw, str):
+            return payload
+        action_id = quote(action_id_raw, safe="")
+        for _attempt in range(ROLE_CLAIM_RESULT_ATTEMPTS):
+            if payload.get("status") not in {"queued", "pending", "running"}:
+                return payload
+            await asyncio.sleep(ROLE_CLAIM_RESULT_RETRY_S)
+            payload = await self._get(
+                f"/api/v1/bridge/{self._bridge_id}/process/result/{action_id}",
+            )
+        return payload
+
+    def _cache_effective_agent_session_id(self, payload: dict[str, Any]) -> None:
+        """Adopt a server-preserved logical session id from /peer/register."""
+        raw_agent_session_id = payload.get("agent_session_id")
+        if not isinstance(raw_agent_session_id, str):
+            return
+        if (
+            not raw_agent_session_id
+            or raw_agent_session_id == UNCLAIMED_AGENT_SESSION_ID
+            or raw_agent_session_id == self._agent_session_id
+        ):
+            return
+        self._agent_session_id = raw_agent_session_id
 
     async def _reconnect(self) -> None:
         """Reopen the bridge, re-register identity, announce reconnect.
@@ -300,6 +471,7 @@ class Forwarder:
             await self._open_with_retry()
             effective_label = await self._register_identity()
             if effective_label is not None:
+                await self._claim_session_role()
                 await self._announce_reconnect(effective_label)
 
     async def _announce_reconnect(self, effective_label: str) -> None:
@@ -351,6 +523,7 @@ class Forwarder:
     async def _long_poll_loop(self) -> None:
         """Drain /events forever; emit each as an MCP notification."""
         consecutive_failures = 0
+        polls_since_reassert = 0
         while self._poll_active:
             if self._bridge_id is None:
                 await asyncio.sleep(0.5)
@@ -358,6 +531,10 @@ class Forwarder:
             try:
                 await self._drain_once(self._bridge_id)
                 consecutive_failures = 0
+                polls_since_reassert += 1
+                if polls_since_reassert >= REGISTER_REASSERT_EVERY_N_POLLS:
+                    polls_since_reassert = 0
+                    await self._reassert_identity()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -697,6 +874,7 @@ class Forwarder:
             return await self._get(self._bridge_path("/current_identity"))
 
         payload = await self._call_with_reconnect("current_identity", call)
+        self._cache_effective_agent_session_id(payload)
         payload.update(
             {
                 "transport": "stdio",
@@ -818,7 +996,9 @@ class Forwarder:
         }
 
         async def call() -> dict[str, Any]:
-            return await self._post(self._bridge_path("/peer/register"), body)
+            payload = await self._post(self._bridge_path("/peer/register"), body)
+            self._cache_effective_agent_session_id(payload)
+            return payload
 
         return await self._call_with_reconnect("peer_register", call)
 
@@ -844,12 +1024,20 @@ class Forwarder:
 
         return await self._call_with_reconnect("peer_send", call)
 
+    async def peer_send_by_name(self, *, name: str, content: str) -> dict[str, Any]:
+        body = {"name": name, "content": content}
+
+        async def call() -> dict[str, Any]:
+            return await self._post(self._bridge_path("/peer/send_by_name"), body)
+
+        return await self._call_with_reconnect("peer_send_by_name", call)
+
     async def peer_inbox(
         self,
         *,
         after: str | None = None,
         limit: int | None = None,
-        include_important: bool = False,
+        include_important: bool = True,
         role_after: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, str] = {}
@@ -857,8 +1045,8 @@ class Forwarder:
             params["after"] = after
         if limit is not None:
             params["limit"] = str(limit)
-        if include_important:
-            params["include_important"] = "true"
+        if not include_important:
+            params["include_important"] = "false"
         if role_after is not None:
             params["role_after"] = role_after
         query = f"?{urlencode(params)}" if params else ""

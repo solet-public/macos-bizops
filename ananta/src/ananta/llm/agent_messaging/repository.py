@@ -219,12 +219,10 @@ class AgentMessagingRepository:
         (the collision from a write-side re-home stays shut). An empty session id
         skips disjunct (ii) — pure legacy instance-only visibility, no regression.
 
-        ``silent_only`` (default True) restricts results to messages
-        the sender did NOT mark IMPORTANT — those that were persisted
-        without firing a notification.  IMPORTANT messages already
-        woke the receiver at delivery time, so re-listing them in the
-        inbox is noise.  Pass ``silent_only=False`` for the full
-        peer-thread audit view.
+        ``silent_only=True`` restricts results to messages the sender did NOT
+        mark IMPORTANT. Public ``peer_inbox`` now passes ``silent_only=False``
+        by default so the inbox works as a durable catch-up view; callers that
+        want intentional silent-only status checks opt into this filter.
         """
         capped = max(1, min(limit, _MAX_LIST_LIMIT))
         # R3a (SQL-lockdown) + REL-08 UNION: two single-namespace 2-eq reads (no

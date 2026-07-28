@@ -222,6 +222,14 @@ class BridgeSessionState:
     # while this stays stale — that is exactly the Vector-B discriminator. Empty
     # until the first model-initiated route.
     last_model_activity_at: str = ""
+    # REL-05 QUIET-GAP: the model-activity stamp IMMEDIATELY PRECEDING
+    # ``last_model_activity_at``. The pair bounds the quiet gap the consumption
+    # reconciler needs: an emission proves it was surfaced only when it landed in
+    # a gap long enough to be a TURN BOUNDARY. Activity alone cannot discriminate
+    # "a new turn started on this wake" from "a turn already in flight made its
+    # next call" — and the latter marked every wake to a BUSY session consumed on
+    # its first emit, which is the silent-loss class this pair closes.
+    prev_model_activity_at: str = ""
     closed: bool = False
     next_event_id: int = 0
     pending_events: list[QueuedEvent] = field(default_factory=list)
@@ -239,6 +247,7 @@ class BridgeSessionState:
         read it without the live session.
         """
         stamp = datetime.now(UTC).isoformat()
+        self.prev_model_activity_at = self.last_model_activity_at
         self.last_model_activity_at = stamp
         return stamp
 

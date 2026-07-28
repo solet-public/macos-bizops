@@ -36,6 +36,7 @@ import yaml
 from .retrieval_test import parse_article_path
 
 TEST_FILE_GLOB = "*.retrieval_test.yaml"
+TEST_FILE_GLOB_UNDERSCORE = "*_retrieval_test.yaml"
 DEFAULT_MIN_RANK = 3
 DEFAULT_FORBIDDEN_MIN_RANK = 4
 
@@ -75,8 +76,22 @@ class AuditAggregate:
 
 
 def discover_test_files(corpus_root: Path) -> list[Path]:
-    """Return every ``*.retrieval_test.yaml`` under ``corpus_root``, path-sorted."""
-    return sorted(corpus_root.rglob(TEST_FILE_GLOB))
+    """Return every retrieval-test companion file under ``corpus_root``, path-sorted.
+
+    Matches both the dot-separated glob (``*.retrieval_test.yaml``) and the
+    underscore-separated variant three ``ananta_platform`` fixtures use
+    (``*_retrieval_test.yaml``). ``recurse_symlinks=True`` is required because
+    ``knowledge_bases/`` is a symlink-aggregation directory — the real content
+    lives at ``ananta/knowledge_bases/ananta_platform/`` and each plugin's own
+    ``knowledge_base/``, and ``Path.rglob`` does not traverse symlinked
+    directories by default.
+    """
+    found = {
+        path
+        for glob in (TEST_FILE_GLOB, TEST_FILE_GLOB_UNDERSCORE)
+        for path in corpus_root.rglob(glob, recurse_symlinks=True)
+    }
+    return sorted(found)
 
 
 def _as_str_list(value: Any) -> list[str]:
@@ -280,13 +295,20 @@ def render_markdown(
     corpus_root: str,
     report_path: str,
     duration_seconds: float,
+    total_fixtures_discovered: int,
 ) -> str:
-    """Render the aggregate as a Markdown audit report."""
+    """Render the aggregate as a Markdown audit report.
+
+    ``total_fixtures_discovered`` is reported alongside ``total_articles_audited``
+    (the post active-KB-filter count that actually ran) so a partial-corpus run
+    is visible in the report itself rather than presented as the whole corpus.
+    """
     header = [
         "# Knowledge Base Retrieval Audit",
         "",
         f"- Ran at: {ran_at}",
         f"- Corpus root: `{corpus_root}`",
+        f"- Fixtures discovered: {total_fixtures_discovered}",
         f"- Articles audited: {aggregate.total_articles_audited}",
         f"- Passed: {aggregate.passed}",
         f"- Failed: {aggregate.failed}",

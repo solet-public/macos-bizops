@@ -106,3 +106,18 @@ class KnowledgeSearchInterface(ABC):
         """
         ...
 
+    @abstractmethod
+    def audit_retrieval_corpus_cron(self) -> dict[str, Any]:
+        """Scheduler-fired EDGE_SINK sibling of ``audit_retrieval_corpus``.
+
+        Submits the full corpus walk (default ``corpus_root``/``report_dir``)
+        to a single-slot background executor and returns immediately with a
+        started/already-running receipt — running the walk inline on the
+        action-queue thread would park the serial poll loop for its whole
+        multi-minute duration (the fast-return-contract violation class).
+        Cron-only wiring (``is_discoverable=False``); not surfaced via
+        ``process_search``. The model-callable equivalent is
+        ``audit_retrieval_corpus``.
+        """
+        ...
+

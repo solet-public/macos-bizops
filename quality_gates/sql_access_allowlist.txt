@@ -9,7 +9,8 @@
 # sites migrated or their lines shifted off the finding). Format:
 #   <category_id>::<posix-path-suffix>::<lineno>   # false-positive:|# sanctioned-exempt: <reason>
 # Permanent (parked) entries never block; --require-clean ignores them. Adding
-# entries without operator approval defeats the gate (CLAUDE.md convention).
+# entries without operator approval defeats the gate (KB "Gate Allowlist
+# Conventions").
 
 # ===== S0 =====
 S0::ananta/src/ananta/core/orchestration/postgres_authorization_guard.py::80  # sanctioned-exempt: runtime psycopg-monkey-patch lockdown ENFORCEMENT guard (operator 2026-06-21, GAP-CORE-4) — cannot route through state_service; it IS the enforcement (the runtime twin of this gate)

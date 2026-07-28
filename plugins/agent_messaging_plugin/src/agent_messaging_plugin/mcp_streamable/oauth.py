@@ -1217,6 +1217,7 @@ def _issue_access_token(
     claim: dict[str, Any] = {
         "agent_id": _OAUTH_AGENT_ID,
         "agent_instance_id": f"agi-oauth-{client_id}",
+        "agent_session_id": _oauth_agent_session_id(client_id),
         "issued_at": now.isoformat().replace("+00:00", "Z"),
         "session_label": client_name or client_id,
         "scopes": scopes,
@@ -1225,6 +1226,12 @@ def _issue_access_token(
         "exp": int((now + timedelta(seconds=token_ttl_seconds)).timestamp()),
     }
     return jwt.encode(claim, hmac_key, algorithm=HMAC_SIGNING_ALGORITHM)
+
+
+def _oauth_agent_session_id(client_id: str) -> str:
+    """Stable logical-session id for a registered OAuth client."""
+    digest = hashlib.sha256(client_id.encode("utf-8")).hexdigest()[:32]
+    return f"ases-oauth-{digest}"
 
 
 # ---------------------------------------------------------------------

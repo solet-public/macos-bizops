@@ -319,7 +319,7 @@ class ExportBlobIdentityBackfill:
     def _status_ok(result: object) -> bool:
         """Envelope OK iff it EXPLICITLY reports a success ``action_status``.
 
-        Fail-closed (CLAUDE.md fast-fail): a missing / ``None`` ``action_status``
+        Fail-closed (KB "Critical Development Guidelines v2"): a missing / ``None`` ``action_status``
         is treated as FAILURE. The default blob provider always stamps
         ``completed`` / ``error``, but for the MUTATING ops (kind-tag, key-set,
         orphan delete) a malformed envelope from any provider must NOT be read as

@@ -253,7 +253,7 @@ def _extract_blob_id(result: object, *, error_code: str) -> str:
             f"blob_storage_service returned non-dict: {result!r}",
         )
     status = result.get("action_status")
-    # Fail-closed (CLAUDE.md fast-fail): a missing/None action_status is NOT a
+    # Fail-closed (KB "Critical Development Guidelines v2"): a missing/None action_status is NOT a
     # success. The default blob provider always stamps completed/error; a
     # statusless envelope is malformed and must raise, not be read as a stored
     # blob. Uniform with blob_identity_backfill._status_ok (M2).

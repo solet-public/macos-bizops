@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::create_or_update_leads",
+  "display_name": "Marketo: Create or Update Leads",
+  "description": "Create and/or update up to 300 lead records in one batch. action is one of createOrUpdate (default), createOnly, updateOnly, createDuplicate; lookup_field names the dedupe field (defaults to email). Write action.",
+  "embedding_description": "Write new leads into Marketo or update existing lead field values in a batch of up to 300 records — the sync/upsert verb for lead data (Marketo's Sync Lead API). Use createOnly to insert only, updateOnly to modify only, createOrUpdate (default) to upsert by lookup_field. Distinct from delete_leads (removal) and add_leads_to_list (list membership, no field changes).",
+  "result_processor_customizations": {
+    "action_label": "Marketo leads created/updated",
+    "result_type": "marketo_create_or_update_leads_result",
+    "result_description": "Dict with results (Marketo's per-record array: id, status [created/updated/skipped], reasons on skip), row_count, and tallies (a status -> count summary).",
+    "presentation_guidance": "Lead field data is business-contact PII (data_sensitivity 0.3, generic-SaaS floor). Summarize the tallies (e.g. '12 created, 3 updated, 1 skipped') and surface any skipped reasons."
+  },
+  "error_processor_customizations": {
+    "action_context": "Create/update a batch of leads in the configured Marketo instance.",
+    "error_interpretation": "marketo.invalid_params: missing/empty records, more than 300 records, or an invalid action. marketo.validation_failed: the whole batch was structurally rejected (rare — most per-record failures land in results/tallies, not this error). marketo.auth_failed: OAuth credentials rejected. marketo.permission_denied: the API user's Role lacks Read-Write Person — this write permission is NOT checked by check_setup (unverifiable without performing a write), so this may be the FIRST signal of the gap.",
+    "recovery_guidance": "marketo.validation_failed: check the 'action' value and that lookup_field (if set) is a real, indexed Marketo field. Individual skipped/failed records are in the results array, not an error — inspect their reasons instead of retrying the whole batch. marketo.permission_denied: add 'Read-Write Person' under Admin > Users & Roles > Roles > <the API role> > Access API, then retry."
+  }
+}

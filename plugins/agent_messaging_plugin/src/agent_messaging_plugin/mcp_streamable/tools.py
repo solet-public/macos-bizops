@@ -1,6 +1,6 @@
 """Tool descriptors for the Streamable HTTP MCP transport.
 
-Mirrors the 15-tool surface exposed by the stdio bridge subprocess
+Mirrors the MCP tool surface exposed by the stdio bridge subprocess
 (:mod:`agent_messaging_plugin.mcp_bridge.__main__`).  Kept here as
 plain dicts — the Streamable HTTP transport speaks raw JSON-RPC, not
 the Python MCP SDK ``Tool`` type, so a separate descriptor table is
@@ -111,16 +111,14 @@ _PEER_INBOX_DESCRIPTION: Final[str] = "\n".join(
     [
         "Pull peer messages addressed to your agent_id.",
         "",
-        "Default behavior: return only messages that were persisted",
-        "silently (no IMPORTANT marker, so no notification fired).",
-        "IMPORTANT-marked messages are excluded by default because they",
-        "already woke the receiver via notification at delivery time;",
-        "re-listing them here would be noise.",
+        "Default behavior: return silent and IMPORTANT-marked messages",
+        "as a durable catch-up view. Use an `after` timestamp when polling",
+        "during an active incident so old IMPORTANT history does not flood",
+        "the context window.",
         "",
-        "Set include_important=true to also return messages whose sender",
-        "used the IMPORTANT marker. Useful when your MCP client did NOT",
-        "auto-surface the live notification between turns and you need to",
-        "catch up on requests-for-action you may have missed.",
+        "Set include_important=false only for intentional silent-only",
+        "status checks where previously-notified IMPORTANT messages would",
+        "be noise.",
         "",
         "Spans every peer thread targeting you, regardless of which bridge owns",
         "the thread. Pagination uses after (ISO-8601 timestamp); pass the previous",
@@ -531,13 +529,12 @@ TOOLS: Final[list[dict[str, Any]]] = [
                 },
                 "include_important": {
                     "type": "boolean",
-                    "default": False,
+                    "default": True,
                     "description": (
-                        "When true, also return messages whose sender used "
-                        "the IMPORTANT marker (otherwise excluded as "
-                        "already-notified). For the role section this is the "
-                        "catch-up view: already-delivered IMPORTANT role "
-                        "messages resurface."
+                        "When true, return the durable catch-up view including "
+                        "messages whose sender used the IMPORTANT marker. "
+                        "Default true. Set false only for intentional "
+                        "silent-only status checks."
                     ),
                 },
                 "role_after": {

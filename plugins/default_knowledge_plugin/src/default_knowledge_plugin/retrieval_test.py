@@ -49,14 +49,28 @@ class ArticleLocator:
 
 
 def parse_article_path(article_path: str) -> ArticleLocator:
-    """Parse ``knowledge_bases/<kb>/<rest...>`` into (kb, KB-relative path)."""
+    """Parse a repo-relative article path into (kb, KB-relative path).
+
+    ``knowledge_bases/`` is a symlink-aggregation directory, so a fixture's
+    ``article_path`` may declare either the symlink-relative dialect
+    (``knowledge_bases/<kb>/<rest>``) or one of the two real-path dialects the
+    symlinks resolve to: ``ananta/knowledge_bases/<kb>/<rest>`` (ananta_platform)
+    or ``plugins/<plugin>/knowledge_base/<rest>`` (a plugin's own KB, where the
+    plugin directory name IS the KB name). All three normalize to the same
+    ``ArticleLocator``.
+    """
     parts = article_path.strip("/").split("/")
-    if len(parts) < 3 or parts[0] != KB_ROOT:
-        raise ValueError(
-            "article_path must be repo-relative under "
-            f"'{KB_ROOT}/<kb>/<path>'; got {article_path!r}"
-        )
-    return ArticleLocator(knowledge_base=parts[1], relative_path="/".join(parts[2:]))
+    if parts[0] == KB_ROOT and len(parts) >= 3:
+        return ArticleLocator(knowledge_base=parts[1], relative_path="/".join(parts[2:]))
+    if parts[:2] == ["ananta", KB_ROOT] and len(parts) >= 4:
+        return ArticleLocator(knowledge_base=parts[2], relative_path="/".join(parts[3:]))
+    if parts[0] == "plugins" and len(parts) >= 4 and parts[2] == "knowledge_base":
+        return ArticleLocator(knowledge_base=parts[1], relative_path="/".join(parts[3:]))
+    raise ValueError(
+        "article_path must be repo-relative under "
+        f"'{KB_ROOT}/<kb>/<path>', 'ananta/{KB_ROOT}/<kb>/<path>', or "
+        f"'plugins/<plugin>/knowledge_base/<path>'; got {article_path!r}"
+    )
 
 
 def _result_path(result: dict[str, Any]) -> str:

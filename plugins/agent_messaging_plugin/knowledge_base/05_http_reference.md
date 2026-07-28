@@ -69,6 +69,7 @@ GET    /api/v1/bridge/{bridge_id}/download/{blob_id}
 POST   /api/v1/bridge/{bridge_id}/peer/register
 GET    /api/v1/bridge/{bridge_id}/peer/list
 POST   /api/v1/bridge/{bridge_id}/peer/send
+POST   /api/v1/bridge/{bridge_id}/peer/send_by_name
 GET    /api/v1/bridge/{bridge_id}/peer/inbox
 
 # Backend agent threads (agent → backend agent)
@@ -169,12 +170,13 @@ POST /api/v1/bridge/{bridge_id}/peer/register
           "session_label": "codex on baroque-suite" }
 
 GET  /api/v1/bridge/{bridge_id}/peer/list
-  resp: { "peers": { "<agent_id>": [ {agent_instance_id, session_label, ...}, ... ] } }
+  resp: { "agent_ids": ["claude_code", ...],
+          "instances": { "<agent_id>": [ {agent_instance_id, session_label, ...}, ... ] } }
 
 POST /api/v1/bridge/{bridge_id}/peer/send
   body: { "peer_id": "claude_code",
           "peer_agent_instance_id"?: "agi-...",   # required if N>1
-          "content": "IMPORTANT: please review ..." }
+          "content": [ {"type": "text", "text": "IMPORTANT: please review ..."} ] }
   resp: { "delivery": "queued_notification" | "queued_wake"
                     | "queued_watcher" | "persisted_silent",
           "thread_id": "...", "message_id": "..." }
@@ -189,9 +191,25 @@ POST /api/v1/bridge/{bridge_id}/peer/send
   # one sees it at its next look), and the watcher's /events cursor ack stamps
   # it consumed.
 
-GET  /api/v1/bridge/{bridge_id}/peer/inbox?include_important=false
-  resp: { "messages": [ {sender_agent_id, sender_agent_instance_id,
-                         sender_session_label, content, cursor, ...}, ... ] }
+POST /api/v1/bridge/{bridge_id}/peer/send_by_name
+  body: { "name": "Git-Controller",
+          "content": "IMPORTANT: please commit ..." }
+  resp: { "delivery": "queued_notification" | "queued_wake" | "queued_watcher"
+                    | "queued_for_replay" | "persisted_silent",
+          "thread_id": "role:Git-Controller",
+          "message_id": "...",
+          "resolved_agent_id": "claude_code",
+          "resolved_agent_instance_id": "agi-..." }
+
+GET  /api/v1/bridge/{bridge_id}/peer/inbox?after=<recent-ISO-time>
+  resp: { "entries": [ {sender_agent_id, sender_agent_instance_id,
+                        sender_session_label, message, ...}, ... ],
+          "role_entries": [ {sender_agent_id, sender_agent_instance_id,
+                              sender_session_label, message, ...}, ... ],
+          "next_after_created_at": "...",
+          "next_role_cursor": "..." }
+  # Default is catch-up mode: silent + IMPORTANT. Pass
+  # include_important=false only for intentional silent-only status checks.
 ```
 
 See `03_inter_agent_messaging.md` for the IMPORTANT-marker

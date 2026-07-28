@@ -1,0 +1,124 @@
+# {{HOMUNCULUS_NAME}} — project instructions
+
+<!-- BEGIN HOMUNCULUS HYDRATION -->
+
+This clone is the home of **{{HOMUNCULUS_NAME}}**, a homunculus on the Ananta
+platform: a named, persistent agentic instance with its own PostgreSQL schema,
+memories, knowledge bases, and plugins. You — the AGENTS.md-convention
+session reading this — are its driving agent. This managed block governs
+{{HOMUNCULUS_NAME}} access for sessions opened in this directory. Existing
+project instructions still apply; if they conflict with how to reach
+{{HOMUNCULUS_NAME}}, follow this block for access and ask the operator about
+the conflict.
+
+## Access mode — no-MCP CLI is the default
+
+Before responding to any question or starting any non-trivial task, ask
+{{HOMUNCULUS_NAME}} through the local command genesis installed:
+
+```bash
+{{HOMUNCULUS_NAME}} call service_interface::knowledge_service::search '{"query": "<plain-English description>", "top_k": 8}'
+```
+
+This talks to {{HOMUNCULUS_NAME}} over its local bridge and is the primary,
+complete path for knowledge-base search and process calls. After history
+ingestion is enabled it is also the path for session-ledger recall:
+
+```bash
+{{HOMUNCULUS_NAME}} call service_interface::session_ledger_service::search_event_content '{"query": "<topic>", "limit": 8}'
+```
+
+It needs no MCP server and no `mcp__{{HOMUNCULUS_NAME}}__*` tools.
+
+MCP is optional and exists only for the operator who explicitly asks for it
+and whose machine policy permits it. Do not register, debug, or search for MCP
+tools unprompted, and do not treat their absence as a problem to solve — the
+CLI path above is not a fallback, it is the default. Runner-specific
+peer-to-peer wake is a separate concern from knowledge/process access; retrieve
+the current messaging contract before assuming its transport.
+
+If `{{HOMUNCULUS_NAME}} call` itself fails (the homunculus process is not
+running — check with `{{HOMUNCULUS_NAME}} health`), the fallback is
+source-artifact recovery: read the KB source markdown directly under this
+clone's own knowledge-base directories (`ananta/knowledge_bases/`,
+`ananta/knowledge_base/`, each plugin's `knowledge_base/`, and any real
+directories under `knowledge_bases/`) instead of the live search. This is an unranked,
+degraded recovery, not a substitute for the live path — it means the
+homunculus needs attention before claiming live retrieval; say so rather than
+treating the source read as sufficient. There is no offline query script shipped in
+this clone to try first: `default_knowledge_plugin`'s query script lives only
+in the platform's own development repo and is pruned from every seed.
+
+Building on assumptions when a canonical answer exists in {{HOMUNCULUS_NAME}}'s
+knowledge base produces drift. If a search returns nothing relevant, that is
+information too: confirm the gap before inventing a pattern, and add an
+article documenting what you ended up with.
+
+Before editing code, changing config, or explaining a subsystem in this repo,
+search {{HOMUNCULUS_NAME}}'s knowledge base for the current design record and
+recent implementation notes using the actual nouns from the request — do not
+reconstruct architecture from local code fragments alone.
+
+Two carve-outs: locating a specific known code symbol or file in this repo
+(grep directly), and repairing a not-running `{{HOMUNCULUS_NAME}}` command
+(`{{HOMUNCULUS_NAME}} health`, launchd state, logs under
+`profile/data/logs/`).
+
+## Startup discipline
+
+After any restart of {{HOMUNCULUS_NAME}} (LaunchAgent reload or foreground
+launch), wait for startup to finish before querying: poll the newest log under
+`profile/data/logs/` with `wc -l <logfile> && sleep 5 && wc -l <logfile>` and
+proceed only once the two counts match. Querying mid-startup competes with the
+embedding rebuild and causes inference timeouts.
+
+## Running {{HOMUNCULUS_NAME}}
+
+- Normal mode: the LaunchAgent `local.homunculus.{{HOMUNCULUS_NAME}}` (starts
+  at login, restarts on failure); stop/start with `launchctl unload -w` /
+  `load -w` on `~/Library/LaunchAgents/local.homunculus.{{HOMUNCULUS_NAME}}.plist`.
+- Foreground (debugging): `{{CLONE_DIR}}/client/bin/launch-{{HOMUNCULUS_NAME}}`
+  (stop the LaunchAgent first — never run two instances).
+- The `{{HOMUNCULUS_NAME}}` CLI is on PATH via genesis's
+  `~/.local/bin/{{HOMUNCULUS_NAME}}` symlink; no venv activation needed for
+  `{{HOMUNCULUS_NAME}} call` / `{{HOMUNCULUS_NAME}} health`.
+- Hydration does not yet generate a named launcher for AGENTS.md-convention
+  sessions the way it does for Claude Code (no `codex-{{HOMUNCULUS_NAME}}` or
+  equivalent). Before making this session addressable by role name, retrieve
+  the available messaging and role-binding contract using the search terms
+  below. If no runner-specific wake contract is present, report that gap
+  rather than inferring a transport from this bootstrap file.
+
+## Messaging, connectivity, and governance — found via Step Zero
+
+The full contract for these lives in {{HOMUNCULUS_NAME}}'s knowledge base, not
+here — search for the terms below rather than assuming the mechanism:
+
+- `router bridge blue-green local deployment architecture` — the bridge vs.
+  the optional blue-green router vs. the optional MCP bridge vs. development
+  channels; several distinct layers get loosely called "the bridge."
+- `peer registry role binding durable claim` — why an entry in a raw peer
+  list is presence, not a claim, and how `peer_send_by_name` actually
+  resolves.
+- `first days owner onboarding` / `homunculus charter template` / `operator
+  decision brief` / `operator collaboration craft` — the governance set for
+  working with your operator.
+- `session history ingestion session ledger hydration current notes` — how
+  and when session-ledger recall becomes available.
+
+## Development standards (if you extend the platform)
+
+Python 3.13, full type hints. Fail fast and loudly — no silent fallbacks, no
+defensive layers over broken root causes, no backwards-compatibility shims.
+Prefer an existing library over a hand-rolled implementation. Leave code
+better than you found it. Database access goes through the
+`StateManagementInterface` primitives — never raw SQL from feature code.
+
+## Reference
+
+The genesis ladder that created this homunculus, and the hydration runbook
+that generated this file, live in the knowledge base — search "genesis
+bootstrap ladder" or "hydration operator environment setup" via Step Zero
+above.
+
+<!-- END HOMUNCULUS HYDRATION -->

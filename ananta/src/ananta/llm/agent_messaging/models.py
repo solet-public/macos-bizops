@@ -352,13 +352,9 @@ class PeerInboxRequest:
     """Inputs to ``AgentMessagingService.peer_inbox``.
 
     ``include_important`` controls whether messages whose sender used
-    the IMPORTANT marker are returned alongside silent-bucket
-    messages.  Default False preserves the loop-prevention property
-    (silent inbox doesn't surface noise from messages that already
-    woke the receiver via notification).  Pass True when the
-    receiving agent's MCP client doesn't auto-surface
-    notifications/claude/channel between turns and needs to catch up
-    on requests-for-action it may have missed.
+    the IMPORTANT marker are returned alongside silent-bucket messages.
+    Default True makes ``peer_inbox`` the durable catch-up view; callers
+    that intentionally want silent-only status checks must pass False.
     """
 
     recipient_agent_id: str
@@ -371,7 +367,7 @@ class PeerInboxRequest:
     recipient_agent_session_id: str = ""
     after_created_at: datetime | None = None
     limit: int = 50
-    include_important: bool = False
+    include_important: bool = True
     # v10 Control #1a: the opaque, scope-bound cursor for the role-inbox
     # section (a global (created_at, id) k-way merge across held roles).
     # Independent of ``after_created_at`` (the instance section's raw

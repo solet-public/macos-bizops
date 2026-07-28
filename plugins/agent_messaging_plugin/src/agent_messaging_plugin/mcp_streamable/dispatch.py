@@ -469,7 +469,7 @@ def _tool_current_identity(
         "homunculus_name": context.homunculus_name,
         "agent_id": session.agent_id,
         "agent_instance_id": session.agent_instance_id,
-        "agent_session_id": "",
+        "agent_session_id": session.agent_session_id,
         "session_label": session.session_label,
         "bridge_id": session.bridge_id,
         "mcp_session_id": session.mcp_session_id,
@@ -805,7 +805,7 @@ def _tool_peer_inbox(
         raise JsonRpcError(
             _INVALID_PARAMS, "peer_inbox.limit must be a positive integer",
         )
-    include_important = bool(arguments.get("include_important", False))
+    include_important = bool(arguments.get("include_important", True))
     role_after_raw = arguments.get("role_after")
     if role_after_raw is not None and not isinstance(role_after_raw, str):
         raise JsonRpcError(

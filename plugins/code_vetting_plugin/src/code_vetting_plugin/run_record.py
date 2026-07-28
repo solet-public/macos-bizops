@@ -10,7 +10,7 @@ tracked-debt burn-down.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .models import Dimension, Finding, Layer, Severity, Verdict
@@ -23,9 +23,26 @@ class RunTarget:
     repo: str
     ref: str
     scope: str
+    # Foreign runs may add a bounded report-stage source-role partition.  None is
+    # conditionally omitted so every existing RunTarget constructor and self-vet
+    # payload remains byte-compatible.
+    source_role_partition: Mapping[str, object] | None = None
+    # Foreign runs may also carry a bounded declaration/topology fingerprint and
+    # deterministic capability-routing needs. It rides the existing target JSON;
+    # None is omitted so self-run bytes remain unchanged.
+    technology_fingerprint: Mapping[str, object] | None = None
 
-    def to_dict(self) -> dict[str, str]:
-        return {"repo": self.repo, "ref": self.ref, "scope": self.scope}
+    def to_dict(self) -> dict[str, object]:
+        target: dict[str, object] = {
+            "repo": self.repo,
+            "ref": self.ref,
+            "scope": self.scope,
+        }
+        if self.source_role_partition is not None:
+            target["source_role_partition"] = dict(self.source_role_partition)
+        if self.technology_fingerprint is not None:
+            target["technology_fingerprint"] = dict(self.technology_fingerprint)
+        return target
 
 
 @dataclass(frozen=True, slots=True)

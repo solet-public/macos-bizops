@@ -8,7 +8,7 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born homunculus without losing its state — why a fast-forward git pull from the same seed repo is the default update path and teardown-plus-re-birth is only the fallback, the exact sequence (health probe, pull --ff-only, restart, startup quiescence wait, automatic knowledge-base re-ingest), when the virtual environment needs attention (editable installs make pulled code live at restart; only NEW plugins or changed dependencies need a pip step), re-running the changed hydration steps afterward, and the verification checklist including the watcher role-claim ground truth.
+Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born homunculus without losing its state — why a fast-forward git pull from the same seed repo is the default update path and teardown-plus-re-birth is only the fallback, the exact sequence (health probe, pull --ff-only, restart, startup quiescence wait, automatic knowledge-base re-ingest), when the virtual environment needs attention (editable installs make pulled code live at restart; only NEW plugins or changed dependencies need a pip step), re-running the changed hydration steps afterward — including adding a release-added plugin to the clone's profile manifest and running its hydration guidance so it actually activates — and the verification checklist including the watcher role-claim ground truth.
 
 ## When to use this runbook
 
@@ -37,8 +37,8 @@ plainly to the operator before choosing it.
 - `<name> health` answers (the instance is alive now; if it is not, this is
   repair or re-birth territory, not an update).
 - `git -C <clone> remote get-url origin` points at the seed repository.
-- `git -C <clone> status --short` — hydration-generated files (`CLAUDE.md`,
-  `client/`, workbench notes) showing as untracked or modified is NORMAL and
+- `git -C <clone> status --short` — hydration-generated files (`AGENTS.md`,
+  `CLAUDE.md`, `client/`, workbench notes) showing as untracked or modified is NORMAL and
   harmless; the seed never ships those paths, so they cannot conflict. Only a
   conflict during the pull itself is a stop condition.
 
@@ -88,13 +88,21 @@ is needed.
 ## Step 5 — re-run the hydration steps the release changed
 
 Updates that only change platform code end here. Updates that change the
-OPERATOR-SIDE artifacts — the generated `CLAUDE.md` block, the user-scope
-`~/.claude/settings.json` hooks, the rename skill, the fleet functions — need
+OPERATOR-SIDE artifacts — the generated `AGENTS.md` / `CLAUDE.md` blocks, the
+user-scope `~/.claude/settings.json` hooks, the rename skill, the fleet functions — need
 the matching hydration steps re-run once. The hydration runbook's steps are
 idempotent by design: probes first, marker-based structural merges, never
 clobber. Re-run its Step 2 (and Step 4a if the operator uses fleet roles);
 the markers replace the old homunculus-owned pieces in place and leave
 everything else alone.
+
+A release that ADDS a plugin needs one more route. Step 3's editable install
+puts the new code in the venv, but the pull never touches the clone's
+genesis-written `profile/config/manifest.yaml`, so the plugin stays
+installed-but-inert until it is listed there. Add it to that manifest's
+`plugins:` list, restart again (Step 4), then run the hydration runbook's
+Step 4b for it — the `hydration_guidance.md` glob picks up the new plugin's
+activation work and first-use credential contract.
 
 ## Step 6 — verify
 

@@ -91,6 +91,7 @@ class StreamableSession:
     agent_instance_id: str
     session_label: str
     binding: BridgeBinding
+    agent_session_id: str = ""
     client_info: dict[str, object] = field(default_factory=dict)
     protocol_version: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -154,6 +155,7 @@ class StreamableSessionManager:
             agent_instance_id=claim.agent_instance_id,
             session_label=session_label,
             parent_pid=None,
+            agent_session_id=claim.agent_session_id,
         )
         # open_bridge already pre-marks the bridge with agent_instance_id +
         # session_label from the claim (so legacy IO peer lookups read
@@ -167,6 +169,7 @@ class StreamableSessionManager:
             agent_instance_id=claim.agent_instance_id,
             session_label=session_label,
             binding=binding,
+            agent_session_id=claim.agent_session_id,
             client_info=dict(client_info or {}),
             protocol_version=protocol_version,
         )

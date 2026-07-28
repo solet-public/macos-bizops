@@ -56,7 +56,15 @@ def get_vetting_runs_schema() -> SchemaDefinition:
     """
     columns = {
         "run_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True, unique=True, description="Unique run id — the upsert conflict key."),
-        "target": ColumnDefinition(type=ColumnType.JSON, not_null=True, description="{repo, ref, scope} — what was examined."),
+        "target": ColumnDefinition(
+            type=ColumnType.JSON,
+            not_null=True,
+            description=(
+                "{repo, ref, scope} — what was examined; foreign runs may also "
+                "carry the bounded source_role_partition and technology_fingerprint "
+                "(scoped evidence plus capability-routing needs) in this existing JSON column."
+            ),
+        ),
         "started": ColumnDefinition(type=ColumnType.TEXT, not_null=True, description="ISO-8601 UTC run start (retention ordering key)."),
         "finished": ColumnDefinition(type=ColumnType.TEXT, description="ISO-8601 UTC run finish."),
         "substrate": ColumnDefinition(type=ColumnType.TEXT, not_null=True, description="Which inference engine reviewed/refuted: heuristic | local_inference | subscription."),

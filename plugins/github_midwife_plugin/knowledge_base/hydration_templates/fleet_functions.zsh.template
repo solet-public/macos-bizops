@@ -33,21 +33,29 @@
 #                               in the environment (or edit the line below)
 #                               only after you understand that tradeoff.
 #
-# Peer messaging, role binding, AND idle wake need NO flag here: each
-# session's SessionStart hook invokes the rename skill, which arms the
-# `{{HOMUNCULUS_NAME}} watch` registered-presence watcher (register + claim
-# + receive, zero MCP), and the user-scope Stop hook runs
-# `{{HOMUNCULUS_NAME}} wake`, which turns deliveries into session turns on
-# any provider. The optional MCP development-channel wake
+# Peer messaging, role binding, AND idle wake need NO flag here on the
+# default transport: each session's SessionStart hook invokes the rename
+# skill, which arms the `{{HOMUNCULUS_NAME}} watch` registered-presence
+# watcher (register + claim + receive, zero MCP), and the user-scope Stop
+# hook runs `{{HOMUNCULUS_NAME}} wake`, which turns deliveries into session
+# turns on any provider.
+#
+# {{HOMUNCULUS_NAME}}_FLEET_TRANSPORT declares the fleet-coordination
+# transport for launched sessions ("watch" default | "mcp"), exported to
+# each session as FLEET_TRANSPORT, which the rename skill and
+# the user-scope Stop hook read. "mcp" is only meaningful where the
+# operator explicitly wired the optional MCP bridge (`claude mcp add`,
+# hydration's explicit-request-only step) — declared-mcp with no bridge
+# attached fails loudly in the rename skill by design; nothing silently
+# falls back. The MCP wake half is the separate development-channel flag
 # ({{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS=1 adds
-# --dangerously-load-development-channels server:{{HOMUNCULUS_NAME}}) is
-# opt-in and needs BOTH halves to function: this flag AND a registered MCP
-# server named {{HOMUNCULUS_NAME}} (`claude mcp add`, hydration's
-# explicit-request-only step) — the flag alone is inert. It also requires
-# Anthropic-direct auth (DELIVER_IMMEDIATELY channels are unavailable on
-# Bedrock), so on a machine whose policy blocks MCP there is NO provider
-# setting under which it works. Default is OFF; do not suggest it
-# unprompted.
+# --dangerously-load-development-channels server:{{HOMUNCULUS_NAME}});
+# it needs BOTH halves to function: this flag AND the registered MCP
+# server — the flag alone is inert. It also requires Anthropic-direct auth
+# (DELIVER_IMMEDIATELY channels are unavailable on Bedrock), so on a
+# machine whose policy blocks MCP there is NO provider setting under which
+# it works. The hydration wizard's MCP path sets both variables together.
+# Defaults are watch + channels OFF; do not suggest MCP unprompted.
 _claude_for_{{HOMUNCULUS_NAME}}() {
   local role="$1"
   local model="$2"    # optional CLI model alias; empty = settings.json default
@@ -59,6 +67,7 @@ _claude_for_{{HOMUNCULUS_NAME}}() {
   [[ "${{{HOMUNCULUS_NAME}}_FLEET_SKIP_PERMISSIONS:-0}" == "1" ]] && extra_flags+=(--dangerously-skip-permissions)
   [[ "${{{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS:-0}" == "1" ]] && extra_flags+=(--dangerously-load-development-channels server:{{HOMUNCULUS_NAME}})
 
+  FLEET_TRANSPORT="${{{HOMUNCULUS_NAME}}_FLEET_TRANSPORT:-watch}" \
   HOMUNCULUS_AGENT_SESSION_LABEL="$role" \
   HOMUNCULUS_AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
   exec claude \

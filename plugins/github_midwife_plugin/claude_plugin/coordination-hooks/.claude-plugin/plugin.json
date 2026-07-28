@@ -1,0 +1,10 @@
+{
+  "name": "coordination-hooks",
+  "version": "0.1.0",
+  "description": "Fleet coordination hooks: a knowledge-base-first reminder, a check-your-messages reminder, and an opt-in git-mutation guard for coordinator-style multi-session workflows.",
+  "author": {
+    "name": "<<AUTHOR_NAME>>",
+    "email": "<<AUTHOR_EMAIL>>"
+  },
+  "homepage": "<<PLUGIN_HOMEPAGE_URL>>"
+}

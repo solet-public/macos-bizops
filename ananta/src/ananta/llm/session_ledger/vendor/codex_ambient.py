@@ -69,7 +69,7 @@ lifts these into the SYSTEM event's content_json):
                                    # makes SQL filtering convenient
     }
 
-Failure policy (CLAUDE.md fast-fail with the documented write-pattern
+Failure policy (KB "Critical Development Guidelines v2", with the documented write-pattern
 exception): unrecognized shape (missing required field, wrong type)
 raises ``ValueError``. ``JSONDecodeError`` on the file is treated as
 transient mid-write (returns empty result) so the importer-side per-

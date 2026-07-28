@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::list_static_lists",
+  "display_name": "Marketo: List Static Lists",
+  "description": "List static lists, optionally filtered by names.",
+  "embedding_description": "List the Marketo static lists (manually-curated lead segments) configured in this instance, optionally filtered by exact list name — use this to discover a list's id before calling add_leads_to_list or remove_leads_from_list. Distinct from list_campaigns (marketing automation flows) and get_leads (individual lead records).",
+  "result_processor_customizations": {
+    "action_label": "Marketo static lists listed",
+    "result_type": "marketo_list_static_lists_result",
+    "result_description": "Dict with records (a list of list dicts: id, name, description, workspaceName, ...) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large.",
+    "presentation_guidance": "Summarize the row_count and list names + ids."
+  },
+  "error_processor_customizations": {
+    "action_context": "List static lists from the configured Marketo instance.",
+    "error_interpretation": "marketo.auth_failed: OAuth credentials rejected. marketo.permission_denied: the API user's Role lacks the Access API permission this needs (unconfirmed exact checkbox — see check_setup's guidance). marketo.rate_limited: API rate limit exceeded.",
+    "recovery_guidance": "marketo.rate_limited: retry after a short delay. marketo.auth_failed: ask the operator to check the OAuth client_id/client_secret. marketo.permission_denied: run check_setup — its guidance for this probe points at the Access API tree generally since the exact permission name for list enumeration isn't publicly pinned."
+  }
+}

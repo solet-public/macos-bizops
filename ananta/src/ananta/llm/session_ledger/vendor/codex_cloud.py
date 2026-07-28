@@ -78,7 +78,7 @@ M6 auto-summarizer can route best-of-N attempts to the same logical
 conversation without losing per-attempt provenance.
 
 ================================================================
-Fast-fail rules (per CLAUDE.md no defensive programming)
+Fast-fail rules (per the KB "Critical Development Guidelines v2")
 ================================================================
 
 * Unrecognized envelope top-level field is silently ignored (forward-compat

@@ -25,7 +25,7 @@ at the TEXT-write seam — per the 2026-06-01 operator ruling captured in
 ``knowledge_bases/ananta_platform/19_session_ledger_02_nul_byte_sanitization_seam.md``
 — so the parser leaves the raw ``display`` text alone.
 
-Failure policy: per CLAUDE.md fast-fail, malformed JSON or non-dict object
+Failure policy: per the KB "Critical Development Guidelines v2", malformed JSON or non-dict object
 is a ``ValueError``. Lines missing ``timestamp`` or ``display`` cannot be
 salvaged into a MESSAGE event and are skipped with a warning; raising
 here would block ingest on a single bad line in a large append-only file.
