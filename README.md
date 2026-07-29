@@ -109,8 +109,8 @@ the seed ships both halves of the receive path:
                                     # spool, wakes an idle session on delivery
 ```
 
-`watch` reads the launcher-exported `HOMUNCULUS_AGENT_SESSION_LABEL` /
-`HOMUNCULUS_AGENT_SESSION_ID` (or pass `--role`), registers the session in the
+`watch` reads the launcher-exported `AGENT_SESSION_LABEL` /
+`AGENT_SESSION_ID` (or pass `--role`), registers the session in the
 peer registry, claims the role as its durable binding, drains messages that
 arrived while unwatched, then prints one JSON line per delivery and nothing
 while idle — teeing each delivery into a per-session spool. `wake` is wired
@@ -150,7 +150,7 @@ should reach across and mutate. To register:
 2. **Act** — reference form as of 2026-07 (confirm against what step 1 actually showed you; treat this as a starting point, not gospel):
    ```bash
    claude mcp add --scope user \
-     -e HOMUNCULUS_NAME=<name> -e HOMUNCULUS_AGENT_IDENTITY=claude_code \
+     -e HOMUNCULUS_NAME=<name> -e AGENT_IDENTITY=claude_code \
      <name> -- <clone>/.venv/bin/python3 -m agent_messaging_plugin.mcp_bridge
    ```
    `--scope user` is what makes this cwd-independent — the user can open Claude Code in any directory afterward and still reach this homunculus.

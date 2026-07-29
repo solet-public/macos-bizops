@@ -157,7 +157,7 @@ class PeerRegisterBody(BaseModel):
     # already sends (mcp_bridge/__main__.py + forwarder.py). The model previously
     # DROPPED it silently; it is now stored on the BridgeBinding and drives the
     # reconnect state-table self-refresh (S2). Empty when the launcher did not
-    # export HOMUNCULUS_AGENT_SESSION_ID -> self-refresh disabled (S1.5 loud log).
+    # export AGENT_SESSION_ID -> self-refresh disabled (S1.5 loud log).
     agent_session_id: str = ""
     # D-IF7: opt-in flag for the per-bridge SessionInferenceProvider
     # sidecar (v4 §4). When True, the post-register hook binds an
@@ -521,14 +521,14 @@ def _state_table_self_refresh(
 
     Tokens: ``rerouted:<n>`` (re-pointed n held roles) / ``no_roles`` (session
     holds none) / ``no_session_key`` (S1.5: launched without a stable
-    HOMUNCULUS_AGENT_SESSION_ID -> self-refresh disabled, LOUD) / ``no_state_service`` /
+    AGENT_SESSION_ID -> self-refresh disabled, LOUD) / ``no_state_service`` /
     ``error`` (a state fault — logged loud with traceback, registration kept).
     """
     if not agent_session_id or agent_session_id == UNCLAIMED_SESSION_ID:
         logger.warning(
             "peer/register: no stable agent_session_id (%r) — this session's roles "
             "will NOT survive reconnect (state-table self-refresh disabled). Launch "
-            "with HOMUNCULUS_AGENT_SESSION_ID exported to enable reconnect survival.",
+            "with AGENT_SESSION_ID exported to enable reconnect survival.",
             agent_session_id,
         )
         return "no_session_key"

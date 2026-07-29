@@ -14,9 +14,16 @@
 schema_version: 1
 homunculus_name: dax
 
+# `universal:` is the REQUIRED set — every homunculus MUST have these, in a
+# development checkout AND in a freshly-born seed clone alike.  Absence is
+# BLOCKING at pre-commit and at cutover, so an entry belongs here ONLY if it
+# is present in BOTH shapes.  The seed ships this file verbatim (the midwife
+# rewrites `homunculus_name:` and nothing else), so anything listed here that
+# a newborn does not have hard-blocks that newborn's very first
+# `apply_manifest` — no code or plugin update can deploy until a human
+# hand-edits the manifest.  See the `sanctioned:` note below.
 universal:
   files:
-    - CLAUDE.md
     - README.md
     - LICENSE
     - NOTICE
@@ -29,7 +36,6 @@ universal:
     - knowledge_bases
     - profile
     - quality_gates
-    - .claude
 
 platform_managed:
   directories:
@@ -41,46 +47,70 @@ platform_managed:
     - .pytest_cache
     - .idea
 
+# `sanctioned:` is the ALLOWED-PERMANENT set — declared, so presence is never
+# `unknown_root_entries` (BLOCKING), and absence is only `missing_sanctioned`
+# (INFO).  That present-or-absent tolerance is exactly what the entries below
+# need: each one legitimately exists in one shape of the tree and legitimately
+# does not exist in the other.  Dax seed-review §19.6 (filed 2026-07-22 against
+# seed b31a54e, still reproducing five mints later in a61d6b6) reported these
+# as a hard cutover block on every fresh birth.
+#
+# Development-checkout surfaces — present in a git clone of the platform
+# origin; NOT in a sealed seed bundle, and not yet created at the moment a
+# newborn runs its first apply_manifest.  Agent-instruction and hydration
+# surfaces (CLAUDE.md, AGENTS.md, .claude/) are written by the operator-run
+# hydration runbook, which happens AFTER birth — so the cutover gate can and
+# does fire before they exist.
 sanctioned:
-  - path: PROVENANCE.json
-    reason: "genesis provenance record — written at birth, not in seed"
-    operator_approved: "2026-07-22"
-
-  - path: client
-    reason: "hydration-generated client launchers and fleet functions — written post-genesis"
-    operator_approved: "2026-07-22"
-
   - path: .gitignore
-    reason: "not shipped by seed; added by operator or tooling as needed"
-    operator_approved: "2026-07-22"
+    reason: "development-checkout surface; a sealed seed ships no dotfiles and a newborn's is written by git-init at hydration, after the first cutover gate"
+    operator_approved: "2026-07-28"
 
   - path: .dockerignore
-    reason: "not shipped by seed; relevant only for container deployments"
-    operator_approved: "2026-07-22"
+    reason: "development-checkout surface; container build context is origin-only, never shipped in a seed"
+    operator_approved: "2026-07-28"
 
   - path: .mcp.json
-    reason: "not shipped by seed; added when MCP bridge is registered"
-    operator_approved: "2026-07-22"
+    reason: "development-checkout surface; per-clone MCP wiring, written at hydration if the operator selects the MCP transport"
+    operator_approved: "2026-07-28"
 
   - path: AGENTS.md
-    reason: "not shipped by seed; symlink to CLAUDE.md added by operator workflow"
-    operator_approved: "2026-07-22"
+    reason: "agent-instruction bootstrap surface; rendered into a born clone by the hydration runbook, after birth and after the first cutover gate"
+    operator_approved: "2026-07-28"
+
+  - path: CLAUDE.md
+    reason: "agent-instruction bootstrap surface; rendered into a born clone by the hydration runbook, after birth and after the first cutover gate"
+    operator_approved: "2026-07-28"
+
+  - path: .claude
+    reason: "Claude Code session surface; current hydration installs skills and hooks at USER scope (~/.claude), so a born clone may never have a local one"
+    operator_approved: "2026-07-28"
 
   - path: pyproject.toml
-    reason: "not shipped by seed; added if repo-level packaging is needed"
-    operator_approved: "2026-07-22"
-
-  - path: binary_libraries
-    reason: "not shipped by seed; created only when native binary plugins are added"
-    operator_approved: "2026-07-22"
-
-  - path: workbench
-    reason: "not shipped by seed; scratch/research directory created on first use"
-    operator_approved: "2026-07-22"
+    reason: "development-checkout surface; a seed-born homunculus installs from the shipped plugin trees, not from a root project definition"
+    operator_approved: "2026-07-28"
 
   - path: .githooks
-    reason: "not shipped by seed; added if pre-commit hooks are configured"
-    operator_approved: "2026-07-22"
+    reason: "development-checkout surface; tracked hooks are wired by deployment/scripts/setup_clone.sh, which is origin-only"
+    operator_approved: "2026-07-28"
+
+  - path: binary_libraries
+    reason: "development-checkout surface; vendored binaries are deliberately excluded from the seed (the seed ships no dependency bytes)"
+    operator_approved: "2026-07-28"
+
+  - path: workbench
+    reason: "development-checkout surface; agent working notes are origin-only and never shipped in a seed"
+    operator_approved: "2026-07-28"
+
+  # Birth-time surfaces — created by or for a newborn; absent in the platform
+  # origin checkout, which is not itself seed-born.
+  - path: PROVENANCE.json
+    reason: "seed provenance stamp; mandatory in every sealed bundle and every born clone, absent in the platform origin checkout"
+    operator_approved: "2026-07-28"
+
+  - path: client
+    reason: "birth-time surface reported present by seed-review §19.6; declared so it can never be BLOCKING unknown drift in a born clone"
+    operator_approved: "2026-07-28"
 
   - path: disabled_plugins
     reason: "operator-sanctioned plugin retirement holding pen; not drift"

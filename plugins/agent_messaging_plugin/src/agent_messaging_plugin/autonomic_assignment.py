@@ -415,7 +415,7 @@ class AutonomicAssignment:
             # vacant lane) but degrades those paths to agent_instance_id.
             logger.warning(
                 "sys:autonomic claim for agi=%s carries NO agent_session_id "
-                "(no HOMUNCULUS_AGENT_SESSION_ID carrier) — reconnect self-refresh "
+                "(no AGENT_SESSION_ID carrier) — reconnect self-refresh "
                 "and sid-keyed succession degrade to instance identity",
                 agent_instance_id,
             )

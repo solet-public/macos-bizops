@@ -12,6 +12,7 @@ overview for the explicit read/write posture note.
 Verbs (all EDGE):
   - describe_lead_fields                                    — read
   - get_leads                                                — read
+  - get_activities                                           — read (activity log; verifies what a write CAUSED, after the fact)
   - create_or_update_leads                                   — write
   - delete_leads                                             — write (destructive)
   - merge_leads                                              — write (destructive, irreversible)
@@ -67,12 +68,14 @@ from .constants import (
     ERROR_BLOB_STORAGE_NOT_AVAILABLE,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
+    INLINE_BYTE_CAP,
     PLUGIN_NAME,
     RESULT_TYPE_ADD_LEADS_TO_LIST,
     RESULT_TYPE_CHECK_SETUP,
     RESULT_TYPE_CREATE_OR_UPDATE_LEADS,
     RESULT_TYPE_DELETE_LEADS,
     RESULT_TYPE_DESCRIBE_LEAD_FIELDS,
+    RESULT_TYPE_GET_ACTIVITIES,
     RESULT_TYPE_GET_LEADS,
     RESULT_TYPE_LIST_CAMPAIGNS,
     RESULT_TYPE_LIST_STATIC_LISTS,
@@ -145,10 +148,11 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
                 f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires "
                 "address_book_service to resolve the marketo_instance credentials"
             )
-        # blob_storage is needed only for the four spilling reads; resolved
-        # here but checked at point-of-use so a missing binding fails the
-        # specific verb, not readiness.
-        self._blob_storage_service = self.orchestrator_ref.get_service("blob_storage_service")
+        # blob_storage is needed only for the four spilling reads and is
+        # resolved lazily at first use (_blob_service): the platform constructs
+        # blob_storage_service in the init_service_manager startup step, AFTER
+        # every plugin's prepare_for_readiness — resolving it here caches None
+        # forever and every spill hard-fails (Dax Part-20 §20.1).
         self._app_config_loader = AppConfigLoader(self._address_book_service)
         self.set_ready()
 
@@ -188,24 +192,42 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
+    def _blob_service(self) -> Any | None:
+        """Resolve blob_storage_service lazily at point of use (cached once found).
+
+        Readiness-time resolution is a known trap: the platform constructs
+        blob_storage_service after every plugin's prepare_for_readiness, so a
+        readiness-time get_service() returns None and the miss would be cached
+        for the life of the plugin (Dax Part-20 §20.1).
+        """
+        if self._blob_storage_service is None and self.orchestrator_ref is not None:
+            self._blob_storage_service = self.orchestrator_ref.get_service("blob_storage_service")
+        return self._blob_storage_service
+
     def _store_blob(self, content: bytes, filename: str, mime_type: str) -> str:
         """Store a spilled result as a blob; return the blob id (the *_blob_key)."""
-        if self._blob_storage_service is None:
+        blob_service = self._blob_service()
+        if blob_service is None:
             raise MarketoServiceError(
                 ERROR_BLOB_STORAGE_NOT_AVAILABLE,
-                "blob_storage_service is not available for result spill",
+                f"blob_storage_service is not available for result spill: the serialized "
+                f"result is {len(content)} bytes and the inline-return cap is "
+                f"{INLINE_BYTE_CAP} bytes; request fewer ids/fields (or a smaller page) "
+                f"so the result fits inline",
             )
-        result = self._blob_storage_service.store_blob(
+        result = blob_service.store_blob(
             BLOB_NAMESPACE, content, {"filename": filename, "mime_type": mime_type}
         )
         if not isinstance(result, dict) or result.get("action_status") != "completed":
             raise MarketoServiceError(
-                ERROR_BLOB_STORAGE_NOT_AVAILABLE, f"failed to store result blob for '{filename}'"
+                ERROR_BLOB_STORAGE_NOT_AVAILABLE,
+                f"failed to store result blob for '{filename}' ({len(content)} bytes)",
             )
         blob_id = (result.get("data") or {}).get("blob_id")
         if not isinstance(blob_id, str) or not blob_id:
             raise MarketoServiceError(
-                ERROR_BLOB_STORAGE_NOT_AVAILABLE, f"blob storage returned no blob_id for '{filename}'"
+                ERROR_BLOB_STORAGE_NOT_AVAILABLE,
+                f"blob storage returned no blob_id for '{filename}' ({len(content)} bytes)",
             )
         return blob_id
 
@@ -243,6 +265,7 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         return {
             "describe_lead_fields": _edge("describe_lead_fields", RESULT_TYPE_DESCRIBE_LEAD_FIELDS, retryable=True),
             "get_leads": _edge("get_leads", RESULT_TYPE_GET_LEADS, retryable=True),
+            "get_activities": _edge("get_activities", RESULT_TYPE_GET_ACTIVITIES, retryable=True),
             "create_or_update_leads": _edge("create_or_update_leads", RESULT_TYPE_CREATE_OR_UPDATE_LEADS, retryable=False),
             "delete_leads": _edge("delete_leads", RESULT_TYPE_DELETE_LEADS, retryable=False),
             "merge_leads": _edge("merge_leads", RESULT_TYPE_MERGE_LEADS, retryable=False),
@@ -297,6 +320,54 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
     )
     def get_leads(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         return self._run(lambda client: marketing_actions.get_leads(client, params, self._store_blob), "get_leads")
+
+    @platform_process(
+        name="get_activities",
+        display_name="Marketo: Get Lead Activities",
+        description=(
+            "Read the Marketo activity log — what leads actually DID, or had done to them "
+            "(emails sent/delivered, alerts, campaign requests, data value changes). Pass "
+            "since_datetime (ISO-8601) to start a new read, or next_page_token to continue. "
+            "Optional lead_ids (max 30) and activity_type_ids (max 10) filter server-side. "
+            "AFTER-THE-FACT audit: it reports what a write already caused; it cannot promise "
+            "that a future merge/update will stay silent."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "since_datetime": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="ISO-8601 instant to read activities from (e.g. 2026-07-28T00:00:00-07:00). Required unless next_page_token is given.",
+            ),
+            "next_page_token": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="Continue a prior get_activities page. Required unless since_datetime is given.",
+            ),
+            "lead_ids": ParameterMetadata(
+                type=ParameterType.LIST,
+                required=False,
+                description="Up to 30 lead ids to restrict the read to (Marketo's own server-side cap).",
+            ),
+            "activity_type_ids": ParameterMetadata(
+                type=ParameterType.LIST,
+                required=False,
+                description="Up to 10 Marketo activity type ids to filter by. Read /rest/v1/activities/types.json for your instance's authoritative ids.",
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description=(
+                "records (activity items) + row_count + spilled=false inline, OR result_blob_key "
+                "+ row_count + spilled=true when large; plus next_page_token and more_result. "
+                "more_result true means keep paging even if records is empty."
+            ),
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_activities(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._run(lambda client: marketing_actions.get_activities(client, params, self._store_blob), "get_activities")
 
     @platform_process(
         name="create_or_update_leads",
@@ -360,13 +431,21 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="list_campaigns",
         display_name="Marketo: List Campaigns",
-        description="List campaigns, optionally filtered by names and/or program_names.",
+        description=(
+            "List campaigns, optionally filtered by names and/or program_names. Marketo pages "
+            "at 300 campaigns — check more_result and continue with next_page_token, otherwise "
+            "an instance with more than 300 campaigns gives you an arbitrary slice."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "names": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional list of exact campaign names to filter by."),
             "program_names": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional list of exact program names to filter by."),
+            "next_page_token": ParameterMetadata(type=ParameterType.STRING, required=False, description="Continue a prior list_campaigns page."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="records inline or result_blob_key on spill, plus row_count."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="records inline or result_blob_key on spill, plus row_count, next_page_token, more_result.",
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
@@ -393,12 +472,19 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="list_static_lists",
         display_name="Marketo: List Static Lists",
-        description="List static lists, optionally filtered by names.",
+        description=(
+            "List static lists, optionally filtered by names. Same 300-per-page cap as "
+            "list_campaigns — check more_result and continue with next_page_token."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "names": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional list of exact static list names to filter by."),
+            "next_page_token": ParameterMetadata(type=ParameterType.STRING, required=False, description="Continue a prior list_static_lists page."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="records inline or result_blob_key on spill, plus row_count."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="records inline or result_blob_key on spill, plus row_count, next_page_token, more_result.",
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )

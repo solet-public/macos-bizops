@@ -128,7 +128,7 @@ class BridgeBinding:
     # bridge reconnect / agent_instance_id rotation. Drives the reconnect
     # state-table self-refresh (peer_register → refresh_role_binding_cas) and
     # surfaces via current_identity. Empty for sessions launched without
-    # HOMUNCULUS_AGENT_SESSION_ID exported (streamable / older clients) -> no self-refresh.
+    # AGENT_SESSION_ID exported (streamable / older clients) -> no self-refresh.
     agent_session_id: str = ""
 
     @property

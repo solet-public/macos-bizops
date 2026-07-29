@@ -68,8 +68,9 @@ _claude_for_{{HOMUNCULUS_NAME}}() {
   [[ "${{{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS:-0}" == "1" ]] && extra_flags+=(--dangerously-load-development-channels server:{{HOMUNCULUS_NAME}})
 
   FLEET_TRANSPORT="${{{HOMUNCULUS_NAME}}_FLEET_TRANSPORT:-watch}" \
-  HOMUNCULUS_AGENT_SESSION_LABEL="$role" \
-  HOMUNCULUS_AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
+  AGENT_SESSION_LABEL="$role" \
+  AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
+  AGENT_WAKE_CLI="{{HOMUNCULUS_NAME}}" \
   exec claude \
       --name "$role" \
       --remote-control "$role" \

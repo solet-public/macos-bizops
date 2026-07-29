@@ -15,49 +15,20 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
-import os
 from pathlib import Path
 from typing import Final
 
 from ananta.core.runtime.port_manager import get_runtime_dir
 
-# Launcher-exported per-session identity.
-#
-# PRIMARY names are product-neutral on purpose. The Claude Code coordination
-# hooks plugin is submitted for enterprise security review, and its whole
-# env contract is deliberately generic (AGENT_SESSION_LABEL, AGENT_WAKE_CLI,
-# GIT_CONTROLLER_NAME, FLEET_TRANSPORT) — no product or instance names. The
-# `wake` verb is invoked BY that plugin's Stop hook, so this CLI reads the
-# same generic names rather than forcing an operator to export a second,
-# instance-branded pair alongside them.
-WATCH_SESSION_LABEL_ENV: Final[str] = "AGENT_SESSION_LABEL"
-WATCH_SESSION_ID_ENV: Final[str] = "AGENT_SESSION_ID"
+from ..env_contract import AGENT_SESSION_ID_ENV, AGENT_SESSION_LABEL_ENV
 
-# DEPRECATED launcher names, still honored so a session launched before the
-# rename keeps working. Remove once no launcher exports them.
-LEGACY_WATCH_SESSION_LABEL_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_LABEL"
-LEGACY_WATCH_SESSION_ID_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_ID"
+# Launcher-exported per-session identity (see hydration TEMPLATE_VARS.md —
+# these names are part of the seed contract; env_contract.py is the single
+# source of truth for the family).
+WATCH_SESSION_LABEL_ENV: Final[str] = AGENT_SESSION_LABEL_ENV
+WATCH_SESSION_ID_ENV: Final[str] = AGENT_SESSION_ID_ENV
 
 _DIGEST_LENGTH: Final[int] = 24
-
-
-def _first_set(*names: str) -> str:
-    """First non-empty environment value among ``names``, else ``""``."""
-    for name in names:
-        value = os.environ.get(name, "")
-        if value:
-            return value
-    return ""
-
-
-def resolve_session_label() -> str:
-    """The session's role label: generic name first, deprecated name second."""
-    return _first_set(WATCH_SESSION_LABEL_ENV, LEGACY_WATCH_SESSION_LABEL_ENV)
-
-
-def resolve_session_id() -> str:
-    """The launcher's stable ``ases-...`` session id, same precedence."""
-    return _first_set(WATCH_SESSION_ID_ENV, LEGACY_WATCH_SESSION_ID_ENV)
 
 
 def watch_instance_digest(agent_session_id: str) -> str:

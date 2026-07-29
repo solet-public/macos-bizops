@@ -526,7 +526,7 @@ def _mcp_register_suggestion(name: str, clone_root: Path) -> str:
         "for you -- see README.md \"Registering the MCP bridge\" for the "
         "full probe/verify ladder):\n"
         f"  claude mcp add --scope user -e HOMUNCULUS_NAME={name} "
-        "-e HOMUNCULUS_AGENT_IDENTITY=claude_code "
+        "-e AGENT_IDENTITY=claude_code "
         f"{name} -- {venv_python} -m agent_messaging_plugin.mcp_bridge"
     )
 

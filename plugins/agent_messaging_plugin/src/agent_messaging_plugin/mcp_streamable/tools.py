@@ -151,7 +151,7 @@ _PEER_REGISTER_DESCRIPTION: Final[str] = "\n".join(
         "Register or relabel this MCP session in the peer registry.",
         "",
         "Auto-registration: each transport registers this MCP session",
-        "when it opens. Stdio uses $HOMUNCULUS_AGENT_IDENTITY when set and",
+        "when it opens. Stdio uses $AGENT_IDENTITY when set and",
         "otherwise generates a durable agent_instance_id; Streamable",
         "HTTP uses the bearer-token claim. Call this tool manually",
         "only to change agent_id or session_label; the durable",

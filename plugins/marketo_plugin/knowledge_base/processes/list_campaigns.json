@@ -6,8 +6,8 @@
   "result_processor_customizations": {
     "action_label": "Marketo campaigns listed",
     "result_type": "marketo_list_campaigns_result",
-    "result_description": "Dict with records (a list of campaign dicts: id, name, type, programName, ...) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large.",
-    "presentation_guidance": "Summarize the row_count and list campaign names + ids."
+    "result_description": "Dict with records (a list of campaign dicts: id, name, type, programName, ...) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large, plus next_page_token and more_result for continuing the listing.",
+    "presentation_guidance": "Summarize the row_count and list campaign names + ids. If more_result is true the listing is INCOMPLETE — say so explicitly and continue with next_page_token before answering any question of the form 'which campaigns could this fire', because an unpaged first page is an arbitrary slice rather than the full set."
   },
   "error_processor_customizations": {
     "action_context": "List campaigns from the configured Marketo instance.",

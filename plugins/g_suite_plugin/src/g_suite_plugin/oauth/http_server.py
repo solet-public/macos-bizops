@@ -46,7 +46,6 @@ class OAuthServer:
         self._port_manager: PortManager = PortManager("gsuite")
         self._server_loop: asyncio.AbstractEventLoop | None = None
         self._server_thread: threading.Thread | None = None
-        self._server: Any = None
         self._startup_error: BaseException | None = None
         self._started = threading.Event()
 
@@ -86,7 +85,6 @@ class OAuthServer:
 
         config = uvicorn.Config(app, host=host, port=port, log_level="warning", loop="asyncio")
         server = uvicorn.Server(config)
-        self._server = server
 
         def run() -> None:
             loop = asyncio.new_event_loop()
@@ -94,7 +92,11 @@ class OAuthServer:
             self._server_loop = loop
             try:
                 loop.run_until_complete(server.serve())
-            except BaseException as exc:  # noqa: BLE001 — bind failures must be captured, not swallowed
+            except BaseException as exc:
+                # BaseException, not Exception, and deliberately so: uvicorn
+                # raises SystemExit when it cannot bind, so `except Exception`
+                # silently loses a port collision. The error is captured rather
+                # than swallowed — start() re-raises it as OAuthServerStartError.
                 self._startup_error = exc
                 _logger.error(
                     "Google OAuth callback server failed on %s:%d: %s", host, port, exc
@@ -107,7 +109,7 @@ class OAuthServer:
 
         # Block until the socket is bound (server.started) or startup fails.
         # uvicorn flips server.started to True only after create_server() binds,
-        # so a port collision surfaces as a captured OSError here rather than a
+        # so a port collision surfaces as a captured error here rather than a
         # false success that returns an unbound port.
         deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
@@ -130,8 +132,12 @@ class OAuthServer:
     def _fail_start(self, host: str, port: int, cause: BaseException) -> NoReturn:
         """Release the reserved port and raise a loud, typed start failure."""
         self.stop()
+        # uvicorn's bind failure arrives as SystemExit(1), whose str() is a bare
+        # "1" — name the type so the message is diagnosable on its own.
         raise OAuthServerStartError(
-            f"OAuth callback server could not start on {host}:{port}: {cause}"
+            f"OAuth callback server could not start on {host}:{port}: "
+            f"{type(cause).__name__}: {cause} — the port is most likely already "
+            f"in use (uvicorn logs the underlying bind error)"
         ) from cause
 
     def stop(self) -> None:
@@ -140,7 +146,6 @@ class OAuthServer:
             self._server_loop.call_soon_threadsafe(self._server_loop.stop)
         self._port_manager.release()
         self._server_loop = None
-        self._server = None
         self._started.clear()
 
     def is_running(self) -> bool:

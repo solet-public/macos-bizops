@@ -9,6 +9,7 @@ Errors go to stderr with a mapped exit code.
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from ananta.constants import ExitCodes
 
 # The parent package __init__ is lazy (PEP 562) and ``models`` is stdlib-only,
 # so this import keeps the console script's bare-PATH contract intact.
+from ..env_contract import enforce_no_legacy_agent_env
 from ..models import WATCH_AGENT_INSTANCE_PREFIX
 from . import __version__
 from .client import (
@@ -37,8 +39,6 @@ from .spool import (
     WATCH_SESSION_ID_ENV,
     WATCH_SESSION_LABEL_ENV,
     default_spool_path,
-    resolve_session_id,
-    resolve_session_label,
     spool_append,
     watch_instance_digest,
 )
@@ -283,16 +283,22 @@ def _resolve_watch_identity(role: str | None, agent_id: str) -> WatchIdentity:
     ``ases-...`` export) — never a PID, which app-hosted siblings share. The
     reconnect self-refresh and `peer_claim_role` (REL-07) key on it, so watch
     fails loud rather than registering a degraded, self-refresh-disabled
-    binding.
+    binding. An un-migrated launcher still exporting a legacy prefixed
+    family (either pre-rename generation, e.g. ``HOMUNCULUS_AGENT_*``)
+    fails loud the same way (one-release tripwire, env_contract.py).
     """
-    resolved_role = role or resolve_session_label()
+    try:
+        enforce_no_legacy_agent_env()
+    except RuntimeError as exc:
+        _die(str(exc), ExitCodes.UNKNOWN_ERROR)
+    resolved_role = role or os.environ.get(WATCH_SESSION_LABEL_ENV, "")
     if not resolved_role:
         _die(
             f"watch needs a role: pass --role or export {WATCH_SESSION_LABEL_ENV} "
             "(the claude-<name> launcher and fleet functions do this)",
             ExitCodes.UNKNOWN_ERROR,
         )
-    session_id = resolve_session_id()
+    session_id = os.environ.get(WATCH_SESSION_ID_ENV, "")
     if not session_id:
         _die(
             f"watch needs the stable session id: export {WATCH_SESSION_ID_ENV} "
