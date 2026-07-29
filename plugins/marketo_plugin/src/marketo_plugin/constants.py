@@ -125,6 +125,9 @@ MAX_ACTIVITY_TYPE_IDS: Final[int] = 10
 ACTIVITY_PAGING_TOKEN_PATH: Final[str] = "/rest/v1/activities/pagingtoken.json"
 ACTIVITIES_PATH: Final[str] = "/rest/v1/activities.json"
 ACTIVITIES_SPILL_FILENAME: Final[str] = "get_activities_results.json"
+ACTIVITY_TYPES_PATH: Final[str] = "/rest/v1/activities/types.json"
+ACTIVITY_TYPES_SPILL_FILENAME: Final[str] = "list_activity_types_results.json"
+API_USAGE_PATH: Final[str] = "/rest/v1/stats/usage.json"
 
 # Activity type ids that answer "did this write notify a human?".
 #
@@ -132,10 +135,11 @@ ACTIVITIES_SPILL_FILENAME: Final[str] = "get_activities_results.json"
 # Part 20 field report (2026-07-28), NOT from a verified vendor table. The
 # Adobe REST docs confirm ids 1 (Visit Webpage), 2 (Fill Out Form), 13 (Data
 # Value Change) and 37 (Deleted Lead), but do NOT enumerate names for 6/7/38/
-# 39/42/44/46/47 in the reference page checked. They are therefore recorded as
-# a STARTING POINT for an operator's own confirmation, never applied as a
-# silent default by any verb here — ``get_activities`` requires the caller to
-# pass ``activity_type_ids`` explicitly.
+# 39/42/44/47 in the reference page checked. Dax verified those ids on its
+# instance on 2026-07-29 and proved id 46 invalid there; because ids remain
+# instance-specific, the accepted entries are still only a STARTING POINT,
+# never a silent default. ``get_activities`` requires the caller to pass
+# ``activity_type_ids`` explicitly.
 #
 # The authoritative, per-instance list is GET /rest/v1/activities/types.json —
 # activity type ids are NOT guaranteed identical across Marketo subscriptions,
@@ -148,7 +152,6 @@ SUSPECTED_NOTIFICATION_ACTIVITY_TYPE_IDS: Final[dict[int, str]] = {
     39: "Send Sales Email (unverified)",
     42: "Add to SFDC Campaign (unverified)",
     44: "Change SFDC Campaign Status (unverified)",
-    46: "Interesting Moment (unverified)",
     47: "Request Campaign (unverified)",
 }
 
@@ -156,10 +159,6 @@ LEAD_ACTIONS: Final[frozenset[str]] = frozenset(
     {"createOrUpdate", "createOnly", "updateOnly", "createDuplicate"}
 )
 DEFAULT_LEAD_ACTION: Final[str] = "createOrUpdate"
-
-LEAD_FILTER_TYPES: Final[frozenset[str]] = frozenset(
-    {"id", "email", "cookie", "twitterId", "facebookId", "linkedInId", "sfdcAccountId", "sfdcContactId", "sfdcLeadId", "sfdcOpptyId"}
-)
 
 # ---------------------------------------------------------------------------
 # Error codes (marketo.* prefix — surfaced to callers of the verbs)
@@ -173,7 +172,8 @@ ERROR_NOT_CONFIGURED: Final[str] = "marketo.not_configured"
 ERROR_INVALID_PARAMS: Final[str] = "marketo.invalid_params"
 ERROR_AUTH_FAILED: Final[str] = "marketo.auth_failed"
 # The API user's Role is missing an "Access API" permission checkbox (e.g.
-# Read-Write Person, Read-Only/Read-Write Campaign, Execute Campaign) — a
+# Read-Write Person, Read-Only Activity, Read-Only/Read-Write Campaign,
+# Execute Campaign) — a
 # Users & Roles fix, NOT a bad/expired token. Distinct from ERROR_AUTH_FAILED
 # (601/602) so the remediation text points at the right console screen.
 ERROR_PERMISSION_DENIED: Final[str] = "marketo.permission_denied"
@@ -250,6 +250,8 @@ MARKETO_AUTH_RETRY_CODES: Final[frozenset[str]] = frozenset({"601", "602"})
 CHECK_SETUP_PROBES: Final[tuple[tuple[str, str, str | None], ...]] = (
     ("describe_lead_fields", "Lead field schema (read)", "Read-Only Person"),
     ("get_leads", "Lead query (read)", "Read-Only Person"),
+    ("list_activity_types", "Activity type catalog (read)", "Read-Only Activity"),
+    ("get_api_usage", "Current-day API usage (read)", None),
     ("list_campaigns", "Campaign listing (read)", "Read-Only Campaign"),
     ("list_static_lists", "Static list listing (read)", None),
 )
@@ -282,3 +284,5 @@ RESULT_TYPE_ADD_LEADS_TO_LIST: Final[str] = "marketo_add_leads_to_list_result"
 RESULT_TYPE_REMOVE_LEADS_FROM_LIST: Final[str] = "marketo_remove_leads_from_list_result"
 RESULT_TYPE_MERGE_LEADS: Final[str] = "marketo_merge_leads_result"
 RESULT_TYPE_GET_ACTIVITIES: Final[str] = "marketo_get_activities_result"
+RESULT_TYPE_LIST_ACTIVITY_TYPES: Final[str] = "marketo_list_activity_types_result"
+RESULT_TYPE_GET_API_USAGE: Final[str] = "marketo_get_api_usage_result"

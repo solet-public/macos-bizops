@@ -1,8 +1,8 @@
 {
   "process_key": "plugin::marketo_plugin::get_leads",
   "display_name": "Marketo: Get Leads",
-  "description": "Query actual lead records by filter_type (id/email/cookie/twitterId/facebookId/linkedInId/sfdcAccountId/sfdcContactId/sfdcLeadId/sfdcOpptyId) and filter_values (up to 300). Optional fields list restricts returned columns; next_page_token continues a prior page.",
-  "embedding_description": "Fetch actual lead/person records from Marketo by matching a filter type such as email or id against up to 300 filter values — the read verb for real lead data (name, email, custom fields), as opposed to describe_lead_fields (schema metadata only). Supports paging via next_page_token for large result sets.",
+  "description": "Query actual lead records by an instance-supported filter_type and up to 300 filter_values. Read describe_lead_fields.searchable_fields first to discover valid standard and custom filter types. Optional fields restrict returned columns; next_page_token continues a prior page.",
+  "embedding_description": "Fetch Marketo lead and person records by matching an instance-supported standard or custom field against up to 300 values, with optional returned columns and paging.",
   "result_processor_customizations": {
     "action_label": "Marketo leads fetched",
     "result_type": "marketo_get_leads_result",
@@ -11,7 +11,7 @@
   },
   "error_processor_customizations": {
     "action_context": "Query leads by filter from the configured Marketo instance.",
-    "error_interpretation": "marketo.invalid_params: missing/invalid filter_type or filter_values, or more than 300 values. marketo.object_not_found: no leads matched the filter (Marketo code 702). marketo.auth_failed: OAuth credentials rejected. marketo.permission_denied: the API user's Role lacks Read-Only/Read-Write Person. marketo.partition_access_denied: the API user isn't assigned to the workspace/partition these leads live in. marketo.rate_limited: API rate limit exceeded.",
-    "recovery_guidance": "marketo.object_not_found: confirm the filter_type/filter_values actually match a lead. marketo.rate_limited: retry after a short delay. marketo.auth_failed: ask the operator to check the OAuth client_id/client_secret. marketo.permission_denied / marketo.partition_access_denied: run check_setup to see the exact gap and which admin screen fixes it."
+    "error_interpretation": "marketo.invalid_params: missing filter_type/filter_values, more than 300 values, or Marketo rejected a filter_type that is not searchable on this instance. marketo.object_not_found: no leads matched the filter (Marketo code 702). marketo.auth_failed: OAuth credentials rejected. marketo.permission_denied: the API user's Role lacks Read-Only/Read-Write Person. marketo.partition_access_denied: the API user isn't assigned to the workspace/partition these leads live in. marketo.rate_limited: API rate limit exceeded.",
+    "recovery_guidance": "marketo.invalid_params: read describe_lead_fields.searchable_fields and use an exact returned field name. marketo.object_not_found: confirm the filter_type/filter_values actually match a lead. marketo.rate_limited: retry after a short delay. marketo.auth_failed: ask the operator to check the OAuth client_id/client_secret. marketo.permission_denied / marketo.partition_access_denied: run check_setup to see the exact gap and which admin screen fixes it."
   }
 }

@@ -36,7 +36,8 @@ POLL_INTERVAL_S: Final[float] = 0.5
 # placeholder -- so it is the signal to use the clone-dir basename.
 _NAME_PLACEHOLDER: Final[str] = "homunculus"
 
-# Action statuses that mean "still working". Anything else is terminal.
+# Action statuses that mean "still working". A completed action is also still
+# settling until process/result carries the separately persisted result row.
 NON_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
     {"queued", "pending", "dispatched", "processing", "running"},
 )
@@ -191,7 +192,7 @@ class BridgeClient:
         reason: str | None = None,
         poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        """Dispatch a process and poll until its result is terminal."""
+        """Dispatch a process and poll until its result payload is available."""
         dispatch = self.process_call(process_key, arguments, reason=reason)
         action_id = dispatch.get("action_id")
         if not isinstance(action_id, str):
@@ -206,12 +207,24 @@ class BridgeClient:
         *,
         poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        """Poll ``process/result`` until the action leaves a working state."""
+        """Poll until the action is terminal and its completed result is stored.
+
+        The action-event row is marked completed immediately before the result
+        row is written. A snapshot in that narrow window has
+        ``status=completed`` but no ``result`` key; treating it as terminal
+        makes ``homunculus call`` nondeterministically omit successful output.
+        """
         deadline = time.monotonic() + poll_timeout_s
         while True:
             payload = self.process_result(action_id)
             status = str(payload.get("status", ""))
-            if status not in NON_TERMINAL_STATUSES:
+            completed_result_pending = (
+                status == "completed" and "result" not in payload
+            )
+            if (
+                status not in NON_TERMINAL_STATUSES
+                and not completed_result_pending
+            ):
                 return payload
             if time.monotonic() >= deadline:
                 raise BridgeResultTimeoutError(

@@ -47,8 +47,8 @@ the Role, API-only User, and LaunchPoint service") — this is the condensed
 version for the hydration conversation:
 
 1. **New service?** Role (Access API: `Read-Write Person`, `Read-Only
-   Campaign`, `Execute Campaign`) → API-only User → LaunchPoint Custom
-   Service → Get Token.
+   Activity`, `Read-Only Campaign`, `Execute Campaign`) → API-only User →
+   LaunchPoint Custom Service → Get Token.
 2. **Reusing an existing service?** Skip straight to Get Token on it.
 3. **Copy** the client secret (the operator's only browser act beyond
    clicking through the above) — the agent harvests it via `pbpaste` into a
@@ -77,7 +77,7 @@ manager or cross-device sync could in principle capture it in that window.
 
 Once `marketo_instance` is registered: run `test_connection` (credentials
 valid?) then `check_setup` (what does the Role actually grant?).
-`check_setup` runs four safe read-only probes and names the exact missing
+`check_setup` runs six safe read-only probes and names the exact missing
 Access API permission for anything that fails, plus which admin screen fixes
 it. It **cannot** check write/execute permissions (`create_or_update_leads`,
 `delete_leads`, `merge_leads`, `add_leads_to_list`, `remove_leads_from_list`,

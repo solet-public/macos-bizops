@@ -28,6 +28,25 @@ merges (not an arbitrary choice made here). Marketo's own 1080 error code
 (server-enforced batch-size limit, effective 2026-03-31) backstops the
 client-side cap.
 
+## Budgeting a batch — `get_api_usage`
+
+`get_api_usage` reads Marketo's current-day subscription usage summary from
+`/rest/v1/stats/usage.json` and returns `calls_today` plus the per-API-user
+breakdown. Use it before and during high-volume work so the local runner's own
+counter is reconciled with calls made by other integrations. The endpoint
+reports consumption, not the account's purchased quota limit: compare
+`calls_today` against an operator-confirmed quota and retain headroom for
+concurrent production integrations.
+
+## Discovering query filters — `describe_lead_fields.searchable_fields`
+
+`describe_lead_fields` returns both the field descriptors and the configured
+instance's `searchable_fields`. Those names are the source of truth for
+`get_leads.filter_type`, including eligible custom fields; the plugin forwards
+the selected name and lets Marketo validate it. Do not constrain a caller to a
+static cross-instance list when the describe response exposes the real
+instance-specific contract.
+
 ## Verifying what a write actually DID — `get_activities`
 
 `merge_leads`, `delete_leads` and `create_or_update_leads` can fire smart
@@ -40,9 +59,10 @@ side effect of a data-cleanup operation.
 anybody?" — it reads the Marketo activity log (emails sent/delivered, alerts,
 sales emails, interesting moments, campaign requests, data value changes)
 either from an ISO-8601 instant (`since_datetime`, which mints a paging token)
-or by continuing a prior page (`next_page_token`). `lead_ids` (max 30) and
-`activity_type_ids` (max 10) filter server-side; both caps are Marketo's own
-and are enforced in-plugin rather than left to a server-side error.
+or by continuing a prior page (`next_page_token`). `activity_type_ids` is
+mandatory on every page and accepts 1-10 ids; `lead_ids` is optional with a
+maximum of 30. Both caps are Marketo's own and are enforced in-plugin rather
+than left to a server-side error.
 
 **What this verb does NOT do — state this plainly to an operator who asks for
 assurance.** It is an AFTER-THE-FACT audit. It reports what already happened;
@@ -59,14 +79,13 @@ Two traps worth knowing:
   Marketo streams activities in ~300-item pages and an empty page mid-stream is
   normal. Never report "nothing happened" from a partial read — drain the token
   chain until `more_result` is false.
-- **Activity type ids are not guaranteed identical across subscriptions.** The
-  ids commonly cited for the notifying activities (6 Send Email, 7 Email
-  Delivered, 38 Send Alert, 39 Send Sales Email, 46 Interesting Moment, 47
-  Request Campaign, 42/44 SFDC campaign add/status change) are recorded in
-  `constants.py` as a STARTING POINT and are explicitly marked unverified — no
-  verb applies them as a silent default. For an answer that has to be
-  defensible, read `GET /rest/v1/activities/types.json` on the actual instance
-  and use its ids.
+- **Activity type ids are not guaranteed identical across subscriptions.**
+  Call `list_activity_types` on the configured instance and pass only ids it
+  returns. Dax proved why this matters on 2026-07-29: ids
+  6/7/38/39/42/44/47 were accepted while id 46 was invalid, and Marketo
+  rejected the entire request because of that one bad id. `constants.py`
+  retains the accepted notification ids only as a starting point and no verb
+  applies them as a silent default.
 
 ## Enumerating campaigns and lists — paging is not optional
 
@@ -92,8 +111,9 @@ agent-blind secret-ingestion procedure): `knowledge_base/hydration_guidance.md`.
 Because "does the Role have the right permissions" can't be answered just by
 minting a token (`test_connection` only proves the credentials are valid,
 not what they can do), this plugin ships a second diagnostic verb,
-`check_setup`, that runs four safe read-only probes
-(`describe_lead_fields`, `get_leads`, `list_campaigns`, `list_static_lists`)
+`check_setup`, that runs six safe read-only probes
+(`describe_lead_fields`, `get_leads`, `list_activity_types`, `get_api_usage`,
+`list_campaigns`, `list_static_lists`)
 and reports, per probe, either `ok` or the exact missing Access API
 permission plus which admin screen fixes it. It is **read-only and
 side-effect-free by construction** — it never calls a write/execute verb, so
@@ -165,6 +185,8 @@ existing one's Role turns out to be missing a permission `check_setup` names.
    **Access API** permission tree, check:
    - `Read-Write Person` — covers lead read/write AND static-list membership
      add/remove (one permission gates both, per Marketo's own docs).
+   - `Read-Only Activity` — covers the activity type catalog and activity log
+     reads.
    - `Read-Only Campaign` (campaign listing; use `Read-Write Campaign` instead
      if campaign edits are wanted later — this plugin never writes one).
    - `Execute Campaign` (required for `trigger_campaign` to actually fire).
@@ -245,5 +267,5 @@ silent for this plugin — no allowlist entry needed anywhere in `src/` or
 | `src/marketo_plugin/app_config.py` | Resolves `marketo_instance` from the address book; the client_secret is chain-consumed. |
 | `src/marketo_plugin/http_client.py` | `MarketoClient` — synchronous httpx client with cached, envelope-triggered re-mintable bearer auth (client-credentials grant, GET-based token mint). |
 | `src/marketo_plugin/errors.py` | Envelope-first error classification (`classify_marketo_envelope`) from the response body's `errors[]` list. |
-| `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `get_activities`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup`. |
+| `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `get_api_usage`, `list_activity_types`, `get_activities`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup`. |
 | `src/marketo_plugin/plugin.py` | The `MarketoPlugin` EDGE provider — client lifecycle, error mapping, EDGE registration. |

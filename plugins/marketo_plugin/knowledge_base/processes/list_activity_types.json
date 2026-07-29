@@ -1,0 +1,22 @@
+{
+  "process_key": "plugin::marketo_plugin::list_activity_types",
+  "display_name": "Marketo: List Activity Types",
+  "description": "List the configured Marketo instance's available activity type ids and metadata. Use these authoritative per-instance ids as the mandatory activity_type_ids for get_activities; do not rely on ids copied from another subscription.",
+  "embedding_description": "Enumerate the configured Marketo subscription's available activity type ids, names, descriptions, primary attributes, and attribute definitions.",
+  "result_processor_customizations": {
+    "action_label": "Marketo activity types listed",
+    "result_type": "marketo_list_activity_types_result",
+    "result_description": "Dict with records (activity type descriptors carrying id, name, description, primaryAttribute, and attributes) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large.",
+    "presentation_guidance": "Report row_count and the requested activity type ids/names. Point to result_blob_key when the complete catalog spilled.",
+    "output_action_guidance": "When the caller is preparing get_activities, carry only ids returned for this configured instance and keep each request to at most 10 ids.",
+    "field_sensitivities": {
+      "result_blob_key": 0.2,
+      "row_count": 0.1
+    }
+  },
+  "error_processor_customizations": {
+    "action_context": "List the configured Marketo instance's activity type catalog.",
+    "error_interpretation": "marketo.auth_failed: OAuth credentials rejected. marketo.permission_denied: the API user's Role lacks Read-Only Activity. marketo.rate_limited: API rate limit exceeded.",
+    "recovery_guidance": "marketo.permission_denied: add Read-Only Activity to the API role, then re-run check_setup. marketo.rate_limited: retry after a short delay."
+  }
+}

@@ -2,8 +2,8 @@
 
 Each function takes an already-built :class:`http_client.MarketoClient` and a
 ``params`` dict, returning a plain result dict. Blob I/O is injected
-(``blob_writer``) for the four verbs whose result can be large (describe,
-get_leads, list_campaigns, list_static_lists). Invalid parameters raise
+(``blob_writer``) for the five verbs whose result can be large (describe,
+get_leads, list_activity_types, list_campaigns, list_static_lists). Invalid parameters raise
 ``ValueError`` (mapped to ``marketo.invalid_params``); ``success: false``
 envelopes raise ``MarketoEnvelopeError`` (carrying the payload for the
 plugin's classifier).
@@ -32,6 +32,9 @@ from .constants import (
     ACTIVITIES_PATH,
     ACTIVITIES_SPILL_FILENAME,
     ACTIVITY_PAGING_TOKEN_PATH,
+    ACTIVITY_TYPES_PATH,
+    ACTIVITY_TYPES_SPILL_FILENAME,
+    API_USAGE_PATH,
     CHECK_SETUP_PROBES,
     CHECK_SETUP_UNVERIFIED_WRITE_VERBS,
     DEFAULT_LEAD_ACTION,
@@ -40,7 +43,6 @@ from .constants import (
     ERROR_PERMISSION_DENIED,
     INLINE_BYTE_CAP,
     LEAD_ACTIONS,
-    LEAD_FILTER_TYPES,
     MAX_ACTIVITY_LEAD_IDS,
     MAX_ACTIVITY_TYPE_IDS,
     MAX_BATCH_RECORDS,
@@ -60,14 +62,71 @@ def describe_lead_fields(client: Any, _params: dict[str, Any], blob_writer: Blob
     """Fetch the full lead field metadata list (id, displayName, name, dataType, ...)."""
     payload = client.get_json("/rest/v1/leads/describe.json")
     fields = payload.get("result") or []
-    return _spill_envelope(fields if isinstance(fields, list) else [], blob_writer, "describe_lead_fields_results.json")
+    searchable_fields = payload.get("searchableFields")
+    if not isinstance(searchable_fields, list):
+        raise ValueError("Marketo describe response omitted searchableFields")
+    envelope = _spill_envelope(
+        fields if isinstance(fields, list) else [],
+        blob_writer,
+        "describe_lead_fields_results.json",
+    )
+    envelope["searchable_fields"] = searchable_fields
+    return envelope
+
+
+def list_activity_types(
+    client: Any,
+    _params: dict[str, Any],
+    blob_writer: BlobWriter,
+) -> dict[str, Any]:
+    """Return the configured instance's authoritative activity type catalog."""
+    payload = client.get_json(ACTIVITY_TYPES_PATH)
+    records = payload.get("result") or []
+    return _spill_envelope(
+        records if isinstance(records, list) else [],
+        blob_writer,
+        ACTIVITY_TYPES_SPILL_FILENAME,
+    )
+
+
+def get_api_usage(client: Any, _params: dict[str, Any]) -> dict[str, Any]:
+    """Return current-day REST API call totals and per-user usage."""
+    payload = client.get_json(API_USAGE_PATH)
+    records = payload.get("result") or []
+    if not isinstance(records, list):
+        raise ValueError("Marketo API usage response result must be a list")
+    if not records:
+        return {
+            "records": [],
+            "row_count": 0,
+            "date": None,
+            "calls_today": None,
+            "users": [],
+        }
+    current = records[0]
+    if not isinstance(current, dict):
+        raise ValueError("Marketo API usage response contains a non-object record")
+    date = current.get("date")
+    total = current.get("total")
+    users = current.get("users")
+    if not isinstance(date, str) or not date:
+        raise ValueError("Marketo API usage response omitted date")
+    if not isinstance(total, int) or isinstance(total, bool):
+        raise ValueError("Marketo API usage response omitted integer total")
+    if not isinstance(users, list):
+        raise ValueError("Marketo API usage response omitted users")
+    return {
+        "records": records,
+        "row_count": len(records),
+        "date": date,
+        "calls_today": total,
+        "users": users,
+    }
 
 
 def get_leads(client: Any, params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
     """Query leads by filterType/filterValues; optionally restrict the returned fields."""
     filter_type = _require_str(params, "filter_type")
-    if filter_type not in LEAD_FILTER_TYPES:
-        raise ValueError(f"'filter_type' must be one of {sorted(LEAD_FILTER_TYPES)}, got {filter_type!r}")
     filter_values = _require_list(params, "filter_values", max_len=MAX_FILTER_VALUES)
     query: dict[str, Any] = {
         "filterType": filter_type,
@@ -118,14 +177,19 @@ def get_activities(client: Any, params: dict[str, Any], blob_writer: BlobWriter)
 
 
 def _activity_query(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Build activities.json's query: the required token plus optional filters."""
-    query: dict[str, Any] = {"nextPageToken": _activity_token(client, params)}
+    """Build activities.json's query with both server-required arguments."""
+    type_ids = _require_list(
+        params,
+        "activity_type_ids",
+        max_len=MAX_ACTIVITY_TYPE_IDS,
+    )
+    query: dict[str, Any] = {
+        "nextPageToken": _activity_token(client, params),
+        "activityTypeIds": ",".join(str(type_id) for type_id in type_ids),
+    }
     if params.get("lead_ids") is not None:
         lead_ids = _require_list(params, "lead_ids", max_len=MAX_ACTIVITY_LEAD_IDS)
         query["leadIds"] = ",".join(str(lead_id) for lead_id in lead_ids)
-    if params.get("activity_type_ids") is not None:
-        type_ids = _require_list(params, "activity_type_ids", max_len=MAX_ACTIVITY_TYPE_IDS)
-        query["activityTypeIds"] = ",".join(str(type_id) for type_id in type_ids)
     return query
 
 
@@ -282,9 +346,9 @@ def remove_leads_from_list(client: Any, params: dict[str, Any]) -> dict[str, Any
 def check_setup(client: Any, blob_writer: BlobWriter) -> dict[str, Any]:
     """Probe the configured API user's READ-ONLY capabilities; report gaps by name.
 
-    Runs the four safe, side-effect-free read probes in :data:`CHECK_SETUP_PROBES`
-    (a trivial ``get_leads`` query, ``describe_lead_fields``, ``list_campaigns``,
-    ``list_static_lists``) and classifies any failure via
+    Runs the six safe, side-effect-free read probes in :data:`CHECK_SETUP_PROBES`
+    (lead describe/query, activity-type listing, API usage, campaign listing,
+    and static-list listing) and classifies any failure via
     :func:`errors.classify_marketo_envelope`. Deliberately does NOT probe any
     write/execute verb (create_or_update_leads, delete_leads, add/remove_leads_
     from_list, trigger_campaign) — there is no way to test those permissions
@@ -325,6 +389,10 @@ def _run_read_probe(client: Any, verb: str, blob_writer: BlobWriter) -> None:
         describe_lead_fields(client, {}, blob_writer)
     elif verb == "get_leads":
         get_leads(client, {"filter_type": "id", "filter_values": ["0"]}, blob_writer)
+    elif verb == "list_activity_types":
+        list_activity_types(client, {}, blob_writer)
+    elif verb == "get_api_usage":
+        get_api_usage(client, {})
     elif verb == "list_campaigns":
         list_campaigns(client, {}, blob_writer)
     elif verb == "list_static_lists":

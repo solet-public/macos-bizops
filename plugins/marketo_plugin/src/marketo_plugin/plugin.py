@@ -12,6 +12,8 @@ overview for the explicit read/write posture note.
 Verbs (all EDGE):
   - describe_lead_fields                                    — read
   - get_leads                                                — read
+  - get_api_usage                                            — read (current-day API consumption)
+  - list_activity_types                                      — read (per-instance activity metadata)
   - get_activities                                           — read (activity log; verifies what a write CAUSED, after the fact)
   - create_or_update_leads                                   — write
   - delete_leads                                             — write (destructive)
@@ -76,7 +78,9 @@ from .constants import (
     RESULT_TYPE_DELETE_LEADS,
     RESULT_TYPE_DESCRIBE_LEAD_FIELDS,
     RESULT_TYPE_GET_ACTIVITIES,
+    RESULT_TYPE_GET_API_USAGE,
     RESULT_TYPE_GET_LEADS,
+    RESULT_TYPE_LIST_ACTIVITY_TYPES,
     RESULT_TYPE_LIST_CAMPAIGNS,
     RESULT_TYPE_LIST_STATIC_LISTS,
     RESULT_TYPE_MERGE_LEADS,
@@ -265,6 +269,8 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         return {
             "describe_lead_fields": _edge("describe_lead_fields", RESULT_TYPE_DESCRIBE_LEAD_FIELDS, retryable=True),
             "get_leads": _edge("get_leads", RESULT_TYPE_GET_LEADS, retryable=True),
+            "get_api_usage": _edge("get_api_usage", RESULT_TYPE_GET_API_USAGE, retryable=True),
+            "list_activity_types": _edge("list_activity_types", RESULT_TYPE_LIST_ACTIVITY_TYPES, retryable=True),
             "get_activities": _edge("get_activities", RESULT_TYPE_GET_ACTIVITIES, retryable=True),
             "create_or_update_leads": _edge("create_or_update_leads", RESULT_TYPE_CREATE_OR_UPDATE_LEADS, retryable=False),
             "delete_leads": _edge("delete_leads", RESULT_TYPE_DELETE_LEADS, retryable=False),
@@ -285,11 +291,18 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="describe_lead_fields",
         display_name="Marketo: Describe Lead Fields",
-        description="Fetch the full lead field metadata list (id, displayName, name, dataType, length) for the configured Marketo instance.",
+        description=(
+            "Fetch the full lead field metadata list and the instance-specific "
+            "searchable_fields accepted by get_leads.filter_type."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
         return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT, description="records (field descriptors) inline or a result_blob_key on spill, plus row_count."
+            type=ParameterType.OBJECT,
+            description=(
+                "records (field descriptors) inline or result_blob_key on "
+                "spill, plus row_count and searchable_fields."
+            ),
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
@@ -298,16 +311,54 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         return self._run(lambda client: marketing_actions.describe_lead_fields(client, params, self._store_blob), "describe_lead_fields")
 
     @platform_process(
+        name="get_api_usage",
+        display_name="Marketo: Get Current API Usage",
+        description=(
+            "Read the configured Marketo subscription's current-day REST API "
+            "call total and per-user breakdown. Use calls_today when checking "
+            "whether a planned batch fits the operator's known daily quota."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description=(
+                "date, calls_today, users, records, and row_count for the "
+                "current subscription day."
+            ),
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_api_usage(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._run(
+            lambda client: marketing_actions.get_api_usage(client, params),
+            "get_api_usage",
+        )
+
+    @platform_process(
         name="get_leads",
         display_name="Marketo: Get Leads",
         description=(
-            "Query leads by filter_type (id/email/cookie/twitterId/facebookId/linkedInId/sfdcAccountId/"
-            "sfdcContactId/sfdcLeadId/sfdcOpptyId) and filter_values (up to 300). Optional fields list "
-            "restricts returned columns; next_page_token continues a prior page."
+            "Query leads by an instance-supported filter_type and up to 300 "
+            "filter_values. Read describe_lead_fields.searchable_fields to "
+            "discover valid standard and custom filter types first. Optional "
+            "fields restrict returned columns; next_page_token continues a page."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "filter_type": ParameterMetadata(type=ParameterType.STRING, required=True, description="One of the supported Marketo lead filter types."),
+            "filter_type": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description=(
+                    "A field from describe_lead_fields.searchable_fields for "
+                    "this Marketo instance."
+                ),
+            ),
             "filter_values": ParameterMetadata(type=ParameterType.LIST, required=True, description="Up to 300 filter values to match."),
             "fields": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional list of lead field API names to return."),
             "next_page_token": ParameterMetadata(type=ParameterType.STRING, required=False, description="Continue a prior get_leads page."),
@@ -322,13 +373,48 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         return self._run(lambda client: marketing_actions.get_leads(client, params, self._store_blob), "get_leads")
 
     @platform_process(
+        name="list_activity_types",
+        display_name="Marketo: List Activity Types",
+        description=(
+            "List the configured Marketo instance's activity type ids and "
+            "metadata. Use these per-instance ids as the mandatory "
+            "activity_type_ids for get_activities."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description=(
+                "records (activity type descriptors) inline or result_blob_key "
+                "on spill, plus row_count."
+            ),
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def list_activity_types(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._run(
+            lambda client: marketing_actions.list_activity_types(
+                client,
+                params,
+                self._store_blob,
+            ),
+            "list_activity_types",
+        )
+
+    @platform_process(
         name="get_activities",
         display_name="Marketo: Get Lead Activities",
         description=(
             "Read the Marketo activity log — what leads actually DID, or had done to them "
             "(emails sent/delivered, alerts, campaign requests, data value changes). Pass "
             "since_datetime (ISO-8601) to start a new read, or next_page_token to continue. "
-            "Optional lead_ids (max 30) and activity_type_ids (max 10) filter server-side. "
+            "activity_type_ids is mandatory on every page (max 10); discover valid ids with "
+            "list_activity_types. Optional lead_ids (max 30) filter server-side. "
             "AFTER-THE-FACT audit: it reports what a write already caused; it cannot promise "
             "that a future merge/update will stay silent."
         ),
@@ -351,8 +437,11 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             ),
             "activity_type_ids": ParameterMetadata(
                 type=ParameterType.LIST,
-                required=False,
-                description="Up to 10 Marketo activity type ids to filter by. Read /rest/v1/activities/types.json for your instance's authoritative ids.",
+                required=True,
+                description=(
+                    "One to 10 ids from list_activity_types for this Marketo "
+                    "instance. Required on every page."
+                ),
             ),
         },
         return_value_schema=ReturnValueSchema(
@@ -551,8 +640,8 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         name="check_setup",
         display_name="Marketo: Check Setup",
         description=(
-            "Probe the configured API user's READ-ONLY capabilities (lead field schema, lead "
-            "query, campaign listing, static list listing) and report which Access API Role "
+            "Probe the configured API user's READ-ONLY capabilities (lead schema/query, activity "
+            "type listing, API usage, campaign listing, static list listing) and report which Access API Role "
             "permission is missing for any that fail. PARTIAL by design: write/execute verbs "
             "(create_or_update_leads, delete_leads, add/remove_leads_from_list, trigger_campaign) "
             "cannot be probed without performing them, so reads_verified=true does NOT mean the "

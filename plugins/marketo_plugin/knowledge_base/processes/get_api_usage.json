@@ -1,0 +1,22 @@
+{
+  "process_key": "plugin::marketo_plugin::get_api_usage",
+  "display_name": "Marketo: Get Current API Usage",
+  "description": "Read current-day REST API consumption for the configured Marketo subscription: date, total calls_today, and a per-API-user breakdown. Compare calls_today with the operator-confirmed subscription quota before starting a large batch; this verb reports consumption and does not assume the account's quota limit.",
+  "embedding_description": "Read current-day Marketo REST API call consumption with the subscription total and per-API-user counts for batch budgeting and headroom monitoring.",
+  "result_processor_customizations": {
+    "action_label": "Marketo API usage fetched",
+    "result_type": "marketo_get_api_usage_result",
+    "result_description": "Dict with date, calls_today, users (per-user counts), records (the source daily summary), and row_count. An empty current-day response carries calls_today=null rather than claiming zero use.",
+    "presentation_guidance": "Lead with date and calls_today, then summarize the largest per-user consumers. Compare against a quota only when the operator supplied or confirmed that quota.",
+    "output_action_guidance": "For a planned batch, calculate headroom from the operator-confirmed daily quota and include concurrent integrations in the safety margin.",
+    "field_sensitivities": {
+      "calls_today": 0.2,
+      "date": 0.1
+    }
+  },
+  "error_processor_customizations": {
+    "action_context": "Read the configured Marketo subscription's current-day API usage.",
+    "error_interpretation": "marketo.auth_failed: OAuth credentials rejected. marketo.permission_denied: the API user's Role cannot read subscription usage. marketo.rate_limited or marketo.daily_quota_exceeded: Marketo rejected the monitoring call because the limit is already under pressure.",
+    "recovery_guidance": "marketo.permission_denied: ask a Marketo admin to review the API user's Access API role and re-run the verb. marketo.rate_limited: retry after the rate window. marketo.daily_quota_exceeded: stop the batch and wait for the subscription quota reset."
+  }
+}

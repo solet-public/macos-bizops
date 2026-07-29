@@ -21,7 +21,10 @@ replayer):
   until empty — the at-least-once safety net for a role holder that was offline
   (``queued_for_replay``) AND the deaf-wake insurance for a direct IMPORTANT send
   whose recipient never entered a turn (REL-05 Vector B). A re-emit is visibly
-  marked ``[re-emit n/cap ...]`` (N3).
+  marked ``[re-emit n/cap ...]`` (N3) and, past
+  :data:`REEMIT_BODY_HEAD_CHARS`, carries only the head of the original prose
+  plus a pointer to the persisted full text (N3-CONDENSE) — a re-read costs the
+  whole body every time otherwise.
 
 Both paths converge on :meth:`OwedDeliveryCoordinator._settle`: each caller
 AWAITS the one shared per-id emit task and only then issues the ``delivered=true``
@@ -67,6 +70,25 @@ REPAIR_DRAIN_PAGE_LIMIT: Final[int] = 50
 # Loud upper bound on re-queries within a single pass — a flip that never
 # lands (ownership lost mid-pass) cannot return the same rows forever silently.
 REPAIR_DRAIN_MAX_PASSES: Final[int] = 1000
+
+# N3-CONDENSE: how much of the original prose a RE-EMIT head carries. An MCP
+# session that stayed busy through the quiet-gap guard (TURN_BOUNDARY_QUIET_S)
+# pays the FULL body once per re-emit up to the cap — the overwhelmingly common
+# case is a recipient who did read the original and is now re-reading it, where
+# the duplicate is cost without news. The head is kept (not elided outright) so
+# a genuinely deaf recipient can still recognise WHAT they missed and judge
+# urgency without a round-trip, and the marker names the bounded retrieval call.
+#
+# ⚠ The marker prose must claim only PERSISTENCE, never delivery. A DIRECT row's
+# first emission is recorded optimistically at send time (REL-05), so
+# ``emit_count == 1`` does NOT prove the bytes ever reached the client — that
+# unproven case IS the deaf wake. Telling such a recipient "you already received
+# this" would be false exactly when it costs something.
+#
+# A body small enough that condensing would not actually save bytes is carried
+# whole (see :func:`_apply_reemit_marker`) — claiming a truncation that did not
+# happen would be a lie in the prose.
+REEMIT_BODY_HEAD_CHARS: Final[int] = 240
 
 
 def _log(msg: str) -> None:
@@ -411,16 +433,36 @@ def _apply_reemit_marker(
     (original message_id + send timestamp) instead of treating it as news. A
     first drain of an owed row that was never emitted (a role original,
     ``emit_count == 0``) is left unmarked.
+
+    A re-emit whose body exceeds :data:`REEMIT_BODY_HEAD_CHARS` is CONDENSED to
+    the marker plus that head (N3-CONDENSE). This is a cost fix ONLY — it does
+    not touch the server-side consumption guards, so the row stays owed, keeps
+    re-emitting, and still escalates to the sender at cap. Nothing is dropped:
+    the full text stays PERSISTED in the thread and retrievable via the named
+    ``peer_inbox`` call. The prose deliberately does not claim the recipient
+    already received it — for a direct row ``emit_count == 1`` is optimistic at
+    send, not client-confirmed (see :data:`REEMIT_BODY_HEAD_CHARS`).
     """
     emit_count = row.get("emit_count")
     n = emit_count if isinstance(emit_count, int) else 0
     if n < 1:
         return
     created = str(row.get("created_at") or "")
-    marker = (
-        f"[re-emit {n}/{cap} of message_id={message_id} originally sent {created}]"
+    body = str(event.get("content") or "")
+    prefix = f"[re-emit {n}/{cap} of message_id={message_id} originally sent {created}"
+    whole = f"{prefix}]\n\n{body}"
+    condensed = (
+        f"{prefix} — body truncated here to save context; the FULL text is "
+        "persisted in the thread. Read it whole with peer_inbox (limit=10), "
+        f"matching message_id={message_id}.]"
+        f"\n\n{body[:REEMIT_BODY_HEAD_CHARS]}…"
     )
-    event["content"] = f"{marker}\n\n{event.get('content') or ''}"
+    # Condense only when it actually SAVES: the pointer prose is itself a few
+    # hundred characters, so on a mid-sized body the "condensed" form can be
+    # LONGER than simply re-sending it. Comparing the two rendered forms makes
+    # that impossible by construction (and keeps short bodies byte-whole)
+    # without a second hand-tuned threshold to drift out of sync with the prose.
+    event["content"] = condensed if len(condensed) < len(whole) else whole
 
 
 __all__ = [
@@ -428,6 +470,7 @@ __all__ = [
     "REPAIR_DRAIN_INTERVAL_S",
     "REPAIR_DRAIN_MAX_PASSES",
     "REPAIR_DRAIN_PAGE_LIMIT",
+    "REEMIT_BODY_HEAD_CHARS",
     "OwedDeliveryCoordinator",
     "OwedDeliveryTransport",
 ]

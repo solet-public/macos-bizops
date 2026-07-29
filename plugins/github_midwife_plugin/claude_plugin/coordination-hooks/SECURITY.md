@@ -1,16 +1,16 @@
 # Security notes — coordination-hooks
 
 This page pre-answers the questions a security review of this plugin is
-likely to ask. The plugin is four Claude Code hooks: two context reminders
-(`step_zero_reminder.js`, `check_messages_reminder.js`), one opt-in
-idle-wake waiter (`wake_waiter.js`), and one opt-in git-mutation guard
-(`git_controller_gate.py`).
+likely to ask. The plugin is five Claude Code hooks: three context reminders
+(`step_zero_reminder.js`, `check_messages_reminder.js`,
+`role_binding_reminder.js`), one opt-in idle-wake waiter (`wake_waiter.js`),
+and one opt-in git-mutation guard (`git_controller_gate.py`).
 
 The wake waiter is the plugin's one privileged behavior — it executes a
 local command — so it gets its own section below and is the right place to
-focus review attention. Like every other hook here, it emits only fixed
-string literals: it discards the command's output and conveys a single bit
-("deliveries pending"). The other three hooks execute nothing at all.
+focus review attention. It emits only fixed string literals: it discards the
+command's output and conveys a single bit ("deliveries pending"). The other
+four hooks execute nothing at all.
 
 ## Inputs and outputs — the complete data-flow surface
 
@@ -19,7 +19,9 @@ Inputs, exhaustively:
 - **stdin**: the JSON payload Claude Code passes to every hook (event name,
   tool name, tool input). Parsed defensively; malformed input degrades to a
   no-op (reminders) or an allow (gate).
-- **Environment variables**: `AGENT_SESSION_LABEL` (reminders + wake on/off),
+- **Environment variables**: `AGENT_SESSION_LABEL` (reminders + wake on/off,
+  and — in `role_binding_reminder.js` only — the one value the plugin
+  interpolates into injected text; see the injection section below),
   `GIT_CONTROLLER_NAME` (gate on/off + controller name), `AGENT_WAKE_CLI`
   (wake waiter on/off + the command it runs), `FLEET_TRANSPORT` (disarms the
   wake waiter on non-watch transports), `CLAUDE_PROJECT_DIR` (repo root,
@@ -31,7 +33,12 @@ Outputs, exhaustively:
 
 - **stdout**: a JSON object whose `additionalContext` is a **fixed string
   literal** compiled into the script (reminders); nothing (gate, wake
-  waiter).
+  waiter). One exception, stated precisely: `role_binding_reminder.js`
+  interpolates a single value into its otherwise-fixed literal — the
+  `AGENT_SESSION_LABEL` environment variable, JSON-escaped via
+  `JSON.stringify`. That value comes from the operator-controlled process
+  environment; no hook interpolates anything read from stdin, from a file,
+  or from any message content.
 - **stderr**: a static block-explanation message when the gate blocks; the
   wake waiter's **fixed** nudge or fixed-format failure note (the numeric
   exit status is the only variable part; the child's own output is
@@ -39,7 +46,14 @@ Outputs, exhaustively:
 - **Exit codes**: `0` (allow / no-op) or `2` (gate block; wake signal).
 
 Beyond that: no network I/O of any kind in any hook (no HTTP, no sockets,
-no DNS). No file writes. No secrets are read, stored, or transmitted; the
+no DNS). No hook writes a file as an action of its own. One interpreter
+side effect is disclosed rather than claimed away: `git_controller_gate.py`
+imports two sibling modules (`_git_controller_lex.py`,
+`_git_controller_walker.py`), and CPython byte-compiles imports, so running
+the gate causes `hooks/__pycache__/*.pyc` to appear beside the scripts.
+Nothing in the plugin reads those files back, and an operator who wants them
+gone can set `PYTHONDONTWRITEBYTECODE=1` in the session environment.
+No secrets are read, stored, or transmitted; the
 hooks have no credential access at all. Exactly one subprocess execution
 exists in the plugin — the wake waiter's fixed-argv invocation of the
 operator-configured CLI, detailed below. The gate executes nothing: it
@@ -90,12 +104,23 @@ position.
 
 ## Context injection (reminders)
 
-The only text the two reminder hooks ever inject is the fixed literals
-visible in their scripts. They never relay message content, search results,
-or any other dynamic data. Whatever knowledge-base or messaging mechanism a
-project uses, its *content* reaches the model only through the model's own
-tool calls or the wake path described above, each subject to its own
-controls; the reminders only note such mechanisms may exist.
+The text the three reminder hooks inject is the fixed literals visible in
+their scripts, plus exactly one interpolated value: the
+`AGENT_SESSION_LABEL` environment variable, echoed back by
+`role_binding_reminder.js` so the reminder can name the label the session
+was launched with. It is JSON-escaped on the way out, it originates in the
+operator-controlled process environment, and it is the only non-literal
+character any hook here can place in injected context.
+
+No reminder relays message content, search results, or any other dynamic
+data. Whatever knowledge-base, messaging, or role-binding mechanism a
+project uses, its *content* and its *state* reach the model only through the
+model's own tool calls or the wake path described above, each subject to its
+own controls; the reminders only note such mechanisms may exist. In
+particular `role_binding_reminder.js` performs no lookup of any kind — it
+does not query, confirm, or repair a role binding, and cannot report whether
+one is stale. It states that local labels and external bindings are separate
+things, and leaves verification to the session's own tools.
 
 ## Deployment context (disclosed so nothing is discovered later)
 
@@ -151,8 +176,10 @@ mistakes, not malice.
   mistake-prevention scope, a hook bug should not break trusted peers'
   workflows; fail-closed is the wrong trade when the "attacker" is a typo.
   Blocking decisions are made only on affirmatively parsed evidence.
-- The hooks are stateless and idempotent — no caches, no temp files, no
-  ordering dependencies.
+- The hooks are stateless and idempotent — no temp files, no ordering
+  dependencies, and no state carried between invocations (the only files
+  ever produced are the interpreter's own `__pycache__` byte-code artifacts
+  disclosed above, which the plugin never reads).
 
 ## Supply chain
 

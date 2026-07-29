@@ -1,13 +1,13 @@
 {
   "process_key": "plugin::marketo_plugin::describe_lead_fields",
   "display_name": "Marketo: Describe Lead Fields",
-  "description": "Fetch the full lead field metadata list (id, displayName, name, dataType, length) for the configured Marketo instance's Lead Database schema.",
-  "embedding_description": "Retrieve the Marketo Lead Database's own field schema/metadata catalog — every available lead field's API name, display name, and data type — for discovering what fields exist BEFORE building get_leads filters or create_or_update_leads payloads. This is schema discovery, not lead data itself; use get_leads to fetch actual lead records.",
+  "description": "Fetch the full lead field metadata list (id, displayName, name, dataType, length) and searchable_fields for the configured Marketo instance. searchable_fields is the authoritative instance-specific set accepted by get_leads.filter_type.",
+  "embedding_description": "Retrieve the configured Marketo Lead Database field schema, metadata catalog, searchable field names, API names, display names, data types, lengths, and read-only status.",
   "result_processor_customizations": {
     "action_label": "Marketo lead field schema fetched",
     "result_type": "marketo_describe_lead_fields_result",
-    "result_description": "Dict with records (a list of field descriptor dicts: id, displayName, name, dataType, length) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when the schema is large.",
-    "presentation_guidance": "Summarize the row_count (field count) and list a handful of field names/types; point to result_blob_key for the full schema."
+    "result_description": "Dict with records (a list of field descriptor dicts: id, displayName, name, dataType, length) + searchable_fields + row_count + spilled=false inline, OR result_blob_key + searchable_fields + row_count + spilled=true when the schema is large.",
+    "presentation_guidance": "Summarize the row_count (field count), searchable_fields, and a handful of field names/types; point to result_blob_key for the full schema."
   },
   "error_processor_customizations": {
     "action_context": "Fetch the Marketo lead field schema.",
