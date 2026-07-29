@@ -132,7 +132,7 @@ a knowledge-base repo). Hooks installed only in the clone never fire for those
 sessions — verified in the field: a fleet session in another repo got no
 role-reclaim prompt and its role binding sat vacant with nobody told. User
 scope fires from any directory; all three hooks guard on
-`HOMUNCULUS_AGENT_SESSION_LABEL` (set by the launchers), so sessions not
+`AGENT_SESSION_LABEL` (set by the launchers), so sessions not
 started through a homunculus launcher get zero output and zero errors.
 
 The third hook is the wake half of messaging: a `Stop` hook running
@@ -314,7 +314,7 @@ Let the operator pick names and count; do not invent roles they did not ask for.
 
 **Git safety when more than one session shares a clone — an OPTIONAL, nameable gate you must NOT default on.** If the operator is choosing more than one role, ask directly: will more than one of these sessions ever run git commands (commit, push, checkout, stash, branch) against the SAME clone? If yes, concurrent mutating git from multiple sessions is a real collision risk (a stash or checkout from one session can silently clobber another session's in-progress work). There is an OPTIONAL gate for exactly this, and the operator names it themselves: designate ONE role — **any name they choose** (`Git-Controller`, `gitops`, whatever) — as the sole git-mutator, and every other session is then blocked from mutating git. The reference implementation lives in the PLATFORM ORIGIN repository (`.claude/hooks/git_controller_gate.py` with `_git_controller_lex.py` + `_git_controller_walker.py`, enabled by setting `HOMUNCULUS_GIT_CONTROLLER_NAME=<chosen-role>` on the gate's `PreToolUse` command; the origin's `deployment/scripts/setup_clone.sh` step 3 shows the exact wiring) — **the seed does NOT ship these files.** On a seed-born deployment, be honest about that: if the operator wants the gate, obtaining or re-authoring those hook scripts is explicit fleet-setup work, not something already present in the clone. Do not cite paths to the operator as if they exist locally. **Default is OFF, and state the tradeoff up front, plainly:** enabling the gate BLOCKS the Task tool (Anthropic subagents) for every non-controller session — **and that block is the gate's PRIMARY PURPOSE, not a side effect.** Those subagents spawn their own git worktrees and run git, which is exactly how in-progress work gets lost — the very collision the gate exists to prevent. So the choice is honest and either-way: an operator who runs several git-mutating sessions against one clone enables the gate (names a controller, gives up subagents); an operator who wants Anthropic's subagents leaves the gate OFF and works some other way (separate clones per session, or a single git-mutating session). Do NOT default it on; do NOT skip this conversation when more than one session will share a clone.
 
-**Operational guidance: leave sessions running, use `/clear`.** Once a role's session is started, tell the operator to leave it running in its own iTerm2 (or other terminal) tab rather than closing it between conversations. Quitting a session loses its process and its role's live identity until it is manually relaunched; the `/clear` slash command instead resets the conversation while the process (and its stable `HOMUNCULUS_AGENT_SESSION_ID`) keeps running — the SessionStart hook's `matcher` already covers `clear` (Step 2's `claude_settings.json.template`), so the role re-claim fires automatically and the session is addressable again within moments. This is the operational rhythm this platform runs on: long-lived tabs, `/clear` between tasks, restart only when a session is genuinely stuck.
+**Operational guidance: leave sessions running, use `/clear`.** Once a role's session is started, tell the operator to leave it running in its own iTerm2 (or other terminal) tab rather than closing it between conversations. Quitting a session loses its process and its role's live identity until it is manually relaunched; the `/clear` slash command instead resets the conversation while the process (and its stable `AGENT_SESSION_ID`) keeps running — the SessionStart hook's `matcher` already covers `clear` (Step 2's `claude_settings.json.template`), so the role re-claim fires automatically and the session is addressable again within moments. This is the operational rhythm this platform runs on: long-lived tabs, `/clear` between tasks, restart only when a session is genuinely stuck.
 
 ## Step 4b — activate shipped plugins; configure credentials on first use
 
@@ -340,7 +340,7 @@ environment permits MCP, you may mention once that an optional MCP bridge
 exists for tool-native access, then move on; act only if the operator
 explicitly asks for it. When asked: follow the seed README's registration
 ladder. Reference form: `claude mcp add --scope user -e HOMUNCULUS_NAME=<name>
--e HOMUNCULUS_AGENT_IDENTITY=claude_code <name> --
+-e AGENT_IDENTITY=claude_code <name> --
 <clone>/.venv/bin/python3 -m agent_messaging_plugin.mcp_bridge`. Probe
 `claude mcp add --help` before trusting that form; CLI flags drift.
 

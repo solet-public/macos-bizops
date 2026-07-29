@@ -56,7 +56,7 @@ class CodingAgentSessionServiceInterface(ABC):
         - The bridge subprocess is ``python -m
           agent_messaging_plugin.mcp_bridge`` with
           ``HOMUNCULUS_NAME=<homunculus_name>`` and
-          ``HOMUNCULUS_AGENT_IDENTITY=claude_code`` in its environment. The
+          ``AGENT_IDENTITY=claude_code`` in its environment. The
           plugin records the spawned pid keyed by
           ``agent_instance_id`` so subsequent ``terminate_bridge`` /
           ``restart_bridge`` calls find the right process.

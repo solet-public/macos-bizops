@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ": HOMUNCULUS_STEP_ZERO_HOOK={{HOMUNCULUS_NAME}}; [ -n \"$HOMUNCULUS_AGENT_SESSION_LABEL\" ] && echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", \"additionalContext\": \"STEP ZERO: before any other tool call this turn, use the local {{HOMUNCULUS_NAME}} command to ask {{HOMUNCULUS_NAME}}. No MCP tools are required. For KB search, run {{HOMUNCULUS_NAME}} call service_interface::knowledge_service::search with query plus top_k=8. For implementation/debugging/design work, search the {{HOMUNCULUS_NAME}} knowledge base for the current design record, runbook, and recent notes before editing or explaining; router/bridge/blue-green questions especially require a KB search for those nouns. For past-session/status/blocker questions after history ingestion is enabled, run {{HOMUNCULUS_NAME}} call service_interface::session_ledger_service::search_event_content with query plus limit=8. Only skip Step Zero when locating a known code symbol/file or repairing a not-running {{HOMUNCULUS_NAME}} command. Do not register or troubleshoot MCP unless the user says policy permits MCP and asks for it.\"}}' || true"
+            "command": ": HOMUNCULUS_STEP_ZERO_HOOK={{HOMUNCULUS_NAME}}; [ -n \"$AGENT_SESSION_LABEL\" ] && echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", \"additionalContext\": \"STEP ZERO: before any other tool call this turn, use the local {{HOMUNCULUS_NAME}} command to ask {{HOMUNCULUS_NAME}}. No MCP tools are required. For KB search, run {{HOMUNCULUS_NAME}} call service_interface::knowledge_service::search with query plus top_k=8. For implementation/debugging/design work, search the {{HOMUNCULUS_NAME}} knowledge base for the current design record, runbook, and recent notes before editing or explaining; router/bridge/blue-green questions especially require a KB search for those nouns. For past-session/status/blocker questions after history ingestion is enabled, run {{HOMUNCULUS_NAME}} call service_interface::session_ledger_service::search_event_content with query plus limit=8. Only skip Step Zero when locating a known code symbol/file or repairing a not-running {{HOMUNCULUS_NAME}} command. Do not register or troubleshoot MCP unless the user says policy permits MCP and asks for it.\"}}' || true"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ": HOMUNCULUS_ROLE_RECLAIM_HOOK={{HOMUNCULUS_NAME}}; [ -n \"$HOMUNCULUS_AGENT_SESSION_LABEL\" ] && python3 -c \"import json, os; role = os.environ['HOMUNCULUS_AGENT_SESSION_LABEL']; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': 'ROLE RE-CLAIM (SessionStart hook): this session was launched as ' + role + '. The platform-side role binding and address-book registration are re-pointed by the rename skill (Skill tool, skill: rename, args: ' + role + '); until that has run in this conversation, delivery routes from before a /clear, restart, or reconnect may still be stale (REL-07). The skill follows the declared fleet transport (FLEET_TRANSPORT; unset on this machine means watch, the {{HOMUNCULUS_NAME}} watch registered-presence watcher). Ground truth for any claim is {{HOMUNCULUS_NAME}} call plugin::agent_messaging_plugin::peer_holds_role with the role name and agent_instance_id - a raw peer-list entry is presence, not a claim.'}}))\" || true"
+            "command": ": HOMUNCULUS_ROLE_RECLAIM_HOOK={{HOMUNCULUS_NAME}}; [ -n \"$AGENT_SESSION_LABEL\" ] && python3 -c \"import json, os; role = os.environ['AGENT_SESSION_LABEL']; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': 'ROLE RE-CLAIM (SessionStart hook): this session was launched as ' + role + '. The platform-side role binding and address-book registration are re-pointed by the rename skill (Skill tool, skill: rename, args: ' + role + '); until that has run in this conversation, delivery routes from before a /clear, restart, or reconnect may still be stale (REL-07). The skill follows the declared fleet transport (FLEET_TRANSPORT; unset on this machine means watch, the {{HOMUNCULUS_NAME}} watch registered-presence watcher). Ground truth for any claim is {{HOMUNCULUS_NAME}} call plugin::agent_messaging_plugin::peer_holds_role with the role name and agent_instance_id - a raw peer-list entry is presence, not a claim.'}}))\" || true"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ": HOMUNCULUS_WAKE_HOOK={{HOMUNCULUS_NAME}}; [ -n \"$HOMUNCULUS_AGENT_SESSION_LABEL\" ] && [ \"${FLEET_TRANSPORT:-watch}\" = \"watch\" ] && exec {{HOMUNCULUS_NAME}} wake; exit 0",
+            "command": ": HOMUNCULUS_WAKE_HOOK={{HOMUNCULUS_NAME}}; [ -n \"$AGENT_SESSION_LABEL\" ] && [ \"${FLEET_TRANSPORT:-watch}\" = \"watch\" ] && exec {{HOMUNCULUS_NAME}} wake; exit 0",
             "asyncRewake": true,
             "timeout": 86400
           }

@@ -63,7 +63,7 @@ The DEFAULT receive path for terminal coding-agent sessions (Claude Code and
 similar) is the local CLI's registered-presence watcher — zero MCP:
 
 ```bash
-<name> watch                 # role from $HOMUNCULUS_AGENT_SESSION_LABEL
+<name> watch                 # role from $AGENT_SESSION_LABEL
 <name> watch --role <Role>   # explicit role
 ```
 
@@ -72,7 +72,7 @@ receive contract in one command:
 
 1. **Register** — opens a bridge and POSTs `peer/register` with a stable
    identity derived from the launcher-exported environment:
-   `agent_session_id` = `$HOMUNCULUS_AGENT_SESSION_ID` (the per-logical-
+   `agent_session_id` = `$AGENT_SESSION_ID` (the per-logical-
    session carrier; watch fails loud when it is absent rather than register
    a degraded binding), `session_label` = the role, and a deterministic
    `agent_instance_id` (`agi-watch-<sha256(session_id) prefix>`) so a
@@ -136,8 +136,8 @@ common receive pattern is:
    streamable clients.
 
 For the local stdio bridge, an explicitly configured
-`HOMUNCULUS_AGENT_SESSION_LABEL` is also claimed as the standing role after
-registration and every reconnect. `HOMUNCULUS_AGENT_ROLE` overrides that
+`AGENT_SESSION_LABEL` is also claimed as the standing role after
+registration and every reconnect. `AGENT_ROLE` overrides that
 default when the display label and routable role differ. Inferred cwd labels
 are display-only and do not claim roles. Registration/relabeling and role
 claiming remain distinct server operations; the bridge performs both so a
@@ -333,7 +333,7 @@ params.meta    = full bridge metadata plus trigger_turn=true
 Local launch requirements:
 
 - The MCP server entry exports `HOMUNCULUS_NAME=<homunculus>` and
-  `HOMUNCULUS_AGENT_IDENTITY=codex`.
+  `AGENT_IDENTITY=codex`.
 - Codex sessions use a local binary or extension that consumes
   `notifications/homunculus/peer_message`.
 - Reconnect or restart the MCP client after bridge or Codex-wake code changes so

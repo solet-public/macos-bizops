@@ -29,8 +29,8 @@ from macos_coding_agent_session_plugin.constants import (
     DEFAULT_AGENT_IDENTITY,
     DEFAULT_TERMINATE_GRACE_SECONDS,
     DEFAULT_TERMINATE_POLL_INTERVAL_SECONDS,
-    ENV_HOMUNCULUS_AGENT_IDENTITY,
-    ENV_HOMUNCULUS_AGENT_INSTANCE_ID,
+    ENV_AGENT_IDENTITY,
+    ENV_AGENT_INSTANCE_ID,
     ENV_HOMUNCULUS_NAME,
 )
 
@@ -70,15 +70,15 @@ def default_spawn(agent_instance_id: str, homunculus_name: str) -> subprocess.Po
 
     The child inherits the parent's PATH + PYTHONPATH so the same
     ananta editable install reaches it. ``HOMUNCULUS_NAME`` +
-    ``HOMUNCULUS_AGENT_IDENTITY`` are the env keys the bridge subprocess
+    ``AGENT_IDENTITY`` are the env keys the bridge subprocess
     requires per the bridge overview KB article. agent_instance_id is
-    passed through ``HOMUNCULUS_AGENT_INSTANCE_ID`` for stable registry
+    passed through ``AGENT_INSTANCE_ID`` for stable registry
     identity across bridge reconnects.
     """
     env = os.environ.copy()
     env[ENV_HOMUNCULUS_NAME] = homunculus_name
-    env.setdefault(ENV_HOMUNCULUS_AGENT_IDENTITY, DEFAULT_AGENT_IDENTITY)
-    env[ENV_HOMUNCULUS_AGENT_INSTANCE_ID] = agent_instance_id
+    env.setdefault(ENV_AGENT_IDENTITY, DEFAULT_AGENT_IDENTITY)
+    env[ENV_AGENT_INSTANCE_ID] = agent_instance_id
     return subprocess.Popen(
         [sys.executable, "-m", "agent_messaging_plugin.mcp_bridge"],
         env=env,

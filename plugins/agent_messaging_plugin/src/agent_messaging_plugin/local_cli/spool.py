@@ -20,10 +20,13 @@ from typing import Final
 
 from ananta.core.runtime.port_manager import get_runtime_dir
 
+from ..env_contract import AGENT_SESSION_ID_ENV, AGENT_SESSION_LABEL_ENV
+
 # Launcher-exported per-session identity (see hydration TEMPLATE_VARS.md —
-# these names are part of the seed contract).
-WATCH_SESSION_LABEL_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_LABEL"
-WATCH_SESSION_ID_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_ID"
+# these names are part of the seed contract; env_contract.py is the single
+# source of truth for the family).
+WATCH_SESSION_LABEL_ENV: Final[str] = AGENT_SESSION_LABEL_ENV
+WATCH_SESSION_ID_ENV: Final[str] = AGENT_SESSION_ID_ENV
 
 _DIGEST_LENGTH: Final[int] = 24
 

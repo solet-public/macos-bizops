@@ -86,7 +86,7 @@ localhost port. MCP clients see one server (`<server-name>`) and one tool prefix
 right `/api/v1/bridge/*` endpoint and bridges long-poll events back as
 transport-specific MCP notifications. The default and Claude Code
 method is `notifications/claude/channel`. For Codex sessions registered
-with `HOMUNCULUS_AGENT_IDENTITY=codex`, peer-message wake events use
+with `AGENT_IDENTITY=codex`, peer-message wake events use
 `notifications/homunculus/peer_message` so the locally patched Codex CLI can
 route the message into its inter-agent mailbox and start a normal turn.
 Port discovery is fully runtime: the bridge subprocess reads

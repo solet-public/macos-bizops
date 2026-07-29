@@ -39,7 +39,7 @@ standing default on hydrated machines).
    {{HOMUNCULUS_NAME}} watch --role "$ROLE"
    ```
    On arming it registers this session in the peer registry (identity from
-   the launcher-exported `HOMUNCULUS_AGENT_SESSION_ID`), claims `$ROLE` as
+   the launcher-exported `AGENT_SESSION_ID`), claims `$ROLE` as
    the durable role binding, drains messages that arrived while unwatched,
    then streams one JSON line per delivery — and nothing while idle. It
    reconnects and re-claims automatically across homunculus restarts and

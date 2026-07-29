@@ -65,20 +65,24 @@ casually:
 
 | Var | Occurrences |
 |---|---|
-| `HOMUNCULUS_AGENT_SESSION_LABEL` | `claude_launcher.template` (export); `claude_settings.json.template` (guard on ALL THREE hooks + SessionStart read — load-bearing at user scope: unlabeled sessions must get zero output); `fleet_functions.zsh.template` (export) |
-| `HOMUNCULUS_AGENT_SESSION_ID` | `claude_launcher.template` (export); `fleet_functions.zsh.template` (export); consumed (not referenced textually) by the Stop hook's `<name> wake`, which derives the per-session watch spool path from it — the same derivation `<name> watch` uses, so the pair meets with no flags |
-| `FLEET_TRANSPORT` | `fleet_functions.zsh.template` (export, from the operator knob `<NAME>_FLEET_TRANSPORT`, default `watch`); `claude_settings.json.template` (Stop-hook guard, `:-watch` default); `rename_skill_SKILL.md.template` (transport-selection read). Values `watch` \| `mcp`; unset resolves to the machine's standing default (`watch` on hydrated seeds, `mcp` on the platform development checkout). Declares the fleet-coordination transport; the rename skill never probes and never silently crosses transports (design: platform repo `workbench/2026-07-28_fleet_transport_parity_design.md`). Deliberately UNPREFIXED (operator seed-naming ruling 2026-07-28: no `HOMUNCULUS_*` env names in seed-facing artifacts) — safe because no shipped Python reads it; its exporter and readers all travel together in this render set |
+| `AGENT_SESSION_LABEL` | `claude_launcher.template` (export); `claude_settings.json.template` (guard on ALL THREE hooks + SessionStart read — load-bearing at user scope: unlabeled sessions must get zero output); `fleet_functions.zsh.template` (export); the coordination-hooks Claude plugin guards every hook on the same name |
+| `AGENT_SESSION_ID` | `claude_launcher.template` (export); `fleet_functions.zsh.template` (export); consumed (not referenced textually) by the Stop hook's `<name> wake`, which derives the per-session watch spool path from it — the same derivation `<name> watch` uses, so the pair meets with no flags |
+| `AGENT_WAKE_CLI` | `claude_launcher.template` (export); `fleet_functions.zsh.template` (export). Names the coordination CLI (the `<name>` console script) for the coordination-hooks plugin's Stop-hook waiter, which invokes exactly `$AGENT_WAKE_CLI wake`. The user-scope settings Stop hook does not read it (it execs `<name> wake` directly); the export exists so the plugin's transport-guarded waiter can arm on fleet machines |
+| `FLEET_TRANSPORT` | `fleet_functions.zsh.template` (export, from the operator knob `<NAME>_FLEET_TRANSPORT`, default `watch`); `claude_settings.json.template` (Stop-hook guard, `:-watch` default); `rename_skill_SKILL.md.template` (transport-selection read). Values `watch` \| `mcp`; unset resolves to the machine's standing default (`watch` on hydrated seeds, `mcp` on the platform development checkout). Declares the fleet-coordination transport; the rename skill never probes and never silently crosses transports (design: platform repo `workbench/2026-07-28_fleet_transport_parity_design.md`). |
+| `AGENT_IDENTITY` | none here — lives in the root README's `claude mcp add` reference form, cited by the hydration runbook's mcp-add step |
+| `GIT_CONTROLLER_NAME` | none here by design — the coordination-hooks plugin's git-mutation gate is operator-opt-in and default-off (hydration runbook, git-safety step). An operator who enables the gate exports it themselves with their chosen controller role name; the templates never default it on |
 
-| `HOMUNCULUS_AGENT_IDENTITY` | none here — lives in the root README's `claude mcp add` reference form, cited by the hydration runbook's mcp-add step |
-
-The `HOMUNCULUS_AGENT_*` names above predate the 2026-07-28 seed-naming
-ruling (no `HOMUNCULUS_*` env names in seed-facing artifacts) and are read by
-shipped platform code (`mcp_bridge/__main__.py`, `local_cli` watch/wake) with
-no fallback, so they can only change together with that code — see the design
-record's addendum (platform repo
-`workbench/2026-07-28_fleet_transport_parity_design.md` §7) for the ruled
-follow-on migration. Do not rename them piecemeal in these templates; a
-template-only rename recreates the 2026-07-25 half-landed-rename incident.
+The whole family is deliberately UNPREFIXED (operator seed-naming ruling
+2026-07-28: no `HOMUNCULUS_*` env names in seed-facing artifacts). The
+`AGENT_*` five-name family (`AGENT_IDENTITY`, `AGENT_INSTANCE_ID`,
+`AGENT_SESSION_LABEL`, `AGENT_SESSION_ID`, `AGENT_ROLE`) is read by shipped
+platform code (`agent_messaging_plugin/env_contract.py` is the single source
+of truth; `mcp_bridge/__main__.py` and `local_cli` watch/wake read through
+it) with no fallback and NO legacy-alias reads: for one release those entry
+points fail loudly when a pre-migration `HOMUNCULUS_AGENT_*` name is present
+without its neutral replacement. Renaming any member piecemeal in these
+templates recreates the 2026-07-25 half-landed-rename incident — code and
+templates move together or not at all.
 
 ## Invariant
 

@@ -28,6 +28,56 @@ merges (not an arbitrary choice made here). Marketo's own 1080 error code
 (server-enforced batch-size limit, effective 2026-03-31) backstops the
 client-side cap.
 
+## Verifying what a write actually DID — `get_activities`
+
+`merge_leads`, `delete_leads` and `create_or_update_leads` can fire smart
+campaign triggers: Adobe's own documentation confirms a merge raises
+lead-created / data-value-changed events, and a subscription with active
+trigger campaigns can therefore send real email to real people as a
+side effect of a data-cleanup operation.
+
+`get_activities` is the read that lets a caller answer "did that write notify
+anybody?" — it reads the Marketo activity log (emails sent/delivered, alerts,
+sales emails, interesting moments, campaign requests, data value changes)
+either from an ISO-8601 instant (`since_datetime`, which mints a paging token)
+or by continuing a prior page (`next_page_token`). `lead_ids` (max 30) and
+`activity_type_ids` (max 10) filter server-side; both caps are Marketo's own
+and are enforced in-plugin rather than left to a server-side error.
+
+**What this verb does NOT do — state this plainly to an operator who asks for
+assurance.** It is an AFTER-THE-FACT audit. It reports what already happened;
+it cannot promise a future merge will stay silent, because that depends on
+which trigger campaigns are active and how their filters match. The defensible
+workflow is: run one merge on a single sacrificial pair, then read
+`get_activities` for that lead since just before the write, and inspect what
+appeared. A clean activity log for one pair is evidence about that pair, not a
+guarantee about the remaining batch.
+
+Two traps worth knowing:
+
+- **`more_result: true` means KEEP PAGING, even when `records` is empty.**
+  Marketo streams activities in ~300-item pages and an empty page mid-stream is
+  normal. Never report "nothing happened" from a partial read — drain the token
+  chain until `more_result` is false.
+- **Activity type ids are not guaranteed identical across subscriptions.** The
+  ids commonly cited for the notifying activities (6 Send Email, 7 Email
+  Delivered, 38 Send Alert, 39 Send Sales Email, 46 Interesting Moment, 47
+  Request Campaign, 42/44 SFDC campaign add/status change) are recorded in
+  `constants.py` as a STARTING POINT and are explicitly marked unverified — no
+  verb applies them as a silent default. For an answer that has to be
+  defensible, read `GET /rest/v1/activities/types.json` on the actual instance
+  and use its ids.
+
+## Enumerating campaigns and lists — paging is not optional
+
+`list_campaigns` and `list_static_lists` return one Marketo page (300 records)
+per call. Both now surface `next_page_token` and `more_result` verbatim from
+the response. **If `more_result` is true the result is an arbitrary slice, not
+the full set** — an instance with 19,919 campaigns will otherwise hand back 300
+of them, and repeat calls can return DIFFERENT 300s, which reads as data rather
+than as truncation. Any question of the form "which active trigger campaigns
+could this write fire?" requires draining the token chain first.
+
 ## Setup verification — `check_setup`, and the Role/User/Service prerequisite
 
 Marketo REST access needs three admin-console objects that don't exist by
@@ -195,5 +245,5 @@ silent for this plugin — no allowlist entry needed anywhere in `src/` or
 | `src/marketo_plugin/app_config.py` | Resolves `marketo_instance` from the address book; the client_secret is chain-consumed. |
 | `src/marketo_plugin/http_client.py` | `MarketoClient` — synchronous httpx client with cached, envelope-triggered re-mintable bearer auth (client-credentials grant, GET-based token mint). |
 | `src/marketo_plugin/errors.py` | Envelope-first error classification (`classify_marketo_envelope`) from the response body's `errors[]` list. |
-| `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup`. |
+| `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `get_activities`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup`. |
 | `src/marketo_plugin/plugin.py` | The `MarketoPlugin` EDGE provider — client lifecycle, error mapping, EDGE registration. |

@@ -60,6 +60,7 @@ from .constants import (
     ERROR_BLOB_STORAGE_NOT_AVAILABLE,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
+    INLINE_BYTE_CAP,
     PLUGIN_NAME,
     RESULT_TYPE_BULK_EXPORT,
     RESULT_TYPE_CREATE_OBJECT,
@@ -135,10 +136,11 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
                 f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires "
                 "address_book_service to resolve the zuora_tenant credentials"
             )
-        # blob_storage is needed only for data_query spill / bulk_export;
-        # resolved here but checked at point-of-use so a missing binding
-        # fails the specific verb, not readiness.
-        self._blob_storage_service = self.orchestrator_ref.get_service("blob_storage_service")
+        # blob_storage is needed only for data_query spill / bulk_export and is
+        # resolved lazily at first use (_blob_service): the platform constructs
+        # blob_storage_service in the init_service_manager startup step, AFTER
+        # every plugin's prepare_for_readiness — resolving it here caches None
+        # forever and every spill hard-fails (Dax Part-20 §20.1).
         self._app_config_loader = AppConfigLoader(self._address_book_service)
         self.set_ready()
 
@@ -178,24 +180,42 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
+    def _blob_service(self) -> Any | None:
+        """Resolve blob_storage_service lazily at point of use (cached once found).
+
+        Readiness-time resolution is a known trap: the platform constructs
+        blob_storage_service after every plugin's prepare_for_readiness, so a
+        readiness-time get_service() returns None and the miss would be cached
+        for the life of the plugin (Dax Part-20 §20.1).
+        """
+        if self._blob_storage_service is None and self.orchestrator_ref is not None:
+            self._blob_storage_service = self.orchestrator_ref.get_service("blob_storage_service")
+        return self._blob_storage_service
+
     def _store_blob(self, content: bytes, filename: str, mime_type: str) -> str:
         """Store a spilled/exported result as a blob; return the blob id (the *_blob_key)."""
-        if self._blob_storage_service is None:
+        blob_service = self._blob_service()
+        if blob_service is None:
             raise ZuoraServiceError(
                 ERROR_BLOB_STORAGE_NOT_AVAILABLE,
-                "blob_storage_service is not available for result spill",
+                f"blob_storage_service is not available for result spill: the serialized "
+                f"result is {len(content)} bytes and the inline-return cap is "
+                f"{INLINE_BYTE_CAP} bytes; narrow the query (fewer rows/columns or a "
+                f"smaller page) so the result fits inline",
             )
-        result = self._blob_storage_service.store_blob(
+        result = blob_service.store_blob(
             BLOB_NAMESPACE, content, {"filename": filename, "mime_type": mime_type}
         )
         if not isinstance(result, dict) or result.get("action_status") != "completed":
             raise ZuoraServiceError(
-                ERROR_BLOB_STORAGE_NOT_AVAILABLE, f"failed to store result blob for '{filename}'"
+                ERROR_BLOB_STORAGE_NOT_AVAILABLE,
+                f"failed to store result blob for '{filename}' ({len(content)} bytes)",
             )
         blob_id = (result.get("data") or {}).get("blob_id")
         if not isinstance(blob_id, str) or not blob_id:
             raise ZuoraServiceError(
-                ERROR_BLOB_STORAGE_NOT_AVAILABLE, f"blob storage returned no blob_id for '{filename}'"
+                ERROR_BLOB_STORAGE_NOT_AVAILABLE,
+                f"blob storage returned no blob_id for '{filename}' ({len(content)} bytes)",
             )
         return blob_id
 

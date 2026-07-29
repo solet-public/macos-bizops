@@ -11,7 +11,7 @@
   },
   "error_processor_customizations": {
     "action_context": "Start the Google OAuth callback uvicorn server.",
-    "error_interpretation": "service_not_available: the vault or address-book service the callback needs was not injected at readiness.",
-    "recovery_guidance": "service_not_available: confirm the plugin reached readiness (vault + address_book bound). Check plugin load logs; retry after the platform is fully started."
+    "error_interpretation": "service_not_available: the vault or address-book service the callback needs was not injected at readiness. callback_server_start_failed: the uvicorn server could not bind its socket within the five-second startup window — almost always another process already listening on that port, occasionally a host the process may not bind. The message carries the host, the port, and the underlying bind error.",
+    "recovery_guidance": "service_not_available: confirm the plugin reached readiness (vault + address_book bound). Check plugin load logs; retry after the platform is fully started. callback_server_start_failed: find what already holds the port (lsof -nP -iTCP:<port> -sTCP:LISTEN), then either stop that process or call start_interface again with an explicit free port. Never treat this error as cosmetic — the callback server is NOT listening, so the Google redirect would land on whatever else owns the port and the browser flow cannot complete."
   }
 }

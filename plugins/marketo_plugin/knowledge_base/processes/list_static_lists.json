@@ -6,7 +6,7 @@
   "result_processor_customizations": {
     "action_label": "Marketo static lists listed",
     "result_type": "marketo_list_static_lists_result",
-    "result_description": "Dict with records (a list of list dicts: id, name, description, workspaceName, ...) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large.",
+    "result_description": "Dict with records (a list of list dicts: id, name, description, workspaceName, ...) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large, plus next_page_token and more_result for continuing the listing.",
     "presentation_guidance": "Summarize the row_count and list names + ids."
   },
   "error_processor_customizations": {

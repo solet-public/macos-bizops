@@ -113,6 +113,45 @@ MAX_TRIGGER_LEADS: Final[int] = 100
 MAX_MERGE_LOSING_LEADS: Final[int] = 25
 MAX_MERGE_LOSING_LEADS_CRM: Final[int] = 1
 
+# Get Lead Activities: Marketo caps ``leadIds`` at 30 and ``activityTypeIds``
+# at 10 per call, and returns 300 activity items per page. Verified 2026-07-28
+# against the Adobe REST "Activities" reference, which states leadIds limits
+# results to "up to 30 leads, supplied as a comma-separated list" and
+# activityTypeIds accepts "up to ten activity type Ids as a comma-separated
+# list". The 10-id cap is enforced here because an over-cap call otherwise
+# fails server-side mid-remediation.
+MAX_ACTIVITY_LEAD_IDS: Final[int] = 30
+MAX_ACTIVITY_TYPE_IDS: Final[int] = 10
+ACTIVITY_PAGING_TOKEN_PATH: Final[str] = "/rest/v1/activities/pagingtoken.json"
+ACTIVITIES_PATH: Final[str] = "/rest/v1/activities.json"
+ACTIVITIES_SPILL_FILENAME: Final[str] = "get_activities_results.json"
+
+# Activity type ids that answer "did this write notify a human?".
+#
+# PROVENANCE — READ BEFORE TRUSTING: these id->meaning pairs come from Dax's
+# Part 20 field report (2026-07-28), NOT from a verified vendor table. The
+# Adobe REST docs confirm ids 1 (Visit Webpage), 2 (Fill Out Form), 13 (Data
+# Value Change) and 37 (Deleted Lead), but do NOT enumerate names for 6/7/38/
+# 39/42/44/46/47 in the reference page checked. They are therefore recorded as
+# a STARTING POINT for an operator's own confirmation, never applied as a
+# silent default by any verb here — ``get_activities`` requires the caller to
+# pass ``activity_type_ids`` explicitly.
+#
+# The authoritative, per-instance list is GET /rest/v1/activities/types.json —
+# activity type ids are NOT guaranteed identical across Marketo subscriptions,
+# so an operator whose answer must be defensible should read that endpoint for
+# their own instance rather than trusting this table.
+SUSPECTED_NOTIFICATION_ACTIVITY_TYPE_IDS: Final[dict[int, str]] = {
+    6: "Send Email (unverified)",
+    7: "Email Delivered (unverified)",
+    38: "Send Alert (unverified)",
+    39: "Send Sales Email (unverified)",
+    42: "Add to SFDC Campaign (unverified)",
+    44: "Change SFDC Campaign Status (unverified)",
+    46: "Interesting Moment (unverified)",
+    47: "Request Campaign (unverified)",
+}
+
 LEAD_ACTIONS: Final[frozenset[str]] = frozenset(
     {"createOrUpdate", "createOnly", "updateOnly", "createDuplicate"}
 )
@@ -242,3 +281,4 @@ RESULT_TYPE_LIST_STATIC_LISTS: Final[str] = "marketo_list_static_lists_result"
 RESULT_TYPE_ADD_LEADS_TO_LIST: Final[str] = "marketo_add_leads_to_list_result"
 RESULT_TYPE_REMOVE_LEADS_FROM_LIST: Final[str] = "marketo_remove_leads_from_list_result"
 RESULT_TYPE_MERGE_LEADS: Final[str] = "marketo_merge_leads_result"
+RESULT_TYPE_GET_ACTIVITIES: Final[str] = "marketo_get_activities_result"

@@ -28,6 +28,9 @@ typeset -a extra_flags
 # SessionStart hook in .claude/settings.json for the role re-claim.
 # Session id: stable for this whole process tree, so the role binding
 # re-points to this same session across reconnects instead of going stale.
-HOMUNCULUS_AGENT_SESSION_LABEL="$label" \
-HOMUNCULUS_AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
+# Wake CLI: names the coordination CLI for the coordination-hooks plugin's
+# Stop-hook waiter ($AGENT_WAKE_CLI wake); harmless when that plugin is absent.
+AGENT_SESSION_LABEL="$label" \
+AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
+AGENT_WAKE_CLI="{{HOMUNCULUS_NAME}}" \
 exec claude --name "$label" "${extra_flags[@]}"

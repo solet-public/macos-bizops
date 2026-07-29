@@ -35,11 +35,15 @@ from .app_config import MarketoInstanceConfig
 from .constants import (
     DEFAULT_TOKEN_TTL_SECONDS,
     IDENTITY_TOKEN_PATH,
+    MIME_JSON,
     TOKEN_REFRESH_MARGIN_SECONDS,
 )
 from .errors import MarketoEnvelopeError, MarketoTransportError, is_retryable_auth_code
 
 _HTTP_OK: int = 200
+
+# Write methods that must still declare a content type when they carry no body.
+_BODYLESS_CONTENT_TYPE_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
 class MarketoAuthError(RuntimeError):
@@ -128,6 +132,16 @@ class MarketoClient:
         json: dict[str, Any] | None,
     ) -> httpx.Response:
         headers = {"Authorization": f"Bearer {self._bearer()}"}
+        if json is None and method in _BODYLESS_CONTENT_TYPE_METHODS:
+            # Marketo rejects a body-less POST carrying no content type with
+            # error 612 "Invalid Content Type", even when every argument is a
+            # query parameter — which is exactly the shape of
+            # /leads/{id}/merge.json. httpx sets Content-Type only when it
+            # serialises a json= body, and nothing else here sets a default, so
+            # without this merge_leads fails 100% of the time (Dax Part 21).
+            # Set at the CLASS level rather than in the one verb so any future
+            # body-less write inherits the fix instead of rediscovering the bug.
+            headers["Content-Type"] = MIME_JSON
         return self._http.request(method, path, params=params, json=json, headers=headers)
 
     def _bearer(self) -> str:

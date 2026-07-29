@@ -185,6 +185,7 @@ ERROR_REFRESH_TOKEN_ROTATE_FAILED: Final[str] = "refresh_token_rotate_failed"
 ERROR_TOKEN_STORE_FAILED: Final[str] = "token_store_failed"
 ERROR_OAUTH_STATE_INVALID: Final[str] = "oauth_state_invalid"
 ERROR_SERVER_NOT_STARTED: Final[str] = "callback_server_not_started"
+ERROR_SERVER_START_FAILED: Final[str] = "callback_server_start_failed"
 
 # gsuite.* — surfaced to callers of the Workspace verbs
 ERROR_NOT_CONNECTED: Final[str] = "gsuite.not_connected"

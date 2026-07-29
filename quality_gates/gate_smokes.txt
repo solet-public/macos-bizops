@@ -140,7 +140,7 @@ plugins/agent_messaging_plugin/tests/role_reconnect_self_refresh_smoke.py
 # Session-identity carrier resolution, PER-AGENT-KIND (2026-07-16) —
 # _resolve_agent_session_id(agent_id): codex bridges prefer their OWN
 # CODEX_THREAD_ID (authoritative, never stale for a Codex child) then
-# HOMUNCULUS_AGENT_SESSION_ID; every other kind (incl. unknown) uses HOMUNCULUS_AGENT_SESSION_ID
+# AGENT_SESSION_ID; every other kind (incl. unknown) uses AGENT_SESSION_ID
 # ONLY and never adopts the codex carrier (role-refresh CAS keys on
 # agent_session_id alone — cross-agent adoption re-points the wrong session's
 # roles, both nesting directions). Neither carrier → preserved loud-logged "".
@@ -1055,6 +1055,10 @@ plugins/zuora_plugin/tests/smoke_objects.py
 plugins/marketo_plugin/tests/smoke_auth.py
 plugins/marketo_plugin/tests/smoke_leads.py
 plugins/marketo_plugin/tests/smoke_campaigns_lists.py
+# smoke_blob_spill.py (Dax Part-20 §20.1): blob_storage_service is resolved
+# lazily at first spill (it does not exist yet at plugin readiness) and the
+# unavailable error self-describes payload size + inline cap.
+plugins/marketo_plugin/tests/smoke_blob_spill.py
 
 # trigger_poll dispatch-offload (2026-07-10 fleet-wide dispatch-wedge fix): the cron
 # heartbeat trigger_poll now SUBMITS the whole importer pass to a single-slot

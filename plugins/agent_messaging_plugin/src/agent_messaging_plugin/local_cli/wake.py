@@ -34,6 +34,7 @@ from typing import IO, Final
 import click
 from ananta.constants import ExitCodes
 
+from ..env_contract import enforce_no_legacy_agent_env
 from .client import HomunculusIdentityError, resolve_homunculus_name
 from .spool import (
     WATCH_SESSION_ID_ENV,
@@ -110,8 +111,18 @@ def _resolve_target(spool_override: Path | None) -> WakeTarget | None:
 
     A missing launcher identity is the one silent path: the Stop hook is
     installed at user scope, so it fires in plain unlabeled sessions too and
-    must be a perfect no-op there.
+    must be a perfect no-op there. A LEGACY identity (an un-migrated
+    launcher exporting either pre-rename prefixed generation, e.g.
+    ``HOMUNCULUS_AGENT_*``) is not silent: it surfaces loudly on the
+    non-wake error exit, mirroring the identity-failure path below.
     """
+    try:
+        enforce_no_legacy_agent_env()
+    except RuntimeError as exc:
+        click.echo(f"homunculus wake: {exc}", err=True)
+        # Same contract as the identity failure below: a plain non-blocking
+        # hook error exit, never the wake/block signal.
+        raise SystemExit(int(ExitCodes.UNKNOWN_ERROR)) from exc
     role = os.environ.get(WATCH_SESSION_LABEL_ENV, "")
     session_id = os.environ.get(WATCH_SESSION_ID_ENV, "")
     if not role or not session_id:

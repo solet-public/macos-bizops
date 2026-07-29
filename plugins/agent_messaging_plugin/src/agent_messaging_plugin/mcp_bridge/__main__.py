@@ -33,6 +33,14 @@ from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from ..env_contract import (
+    AGENT_IDENTITY_ENV,
+    AGENT_INSTANCE_ID_ENV,
+    AGENT_ROLE_ENV,
+    AGENT_SESSION_ID_ENV,
+    AGENT_SESSION_LABEL_ENV,
+    enforce_no_legacy_agent_env,
+)
 from .forwarder import Forwarder
 
 if TYPE_CHECKING:
@@ -43,12 +51,6 @@ SERVER_VERSION: Final[str] = "1.0.0"
 BRIDGE_SERVICE_NAME: Final[str] = "bridge"
 DEFAULT_AGENT_ID: Final[str] = "claude_code"
 PORT_DISCOVERY_RETRY_S: Final[float] = 2.0
-
-HOMUNCULUS_AGENT_IDENTITY_ENV: Final[str] = "HOMUNCULUS_AGENT_IDENTITY"
-HOMUNCULUS_AGENT_INSTANCE_ID_ENV: Final[str] = "HOMUNCULUS_AGENT_INSTANCE_ID"
-HOMUNCULUS_AGENT_SESSION_LABEL_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_LABEL"
-HOMUNCULUS_AGENT_SESSION_ID_ENV: Final[str] = "HOMUNCULUS_AGENT_SESSION_ID"
-HOMUNCULUS_AGENT_ROLE_ENV: Final[str] = "HOMUNCULUS_AGENT_ROLE"
 
 # Discriminator for the Codex agent kind. A Codex session spawns the bridge as
 # its child, so CODEX_THREAD_ID is inherited.
@@ -62,18 +64,18 @@ CODEX_AGENT_ID: Final[str] = "codex"
 # parent's carrier would re-point the WRONG session's roles (the hazard is
 # bidirectional). A Codex bridge prefers its own `CODEX_THREAD_ID` —
 # authoritative, definitionally this Codex conversation and never stale for a
-# Codex child — then an exported `HOMUNCULUS_AGENT_SESSION_ID`. EVERY OTHER kind
-# uses `HOMUNCULUS_AGENT_SESSION_ID` only and NEVER adopts `CODEX_THREAD_ID`.
+# Codex child — then an exported `AGENT_SESSION_ID`. EVERY OTHER kind
+# uses `AGENT_SESSION_ID` only and NEVER adopts `CODEX_THREAD_ID`.
 # Unknown agent_ids take the default (non-codex) chain. All-absent → ""
 # preserves the degraded, self-refresh-disabled binding.
 SESSION_ID_ENV_VARS_BY_AGENT: Final[dict[str, tuple[str, ...]]] = {
     CODEX_AGENT_ID: (
         "CODEX_THREAD_ID",
-        HOMUNCULUS_AGENT_SESSION_ID_ENV,
+        AGENT_SESSION_ID_ENV,
     ),
 }
 DEFAULT_SESSION_ID_ENV_VARS: Final[tuple[str, ...]] = (
-    HOMUNCULUS_AGENT_SESSION_ID_ENV,
+    AGENT_SESSION_ID_ENV,
 )
 
 SERVER_INSTRUCTIONS: Final[str] = "\n".join(
@@ -411,7 +413,7 @@ TOOLS: Final[list[Tool]] = [
                 "Register or relabel this MCP session in the peer registry.",
                 "",
                 "Auto-registration: each transport registers this MCP session",
-                "when it opens. Stdio uses $HOMUNCULUS_AGENT_IDENTITY when set and",
+                "when it opens. Stdio uses $AGENT_IDENTITY when set and",
                 "otherwise generates a durable agent_instance_id; Streamable",
                 "HTTP uses the bearer-token claim. Call this tool manually",
                 "only to change agent_id or session_label; the durable",
@@ -671,8 +673,8 @@ def _generate_agent_instance_id() -> str:
 
 
 def _compute_session_label(agent_id: str) -> str:
-    """Use $HOMUNCULUS_AGENT_SESSION_LABEL when present, else infer from cwd."""
-    explicit = os.environ.get(HOMUNCULUS_AGENT_SESSION_LABEL_ENV)
+    """Use $AGENT_SESSION_LABEL when present, else infer from cwd."""
+    explicit = os.environ.get(AGENT_SESSION_LABEL_ENV)
     if explicit:
         return explicit
     cwd_base = Path.cwd().name
@@ -685,17 +687,17 @@ def _compute_session_role(session_label: str) -> str:
     """Resolve the standing role this bridge must claim after registration.
 
     An explicit role may differ from the human-readable session label. When a
-    launcher supplies only ``HOMUNCULUS_AGENT_SESSION_LABEL``, that explicit
+    launcher supplies only ``AGENT_SESSION_LABEL``, that explicit
     label is also the role by convention. Cwd-inferred labels never claim roles.
     """
-    explicit_role = os.environ.get(HOMUNCULUS_AGENT_ROLE_ENV)
+    explicit_role = os.environ.get(AGENT_ROLE_ENV)
     if explicit_role is not None:
         role = explicit_role.strip()
         if not role:
-            msg = f"{HOMUNCULUS_AGENT_ROLE_ENV} must be non-empty when set"
+            msg = f"{AGENT_ROLE_ENV} must be non-empty when set"
             raise RuntimeError(msg)
         return role
-    if os.environ.get(HOMUNCULUS_AGENT_SESSION_LABEL_ENV):
+    if os.environ.get(AGENT_SESSION_LABEL_ENV):
         return session_label
     return ""
 
@@ -710,8 +712,8 @@ def _resolve_agent_session_id(agent_id: str) -> str:
     ALONE, so a bridge that adopted a foreign kind's inherited/leaked session id
     would re-point the WRONG session's roles. A Codex bridge prefers its own
     `CODEX_THREAD_ID` (authoritative — this Codex conversation, never stale for a
-    Codex child), then `HOMUNCULUS_AGENT_SESSION_ID`; every other kind uses
-    `HOMUNCULUS_AGENT_SESSION_ID` only and NEVER adopts `CODEX_THREAD_ID`. Returns the
+    Codex child), then `AGENT_SESSION_ID`; every other kind uses
+    `AGENT_SESSION_ID` only and NEVER adopts `CODEX_THREAD_ID`. Returns the
     first non-empty carrier, else `""` — the degraded, self-refresh-disabled
     binding (server logs the S1.5 warning). The resolved value flows unchanged
     into `Forwarder` and thus every register POST, so any accepted carrier
@@ -902,26 +904,27 @@ async def _dispatch_tool(
 
 async def _run() -> None:
     """Bridge entry point: discover, connect, register, serve."""
+    enforce_no_legacy_agent_env()
     homunculus_name = os.environ.get("HOMUNCULUS_NAME")
     if not homunculus_name:
         msg = "HOMUNCULUS_NAME env var is required to discover the bridge port"
         raise RuntimeError(msg)
-    agent_id = os.environ.get(HOMUNCULUS_AGENT_IDENTITY_ENV) or DEFAULT_AGENT_ID
-    # v10 Control #2.D: honor an injected HOMUNCULUS_AGENT_INSTANCE_ID so a managed
+    agent_id = os.environ.get(AGENT_IDENTITY_ENV) or DEFAULT_AGENT_ID
+    # v10 Control #2.D: honor an injected AGENT_INSTANCE_ID so a managed
     # spawner (macos bridge_tracker sets it per session) keeps a STABLE
     # agent_instance_id across bridge reconnects — the registry replaces in
     # place instead of accreting a fresh id every reconnect. Absent (operator
     # .mcp.json path) → mint a durable id as before.
     agent_instance_id = (
-        os.environ.get(HOMUNCULUS_AGENT_INSTANCE_ID_ENV)
+        os.environ.get(AGENT_INSTANCE_ID_ENV)
         or _generate_agent_instance_id()
     )
     # v10 Control #2.D (read-defensively): the stable logical-session key the
     # role-binding CAS self-refresh keys on to re-point a rotated
     # agent_instance_id without an explicit re-claim. Resolved through this
     # bridge's PER-AGENT-KIND carrier chain (keyed on agent_id): a codex bridge
-    # prefers its own CODEX_THREAD_ID then HOMUNCULUS_AGENT_SESSION_ID; every other kind
-    # uses HOMUNCULUS_AGENT_SESSION_ID only and never adopts CODEX_THREAD_ID (the CAS
+    # prefers its own CODEX_THREAD_ID then AGENT_SESSION_ID; every other kind
+    # uses AGENT_SESSION_ID only and never adopts CODEX_THREAD_ID (the CAS
     # filters on agent_session_id alone, so cross-agent adoption would re-point
     # the wrong session's roles). Absent all → "" → the CAS fails closed to
     # explicit re-claim (= no worse than today; server logs S1.5). Any carrier
