@@ -56,6 +56,7 @@ from ananta.llm.agent_messaging.role_binding import (
     role_binding_external_id,
 )
 from ananta.llm.agent_messaging.state_results import (
+    StateOperationError,
     is_completed,
     require_completed,
     require_records,
@@ -300,11 +301,10 @@ def list_roles_for_agent_instance(
 class RoleClaimContendedError(Exception):
     """The §5.1 claim CAS did not converge within the bounded attempt budget.
 
-    Either persistent contention (many sessions racing one role) or a PERSISTENT
-    non-conflict write fault — e.g. a not-null violation on a malformed record
-    that keeps the INSERT failing while the ``is_deleted=0`` re-read keeps finding
-    no row. Carries the last state-op detail so a masked write fault is never
-    mistaken for pure contention.
+    This means persistent contention (many sessions racing one role) or a
+    no-tombstone invariant breach where ``ON CONFLICT DO NOTHING`` keeps seeing a
+    soft-deleted row hidden from the live-row re-read. Genuine provider faults
+    fail immediately as :class:`StateOperationError`.
     """
 
     def __init__(self, name: str, attempts: int, last_detail: str) -> None:
@@ -348,13 +348,17 @@ def _outcome(
     }
 
 
-def _result_detail(result: object) -> str:
-    """A compact ``code: message`` from a non-completed ActionResult error."""
-    if isinstance(result, dict):
-        error = result.get("error")
-        if isinstance(error, dict):
-            return f"{error.get('code', '')}: {error.get('message', '')}"
-    return str(result)
+def _require_inserted(result: object) -> bool:
+    """Bool ``inserted`` from a completed DO-NOTHING upsert; fail loud otherwise."""
+    data = require_completed(result, "upsert role_binding")
+    inner = data.get("result")
+    inserted = inner.get("inserted") if isinstance(inner, dict) else None
+    if not isinstance(inserted, bool):
+        raise StateOperationError(
+            "state upsert role_binding returned no bool 'inserted' "
+            f"(got {inserted!r})",
+        )
+    return inserted
 
 
 def _read_binding_row(
@@ -476,16 +480,15 @@ def claim_role_binding_v4(
 ) -> dict[str, object]:
     """Race-safe claim/displace of the v4 ``role_binding`` row (§5.1).
 
-    First-claim uses ``write_state`` INSERT as the race primitive: the
-    ``external_id`` UNIQUE constraint means exactly one concurrent first-claim
-    wins; the loser's INSERT returns a NON-completed ActionResult (the postgres
-    provider raises ``psycopg.UniqueViolation``, which ``write_state``'s broad
-    ``except`` catches into an error envelope — it does NOT propagate the raise),
-    so the loser RE-READS to disambiguate. A live holder → displace via a
-    predicated CAS on ``claim_epoch``; a self-re-claim (holder's
-    ``agent_session_id`` == the claimant's) is an idempotent refresh, never a
-    displace. ``rows_affected==0`` on the CAS means another session moved the
-    epoch under us → re-read + retry (bounded + loud).
+    First-claim uses ``upsert_state(on_conflict='do_nothing')`` as the race
+    primitive: the ``external_id`` UNIQUE constraint means exactly one
+    concurrent first-claim reports ``inserted=True``. A conflict reports the
+    completed, non-error ``inserted=False`` shape, so the loser RE-READS to
+    disambiguate without logging an expected ``UniqueViolation`` traceback. A
+    live holder → displace via a predicated CAS on ``claim_epoch``; a
+    self-re-claim (holder's ``agent_session_id`` == the claimant's) is an
+    idempotent refresh, never a displace. ``rows_affected==0`` on the CAS means
+    another session moved the epoch under us → re-read + retry (bounded + loud).
 
     NO-TOMBSTONE INVARIANT (load-bearing): a released ``role_binding`` row MUST be
     HARD-deleted (``soft_delete=False``). The v4 release wrapper that enforces this
@@ -493,31 +496,34 @@ def claim_role_binding_v4(
     hard-deletes only the ``agent_role_binding`` table — the same discipline,
     established there). The INSERT race primitive REQUIRES it — the ``external_id``
     UNIQUE index IGNORES ``is_deleted``, so a soft-delete tombstone would make the
-    INSERT conflict on a DEAD row while both the ``is_deleted=0`` re-read AND the
-    ``is_deleted=0`` CAS hide it → a permanently deadlocked slot. Slice-D's
-    migration MUST also filter ``is_deleted=1`` (never copy tombstones from
+    upsert conflict on a DEAD row while both the ``is_deleted=0`` re-read AND
+    the ``is_deleted=0`` CAS hide it → a permanently deadlocked slot. The
+    migration also filters ``is_deleted=1`` (never copy tombstones from
     ``agent_role_binding``).
 
     Returns ``_outcome(...)``: ``action`` is ``'claimed'`` (fresh INSERT),
     ``'displaced'`` (took it from another session — ``prior`` set), or
     ``'refreshed'`` (idempotent self-re-claim — ``prior`` None). Raises
     :class:`RoleClaimContendedError` on bounded-loop exhaustion (with the last
-    write detail so a persistent non-conflict fault is not masked as contention);
-    a genuine query fault propagates as ``StateOperationError`` from the re-read.
+    contention detail); a genuine upsert or query fault propagates immediately as
+    ``StateOperationError``.
 
-    NOT yet the live claim authority — the §9 cutover (slice-D) repoints the
-    ``peer_claim_role`` verb here. Built + smoked now; the switch flips later.
+    This is the live claim authority after the §9 cutover.
     """
     external_id = role_binding_external_id(name)
-    last_detail = ""
+    last_detail = "upsert conflict followed by a missing or concurrently moved row"
     for _ in range(_CLAIM_CAS_MAX_ATTEMPTS):
-        insert_result = state.write_state(
+        insert_result = state.upsert_state(
             AGENT_ROLE_BINDING_NAMESPACE,
-            {"table": TABLE_ROLE_BINDING, "record": _binding_record(name, claim)},
+            {
+                "table": TABLE_ROLE_BINDING,
+                "record": _binding_record(name, claim),
+                "conflict_columns": [_COL_EXTERNAL_ID],
+                "on_conflict": "do_nothing",
+            },
         )
-        if is_completed(insert_result):
+        if _require_inserted(insert_result):
             return _outcome("claimed", name, claim.agent_instance_id, None)
-        last_detail = _result_detail(insert_result)
         row = _read_binding_row(state, external_id)
         if row is None:
             continue

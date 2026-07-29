@@ -72,6 +72,16 @@ INFRA_ROUTES: frozenset[str] = frozenset(
         f"{_P}/{{bridge_id}}/close",
         f"{_P}/{{bridge_id}}/events",
         f"{_P}/{{bridge_id}}/peer/register",
+        # F1's sibling: the forwarder claims its standing role on open, on
+        # reconnect, and whenever a steady-state re-assert finds the binding
+        # gone — all with NO model turn. That claim used to travel the
+        # MODEL_INITIATED ``/process/call`` route, so it stamped model activity
+        # every ~176s forever and marked owed IMPORTANT wakes to an idle session
+        # consumed. A genuinely model-initiated claim (the ``/rename`` skill)
+        # still goes through ``/process/call`` and still stamps, which is
+        # correct — the two transports exist precisely to tell those cases
+        # apart. Both share one body; see :mod:`role_claim`.
+        f"{_P}/{{bridge_id}}/peer/claim_role",
         f"{_P}/{{bridge_id}}/peer/drain",
         f"{_P}/{{bridge_id}}/peer/delivered",
         f"{_P}/{{bridge_id}}/peer/delivered_direct",

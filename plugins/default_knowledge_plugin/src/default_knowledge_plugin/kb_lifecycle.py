@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -234,6 +235,148 @@ def purge_orphaned_chunks(
 # Auto-install
 # ---------------------------------------------------------------------------
 
+def materialize_missing_plugin_kb_symlinks(
+    kb_root: Path,
+    manifest_plugin_set: set[str] | None,
+) -> list[str]:
+    """Create the ``kb_root`` entries that the genesis symlink sweep never made.
+
+    Returns the plugin names materialised, in the order created.
+
+    THE BUG THIS CLOSES. ``auto_install_knowledge_bases`` ran its two directions
+    off two different sources of truth: removal is driven by the LIVE MANIFEST,
+    while addition built its candidates from ``sorted(kb_root.iterdir())`` — the
+    FILESYSTEM SYMLINK SET, a genesis artifact written once and never revisited.
+    So a manifest-enabled plugin shipping a ``knowledge_base/`` with no symlink
+    was not a candidate the loop rejected; it was not a candidate at all, and the
+    manifest gate, ``is_source_stale`` and ``install_kb`` were all unreachable for
+    it. The asymmetry survived because at genesis the two sources agree by
+    construction. Every plugin added post-birth had KB content on disk, no
+    symlink, and no index — and retrieval does not degrade gracefully when a
+    corpus is missing, it answers confidently from whatever IS indexed.
+
+    KEYED ON THE RESOLVED TARGET, NEVER THE ENTRY NAME. This is the whole safety
+    argument. ``knowledge_bases/`` entry names are descriptive and need not match
+    their plugin: ``default_thinking_plugin`` ships four DISTINCT corpora indexed
+    as ``thinking_plans``, ``authored_joseki``, ``thinking_playbooks`` and
+    ``plan_templates``. A name-keyed loop sees no ``knowledge_bases/
+    default_thinking_plugin`` entry and creates a fifth link duplicating the
+    corpus ``thinking_plans`` already indexes. Comparing resolved targets makes
+    that case disappear without an alias registry — and the removal side already
+    resolves for exactly this reason (``_resolve_owning_plugin``), so this
+    applies the module's own existing convention to the direction that lacked it.
+
+    ``manifest_plugin_set is None`` MATERIALISES NOTHING. Fail closed. A None
+    manifest means "skip manifest filtering", which is harmless for removal (it
+    does less) but INVERTS for addition: a manifest-unaware caller would link and
+    index every plugin on disk, including ones deliberately absent from the
+    manifest. Doing less on an unknown is the only safe direction here.
+
+    Deliberately service-free — filesystem and manifest only. Indexing needs
+    services; deciding WHICH links are missing does not. Splitting them keeps the
+    resolved-target rule unit-testable with no services at all, and lets a
+    pre-commit harness invoke the real selection logic without a running
+    platform.
+    """
+    if manifest_plugin_set is None or not kb_root.is_dir():
+        return []
+    plugins_dir = kb_root.parent / "plugins"
+    if not plugins_dir.is_dir():
+        return []
+    existing_targets = _existing_kb_targets(kb_root)
+    created: list[str] = []
+    for plugin_name in sorted(manifest_plugin_set):
+        kb_dir = _unlinked_plugin_kb(plugins_dir, plugin_name, existing_targets)
+        if kb_dir is None:
+            continue
+        if not _create_kb_symlink(kb_root, plugin_name, kb_dir):
+            continue
+        existing_targets.add(kb_dir.resolve())
+        created.append(plugin_name)
+    return created
+
+
+def _existing_kb_targets(kb_root: Path) -> set[Path]:
+    """Every directory already reachable from ``kb_root``, by RESOLVED path.
+
+    Resolution is what makes entry names irrelevant: a corpus indexed under a
+    descriptive alias is still reachable, so it is not missing.
+    """
+    targets: set[Path] = set()
+    for entry in kb_root.iterdir():
+        if entry.name.startswith("."):
+            continue
+        try:
+            targets.add(entry.resolve())
+        except OSError:
+            logger.warning(
+                "%s: kb_root entry %s could not be resolved; ignoring it as a "
+                "target (a stale link must not suppress a real candidate)",
+                PLUGIN_NAME, entry.name,
+            )
+    return targets
+
+
+def _unlinked_plugin_kb(
+    plugins_dir: Path, plugin_name: str, existing_targets: set[Path],
+) -> Path | None:
+    """The plugin's ``knowledge_base/`` iff it ships content nothing links to."""
+    kb_dir = plugins_dir / plugin_name / "knowledge_base"
+    if not kb_dir.is_dir() or not _has_content(kb_dir):
+        return None
+    try:
+        resolved = kb_dir.resolve()
+    except OSError:
+        return None
+    return None if resolved in existing_targets else kb_dir
+
+
+def _create_kb_symlink(kb_root: Path, plugin_name: str, kb_dir: Path) -> bool:
+    """Create ``kb_root/<plugin_name>`` -> ``kb_dir``. True iff created.
+
+    Never clobbers an existing entry: if the name is taken by something
+    resolving elsewhere, the operator's mapping outranks this repair, and
+    silently re-pointing an indexed corpus would be worse than the gap.
+    """
+    link = kb_root / plugin_name
+    if link.exists() or link.is_symlink():
+        logger.warning(
+            "%s: %s ships KB content with no resolving entry, but the name %s "
+            "is already taken by a DIFFERENT target — skipping rather than "
+            "replacing it", PLUGIN_NAME, plugin_name, link.name,
+        )
+        return False
+    relative = os.path.relpath(kb_dir, kb_root)
+    try:
+        link.symlink_to(Path(relative))
+    except OSError as exc:
+        logger.error(
+            "%s: could not materialise KB symlink for %s: %s",
+            PLUGIN_NAME, plugin_name, exc,
+        )
+        return False
+    # Logged at INFO with the plugin name so the working-tree change this makes
+    # in a git checkout is attributable the moment it appears.
+    logger.info(
+        "%s: materialised missing KB symlink: %s -> %s",
+        PLUGIN_NAME, plugin_name, relative,
+    )
+    return True
+
+
+def _has_content(kb_dir: Path) -> bool:
+    """True iff ``kb_dir`` holds at least one regular file (at any depth).
+
+    "Non-empty" means real content, not merely an existing directory: an empty
+    or directory-only ``knowledge_base/`` has nothing to index, and linking it
+    would create tracked repo churn for no retrieval benefit.
+    """
+    try:
+        return any(path.is_file() for path in kb_dir.rglob("*"))
+    except OSError:
+        return False
+
+
 def auto_install_knowledge_bases(
     kb_root: Path,
     state_service: Any,
@@ -251,14 +394,24 @@ def auto_install_knowledge_bases(
     chunk memories forgotten). The install loop then also skips
     plugin-owned KB directories whose plugin is absent from the
     manifest, so a leftover symlink doesn't re-create the install
-    record that was just removed. Symmetric to the install pass —
-    keeps the KB index in sync with the active plugin manifest so
-    agents don't find documentation for verbs that aren't loaded.
+    record that was just removed. This keeps the KB index in sync with
+    the active plugin manifest so agents don't find documentation for
+    verbs that aren't loaded.
+
+    The two directions are now genuinely symmetric — both manifest-driven.
+    They were NOT before: removal read the live manifest while addition
+    read ``kb_root.iterdir()``, the genesis symlink set, so a
+    manifest-enabled plugin with no symlink was invisible to this sweep
+    entirely. :func:`materialize_missing_plugin_kb_symlinks` closes that
+    and runs FIRST, so anything it creates falls through to the unchanged
+    install path below instead of needing a parallel one.
 
     Passing ``manifest_plugin_set=None`` skips the manifest-aware
     filtering (preserves prior behaviour for callers that don't have
     manifest awareness — e.g. legacy call sites and tests that build
-    fixture state without a manifest).
+    fixture state without a manifest). It also materialises NOTHING: for
+    addition, "no manifest" must mean "do less", never "link every plugin
+    on disk".
     """
     if not kb_root.is_dir():
         logger.info("%s: auto-install skipped (kb_root=%s)", PLUGIN_NAME, kb_root)
@@ -268,6 +421,11 @@ def auto_install_knowledge_bases(
         _uninstall_orphaned_plugin_kbs(
             manifest_plugin_set, state_service, memory_service,
         )
+
+    # Repair the addition side's source of truth BEFORE building candidates:
+    # anything materialised here becomes an ordinary kb_root entry below and
+    # takes the existing manifest-gate / staleness / install_kb path unchanged.
+    materialize_missing_plugin_kb_symlinks(kb_root, manifest_plugin_set)
 
     candidates = [
         entry.name

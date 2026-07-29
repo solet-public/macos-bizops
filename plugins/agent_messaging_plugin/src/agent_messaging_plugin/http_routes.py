@@ -79,9 +79,15 @@ from .role_binding_store import (
     UNCLAIMED_SESSION_ID,
     ResolvedRole,
     RoleBindingVacantError,
+    holds_role,
     list_roles_for_agent_instance,
     refresh_role_binding_cas,
     resolve_role_binding,
+)
+from .role_claim import (
+    RoleClaimFailure,
+    RoleClaimOrigin,
+    claim_role_for_session,
 )
 
 if TYPE_CHECKING:
@@ -167,6 +173,15 @@ class PeerRegisterBody(BaseModel):
     # Defaults to False so non-coding-agent peers (older Codex sessions,
     # MCP-only consumers) remain unaffected.
     provides_inference: bool = False
+    # The session's CONFIGURED standing role, sent so the response can answer
+    # "do I still hold it?" (``session_role_held``) on the INFRA register route.
+    # Without that answer the forwarder's steady-state re-assert has to issue a
+    # blind re-claim through the MODEL_INITIATED ``/process/call`` route every
+    # few minutes forever, which phantom-stamps ``last_model_activity_at`` with
+    # no model turn and silently consumes owed wakes (the F1 class this module's
+    # classification exists to prevent). Empty when the session has no
+    # configured role -> ``unknown``, and the forwarder claims as before.
+    session_role: str = ""
 
 
 class PeerSendBody(BaseModel):
@@ -177,6 +192,18 @@ class PeerSendBody(BaseModel):
     peer_id: str
     peer_agent_instance_id: str | None = None
     content: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PeerClaimRoleBody(BaseModel):
+    # Deliberately carries ONLY the role name. Every identity field
+    # (agent_id / agent_instance_id / agent_session_id / session_label) is read
+    # from the calling bridge's REGISTERED binding rather than the request body:
+    # the forwarder's identity IS the bridge's identity by construction, so
+    # accepting it from the body would add a spoofing surface and a mismatch
+    # class for nothing. The MODEL_INITIATED ``/process/call`` verb keeps its
+    # caller-supplied identity — the ``/rename`` skill threads values it read
+    # from its own ``peer_register`` response.
+    name: str
 
 
 class PeerSendByNameBody(BaseModel):
@@ -565,6 +592,59 @@ def _state_table_self_refresh(
     return "no_roles"
 
 
+def _session_role_held_token(
+    state_service: Any | None,
+    *,
+    session_role: str,
+    agent_session_id: str,
+    self_refresh: str,
+) -> str:
+    """Does this session STILL hold its configured standing role?
+
+    Answered on ``peer/register`` — an INFRA route — so the forwarder's
+    steady-state re-assert can skip a blind re-claim. The claim path runs through
+    ``/process/call``, which :mod:`route_activity` classifies MODEL_INITIATED;
+    issuing it from the poll loop stamps ``last_model_activity_at`` with NO model
+    turn, which can mark an owed IMPORTANT wake to an idle session consumed. That
+    is the F1 class the classification exists to prevent, and the re-assert runs
+    every few minutes forever, so it accumulates.
+
+    Tokens: ``held`` / ``not_held`` / ``unknown``. ``unknown`` means "cannot
+    answer" (no configured role, no stable session key, no state service, a
+    faulted self-refresh, or a malformed binding row) — the forwarder then claims
+    exactly as it did before, so an unanswerable check can never suppress a
+    genuine recovery. A malformed row is logged LOUD rather than swallowed, but
+    never fails the registration: same loud-but-non-fatal posture as the
+    self-refresh helpers above.
+
+    ``self_refresh == "error"`` is NOT answerable and must not read as ``held``.
+    :func:`holds_role` compares the stable ``agent_session_id`` ALONE — it cannot
+    see whether the binding's ``agent_instance_id`` pointer is live. When the
+    re-point CAS just faulted, the binding is exactly the "held by my session id
+    but pointing at my DEAD instance" state whose documented remedy is the
+    re-claim (see :func:`_state_table_self_refresh`: "will strand until
+    re-claim"). Answering ``held`` there would skip the one thing that heals it.
+    """
+    if not session_role:
+        return "unknown"
+    if self_refresh == "error":
+        return "unknown"
+    if not agent_session_id or agent_session_id == UNCLAIMED_SESSION_ID:
+        return "unknown"
+    if state_service is None:
+        return "unknown"
+    try:
+        held = holds_role(state_service, session_role, agent_session_id)
+    except Exception:  # noqa: BLE001 — never fail a registration on this probe
+        logger.exception(
+            "peer/register: session_role_held probe FAULTED for role %r "
+            "(session %r); registration kept 200 and the caller will re-claim "
+            "as before", session_role, agent_session_id,
+        )
+        return "unknown"
+    return "held" if held else "not_held"
+
+
 def _direct_wake_self_refresh(
     agent_messaging_service: Any | None,
     *,
@@ -716,6 +796,17 @@ def _register_peer_routes(
             agent_session_id=effective_agent_session_id,
             new_agent_instance_id=agent_instance_id,
         )
+        # Steady-state re-assert support: answer "do I still hold my configured
+        # role?" HERE, on the INFRA route, so the caller never has to ask via the
+        # MODEL_INITIATED /process/call claim path just to find out. Read AFTER
+        # the self-refresh above, so a reconnecting holder that just re-pointed
+        # its binding reads back as held (no spurious re-claim).
+        session_role_held = _session_role_held_token(
+            state_service,
+            session_role=body.session_role.strip(),
+            agent_session_id=effective_agent_session_id,
+            self_refresh=self_refresh_action,
+        )
         # Fork-1a: re-home this session's owed DIRECT-wake rows off the rotated
         # instance onto the successor (the direct-send sibling of the role
         # self-refresh above; same loud-but-non-fatal one-shot posture).
@@ -759,6 +850,7 @@ def _register_peer_routes(
                 "self_refresh": self_refresh_action,
                 "direct_rehome": direct_rehome_action,
                 "autonomic": autonomic_action,
+                "session_role_held": session_role_held,
             },
             status_code=200,
         )
@@ -838,6 +930,19 @@ def _register_peer_routes(
             bridge_manager=bridge_manager,
             peer_registry=peer_registry,
             agent_messaging_service=agent_messaging_service,
+        )
+
+    @app.post(f"{API_PREFIX}/{{bridge_id}}/peer/claim_role")
+    async def peer_claim_role_route(
+        bridge_id: str, body: PeerClaimRoleBody,
+    ) -> JSONResponse:
+        return _peer_claim_role_impl(
+            bridge_id=bridge_id,
+            body=body,
+            bridge_manager=bridge_manager,
+            peer_registry=peer_registry,
+            agent_messaging_service=agent_messaging_service,
+            state_service=state_service,
         )
 
     @app.post(f"{API_PREFIX}/{{bridge_id}}/peer/send_by_name")
@@ -1334,6 +1439,76 @@ def _resolve_role_for_send(
             ),
         )
     return role
+
+
+_CLAIM_ROLE_ERROR_STATUS: Final[dict[str, int]] = {
+    "missing_argument": 400,
+    "missing_session_id": 400,
+    "system_slot_claim_denied": 403,
+    "state_service_unavailable": 503,
+}
+
+
+def _peer_claim_role_impl(
+    *,
+    bridge_id: str,
+    body: PeerClaimRoleBody,
+    bridge_manager: BridgeSessionManager,
+    peer_registry: PeerRegistry,
+    agent_messaging_service: Any,
+    state_service: Any | None,
+) -> JSONResponse:
+    """Claim a role for the CALLING bridge, synchronously (the INFRA transport).
+
+    Synchronous by requirement, not by taste. ``peer_claim_role`` is an EDGE
+    process, so reaching it through ``/process/call`` enqueues an action and
+    delivers the outcome later as an EDGE_SINK ``bridge_delivery_result``
+    notification — which is the second half of the defect this route exists to
+    remove: the forwarder's re-assert fired one such notification at every tick,
+    forever. Returning the outcome in the response body means there is no
+    fan-out to leak, and it lets the forwarder drop its ``/process/result``
+    poll (itself a MODEL_INITIATED route it had no business touching).
+
+    Identity comes from the bridge's REGISTERED binding, never the request body
+    — see :class:`PeerClaimRoleBody`. ``call_context`` is ``None`` because no
+    plugin principal is involved, which makes the §6.1 gate refuse every
+    ``sys:`` name from this transport. That is deliberate and fail-closed: the
+    forwarder claims standing roles, never system slots.
+    """
+    bridge = bridge_manager.get(bridge_id)
+    if bridge is None or bridge.closed:
+        return _bridge_not_found(bridge_id)
+    name = body.name.strip()
+    if not name:
+        return _validation_error("missing_role_name", "name is required")
+    binding = _lookup_binding_for_bridge(peer_registry, bridge_id)
+    if binding is None:
+        return _validation_error(
+            "peer_identity_unregistered",
+            (
+                "this bridge has no registered peer identity; "
+                "call peer/register before claiming a role"
+            ),
+        )
+    result = claim_role_for_session(
+        origin=RoleClaimOrigin.INFRA,
+        name=name,
+        agent_id=binding.agent_id,
+        agent_instance_id=binding.agent_instance_id,
+        agent_session_id=binding.agent_session_id,
+        session_label=binding.session_label,
+        state_service=state_service,
+        bridge_manager=bridge_manager,
+        peer_registry=peer_registry,
+        agent_messaging_service=agent_messaging_service,
+        call_context=None,
+    )
+    if isinstance(result, RoleClaimFailure):
+        return JSONResponse(
+            content={"code": result.code, "message": result.message},
+            status_code=_CLAIM_ROLE_ERROR_STATUS.get(result.code, 400),
+        )
+    return JSONResponse(content=result.to_public(), status_code=200)
 
 
 def _peer_send_by_name_impl(

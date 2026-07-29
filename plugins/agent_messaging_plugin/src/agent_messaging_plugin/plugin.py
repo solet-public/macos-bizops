@@ -66,8 +66,6 @@ from ananta.interfaces.io_capabilities import IOCapability
 from ananta.llm.agent_messaging.models import PeerInbox, TextPart
 from ananta.llm.agent_messaging.repository import AgentMessagingRepository
 from ananta.llm.agent_messaging.role_binding import (
-    HOLDER_KIND_INFERENCE_PROVIDER,
-    HOLDER_KIND_SESSION,
     SYS_AUTONOMIC_SLOT,
     is_system_role,
 )
@@ -113,7 +111,10 @@ from .bridge_sessions import (
     BridgeQueueFullError,
     BridgeSessionManager,
 )
-from .constants import PLUGIN_NAME
+from .constants import (
+    PLUGIN_NAME,
+    SYSTEM_AGENT_ID,
+)
 from .direct_wake_reconcile import DirectWakeReconciler
 from .http_routes import register_routes
 from .mcp_streamable import (
@@ -141,22 +142,23 @@ from .peer_dispatch import (
 from .peer_registry import (
     PeerAmbiguousError,
     PeerRegistry,
-    PeerSessionAmbiguousError,
     PeerUnreachableError,
 )
 from .platform_surface import PlatformSurface
 from .process_exposure import ProcessExportPolicy
 from .role_binding_store import (
-    HolderClaim,
     RoleBindingVacantError,
-    claim_role_binding_v4,
     holds_role,
     release_role_binding_v4,
     resolve_role_binding,
     resolve_role_binding_v4,
     run_cutover_migration_at_readiness,
-    session_claim_requires_session_id,
-    upsert_role_entity,
+)
+from .role_claim import (
+    RoleClaimFailure,
+    RoleClaimOrigin,
+    claim_role_for_session,
+    send_handover_notice,
 )
 from .role_message_consumed_backfill import backfill_role_message_consumed
 from .route_activity import make_model_activity_middleware
@@ -167,8 +169,6 @@ from .schema import (
 )
 from .session_inference_provider import SessionInferenceProvider
 from .system_slots import (
-    SystemSlotClaimDecision,
-    evaluate_system_slot_claim,
     validate_system_slot_declarations,
 )
 
@@ -200,11 +200,8 @@ if TYPE_CHECKING:  # pragma: no cover — type-only references
     from .models import BridgeSessionState
 
 logger = logging.getLogger(__name__)
-SYSTEM_AGENT_ID: Final[str] = "system"
 SYSTEM_SCHEDULER_ID: Final[str] = "system:scheduler"
-SYSTEM_ROLE_HANDOVER_ID: Final[str] = "system:role-handover"
 SYSTEM_SCHEDULER_LABEL: Final[str] = "System (Scheduler)"
-SYSTEM_ROLE_HANDOVER_LABEL: Final[str] = "System (role handover)"
 
 
 class _UploadRouteAuth(Protocol):
@@ -1124,202 +1121,48 @@ class AgentMessagingPlugin(
         prose: str,
         kind: str,
     ) -> bool:
-        """Best-effort IMPORTANT role-handover notice to a specific instance (REL-04).
+        """Bind this plugin's bridge collaborators to the shared REL-04 sender.
 
-        Persists durably + wakes when the recipient is live. NEVER raises — a role
-        claim must not fail because a handover notice could not be delivered
-        (displacement often happens BECAUSE the prior holder is dead). Returns
-        ``True`` on delivery, ``False`` on best-effort failure (loud log).
+        Kept as a bound method because ``AutonomicAssignment`` takes it as its
+        ``send_notice`` callable. The behaviour lives in :mod:`role_claim` so the
+        verb, the bridge route, and the autonomic lane all emit the same notice.
         """
-        if self._peer_registry is None or self._bridge_manager is None:
-            logger.warning(
-                "REL-04 %s notice skipped (bridge not started): agi=%s",
-                kind, peer_agent_instance_id,
-            )
-            return False
-        try:
-            dispatch_peer_send(
-                bridge_manager=self._bridge_manager,
-                peer_registry=self._peer_registry,
-                agent_messaging_service=self._require_service(),
-                sender_bridge_id=SYSTEM_ROLE_HANDOVER_ID,
-                sender_agent_id=SYSTEM_AGENT_ID,
-                sender_agent_instance_id=SYSTEM_ROLE_HANDOVER_ID,
-                sender_session_label=SYSTEM_ROLE_HANDOVER_LABEL,
-                sender_parent_pid=None,
-                peer_id=peer_id,
-                peer_agent_instance_id=peer_agent_instance_id,
-                content=[TextPart(type="text", text=prose)],
-            )
-        except (
-            PeerAmbiguousError,
-            PeerUnreachableError,
-            BridgeNotFoundError,
-            BridgeQueueFullError,
-            NativeWakeError,
-        ) as exc:
-            logger.warning(
-                "REL-04 %s notice undelivered (agi=%s): %s — role claim proceeds",
-                kind, peer_agent_instance_id, exc,
-            )
-            return False
-        return True
-
-    def _is_genuine_displacement(
-        self, prior: Any, new_agent_instance_id: str, new_agent_session_id: str,
-    ) -> bool:
-        """True iff ``prior`` is a DIFFERENT session than the new holder (REL-07(2)).
-
-        Keys on the stable ``agent_session_id`` when both sides have one — an
-        ``agent_instance_id`` rotates on reconnect, so the old instance-id check
-        mistook a same-session re-claim for a displacement and double-woke it.
-        Falls back to instance identity only for a legacy binding row that carries
-        no session id.
-        """
-        if prior is None:
-            return False
-        prior_sid = str(getattr(prior, "agent_session_id", "") or "")
-        if prior_sid and new_agent_session_id:
-            return prior_sid != new_agent_session_id
-        return bool(prior.agent_instance_id) and (
-            prior.agent_instance_id != new_agent_instance_id
+        return send_handover_notice(
+            bridge_manager=self._bridge_manager,
+            peer_registry=self._peer_registry,
+            agent_messaging_service=self._handover_service(),
+            peer_id=peer_id,
+            peer_agent_instance_id=peer_agent_instance_id,
+            prose=prose,
+            kind=kind,
         )
 
-    def _displaced_target(self, prior: Any) -> tuple[str, str]:
-        """Route the displaced-holder notice to the prior holder's CURRENT bridge.
+    def _handover_service(self) -> Any:
+        """The messaging service the REL-04 notices dispatch through, or ``None``.
 
-        The role binding records the ``agent_instance_id`` as of the CLAIM; by the
-        time a reconnect displaces it, that instance has rotated. Resolve the
-        prior's live binding by its stable session id; fall back to the recorded
-        instance when it has no session id, no live binding, or an ambiguous one
-        (best-effort — an undeliverable notice never gates a claim).
+        ``_require_service`` builds the service on first use, so the raw
+        ``_service`` attribute is not a substitute for it. Only built when the
+        bridge collaborators exist: without them a notice cannot be dispatched
+        at all, and building the service would be wasted work that can raise on
+        a plugin whose orchestrator is not injected.
         """
-        prior_sid = str(getattr(prior, "agent_session_id", "") or "")
-        if prior_sid and self._peer_registry is not None:
-            try:
-                live = self._peer_registry.resolve_by_agent_session_id(prior_sid)
-            except PeerSessionAmbiguousError as exc:
-                logger.warning(
-                    "REL-04 displaced-notice: ambiguous session id %r — "
-                    "falling back to recorded instance: %s", prior_sid, exc,
-                )
-                live = None
-            if live is not None:
-                return live.agent_id, live.agent_instance_id
-        return prior.agent_id, prior.agent_instance_id
-
-    def _notify_role_handover(
-        self,
-        *,
-        name: str,
-        new_agent_id: str,
-        new_agent_instance_id: str,
-        new_agent_session_id: str,
-        prior: Any,
-    ) -> None:
-        """Fire the REL-04/§5.4 handover notices for a GENUINE role claim.
-
-        Notifies a displaced PRIOR holder — routed to its CURRENT bridge via its
-        stable session id (§5.4), not the stale recorded instance — then confirms
-        to the new holder so it drains any role backlog. Best-effort throughout;
-        the claim already succeeded and never fails on a notify. The caller
-        suppresses this entirely for an idempotent self-re-claim, so any prior seen
-        here is a different session. ``name`` is opaque — never special-cased.
-
-        §5.4 provider-transition rule: a displaced holder that is an
-        ``inference_provider`` has NO wake target (a provider consumes no
-        messages), so the transition is LOG-LOUD, never silent — an audit line
-        instead of an undeliverable notice. The displaced-notice fires ONLY when
-        the displaced holder is a session.
-        """
-        if prior is not None and (
-            str(getattr(prior, "holder_kind", "") or "") == HOLDER_KIND_INFERENCE_PROVIDER
-        ):
-            logger.warning(
-                "role %r handover: displaced holder was an inference_provider "
-                "(identity=%s) — no wake target, logging the transition for audit "
-                "(new holder %s/%s).",
-                name, getattr(prior, "holder_identity", {}), new_agent_id, new_agent_instance_id,
-            )
-        elif self._is_genuine_displacement(
-            prior, new_agent_instance_id, new_agent_session_id,
-        ):
-            target_agent_id, target_instance_id = self._displaced_target(prior)
-            self._send_handover_notice(
-                peer_id=target_agent_id or new_agent_id,
-                peer_agent_instance_id=target_instance_id,
-                prose=_displaced_prose(name, new_agent_instance_id),
-                kind="displaced-holder",
-            )
-        self._send_handover_notice(
-            peer_id=new_agent_id,
-            peer_agent_instance_id=new_agent_instance_id,
-            prose=_new_holder_prose(name),
-            kind="new-holder",
-        )
+        if self._bridge_manager is None or self._peer_registry is None:
+            return None
+        return self._require_service()
 
     def _claimant_session_id(self, agent_instance_id: str) -> str:
-        """The claimant's stable session id from its live ``peer_binding`` (REL-07(1)).
+        """A session's stable id from its live ``peer_binding`` row (REL-07(1)).
 
-        Claim args never carry ``agent_session_id``, and an empty column makes the
-        reconnect CAS (keyed on it alone) unable to re-point the role. Sourced from
-        the claimant's OWN registered binding; "" when the bridge is not started or
-        the instance is unregistered (no worse than the pre-fix state).
+        ``peer_holds_role`` reads it here rather than trusting a caller-supplied
+        session id — the whole point of that verb is that it compares PULL-TRUTH.
+        The claim path sources the same value inside
+        :func:`role_claim.claim_role_for_session`, from the same registry.
+        Returns ``""`` when the bridge is not started or the instance is
+        unregistered.
         """
         if self._peer_registry is None:
             return ""
         return self._peer_registry.agent_session_id_for_instance(agent_instance_id)
-
-    def _settle_role_handover(
-        self,
-        *,
-        name: str,
-        agent_id: str,
-        agent_instance_id: str,
-        agent_session_id: str,
-        outcome: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Consume ``claim_role_binding_v4``'s outcome (action + pre-CAS prior) + fire
-        the REL-04/§5.4 handover notices (§9 CUTOVER — the v4 claim now decides
-        self-re-claim vs displace).
-
-        ``action='refreshed'`` = an idempotent self-re-claim → report
-        ``action='updated'`` (the ``/rename`` refresh contract) and fire NO wake.
-        ``'claimed'`` (fresh) / ``'displaced'`` (prior set) → notify: a displaced prior
-        at its current bridge (§5.4) + the new-holder confirm. The new holder is always
-        a SESSION here (the claimant), so carry-forward (d) [confirm-iff-session] is
-        satisfied by construction — no kind gate needed.
-
-        The v4 outcome carries ``prior`` (a ``ResolvedRole``) for the notify ONLY — it
-        is NOT json-serializable, so it MUST NOT reach the public ActionResult (result
-        persistence json.dumps would TypeError on a real displace — Codex BLOCKER-1).
-        A plain, schema-shaped ``{action, name, agent_instance_id, agent_session_id}``
-        is returned. Every property the verb's ``return_value_schema`` declares MUST
-        be present here: ``ExecutionContext.store_result`` raises
-        ``PlaceholderResolutionError`` on a declared-but-absent property, which fails
-        the action AFTER the binding write already landed — reporting a bogus failure
-        for a claim that actually succeeded. ``agent_session_id`` is the RESOLVED id
-        (the caller may omit it and have it sourced from ``peer_binding``), so echoing
-        it is what tells the claimant which session id its role is now keyed on.
-        """
-        action = str(outcome.get("action") or "")
-        public: dict[str, Any] = {
-            "action": action,
-            "name": outcome.get("name"),
-            "agent_instance_id": outcome.get("agent_instance_id"),
-            "agent_session_id": agent_session_id,
-        }
-        if action == "refreshed":
-            public["action"] = "updated"  # /rename refresh contract; no wake
-            return public
-        self._notify_role_handover(
-            name=name,
-            new_agent_id=agent_id,
-            new_agent_instance_id=agent_instance_id,
-            new_agent_session_id=agent_session_id,
-            prior=outcome.get("prior"),
-        )
-        return public
 
     @platform_process(
         name="peer_claim_role",
@@ -1381,6 +1224,16 @@ class AgentMessagingPlugin(
     ) -> dict[str, Any]:
         """Claim-or-replace the ``agent_role_binding`` row for ``name`` (v10 #2.C).
 
+        The MODEL_INITIATED transport for a claim: reached through
+        ``/process/call``, so a genuine model turn (the ``/rename`` skill) stamps
+        ``last_model_activity_at`` as it should. The forwarder's housekeeping
+        claim deliberately does NOT come here — it uses the INFRA
+        ``peer/claim_role`` bridge route, which shares this body via
+        :func:`role_claim.claim_role_for_session` but is classified so it never
+        stamps. Splitting the transports is what separates "the model claimed a
+        role" from "the bridge re-asserted its binding"; see the module docstring
+        of :mod:`role_claim`.
+
         Caller-supplied identity (the ``/rename`` skill threads ``agent_id`` /
         ``agent_instance_id`` from the ``peer_register`` response, and
         ``agent_session_id`` from the same response when a carrier set it). A
@@ -1388,79 +1241,34 @@ class AgentMessagingPlugin(
         including a backfilled UNCLAIMED ``agent_session_id``.
         """
         raw = params.get("parameters", params)
-        name = str(raw.get("name", "")).strip()
-        agent_id = str(raw.get("agent_id", "")).strip()
-        agent_instance_id = str(raw.get("agent_instance_id", "")).strip()
-        agent_session_id = str(raw.get("agent_session_id", "")).strip()
-        session_label = str(raw.get("session_label", "") or name)
-        if not name or not agent_id or not agent_instance_id:
-            return _failure_result(
-                code="missing_argument",
-                message=(
-                    "peer_claim_role requires non-empty 'name', "
-                    "'agent_id', and 'agent_instance_id'."
-                ),
-            )
-        # §6.1 reserved-keyspace gate: the general peer_claim_role never assigns a
-        # SESSION-FILLED system slot (that is the §D.9 auto-assignment lane), and a
-        # PLUGIN-OWNED slot is claimable ONLY by its declared owner — verified
-        # against the SERVER-BUILT principal lifted into `state`, never spoofable
-        # caller `params`. A normal (non-sys:) role → NOT_SYSTEM → proceeds.
-        verdict = evaluate_system_slot_claim(name, state.get("call_context"))
-        if verdict.decision is SystemSlotClaimDecision.REJECT:
-            return _failure_result(
-                code="system_slot_claim_denied",
-                message=verdict.reason,
-            )
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(
-                code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
-            )
-        # REL-07(1): source the claimant's stable session id from its OWN live
-        # peer_binding row when the claim args omit it (they always do). An empty
-        # agent_session_id makes the reconnect CAS (keyed on it alone) unable to
-        # re-point this role — the class fresh-C's REL-07 diagnostic surfaced.
-        if not agent_session_id:
-            agent_session_id = self._claimant_session_id(agent_instance_id)
-        # carry-forward (c) [§4.5.3/§11]: a durable session claim MUST carry a stable
-        # agent_session_id (the reconnect CAS + the §D.9 succession key on it). The
-        # pre-cutover 'no worse than pre-fix' empty-allowed fallback DIES at the §9
-        # cutover — reject an unsourceable session claim rather than write a dead binding.
-        if session_claim_requires_session_id(HOLDER_KIND_SESSION, agent_session_id):
-            return _failure_result(
-                code="missing_session_id",
-                message=(
-                    "peer_claim_role requires a non-empty agent_session_id for a "
-                    "session holder; the claimant's peer_binding carried none "
-                    "(launch with the session-id carrier exported, or pass it)."
-                ),
-            )
-        # §5.5 entity-first: upsert the role entity BEFORE the binding CAS (a lost CAS
-        # then leaves at most a harmless orphan entity; resolve never reads it).
-        upsert_role_entity(state_service, name=name)
-        # §9 CUTOVER: the v4 predicated-CAS claim (claim / displace / self-reclaim in
-        # one) returns action + the PRE-CAS displaced prior for the §5.4 notify.
-        outcome = claim_role_binding_v4(
-            state_service,
-            name=name,
-            claim=HolderClaim(
-                holder_kind=HOLDER_KIND_SESSION,
-                holder_identity={"agent_id": agent_id, "session_label": session_label},
-                agent_instance_id=agent_instance_id,
-                agent_session_id=agent_session_id,
-                session_label=session_label,
-            ),
+        result = claim_role_for_session(
+            origin=RoleClaimOrigin.MODEL_TURN,
+            name=str(raw.get("name", "")),
+            agent_id=str(raw.get("agent_id", "")),
+            agent_instance_id=str(raw.get("agent_instance_id", "")),
+            agent_session_id=str(raw.get("agent_session_id", "")),
+            session_label=str(raw.get("session_label", "")),
+            state_service=self._get_state_service(),
+            bridge_manager=self._bridge_manager,
+            peer_registry=self._peer_registry,
+            # NOT ``self._service`` — that attribute is lazily populated, and
+            # ``_require_service`` is what BUILDS it on first use. Reading the
+            # raw attribute would hand the claim body ``None`` whenever nothing
+            # had happened to construct the service yet, and the handover notices
+            # would then be skipped with a "bridge not started" log while the
+            # claim reported success: a displaced holder never told it lost the
+            # role. Guarded exactly as ``_send_handover_notice`` guards it — with
+            # no bridge collaborators there is nothing to notify anyway, so
+            # building the service would be pointless work that can raise.
+            agent_messaging_service=self._handover_service(),
+            # SERVER-BUILT context, lifted into ``state`` by the action processor
+            # — never read from caller ``params``, so slot ownership cannot be
+            # forged.
+            call_context=state.get("call_context"),
         )
-        outcome = self._settle_role_handover(
-            name=name,
-            agent_id=agent_id,
-            agent_instance_id=agent_instance_id,
-            agent_session_id=agent_session_id,
-            outcome=outcome,
-        )
-        return _success_result(data=outcome)
+        if isinstance(result, RoleClaimFailure):
+            return _failure_result(code=result.code, message=result.message)
+        return _success_result(data=dict(result.to_public()))
 
     @platform_process(
         name="peer_release_role",
@@ -2521,7 +2329,10 @@ class AgentMessagingPlugin(
             properties={
                 "status": ParameterMetadata(
                     type=ParameterType.STRING,
-                    description="'queued' on success.",
+                    description=(
+                        "'queued' when appended, or 'dropped_bridge_gone' "
+                        "when the originating bridge has already closed."
+                    ),
                 ),
             },
         ),
@@ -2626,7 +2437,10 @@ class AgentMessagingPlugin(
             properties={
                 "status": ParameterMetadata(
                     type=ParameterType.STRING,
-                    description="'queued' on success.",
+                    description=(
+                        "'queued' when appended, or 'dropped_bridge_gone' "
+                        "when the originating bridge has already closed."
+                    ),
                 ),
             },
         ),
@@ -3131,10 +2945,23 @@ class AgentMessagingPlugin(
                 },
             )
         except BridgeNotFoundError:
-            return _failure_result(
-                code=_ERR_NO_ACTIVE_BRIDGE,
-                message=f"Bridge {bridge_id} is closed or missing",
+            # A bridge-delivery action is terminal by contract. Once the
+            # originating bridge is gone there is no caller left to receive
+            # either this payload or an inference-formatted explanation.
+            # Returning a failure here used to route the EDGE_SINK through
+            # process_error, assign it to sys:autonomic, and mint a durable
+            # forwarded vertex that INF-06 re-drove forever. Record the
+            # irreversible transport drop loudly, then complete terminally
+            # with zero continuation actions.
+            logger.warning(
+                "%s: dropping %s for closed or missing bridge %s "
+                "(source_process_key=%s)",
+                self.name,
+                event_type,
+                bridge_id,
+                str(params.get("source_process_key") or ""),
             )
+            return _success_result(data={"status": "dropped_bridge_gone"})
         except BridgeQueueFullError:
             return _failure_result(
                 code=_ERR_QUEUE_FULL,
@@ -4253,25 +4080,6 @@ def _resolve_role_send_sender(
         session_label=SYSTEM_SCHEDULER_LABEL,
         bridge_id=SYSTEM_SCHEDULER_ID,
         reply_to_role="",
-    )
-
-
-def _displaced_prose(name: str, new_agent_instance_id: str) -> str:
-    """REL-04 displaced-holder notice. ``name`` is an opaque operator-defined role."""
-    return (
-        f"IMPORTANT: You have been displaced from role {name!r} by instance "
-        f"{new_agent_instance_id}. You no longer hold this role — a role-addressed "
-        f"message to {name!r} now reaches the new holder. Re-claim the role "
-        f"(/rename) if this displacement was not intended."
-    )
-
-
-def _new_holder_prose(name: str) -> str:
-    """REL-04 new-holder confirmation. ``name`` is an opaque operator-defined role."""
-    return (
-        f"IMPORTANT: You now hold role {name!r}. Drain your role backlog with "
-        f"peer_inbox(include_important=true) — role-addressed messages sent to "
-        f"{name!r} while it was held by another session (or unclaimed) are waiting."
     )
 
 
