@@ -36,9 +36,9 @@ from ananta.constants import ExitCodes
 
 from .client import HomunculusIdentityError, resolve_homunculus_name
 from .spool import (
-    WATCH_SESSION_ID_ENV,
-    WATCH_SESSION_LABEL_ENV,
     default_spool_path,
+    resolve_session_id,
+    resolve_session_label,
     spool_lock_path,
     spool_offset_path,
     watch_instance_digest,
@@ -112,8 +112,8 @@ def _resolve_target(spool_override: Path | None) -> WakeTarget | None:
     installed at user scope, so it fires in plain unlabeled sessions too and
     must be a perfect no-op there.
     """
-    role = os.environ.get(WATCH_SESSION_LABEL_ENV, "")
-    session_id = os.environ.get(WATCH_SESSION_ID_ENV, "")
+    role = resolve_session_label()
+    session_id = resolve_session_id()
     if not role or not session_id:
         return None
     try:

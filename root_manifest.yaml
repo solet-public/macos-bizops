@@ -12,16 +12,11 @@
 # workbench/2026-06-16_root_manifest_yaml_design.md).
 
 schema_version: 1
-homunculus_name: homunculus
+homunculus_name: dax
 
 universal:
   files:
-    - .gitignore
-    - .dockerignore
-    - .mcp.json
-    - AGENTS.md
     - CLAUDE.md
-    - pyproject.toml
     - README.md
     - LICENSE
     - NOTICE
@@ -31,12 +26,9 @@ universal:
   directories:
     - ananta
     - plugins
-    - binary_libraries
     - knowledge_bases
     - profile
-    - workbench
     - quality_gates
-    - .githooks
     - .claude
 
 platform_managed:
@@ -50,6 +42,46 @@ platform_managed:
     - .idea
 
 sanctioned:
+  - path: PROVENANCE.json
+    reason: "genesis provenance record — written at birth, not in seed"
+    operator_approved: "2026-07-22"
+
+  - path: client
+    reason: "hydration-generated client launchers and fleet functions — written post-genesis"
+    operator_approved: "2026-07-22"
+
+  - path: .gitignore
+    reason: "not shipped by seed; added by operator or tooling as needed"
+    operator_approved: "2026-07-22"
+
+  - path: .dockerignore
+    reason: "not shipped by seed; relevant only for container deployments"
+    operator_approved: "2026-07-22"
+
+  - path: .mcp.json
+    reason: "not shipped by seed; added when MCP bridge is registered"
+    operator_approved: "2026-07-22"
+
+  - path: AGENTS.md
+    reason: "not shipped by seed; symlink to CLAUDE.md added by operator workflow"
+    operator_approved: "2026-07-22"
+
+  - path: pyproject.toml
+    reason: "not shipped by seed; added if repo-level packaging is needed"
+    operator_approved: "2026-07-22"
+
+  - path: binary_libraries
+    reason: "not shipped by seed; created only when native binary plugins are added"
+    operator_approved: "2026-07-22"
+
+  - path: workbench
+    reason: "not shipped by seed; scratch/research directory created on first use"
+    operator_approved: "2026-07-22"
+
+  - path: .githooks
+    reason: "not shipped by seed; added if pre-commit hooks are configured"
+    operator_approved: "2026-07-22"
+
   - path: disabled_plugins
     reason: "operator-sanctioned plugin retirement holding pen; not drift"
     operator_approved: "2026-06-15"

@@ -9,7 +9,6 @@ Errors go to stderr with a mapped exit code.
 from __future__ import annotations
 
 import json
-import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,6 +37,8 @@ from .spool import (
     WATCH_SESSION_ID_ENV,
     WATCH_SESSION_LABEL_ENV,
     default_spool_path,
+    resolve_session_id,
+    resolve_session_label,
     spool_append,
     watch_instance_digest,
 )
@@ -284,14 +285,14 @@ def _resolve_watch_identity(role: str | None, agent_id: str) -> WatchIdentity:
     fails loud rather than registering a degraded, self-refresh-disabled
     binding.
     """
-    resolved_role = role or os.environ.get(WATCH_SESSION_LABEL_ENV, "")
+    resolved_role = role or resolve_session_label()
     if not resolved_role:
         _die(
             f"watch needs a role: pass --role or export {WATCH_SESSION_LABEL_ENV} "
             "(the claude-<name> launcher and fleet functions do this)",
             ExitCodes.UNKNOWN_ERROR,
         )
-    session_id = os.environ.get(WATCH_SESSION_ID_ENV, "")
+    session_id = resolve_session_id()
     if not session_id:
         _die(
             f"watch needs the stable session id: export {WATCH_SESSION_ID_ENV} "
