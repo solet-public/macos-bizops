@@ -103,6 +103,7 @@ ananta/src/ananta/services/inference_service/tests/autonomic_flip_smoke.py
 # a swept sys:autonomic holder fires grace succession with exactly-one notice,
 # and the startup reconciliation purges pre-restart zombie peer_binding rows.
 plugins/agent_messaging_plugin/tests/bridge_lifecycle_sweep_smoke.py
+plugins/agent_messaging_plugin/tests/bridge_delivery_dead_origin_smoke.py
 
 # Bridge /health readiness-probe gating (Task #11 cloud-boot fix): no probe →
 # unconditional 200 (legacy contract); probe False → 503 starting; flip → 200
@@ -224,6 +225,15 @@ plugins/agent_messaging_plugin/tests/direct_wake_outbox_smoke.py
 # {model-initiated, never-stamp}; peer/register is INFRA (F1, from both the
 # open-auto-register and reconnect-re-register angle); touch() does not stamp.
 plugins/agent_messaging_plugin/tests/route_activity_classification_smoke.py
+#
+# The INFRA peer/claim_role route, end-to-end: synchronous outcome in the body
+# (no queued receipt, so no EDGE_SINK notification per tick); a self-re-claim
+# reports 'updated' and wakes NOBODY while a real displacement notifies both
+# parties; the non-serializable `prior` never reaches the body; sys: slots are
+# refused on this transport; identity comes from the bridge binding, not the
+# request body. Plus the assertion that earns the shared claim body — the verb
+# and the route publish the SAME payload shape.
+plugins/agent_messaging_plugin/tests/peer_claim_role_route_smoke.py
 #
 # REL-05 S5 — client-side direct repair drain: one payload settles role + direct
 # rows on their distinct paths in one pass; concurrent direct settles emit once
@@ -735,6 +745,19 @@ plugins/github_midwife_plugin/tests/bootstrap_stdlib_only_smoke.py
 # (never-delete-branches invariant), (3) an existing 'managed' is checked out
 # idempotently, (4) fetch_and_merge on 'managed' still merges origin/<default>
 # cleanly (the rename didn't break the update path). Offline (local tmp repos).
+#
+# Dax Part 23 — the KB-symlink reconcile ADDITION side. auto_install ran its two
+# directions off two sources of truth: removal from the live manifest, addition
+# from kb_root.iterdir() (the genesis symlink set), so a plugin added post-birth
+# was never a candidate at all — content on disk, no symlink, no index, and
+# retrieval then answers CONFIDENTLY from whatever IS indexed. Pins the two
+# binding conditions (key on the RESOLVED TARGET not the entry name, so
+# default_thinking_plugin's four distinct corpora are not duplicated; and
+# manifest=None materialises NOTHING, fail closed) plus an EXPLICIT idempotence
+# test — the sweep runs every boot against a tracked git checkout, so a
+# non-idempotent pass means unattributable working-tree churn.
+plugins/default_knowledge_plugin/tests/kb_symlink_reconcile_smoke.py
+#
 plugins/default_knowledge_plugin/tests/kb_git_smoke.py
 
 # github_midwife_plugin genesis Slice F (2026-07-09, RISKY — flagged for a

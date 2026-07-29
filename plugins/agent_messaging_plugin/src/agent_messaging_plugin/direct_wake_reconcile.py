@@ -4,11 +4,13 @@ The client-side repair drain re-emits owed IMPORTANT sends until they are
 consumed; this reconciler is the SERVER-side terminal step for the ones that
 never will be. It does NOT emit — it only ESCALATES an owed wake (BOTH direct
 AND role rows — RIDER-1 generalized it from direct-only) that has either hit the
-emit cap (a live recipient that stayed deaf through every re-emit →
-``cap_reached``) or been owed past the cap-equivalent time (a recipient whose
-bridge died so its drain never ran → ``recipient_gone``): stamp the row terminal
-and notify the SENDER's live bridge — the party with context to chase — or a
-loud server log if the sender's bridge is gone.
+emit cap without the route-specific consumption acknowledgement
+(``cap_reached``) or been owed past the cap-equivalent time after its recipient
+route disappeared (``recipient_gone``): stamp the row terminal and notify the
+SENDER's live bridge — the party with context to inspect operational state — or
+a loud server log if the sender's bridge is gone. Neither reason proves that the
+recipient failed to see or act on the message; MCP consumption is a model-activity
+proxy, while watcher consumption is an explicit cursor acknowledgement.
 
 RIDER-1 (role terminal-clear): before role rows could escalate, a capped-
 unconsumed role IMPORTANT went DORMANT (consumed=false, emit_count=cap) and never
@@ -36,6 +38,7 @@ from ananta.llm.agent_messaging.schema import (
     ESCALATION_REASON_GONE,
 )
 
+from .models import WATCH_AGENT_INSTANCE_PREFIX
 from .peer_registry import PeerAmbiguousError, PeerUnreachableError
 
 if TYPE_CHECKING:
@@ -58,6 +61,18 @@ ESCALATION_EVENT_TYPE = "post_message"
 def _as_int(value: object) -> int:
     """A state-row integer cell coerced to ``int`` (0 for a missing/other cell)."""
     return value if isinstance(value, int) else 0
+
+
+def _consumption_acknowledgement(row: dict[str, object]) -> str:
+    """Name the route-specific consumption signal the platform did not observe."""
+    recipient_instance = str(
+        row.get("emitted_to_agent_instance_id")
+        or row.get("recipient_agent_instance_id")
+        or "",
+    )
+    if recipient_instance.startswith(WATCH_AGENT_INSTANCE_PREFIX):
+        return "watcher delivery acknowledgement"
+    return "qualifying model-activity consumption acknowledgement"
 
 
 class DirectWakeReconciler:
@@ -141,7 +156,7 @@ class DirectWakeReconciler:
         return escalated
 
     def _reason(self, row: dict[str, object]) -> str:
-        """cap_reached (live recipient stayed deaf) vs recipient_gone (bridge died)."""
+        """Classify exhausted emission cap vs a disappeared recipient route."""
         return (
             ESCALATION_REASON_CAP
             if _as_int(row.get("emit_count")) >= self._cap
@@ -159,12 +174,23 @@ class DirectWakeReconciler:
         """Append a deaf-wake-escalation channel event on the sender's live bridge."""
         emit_count = _as_int(row.get("emit_count"))
         created_at = str(row.get("created_at") or "")
+        acknowledgement = _consumption_acknowledgement(row)
+        if reason == ESCALATION_REASON_CAP:
+            observation = (
+                f"The platform observed no {acknowledgement} before the "
+                "emission cap."
+            )
+        else:
+            observation = (
+                "The recipient's registered route disappeared before the "
+                f"platform observed a {acknowledgement}."
+            )
         prose = (
             f"deaf_wake_escalation: your IMPORTANT to {recipient} "
             f"(message_id={message_id}, sent {created_at}, emitted {emit_count}x) "
-            f"remains unconsumed ({reason}). It was queued on the recipient's live "
-            f"bridge but the recipient's session never entered a turn on it — "
-            f"resend or reach them another way."
+            f"has no recorded consumption acknowledgement ({reason}). {observation} "
+            "This does not prove the recipient failed to see or act on the message; "
+            "inspect operational state before resending or using another route."
         )
         bridge_id = self._resolve_sender_bridge(row)
         if bridge_id is None:

@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import re
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote, urlencode
@@ -60,22 +61,19 @@ REGISTER_IDENTITY_ATTEMPTS: Final[int] = 5
 # The bridge process-call route is asynchronous. Role claims are tiny EDGE
 # actions, so wait briefly for their action_id to reach a terminal result rather
 # than declaring the initial `queued` receipt a failed claim.
-ROLE_CLAIM_RESULT_ATTEMPTS: Final[int] = 50
-ROLE_CLAIM_RESULT_RETRY_S: Final[float] = 0.1
 
-# Successful /events drains between steady-state re-assertions of the peer
-# binding. Registration at open/reconnect is necessary but not sufficient: the
-# binding can go missing underneath a perfectly healthy bridge (server-side
-# idle sweep reaping a bridge whose registry row outlived it, a competing
-# registration under the same label, a reconnect whose re-register lost a race).
-# The session cannot detect any of that -- process calls keep working, so the
-# first symptom is a peer_send from someone ELSE returning peer_unreachable,
-# which the unreachable session never sees. Re-asserting is idempotent (the
-# server replaces the binding for this agent_instance_id), so a periodic
-# re-assert converts a permanent silent outage into at most one lost window.
-# Same shape as the router's steady-state activation re-assert (Dax Part 15).
-# 8 drains x ~25s long-poll ~= one cheap POST every few minutes.
-REGISTER_REASSERT_EVERY_N_POLLS: Final[int] = 8
+# Wall-clock interval between steady-state re-assertions of the peer binding.
+# Registration at open/reconnect is necessary but not sufficient: the binding
+# can go missing underneath a perfectly healthy bridge (server-side idle sweep,
+# a competing registration under the same label, or a reconnect race).
+#
+# This MUST be elapsed-time based, never successful-drain-count based. A long
+# poll returns immediately when events are queued, so an event burst can produce
+# hundreds of successful drains in seconds. The prior "8 drains" scheduler
+# therefore collapsed its intended few-minute heartbeat into a ~1.8s register /
+# claim burst under INF-06 traffic. A monotonic deadline keeps event volume from
+# changing heartbeat frequency and is immune to wall-clock adjustments.
+REGISTER_REASSERT_INTERVAL_S: Final[float] = 200.0
 
 # Per-request timeout for non-long-poll calls.
 DEFAULT_REQUEST_TIMEOUT_S: Final[float] = 30.0
@@ -139,15 +137,23 @@ def _is_bridge_gone(exc: BaseException) -> bool:
     )
 
 
+_ROLE_CLAIM_ACTIONS: Final[frozenset[str]] = frozenset(
+    {"claimed", "updated", "displaced"},
+)
+
+
 def _role_claim_succeeded(payload: dict[str, Any]) -> bool:
-    """Return whether a process-call result confirms a completed role claim."""
-    result = payload.get("result")
-    return (
-        payload.get("status") == "completed"
-        and isinstance(result, dict)
-        and result.get("action_status") == "completed"
-        and result.get("success") is True
-    )
+    """Return whether the claim response confirms a landed role binding.
+
+    Reads the SYNCHRONOUS ``peer/claim_role`` body — the outcome is the
+    response, so there is no receipt to resolve and no ``status`` envelope to
+    unwrap. The three actions are the complete set the shared claim body can
+    return on success: ``claimed`` (fresh), ``updated`` (idempotent
+    self-re-claim, the steady-state case), ``displaced`` (took it from another
+    session). Matching the set explicitly rather than "no error key" keeps an
+    unrecognised action loud instead of passing as success.
+    """
+    return str(payload.get("action") or "") in _ROLE_CLAIM_ACTIONS
 
 
 class BridgeHTTPError(RuntimeError):
@@ -185,6 +191,7 @@ class Forwarder:
         parent_pid: int,
         provides_inference: bool,
         session_role: str = "",
+        monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._homunculus_name = homunculus_name
@@ -197,6 +204,11 @@ class Forwarder:
         self._agent_session_id = agent_session_id
         self._session_label = session_label
         self._session_role = session_role
+        # Server's answer to "do I still hold self._session_role?", refreshed on
+        # every peer/register response. "held" suppresses the re-claim; anything
+        # else ("not_held" / "unknown" / never-answered) claims as before, so an
+        # older server that does not send the field degrades to prior behavior.
+        self._session_role_held = "unknown"
         self._parent_pid = parent_pid
         # INF-01 §D.9 client half: declared on EVERY register POST (auto,
         # reconnect, and manual relabel) — the server's provider-sidecar
@@ -204,6 +216,7 @@ class Forwarder:
         # off it, and the sidecar entry does not survive a reconnect, so
         # the capability must be re-asserted each time.
         self._provides_inference = provides_inference
+        self._monotonic_clock = monotonic_clock
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=DEFAULT_REQUEST_TIMEOUT_S,
@@ -239,7 +252,7 @@ class Forwarder:
         """Open a bridge session, register identity, start the poll loop."""
         await self._open_with_retry()
         effective_label = await self._register_identity()
-        if effective_label is not None:
+        if effective_label is not None and self._claim_needed():
             await self._claim_session_role()
         self._poll_active = True
         self._poll_task = asyncio.create_task(self._long_poll_loop())
@@ -309,6 +322,7 @@ class Forwarder:
             "session_label": self._session_label,
             "parent_pid": self._parent_pid,
             "provides_inference": self._provides_inference,
+            "session_role": self._session_role,
         }
         for attempt in range(1, REGISTER_IDENTITY_ATTEMPTS + 1):
             try:
@@ -339,6 +353,7 @@ class Forwarder:
                 else ""
             )
             self._cache_effective_agent_session_id(payload)
+            self._cache_session_role_held(payload)
             _log(
                 f"peer identity registered: {self._agent_id}/{self._agent_instance_id}"
                 f' (label="{effective_label}")',
@@ -357,6 +372,13 @@ class Forwarder:
 
         Silent on the happy path. Logging every few minutes would bury the
         `peer identity registered` line that actually matters at open/reconnect.
+
+        The role re-claim is CONDITIONAL (`_claim_needed`): register itself is an
+        INFRA route, but the claim runs through MODEL_INITIATED `/process/call`,
+        so an unconditional re-claim here stamped model activity with no model
+        turn every few minutes forever — silently consuming owed wakes to an idle
+        session. When the register response confirms the role is still held there
+        is nothing to recover, so the claim is skipped entirely.
         """
         if self._bridge_id is None:
             return
@@ -370,10 +392,13 @@ class Forwarder:
                     "session_label": self._session_label,
                     "parent_pid": self._parent_pid,
                     "provides_inference": self._provides_inference,
+                    "session_role": self._session_role,
                 },
             )
             self._cache_effective_agent_session_id(payload)
-            await self._claim_session_role()
+            self._cache_session_role_held(payload)
+            if self._claim_needed():
+                await self._claim_session_role()
         except Exception as exc:  # noqa: BLE001
             _log(f"steady-state peer identity re-assert failed (will retry): {exc}")
 
@@ -391,23 +416,20 @@ class Forwarder:
             return False
 
         try:
+            # The INFRA transport, and the reason this method no longer polls.
+            # Claiming through MODEL_INITIATED /process/call stamped model
+            # activity for a claim no model made — silently consuming owed
+            # IMPORTANT wakes — and, being an EDGE process, delivered its
+            # outcome as a bridge_delivery_result notification on every tick.
+            # This route runs the same shared body synchronously and answers in
+            # the response, so neither happens. Identity is taken from this
+            # bridge's registered binding server-side; only the role name is
+            # sent. A genuine /rename claim still uses /process/call and still
+            # stamps, which is correct.
             payload = await self._post(
-                f"/api/v1/bridge/{self._bridge_id}/process/call",
-                {
-                    "process_key": (
-                        "plugin::agent_messaging_plugin::peer_claim_role"
-                    ),
-                    "arguments": {
-                        "name": self._session_role,
-                        "agent_id": self._agent_id,
-                        "agent_instance_id": self._agent_instance_id,
-                        "agent_session_id": self._agent_session_id,
-                        "session_label": self._session_label,
-                    },
-                    "reason": "Restore the bridge session's configured role binding.",
-                },
+                f"/api/v1/bridge/{self._bridge_id}/peer/claim_role",
+                {"name": self._session_role},
             )
-            payload = await self._wait_for_role_claim_result(payload)
         except Exception as exc:  # noqa: BLE001
             _log(f'ROLE UNCLAIMED: "{self._session_role}" claim failed: {exc}')
             return False
@@ -424,23 +446,27 @@ class Forwarder:
         )
         return True
 
-    async def _wait_for_role_claim_result(
-        self,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Resolve the asynchronous process-call receipt for a role claim."""
-        action_id_raw = payload.get("action_id")
-        if not isinstance(action_id_raw, str):
-            return payload
-        action_id = quote(action_id_raw, safe="")
-        for _attempt in range(ROLE_CLAIM_RESULT_ATTEMPTS):
-            if payload.get("status") not in {"queued", "pending", "running"}:
-                return payload
-            await asyncio.sleep(ROLE_CLAIM_RESULT_RETRY_S)
-            payload = await self._get(
-                f"/api/v1/bridge/{self._bridge_id}/process/result/{action_id}",
-            )
-        return payload
+    def _cache_session_role_held(self, payload: dict[str, Any]) -> None:
+        """Adopt the register response's ``session_role_held`` verdict.
+
+        Absent or non-string (a server predating the field) reads as
+        ``"unknown"`` — the caller then claims exactly as it always did.
+        """
+        raw = payload.get("session_role_held")
+        self._session_role_held = raw if isinstance(raw, str) else "unknown"
+
+    def _claim_needed(self) -> bool:
+        """Should the configured role be (re-)claimed after a registration?
+
+        ``False`` only when the server just confirmed we STILL hold the role.
+        The claim runs through ``/process/call``, a MODEL_INITIATED route, so
+        issuing it from the forwarder with no model turn phantom-stamps
+        ``last_model_activity_at`` and can mark an owed wake to an idle session
+        consumed. Skipping a claim that would change nothing removes that stamp
+        from the steady state; every other verdict still claims, so a genuine
+        recovery is never suppressed.
+        """
+        return self._session_role_held != "held"
 
     def _cache_effective_agent_session_id(self, payload: dict[str, Any]) -> None:
         """Adopt a server-preserved logical session id from /peer/register."""
@@ -471,7 +497,8 @@ class Forwarder:
             await self._open_with_retry()
             effective_label = await self._register_identity()
             if effective_label is not None:
-                await self._claim_session_role()
+                if self._claim_needed():
+                    await self._claim_session_role()
                 await self._announce_reconnect(effective_label)
 
     async def _announce_reconnect(self, effective_label: str) -> None:
@@ -523,7 +550,7 @@ class Forwarder:
     async def _long_poll_loop(self) -> None:
         """Drain /events forever; emit each as an MCP notification."""
         consecutive_failures = 0
-        polls_since_reassert = 0
+        next_reassert_at = self._monotonic_clock() + REGISTER_REASSERT_INTERVAL_S
         while self._poll_active:
             if self._bridge_id is None:
                 await asyncio.sleep(0.5)
@@ -531,10 +558,11 @@ class Forwarder:
             try:
                 await self._drain_once(self._bridge_id)
                 consecutive_failures = 0
-                polls_since_reassert += 1
-                if polls_since_reassert >= REGISTER_REASSERT_EVERY_N_POLLS:
-                    polls_since_reassert = 0
+                if self._monotonic_clock() >= next_reassert_at:
                     await self._reassert_identity()
+                    next_reassert_at = (
+                        self._monotonic_clock() + REGISTER_REASSERT_INTERVAL_S
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
