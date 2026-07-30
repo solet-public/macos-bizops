@@ -19,7 +19,7 @@ Verbs (all EDGE):
   - delete_leads                                             — write (destructive)
   - merge_leads                                              — write (destructive, irreversible)
   - list_campaigns                                           — read
-  - trigger_campaign                                         — write (side-effecting)
+  - trigger_campaign                                         — write (side-effecting; the flow it runs is NOT readable first — see the KB's campaign flow inspection article)
   - list_static_lists                                        — read
   - add_leads_to_list / remove_leads_from_list               — write
   - test_connection                                          — diagnostic (credentials reachable)
@@ -416,7 +416,13 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             "activity_type_ids is mandatory on every page (max 10); discover valid ids with "
             "list_activity_types. Optional lead_ids (max 30) filter server-side. "
             "AFTER-THE-FACT audit: it reports what a write already caused; it cannot promise "
-            "that a future merge/update will stay silent."
+            "that a future merge/update will stay silent. PAGING: more_result is the only usable "
+            "continuation signal here — Adobe documents that this endpoint always returns a "
+            "token, so token presence cannot terminate the loop (the inverse of get_leads/"
+            "list_campaigns/list_static_lists). Page until more_result is false; a page with "
+            "fewer than 300 items does not mean the end. The flag's reliability on this endpoint "
+            "is documented but UNMEASURED — the one live measurement of moreResult anywhere found "
+            "it violated on list_campaigns, and here there is no fallback."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -464,7 +470,9 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Create and/or update up to 300 lead records in one batch. action is one of "
             "createOrUpdate (default), createOnly, updateOnly, createDuplicate; lookup_field "
-            "names the dedupe field (defaults to email). Write action."
+            "names the dedupe field (defaults to email). Before writing, one lead-describe "
+            "call validates the batch and refuses it whole if any non-key field is REST "
+            "read-only. Write action."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -498,11 +506,12 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         name="merge_leads",
         display_name="Marketo: Merge Leads",
         description=(
-            "Merge up to 25 losing leads into one winning lead (winner's field values take "
-            "precedence over empty/blank ones). merge_in_crm additionally merges the natively-"
-            "synced CRM records — Marketo itself restricts a CRM merge to exactly ONE losing lead "
-            "per call, not 25. Destructive write action: losing leads' identities are absorbed "
-            "into the winner and cannot be split back apart."
+            "Merge up to 25 losing leads into one winning lead. Read-only fields retain "
+            "the winner's value even when empty rather than being filled from a loser under "
+            "the general precedence rule. merge_in_crm additionally merges the natively-synced "
+            "CRM records — Marketo itself restricts a CRM merge to exactly ONE losing lead per "
+            "call, not 25. Destructive write action: losing leads' identities are absorbed into "
+            "the winner and cannot be split back apart."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -544,7 +553,14 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="trigger_campaign",
         display_name="Marketo: Trigger Campaign",
-        description="Trigger (Request Campaign) a campaign for up to 100 leads, with optional campaign tokens. Write/side-effecting action.",
+        description=(
+            "Trigger (Request Campaign) a campaign for up to 100 leads, with optional campaign "
+            "tokens. Destructive-class write action: the campaign's flow runs against real people, "
+            "is irreversible, and is visible outside this system (it may send email, alert sales, "
+            "change scoring, or move program status). Marketo's REST API exposes no way to read a "
+            "campaign's flow steps first and no dry-run, so a caller cannot establish what this "
+            "will do before it happens — trigger only campaigns you authored."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "campaign_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The Marketo campaign id."),

@@ -1,13 +1,13 @@
 {
   "process_key": "plugin::marketo_plugin::get_leads",
   "display_name": "Marketo: Get Leads",
-  "description": "Query actual lead records by an instance-supported filter_type and up to 300 filter_values. Read describe_lead_fields.searchable_fields first to discover valid standard and custom filter types. Optional fields restrict returned columns; next_page_token continues a prior page.",
-  "embedding_description": "Fetch Marketo lead and person records by matching an instance-supported standard or custom field against up to 300 values, with optional returned columns and paging.",
+  "description": "Query actual lead records by an instance-supported filter_type and up to 300 filter_values. Read describe_lead_fields.searchable_fields first to discover valid standard and custom filter types. Optional fields restrict returned columns. A non-empty next_page_token is authoritative: more_result is normalized from token presence, so continue even when Marketo's raw moreResult flag says false.",
+  "embedding_description": "Fetch Marketo lead and person records by matching an instance-supported standard or custom field against up to 300 values, optionally selecting returned columns and draining all matching pages through their continuation tokens.",
   "result_processor_customizations": {
     "action_label": "Marketo leads fetched",
     "result_type": "marketo_get_leads_result",
-    "result_description": "Dict with records (a list of lead field-value dicts) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large, plus next_page_token and more_result for continuing the query.",
-    "presentation_guidance": "Summarize the row_count and show a few lead records. If more_result is true, mention next_page_token can continue the query."
+    "result_description": "Dict with records (a list of lead field-value dicts) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large, plus next_page_token and more_result. For get_leads, more_result is normalized from whether a non-empty continuation token is present.",
+    "presentation_guidance": "Summarize the row_count and show a few lead records. If more_result is true, the query is INCOMPLETE and must continue with next_page_token; token presence is authoritative even when Marketo's raw moreResult flag was false."
   },
   "error_processor_customizations": {
     "action_context": "Query leads by filter from the configured Marketo instance.",

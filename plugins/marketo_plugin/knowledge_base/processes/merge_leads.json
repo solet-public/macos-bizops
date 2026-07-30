@@ -1,8 +1,8 @@
 {
   "process_key": "plugin::marketo_plugin::merge_leads",
   "display_name": "Marketo: Merge Leads",
-  "description": "Merge up to 25 losing leads into one winning lead (winner's field values win over empty/blank ones). merge_in_crm additionally merges natively-synced CRM records, capping losing_lead_ids at 1. Destructive write action.",
-  "embedding_description": "Merge duplicate Marketo lead/person records — one winning lead absorbs up to 25 losing leads' activity history, program/campaign/list memberships, and field values (winner's own values take precedence unless blank). Use merge_in_crm=true to also merge the natively-synced CRM contact/lead (Marketo restricts CRM merges to exactly 1 losing lead, not 25). This is IRREVERSIBLE — losing lead ids stop existing after the call. Distinct from delete_leads (which discards data, not combines it) and create_or_update_leads (field writes, no consolidation).",
+  "description": "Merge up to 25 losing leads into one winning lead. Writable fields follow Marketo's general precedence: the winner's value wins when present, while a losing value may fill a null winner. Read-only fields are an observed exception: they keep the winning record's value, including an empty one, and are never populated from a losing record, although Adobe's general precedence documentation predicts otherwise. merge_in_crm additionally merges natively-synced CRM records, capping losing_lead_ids at 1. Destructive write action.",
+  "embedding_description": "Merge duplicate Marketo lead/person records so one winner absorbs losing records' history, memberships, and eligible field values. Read-only fields keep the winning record's value, including an empty one, and are never populated from a losing record; Adobe's documented general precedence rule predicts the opposite. Up to 25 losing leads are supported, or one with merge_in_crm.",
   "result_processor_customizations": {
     "action_label": "Marketo leads merged",
     "result_type": "marketo_merge_leads_result",

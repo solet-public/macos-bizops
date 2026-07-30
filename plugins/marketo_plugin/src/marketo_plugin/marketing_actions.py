@@ -12,8 +12,11 @@ Batch verbs (create_or_update_leads, delete_leads, add/remove_leads_from_list)
 return Marketo's own per-record ``result`` array UNCHANGED plus a computed
 tally — a per-record ``status: "skipped"``/``"failed"`` entry is normal data,
 not a plugin-level fault, because Marketo's overall ``success`` stays true for
-those calls. Only a ``success: false`` envelope (structural fault — bad
-batch shape, auth, access) raises.
+those calls. ``create_or_update_leads`` first refuses a whole batch that names
+any intended REST read-only field other than identifiers or documented
+default-read echoes, before calling the write endpoint. Only a ``success:
+false`` envelope (structural fault — bad batch shape, auth, access) raises
+after a write is attempted.
 
 No bulk-extract verb exists (v1 scope): Marketo's async Bulk Extract job API
 (create -> enqueue -> poll status -> download file) is a materially different
@@ -38,11 +41,16 @@ from .constants import (
     CHECK_SETUP_PROBES,
     CHECK_SETUP_UNVERIFIED_WRITE_VERBS,
     DEFAULT_LEAD_ACTION,
+    DEFAULT_LEAD_LOOKUP_FIELD,
+    DESCRIBE_SPILL_FILENAME,
     ERROR_AUTH_FAILED,
     ERROR_PARTITION_ACCESS_DENIED,
     ERROR_PERMISSION_DENIED,
+    GET_LEADS_DEFAULT_FIELDS,
     INLINE_BYTE_CAP,
     LEAD_ACTIONS,
+    LEAD_ID_FIELD,
+    LEADS_DESCRIBE_PATH,
     MAX_ACTIVITY_LEAD_IDS,
     MAX_ACTIVITY_TYPE_IDS,
     MAX_BATCH_RECORDS,
@@ -60,7 +68,7 @@ BlobWriter = Callable[[bytes, str, str], str]
 
 def describe_lead_fields(client: Any, _params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
     """Fetch the full lead field metadata list (id, displayName, name, dataType, ...)."""
-    payload = client.get_json("/rest/v1/leads/describe.json")
+    payload = client.get_json(LEADS_DESCRIBE_PATH)
     fields = payload.get("result") or []
     searchable_fields = payload.get("searchableFields")
     if not isinstance(searchable_fields, list):
@@ -68,7 +76,7 @@ def describe_lead_fields(client: Any, _params: dict[str, Any], blob_writer: Blob
     envelope = _spill_envelope(
         fields if isinstance(fields, list) else [],
         blob_writer,
-        "describe_lead_fields_results.json",
+        DESCRIBE_SPILL_FILENAME,
     )
     envelope["searchable_fields"] = searchable_fields
     return envelope
@@ -125,7 +133,12 @@ def get_api_usage(client: Any, _params: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_leads(client: Any, params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
-    """Query leads by filterType/filterValues; optionally restrict the returned fields."""
+    """Query leads by filterType/filterValues; optionally restrict returned fields.
+
+    A non-empty ``next_page_token`` is the authoritative continuation signal.
+    Marketo can return ``moreResult: false`` on a full page that still carries
+    a usable token, so ``more_result`` is normalized from token presence.
+    """
     filter_type = _require_str(params, "filter_type")
     filter_values = _require_list(params, "filter_values", max_len=MAX_FILTER_VALUES)
     query: dict[str, Any] = {
@@ -139,7 +152,7 @@ def get_leads(client: Any, params: dict[str, Any], blob_writer: BlobWriter) -> d
     payload = client.get_json("/rest/v1/leads.json", params=query)
     leads = payload.get("result") or []
     envelope = _spill_envelope(leads if isinstance(leads, list) else [], blob_writer, "get_leads_results.json")
-    return _with_paging(envelope, payload)
+    return _with_token_authoritative_paging(envelope, payload)
 
 
 def get_activities(client: Any, params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
@@ -163,9 +176,26 @@ def get_activities(client: Any, params: dict[str, Any], blob_writer: BlobWriter)
     and how their filters match, which no activity read can predict. Do not let
     a clean result here be reported as "merges are safe".
 
-    ``more_result`` true means KEEP PAGING even when this page's ``records`` is
-    empty — Marketo streams activities in ~300-item pages and an empty page
-    mid-stream is normal, not the end of the data.
+    PAGING — ``more_result`` is the ONLY USABLE continuation signal here, which
+    is not the same as a verified reliable one. Adobe documents that this
+    endpoint ALWAYS returns ``nextPageToken`` (Developer Guide → REST → Lead
+    Database → Activities), so token presence cannot terminate the loop — the
+    exact inverse of :func:`_with_token_authoritative_paging`'s verbs, which
+    ignore the vendor flag because there the token IS the honest signal. Page
+    until ``more_result`` is false. Adobe also states the endpoint "can return
+    fewer than 300 activity items while setting ``moreResult`` to true", so a
+    SHORT page — including an empty one — does not mean the end of the data.
+
+    ⚠ UNMEASURED, and this is the open risk: the flag's reliability on THIS
+    endpoint has never been checked against a live instance. The only live
+    measurement of ``moreResult`` anywhere found it VIOLATED on
+    ``list_campaigns`` — a full 300-record page reporting false while carrying
+    a usable token (Dax Part 28 §28.2). On the token-authoritative verbs that
+    is survivable because token presence is a valid fallback; here there is NO
+    fallback, so if the flag under-reports, an activity read truncates
+    silently and no caller-side rule can detect it. The hermetic smokes assert
+    that this code implements the documented rule; they cannot and do not show
+    that Marketo honours it.
     """
     query = _activity_query(client, params)
     payload = client.get_json(ACTIVITIES_PATH, params=query)
@@ -173,7 +203,7 @@ def get_activities(client: Any, params: dict[str, Any], blob_writer: BlobWriter)
     envelope = _spill_envelope(
         activities if isinstance(activities, list) else [], blob_writer, ACTIVITIES_SPILL_FILENAME
     )
-    return _with_paging(envelope, payload)
+    return _with_activity_paging(envelope, payload)
 
 
 def _activity_query(client: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -220,17 +250,19 @@ def _mint_activity_paging_token(client: Any, since_datetime: str) -> str:
 
 
 def create_or_update_leads(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Create and/or update up to MAX_BATCH_RECORDS lead records in one batch."""
+    """Create/update leads after refusing intended REST read-only fields."""
     action = params.get("action") or DEFAULT_LEAD_ACTION
     if action not in LEAD_ACTIONS:
         raise ValueError(f"'action' must be one of {sorted(LEAD_ACTIONS)}, got {action!r}")
-    records = _require_list(params, "records", max_len=MAX_BATCH_RECORDS)
-    for record in records:
-        if not isinstance(record, dict) or not record:
-            raise ValueError("every entry in 'records' must be a non-empty object")
+    records = _require_lead_records(params)
+    lookup_field = _optional_lookup_field(params)
+    _refuse_read_only_lead_fields(
+        client,
+        records,
+        lookup_field or DEFAULT_LEAD_LOOKUP_FIELD,
+    )
     body: dict[str, Any] = {"action": action, "input": records}
-    lookup_field = params.get("lookup_field")
-    if isinstance(lookup_field, str) and lookup_field:
+    if lookup_field is not None:
         body["lookupField"] = lookup_field
     payload = client.post_json("/rest/v1/leads.json", json=body)
     return _batch_envelope(payload)
@@ -245,11 +277,13 @@ def delete_leads(client: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def merge_leads(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Merge up to 25 losing leads into one winning lead (winner's fields take precedence).
+    """Merge up to 25 losing leads into one winning lead.
 
     ``merge_in_crm=True`` also merges the natively-synced CRM records — Marketo
     itself restricts a CRM merge to exactly ONE losing lead per call (not 25),
     so that cap is enforced here rather than left to a server-side 1080.
+    Read-only fields retain the winner's value even when it is empty; they are
+    not populated from a losing record under the general merge-precedence rule.
     """
     winning_lead_id = _require_str(params, "winning_lead_id")
     merge_in_crm = params.get("merge_in_crm")
@@ -271,9 +305,10 @@ def list_campaigns(client: Any, params: dict[str, Any], blob_writer: BlobWriter)
     the response's own paging fields, so an instance with more than 300
     campaigns silently returned an arbitrary 300-campaign slice — and repeat
     calls could return DIFFERENT slices, which reads as data rather than as
-    truncation (Dax Part 20 §20.3: 300 of 19,919). The paging fields are now
-    surfaced verbatim, so a caller can both detect truncation (``more_result``)
-    and continue (``next_page_token``).
+    truncation (Dax Part 20 §20.3: 300 of 19,919). A non-empty
+    ``next_page_token`` is the authoritative continuation signal:
+    ``more_result`` is normalized to true whenever that token is present,
+    including when Marketo's raw ``moreResult`` flag incorrectly says false.
     """
     query: dict[str, Any] = {}
     names = params.get("names")
@@ -288,7 +323,7 @@ def list_campaigns(client: Any, params: dict[str, Any], blob_writer: BlobWriter)
     envelope = _spill_envelope(
         campaigns if isinstance(campaigns, list) else [], blob_writer, "list_campaigns_results.json"
     )
-    return _with_paging(envelope, payload)
+    return _with_token_authoritative_paging(envelope, payload)
 
 
 def trigger_campaign(client: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -310,7 +345,9 @@ def list_static_lists(client: Any, params: dict[str, Any], blob_writer: BlobWrit
     """List static lists, optionally filtered by name.
 
     Same page-cap exposure as :func:`list_campaigns` — Dax framed §20.3 as a
-    class, not one verb — so the response's paging fields are surfaced here too.
+    class, not one verb. A non-empty ``next_page_token`` is authoritative, so
+    ``more_result`` is normalized from token presence rather than Marketo's
+    unreliable raw flag.
     """
     query: dict[str, Any] = {}
     names = params.get("names")
@@ -322,7 +359,7 @@ def list_static_lists(client: Any, params: dict[str, Any], blob_writer: BlobWrit
     envelope = _spill_envelope(
         lists_ if isinstance(lists_, list) else [], blob_writer, "list_static_lists_results.json"
     )
-    return _with_paging(envelope, payload)
+    return _with_token_authoritative_paging(envelope, payload)
 
 
 def add_leads_to_list(client: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -452,12 +489,32 @@ def _apply_next_page_token(query: dict[str, Any], params: dict[str, Any]) -> Non
         query["nextPageToken"] = next_page_token
 
 
-def _with_paging(envelope: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-    """Surface Marketo's own paging fields verbatim on a result envelope.
+def _with_token_authoritative_paging(
+    envelope: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize collection paging from the usable continuation token.
 
-    ``next_page_token`` is None and ``more_result`` False when the endpoint did
-    not return them — which is honest ("no continuation offered") and is still
-    strictly more information than dropping the fields entirely.
+    Used by ``get_leads``, ``list_campaigns``, and ``list_static_lists``:
+    Marketo's raw ``moreResult`` can be false while ``nextPageToken`` still
+    continues to another page, so token presence wins for these verbs.
+    """
+    next_page_token = payload.get("nextPageToken")
+    envelope["next_page_token"] = next_page_token
+    envelope["more_result"] = bool(next_page_token)
+    return envelope
+
+
+def _with_activity_paging(
+    envelope: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Surface activity paging with Marketo's ``moreResult`` flag authoritative.
+
+    The activity token is a resumable bookmark that can be returned on the last
+    page too. Token presence therefore cannot determine whether to continue;
+    callers must keep paging through empty pages while ``more_result`` is true
+    and stop when it is false, even if ``next_page_token`` remains populated.
     """
     envelope["next_page_token"] = payload.get("nextPageToken")
     envelope["more_result"] = bool(payload.get("moreResult", False))
@@ -480,6 +537,92 @@ def _batch_envelope(payload: dict[str, Any]) -> dict[str, Any]:
         status = entry.get("status", "unknown") if isinstance(entry, dict) else "unknown"
         tallies[status] = tallies.get(status, 0) + 1
     return {"results": results, "row_count": len(results), "tallies": tallies}
+
+
+def _require_lead_records(params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return validated lead-record objects with their value types preserved."""
+    records = _require_list(params, "records", max_len=MAX_BATCH_RECORDS)
+    if any(not isinstance(record, dict) or not record for record in records):
+        raise ValueError("every entry in 'records' must be a non-empty object")
+    return records
+
+
+def _optional_lookup_field(params: dict[str, Any]) -> str | None:
+    """Validate the optional lookup field; omission selects Marketo's email default."""
+    lookup_field = params.get("lookup_field")
+    if lookup_field is None:
+        return None
+    if isinstance(lookup_field, str) and (normalized := lookup_field.strip()):
+        return normalized
+    raise ValueError("'lookup_field' must be a non-empty string if provided")
+
+
+def _refuse_read_only_lead_fields(
+    client: Any,
+    records: list[dict[str, Any]],
+    effective_lookup_field: str,
+) -> None:
+    """Refuse intended read-only writes while allowing keys and default-read echoes."""
+    read_only_fields = _read_only_rest_field_names(client)
+    key_fields = {effective_lookup_field, LEAD_ID_FIELD}
+    echoed_read_only_fields = read_only_fields & (GET_LEADS_DEFAULT_FIELDS - key_fields)
+    excluded_fields = key_fields | echoed_read_only_fields
+    offending_records: dict[str, list[int]] = {}
+    for record_number, record in enumerate(records, start=1):
+        for field_name in record:
+            if field_name in read_only_fields and field_name not in excluded_fields:
+                offending_records.setdefault(field_name, []).append(record_number)
+    if not offending_records:
+        return
+    details = "; ".join(
+        f"{field_name} (records {', '.join(str(number) for number in offending_records[field_name])})"
+        for field_name in sorted(offending_records)
+    )
+    raise ValueError(
+        "Marketo REST read-only fields cannot be written: "
+        f"{details}. Remove every listed field and retry; no write was attempted."
+    )
+
+
+def _read_only_rest_field_names(client: Any) -> set[str]:
+    """Read one describe page and return fields explicitly marked REST read-only.
+
+    Missing ``rest`` or ``rest.readOnly`` metadata is deliberately treated as
+    writable: absence is not evidence that Marketo will refuse the field.
+    Present-but-malformed metadata still fails loudly.
+    """
+    payload = client.get_json(LEADS_DESCRIBE_PATH)
+    fields = payload.get("result")
+    if not isinstance(fields, list):
+        raise ValueError("Marketo describe response omitted the lead field list")
+    read_only_fields: set[str] = set()
+    for entry in fields:
+        field_name = _read_only_rest_field_name(entry)
+        if field_name is not None:
+            read_only_fields.add(field_name)
+    return read_only_fields
+
+
+def _read_only_rest_field_name(entry: Any) -> str | None:
+    """Validate one describe entry and return its read-only REST name, if any."""
+    if not isinstance(entry, dict):
+        raise ValueError("Marketo describe response contained a non-object field entry")
+    rest = entry.get("rest")
+    if rest is None:
+        return None
+    if not isinstance(rest, dict):
+        raise ValueError("Marketo describe response contained malformed REST field metadata")
+    read_only = rest.get("readOnly")
+    if read_only is None:
+        return None
+    if not isinstance(read_only, bool):
+        raise ValueError("Marketo describe response contained a non-boolean rest.readOnly marker")
+    if not read_only:
+        return None
+    field_name = rest.get("name")
+    if not isinstance(field_name, str) or not field_name:
+        raise ValueError("Marketo describe response marked an unnamed REST field read-only")
+    return field_name
 
 
 def _require_str(params: dict[str, Any], key: str) -> str:

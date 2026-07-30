@@ -925,6 +925,64 @@ plugins/github_midwife_plugin/tests/router_install_smoke.py
 # genesis_integration_smoke. Offline (tmpfs dirs only).
 plugins/github_midwife_plugin/tests/command_launcher_smoke.py
 
+# github_midwife_plugin coordination-hooks SHIPPING gate (2026-07-29,
+# Git-Controller) — the Git-Controller gate exists in two copies and only the
+# PLUGIN one ships: `.claude/` is absent from seed_manifest.yaml's `copy:` while
+# github_midwife_plugin is always resolved into select_plugins (BORNABLE), so
+# every seed and the enterprise plugin review carry
+# claude_plugin/coordination-hooks/hooks/git_controller_gate.py while the
+# 142-check suite covered only the local `.claude/hooks/` twin. This is a DRIVER,
+# not a forked copy: it re-runs `.claude/hooks/tests/git_controller_gate_smoke.py`
+# with GATE_SMOKE_HOOK_DIR pointed at the plugin's hooks/, so the assertions can
+# never drift between the two copies. It adds the two PER-COPY bindings the
+# shared cases are structurally blind to — the env-var literal
+# (`GIT_CONTROLLER_NAME` shipped vs `HOMUNCULUS_GIT_CONTROLLER_NAME` local; the
+# shared cases read gate.GIT_CONTROLLER_ENV and so pass whatever it holds, and
+# the gate is fail-OPEN when unset, making a rename a silent disable) and the
+# operator-facing authority noun ("controller" shipped vs "Coordinator" local).
+# Both gate env names are scrubbed from the child env — an inherited value would
+# let a gate-OFF case run against a live gate and still report PASS. Preflight
+# fails loud if either the shared smoke or a shipped sibling module is absent,
+# so a moved file can never read as a vacuous pass. Offline (tmpfs dirs only).
+plugins/github_midwife_plugin/tests/coordination_hooks_gate_smoke.py
+
+# github_midwife_plugin coordination-hooks SECURITY-CLAIM suite (2026-07-29,
+# Coordinator-Day) — the plugin goes to corporate security review as a
+# standalone directory, and SECURITY.md is the document that IS that review. It
+# makes ~10 falsifiable claims and, before this suite, nothing verified any of
+# them: the word "test" did not appear in it. The drift is not hypothetical —
+# adding a fifth hook falsified its "fixed string literal" claim and its hook
+# counts (fixed by hand in 92f41b774), and plugin.json's description had
+# silently omitted wake_waiter.js before that.
+#
+# UNLIKE every other entry here, these three live INSIDE the plugin
+# (claude_plugin/coordination-hooks/tests/) rather than in the plugin's tests/
+# dir, because the reviewed artifact must carry its own evidence: `cd
+# coordination-hooks && python3 tests/run_all.py` is verified green on macOS's
+# own python3 3.9.6, under `env -i`, outside any git repo, creating no file
+# inside the artifact. Nothing in them resolves a path outside the plugin, and
+# manifest_consistency_smoke.py asserts that so it cannot regress. `**/tests/`
+# is a categorical seed prune, so seeds still ship the plugin without them —
+# reviewed is a superset of shipped, which is the safe direction.
+#
+# No pytest and no npm: a test framework inside the artifact would contradict
+# the stdlib-only supply-chain claim these very tests defend. The harness is
+# stdlib Python driving the Node hooks as subprocesses — the same contract
+# Claude Code uses, and the only contract the Node hooks have (they export
+# nothing). Child environments are built explicitly, never inherited, so a
+# "disarmed" case cannot silently run against a hook the launcher already armed.
+#
+# Every check was mutation-verified: 17 deliberate defects (relayed child
+# output, propagated nonzero exit, raw-label concatenation, inline shell in the
+# manifest, added network import, second subprocess, third-party require,
+# count drift, undocumented sixth hook, ...) each turn the relevant smoke red.
+# That pass found a real hole — capturing the child's streams via `stdio: pipe`
+# falsifies "dropped unread" while leaking nothing observable, so the "unread"
+# claim needed a source-level check, not a black-box one. Offline (tmpfs only).
+plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py
+plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py
+plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py
+
 # jira_plugin (Lane C of the Enterprise Connector Suite, 2026-07-09, Claude-C) —
 # hermetic connector smokes (faked address_book_service, faked JIRA client +
 # JIRAError, in-memory ProcessExportPolicy; no network/credentials). Each smoke

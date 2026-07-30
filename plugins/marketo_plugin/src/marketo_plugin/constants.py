@@ -159,6 +159,19 @@ LEAD_ACTIONS: Final[frozenset[str]] = frozenset(
     {"createOrUpdate", "createOnly", "updateOnly", "createDuplicate"}
 )
 DEFAULT_LEAD_ACTION: Final[str] = "createOrUpdate"
+# Adobe's Sync Leads contract defaults an omitted lookupField to email and
+# describes id as the system-managed unique key. Both are identifiers rather
+# than intended write targets for the read-only-field preflight.
+DEFAULT_LEAD_LOOKUP_FIELD: Final[str] = "email"
+LEAD_ID_FIELD: Final[str] = "id"
+# Adobe's Get Leads documentation says these six fields are returned when the
+# caller omits ``fields``. Evidence class: documented, not measured. Membership
+# here does not claim that Marketo marks any field REST read-only; the live
+# describe response remains the authority for that separate property.
+GET_LEADS_DEFAULT_FIELDS: Final[frozenset[str]] = frozenset(
+    {"id", "email", "updatedAt", "createdAt", "firstName", "lastName"}
+)
+LEADS_DESCRIBE_PATH: Final[str] = "/rest/v1/leads/describe.json"
 
 # ---------------------------------------------------------------------------
 # Error codes (marketo.* prefix — surfaced to callers of the verbs)

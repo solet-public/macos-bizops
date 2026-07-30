@@ -181,6 +181,56 @@ mistakes, not malice.
   ever produced are the interpreter's own `__pycache__` byte-code artifacts
   disclosed above, which the plugin never reads).
 
+## Verification — running the claims on this page
+
+The claims above are executable. From this directory, on any machine with the
+`node` and `python3` the plugin already requires:
+
+```
+python3 tests/run_all.py
+```
+
+No repository, no network, no configuration, and no environment variables are
+needed; the suite creates nothing outside a temporary directory it removes.
+
+**Where the suite is present.** `tests/` accompanies the review and development
+copies of this plugin. Distribution builds prune every `tests/` directory, so a
+plugin installed from a distribution will not contain it and the paths cited
+below will be absent there — the shipped hooks are byte-identical either way,
+with the test files simply not carried. To verify a distributed copy, take the
+suite from the plugin's source repository and run it against that copy.
+It adds no dependency the plugin does not already have — the harness is Python
+standard library and drives the Node hooks as processes, exactly as Claude Code
+invokes them.
+
+| Claim on this page | Where it is proved |
+|---|---|
+| Exactly one subprocess exists in the plugin | `tests/manifest_consistency_smoke.py` |
+| No network I/O in any hook | `tests/manifest_consistency_smoke.py` |
+| No hook writes a file as an action of its own | `tests/manifest_consistency_smoke.py` and `tests/wake_waiter_smoke.py` |
+| Supply chain is stdlib/built-ins only | `tests/manifest_consistency_smoke.py` |
+| `hooks.json` is exec-form with no shell in the invocation path | `tests/manifest_consistency_smoke.py` |
+| The hook inventory on this page matches the tree | `tests/manifest_consistency_smoke.py` |
+| Injected context is a fixed literal, with `AGENT_SESSION_LABEL` the one exception | `tests/reminder_hooks_smoke.py` |
+| That one interpolated value is JSON-escaped and cannot restructure the output | `tests/reminder_hooks_smoke.py` |
+| Reminders are default-off and degrade to a silent no-op | `tests/reminder_hooks_smoke.py` |
+| Reminders can never block a session (never exit 2) | `tests/reminder_hooks_smoke.py` |
+| The wake waiter discards the child's output unread | `tests/manifest_consistency_smoke.py` and `tests/wake_waiter_smoke.py` |
+| The wake waiter conveys exactly one bit, via a compiled-in nudge | `tests/wake_waiter_smoke.py` |
+| The wake waiter's argv is fixed, with no shell | `tests/manifest_consistency_smoke.py` |
+| A broken wake path never traps the session | `tests/wake_waiter_smoke.py` |
+| Every hook is default-off behind its environment guard | `tests/reminder_hooks_smoke.py` and `tests/wake_waiter_smoke.py` |
+
+Two limits, stated so the coverage is not read as wider than it is:
+
+- The no-network, no-file-write, one-subprocess and supply-chain checks are
+  **source-level**: they prove the code never names the primitive, which is what
+  makes those claims auditable by reading. They are not a syscall trace.
+- The git-mutation guard's own behaviour (which commands it blocks) is covered
+  by a separate 143-case suite that currently lives in the repository this
+  plugin is developed in, not in this directory. The tests here cover its
+  registration, its imports, and its documentation — not its blocking rules.
+
 ## Supply chain
 
 The reminders are plain Node scripts; the gate is stdlib-only Python. No
