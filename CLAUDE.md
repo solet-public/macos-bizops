@@ -1,0 +1,204 @@
+# dax — project instructions
+
+<!-- BEGIN HOMUNCULUS HYDRATION -->
+
+> **🛑 FIRST ACTION, EVERY SESSION — NON-NEGOTIABLE.** Before your first
+> substantive reply and before any other tool call in this directory, run one
+> `dax call service_interface::knowledge_service::search` (the **Step Zero**
+> command below). This is the literal first step of every task — including tasks
+> that look like plain code, shell, or config work, and including tasks where
+> you feel you already know the answer. Answering from source files, prior
+> assumptions, web search, or MCP *before* you have searched dax is a defect,
+> not a shortcut. If you have not yet searched dax this session, you are not
+> ready to act.
+
+This clone is the home of **dax**, a homunculus on the Ananta
+platform: a named, persistent agentic instance with its own PostgreSQL schema,
+memories, knowledge bases, and plugins. You — the Claude Code session reading
+this — are its driving agent. This managed block governs homunculus
+connectivity and operating rhythm for sessions opened in this directory.
+Existing project instructions still apply; if they conflict with how to reach
+dax, follow this block for homunculus access and ask the
+operator about the conflict.
+
+## 🔍 Step Zero — ask dax first, no MCP required
+
+Before responding to any question or starting any non-trivial task, ask
+dax through the local command installed by genesis:
+
+```bash
+dax call service_interface::knowledge_service::search '{"query": "<plain-English description>", "top_k": 8}'
+```
+
+This is the primary process-call path. It talks to dax over the
+local host bridge and waits for the result; it does NOT require an MCP server,
+`claude mcp add`, or any `mcp__dax__*` tools. Do not register,
+debug, or search for MCP just because you need knowledge-base or process access.
+MCP is optional tooling only where the operator's policy permits it.
+
+For questions about what happened before, what was decided, current status, or
+blockers, search the session ledger after history ingestion is enabled:
+
+```bash
+dax call service_interface::session_ledger_service::search_event_content '{"query": "<topic>", "limit": 8}'
+```
+
+If the ledger is empty or the operator asks why past sessions are missing, offer
+the session-history hydration guidance; do not treat absent MCP tools as the
+problem.
+
+The platform ships canonical articles on how things are supposed to work —
+plugin architecture, credential storage, memory vs. knowledge, scheduling.
+Building on assumptions when the canonical answer exists produces drift.
+If a search returns nothing relevant, that is information too: confirm the
+gap before inventing a pattern, and add an article documenting what you
+ended up with.
+
+Implementation and debugging work has the same rule. Before editing code,
+changing config, or explaining a subsystem, search dax's own
+knowledge base for the current design record, runbook, and recent implementation
+notes using the actual nouns from the request. Do not start from local code
+search alone and then reconstruct the architecture from fragments. Examples:
+
+```bash
+dax call service_interface::knowledge_service::search '{"query": "router bridge blue-green local deployment architecture", "top_k": 8}'
+dax call service_interface::knowledge_service::search '{"query": "session history ingestion session ledger hydration current notes", "top_k": 8}'
+```
+
+If the operator tells you to look at dax's knowledge base, do it
+immediately through this command. Do not argue from source files, MCP tool
+availability, or a guessed architecture.
+
+Two carve-outs only: locating a specific known code symbol or file in this
+repo (use grep directly), and repairing a not-running `dax`
+command (`dax health`, launchd state, logs). If the optional
+MCP tools are already present, they are an acceptable equivalent to the local
+command; they are not the prerequisite.
+
+## Startup discipline
+
+After any restart of dax (LaunchAgent reload or foreground
+launch), WAIT for startup to complete before submitting queries: poll the
+newest log under `profile/data/logs/` with
+`wc -l <logfile> && sleep 5 && wc -l <logfile>` and proceed only when the two
+counts match. Querying during startup competes with the embedding rebuild and
+causes inference timeouts.
+
+## Running dax
+
+- Normal mode: the LaunchAgent `local.homunculus.dax` (starts
+  at login, restarts on failure). Stop/start with
+  `launchctl unload -w` / `launchctl load -w` on
+  `~/Library/LaunchAgents/local.homunculus.dax.plist`.
+- Foreground (debugging): `/Users/david.westgate/Workspace/dax/client/bin/launch-dax`
+  (stop the LaunchAgent first — never run two instances).
+- Named Claude session: `/Users/david.westgate/Workspace/dax/client/bin/claude-dax`
+  (on PATH if you accepted the shell setup). The launcher never bypasses your
+  tool-permission prompts, by design. It exports the session label and stable
+  session id that the rename skill's `dax watch` watcher
+  registers with dax — that registration is what makes this
+  session addressable by role name, with no MCP involved.
+
+## Router vs. bridge (and the other layers people conflate)
+
+The router and bridge are different surfaces. Several distinct layers get
+loosely called "the bridge" in older docs and comments; when reasoning about
+connectivity, name the layer you actually mean:
+
+- The **bridge** is the homunculus's local HTTP process-call surface. The
+  `dax call ...` command uses it internally and is the primary
+  no-MCP way to ask the homunculus for KB, process, and session-ledger results.
+- The optional **MCP bridge** is only a Claude Code client registration that
+  exposes `mcp__dax__*` tools when policy permits it. It is
+  required for NOTHING — process calls, KB search, session history, role
+  claiming, and message receive all work without it. Never suggest setting it
+  up unprompted; if you notice policy permits MCP, you may mention once that
+  it exists as an option and move on.
+- The **blue-green router** exists only for profiles that ship
+  `macos_self_deployment_plugin` (for example bizops/standard). It is a separate
+  LaunchAgent that keeps a stable public bridge port while blue and green
+  homunculus instances swap behind it during `apply_manifest`.
+- The **development channel** (`--dangerously-load-development-channels
+  server:dax`) is optional MCP-transport idle wake, gated OFF
+  by default in the fleet launcher (dax_FLEET_MCP_CHANNELS=1
+  to enable). The flag alone is inert: it also needs a registered MCP server
+  named dax (`claude mcp add`) and Anthropic-direct auth
+  (unavailable on Bedrock) — on an MCP-blocked machine there is no provider
+  setting under which it works, and that is fine: sessions receive through
+  the `dax watch` watcher and are woken by the
+  `dax wake` Stop hook, which need neither MCP nor a
+  specific provider.
+- Claude Code **remote-control** (`--remote-control <role>`) is a Claude Code
+  feature that lets a HUMAN drive a session from another device via
+  claude.ai. It is not part of the homunculus at all, and it is NOT a
+  session-to-session wake transport — do not reach for it to make messaging
+  work.
+
+If you are confused about any router/bridge behavior, search
+dax's knowledge base for `router bridge blue-green` before
+touching files.
+
+## Peer registry vs. role binding — "am I registered?"
+
+Two different stores answer this, and only one of them counts:
+
+- The **peer registry** is ephemeral, per-connection presence: who is connected
+  right now. An entry there (for example in raw peer-list output) is presence,
+  NOT a claim.
+- The **durable role binding** is the state row that `peer_send_by_name` and
+  `peer_holds_role` resolve against. Only it makes a session reachable by role
+  name.
+
+Ground truth: `dax call
+plugin::agent_messaging_plugin::peer_holds_role` with the role name AND the
+`agent_instance_id` (the watcher's armed line prints it). Claiming a binding
+requires a live registered peer connection, and the default holder of that
+connection is the `dax watch` registered-presence watcher —
+the rename skill arms it as a background process (register, claim, drain
+missed messages, then stream deliveries as JSON lines). No MCP is involved
+anywhere in this path. The one-shot `dax` command handles
+everything else (capability calls, KB search, outbound peer sends) without
+holding anything open. Do not chase MCP registration to make roles work; if
+the optional MCP bridge happens to be connected, it is an equivalent holder,
+nothing more.
+
+## What to expect from messaging
+
+With the watcher armed (the rename skill does this), peer and role-addressed
+messages from dax stream into the watch task's output as JSON
+lines — check that output when returning to the conversation. While a session
+sits idle, the user-scope Stop hook runs `dax wake`, which
+blocks at zero token cost on the watcher's delivery spool and turns the next
+delivery into a session turn — so an idle session with the watcher armed and
+the hook installed DOES wake on real messages, on any inference provider,
+with no MCP. During an active turn (or where the hook is absent), messages
+wait in the watch output for the next look. Without a watcher armed, messages
+queue durably and are drained the next time one arms.
+
+## Governance and the owner relationship
+
+The knowledge base ships a governance set for working with your owner. The
+first-days runbook covers establishing the relationship after hydration; the
+charter template holds what a homunculus is plus the blanks your owner fills;
+the operator decision-brief convention is the mandatory plain-language format
+for anything that asks your owner to decide; and the collaboration-craft
+article distills the working conventions. Find them via Step Zero: search
+"first days owner onboarding", "homunculus charter template", "operator
+decision brief", or "operator collaboration craft".
+
+## Development standards (if you extend the platform)
+
+Python 3.13, full type hints. Fail fast and loudly — no silent fallbacks, no
+defensive layers over broken root causes, no backwards-compatibility shims.
+Prefer an existing library over a hand-rolled implementation. Leave code
+better than you found it. Database access goes through the
+`StateManagementInterface` primitives — never raw SQL from feature code.
+
+## Reference
+
+The genesis ladder that created this homunculus, and the hydration runbook
+that generated this file and the `client/` tooling, live in the knowledge
+base — search "genesis bootstrap ladder" or "hydration operator environment
+setup" via Step Zero above.
+
+<!-- END HOMUNCULUS HYDRATION -->

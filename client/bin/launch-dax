@@ -1,0 +1,18 @@
+#!/bin/zsh
+# launch-dax — run dax in the FOREGROUND.
+#
+# This is the debugging path. Normal operation is the LaunchAgent
+# (label: local.homunculus.dax), which starts the homunculus
+# at login and restarts it on failure. To avoid running two instances,
+# stop the LaunchAgent first:
+#   launchctl unload -w ~/Library/LaunchAgents/local.homunculus.dax.plist
+# and re-enable it when done:
+#   launchctl load -w ~/Library/LaunchAgents/local.homunculus.dax.plist
+#
+# After any start, wait for startup to finish before sending queries: poll the
+# newest log under /Users/david.westgate/Workspace/dax/profile/data/logs/ with
+#   wc -l <logfile> && sleep 5 && wc -l <logfile>
+# and proceed only when the two counts match.
+
+exec env HOMUNCULUS_NAME=dax \
+  "/Users/david.westgate/Workspace/dax/.venv/bin/python3" -m ananta.cli --app-home "/Users/david.westgate/Workspace/dax/profile"
