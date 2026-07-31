@@ -18,8 +18,8 @@ exit contract:
 
 Because it is a shell hook and not an inference channel, it is
 provider-agnostic: it works identically on Anthropic-direct and Bedrock, on
-machines where MCP is policy-blocked (the enterprise posture Dax Part 16
-documented).
+machines where MCP is policy-blocked (an enterprise posture documented against
+a live deployment).
 """
 
 from __future__ import annotations

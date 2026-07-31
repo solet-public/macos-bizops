@@ -28,6 +28,62 @@ merges (not an arbitrary choice made here). Marketo's own 1080 error code
 (server-enforced batch-size limit, effective 2026-03-31) backstops the
 client-side cap.
 
+Field precedence has a measured read-only exception that Adobe's general
+merge documentation does not disclose. Writable fields normally keep a
+present winner value and may fill a null winner from the first eligible losing
+record. Read-only fields instead keep the winning record's value, including an
+empty one, and are never populated from a losing record. Do not rely on
+Adobe's general "some value is better than no value" rule for a read-only
+field; it predicts the opposite of observed Marketo behavior.
+
+## Budgeting a batch — `get_api_usage`
+
+`get_api_usage` reads Marketo's current-day subscription usage summary from
+`/rest/v1/stats/usage.json` and returns `calls_today` plus the per-API-user
+breakdown. Use it before and during high-volume work so the local runner's own
+counter is reconciled with calls made by other integrations. The endpoint
+reports consumption, not the account's purchased quota limit: compare
+`calls_today` against an operator-confirmed quota and retain headroom for
+concurrent production integrations.
+
+## Discovering query filters — `describe_lead_fields.searchable_fields`
+
+`describe_lead_fields` returns both the field descriptors and the configured
+instance's `searchable_fields`. Those names are the source of truth for
+`get_leads.filter_type`, including eligible custom fields; the plugin forwards
+the selected name and lets Marketo validate it. Do not constrain a caller to a
+static cross-instance list when the describe response exposes the real
+instance-specific contract.
+
+## Paging contracts differ by verb — do not generalize
+
+The four paged reads do not share one safe raw continuation signal:
+
+- `get_leads`: a non-empty `next_page_token` is authoritative. The plugin
+  normalizes `more_result` from token presence because Marketo can return a
+  usable token with raw `moreResult: false`.
+- `list_campaigns`: a non-empty `next_page_token` is authoritative for the
+  same reason. Keep paging until no token is returned.
+- `list_static_lists`: a non-empty `next_page_token` is authoritative. Keep
+  paging until no token is returned.
+- `get_activities`: `more_result` is authoritative. Its
+  `next_page_token` is a resumable bookmark that can remain populated on the
+  last page, so token presence alone would make paging never terminate.
+
+This boundary is deliberate. A generic rule such as "always trust
+`more_result`" truncates lead/campaign/list enumeration, while "always trust
+the token" loops forever on the activity stream.
+
+**The asymmetry is OUR design decision, and the two sides do not rest on the
+same evidence.** The token-authoritative side is backed by a live measurement:
+`more_result` was observed reporting false on a full 300-record
+`list_campaigns` page that still returned a usable token. The
+activity side rests on Adobe's documented "this endpoint always returns
+`nextPageToken`" plus one narrow live read, so calling `more_result`
+"authoritative" there states what a caller must key off, not a verified
+property of the vendor. Its reliability on `get_activities` is
+**UNVERIFIED** — see the evidence classes in the traps below.
+
 ## Verifying what a write actually DID — `get_activities`
 
 `merge_leads`, `delete_leads` and `create_or_update_leads` can fire smart
@@ -40,9 +96,10 @@ side effect of a data-cleanup operation.
 anybody?" — it reads the Marketo activity log (emails sent/delivered, alerts,
 sales emails, interesting moments, campaign requests, data value changes)
 either from an ISO-8601 instant (`since_datetime`, which mints a paging token)
-or by continuing a prior page (`next_page_token`). `lead_ids` (max 30) and
-`activity_type_ids` (max 10) filter server-side; both caps are Marketo's own
-and are enforced in-plugin rather than left to a server-side error.
+or by continuing a prior page (`next_page_token`). `activity_type_ids` is
+mandatory on every page and accepts 1-10 ids; `lead_ids` is optional with a
+maximum of 30. Both caps are Marketo's own and are enforced in-plugin rather
+than left to a server-side error.
 
 **What this verb does NOT do — state this plainly to an operator who asks for
 assurance.** It is an AFTER-THE-FACT audit. It reports what already happened;
@@ -53,30 +110,53 @@ workflow is: run one merge on a single sacrificial pair, then read
 appeared. A clean activity log for one pair is evidence about that pair, not a
 guarantee about the remaining batch.
 
-Two traps worth knowing:
+Three traps worth knowing:
 
-- **`more_result: true` means KEEP PAGING, even when `records` is empty.**
-  Marketo streams activities in ~300-item pages and an empty page mid-stream is
-  normal. Never report "nothing happened" from a partial read — drain the token
-  chain until `more_result` is false.
-- **Activity type ids are not guaranteed identical across subscriptions.** The
-  ids commonly cited for the notifying activities (6 Send Email, 7 Email
-  Delivered, 38 Send Alert, 39 Send Sales Email, 46 Interesting Moment, 47
-  Request Campaign, 42/44 SFDC campaign add/status change) are recorded in
-  `constants.py` as a STARTING POINT and are explicitly marked unverified — no
-  verb applies them as a silent default. For an answer that has to be
-  defensible, read `GET /rest/v1/activities/types.json` on the actual instance
-  and use its ids.
+- **`more_result` is the authoritative activity continuation signal.**
+  `more_result: true` means KEEP PAGING, even when `records` is empty. Marketo
+  streams activities in ~300-item pages and an empty page mid-stream is normal.
+  Never report "nothing happened" from a partial read — continue until
+  `more_result` is false.
+
+  **Name the evidence class before repeating the word "authoritative."** Three
+  distinct claims sit behind it, and only two are observations:
+
+  | Claim | Evidence class |
+  |---|---|
+  | The flag does not under-report at END OF STREAM | **Measured** — 2026-07-30, one live instance, ONE one-hour window paged to termination twice under two type filters 21 seconds apart. That is one sample measured twice, not two independent runs; the near-identical row totals follow from the shared window rather than replicating each other. Both terminations landed on a SHORT page, and a probe issued past the terminal token returned nothing. |
+  | The flag does not under-report MID-STREAM | **No observation at all.** The truncating mode is the flag going false on a FULL page with another page behind the returned token — the shape actually seen on `list_campaigns`. It never occurred in that read, so it is UNEXERCISED, not refuted. |
+  | A page can carry fewer than 300 items while the flag is still true | **Documented** by Adobe, unobserved in that read (no short page appeared while `more_result` was true). Ten pages is not a sample and does not refute the vendor's statement — keep tolerating a short mid-stream page. |
+
+  So the defensible summary is: no evidence the flag lies at end of stream, on
+  one hour of one instance's traffic, and nothing at all about the mid-stream
+  case, under load, or across a campaign send. It remains UNVERIFIED that
+  `more_result` is reliable on activities. Do not let the measurement retire
+  the hedge — there is no fallback signal here, so a lying flag truncates the
+  read silently.
+- **The activity token is a resumable bookmark, not proof of another page.**
+  Marketo can return `next_page_token` on the final page too. Stop when
+  `more_result` becomes false even if the token remains populated.
+- **Activity type ids are not guaranteed identical across subscriptions.**
+  Call `list_activity_types` on the configured instance and pass only ids it
+  returns. The vendor behavior that makes this load-bearing was measured
+  against a live instance on 2026-07-29: **one invalid id rejects the ENTIRE
+  request**, not just the offending id, so a single stale id taken from
+  another subscription's catalog fails the whole read. `constants.py` retains
+  a starting-point id table and no verb applies it as a silent default. Which
+  ids a given subscription accepts is a property of that instance, so it is
+  not recorded here.
 
 ## Enumerating campaigns and lists — paging is not optional
 
 `list_campaigns` and `list_static_lists` return one Marketo page (300 records)
-per call. Both now surface `next_page_token` and `more_result` verbatim from
-the response. **If `more_result` is true the result is an arbitrary slice, not
-the full set** — an instance with 19,919 campaigns will otherwise hand back 300
-of them, and repeat calls can return DIFFERENT 300s, which reads as data rather
-than as truncation. Any question of the form "which active trigger campaigns
-could this write fire?" requires draining the token chain first.
+per call. Both surface `next_page_token` and normalize `more_result` from
+whether that token is non-empty; the token is authoritative because Marketo's
+raw flag can say false while another page exists. **If `more_result` is true
+the result is an arbitrary slice, not the full set** — an instance holding tens
+of thousands of campaigns will otherwise hand back 300 of them, and repeat
+calls can return DIFFERENT 300s, which reads as data rather than as truncation. Any question of
+the form "which active trigger campaigns could this write fire?" requires
+draining the token chain first.
 
 ## Setup verification — `check_setup`, and the Role/User/Service prerequisite
 
@@ -92,8 +172,9 @@ agent-blind secret-ingestion procedure): `knowledge_base/hydration_guidance.md`.
 Because "does the Role have the right permissions" can't be answered just by
 minting a token (`test_connection` only proves the credentials are valid,
 not what they can do), this plugin ships a second diagnostic verb,
-`check_setup`, that runs four safe read-only probes
-(`describe_lead_fields`, `get_leads`, `list_campaigns`, `list_static_lists`)
+`check_setup`, that runs six safe read-only probes
+(`describe_lead_fields`, `get_leads`, `list_activity_types`, `get_api_usage`,
+`list_campaigns`, `list_static_lists`)
 and reports, per probe, either `ok` or the exact missing Access API
 permission plus which admin screen fixes it. It is **read-only and
 side-effect-free by construction** — it never calls a write/execute verb, so
@@ -104,6 +185,19 @@ write/execute permissions (`create_or_update_leads`, `delete_leads`,
 `trigger_campaign`) are listed in `writes_unverified` and can only be
 confirmed by first real use — a missing one surfaces as
 `marketo.permission_denied` naming the gap.
+
+**`reads_verified` is partial in a second, less obvious way: an entire
+ENTITLEMENT CLASS is out of its reach.** Marketo gates the asset surface
+(`/rest/asset/v1/…` — programs, emails, landing pages, templates) behind a
+separate **Read-Only Asset** entitlement that is independent of the Access API
+permissions the six probes exercise. All six probes are Lead-API reads, so an
+instance can return `reads_verified: true` while holding no asset entitlement
+at all. There is no cheap API-side probe for it either: with no asset verb in
+this plugin there is nothing to 403, and the answer lives on an operator screen
+(Admin → Users & Roles), not in an API response. State it as **a requirement a
+consumer verifies before depending on it, never as an assurance from us** — if
+an asset verb is ever added, the gap surfaces as a 403 at first real use rather
+than at setup, which is the failure mode `check_setup` exists to prevent.
 
 ## Error model — envelope-first, not HTTP-status-first (the key divergence from zuora_plugin)
 
@@ -139,6 +233,58 @@ normal batch-operation data, not a plugin-level fault. Only a top-level
 `success: false` envelope (a structural fault — bad batch shape, auth,
 access) raises and gets classified.
 
+Before `create_or_update_leads` writes, it reads this instance's lead-field
+metadata once and refuses the whole batch when an intended field is marked
+REST read-only. Read-modify-write is the deliberate exception: Adobe
+documents that an omitted Get Leads `fields` parameter returns exactly
+`id`, `email`, `updatedAt`, `createdAt`, `firstName`, and `lastName`, so the
+plugin treats the intersection of that explicit default set and this
+instance's live `readOnly` metadata as echoed read output rather than an
+intended write. The six-field set has **documented, not measured**
+provenance and does not assert which members Marketo marks read-only; the
+describe response supplies that separate property at execution time.
+
+A live describe on 2026-07-30 settled three things about that mechanism. The
+preflight must key off each descriptor's **`rest.readOnly`**: the fields whose
+read-only status actually blocks a read-modify-write were observed carrying a
+`rest` block and **no `soap` sub-object at all**, so a preflight falling back
+to `soap` would find nothing exactly where the answer matters. The intersection
+was **non-empty** on that instance, so the exclusion is load-bearing rather
+than a no-op — without it every read-modify-write there would have refused.
+And **`id` came back `readOnly: false`, i.e. writable**, which retires the
+worry that using the bare `id` as a lookup key could brick a write on a
+read-only field. Which fields are read-only remains a property of the instance,
+computed as a runtime intersection against its live describe; it is deliberately
+**not encoded** as a list here or in `constants.py`.
+
+This exception has an accepted silent-drop residue. Default echoes are
+excluded only from the refusal; they remain in the outbound record. If a
+caller genuinely means to write one that the instance marks read-only,
+Marketo may silently ignore it while returning `status: "updated"` and no
+`reasons[]`. Treat those fields as vendor-controlled, strip unchanged
+default echoes from deliberate write payloads where practical, and verify
+the writable fields that matter instead of treating an updated tally as
+proof that every submitted field applied.
+
+### Per-record rejection evidence — inspect `results`, not only `tallies`
+
+Live-instance trials on 2026-07-30 exposed two materially different field
+failure modes in Marketo's own Sync Lead response:
+
+| Submitted record | Vendor result | Observed mutation |
+|---|---|---|
+| Read-only field plus writable field(s) | `status: "updated"`; no `reasons[]` entry for the read-only field | Writable fields applied and `updatedAt` moved; the read-only field was silently dropped. |
+| One unknown field name plus one writable field | `status: "skipped"` with `reasons: [{"code": "1006", "message": "Field '<name>' not found"}]` | The entire record was discarded: the valid field did not apply and `updatedAt` did not move. |
+
+The asymmetry is the trap: Marketo uses `reasons[]` for an unknown field but
+leaves it silent for a read-only one. The plugin preserves each vendor result
+verbatim and computes `tallies` only as a status-count summary; it does not
+normalize or synthesize reasons. A caller must therefore inspect every
+per-record `status` and its `reasons[]`. When one record is `skipped` for code
+1006, treat every field in that record as unapplied, correct the field name,
+and resend the record. A tally such as `{"updated": 9, "skipped": 1}` cannot
+identify the skipped record or explain why it was discarded.
+
 ## Session model — re-mintable bearer, in-memory only, envelope-triggered re-mint
 
 The OAuth `client_secret` is the durable credential (chain-consumed through
@@ -165,6 +311,8 @@ existing one's Role turns out to be missing a permission `check_setup` names.
    **Access API** permission tree, check:
    - `Read-Write Person` — covers lead read/write AND static-list membership
      add/remove (one permission gates both, per Marketo's own docs).
+   - `Read-Only Activity` — covers the activity type catalog and activity log
+     reads.
    - `Read-Only Campaign` (campaign listing; use `Read-Write Campaign` instead
      if campaign edits are wanted later — this plugin never writes one).
    - `Execute Campaign` (required for `trigger_campaign` to actually fire).
@@ -245,5 +393,5 @@ silent for this plugin — no allowlist entry needed anywhere in `src/` or
 | `src/marketo_plugin/app_config.py` | Resolves `marketo_instance` from the address book; the client_secret is chain-consumed. |
 | `src/marketo_plugin/http_client.py` | `MarketoClient` — synchronous httpx client with cached, envelope-triggered re-mintable bearer auth (client-credentials grant, GET-based token mint). |
 | `src/marketo_plugin/errors.py` | Envelope-first error classification (`classify_marketo_envelope`) from the response body's `errors[]` list. |
-| `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `get_activities`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup`. |
+| `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `get_api_usage`, `list_activity_types`, `get_activities`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup`. |
 | `src/marketo_plugin/plugin.py` | The `MarketoPlugin` EDGE provider — client lifecycle, error mapping, EDGE registration. |

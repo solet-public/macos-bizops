@@ -138,7 +138,8 @@ class MarketoClient:
             # query parameter — which is exactly the shape of
             # /leads/{id}/merge.json. httpx sets Content-Type only when it
             # serialises a json= body, and nothing else here sets a default, so
-            # without this merge_leads fails 100% of the time (Dax Part 21).
+            # without this merge_leads fails 100% of the time (field-verified
+            # against a live instance).
             # Set at the CLASS level rather than in the one verb so any future
             # body-less write inherits the fix instead of rediscovering the bug.
             headers["Content-Type"] = MIME_JSON

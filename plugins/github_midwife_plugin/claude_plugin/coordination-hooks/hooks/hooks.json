@@ -1,5 +1,5 @@
 {
-  "description": "Coordination hooks: KB-first reminder, check-your-messages reminder, an opt-in idle-wake waiter, and an opt-in git-mutation guard.",
+  "description": "Coordination hooks: KB-first reminder, check-your-messages reminder, role-binding reminder, an opt-in idle-wake waiter, and an opt-in git-mutation guard.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -29,6 +29,11 @@
             "type": "command",
             "command": "node",
             "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/check_messages_reminder.js"]
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/role_binding_reminder.js"]
           }
         ]
       }

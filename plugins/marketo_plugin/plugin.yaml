@@ -1,10 +1,13 @@
 name: marketo_plugin
 description: >
   Marketo Engage marketing-automation connector — lead query (get_leads),
-  lead field metadata (describe_lead_fields), lead CRUD (create_or_update_leads,
-  delete_leads), campaign trigger (list_campaigns, trigger_campaign), and
-  static list membership (list_static_lists, add_leads_to_list,
-  remove_leads_from_list). REST API (no official Marketo SDK) via a plain
+  lead field/filter metadata (describe_lead_fields), current-day API usage
+  (get_api_usage), activity type discovery and history
+  (list_activity_types, get_activities), lead CRUD
+  (create_or_update_leads, delete_leads), campaign trigger
+  (list_campaigns, trigger_campaign), and static list membership
+  (list_static_lists, add_leads_to_list, remove_leads_from_list). REST API
+  (no official Marketo SDK) via a plain
   synchronous httpx client. Auth: OAuth 2.0 client-credentials against a
   LaunchPoint custom service, resolved from the address book entry
   "marketo_instance" via chain-consumed vault:: references — the same

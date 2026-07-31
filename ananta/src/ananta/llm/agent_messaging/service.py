@@ -1055,7 +1055,7 @@ class AgentMessagingService:
         )
 
     def mark_role_consumed_on_ack(self, *, external_id: str) -> bool:
-        """Watcher events-ack consumption for ONE role row (Dax Part 14).
+        """Watcher events-ack consumption for ONE role row.
 
         A no-MCP watcher acknowledged the bridge event carrying this role
         delivery — its long-poll cursor moved past it, so the bytes are
@@ -1321,7 +1321,7 @@ class AgentMessagingService:
     def mark_direct_consumed_on_ack(
         self, *, message_id: str, recipient_agent_instance_id: str,
     ) -> bool:
-        """Watcher events-ack consumption for ONE direct row (Dax Part 14).
+        """Watcher events-ack consumption for ONE direct row.
 
         The direct sibling of :meth:`mark_role_consumed_on_ack`: the watcher's
         long-poll acked the queued wake event for this message, so it is

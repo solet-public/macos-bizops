@@ -407,11 +407,11 @@ def _register_bridge_lifecycle_routes(
         # delivery path, same as peer_inbox does. Without this, a watcher that
         # only ever long-polls looks inactive to binding-liveness consumers
         # while its bridge keeps answering, one half of the persisted_silent
-        # black hole (Dax Part 13).
+        # black hole (field-observed on a live deployment).
         binding = _lookup_binding_for_bridge(peer_registry, bridge_id)
         if binding is not None:
             peer_registry.touch_binding(binding.agent_instance_id)
-            # Dax Part 14: a watcher's cursor ack proves the acked events
+            # A watcher's cursor ack proves the acked events
             # streamed into its watch output — the pull equivalent of entering
             # a turn. Retire the acked deliveries' re-emit/escalation insurance
             # so an armed watcher never escalates recipient_gone. MCP-transport
@@ -1000,7 +1000,7 @@ def _register_peer_routes(
         # The bridge calling peer_inbox is alive — bump its binding so
         # peer_list shows recent activity even if no peer_send has run.
         peer_registry.touch_binding(sender_binding.agent_instance_id)
-        # Dax Part 14: the watch client's arm-time catch-up drain prints every
+        # The watch client's arm-time catch-up drain prints every
         # returned entry into the watch output — those exact rows are surfaced,
         # so their re-emit/escalation insurance retires here. Watcher-only:
         # an MCP session's consumption authority stays the /peer/drain
@@ -1861,7 +1861,7 @@ def _consume_watcher_acked_events(
     binding: BridgeBinding,
     acked: list[QueuedEvent],
 ) -> None:
-    """Stamp watcher-acked IMPORTANT deliveries consumed (Dax Part 14).
+    """Stamp watcher-acked IMPORTANT deliveries consumed.
 
     Role deliveries are recognised by the Control #5 ``delivery_external_id``
     meta key (stamped on both the native-wake and channel-event transports);
@@ -1891,7 +1891,7 @@ def _consume_watcher_inbox_page(
     binding: BridgeBinding,
     page: Any,
 ) -> None:
-    """Stamp watcher catch-up-drained IMPORTANT rows consumed (Dax Part 14).
+    """Stamp watcher catch-up-drained IMPORTANT rows consumed.
 
     The instance section's entries map to direct-wake rows by ``message_id``
     (silent messages have no outbox row — the fenced mark is a no-op). Role

@@ -51,9 +51,9 @@ platform_managed:
 # `unknown_root_entries` (BLOCKING), and absence is only `missing_sanctioned`
 # (INFO).  That present-or-absent tolerance is exactly what the entries below
 # need: each one legitimately exists in one shape of the tree and legitimately
-# does not exist in the other.  Dax seed-review §19.6 (filed 2026-07-22 against
-# seed b31a54e, still reproducing five mints later in a61d6b6) reported these
-# as a hard cutover block on every fresh birth.
+# does not exist in the other.  An external seed review (2026-07-22, against
+# seed b31a54e and still reproducing five mints later in a61d6b6) reported
+# these as a hard cutover block on every fresh birth.
 #
 # Development-checkout surfaces — present in a git clone of the platform
 # origin; NOT in a sealed seed bundle, and not yet created at the moment a

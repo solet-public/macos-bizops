@@ -1,13 +1,13 @@
 {
   "process_key": "plugin::marketo_plugin::trigger_campaign",
   "display_name": "Marketo: Trigger Campaign",
-  "description": "Trigger (Request Campaign) a campaign for up to 100 leads, with optional campaign tokens. Write/side-effecting action.",
-  "embedding_description": "Run a Marketo trigger campaign (Request Campaign API) against up to 100 specific leads by id, optionally overriding campaign tokens for that run — the verb that actually FIRES marketing automation (emails, list adds, scoring changes) defined inside the campaign. Requires the campaign_id from list_campaigns and lead_ids from get_leads.",
+  "description": "Trigger (Request Campaign) a campaign for up to 100 leads, with optional campaign tokens. Destructive-class write action: the campaign's flow runs against real people, is irreversible, and is visible outside this system (it may send email, alert sales, change scoring, or move program status). Marketo's REST API exposes no way to read a campaign's flow steps first and no dry-run, so a caller cannot establish what this will do before it happens — trigger only campaigns you authored.",
+  "embedding_description": "Run a Marketo trigger campaign (Request Campaign API) against up to 100 leads by id — the verb that FIRES marketing automation at real people: email, sales alerts, scoring and program-status changes, irreversible and visible outside this system. Flow steps are readable only by a human in the Marketo UI; effects surface afterwards via get_activities. Trigger only campaigns you authored.",
   "result_processor_customizations": {
     "action_label": "Marketo campaign triggered",
     "result_type": "marketo_trigger_campaign_result",
     "result_description": "Dict with success (bool) and request_id.",
-    "presentation_guidance": "Side-effecting action — confirm success and note the request_id; the actual marketing effects (emails sent, etc.) happen inside Marketo asynchronously."
+    "presentation_guidance": "Side-effecting action — confirm success and note the request_id; the actual marketing effects (emails sent, etc.) happen inside Marketo asynchronously. success only means Marketo accepted the request, never that the effects were the intended ones: the flow was not inspectable beforehand. To learn what actually happened, read the activity log with get_activities afterwards."
   },
   "error_processor_customizations": {
     "action_context": "Trigger a campaign for a batch of leads in the configured Marketo instance.",

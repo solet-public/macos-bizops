@@ -181,15 +181,63 @@ def _check_dual_mode_subcommand(sub: str, rest: list[str]) -> tuple[bool, str]:
     return True, f"{sub!r} {first!r} is read-only"
 
 
+# Real git global options that may legitimately precede the subcommand
+# (e.g. `git --no-pager diff`, `git -c core.pager=cat status`). Anything NOT
+# in these two sets is left in place rather than skipped, so an unrecognized
+# leading flag lands in the subcommand slot below and fails closed via the
+# existing "not in the read-only allowlist" branch -- this only widens what
+# is explicitly recognized as safe, never what gets silently skipped past.
+# `-C` / `--git-dir` / `--work-tree` are deliberately EXCLUDED: they are
+# already fail-closed via DANGEROUS_GIT_GLOBALS and must never be skipped
+# past to find a subcommand.
+_BOOLEAN_GIT_GLOBALS = frozenset({
+    "-p", "--paginate", "--no-pager", "--no-replace-objects", "--bare",
+    "--literal-pathspecs", "--no-optional-locks", "--no-advice",
+})
+_VALUE_GIT_GLOBALS = frozenset({
+    "-c", "--exec-path", "--html-path", "--man-path", "--info-path",
+    "--namespace", "--super-prefix", "--config-env",
+})
+
+
+def _find_subcommand_index(invocation: list[str]) -> int | None:
+    """Index of the real subcommand token, skipping recognized leading
+    global git options. Returns ``None`` when nothing follows them (bare
+    `git` or `git` + only global flags).
+
+    An unrecognized leading flag is returned AS the subcommand index (not
+    skipped past), so it fails closed exactly as bare `invocation[1]` did
+    before this function existed.
+    """
+    i = 1
+    n = len(invocation)
+    while i < n:
+        tok = invocation[i]
+        if not tok.startswith("-"):
+            return i
+        if tok in _BOOLEAN_GIT_GLOBALS:
+            i += 1
+            continue
+        base = tok.split("=", 1)[0]
+        if base in _VALUE_GIT_GLOBALS:
+            i += 1 if "=" in tok else 2
+            continue
+        return i
+    return None
+
+
 def is_invocation_allowed(invocation: list[str]) -> tuple[bool, str]:
     """Evaluate a single git invocation against the allowlist + dual-mode gates."""
     if len(invocation) < 2:
         return False, "bare 'git' with no subcommand"
-    sub = invocation[1]
-    rest = invocation[2:]
     blocked, reason = _check_universal_banned(invocation)
     if blocked:
         return False, reason
+    sub_idx = _find_subcommand_index(invocation)
+    if sub_idx is None:
+        return False, "bare 'git' with no subcommand"
+    sub = invocation[sub_idx]
+    rest = invocation[sub_idx + 1:]
     if sub in ALLOWED_NO_FLAG_CHECK:
         return True, f"read-only subcommand {sub!r}"
     if sub in DUAL_MODE_ALLOWED:

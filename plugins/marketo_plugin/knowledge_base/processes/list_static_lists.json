@@ -1,13 +1,13 @@
 {
   "process_key": "plugin::marketo_plugin::list_static_lists",
   "display_name": "Marketo: List Static Lists",
-  "description": "List static lists, optionally filtered by names.",
-  "embedding_description": "List the Marketo static lists (manually-curated lead segments) configured in this instance, optionally filtered by exact list name — use this to discover a list's id before calling add_leads_to_list or remove_leads_from_list. Distinct from list_campaigns (marketing automation flows) and get_leads (individual lead records).",
+  "description": "List static lists, optionally filtered by names. A non-empty next_page_token is authoritative: more_result is normalized from token presence, so continue even when Marketo's raw moreResult flag says false.",
+  "embedding_description": "Enumerate the Marketo static lists that segment leads in this instance, optionally filtering by exact list name and draining every returned continuation token before deciding which lists exist. Use this to discover an id before changing membership; unlike list_campaigns, these are curated lead groups rather than automation flows.",
   "result_processor_customizations": {
     "action_label": "Marketo static lists listed",
     "result_type": "marketo_list_static_lists_result",
-    "result_description": "Dict with records (a list of list dicts: id, name, description, workspaceName, ...) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large, plus next_page_token and more_result for continuing the listing.",
-    "presentation_guidance": "Summarize the row_count and list names + ids."
+    "result_description": "Dict with records (a list of list dicts: id, name, description, workspaceName, ...) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large, plus next_page_token and more_result. For list_static_lists, more_result is normalized from whether a non-empty continuation token is present.",
+    "presentation_guidance": "Summarize the row_count and list names + ids. If more_result is true the listing is INCOMPLETE — continue with next_page_token before claiming the set is complete. Token presence is authoritative even when Marketo's raw moreResult flag was false."
   },
   "error_processor_customizations": {
     "action_context": "List static lists from the configured Marketo instance.",

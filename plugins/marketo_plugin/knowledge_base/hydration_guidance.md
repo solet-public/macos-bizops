@@ -47,8 +47,8 @@ the Role, API-only User, and LaunchPoint service") — this is the condensed
 version for the hydration conversation:
 
 1. **New service?** Role (Access API: `Read-Write Person`, `Read-Only
-   Campaign`, `Execute Campaign`) → API-only User → LaunchPoint Custom
-   Service → Get Token.
+   Activity`, `Read-Only Campaign`, `Execute Campaign`) → API-only User →
+   LaunchPoint Custom Service → Get Token.
 2. **Reusing an existing service?** Skip straight to Get Token on it.
 3. **Copy** the client secret (the operator's only browser act beyond
    clicking through the above) — the agent harvests it via `pbpaste` into a
@@ -77,13 +77,24 @@ manager or cross-device sync could in principle capture it in that window.
 
 Once `marketo_instance` is registered: run `test_connection` (credentials
 valid?) then `check_setup` (what does the Role actually grant?).
-`check_setup` runs four safe read-only probes and names the exact missing
+`check_setup` runs six safe read-only probes and names the exact missing
 Access API permission for anything that fails, plus which admin screen fixes
 it. It **cannot** check write/execute permissions (`create_or_update_leads`,
 `delete_leads`, `merge_leads`, `add_leads_to_list`, `remove_leads_from_list`,
 `trigger_campaign`) without performing them — those are listed as
 `writes_unverified` and will surface as `marketo.permission_denied`, naming
 the gap, on first real use if the Role is short one.
+
+There is a **second** limit worth saying to the operator, because it is the one
+they alone can settle: all six probes are Lead-API reads, so a green
+`check_setup` says nothing about Marketo's separate **`Read-Only Asset`**
+entitlement, which gates the `/rest/asset/v1/…` surface (programs, emails,
+landing pages, smart-campaign smart lists). No verb here touches that surface
+today, so there is nothing for the plugin to probe and nothing to 403 — the
+answer lives on the operator's own Admin → Users & Roles screen. Do not add it
+to the four checkboxes above on this plugin's account; just never assume an
+existing API role carries it, and say it is a requirement to verify rather than
+something this setup has confirmed.
 
 On decline: stop, leave the plugin dormant. `marketo.not_configured` on every
 verb is the fully-supported steady state, not a broken one.

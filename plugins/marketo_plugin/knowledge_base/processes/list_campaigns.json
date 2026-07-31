@@ -1,13 +1,13 @@
 {
   "process_key": "plugin::marketo_plugin::list_campaigns",
   "display_name": "Marketo: List Campaigns",
-  "description": "List campaigns, optionally filtered by names and/or program_names.",
-  "embedding_description": "List the Marketo Smart Campaigns configured in this instance, optionally filtered by exact campaign name or parent program name — use this to discover a campaign's id before calling trigger_campaign. Distinct from list_static_lists (lead segments) and trigger_campaign (which runs one).",
+  "description": "List campaigns, optionally filtered by names and/or program_names. A non-empty next_page_token is authoritative: more_result is normalized from token presence, so continue even when Marketo's raw moreResult flag says false.",
+  "embedding_description": "Enumerate the Marketo Smart Campaigns configured in this instance, optionally filtering by exact campaign or parent program name and draining every returned continuation token before deciding which campaigns exist. Use this to discover an id before trigger_campaign; unlike list_static_lists, these are automation flows.",
   "result_processor_customizations": {
     "action_label": "Marketo campaigns listed",
     "result_type": "marketo_list_campaigns_result",
-    "result_description": "Dict with records (a list of campaign dicts: id, name, type, programName, ...) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large, plus next_page_token and more_result for continuing the listing.",
-    "presentation_guidance": "Summarize the row_count and list campaign names + ids. If more_result is true the listing is INCOMPLETE — say so explicitly and continue with next_page_token before answering any question of the form 'which campaigns could this fire', because an unpaged first page is an arbitrary slice rather than the full set."
+    "result_description": "Dict with records (a list of campaign dicts: id, name, type, programName, ...) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large, plus next_page_token and more_result. For list_campaigns, more_result is normalized from whether a non-empty continuation token is present.",
+    "presentation_guidance": "Summarize the row_count and list campaign names + ids. If more_result is true the listing is INCOMPLETE — say so explicitly and continue with next_page_token before answering any question of the form 'which campaigns could this fire', because an unpaged first page is an arbitrary slice rather than the full set. Token presence is authoritative even when Marketo's raw moreResult flag was false."
   },
   "error_processor_customizations": {
     "action_context": "List campaigns from the configured Marketo instance.",

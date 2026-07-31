@@ -50,10 +50,11 @@ from .wake import wake
 WATCH_RECONNECT_DELAY_S: Final[float] = 2.0
 # The events long-poll holds ~25s server-side; give the HTTP client margin.
 WATCH_REQUEST_TIMEOUT_S: Final[float] = 35.0
-# Heartbeat re-register cadence (Dax Part 13): the peer BINDING can be dropped
-# server-side (post-swap purge, registry eviction) while the BRIDGE stays
-# healthy and keeps answering the events long-poll with empty 200s — no error
-# ever reaches the client, so without a heartbeat the watcher becomes a
+# Heartbeat re-register cadence, field-observed on a live deployment: the peer
+# BINDING can be dropped server-side (post-swap purge, registry eviction) while
+# the BRIDGE stays healthy and keeps answering the events long-poll with empty
+# 200s — no error ever reaches the client, so without a heartbeat the watcher
+# becomes a
 # permanent persisted_silent black hole. Registration is idempotent, so
 # re-asserting it bounds the outage to one interval.
 WATCH_REREGISTER_INTERVAL_S: Final[float] = 60.0

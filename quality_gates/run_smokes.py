@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -40,6 +41,32 @@ def _venv_python() -> Path:
     if not candidate.exists():
         raise FileNotFoundError(f"repo venv interpreter not found: {candidate}")
     return candidate
+
+
+def _require_homunculus_name() -> str:
+    """Fail closed ONCE, here, when ``HOMUNCULUS_NAME`` is unset.
+
+    Many smokes resolve the platform identity at import time and fail closed
+    without it, so an unset variable turns a suite run into a wall of unrelated
+    tracebacks whose shared cause is invisible -- the failure signature reads as
+    a broken platform rather than a missing export. Checking at the entry point
+    turns that into one discoverable message before any smoke is spawned.
+
+    The wording is bootstrap.py's, deliberately: the platform already states
+    this requirement there, and a second phrasing of the same requirement is a
+    divergence waiting to rot. Presence only -- name VALIDATION belongs at
+    genesis (bootstrap.py), and duplicating the pattern here would be the same
+    divergence in another form.
+    """
+    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    if not name:
+        raise RuntimeError(
+            "HOMUNCULUS_NAME env var is required -- it is this homunculus's "
+            "database name (database per homunculus, named after it). The "
+            "driving agent must export it before running the smoke suite: "
+            "HOMUNCULUS_NAME=<name> .venv/bin/python3 quality_gates/run_smokes.py"
+        )
+    return name
 
 
 def _read_register(register: Path) -> list[str]:
@@ -119,6 +146,7 @@ def main() -> int:
     if args.list:
         print("\n".join(entries))
         return 0
+    _require_homunculus_name()
     failures, missing = _run_suite(_venv_python(), entries, args.timeout)
     return _summarize(len(entries), failures, missing)
 
