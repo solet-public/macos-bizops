@@ -57,6 +57,10 @@ _SI_AST_CHECK = _QUALITY_GATES_DIR / "service_interface_ast_check.py"
 _SI_AST_ALLOWLIST = _QUALITY_GATES_DIR / "service_interface_ast_allowlist.txt"
 _RETURN_SHAPE_CHECK = _QUALITY_GATES_DIR / "return_shape_gate.py"
 _RETURN_SHAPE_ALLOWLIST = _QUALITY_GATES_DIR / "return_shape_allowlist.txt"
+_EMBEDDING_BOUND_CHECK = _QUALITY_GATES_DIR / "embedding_description_bound_gate.py"
+_EMBEDDING_BOUND_ALLOWLIST = (
+    _QUALITY_GATES_DIR / "embedding_description_bound_allowlist.txt"
+)
 
 # Exit codes returned by the three wrapper scripts (see each script's
 # docstring): 0 = clean (or every finding allowlisted), 2 = one or more
@@ -340,6 +344,19 @@ _RETURN_SHAPE_GATE = _GateSpec(
     allowlist=_RETURN_SHAPE_ALLOWLIST,
 )
 
+# embedding_description length bound. The platform ALREADY checks this at
+# registry load, but WARNING-only, so nothing ever red and nothing ran at
+# authoring time — 77 of 528 process JSONs were out of range when the gate was
+# built (2026-07-30), including recent additions. This is the enforcement half.
+# The gate reads the bound out of the validator's own source, so it cannot
+# drift from the constraint it mirrors.
+_EMBEDDING_BOUND_GATE = _GateSpec(
+    name="embedding_description_bound",
+    description="embedding_description length bound",
+    script=_EMBEDDING_BOUND_CHECK,
+    allowlist=_EMBEDDING_BOUND_ALLOWLIST,
+)
+
 # W-INT Cycle 2 driver-import gate (W-WINT2-EARLY) ships in WARN mode per
 # master plan §1.7. Findings print but do NOT contribute to the blocking
 # verdict — the gate's role at Tier 0 is to ratchet against NEW driver-
@@ -611,6 +628,51 @@ def _check_return_shape_gate(project_root: Path, venv_python: Path) -> bool:
         return True
     print(
         f"❌ BLOCKING: {_RETURN_SHAPE_GATE.name} gate unexpected exit {result.returncode}:"
+    )
+    print(combined or "(no output)")
+    return True
+
+
+def _check_embedding_bound_gate(project_root: Path, venv_python: Path) -> bool:
+    """Run the embedding_description bound gate. True iff non-allowlisted findings.
+
+    Tree-walking gate: every discoverable process JSON's embedding_description
+    is measured against the platform's own [MIN, MAX] constants, read out of
+    plugin_registration_validator.py at run time. The registry-load check is
+    WARNING-only; this is the authoring-time half. Exit codes follow the
+    canonical _WRAPPER_OK / _WRAPPER_BLOCKING pattern.
+    """
+    artifacts = _resolve_gate_artifacts(project_root, _EMBEDDING_BOUND_GATE)
+    if artifacts is None:
+        return True
+    script, allowlist = artifacts
+
+    print(
+        f"\n📊 {_EMBEDDING_BOUND_GATE.description.title()} "
+        f"Gate ({_EMBEDDING_BOUND_GATE.name})...",
+    )
+    argv = [str(venv_python), str(script), "--allowlist", str(allowlist)]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        print(f"❌ BLOCKING: {_EMBEDDING_BOUND_GATE.name} gate timed out after 120s")
+        return True
+    except FileNotFoundError as exc:
+        print(f"❌ BLOCKING: {_EMBEDDING_BOUND_GATE.name} gate cannot invoke: {exc}")
+        return True
+
+    combined = (result.stdout + result.stderr).rstrip()
+    if result.returncode == _WRAPPER_OK:
+        _print_gate_ok(_EMBEDDING_BOUND_GATE.name, combined)
+        return False
+    if result.returncode == _WRAPPER_BLOCKING:
+        _print_gate_blocking(
+            _EMBEDDING_BOUND_GATE.name, combined, venv_python, script, allowlist,
+        )
+        return True
+    print(
+        f"❌ BLOCKING: {_EMBEDDING_BOUND_GATE.name} gate "
+        f"unexpected exit {result.returncode}:",
     )
     print(combined or "(no output)")
     return True
@@ -894,6 +956,8 @@ def main() -> int:
         results.failed_blocking_gates.append(_SI_AST_GATE.name)
     if _check_return_shape_gate(project_root, venv_python):
         results.failed_blocking_gates.append(_RETURN_SHAPE_GATE.name)
+    if _check_embedding_bound_gate(project_root, venv_python):
+        results.failed_blocking_gates.append(_EMBEDDING_BOUND_GATE.name)
     # W-INT Cycle 2 driver-import gate runs in WARN mode per master plan
     # §1.7 — emits findings but never blocks. Mode flip at W-WINT2-FINAL.
     _check_wint2_driver_import_gate(project_root, venv_python)

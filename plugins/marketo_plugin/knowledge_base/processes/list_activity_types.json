@@ -2,7 +2,7 @@
   "process_key": "plugin::marketo_plugin::list_activity_types",
   "display_name": "Marketo: List Activity Types",
   "description": "List the configured Marketo instance's available activity type ids and metadata. Use these authoritative per-instance ids as the mandatory activity_type_ids for get_activities; do not rely on ids copied from another subscription.",
-  "embedding_description": "Enumerate the configured Marketo subscription's available activity type ids, names, descriptions, primary attributes, and attribute definitions.",
+  "embedding_description": "Enumerate the configured Marketo subscription's activity type catalog: the numeric activity type ids, names, descriptions, primary attributes and attribute definitions this instance defines. Call it to discover which type ids this particular subscription accepts, since the catalog is per-subscription rather than universal across Marketo.",
   "result_processor_customizations": {
     "action_label": "Marketo activity types listed",
     "result_type": "marketo_list_activity_types_result",

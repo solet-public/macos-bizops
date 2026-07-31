@@ -156,7 +156,8 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         # resolved lazily at first use (_blob_service): the platform constructs
         # blob_storage_service in the init_service_manager startup step, AFTER
         # every plugin's prepare_for_readiness — resolving it here caches None
-        # forever and every spill hard-fails (Dax Part-20 §20.1).
+        # forever and every spill hard-fails (field-verified on a live
+        # deployment).
         self._app_config_loader = AppConfigLoader(self._address_book_service)
         self.set_ready()
 
@@ -202,7 +203,7 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         Readiness-time resolution is a known trap: the platform constructs
         blob_storage_service after every plugin's prepare_for_readiness, so a
         readiness-time get_service() returns None and the miss would be cached
-        for the life of the plugin (Dax Part-20 §20.1).
+        for the life of the plugin.
         """
         if self._blob_storage_service is None and self.orchestrator_ref is not None:
             self._blob_storage_service = self.orchestrator_ref.get_service("blob_storage_service")
@@ -413,6 +414,9 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             "Read the Marketo activity log — what leads actually DID, or had done to them "
             "(emails sent/delivered, alerts, campaign requests, data value changes). Pass "
             "since_datetime (ISO-8601) to start a new read, or next_page_token to continue. "
+            "The since_datetime boundary is second-granularity: a fractional-seconds component "
+            "is floor-truncated before the paging-token request because Marketo otherwise "
+            "rewinds that window to midnight UTC; every other byte is preserved. "
             "activity_type_ids is mandatory on every page (max 10); discover valid ids with "
             "list_activity_types. Optional lead_ids (max 30) filter server-side. "
             "AFTER-THE-FACT audit: it reports what a write already caused; it cannot promise "
@@ -429,7 +433,13 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             "since_datetime": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=False,
-                description="ISO-8601 instant to read activities from (e.g. 2026-07-28T00:00:00-07:00). Required unless next_page_token is given.",
+                description=(
+                    "Second-granularity ISO-8601 instant to read activities from "
+                    "(e.g. 2026-07-28T00:00:00-07:00). A fractional-seconds "
+                    "component is floor-truncated before the paging-token request; "
+                    "all other bytes are preserved. Required unless next_page_token "
+                    "is given."
+                ),
             ),
             "next_page_token": ParameterMetadata(
                 type=ParameterType.STRING,

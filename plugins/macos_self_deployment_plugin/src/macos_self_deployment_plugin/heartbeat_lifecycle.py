@@ -250,8 +250,9 @@ def _run_steady_state_heartbeat(
     """Heartbeat every ``DEFAULT_HEARTBEAT_INTERVAL_SECONDS``; re-register on miss.
 
     A HEALTHY heartbeat also re-asserts activation via
-    ``_ensure_active_color`` (Dax Part 15): a plain platform restart can
-    wedge the router at ``no_active_color`` forever — the new instance
+    ``_ensure_active_color`` (field-verified on a live deployment): a plain
+    platform restart can wedge the router at ``no_active_color`` forever — the
+    new instance
     registers while the outgoing instance is still active (so the one-shot
     cold-start auto-activate correctly declines), then the router's
     heartbeat GC drops the outgoing instance and clears the active binding,
@@ -559,10 +560,10 @@ def _ensure_active_color(
     registrants or a hot-swap mid-flight), this is a no-op — the
     helper must never steal authority from a live color.
 
-    Also called on every HEALTHY steady-state heartbeat tick (Dax
-    Part 15): the cold-start probe is one-shot and races the router's
-    heartbeat-timeout GC on the outgoing instance after a plain restart
-    — register lands while the old instance is still active (probe sees
+    Also called on every HEALTHY steady-state heartbeat tick: the cold-start
+    probe is one-shot and races the router's heartbeat-timeout GC on the
+    outgoing instance after a plain restart — register lands while the old
+    instance is still active (probe sees
     a color, declines), the GC then drops the old instance and clears
     the active binding, and the router sits at ``no_active_color``
     forever. The steady-state re-assert makes the same conservative

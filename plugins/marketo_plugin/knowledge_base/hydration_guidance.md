@@ -85,5 +85,16 @@ it. It **cannot** check write/execute permissions (`create_or_update_leads`,
 `writes_unverified` and will surface as `marketo.permission_denied`, naming
 the gap, on first real use if the Role is short one.
 
+There is a **second** limit worth saying to the operator, because it is the one
+they alone can settle: all six probes are Lead-API reads, so a green
+`check_setup` says nothing about Marketo's separate **`Read-Only Asset`**
+entitlement, which gates the `/rest/asset/v1/…` surface (programs, emails,
+landing pages, smart-campaign smart lists). No verb here touches that surface
+today, so there is nothing for the plugin to probe and nothing to 403 — the
+answer lives on the operator's own Admin → Users & Roles screen. Do not add it
+to the four checkboxes above on this plugin's account; just never assume an
+existing API role carries it, and say it is a requirement to verify rather than
+something this setup has confirmed.
+
 On decline: stop, leave the plugin dormant. `marketo.not_configured` on every
 verb is the fully-supported steady state, not a broken one.

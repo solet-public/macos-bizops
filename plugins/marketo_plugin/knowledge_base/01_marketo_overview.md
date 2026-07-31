@@ -74,6 +74,16 @@ This boundary is deliberate. A generic rule such as "always trust
 `more_result`" truncates lead/campaign/list enumeration, while "always trust
 the token" loops forever on the activity stream.
 
+**The asymmetry is OUR design decision, and the two sides do not rest on the
+same evidence.** The token-authoritative side is backed by a live measurement:
+`more_result` was observed reporting false on a full 300-record
+`list_campaigns` page that still returned a usable token. The
+activity side rests on Adobe's documented "this endpoint always returns
+`nextPageToken`" plus one narrow live read, so calling `more_result`
+"authoritative" there states what a caller must key off, not a verified
+property of the vendor. Its reliability on `get_activities` is
+**UNVERIFIED** — see the evidence classes in the traps below.
+
 ## Verifying what a write actually DID — `get_activities`
 
 `merge_leads`, `delete_leads` and `create_or_update_leads` can fire smart
@@ -107,16 +117,34 @@ Three traps worth knowing:
   streams activities in ~300-item pages and an empty page mid-stream is normal.
   Never report "nothing happened" from a partial read — continue until
   `more_result` is false.
+
+  **Name the evidence class before repeating the word "authoritative."** Three
+  distinct claims sit behind it, and only two are observations:
+
+  | Claim | Evidence class |
+  |---|---|
+  | The flag does not under-report at END OF STREAM | **Measured** — 2026-07-30, one live instance, ONE one-hour window paged to termination twice under two type filters 21 seconds apart. That is one sample measured twice, not two independent runs; the near-identical row totals follow from the shared window rather than replicating each other. Both terminations landed on a SHORT page, and a probe issued past the terminal token returned nothing. |
+  | The flag does not under-report MID-STREAM | **No observation at all.** The truncating mode is the flag going false on a FULL page with another page behind the returned token — the shape actually seen on `list_campaigns`. It never occurred in that read, so it is UNEXERCISED, not refuted. |
+  | A page can carry fewer than 300 items while the flag is still true | **Documented** by Adobe, unobserved in that read (no short page appeared while `more_result` was true). Ten pages is not a sample and does not refute the vendor's statement — keep tolerating a short mid-stream page. |
+
+  So the defensible summary is: no evidence the flag lies at end of stream, on
+  one hour of one instance's traffic, and nothing at all about the mid-stream
+  case, under load, or across a campaign send. It remains UNVERIFIED that
+  `more_result` is reliable on activities. Do not let the measurement retire
+  the hedge — there is no fallback signal here, so a lying flag truncates the
+  read silently.
 - **The activity token is a resumable bookmark, not proof of another page.**
   Marketo can return `next_page_token` on the final page too. Stop when
   `more_result` becomes false even if the token remains populated.
 - **Activity type ids are not guaranteed identical across subscriptions.**
   Call `list_activity_types` on the configured instance and pass only ids it
-  returns. Dax proved why this matters on 2026-07-29: ids
-  6/7/38/39/42/44/47 were accepted while id 46 was invalid, and Marketo
-  rejected the entire request because of that one bad id. `constants.py`
-  retains the accepted notification ids only as a starting point and no verb
-  applies them as a silent default.
+  returns. The vendor behavior that makes this load-bearing was measured
+  against a live instance on 2026-07-29: **one invalid id rejects the ENTIRE
+  request**, not just the offending id, so a single stale id taken from
+  another subscription's catalog fails the whole read. `constants.py` retains
+  a starting-point id table and no verb applies it as a silent default. Which
+  ids a given subscription accepts is a property of that instance, so it is
+  not recorded here.
 
 ## Enumerating campaigns and lists — paging is not optional
 
@@ -124,9 +152,9 @@ Three traps worth knowing:
 per call. Both surface `next_page_token` and normalize `more_result` from
 whether that token is non-empty; the token is authoritative because Marketo's
 raw flag can say false while another page exists. **If `more_result` is true
-the result is an arbitrary slice, not the full set** — an instance with 19,919
-campaigns will otherwise hand back 300 of them, and repeat calls can return
-DIFFERENT 300s, which reads as data rather than as truncation. Any question of
+the result is an arbitrary slice, not the full set** — an instance holding tens
+of thousands of campaigns will otherwise hand back 300 of them, and repeat
+calls can return DIFFERENT 300s, which reads as data rather than as truncation. Any question of
 the form "which active trigger campaigns could this write fire?" requires
 draining the token chain first.
 
@@ -157,6 +185,19 @@ write/execute permissions (`create_or_update_leads`, `delete_leads`,
 `trigger_campaign`) are listed in `writes_unverified` and can only be
 confirmed by first real use — a missing one surfaces as
 `marketo.permission_denied` naming the gap.
+
+**`reads_verified` is partial in a second, less obvious way: an entire
+ENTITLEMENT CLASS is out of its reach.** Marketo gates the asset surface
+(`/rest/asset/v1/…` — programs, emails, landing pages, templates) behind a
+separate **Read-Only Asset** entitlement that is independent of the Access API
+permissions the six probes exercise. All six probes are Lead-API reads, so an
+instance can return `reads_verified: true` while holding no asset entitlement
+at all. There is no cheap API-side probe for it either: with no asset verb in
+this plugin there is nothing to 403, and the answer lives on an operator screen
+(Admin → Users & Roles), not in an API response. State it as **a requirement a
+consumer verifies before depending on it, never as an assurance from us** — if
+an asset verb is ever added, the gap surfaces as a 403 at first real use rather
+than at setup, which is the failure mode `check_setup` exists to prevent.
 
 ## Error model — envelope-first, not HTTP-status-first (the key divergence from zuora_plugin)
 
@@ -202,6 +243,19 @@ instance's live `readOnly` metadata as echoed read output rather than an
 intended write. The six-field set has **documented, not measured**
 provenance and does not assert which members Marketo marks read-only; the
 describe response supplies that separate property at execution time.
+
+A live describe on 2026-07-30 settled three things about that mechanism. The
+preflight must key off each descriptor's **`rest.readOnly`**: the fields whose
+read-only status actually blocks a read-modify-write were observed carrying a
+`rest` block and **no `soap` sub-object at all**, so a preflight falling back
+to `soap` would find nothing exactly where the answer matters. The intersection
+was **non-empty** on that instance, so the exclusion is load-bearing rather
+than a no-op — without it every read-modify-write there would have refused.
+And **`id` came back `readOnly: false`, i.e. writable**, which retires the
+worry that using the bare `id` as a lookup key could brick a write on a
+read-only field. Which fields are read-only remains a property of the instance,
+computed as a runtime intersection against its live describe; it is deliberately
+**not encoded** as a list here or in `constants.py`.
 
 This exception has an accepted silent-drop residue. Default echoes are
 excluded only from the refusal; they remain in the outbound record. If a

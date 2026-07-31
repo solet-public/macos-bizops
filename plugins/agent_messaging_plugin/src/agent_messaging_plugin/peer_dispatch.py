@@ -82,11 +82,12 @@ IMPORTANT_MARKER_RE: Final[re.Pattern[str]] = re.compile(
 # whether it becomes a turn is client-side and NOT confirmed by this field —
 # consumption is tracked separately (REL-05 direct-wake outbox).
 #
-# Dax Part 14 (wake semantics, 2026-07-23): a recipient bound by a no-MCP
-# ``watch`` subprocess is a PULL recipient — the queued event streams into a
-# background task's output and surfaces when the session next looks; no turn
-# starts. ``queued_watcher`` names that truthfully so senders never read a
-# watcher delivery as a live wake. Consumption for these rides the watcher's
+# Wake semantics, field-verified against a live deployment (2026-07-23): a
+# recipient bound by a no-MCP ``watch`` subprocess is a PULL recipient — the
+# queued event streams into a background task's output and surfaces when the
+# session next looks; no turn starts. ``queued_watcher`` names that truthfully
+# so senders never read a watcher delivery as a live wake. Consumption for
+# these rides the watcher's
 # events-ack (the /events route), not model activity.
 DELIVERY_PERSISTED_SILENT: Final[str] = "persisted_silent"
 DELIVERY_QUEUED_NOTIFICATION: Final[str] = "queued_notification"
@@ -240,8 +241,8 @@ def dispatch_peer_send(
                 f"native wake failed for {peer_id}: {exc}",
                 peer_agent_id=peer_id,
             ) from exc
-        # Dax Part 14: a watcher-held recipient is a pull consumer — the same
-        # queued event, but no turn starts. Label truthfully.
+        # A watcher-held recipient is a pull consumer — the same queued event,
+        # but no turn starts. Label truthfully.
         delivery_kind = (
             DELIVERY_QUEUED_WATCHER
             if recipient.is_watcher
@@ -414,7 +415,7 @@ def _deliver_important_to_binding(
                 peer_agent_id=recipient.agent_id,
             ) from exc
         if recipient.is_watcher:
-            # Dax Part 14: pull recipient — same queued event, no turn starts.
+            # Pull recipient — same queued event, no turn starts.
             return DELIVERY_QUEUED_WATCHER, str(delivered_to_bridge_id)
         return DELIVERY_QUEUED_WAKE, str(delivered_to_bridge_id)
     meta = build_peer_message_meta(

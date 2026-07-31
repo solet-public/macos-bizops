@@ -220,16 +220,16 @@ invokes them.
 | The wake waiter's argv is fixed, with no shell | `tests/manifest_consistency_smoke.py` |
 | A broken wake path never traps the session | `tests/wake_waiter_smoke.py` |
 | Every hook is default-off behind its environment guard | `tests/reminder_hooks_smoke.py` and `tests/wake_waiter_smoke.py` |
+| The git-mutation guard blocks every mutating git invocation (direct, shell-wrapped, chained, path-qualified) for a non-controller session, allows it for the controller, and is fail-open when its env var is unset | `tests/git_controller_gate_smoke.py` |
 
-Two limits, stated so the coverage is not read as wider than it is:
+One limit, stated so the coverage is not read as wider than it is:
 
 - The no-network, no-file-write, one-subprocess and supply-chain checks are
   **source-level**: they prove the code never names the primitive, which is what
   makes those claims auditable by reading. They are not a syscall trace.
-- The git-mutation guard's own behaviour (which commands it blocks) is covered
-  by a separate 143-case suite that currently lives in the repository this
-  plugin is developed in, not in this directory. The tests here cover its
-  registration, its imports, and its documentation — not its blocking rules.
+  `git_controller_gate_smoke.py` is the exception — its Layer B cases drive the
+  hook as a real subprocess with synthetic stdin, exercising its actual
+  allow/block decisions rather than reading its source.
 
 ## Supply chain
 

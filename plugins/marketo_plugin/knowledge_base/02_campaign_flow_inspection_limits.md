@@ -16,7 +16,7 @@ learn it from the plugin rather than from an abandoned test, and so nobody
 re-derives it.
 
 Established 2026-07-29 against Adobe's published Marketo Developer Guide, in
-response to a client report (Dax Part 28 §28.3). Research record:
+response to a field report from a live Marketo instance. Research record:
 `workbench/2026-07-29_dax_part28_3_campaign_flow_inspection_research_coordinator_dawn.md`.
 
 ## The flow is not readable, and this is permanent

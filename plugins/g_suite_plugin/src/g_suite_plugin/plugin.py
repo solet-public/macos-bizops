@@ -169,7 +169,8 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         # resolved lazily at first use (_blob_service): the platform constructs
         # blob_storage_service in the init_service_manager startup step, AFTER
         # every plugin's prepare_for_readiness — resolving it here caches None
-        # forever and every download/export hard-fails (Dax Part-20 §20.1).
+        # forever and every download/export hard-fails (field-verified on a
+        # live deployment).
         self._app_config_loader = AppConfigLoader(self._address_book_service)
         self._token_store = TokenStore(self._vault_service, self._app_config_loader)
         self._service_factory = GoogleServiceFactory(self._token_store)
@@ -236,7 +237,7 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         Readiness-time resolution is a known trap: the platform constructs
         blob_storage_service after every plugin's prepare_for_readiness, so a
         readiness-time get_service() returns None and the miss would be cached
-        for the life of the plugin (Dax Part-20 §20.1).
+        for the life of the plugin.
         """
         if self._blob_storage_service is None and self.orchestrator_ref is not None:
             self._blob_storage_service = self.orchestrator_ref.get_service("blob_storage_service")

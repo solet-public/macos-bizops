@@ -28,6 +28,7 @@ other connectors use.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -64,6 +65,8 @@ from .errors import MarketoEnvelopeError, classify_marketo_envelope
 
 # blob_writer(content, filename, mime_type) -> blob_id (the returned *_blob_key)
 BlobWriter = Callable[[bytes, str, str], str]
+
+_ISO_8601_FRACTIONAL_SECONDS = re.compile(r"(T\d{2}:\d{2}:\d{2})\.\d+")
 
 
 def describe_lead_fields(client: Any, _params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
@@ -190,7 +193,8 @@ def get_activities(client: Any, params: dict[str, Any], blob_writer: BlobWriter)
     endpoint has never been checked against a live instance. The only live
     measurement of ``moreResult`` anywhere found it VIOLATED on
     ``list_campaigns`` — a full 300-record page reporting false while carrying
-    a usable token (Dax Part 28 §28.2). On the token-authoritative verbs that
+    a usable token (field-verified against a live instance). On the
+    token-authoritative verbs that
     is survivable because token presence is a valid fallback; here there is NO
     fallback, so if the flag under-reports, an activity read truncates
     silently and no caller-side rule can detect it. The hermetic smokes assert
@@ -238,8 +242,16 @@ def _activity_token(client: Any, params: dict[str, Any]) -> str:
 
 
 def _mint_activity_paging_token(client: Any, since_datetime: str) -> str:
-    """Exchange an ISO-8601 instant for the paging token activities.json requires."""
-    payload = client.get_json(ACTIVITY_PAGING_TOKEN_PATH, params={"sinceDatetime": since_datetime})
+    """Exchange a whole-second ISO-8601 instant for an activity paging token."""
+    wire_since_datetime = _ISO_8601_FRACTIONAL_SECONDS.sub(
+        r"\1",
+        since_datetime,
+        count=1,
+    )
+    payload = client.get_json(
+        ACTIVITY_PAGING_TOKEN_PATH,
+        params={"sinceDatetime": wire_since_datetime},
+    )
     token = payload.get("nextPageToken")
     if not isinstance(token, str) or not token:
         raise ValueError(
@@ -305,7 +317,7 @@ def list_campaigns(client: Any, params: dict[str, Any], blob_writer: BlobWriter)
     the response's own paging fields, so an instance with more than 300
     campaigns silently returned an arbitrary 300-campaign slice — and repeat
     calls could return DIFFERENT slices, which reads as data rather than as
-    truncation (Dax Part 20 §20.3: 300 of 19,919). A non-empty
+    truncation across tens of thousands of campaigns. A non-empty
     ``next_page_token`` is the authoritative continuation signal:
     ``more_result`` is normalized to true whenever that token is present,
     including when Marketo's raw ``moreResult`` flag incorrectly says false.
@@ -344,8 +356,8 @@ def trigger_campaign(client: Any, params: dict[str, Any]) -> dict[str, Any]:
 def list_static_lists(client: Any, params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
     """List static lists, optionally filtered by name.
 
-    Same page-cap exposure as :func:`list_campaigns` — Dax framed §20.3 as a
-    class, not one verb. A non-empty ``next_page_token`` is authoritative, so
+    Same page-cap exposure as :func:`list_campaigns` — it is a class of
+    defect, not one verb. A non-empty ``next_page_token`` is authoritative, so
     ``more_result`` is normalized from token presence rather than Marketo's
     unreliable raw flag.
     """

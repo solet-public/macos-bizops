@@ -129,32 +129,6 @@ ACTIVITY_TYPES_PATH: Final[str] = "/rest/v1/activities/types.json"
 ACTIVITY_TYPES_SPILL_FILENAME: Final[str] = "list_activity_types_results.json"
 API_USAGE_PATH: Final[str] = "/rest/v1/stats/usage.json"
 
-# Activity type ids that answer "did this write notify a human?".
-#
-# PROVENANCE — READ BEFORE TRUSTING: these id->meaning pairs come from Dax's
-# Part 20 field report (2026-07-28), NOT from a verified vendor table. The
-# Adobe REST docs confirm ids 1 (Visit Webpage), 2 (Fill Out Form), 13 (Data
-# Value Change) and 37 (Deleted Lead), but do NOT enumerate names for 6/7/38/
-# 39/42/44/47 in the reference page checked. Dax verified those ids on its
-# instance on 2026-07-29 and proved id 46 invalid there; because ids remain
-# instance-specific, the accepted entries are still only a STARTING POINT,
-# never a silent default. ``get_activities`` requires the caller to pass
-# ``activity_type_ids`` explicitly.
-#
-# The authoritative, per-instance list is GET /rest/v1/activities/types.json —
-# activity type ids are NOT guaranteed identical across Marketo subscriptions,
-# so an operator whose answer must be defensible should read that endpoint for
-# their own instance rather than trusting this table.
-SUSPECTED_NOTIFICATION_ACTIVITY_TYPE_IDS: Final[dict[int, str]] = {
-    6: "Send Email (unverified)",
-    7: "Email Delivered (unverified)",
-    38: "Send Alert (unverified)",
-    39: "Send Sales Email (unverified)",
-    42: "Add to SFDC Campaign (unverified)",
-    44: "Change SFDC Campaign Status (unverified)",
-    47: "Request Campaign (unverified)",
-}
-
 LEAD_ACTIONS: Final[frozenset[str]] = frozenset(
     {"createOrUpdate", "createOnly", "updateOnly", "createDuplicate"}
 )

@@ -2,11 +2,11 @@
   "process_key": "plugin::marketo_plugin::describe_lead_fields",
   "display_name": "Marketo: Describe Lead Fields",
   "description": "Fetch the full lead field metadata list (id, displayName, name, dataType, length) and searchable_fields for the configured Marketo instance. searchable_fields is the authoritative instance-specific set accepted by get_leads.filter_type.",
-  "embedding_description": "Retrieve the configured Marketo Lead Database field schema, metadata catalog, searchable field names, API names, display names, data types, lengths, and read-only status.",
+  "embedding_description": "Retrieve the configured Marketo Lead Database field schema and metadata catalog: searchable field names accepted as lead query filters, REST API names, display names, data types, lengths, and each field's read-only or writable status from its rest sub-object. Read it to learn which fields this particular instance accepts on a write before a read-modify-write preflight.",
   "result_processor_customizations": {
     "action_label": "Marketo lead field schema fetched",
     "result_type": "marketo_describe_lead_fields_result",
-    "result_description": "Dict with records (a list of field descriptor dicts: id, displayName, name, dataType, length) + searchable_fields + row_count + spilled=false inline, OR result_blob_key + searchable_fields + row_count + spilled=true when the schema is large.",
+    "result_description": "Dict with records (a list of field descriptor dicts: id, displayName, dataType, length, plus a `rest` sub-object carrying that field's REST `name` and `readOnly` flag, and on SOME fields an additional `soap` sub-object with its own name/readOnly) + searchable_fields + row_count + spilled=false inline, OR result_blob_key + searchable_fields + row_count + spilled=true when the schema is large. ⚠ Read `rest.readOnly` — it is the key that governs REST writes. A field can carry NO `soap` sub-object at all (measured 2026-07-30 on a live instance: the fields whose read-only status actually blocks a read-modify-write had a `rest` block and no `soap` block), so a preflight that falls back to `soap` sees nothing precisely where it counts. A descriptor can also carry no `rest` block at all, in which case that field is invisible to the REST API. Read-only membership is a per-instance property to be read here at execution time; it is not a fixed cross-instance list.",
     "presentation_guidance": "Summarize the row_count (field count), searchable_fields, and a handful of field names/types; point to result_blob_key for the full schema."
   },
   "error_processor_customizations": {
