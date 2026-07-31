@@ -45,6 +45,7 @@ failure OR when the fixture is unreachable (loud, never silent).
 
 from __future__ import annotations
 
+import getpass
 import subprocess
 import sys
 from pathlib import Path
@@ -60,7 +61,9 @@ from external_postgres_plugin.connection import connect  # noqa: E402
 _SCRATCH_DB = "epg_smoke_scratch"
 _HOST = "localhost"
 _PORT = 5432
-_USER = "dw"
+# The trust superuser is the OS login, so derive it — never hardcode an operator
+# username. Same discipline bootstrap.py's _ADMIN_ROLE already uses.
+_USER = getpass.getuser()
 _SSLMODE = "disable"
 _PROBE = "epg_probe"
 _READ_ONLY_SQLSTATE = "25006"
