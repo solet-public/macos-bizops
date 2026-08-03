@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::sheets_batch_update",
   "display_name": "Sheets: Batch Update",
   "description": "Apply a list of raw Google Sheets API batchUpdate request objects (rename/add tabs, cell number formats, column widths, frozen rows, etc.) to a spreadsheet. Requires a connected account.",
-  "embedding_description": "Apply one or more raw Google Sheets API batchUpdate request objects to an existing spreadsheet by id — rename a tab, add or delete a tab, set cell number formats such as financial or percent via repeatCell, resize or auto-fit column widths, freeze or bold the header row. The requests list passes through verbatim to the Sheets API; this is the low-level spreadsheet-structure and cell-formatting verb, complementing the values-only read/write verbs. Returns the batchUpdate replies array. Fails gsuite.invalid_params if requests is empty or not a list of request objects.",
+  "embedding_description": "Apply raw Google Sheets API batchUpdate requests to an existing spreadsheet: rename, add, or delete tabs; set number formats; resize columns; freeze rows; and style headers. Requests pass through verbatim. This is the low-level surface for spreadsheet structure and formatting.",
   "result_processor_customizations": {
     "action_label": "Spreadsheet batch-updated",
     "result_type": "g_suite_sheets_batch_update_result",

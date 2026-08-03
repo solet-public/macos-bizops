@@ -157,5 +157,5 @@ def build_start_result(port: int, host: str) -> dict[str, Any]:
         "port": port,
         "host": host,
         "callback_url": f"http://{host}:{port}{OAUTH_CALLBACK_PATH}",
-        "message": "OAuth callback server started. ALB routes /oauth/google/* to this port.",
+        "message": "OAuth callback server started on the requested bind host.",
     }

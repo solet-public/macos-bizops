@@ -1,7 +1,8 @@
 """Prior-pass cross-check: the Codex seed review folded into the F1 schema.
 
-``workbench/2026-07-19_codex_seed_review.md`` is a fixed prior review of the
-published seed (target ``dwestgate/ananta-seed@3b2e2082``). Its findings are
+``workbench/2026-07-19_codex_seed_review.md`` is a fixed prior review of a published
+seed bundle: a minted seed, reviewed as shipped rather than as assembled, which is why
+it caught the identity-bleed class the manifest-side checks did not. Its findings are
 encoded here as F1 records tagged ``prior_pass:codex_seed_review`` so they ride
 the same register as the fresh L1 scan. Where a fresh scanner independently
 reproduces one of these classes on the platform tree (e.g. the identity-bleed class,

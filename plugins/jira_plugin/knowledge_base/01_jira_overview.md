@@ -103,18 +103,55 @@ mystery 401.
 
 | Verb | R/W | Purpose |
 |---|---|---|
-| `jql_search` | R | Find issues by JQL; trimmed rows, spills to a blob when large |
+| `jql_search` | R | Find issues by JQL; returns trimmed rows inline, one complete result up to the row limit |
 | `get_issue` | R | One issue's summary, description, people, labels, attachment metadata |
 | `create_issue` | W | Open a new issue (project + type + summary + optional fields) |
 | `update_issue` | W | Apply a fields object to an existing issue |
 | `delete_issue` | W | Permanently delete an issue (explicit key) |
 | `add_comment` | W | Post a plain-text comment |
-| `list_comments` | R | Read an issue's comment thread |
+| `list_comments` | R | Read an issue's comment thread; returns rows inline, one complete result up to the row limit |
 | `list_transitions` | R | Discover valid workflow moves from the current status |
 | `transition_issue` | W | Move an issue through a transition (optional comment) |
 | `download_attachment` | R | Fetch an attachment's bytes into blob storage |
 | `add_attachment` | W | Attach bytes from a blob to an issue |
 | `test_connection` | R | Health check: confirm auth + resolved site/account |
+
+## Business-data limits migration (2026-08-02, revised 2026-08-03)
+
+**Jira EXITED the spill floor entirely** — operator veto, 2026-08-03
+verbatim: *"We have no PII in Jira - just company internal accounts. Don't
+worry at all about PII in Jira."* An earlier revision of this section (still
+visible in git history) had `jql_search`/`list_comments` always writing to a
+caller-supplied `output_tsv_path` via a workspace-root containment gate
+(`export_containment.py`). That gate, the `ExportPathRefusedError` it raised,
+and the `jira.export_path_refused` error code are all **deleted**, not
+retained as dead code — jira is g_suite-class: results return **inline**,
+never to a file
+(`workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md`
+§0.1/§5.4).
+
+**Paging is hidden — a second 2026-08-03 operator ruling** (verbatim: *"we
+need to deliver the results - the paging is an implementation detail that
+should be hidden"*) retired the disclosure-only shape both verbs briefly had
+after the first revision. `jql_search` and `list_comments` now carry the full
+`acknowledge_default_limit_override`/`row_limit` mechanism (§5): each defaults
+to a 500-row effective limit and, within that limit, pages **internally**
+across Atlassian's 100-issues/100-comments-per-call ceiling — the caller never
+sees `next_page_token` or `start_at`. An acknowledged override
+(`acknowledge_default_limit_override=true` + `row_limit`) raises the limit up
+to a 5,000-row hard cap (refused above that, never silently clamped). Latency
+is real and scales with the limit: 5 internal HTTP calls at the 500-row
+default, 50 at the 5,000-row cap, each a sequential round-trip — a
+defense-in-depth circuit breaker (`MAX_INTERNAL_CALLS=100`) bounds the loop
+regardless. If the vendor genuinely has more than the effective limit,
+`truncated` is `true` (and on `jql_search`, `total` becomes an approximate
+count) — there is no resume token; the over-limit route is narrowing the
+query or raising `row_limit`, never external continuation.
+
+**`get_issue` is unaffected — single-record reads stay inline-capable.**
+Operator-confirmed 2026-08-02: single-item/single-record reads for
+validation purposes are not the mass-exposure risk this migration targets
+(only the bulk read surfaces `jql_search`/`list_comments` are in scope).
 
 ## Notes
 

@@ -1,8 +1,8 @@
 {
   "process_key": "plugin::jira_plugin::get_issue",
   "display_name": "Jira: Get Issue",
-  "description": "Fetch one Jira issue by key: summary, plain-text description, status, assignee, reporter, labels, and attachment metadata (not the attachment bytes). Read action.",
-  "embedding_description": "Retrieve the full detail of a single known Jira issue given its key (e.g. PROJ-123): the one-line summary, the plain-text description body, current workflow status, assignee and reporter display names, labels, and the list of attachment metadata (id, filename, mime type, size) — not the attachment bytes themselves, which download_attachment fetches. Use jql_search to find issue keys first when you don't know one. Distinct from jql_search (many issues, trimmed rows) and list_comments (the issue's comment thread).",
+  "description": "Fetch one Jira issue by key: summary, plain-text description, status, assignee, reporter, labels, and attachment metadata (not the attachment bytes). Single-record reads like this stay inline (2026-08-02 operator ruling: validation-shaped single-item reads are not the mass-exposure risk the business-data limits migration targets). When the goal is only confirming an issue exists or checking its status, jql_search's trimmed rows (key/status) may already answer that without fetching the full description and people fields. Read action.",
+  "embedding_description": "Retrieve the full detail of one known Jira issue by its key, such as PROJ-123: the summary, description body, current workflow status, assignee and reporter, labels, and the metadata describing each attachment. The single-ticket read for when you already hold the issue key; attachment bytes are fetched separately.",
   "result_processor_customizations": {
     "action_label": "Jira issue fetched",
     "result_type": "jira_get_issue_result",

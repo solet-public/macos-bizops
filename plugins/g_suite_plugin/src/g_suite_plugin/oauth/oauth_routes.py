@@ -51,11 +51,11 @@ def create_oauth_router(
     ) -> HTMLResponse:
         """Receive the Google authorization_code redirect and exchange for tokens."""
         if error:
-            # The callback is externally reachable (start_interface binds 0.0.0.0 /
-            # ALB-routable), so provider/query text must never be reflected into the
-            # HTML body or logs verbatim. Log only the short OAuth error CODE (a
-            # defined token like 'access_denied'), not the free-text
-            # error_description; render a generic body.
+            # The callback can be externally reachable when a cloud deployment
+            # explicitly binds 0.0.0.0 behind an ALB, so provider/query text must
+            # never be reflected into the HTML body or logs verbatim. Log only the
+            # short OAuth error CODE (a defined token like 'access_denied'), not the
+            # free-text error_description; render a generic body.
             _logger.error("Google OAuth returned an authorization error: %s", error)
             return HTMLResponse(
                 content=_html_result(

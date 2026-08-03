@@ -58,7 +58,11 @@ _PEER_SEND_DESCRIPTION: Final[str] = "\n".join(
         "  Discover candidates via peer_list. For replies, take the",
         "  sender_agent_instance_id from the inbox entry or the",
         "  peer_message notification meta and pass it as",
-        "  peer_agent_instance_id here.",
+        "  peer_agent_instance_id here. When the reply hint also",
+        "  supplies peer_agent_session_id, pass both: peer_send resolves",
+        "  the exact instance FIRST and consults the stable session key",
+        "  only after that instance is peer_unreachable. A live instance",
+        "  always wins, even if the session key points elsewhere.",
         "",
         "Loop-prevention contract:",
         "  Messages are ALWAYS persisted in the (sender_bridge, peer_instance)",
@@ -466,6 +470,14 @@ TOOLS: Final[list[dict[str, Any]]] = [
                         "Specific instance to address when multiple instances "
                         "of peer_id are registered. Omit when only one "
                         "instance exists."
+                    ),
+                },
+                "peer_agent_session_id": {
+                    "type": "string",
+                    "description": (
+                        "Stable logical-session fallback from a reply hint. "
+                        "Used only after peer_agent_instance_id is unreachable; "
+                        "never overrides a live instance."
                     ),
                 },
                 "content": {

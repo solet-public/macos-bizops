@@ -26,7 +26,7 @@ Use this article when:
 | Edited one `processes/<name>.json` file | `refresh_plugin_process` | `knowledge_service` |
 | Edited several `processes/*.json` files in the same plugin | `refresh_plugin_processes` | `knowledge_service` |
 | Edited a Python source file (`.py`) that is marked `RELOAD_SAFE = True` | `reload_python_module` | `lifecycle_management_service` |
-| Edited a Python source file that is NOT marked `RELOAD_SAFE` | full homunculus restart (see "When Restart Is Still Required" below) | — |
+| Edited a Python source file that is NOT marked `RELOAD_SAFE` | `apply_manifest` (see "Picking up new code without a bare restart" below; see also "When Restart Is Still Required") | `lifecycle_management_service` |
 
 The four verbs are independent. Editing both a `.md` and a process JSON requires calling both `update` and `refresh_plugin_process(es)` — one does not imply the other.
 
@@ -64,6 +64,20 @@ Call shape:
 ```
 
 For service-interface JSONs that live under `ananta/knowledge_base/processes/<service>/`, pass `plugin_name="ananta"`.
+
+Returns:
+
+```json
+{
+  "status": "success",
+  "plugin_name": "<plugin_name>",
+  "refreshed_process_key": "plugin::<plugin>::<function>",
+  "updated": true,
+  "errors": []
+}
+```
+
+The key that was refreshed comes back as `refreshed_process_key`, **not** `process_key`. At the top level of a result envelope, `process_key` is reserved for the key of the verb that *produced* the result, and the platform's result contract enforces that. This verb used the name for the key it had just refreshed, so the two meanings collided and every single call raised `RESULT_CONTRACT_VIOLATION` — after the refresh had already been applied and a completed result row had already been stored. Callers were told success while the result was rejected and the parent flow token was blocked. Renamed 2026-08-01; the plural verb was never affected because `process_keys` is spelled differently.
 
 The refresh triggers a full discovery rebuild after merging. Fields editable through this path: `display_name`, `description`, `embedding_description`, `action_definition_template_arguments`, `result_processor_customizations`, `error_processor_customizations`. Fields that require a restart instead: `process_key`, `invocation_schema` (because they require matching code changes).
 
@@ -221,11 +235,11 @@ Call shape:
 }
 ```
 
-On disable, the verb stops services on the plugin if it is `LifecycleManaged`, removes the plugin from `orchestrator.plugin_manager.plugins`, and refreshes the process registry via `knowledge_service::refresh_plugin_processes` so the plugin's action keys disappear from discovery. The plugin's Python module stays in `sys.modules`; re-enabling reuses already-loaded code where possible.
+On disable, the verb stops services on the plugin if it is `LifecycleManaged` and removes the plugin from `orchestrator.plugin_manager.plugins` — dispatch resolves a process key to a live instance by roster lookup, so this removal is what makes the plugin's action keys undispatchable. It also refreshes the process registry via `knowledge_service::refresh_plugin_processes`, but that call only re-syncs the plugin's on-disk process-JSON metadata against the knowledge base; it does not itself deregister anything from the runtime dispatch table (that belongs to the atomic installer's remove primitive, which the disable path does not call). The plugin's Python module stays in `sys.modules`; re-enabling reuses already-loaded code where possible.
 
-On enable, if the plugin is already in the live roster the verb only starts its services (no-op when already running). If the plugin is not in the live roster, the verb re-runs entry-point discovery on the plugin manager to pick it up; if the entry-point is genuinely not installed, the response returns `restart_required=true` with a message naming the missing entry-point so the caller can install it (typically via `install_plugin_from_path`).
+On enable, if the plugin is already in the live roster the verb only starts its services (no-op when already running). If the plugin is not in the live roster, the verb stages a fresh instance, wires it (injecting `orchestrator_ref` and `event_bus` before `prepare_for_readiness`, the same boot order `install_plugin_from_path` uses), and commits it into the live roster with one atomic dict store via the plugin manager's single-plugin installer — every other already-loaded plugin's instance is left untouched, and a failure at any staging phase (contract validation, wiring) leaves the whole roster, allowlist, and every pre-existing instance byte-identical. If the entry-point is genuinely not installed, the response returns `restart_required=true` with a message naming the missing entry-point so the caller can install it (typically via `install_plugin_from_path`). The same envelope is returned when the entry-point is installed on disk but excluded from this homunculus's profile manifest allowlist — the staged install checks the manifest before staging, so it never bypasses an operator-set exclusion to load an unlisted plugin; `install_plugin_from_path` will not help in that case, the manifest itself needs editing. These two are the only cases where `restart_required` is true.
 
-The response carries `applied` (true when the runtime state changed this session), `restart_required` (only true on the enable-without-installed-entry-point path), `plugin_name`, and `message`.
+The response carries `applied` (true when the runtime state changed this session), `restart_required` (true when the entry-point is missing or manifest-excluded), `plugin_name`, and `message`.
 
 ## Plugin priority — set_plugin_priority
 
@@ -284,7 +298,7 @@ The response carries `applied` (true on a successful write), `prev_value` (the p
 
 ## Runtime plugin install — install_plugin_from_path
 
-`install_plugin_from_path` brings a plugin online from a local source directory without restarting the homunculus. It runs `pip install -e <path>` against the active Python interpreter via subprocess, re-runs entry-point discovery on the plugin manager, diffs the roster before and after, and registers the new plugin's process keys via `knowledge_service::refresh_plugin_processes`.
+`install_plugin_from_path` brings a plugin online from a local source directory without restarting the homunculus. It runs `pip install -e <path>` against the active Python interpreter via subprocess, then stages, wires (`orchestrator_ref` and `event_bus` injected before `prepare_for_readiness`, then `initialize` and `start_services`), and commits the new plugin into the live roster with a single atomic dict store via the plugin manager's single-plugin installer — the new plugin is the only roster entry touched, and a failure at any staging phase (contract validation, wiring) leaves every pre-existing plugin instance byte-identical. It also registers the new plugin's process keys via `knowledge_service::refresh_plugin_processes`.
 
 Call shape:
 
@@ -300,3 +314,22 @@ Validates the path exists, is a directory, and contains either `plugin.yaml` or 
 The response carries `installed` (true when a brand-new plugin entry-point appeared after install), `plugin_name` (name of the newly installed plugin, or empty string when none new), `new_process_keys` (sorted list of process keys the new plugin contributes), and `message`.
 
 An upgrade-in-place of an already-loaded plugin returns `installed=false` with an explanatory message — pip succeeded but no new entry-point appeared. In that case the in-process Python code is still the pre-upgrade bytecode (since the running plugin instance was constructed at boot); restart via `apply_manifest` + the bound `self_deployment_service` plugin to pick up the new code.
+
+## Picking up new code without a bare restart — apply_manifest
+
+`apply_manifest` is the recurring answer above whenever "restart to pick up new code" comes up, but it needs its own call shape like every other verb here. To restart with the SAME plugin set — no roster change, just picking up updated code for plugins already installed — pass the current plugin list back unchanged:
+
+```json
+{
+  "process_key": "service_interface::lifecycle_management_service::apply_manifest",
+  "arguments": {
+    "new_manifest": {"plugins": ["<the exact list list_plugins just returned>"]},
+    "reason": "<short human-readable reason for the restart>",
+    "dry_run": true
+  }
+}
+```
+
+Run `list_plugins` first to get the current roster verbatim. Call once with `dry_run=true` to preview the diff and confirm `added_plugins`/`removed_plugins` are both empty (an unchanged roster) before committing with `dry_run` omitted or `false`. `reason` is required (a missing value returns an error); `new_manifest.plugins` is required, `profile_name` and `service_bindings` are optional and default to the current values when omitted.
+
+This delegates the actual restart to whichever plugin is bound to `self_deployment_service` — check `list_plugins` for `macos_self_deployment_plugin` (local blue-green router, zero-downtime swap) versus its absence (single-color, plain process restart) before relying on a specific latency or downtime characteristic. On a router-carrying profile the swap is genuinely zero-downtime for the no-MCP CLI path this platform defaults to; an MCP-connected caller sees the bridge go dark for roughly 30–60 seconds during the cutover regardless.

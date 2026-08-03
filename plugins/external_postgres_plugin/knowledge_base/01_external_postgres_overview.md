@@ -138,12 +138,12 @@ process_call service_interface::address_book_service::register {
 
 | Verb | Args | Returns |
 |---|---|---|
-| `run_query` | `connection_name, sql, max_rows=200` | rows inline (columns/rows/row_count/spilled=false); fails loud with `external_pg.result_too_large` over the inline caps |
+| `run_query` | `connection_name, sql, output_tsv_path, acknowledge_default_limit_override=false, row_limit` | `{path, columns, row_count, truncated}` — written as ONE `.tsv` file at the caller's ABSOLUTE path, never rows inline; defaults to 500 rows, up to 1000 with an acknowledged override |
 | `list_connections` | — | `{connections: [name]}` (names only, never secrets) |
 | `list_schemas` | `connection_name` | `{schemas: [name]}` |
 | `list_tables` | `connection_name, schema` | `{tables: [{name, kind}]}` |
 | `describe_table` | `connection_name, schema, table` | `{columns: [{name, type, nullable, default}]}` |
-| `export_query` | `connection_name, sql, output_tsv_path` | `{path, columns, row_count, truncated}` — full result (up to 50000 rows) written as ONE `.tsv` file at the caller's ABSOLUTE path |
+| `export_query` | `connection_name, sql, output_tsv_path, acknowledge_default_limit_override=false, row_limit` | `{path, columns, row_count, truncated}` — the N>>500 route: same shape as run_query, defaults to 500 rows, up to 50000 with an acknowledged override |
 | `test_connection` | `connection_name` | `{ok, server_version, current_user, read_only}` |
 
 `export_query` writes to the operator's OWN workspace, never platform blob
@@ -155,13 +155,20 @@ default `[]` REFUSES every export until the operator opts roots in; refusals
 name the config key. There is no session-cwd inference and no `Path.cwd()` —
 the caller supplies the path, the config supplies the containment.
 
-`run_query` returns up to `max_rows` (default 200, hard cap 1000); a result larger
-than the inline row/byte cap FAILS LOUD (A4, 2026-07-16 — no blob spill). For the
-full result set as a file, use `export_query`. Rows are returned as **arrays
-parallel to `columns`** (not
-name-keyed dicts) so a JOIN's duplicate column names (`SELECT a.id, b.id`) never
-collapse and lose a value. Non-primitive column values (timestamps, Decimals,
-UUIDs) are coerced to their string form in the result.
+Both `run_query` and `export_query` ALWAYS write their result to the caller's
+`output_tsv_path` — never rows inline, at any size (business-data limits +
+spill-floor migration, 2026-08-02; the former inline-return/byte-cap branch
+is deleted, not lowered). Each defaults to 500 rows absent an acknowledged
+override; `run_query`'s override ceiling is 1000, `export_query`'s is 50000
+(the N>>500 route). `acknowledge_default_limit_override=true` together with
+an explicit `row_limit` requests more than the default — both are required
+together, and a `row_limit` above the verb's hard cap is refused, never
+silently clamped. Neither verb has a vendor-imposed ceiling to defer to: this
+connection is an arbitrary customer database, so both limits are entirely
+our own policy. Columns are written to the `.tsv` header in query order, with
+duplicate column names (a JOIN's `SELECT a.id, b.id`) preserved positionally
+rather than collapsed. Non-primitive column values (timestamps, Decimals,
+UUIDs) are coerced to their string form before writing.
 
 ## Dependencies + delivery
 

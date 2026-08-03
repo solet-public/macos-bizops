@@ -28,13 +28,14 @@ from pathlib import Path
 
 import lizard
 from code_vetting_plugin.live_state import get_vetting_runs_schema
-from code_vetting_plugin.models import Dimension, Severity
+from code_vetting_plugin.models import Dimension, Finding, Severity
 from code_vetting_plugin.report import DEFAULT_ZERO_FP_DIMENSIONS
 from code_vetting_plugin.run_record import AllowlistDelta, RunTarget, build_run_metrics
 from code_vetting_plugin.runner import SCANNERS, Applicability
 from code_vetting_plugin.scanners.structural_metrics import (  # noqa: PLC2701 — pin the internal metric/band logic
     LIZARD_PINNED_VERSION,
     _is_tracked_debt,
+    _python_nested_loops,
     render_structural_metrics_section,
     scan,
     supported_languages,
@@ -148,16 +149,54 @@ def _check_exact_metrics(tree: TargetTree) -> None:
     _check("worst offender is big_branch", report.worst_offenders[0].name == "big_branch", report.worst_offenders[0].name)
 
 
+def _check_foreign_nested_loop_rows(
+    findings: list[Finding], got: set[tuple[str, str, str]]
+) -> set[tuple[str, str, str]]:
+    """The nested-loop class, asserted SEPARATELY and just as exactly as the bands.
+
+    Split out of `_check_foreign_findings` to keep that function under the CC gate, not because
+    the assertions are optional. Returns the rows so the caller can still prove every emitted
+    finding is either a band crossing or this class.
+
+    `deeply_nested` in the fixture is for → while → for, so the class must register at depth 2
+    (LOW) and depth 3 (MEDIUM); `_MOD_PY`'s if-chains are ALSO deep, which is precisely the
+    distinction lizard's any-nesting `nd` metric cannot draw and this detector must.
+    """
+    nested = {row for row in got if row[1] == "complexity:nested_loops"}
+    _check(
+        "foreign emits EXACTLY the 2 nested-loop findings (depth 2 LOW, depth 3 MEDIUM)",
+        nested == {("mod.py", "complexity:nested_loops", "low"), ("mod.py", "complexity:nested_loops", "medium")},
+        f"got {sorted(nested)}",
+    )
+    # The set above pins WHICH rows; it cannot pin HOW MANY, because duplicates collapse into it.
+    # A walker that double-visited a node would emit the same finding N times and still satisfy
+    # the set. Count on the finding list itself so the "EXACTLY" in that label is load-bearing.
+    nested_count = len([f for f in findings if f.constraint_violated == "complexity:nested_loops"])
+    _check(
+        "…and emits them exactly ONCE each (a set cannot see duplicates)",
+        nested_count == 2,
+        f"got {nested_count} nested-loop finding rows",
+    )
+    return nested
+
+
 def _check_foreign_findings(tree: TargetTree) -> None:
     findings = scan(tree, "vr-r8").findings
     got = {(f.file, f.constraint_violated, f.severity.value) for f in findings}
+    band = {row for row in got if row[1].startswith("structural:")}
     want = {
         ("big.py", "structural:ccn>30", "medium"),
         ("big.py", "structural:nesting>6", "low"),
         ("mod.py", "structural:nesting>6", "low"),
         ("mod.py", "structural:params>8", "low"),
     }
-    _check("foreign emits EXACTLY the 4 band findings", got == want, f"got {sorted(got)}")
+    _check("foreign emits EXACTLY the 4 band findings", band == want, f"got {sorted(band)}")
+    nested = _check_foreign_nested_loop_rows(findings, got)
+    _check(
+        "every emitted finding is either a band crossing or the named nested-loop class",
+        band | nested == got,
+        f"unclassified: {sorted(got - band - nested)}",
+    )
     _check("severity NEVER exceeds MEDIUM (no HIGH/BLOCKER)", all(f.severity in {Severity.LOW, Severity.MEDIUM} for f in findings), str([f.severity.value for f in findings]))
     _check("all findings are COMPLEXITY dimension", all(f.dimension is Dimension.COMPLEXITY for f in findings), "")
     _check("COMPLEXITY is zero-FP-promoted (renders without an L3 pass)", Dimension.COMPLEXITY in DEFAULT_ZERO_FP_DIMENSIONS, "")
@@ -167,7 +206,23 @@ def _check_foreign_findings(tree: TargetTree) -> None:
 def _check_self_suppression(tree: TargetTree) -> None:
     result = scan(tree, "vr-r8-self")
     _check("self-vet SUPPRESSES metric finding rows (project_local tier)", result.findings == [], str(result.findings))
-    _check("self-vet still carries the full payload", result.structural_metrics is not None and result.structural_metrics.functions_analyzed == 5, "")
+    # The nested-loop denominator must be disclosed on a SELF-vet too. Suppressing the finding
+    # rows must not also suppress the statement of what was examined — otherwise a self-vet
+    # reads as "nothing to report" when the truth may be "not examined for this class".
+    # It rides the payload + report section, NOT gap_reason: a note appended on every run makes
+    # "was anything reduced?" permanently true and buries the genuine reductions.
+    assert result.structural_metrics is not None
+    _check(
+        "self-vet still discloses the nested-loop denominator (on the payload)",
+        result.structural_metrics.nested_loop_files_examined == 2,
+        str(result.structural_metrics.nested_loop_files_examined),
+    )
+    _check(
+        "…and gap_reason is NOT populated when nothing was actually reduced",
+        result.coverage.gap_reason is None,
+        str(result.coverage.gap_reason),
+    )
+    _check("self-vet still carries the full payload", result.structural_metrics.functions_analyzed == 5, "")
     _check("coverage always ran=True (lizard structurally present)", result.coverage.ran is True and result.coverage.files_examined == 3, str(result.coverage))
 
 
@@ -231,11 +286,262 @@ def _check_literal_frequency() -> None:
         _check("literal-freq FLOOR: two-site literal excluded (<4 sites)", ("string", "two_site_only") not in values, str(values))
 
 
+# --- the named NESTED-LOOP pattern class (loops within loops) ------------------------
+#
+# Ruling B (2026-07-31) keeps static bad-pattern detection in scope and names loops-within-
+# loops as the example. lizard's `nd` reports ANY-nesting depth, so before this the class was
+# caught only incidentally and unnamed. These cases pin the DISTINCTION (a loop-free but
+# deeply-branched function must NOT register) and the two ways the detector could make a
+# FALSE claim: counting a closure's loop as nested, and counting a loop keyword in a string.
+
+# A file the walker cannot examine. `_walk_python_loops` costs one Python frame per AST level,
+# so a long chained expression exhausts the stack while parsing fine and staying FAR under the
+# 1MB `_MAX_FILE_BYTES` guard. MEASURED at authoring time against the unguarded walk: 500 terms
+# walks clean, 1000 terms raises RecursionError (2,045 bytes, default limit 1000). 2000 gives
+# margin for a host with a deeper limit without making the fixture slow.
+_DEEP_CHAIN_SOURCE = "x = " + "+".join(["1"] * 2000) + "\nfor a in y:\n    for b in a:\n        pass\n"
+
+# `None` as the expectation means NOT EXAMINED — distinct from `()`, "examined, nothing found".
+# The two must never be written the same way: that conflation is what let an unparseable file be
+# counted in the coverage denominator.
+_NESTED_LOOP_CASES: tuple[tuple[str, str, tuple[int, ...] | None], ...] = (
+    ("a single flat loop is not nested", "for a in x:\n    pass\n", ()),
+    ("two sibling loops are not nested", "for a in x:\n    pass\nfor b in y:\n    pass\n", ()),
+    ("a loop inside a loop is depth 2", "for a in x:\n    for b in y:\n        pass\n", (2,)),
+    ("a while inside a for is depth 2", "for a in x:\n    while b:\n        pass\n", (2,)),
+    ("a triple loop reports depth 2 and 3", "for a in x:\n    for b in y:\n        for c in z:\n            pass\n", (2, 3)),
+    (
+        "an if between two loops does not break the nest",
+        "for a in x:\n    if cond:\n        for b in y:\n            pass\n",
+        (2,),
+    ),
+    (
+        "a loop inside a def inside a loop is NOT a nested loop (closure resets depth)",
+        "for a in x:\n    def inner():\n        for b in y:\n            pass\n",
+        (),
+    ),
+    (
+        "a genuine nest inside that closure still counts",
+        "for a in x:\n    def inner():\n        for b in y:\n            for c in z:\n                pass\n",
+        (2,),
+    ),
+    (
+        "a loop keyword inside a string literal is not a loop",
+        'msg = "for a in x: for b in y:"\nfor a in x:\n    pass\n',
+        (),
+    ),
+    ("nested async for is depth 2", "async def f():\n    async for a in x:\n        async for b in y:\n            pass\n", (2,)),
+    # Both of these are NOT-EXAMINED, not clean. Returning () here would report a file nobody
+    # could look at as one that was looked at and found innocent.
+    ("an unparseable file reports NOT EXAMINED rather than crashing", "def broken(:\n", None),
+    ("a file that out-nests the walker reports NOT EXAMINED rather than aborting the run", _DEEP_CHAIN_SOURCE, None),
+    # DELIBERATE v1 exclusion, pinned so a later change to it is a decision and not a drift.
+    ("a multi-generator comprehension is not counted in v1", "vals = [q for a in x for b in y]\n", ()),
+)
+
+
+def _check_nested_loop_detection() -> None:
+    for label, source, expected in _NESTED_LOOP_CASES:
+        loops = _python_nested_loops("probe.py", source)
+        if expected is None:
+            # Asserted as `is None`, NOT as falsy: `[]` is falsy too, and `[]` is the answer
+            # this case exists to rule out.
+            _check(f"nested-loop: {label}", loops is None, f"expected None (not examined), got {loops}")
+            continue
+        _check(
+            f"nested-loop: {label}",
+            loops is not None and tuple(sorted(loop.depth for loop in loops)) == tuple(sorted(expected)),
+            f"expected {expected}, got {loops if loops is None else tuple(sorted(found.depth for found in loops))}",
+        )
+
+
+def _check_nested_loop_denominator_is_declared() -> None:
+    """The denominator must travel with the rows: an empty list must be distinguishable from
+    'nothing was examined'. Asserted on a tree containing a NON-Python file so the examined
+    count is genuinely smaller than files_parsed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "denominator"
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "loops.py").write_text("def f(x):\n    for a in x:\n        for b in a:\n            pass\n", encoding="utf-8")
+        (root / "src" / "app.ts").write_text("export function f(){ for(;;){ for(;;){} } }\n", encoding="utf-8")
+        # from_walk (not a hand-built TargetTree): `enumeration` is git|walk and `foreign` is
+        # DERIVED, not caller-settable — inventing values for either would be test-only vocabulary.
+        result = scan(TargetTree.from_walk(root), "rid")
+    report = result.structural_metrics
+    assert report is not None
+    _check(
+        "the nested-loop payload carries its own language denominator",
+        report.nested_loop_languages == ("python",),
+        str(report.nested_loop_languages),
+    )
+    _check(
+        "the examined-file count is narrower than files_parsed (the TS file was not examined)",
+        report.nested_loop_files_examined == 1 and report.files_parsed == 2,
+        f"examined={report.nested_loop_files_examined} parsed={report.files_parsed}",
+    )
+    _check(
+        "the Python nested loop was detected",
+        [loop.depth for loop in report.nested_loops] == [2],
+        str(report.nested_loops),
+    )
+    # The serialized payload must carry the denominator too — this is what a consumer reads.
+    payload = report.to_dict()
+    _check(
+        "the serialized payload carries rows AND denominator together",
+        payload["nested_loop_languages"] == ["python"] and payload["nested_loop_files_examined"] == 1,
+        str({k: payload.get(k) for k in ("nested_loop_languages", "nested_loop_files_examined")}),
+    )
+    # The denominator is disclosed in the REPORT SECTION (human-readable) and on the payload
+    # (machine-readable) — not in gap_reason, which is reserved for genuine reductions.
+    _check(
+        "the report section states the nested-loop denominator",
+        "Examined 1 of 2 parsed file(s)" in render_structural_metrics_section(report),
+        render_structural_metrics_section(report)[:400],
+    )
+    _check(
+        "gap_reason stays None when nothing was truncated or skipped",
+        result.coverage.gap_reason is None,
+        str(result.coverage.gap_reason),
+    )
+    _check(
+        "a foreign run emits the nested loop as a named finding",
+        any(f.constraint_violated == "complexity:nested_loops" for f in result.findings),
+        str([f.constraint_violated for f in result.findings]),
+    )
+    section = render_structural_metrics_section(report)
+    _check(
+        "the report section names the class and discloses the language limit",
+        "Nested loops" in section and "were NOT examined" in section,
+        section[:400],
+    )
+
+
+def _check_unexaminable_python_is_not_counted_as_examined() -> None:
+    """A Python file the detector could NOT examine must not inflate its own denominator.
+
+    RED-FIRST: the increment used to run unconditionally after the parser call, so a file whose
+    parse failed — the parser having swallowed the error and returned ``[]`` — was reported as
+    examined. That is the precise inversion of what the field is for: it exists so a reader can
+    tell "none found" from "not examined", and it was answering "examined" for the second case.
+
+    Both unexaminable shapes are covered: a syntax error, and a file that out-nests the walker.
+    Two of the three files here are Python, and only ONE of them is examinable.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "unexaminable"
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "ok.py").write_text("def f(x):\n    for a in x:\n        for b in a:\n            pass\n", encoding="utf-8")
+        (root / "src" / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+        (root / "src" / "deep.py").write_text(_DEEP_CHAIN_SOURCE, encoding="utf-8")
+        result = scan(TargetTree.from_walk(root), "rid-unexaminable")
+    report = result.structural_metrics
+    assert report is not None
+    _check(
+        "an unparseable / over-nested file is NOT counted as examined",
+        report.nested_loop_files_examined == 1,
+        f"examined={report.nested_loop_files_examined} (expected 1 of {report.files_parsed} parsed)",
+    )
+    _check(
+        "…while all three files still count as PARSED (the two denominators stay distinct)",
+        report.files_parsed == 3,
+        f"files_parsed={report.files_parsed}",
+    )
+    _check(
+        "the disclosure reports the honest ratio, not the flattering one",
+        "Examined 1 of 3 parsed file(s)" in render_structural_metrics_section(report),
+        render_structural_metrics_section(report)[:400],
+    )
+    _check(
+        "the examinable file's own nested loop is still found (the guard did not suppress it)",
+        [loop.depth for loop in report.nested_loops] == [2],
+        str(report.nested_loops),
+    )
+
+
+def _check_no_functions_still_renders_the_nested_loop_block() -> None:
+    """"No functions analyzed" must not swallow the nested-loop block.
+
+    RED-FIRST: `render_structural_metrics_section` early-returned `_empty_section` on
+    `functions_analyzed == 0`, dropping the block whose own docstring says it is ALWAYS
+    rendered with its denominator — in exactly the case where loops WERE found.
+
+    Reachability is MEASURED, not assumed: lizard returns `function_list == []` for
+    module-level script code, so a bare for/for file analyses zero functions while the
+    nested-loop detector still finds the nest and `scan` still emits the finding.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "modlevel"
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "script.py").write_text("for a in range(3):\n    for b in range(3):\n        print(a, b)\n", encoding="utf-8")
+        result = scan(TargetTree.from_walk(root), "rid-modlevel")
+    report = result.structural_metrics
+    assert report is not None
+    _check(
+        "the fixture really does reach the zero-functions path (else this proves nothing)",
+        report.functions_analyzed == 0,
+        f"functions_analyzed={report.functions_analyzed}",
+    )
+    _check(
+        "…and the nested loop was still detected",
+        len(report.nested_loops) == 1 and any(f.constraint_violated == "complexity:nested_loops" for f in result.findings),
+        f"loops={report.nested_loops} findings={[f.constraint_violated for f in result.findings]}",
+    )
+    section = render_structural_metrics_section(report)
+    _check(
+        "the zero-functions section STILL renders the nested-loop block",
+        "Nested loops" in section,
+        section[:400],
+    )
+    _check(
+        "…with its denominator, so the report never contradicts the run record",
+        "Examined 1 of 1 parsed file(s)" in section,
+        section[:400],
+    )
+
+
+def _check_nested_loop_total_survives_the_cap() -> None:
+    """A capped payload must still report the TRUE total.
+
+    RED-FIRST: rendering ``len(report.nested_loops)`` as the total understates it on any tree
+    above the cap — a shipped report making a false count claim, which is the exact defect
+    class this scanner emits findings about. Built deliberately OVER the cap.
+    """
+    over_cap = 130
+    body = "".join(f"    for a{i} in x:\n        for b{i} in a{i}:\n            pass\n" for i in range(over_cap))
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "overcap"
+        root.mkdir(parents=True)
+        (root / "many.py").write_text(f"def f(x):\n{body}", encoding="utf-8")
+        result = scan(TargetTree.from_walk(root), "rid")
+    report = result.structural_metrics
+    assert report is not None
+    _check(
+        "the payload is capped (bounded-row invariant still holds)",
+        len(report.nested_loops) == 100 and report.nested_loops_total == over_cap,
+        f"carried={len(report.nested_loops)} total={report.nested_loops_total}",
+    )
+    _check(
+        "the rendered section reports the TRUE total, not the truncated length",
+        f"{over_cap} found" in render_structural_metrics_section(report),
+        render_structural_metrics_section(report)[-400:],
+    )
+    _check(
+        "truncation is disclosed on the coverage record",
+        result.coverage.gap_reason is not None and f"found {over_cap} nested loops" in result.coverage.gap_reason,
+        str(result.coverage.gap_reason),
+    )
+
+
 def main() -> int:
     try:
         _check_roster_and_pin()
         _check_languages()
         _check_literal_frequency()
+        _check_nested_loop_detection()
+        _check_nested_loop_denominator_is_declared()
+        _check_unexaminable_python_is_not_counted_as_examined()
+        _check_no_functions_still_renders_the_nested_loop_block()
+        _check_nested_loop_total_survives_the_cap()
         with tempfile.TemporaryDirectory() as tmp:
             _check_exact_metrics(_fixture(Path(tmp) / "f1", foreign=True))
         with tempfile.TemporaryDirectory() as tmp:

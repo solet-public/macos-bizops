@@ -2,7 +2,7 @@
   "process_key": "plugin::jira_plugin::test_connection",
   "display_name": "Jira: Test Connection",
   "description": "Verify the configured Jira credentials by fetching the authenticated account. Returns ok, the site base_url, and the service account's id and display name. Read action.",
-  "embedding_description": "Confirm that the jira_plugin is correctly configured and can authenticate — fetches the currently authenticated Atlassian account and returns ok, the resolved site base_url, and the service account's account id and display name. Use this as a health check after registering or rotating credentials to confirm the token works and points at the expected site, before relying on the other verbs. Distinct from get_issue (fetch a ticket) and jql_search (find tickets).",
+  "embedding_description": "Confirm the Jira connector is configured and can authenticate: fetches the currently authenticated Atlassian account and returns the resolved site base url plus the service account's id and display name. A health check after registering or rotating credentials, confirming the token works and points at the expected site.",
   "result_processor_customizations": {
     "action_label": "Jira connection verified",
     "result_type": "jira_test_connection_result",

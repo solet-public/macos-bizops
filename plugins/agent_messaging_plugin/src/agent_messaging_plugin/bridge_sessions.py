@@ -25,6 +25,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# The ONE literal for the binding-liveness window (WS-2a W3 / WS-2e §4.3.2).
+# Both transports long-poll continuously, so a live session's bridge is touched
+# every ~25-30s; 90 is >3x that worst case and far under the 3_600s idle sweep,
+# which makes staleness a clean discriminator rather than a heuristic.
+DEFAULT_BINDING_LIVENESS_WINDOW_S: Final[int] = 90
+
+
 BRIDGE_ID_PREFIX: Final[str] = "agc-"
 _BRIDGE_ID_HEX_LEN: Final[int] = 12
 
@@ -96,12 +103,19 @@ class BridgeSessionManager:
         idle_timeout_s: int,
         max_pending_events: int,
         long_poll_timeout_s: int,
+        binding_liveness_window_s: int = DEFAULT_BINDING_LIVENESS_WINDOW_S,
         policy_resolver: Callable[[BearerClaim], tuple[str, ...]] | None = None,
     ) -> None:
         self._session_id_factory = session_id_factory
         self._idle_timeout_s = idle_timeout_s
         self._max_pending_events = max_pending_events
         self._long_poll_timeout_s = long_poll_timeout_s
+        # WS-2a W3 / WS-2e §4.3.2. Lives HERE rather than being threaded through
+        # every dispatch call site: the manager is already constructed from
+        # config and already passed to all five of them, so one wiring point
+        # replaces five chances to silently drop the keyword and leave the knob
+        # inert at that site.
+        self._binding_liveness_window_s = binding_liveness_window_s
         self._bridges: dict[str, BridgeSessionState] = {}
         self._registry_lock = threading.Lock()
         # Per-bridge wakeup primitives: each entry is the asyncio.Event
@@ -196,6 +210,11 @@ class BridgeSessionManager:
             self._wakeups.pop(bridge_id, None)
         logger.info("bridge closed: %s", bridge_id)
         return True
+
+    @property
+    def binding_liveness_window_s(self) -> int:
+        """Seconds a bridge may go unpolled before its bindings read as dead."""
+        return self._binding_liveness_window_s
 
     def get(self, bridge_id: str) -> BridgeSessionState | None:
         with self._registry_lock:

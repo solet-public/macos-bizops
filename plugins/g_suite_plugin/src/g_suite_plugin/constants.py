@@ -107,16 +107,34 @@ ADDRESS_BOOK_FIELD_CLIENT_SECRET: Final[str] = "client_secret"
 ADDRESS_BOOK_FIELD_REDIRECT_URI: Final[str] = "redirect_uri"
 
 # ---------------------------------------------------------------------------
-# Gmail defaults
+# Business-data limits (2026-08-02 —
+# workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md,
+# operator scope refinement arm-4f6174762777dfe2fa66b8d409bb373b: g_suite is
+# LIMITS-ONLY, a resource guard against exhausting vendor rate limits / an
+# unbounded response size — NOT the spill floor (no containment gate, no
+# caller-supplied-path requirement, no inline-branch deletion; the operator's
+# mass-exposure concern does not apply to g_suite). Gmail keeps a 500 default
+# explicitly per the operator, matching Gmail's own real single-call vendor
+# maximum (Reviewer-D's census, Part 1) — default equals the reachable
+# ceiling, so there is nothing an override could raise to without building
+# pageToken pagination (explicitly not in this slice's scope, §7.2), the same
+# "nothing to raise to" shape as jira/marketo's §5.3 vendor-sub-500-ceiling
+# verbs, just reached because the ceiling equals rather than sits below 500.
+# Drive's real single-call vendor maximum (1,000) sits above the 500 default,
+# so its override IS meaningful and gets the full acknowledge_default_limit_
+# override/row_limit mechanism.
 # ---------------------------------------------------------------------------
-GMAIL_DEFAULT_MAX_RESULTS: Final[int] = 25
-GMAIL_MAX_RESULTS_CAP: Final[int] = 100
+GMAIL_DEFAULT_MAX_RESULTS: Final[int] = 500
+GMAIL_MAX_RESULTS_CAP: Final[int] = 500
+
+PARAM_ACKNOWLEDGE_OVERRIDE: Final[str] = "acknowledge_default_limit_override"
+PARAM_ROW_LIMIT: Final[str] = "row_limit"
 
 # ---------------------------------------------------------------------------
 # Drive defaults
 # ---------------------------------------------------------------------------
-DRIVE_DEFAULT_PAGE_SIZE: Final[int] = 25
-DRIVE_PAGE_SIZE_CAP: Final[int] = 100
+DRIVE_DEFAULT_PAGE_SIZE: Final[int] = 500
+DRIVE_PAGE_SIZE_CAP: Final[int] = 1000
 DRIVE_FOLDER_MIME_TYPE: Final[str] = "application/vnd.google-apps.folder"
 DRIVE_UPLOAD_DEFAULT_MIME: Final[str] = "application/octet-stream"
 DRIVE_SHARE_ROLE_READER: Final[str] = "reader"
@@ -153,6 +171,19 @@ SHEETS_EXPORT_MIME_BY_FORMAT: Final[dict[str, str]] = {
 }
 SHEETS_DEFAULT_EXPORT_FORMAT: Final[str] = SHEETS_EXPORT_FORMAT_CSV
 SHEETS_VALUE_INPUT_OPTION_USER_ENTERED: Final[str] = "USER_ENTERED"
+
+# get_values row bound (2026-08-02, business-data limits, resource guard —
+# see the block above). No vendor citation exists for a values.get row
+# ceiling (Sheets' values.get has no server-side per-call size parameter at
+# all, unlike Gmail's maxResults/Drive's pageSize — it returns whatever the
+# requested A1 range contains). OURS-ARBITRARY, matching this design's other
+# arbitrary-cap connectors (postgres: 200/1000). Enforced POST-FETCH,
+# fail-loud over the effective limit — never a silent truncation of the
+# returned grid, and disclosed in the process description that this does NOT
+# reduce the underlying vendor call's size (narrowing the requested range is
+# still the caller's job for that).
+SHEETS_DEFAULT_ROW_LIMIT: Final[int] = 500
+SHEETS_ROW_LIMIT_CAP: Final[int] = 1000
 
 DOCS_EXPORT_FORMAT_PDF: Final[str] = "pdf"
 DOCS_EXPORT_FORMAT_DOCX: Final[str] = "docx"
@@ -195,6 +226,9 @@ ERROR_RATE_LIMITED: Final[str] = "gsuite.rate_limited"
 ERROR_NOT_FOUND: Final[str] = "gsuite.not_found"
 ERROR_INVALID_PARAMS: Final[str] = "gsuite.invalid_params"
 ERROR_API_ERROR: Final[str] = "gsuite.api_error"
+# sheets_get_values' post-fetch fail-loud-over-cap (business-data limits,
+# 2026-08-02): the effective row limit was exceeded, never silently truncated.
+ERROR_RESULT_TOO_LARGE: Final[str] = "gsuite.result_too_large"
 
 # ---------------------------------------------------------------------------
 # Result types

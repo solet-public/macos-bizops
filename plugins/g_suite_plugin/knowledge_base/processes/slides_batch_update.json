@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::slides_batch_update",
   "display_name": "Slides: Batch Update",
   "description": "Apply a list of raw Google Slides API batchUpdate request objects (add slide, insert text/image, etc.) to a presentation. Requires a connected account.",
-  "embedding_description": "Apply one or more raw Google Slides API batchUpdate request objects (for example createSlide, insertText, createImage, updatePageElementTransform) to an existing presentation by id. The requests list is passed through verbatim to the Slides API — this is the low-level structural-edit verb for adding slides, inserting text boxes/images, and repositioning elements. Use slides_get first to find an existing slide's object_id when a request needs to target it. Returns the batchUpdate replies array. Fails gsuite.invalid_params if requests is empty or not a list of request objects.",
+  "embedding_description": "Apply raw Google Slides API batchUpdate requests to an existing presentation by id - createSlide, insertText, createImage, updatePageElementTransform and the rest - passed through verbatim. The low-level structural edit surface for decks, covering changes beyond what the higher-level verbs reach.",
   "result_processor_customizations": {
     "action_label": "Presentation batch-updated",
     "result_type": "g_suite_slides_batch_update_result",

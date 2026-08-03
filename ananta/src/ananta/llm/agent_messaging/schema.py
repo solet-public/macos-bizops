@@ -33,11 +33,18 @@ TABLE_AGENT_ROLE_MESSAGE = "agent_role_message"
 # shape, but the recipient instance is FIXED (Q3 key), so it carries no
 # recipient_kind/recipient_key. Written + read ONLY through the state interface.
 TABLE_AGENT_DIRECT_WAKE = "agent_direct_wake"
+# Pull-surface boundary (workbench/2026-08-02_pull_surface_boundary_design_claude_d.md
+# §1): one row per role, the durable server-side "covered through" mark that
+# bounds the peer_inbox role section's DEFAULT drain. Co-located here (not the
+# plugin's agent_messaging_plugin namespace) because it must be read INLINE on
+# every peer_inbox call alongside agent_role_message, same-namespace.
+TABLE_ROLE_COVERED_MARK = "role_covered_mark"
 
 ID_PREFIX_THREAD = "agt"
 ID_PREFIX_MESSAGE = "agm"
 ID_PREFIX_ROLE_MESSAGE = "arm"
 ID_PREFIX_DIRECT_WAKE = "adw"
+ID_PREFIX_ROLE_COVERED_MARK = "arc"  # R7: collision-checked clear against every ID_PREFIX_* in the repo at build time.
 
 # REL-05 consumption + re-emit bookkeeping columns, shared verbatim across
 # schema.py, the service drain/reconcile methods, the escalation reconciler, and
@@ -66,6 +73,16 @@ COL_EMIT_COUNT = "emit_count"
 # activity from the instance the message was actually emitted to — recorded here
 # on each ``/peer/delivered`` confirm. Direct rows are immune (fixed recipient).
 COL_EMITTED_TO_AGENT_INSTANCE_ID = "emitted_to_agent_instance_id"
+# QUIET-GAP capture (H2 fix): the recipient's ``last_model_activity_at`` AS OF the
+# most recent emission, frozen per-emission on BOTH owed tables. Guard 2 reads this
+# instead of the live ``prev_model_activity_at``, which slides forward on every model
+# call and so could retire an emission's only consumable window after the fact.
+COL_ACTIVITY_AT_EMISSION = "activity_at_emission"
+# H1-role re-home: the STABLE agent_session_id of the instance the most recent
+# emission went to, stamped beside COL_EMITTED_TO_AGENT_INSTANCE_ID. The role
+# sibling of the direct table's ``recipient_agent_session_id`` — an instance id
+# rotates on a genuine session restart, so a re-home needs a key that does not.
+COL_EMITTED_TO_AGENT_SESSION_ID = "emitted_to_agent_session_id"
 
 # recipient_kind domain values for core__agent_role_message.
 RECIPIENT_KIND_ROLE = "role"
@@ -88,6 +105,15 @@ _RECIPIENT_KIND_VALUES = (RECIPIENT_KIND_ROLE, RECIPIENT_KIND_INSTANCE)
 META_KEY_RECIPIENT_KIND = "recipient_kind"
 META_KEY_RECIPIENT_KEY = "recipient_key"
 META_KEY_DELIVERY_EXTERNAL_ID = "delivery_external_id"
+# The persisted role ROW's ``created_at``, carried so a watcher can advance its
+# ``role_high_water`` mark from a LIVE delivery using the same quantity the
+# role-inbox section sorts and pages on. Without it the live path has no
+# comparable timestamp: ``sent_at`` is a clock reading taken at meta-build time
+# (a different quantity, and skipping ahead of a row loses it silently) and
+# ``delivery_external_id`` is ``role:{key}:{message_id}`` — not time-ordered at
+# all. Absent on a pre-deploy server; readers MUST treat "" as "cannot advance"
+# and leave the mark alone rather than substituting one of the above.
+META_KEY_ROLE_CREATED_AT = "role_created_at"
 
 _THREAD_STATUS_VALUES = (
     "open",
@@ -552,6 +578,30 @@ def get_agent_role_message_schema() -> SchemaDefinition:
                     "NULL until first emission."
                 ),
             ),
+            COL_ACTIVITY_AT_EMISSION: ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description=(
+                    "QUIET-GAP capture: the recipient's last_model_activity_at "
+                    "AS OF the most recent emission, frozen on the row. Guard 2 "
+                    "reads THIS rather than the live sliding pair, so the "
+                    "quiet-gap test cannot drift after the fact. Refreshed on "
+                    "every emission (original and each re-emit) so each emission "
+                    "gets its own honest test. NULL = no recorded activity at "
+                    "emission (or a pre-migration row) ⇒ the whole preceding "
+                    "session was the quiet gap ⇒ guard 2 passes."
+                ),
+            ),
+            COL_EMITTED_TO_AGENT_SESSION_ID: ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "H1-role: the STABLE agent_session_id behind "
+                    "emitted_to_agent_instance_id at the most recent emission. "
+                    "The instance id rotates when a session restarts, which "
+                    "stranded the consumption join on a dead id; this key does "
+                    "not rotate, so the register-time re-home can re-point the "
+                    "row onto the successor. NULL until first emission."
+                ),
+            ),
             # ---- RIDER-1 terminal-clear (mirrors the direct-wake escalation) ---
             # Before this, a capped-unconsumed role IMPORTANT went DORMANT
             # (consumed=false, emit_count=cap) and NEVER left the consumed=false
@@ -733,6 +783,19 @@ def get_agent_direct_wake_schema() -> SchemaDefinition:
                 default=0,
                 description="Emissions so far (original + re-emits); the cap-3 stop.",
             ),
+            COL_ACTIVITY_AT_EMISSION: ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description=(
+                    "QUIET-GAP capture: the recipient's last_model_activity_at "
+                    "AS OF the most recent emission, frozen on the row. Guard 2 "
+                    "reads THIS rather than the live sliding pair, so the "
+                    "quiet-gap test cannot drift after the fact. Refreshed on "
+                    "every emission (original and each re-emit). NULL = no "
+                    "recorded activity at emission (or a pre-migration row) ⇒ "
+                    "the whole preceding session was the quiet gap ⇒ guard 2 "
+                    "passes."
+                ),
+            ),
             COL_CONSUMED: ColumnDefinition(
                 type=ColumnType.BOOLEAN,
                 not_null=True,
@@ -805,8 +868,107 @@ def get_agent_direct_wake_schema() -> SchemaDefinition:
     )
 
 
+def role_covered_mark_external_id(recipient_key: str) -> str:
+    """Deterministic UNIQUE conflict key — one row per role.
+
+    Mirrors ``role_binding_external_id``'s ``"role:{name}"`` shape exactly
+    (design §1), defined locally rather than imported from the plugin's
+    ``role_binding.py`` — core does not depend on the plugin layer (the
+    plugin depends on core, never the reverse); ``role_message_external_id``
+    just above is the same locally-defined-but-same-shape pattern.
+    """
+    return f"role:{recipient_key}"
+
+
+def get_role_covered_mark_schema() -> SchemaDefinition:
+    """Pull-surface boundary durable mark (design §1, R1-R7 approved).
+
+    One row per role: the attested ``(covered_created_at, covered_id)`` pair
+    that bounds ``peer_inbox``'s role-section default drain. Written ONLY by
+    ``plugin::agent_messaging_plugin::peer_mark_role_covered`` (a
+    registered-route-only, model-initiated attestation — see that verb's own
+    docstring for the identity fence), read inline by
+    ``AgentMessagingService._query_role_page`` on every call. Monotonic:
+    an attestation at or below the stored mark is a no-op.
+    """
+    role_covered_mark = TableSchema(
+        table_name=TABLE_ROLE_COVERED_MARK,
+        id_prefix=ID_PREFIX_ROLE_COVERED_MARK,
+        description=(
+            "Durable per-role 'covered through' mark bounding the peer_inbox "
+            "role section's default drain (pull-surface boundary design §1)."
+        ),
+        columns={
+            "recipient_key": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="The role name this mark bounds.",
+            ),
+            "covered_created_at": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "normalize_sort_value form of the attested row's OWN "
+                    "created_at — never a caller-asserted value (§2)."
+                ),
+            ),
+            "covered_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "The attested row's OWN id — paired with "
+                    "covered_created_at for the tie-safe (created_at, id) "
+                    "comparison the merge/cursor logic already uses."
+                ),
+            ),
+            "covered_message_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="Audit: which arm-... message_id was attested.",
+            ),
+            "attested_by_agent_instance_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "Server-sourced from the calling route's own peer_binding "
+                    "(R1) — never caller-supplied."
+                ),
+            ),
+            "attested_by_agent_session_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="Server-sourced stable session id at attestation time.",
+            ),
+            "attested_by_session_label": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Audit readability only; nullable best-effort.",
+            ),
+            "attested_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                not_null=True,
+                description="When this attestation was stamped.",
+            ),
+        },
+        indexes=[
+            IndexDefinition(
+                # One row per role; point lookups only (§1) — no range scan.
+                name="idx_role_covered_mark_lookup",
+                columns=["recipient_key"],
+            ),
+        ],
+    )
+    return SchemaDefinition(
+        namespace=NAMESPACE,
+        version="1.0.0",
+        description="Agent messaging — pull-surface boundary durable mark.",
+        tables={TABLE_ROLE_COVERED_MARK: role_covered_mark},
+    )
+
+
 __all__ = [
     "COL_CONSUMED",
+    "COL_ACTIVITY_AT_EMISSION",
+    "COL_EMITTED_TO_AGENT_SESSION_ID",
     "COL_CONSUMED_AT",
     "COL_EMITTED_TO_AGENT_INSTANCE_ID",
     "COL_EMIT_COUNT",
@@ -818,6 +980,7 @@ __all__ = [
     "ESCALATION_REASON_GONE",
     "ID_PREFIX_DIRECT_WAKE",
     "ID_PREFIX_MESSAGE",
+    "ID_PREFIX_ROLE_COVERED_MARK",
     "ID_PREFIX_ROLE_MESSAGE",
     "ID_PREFIX_THREAD",
     "META_KEY_DELIVERY_EXTERNAL_ID",
@@ -831,7 +994,10 @@ __all__ = [
     "TABLE_AGENT_MESSAGE",
     "TABLE_AGENT_ROLE_MESSAGE",
     "TABLE_AGENT_THREAD",
+    "TABLE_ROLE_COVERED_MARK",
     "get_agent_direct_wake_schema",
     "get_agent_messaging_schema",
     "get_agent_role_message_schema",
+    "get_role_covered_mark_schema",
+    "role_covered_mark_external_id",
 ]

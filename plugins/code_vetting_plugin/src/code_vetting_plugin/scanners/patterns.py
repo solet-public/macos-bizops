@@ -16,6 +16,7 @@ deterministic cross-check.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,7 +33,14 @@ from ..targets import TargetTree
 from ..toolrun import run, tool_available
 
 _RG = "rg"
+_GIT = "git"
 _SCANNER = "patterns"
+_GIT_CONFIG_TIMEOUT_S = 10
+_PII_GAP_REASON = (
+    "identity:operator_pii not scanned — the running operator's git user.name and "
+    "user.email are both unset, so no PII atom could be derived (the pattern is "
+    "composed at runtime and is never a hardcoded literal)"
+)
 
 # Directories excluded from the shipping-surface sweep. The top-level
 # ``knowledge_bases/`` aggregation dir holds content/research KBs (compositions,
@@ -81,14 +89,9 @@ _PATTERNS: tuple[_Pattern, ...] = (
         "fleet role / peer-session identifier",
         "Replace with a neutral placeholder (e.g. <role>, worker-1, Reviewer-A example).",
     ),
-    _Pattern(
-        r"2010\.david\.westgate@gmail\.com|david\.westgate",
-        Dimension.IDENTITY_LEAK,
-        Severity.HIGH,
-        "identity:operator_pii",
-        "operator email / name (PII)",
-        "Remove operator PII; use a generic contact placeholder.",
-    ),
+    # NOTE: the operator-PII pattern is NOT here — it is composed at scan time from the
+    # RUNNING operator's git identity by `_operator_pii_pattern()`. See that function for
+    # why a literal in this file was both a guard and a live leak.
     _Pattern(
         # Composed via implicit concatenation so this file's own source never
         # carries the contiguous operator-home literal: this module ships in
@@ -209,6 +212,55 @@ def _rg_matches(pattern: str, root: str) -> list[tuple[str, int, str]]:
     return matches
 
 
+def _git_global_config(key: str) -> str:
+    """The RUNNING operator's ambient git identity value for ``key``; "" when unset.
+
+    An unset key is a legitimate state (a fresh homunculus with no global git config),
+    not a masked failure. The caller turns "" into a visible coverage gap rather than
+    interpolating it into a regex — an empty alternation branch matches everywhere.
+    """
+    if not tool_available(_GIT):
+        return ""
+    outcome = run(
+        [_GIT, "config", "--global", "--get", key],
+        timeout_s=_GIT_CONFIG_TIMEOUT_S,
+        raise_on_timeout=False,
+    )
+    return outcome.stdout.strip() if outcome.returncode == 0 else ""
+
+
+def _operator_pii_pattern() -> _Pattern | None:
+    """The operator-PII pattern, composed from the RUNNING operator's git identity.
+
+    Why this is derived and not a literal: a PII detector has to carry the value it
+    detects, so the natural implementation is to hardcode it — and this module SHIPS in
+    seeds. A hardcoded name/email is therefore simultaneously a contamination guard and
+    the exact leak the dimension exists to catch. It also only ever protects ONE
+    operator. Deriving at scan time satisfies both constraints: the guard works against
+    whoever is actually running it, and nothing personal ships.
+
+    Atoms are ``re.escape``d before they reach the regex — an unescaped ``.`` in a name
+    or email would silently widen the pattern into a wildcard. Returns None when neither
+    atom is derivable, so the caller can record the gap instead of scanning for "".
+    """
+    atoms = [
+        atom
+        for atom in (_git_global_config("user.name"), _git_global_config("user.email"))
+        if atom
+    ]
+    if not atoms:
+        return None
+    return _Pattern(
+        "|".join(re.escape(atom) for atom in atoms),
+        Dimension.IDENTITY_LEAK,
+        Severity.HIGH,
+        "identity:operator_pii",
+        "operator email / name (PII)",
+        "Remove operator PII; use a generic contact placeholder.",
+        redact=True,
+    )
+
+
 def _redacted(matched: str) -> str:
     return f"<redacted {len(matched)}-char match>" if matched else "<redacted>"
 
@@ -253,10 +305,19 @@ def scan(tree: TargetTree, run_id: str) -> ScannerResult:
             findings=[],
             coverage=CoverageRecord(scanner=_SCANNER, ran=False, files_examined=0, gap_reason="rg not installed"),
         )
+    # The operator-PII pattern is runtime-composed, so its absence is a real reduction in
+    # what this scan covered and is disclosed rather than silently passing (F1 §3).
+    operator_pii = _operator_pii_pattern()
+    patterns = (*_PATTERNS, operator_pii) if operator_pii is not None else _PATTERNS
     findings: list[Finding] = []
-    for pattern in _PATTERNS:
+    for pattern in patterns:
         findings.extend(_pattern_findings(pattern, str(tree.root), run_id))
     return ScannerResult(
         findings=findings,
-        coverage=CoverageRecord(scanner=_SCANNER, ran=True, files_examined=len(tree.model_facing())),
+        coverage=CoverageRecord(
+            scanner=_SCANNER,
+            ran=True,
+            files_examined=len(tree.model_facing()),
+            gap_reason=None if operator_pii is not None else _PII_GAP_REASON,
+        ),
     )

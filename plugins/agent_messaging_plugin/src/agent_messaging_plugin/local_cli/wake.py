@@ -40,9 +40,11 @@ from .spool import (
     WATCH_SESSION_ID_ENV,
     WATCH_SESSION_LABEL_ENV,
     default_spool_path,
+    read_watch_pairing,
     spool_lock_path,
     spool_offset_path,
     watch_instance_digest,
+    watch_pairing_path,
 )
 
 # Claude Code hook contract: exit 2 is the wake/block signal for BOTH the
@@ -99,10 +101,25 @@ def wake(spool_override: Path | None, max_wait_s: float) -> None:
     if singleton is None:
         return
     with singleton:
-        lines = _block_until_delivery(target, max_wait_s)
-        if lines is None:
+        delivery = _block_until_delivery(target, max_wait_s)
+        if delivery is None:
             return
+        lines, new_offset = delivery
+        # D5 / REL-05 symmetry: EMIT FIRST, THEN COMMIT. The offset flip is this
+        # path's `/peer/delivered`, and REL-05 already ruled emit-before-flip on
+        # the MCP half -- so both delivery halves are now confirm-then-commit.
+        # Committing first meant a kill in the gap (crash, /clear, operator ^C,
+        # hook timeout) recorded the lines as consumed while nothing had ever
+        # been written: at-most-once, silently.
+        #
+        # What this does and does not prove: a successful stderr write proves
+        # EMISSION, not consumption -- it says the packet left this process, not
+        # that a model read it. The residual window (after the write, before the
+        # flip) yields EXACTLY ONE duplicate wake per crash: the singleton flock
+        # bounds concurrency to one waker, and the re-emitted lines are the same
+        # bytes, so a session recognises them as already handled.
         click.echo(_compose_wake_packet(target, lines), err=True)
+        _write_offset(target.offset_file, new_offset)
     raise SystemExit(WAKE_EXIT_SIGNAL)
 
 
@@ -125,8 +142,24 @@ def _resolve_target(spool_override: Path | None) -> WakeTarget | None:
         raise SystemExit(int(ExitCodes.UNKNOWN_ERROR)) from exc
     role = os.environ.get(WATCH_SESSION_LABEL_ENV, "")
     session_id = os.environ.get(WATCH_SESSION_ID_ENV, "")
-    if not role or not session_id:
+    if not role and not session_id:
         return None
+    if not role or not session_id:
+        # Census D3: NEITHER present is a plain non-fleet session and stays
+        # silent (above). Exactly ONE present is a fleet session whose launcher
+        # identity is broken, and staying silent there makes it permanently
+        # un-wakeable with no diagnostic anywhere — while `watch`, given the
+        # same environment, dies loud. The two halves of one mechanism must not
+        # disagree about whether the same missing input is fatal.
+        missing = WATCH_SESSION_LABEL_ENV if not role else WATCH_SESSION_ID_ENV
+        present = WATCH_SESSION_ID_ENV if not role else WATCH_SESSION_LABEL_ENV
+        click.echo(
+            f"homunculus wake: ${present} is set but ${missing} is not, so this "
+            "session cannot be paired with its watcher and will never be woken. "
+            "A launcher that exports one must export both.",
+            err=True,
+        )
+        raise SystemExit(int(ExitCodes.UNKNOWN_ERROR))
     try:
         name = resolve_homunculus_name()
     except HomunculusIdentityError as exc:
@@ -136,7 +169,7 @@ def _resolve_target(spool_override: Path | None) -> WakeTarget | None:
         # non-blocking hook error, never impersonate a wake.
         raise SystemExit(int(ExitCodes.UNKNOWN_ERROR)) from exc
     instance_id = f"agi-watch-{watch_instance_digest(session_id)}"
-    spool = spool_override or default_spool_path(name, instance_id)
+    spool = spool_override or _paired_spool(name, instance_id)
     return WakeTarget(
         role=role,
         homunculus_name=name,
@@ -144,6 +177,31 @@ def _resolve_target(spool_override: Path | None) -> WakeTarget | None:
         offset_file=spool_offset_path(spool),
         lock_file=spool_lock_path(spool),
     )
+
+
+def _paired_spool(name: str, instance_id: str) -> Path:
+    """The spool THIS session's watcher actually chose (census D4).
+
+    Precedence: an explicit ``wake --spool`` wins (handled by the caller), then
+    the watcher's published choice, then the derived default. Reading the
+    watcher's sidecar is what stops ``watch --spool <other>`` from silently
+    decoupling the pair — previously both halves derived the default
+    independently and neither could observe that the other had moved.
+
+    A watcher that armed with ``--no-spool`` publishes a null choice: that is a
+    configuration in which no wake can ever arrive, so it is reported and the
+    hook exits non-wake rather than blocking out its whole ``--max-wait``.
+    """
+    found, spool = read_watch_pairing(watch_pairing_path(name, instance_id))
+    if found and spool is None:
+        click.echo(
+            "homunculus wake: this session's watcher armed with --no-spool, so "
+            "no delivery can ever reach the wake hook. Re-arm `watch` without "
+            "--no-spool to restore waking.",
+            err=True,
+        )
+        raise SystemExit(int(ExitCodes.UNKNOWN_ERROR))
+    return spool if spool is not None else default_spool_path(name, instance_id)
 
 
 def _acquire_singleton(lock_file: Path) -> IO[str] | None:
@@ -163,15 +221,21 @@ def _acquire_singleton(lock_file: Path) -> IO[str] | None:
 
 def _block_until_delivery(
     target: WakeTarget, max_wait_s: float,
-) -> list[str] | None:
-    """Poll the spool until complete new lines land; ``None`` on idle expiry."""
+) -> tuple[list[str], int] | None:
+    """Poll the spool until complete new lines land; ``None`` on idle expiry.
+
+    Returns the lines PLUS the offset they end at, and deliberately does NOT
+    commit it. The commit belongs to the caller, after the packet has actually
+    been written -- see the emit-then-commit note there. Reading and committing
+    in one step is exactly what made the consumed offset advance for lines no
+    one had been shown.
+    """
     offset = _reconcile_offset(target)
     deadline = time.monotonic() + max_wait_s
     while True:
         lines, new_offset = _consume_complete_lines(target.spool, offset)
         if lines:
-            _write_offset(target.offset_file, new_offset)
-            return lines
+            return lines, new_offset
         if time.monotonic() >= deadline:
             return None
         time.sleep(WAKE_POLL_INTERVAL_S)
@@ -244,7 +308,17 @@ def _write_offset(offset_file: Path, value: int) -> None:
 
 
 def _compose_wake_packet(target: WakeTarget, lines: list[str]) -> str:
-    """The stderr wake packet — shown to the model as its reason to act."""
+    """The stderr wake packet — shown to the model as its reason to act.
+
+    The durable-copies command carries ``agent_session_id`` because the process
+    resolves the reader's identity from that argument alone: ``homunculus call``
+    opens a fresh, unregistered bridge, so unlike the ``/peer/inbox`` route
+    there is no calling session for the server to recognise. This footer used to
+    advertise the same key with no identity at all — which 500'd before Part 24
+    registered the process and would have failed 'missing_argument' after. The
+    shell expands ``$AGENT_SESSION_ID`` from the launcher's own export, so the
+    line stays copy-runnable as printed.
+    """
     surfaced = lines[:WAKE_MAX_SURFACED_LINES]
     overflow = len(lines) - len(surfaced)
     header = (
@@ -259,7 +333,8 @@ def _compose_wake_packet(target: WakeTarget, lines: list[str]) -> str:
         "delivered and consumed server-side. Durable copies: "
         f"`{target.homunculus_name} call "
         "plugin::agent_messaging_plugin::peer_inbox "
-        '\'{"include_important": true}\'`. '
+        '\'{"agent_session_id": "\'"$AGENT_SESSION_ID"\'", '
+        '"include_important": true}\'`. '
         "Do not reply with bare acknowledgements."
     )
     return "\n".join([header, *body, footer])

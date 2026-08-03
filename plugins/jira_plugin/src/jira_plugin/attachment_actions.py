@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from io import BytesIO
 from typing import Any
 
+from .constants import BLOB_NAMESPACE
+
 
 @dataclass(frozen=True)
 class OutgoingAttachment:
@@ -52,6 +54,7 @@ def download_attachment(
     blob_key = blob_writer(data, filename, mime)
     return {
         "attachment_blob_key": blob_key,
+        "namespace": BLOB_NAMESPACE,
         "filename": filename,
         "mime": mime,
         "size": len(data),

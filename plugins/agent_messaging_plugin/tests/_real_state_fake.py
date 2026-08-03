@@ -75,8 +75,10 @@ def _schema_enforcement() -> dict[str, frozenset[str]]:
     from ananta.llm.agent_messaging.schema import (
         TABLE_AGENT_DIRECT_WAKE,
         TABLE_AGENT_ROLE_MESSAGE,
+        TABLE_ROLE_COVERED_MARK,
         get_agent_direct_wake_schema,
         get_agent_role_message_schema,
+        get_role_covered_mark_schema,
     )
 
     from agent_messaging_plugin.schema import get_role_binding_schema
@@ -88,10 +90,14 @@ def _schema_enforcement() -> dict[str, frozenset[str]]:
     direct_wake = frozenset(
         get_agent_direct_wake_schema().tables[TABLE_AGENT_DIRECT_WAKE].columns,
     )
+    role_covered_mark = frozenset(
+        get_role_covered_mark_schema().tables[TABLE_ROLE_COVERED_MARK].columns,
+    )
     return {
         TABLE_ROLE_BINDING: role_binding | _STANDARDIZER_COLUMNS,
         TABLE_AGENT_ROLE_MESSAGE: role_message | _STANDARDIZER_COLUMNS,
         TABLE_AGENT_DIRECT_WAKE: direct_wake | _STANDARDIZER_COLUMNS,
+        TABLE_ROLE_COVERED_MARK: role_covered_mark | _STANDARDIZER_COLUMNS,
     }
 
 

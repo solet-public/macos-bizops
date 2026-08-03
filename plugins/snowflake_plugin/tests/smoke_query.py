@@ -6,10 +6,11 @@ every check asserts REAL behavior in query_actions / connection.classify_
 snowflake_error / the EDGE parity.
 
 Exercises:
-  1. run_query — inline row/column shape + row_count
+  1. run_query — writes a TSV handle (path/columns/row_count/truncated), never
+     rows/records inline (override-friction default/override behavior is
+     smoke_spill.py's job, not duplicated here)
   2. run_query — refuses a write-leader statement (guard)
-  3. run_query — max_rows clamped to the 1000 hard cap (fetchmany arg)
-  4. list_databases — name extraction from a SHOW DATABASES row
+  3. list_databases — name extraction from a SHOW DATABASES row
   5. list_schemas / list_tables / describe_table — shape + identifier escaping
   6. test_connection — account/user/role/warehouse/version shape
   7. TOPOLOGY-LEAK (SECURITY): auth/timeout/warehouse-suspended classes
@@ -28,6 +29,7 @@ Exits 0 on success, 1 on first failure.
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -80,29 +82,39 @@ class _FakeDriverError(Exception):
         self.msg = message
 
 
-def test_run_query_inline() -> None:
+def _passthrough_gate(path: str) -> str:
+    """A no-op containment gate — real containment is smoke_spill.py's job."""
+    return path
+
+
+def test_run_query_writes_tsv() -> None:
     conn, _ = _fake_conn(["id", "name"], [(1, "alice"), (2, "bob")])
-    result = query_actions.run_query(conn, {"sql": "SELECT id, name FROM t"})
-    _assert("inline columns carried", result["columns"] == ["id", "name"])
-    _assert("inline rows as parallel lists", result["rows"] == [[1, "alice"], [2, "bob"]])
-    _assert("inline row_count", result["row_count"] == 2)
-    _assert("inline not spilled", result["spilled"] is False)
+    with tempfile.TemporaryDirectory(prefix="snw_shape_") as workspace:
+        out_path = str(Path(workspace) / "out.tsv")
+        result = query_actions.run_query(
+            conn, {"sql": "SELECT id, name FROM t", "output_tsv_path": out_path}, _passthrough_gate,
+        )
+        _assert("handle columns carried", result["columns"] == ["id", "name"])
+        _assert("handle row_count", result["row_count"] == 2)
+        _assert("handle not truncated", result["truncated"] is False)
+        _assert("no rows/records field — never inline", "rows" not in result and "records" not in result)
+        lines = Path(out_path).read_text(encoding="utf-8").splitlines()
+        _assert("tsv header", lines[0] == "id\tname")
+        _assert("tsv data rows", "1\talice" in lines and "2\tbob" in lines)
 
 
 def test_run_query_guard() -> None:
     conn, _ = _fake_conn(["id"], [(1,)])
-    write = False
-    try:
-        query_actions.run_query(conn, {"sql": "DELETE FROM t"})
-    except StatementGuardError:
-        write = True
-    _assert("write-leader run_query refused", write)
-
-
-def test_run_query_max_rows_clamp() -> None:
-    conn, cur = _fake_conn(["id"], [(1,)])
-    query_actions.run_query(conn, {"sql": "SELECT id FROM t", "max_rows": 999999})
-    _assert("max_rows clamped to 1000 hard cap", cur.fetchmany.call_args.args[0] == 1000)
+    with tempfile.TemporaryDirectory(prefix="snw_guard_") as workspace:
+        out_path = str(Path(workspace) / "out.tsv")
+        write = False
+        try:
+            query_actions.run_query(
+                conn, {"sql": "DELETE FROM t", "output_tsv_path": out_path}, _passthrough_gate,
+            )
+        except StatementGuardError:
+            write = True
+        _assert("write-leader run_query refused", write)
 
 
 def test_list_databases() -> None:
@@ -182,7 +194,9 @@ def test_plugin_level_generic_error() -> None:
 
     connection.connect = _boom  # type: ignore[assignment]
     try:
-        result = plugin.run_query({"sql": "SELECT 1"}, {})
+        result = plugin.run_query(
+            {"sql": "SELECT 1", "output_tsv_path": "/tmp/plugin_level_smoke.tsv"}, {},
+        )
     finally:
         connection.connect = original  # type: ignore[assignment]
     _assert("plugin surfaces an error status", result["action_status"] == "error")
@@ -216,9 +230,8 @@ def test_edge_parity() -> None:
 def main() -> int:
     print("\nsnowflake_plugin query-verb smoke tests")
     print("=" * 47)
-    test_run_query_inline()
+    test_run_query_writes_tsv()
     test_run_query_guard()
-    test_run_query_max_rows_clamp()
     test_list_databases()
     test_list_schemas()
     test_list_tables()

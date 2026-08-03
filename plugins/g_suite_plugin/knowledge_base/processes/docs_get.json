@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::docs_get",
   "display_name": "Docs: Get Document",
   "description": "Fetch a Google Docs document's title and plain-text body content. Requires a connected account.",
-  "embedding_description": "Fetch an existing Google Docs document by id and return its title plus the plain-text of its body (tables, images, and other non-paragraph structural elements are not included in body_text — only paragraph text runs). This is the read counterpart to docs_batch_update (which edits) and docs_export (which spills the fully-formatted document as pdf/docx/txt into a blob). Use docs_export instead when formatting, tables, or images must be preserved. Fails gsuite.not_found if the id does not exist.",
+  "embedding_description": "Fetch a Google Docs document by id and return its title plus a plain-text body assembled from paragraph text runs. Use this lightweight read to inspect or summarize the document wording before editing. Tables, images, and rendered layout are available through the document export path.",
   "result_processor_customizations": {
     "action_label": "Document read",
     "result_type": "g_suite_docs_get_result",

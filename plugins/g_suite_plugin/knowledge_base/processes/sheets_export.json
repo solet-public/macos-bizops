@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::sheets_export",
   "display_name": "Sheets: Export",
   "description": "Export a Google Sheets spreadsheet to csv or xlsx into blob storage and return its sheet_blob_key. Requires a connected account.",
-  "embedding_description": "Export an existing spreadsheet's bytes (csv or xlsx format) via Drive's export_media into platform blob storage, returning a sheet_blob_key reference (not the bytes themselves). Google-native spreadsheets cannot be fetched with drive_download_file — this export verb is the correct path, exactly like docs_export and slides_export for their respective product types. csv exports only the default sheet/tab; xlsx exports the full workbook. The returned sheet_blob_key can be attached to email or handed to other plugins. Fails gsuite.not_found if the id does not exist.",
+  "embedding_description": "Export a Google Sheets spreadsheet through Drive into platform blob storage as CSV for the default tab or XLSX for the complete multi-tab workbook. Returns a sheet blob key for email attachments or downstream plugins. Use this when a Google-native spreadsheet must become a portable file.",
   "result_processor_customizations": {
     "action_label": "Spreadsheet exported to blob",
     "result_type": "g_suite_sheets_export_result",

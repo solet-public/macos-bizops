@@ -63,7 +63,7 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 from ananta.interfaces.io_capabilities import IOCapability
-from ananta.llm.agent_messaging.models import PeerInbox, TextPart
+from ananta.llm.agent_messaging.models import PeerInbox, PeerInboxRequest, TextPart
 from ananta.llm.agent_messaging.repository import AgentMessagingRepository
 from ananta.llm.agent_messaging.role_binding import (
     SYS_AUTONOMIC_SLOT,
@@ -74,10 +74,13 @@ from ananta.llm.agent_messaging.schema import (
     get_agent_direct_wake_schema,
     get_agent_messaging_schema,
     get_agent_role_message_schema,
+    get_role_covered_mark_schema,
 )
 from ananta.llm.agent_messaging.service import (
     AgentMessagingConfig,
+    AgentMessagingError,
     AgentMessagingService,
+    AgentRequestInvalidError,
     _BridgeDeliveryEndpoint,
 )
 from ananta.services.inference_service.completion_request_queue import (
@@ -107,6 +110,7 @@ from .bridge_lifecycle import (
     run_full_bridge_cleanup,
 )
 from .bridge_sessions import (
+    DEFAULT_BINDING_LIVENESS_WINDOW_S,
     BridgeNotFoundError,
     BridgeQueueFullError,
     BridgeSessionManager,
@@ -139,20 +143,25 @@ from .peer_dispatch import (
     dispatch_peer_send,
     dispatch_role_send,
 )
+from .peer_inbox_view import serialize_peer_inbox_page
+from .peer_list_view import serialize_peer_list
 from .peer_registry import (
     PeerAmbiguousError,
     PeerRegistry,
+    PeerSessionAmbiguousError,
     PeerUnreachableError,
 )
 from .platform_surface import PlatformSurface
 from .process_exposure import ProcessExportPolicy
 from .role_binding_store import (
+    RoleBindingMalformedError,
     RoleBindingVacantError,
     holds_role,
     release_role_binding_v4,
     resolve_role_binding,
     resolve_role_binding_v4,
     run_cutover_migration_at_readiness,
+    sole_role_for_reply_address,
 )
 from .role_claim import (
     RoleClaimFailure,
@@ -188,7 +197,6 @@ if TYPE_CHECKING:  # pragma: no cover — type-only references
         ListAgentMessagesRequest,
         ListAgentThreadsRequest,
         OpenAgentThreadRequest,
-        PeerInboxRequest,
         PeerSendRequest,
         PeerSendResult,
         ReadThreadMessagesRequest,
@@ -197,11 +205,21 @@ if TYPE_CHECKING:  # pragma: no cover — type-only references
     from ananta.types.schema_types import SchemaDefinition
     from fastapi import FastAPI
 
-    from .models import BridgeSessionState
+    from .models import BridgeBinding, BridgeSessionState
 
 logger = logging.getLogger(__name__)
 SYSTEM_SCHEDULER_ID: Final[str] = "system:scheduler"
 SYSTEM_SCHEDULER_LABEL: Final[str] = "System (Scheduler)"
+# peer_inbox page size. Deliberately far below the route's 50: a freshly
+# /clear'd Coordinator-Dawn measured a 422,513-character page at 50 instance +
+# 50 role entries on 2026-08-01 — roughly 4KB per entry, because an entry
+# carries the whole message. ``limit`` bounds the COUNT, so bytes are the
+# caller's arithmetic, not the platform's promise: 5 is a page a session can
+# read and still act on, and the two cursors exist to fetch the rest.
+PEER_INBOX_DEFAULT_LIMIT: Final[int] = 5
+PEER_INBOX_MIN_LIMIT: Final[int] = 1
+# Parity with the /peer/inbox route's own clamp — one ceiling, both surfaces.
+PEER_INBOX_MAX_LIMIT: Final[int] = 100
 
 
 class _UploadRouteAuth(Protocol):
@@ -275,6 +293,29 @@ _ROUTER_PLUGIN_NAME = "macos_self_deployment_plugin"
 # directly so W-VAULT-CALLER-ENFORCE Tier 2 doesn't need a compat-mode
 # entry for this row. The lazy-create path in `_load_or_create_bearer_hmac_key`
 # below now writes under the scoped name on first streamable-MCP boot.
+def _coerce_takeover(raw: object) -> bool:
+    """Coerce the ``takeover`` parameter FAIL-CLOSED.
+
+    Only a real ``True`` or the exact string ``"true"`` (case-insensitively,
+    trimmed) authorizes displacing a live holder. Everything else — including
+    the strings ``"false"`` and ``"0"``, ``None``, and any non-boolean type —
+    is ``False``.
+
+    A plain truthiness test would be wrong here in the one direction that
+    matters: this parameter crosses a JSON transport, so a caller sending
+    ``"false"`` as a STRING would take the role, which is the exact opposite of
+    what they asked for, on the exact parameter whose purpose is that it must be
+    deliberate. Refusing an intended takeover costs one retry with a clear
+    message; performing an unintended one silently moves another session's
+    deliveries.
+    """
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() == "true"
+    return False
+
+
 def _bearer_hmac_key_vault_name() -> str:
     name = os.environ.get("HOMUNCULUS_NAME", "").strip()
     if not name:
@@ -356,6 +397,20 @@ class _BridgeRuntimeConfig:
     # idle THRESHOLD stays bridge_idle_timeout_seconds; this knob only
     # bounds detection latency past it.
     bridge_sweep_interval_seconds: int = 300
+    # WS-2a W3 / WS-2e §4.3.2 — ONE knob, TWO consumers. A binding counts as
+    # LIVE iff it resolves to a bridge whose ``last_seen_at`` is within this
+    # window. Both transports long-poll continuously (the events poll holds
+    # ~25s server-side and the client re-polls immediately), so a live
+    # session's bridge never lags more than ~30s: 90 is >3x the worst-case
+    # healthy gap and far under the 3_600s idle sweep, which makes staleness a
+    # clean discriminator rather than a heuristic.
+    #
+    # Consumer 1 (here): dispatch refuses to report ``queued_watcher`` against
+    # a bridge nobody is polling — a SIGKILLed watcher leaves its server-side
+    # session alive, so ``append_event`` succeeds and the label lies for up to
+    # the full idle sweep (~65 min), which is Dax §34.1.
+    # Consumer 2 (pending operator sign-off): the duplicate-role claim gate.
+    binding_liveness_window_seconds: int = DEFAULT_BINDING_LIVENESS_WINDOW_S
     # INF-02: serve window for autonomic-routed completion requests. A
     # pending request whose forward stamp is older than this without a
     # served/failed transition is re-queued by the serve-timeout sweep
@@ -798,6 +853,43 @@ class AgentMessagingPlugin(
                     retryable=False,
                 ),
             ),
+            # Pull-surface boundary (design §2). Retryable: the write is
+            # monotonic (an attestation at or below the stored mark is a
+            # no-op), so a retry after a transient fault re-attests the same
+            # value harmlessly rather than double-advancing anything.
+            "peer_mark_role_covered": EdgeProcessDefinition(
+                name="peer_mark_role_covered",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # Dax Part 24.1/24.2 pull receive verb. Retryable: it is a pure
+            # read whose only write is the liveness touch, so a repeat is
+            # harmless and a transient state-read fault is worth re-running.
+            "peer_inbox": EdgeProcessDefinition(
+                name="peer_inbox",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # Peer-enumeration asymmetry close (WS-1a pattern, operator-
+            # prompted 2026-08-02): a no-MCP session could read its own mail
+            # via peer_inbox but had no way to see who else was live.
+            # Retryable: a pure, unfiltered registry snapshot with no write
+            # at all, so a repeat after a transient state-read fault is
+            # always harmless.
+            "peer_list": EdgeProcessDefinition(
+                name="peer_list",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
             # INF-01 sub-slice-2 manual-set lane. Sensitivities mirror the
             # verb's ACTUAL return (action/name/agent_instance_id — the same
             # claim-outcome shape as peer_claim_role).
@@ -889,6 +981,7 @@ class AgentMessagingPlugin(
             get_agent_messaging_schema(),
             get_agent_role_message_schema(),
             get_agent_direct_wake_schema(),
+            get_role_covered_mark_schema(),
             get_peer_binding_schema_definition(),
             get_agent_role_binding_schema_definition(),
             get_role_model_schema_definition(),
@@ -946,8 +1039,24 @@ class AgentMessagingPlugin(
     def send_peer_message(
         self,
         params: dict[str, Any],
-        state: dict[str, Any],  # noqa: ARG002  # pyright: ignore[reportUnusedParameter]
+        state: dict[str, Any],
     ) -> dict[str, Any]:
+        """Instance-addressed peer send, stamped with the CALLER's identity.
+
+        §34.6: this verb used to hardcode the ``system`` / ``system:scheduler``
+        / ``System (Scheduler)`` sentinel, so a message sent through it arrived
+        unattributable no matter which transport the caller used — including a
+        registered MCP session, whose identity was already sitting unread in
+        ``state``. It now resolves the sender through the same ladder
+        ``peer_send_by_name`` uses (:func:`_resolve_role_send_sender`), which
+        reads only SERVER-STAMPED state keys; the sentinel remains the honest
+        answer for a genuinely scheduler-originated send.
+
+        ``sender_bridge_id`` deliberately stays :data:`SYSTEM_SCHEDULER_ID`:
+        peer threads are keyed on ``(sender_bridge_id, peer_instance)``, so
+        substituting the caller's live (or one-shot) bridge id would fork a new
+        thread per send. Only the identity triple changes — never the key.
+        """
         if self._peer_registry is None or self._bridge_manager is None:
             return _failure_result(
                 code="bridge.not_running",
@@ -961,19 +1070,27 @@ class AgentMessagingPlugin(
         if important:
             content_text = f"IMPORTANT: {content_text}"
         content: list[TextPart] = [TextPart(type="text", text=content_text)]
+        sender = _resolve_role_send_sender(state, self._get_state_service())
         try:
             outcome = dispatch_peer_send(
                 bridge_manager=self._bridge_manager,
                 peer_registry=self._peer_registry,
                 agent_messaging_service=self._require_service(),
                 sender_bridge_id=SYSTEM_SCHEDULER_ID,
-                sender_agent_id=SYSTEM_AGENT_ID,
-                sender_agent_instance_id=SYSTEM_SCHEDULER_ID,
-                sender_session_label=SYSTEM_SCHEDULER_LABEL,
+                sender_agent_id=sender.agent_id,
+                sender_agent_instance_id=sender.agent_instance_id,
+                sender_session_label=sender.session_label,
                 sender_parent_pid=None,
                 peer_id=peer_id,
                 peer_agent_instance_id=peer_agent_instance_id,
                 content=content,
+                # WS-2c V4: resolved from the SENDER's registered instance, not
+                # from ``sender.reply_to_role`` — the ladder's role rung takes
+                # ``sorted(roles)[0]``, which is fine as a flow tag but would
+                # misroute a multi-role sender's replies (DEF-3).
+                reply_to_role=sole_role_for_reply_address(
+                    self._get_state_service(), sender.agent_instance_id,
+                ),
             )
         except (
             PeerAmbiguousError,
@@ -1200,6 +1317,21 @@ class AgentMessagingPlugin(
                 required=False,
                 type=ParameterType.STRING,
             ),
+            "takeover": ParameterMetadata(
+                description=(
+                    "Explicitly take the role from a LIVE holder, displacing it. "
+                    "Default false, in which case a live holder is refused with "
+                    "``role_held_live`` and the claim does nothing. This is the "
+                    "escape hatch that refusal's message names: it exists so a "
+                    "deliberate, operator-confirmed handover is possible while an "
+                    "accidental one still fails. It authorizes THIS claim only and "
+                    "is never persisted. With no live holder it is a silent no-op — "
+                    "an ordinary claim — so callers never have to pre-check "
+                    "liveness and race their own answer."
+                ),
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
         },
         output_type="object",
         output_description=(
@@ -1248,6 +1380,12 @@ class AgentMessagingPlugin(
             agent_instance_id=str(raw.get("agent_instance_id", "")),
             agent_session_id=str(raw.get("agent_session_id", "")),
             session_label=str(raw.get("session_label", "")),
+            # Explicit escape hatch for a LIVE holder (§4.3.3a). bool() rather
+            # than a truthiness test on the raw value: the transport hands JSON,
+            # so a caller sending the STRING "false" would otherwise take the
+            # role — the opposite of what they asked for, on the one parameter
+            # whose whole purpose is that it must be deliberate.
+            takeover=_coerce_takeover(raw.get("takeover")),
             state_service=self._get_state_service(),
             bridge_manager=self._bridge_manager,
             peer_registry=self._peer_registry,
@@ -1351,7 +1489,8 @@ class AgentMessagingPlugin(
         output_type="object",
         output_description=(
             "Act-time role-ownership re-check (§5.0): whether the caller's session "
-            "still holds the role, plus its resolved stable session id."
+            "still holds the role, its resolved stable session id, and whether the "
+            "role's CURRENT holder has a delivery route attached."
         ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -1360,6 +1499,9 @@ class AgentMessagingPlugin(
                 "holds": ParameterMetadata(type=ParameterType.BOOLEAN),
                 "name": ParameterMetadata(type=ParameterType.STRING),
                 "agent_session_id": ParameterMetadata(type=ParameterType.STRING),
+                "delivery_route_attached": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                ),
             },
         ),
     )
@@ -1396,8 +1538,452 @@ class AgentMessagingPlugin(
         agent_session_id = self._claimant_session_id(agent_instance_id)
         holds = holds_role(state_service, name, agent_session_id)
         return _success_result(
-            data={"holds": holds, "name": name, "agent_session_id": agent_session_id},
+            data={
+                "holds": holds,
+                "name": name,
+                "agent_session_id": agent_session_id,
+                "delivery_route_attached": self._role_delivery_route_attached(
+                    state_service, name,
+                ),
+            },
         )
+
+    @platform_process(
+        name="peer_mark_role_covered",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "name": ParameterMetadata(
+                description="Role name to advance the covered mark for.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "message_id": ParameterMetadata(
+                description=(
+                    "The arm-... message_id of the NEWEST role message this "
+                    "session has processed for 'name'. The server looks this "
+                    "row up and attests ITS OWN (created_at, id) — a caller "
+                    "can only ever name a pair that corresponds to a row "
+                    "that exists (pull-surface boundary design §2)."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "The stored role_covered_mark after this attestation — the "
+            "PRE-EXISTING mark unchanged on a monotonic no-op."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="peer_mark_role_covered outcome (design §2).",
+            properties={
+                "recipient_key": ParameterMetadata(type=ParameterType.STRING),
+                "covered_created_at": ParameterMetadata(type=ParameterType.STRING),
+                "covered_id": ParameterMetadata(type=ParameterType.STRING),
+                "covered_message_id": ParameterMetadata(type=ParameterType.STRING),
+                "attested_at": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def peer_mark_role_covered(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Attest ``name`` covered through ``message_id`` (design §2, R1).
+
+        **R1 — REGISTERED-ROUTE-ONLY, no exceptions.** This is a WRITE whose
+        wrong advance is silent loss for the NEXT holder (the strong class,
+        per Architect's ruling — the same shape as the measured
+        ``peer_claim_role`` instance-id finding). Unlike ``peer_holds_role``
+        (a READ, whose mistake-cost falls on the caller), this verb takes NO
+        caller-supplied identity argument at all, ever — not even one
+        resolved server-side. Identity is sourced EXCLUSIVELY from
+        ``state["inference_vertex_session_id"]``: the calling BRIDGE's own
+        ``agent_instance_id``, stamped by ``ActionProcessor
+        ._lift_inference_vertex_identity`` ONLY for a call dispatched through
+        a registered bridge's ``process_call`` (``PlatformSurface
+        ._build_process_call_trigger_data``). A caller arriving over an
+        unregistered route — a one-shot ``homunculus call`` from the local
+        CLI, which stamps the DIFFERENT ``caller_attribution_*`` family
+        instead (§34.6) — is refused loud with ``unregistered_route``. That
+        family is deliberately NEVER consulted here, even as a fallback.
+
+        Role ownership is re-checked LIVE, at attestation time (not claim
+        time) — a displaced prior holder attesting after being displaced
+        could otherwise advance the mark past mail the NEW holder never saw,
+        the identical silent-loss shape the watch-spool mark was ruled out
+        for.
+        """
+        raw = params.get("parameters", params)
+        name = str(raw.get("name", "")).strip()
+        message_id = str(raw.get("message_id", "")).strip()
+        if not name or not message_id:
+            return _failure_result(
+                code="missing_argument",
+                message="peer_mark_role_covered requires non-empty 'name' and 'message_id'.",
+            )
+        caller_instance_id = str(state.get("inference_vertex_session_id") or "").strip()
+        if not caller_instance_id:
+            return _failure_result(
+                code="unregistered_route",
+                message=(
+                    "peer_mark_role_covered requires a call dispatched through "
+                    "a registered bridge's process_call; a one-shot homunculus "
+                    "call carries no registered-route identity to attest with."
+                ),
+            )
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        agent_session_id = self._claimant_session_id(caller_instance_id)
+        if not agent_session_id:
+            return _failure_result(
+                code="identity_not_registered",
+                message=f"no live peer_binding for instance {caller_instance_id!r}.",
+            )
+        if not holds_role(state_service, name, agent_session_id):
+            return _failure_result(
+                code="peer_role_not_held",
+                message=(
+                    f"the calling session does not currently hold role {name!r} "
+                    "— re-check ownership before attesting."
+                ),
+            )
+        try:
+            binding = resolve_role_binding(state_service, name)
+            session_label = binding.session_label
+        except Exception:  # noqa: BLE001 — audit field only, best-effort
+            session_label = ""
+        service = self._require_service()
+        try:
+            mark = service.mark_role_covered(
+                recipient_key=name,
+                message_id=message_id,
+                attested_by_agent_instance_id=caller_instance_id,
+                attested_by_agent_session_id=agent_session_id,
+                attested_by_session_label=session_label,
+            )
+        except AgentRequestInvalidError as exc:
+            return _failure_result(code="role_message_not_found", message=str(exc))
+        return _success_result(
+            data={
+                "recipient_key": mark.recipient_key,
+                "covered_created_at": mark.covered_created_at,
+                "covered_id": mark.covered_id,
+                "covered_message_id": mark.covered_message_id,
+                "attested_at": mark.attested_at,
+            },
+        )
+
+    def _role_delivery_route_attached(
+        self, state_service: Any, name: str,
+    ) -> bool:
+        """Does the role's CURRENT holder have a live bridge bound right now?
+
+        Dax Part 24.3: a role binding outlives the session that claimed it, so
+        ``holds=True`` can be reported for a role whose holder has no receiver
+        left — the claim is durable, the route is not. This measures the route:
+        the holder's stable session id resolves to a ``peer_binding`` row, and
+        that row's bridge is open (an MCP bridge session or an armed ``watch``
+        long-poll — both are the same kind of attachment here).
+
+        Named for what it measures. NOT ``receiving``: on MCP transport a route
+        can be attached while no waker ever fires, so a truthful name is the
+        narrow one. False is also the honest answer for a vacant role and for a
+        holder whose binding is gone.
+
+        **Total by construction.** Every fault this lookup can raise —
+        a duplicate binding for one session id, a malformed role row — is
+        answered ``False`` rather than propagated. ``peer_holds_role`` is
+        Git-Controller's Step-9.5 pre-commit ownership re-check: ``holds`` is
+        the safety answer and must survive anything the route lookup does. An
+        additive truth-in-reporting field that can convert that boolean into an
+        exception would be a regression wearing an addition's clothes.
+
+        Caveat, stated rather than engineered away: this reads the role binding
+        a second time (``holds_role`` read it first), so a displacement landing
+        between the two reads would report ``holds`` for one holder and the
+        route of another. Fixing that would mean re-implementing ``holds_role``
+        inline, and changing the Step-9.5 safety computation to improve an
+        advisory field is the wrong trade. The window is one state read wide.
+        """
+        if self._peer_registry is None or self._bridge_manager is None:
+            return False
+        try:
+            resolved = resolve_role_binding(state_service, name)
+            binding = self._peer_registry.resolve_by_agent_session_id(
+                resolved.agent_session_id,
+            )
+        except (
+            RoleBindingVacantError,
+            RoleBindingMalformedError,
+            PeerSessionAmbiguousError,
+        ):
+            return False
+        if binding is None:
+            return False
+        bridge = self._bridge_manager.get(binding.bridge_id)
+        return bridge is not None and not bridge.closed
+
+    @platform_process(
+        name="peer_inbox",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_session_id": ParameterMetadata(
+                description=(
+                    "The caller's OWN stable session id (ases-...), exported by "
+                    "the fleet launcher as $AGENT_SESSION_ID and echoed by "
+                    "peer_register / current_identity / the watcher's armed line. "
+                    "The agent_id and agent_instance_id whose mail is read are "
+                    "resolved server-side from this session's live peer_binding "
+                    "row — a caller cannot name someone else's inbox."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "after": ParameterMetadata(
+                description=(
+                    "Instance-section cursor ONLY: an ISO-8601 timestamp, echo "
+                    "back the previous page's next_after_created_at. It does "
+                    "NOT page the role section — that is 'role_after'."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "role_after": ParameterMetadata(
+                description=(
+                    "Role-section cursor ONLY: the opaque token from the "
+                    "previous page's next_role_cursor, echoed back verbatim. "
+                    "Independent of 'after'; the two are never mixed. A "
+                    "malformed token fails the role section closed."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "limit": ParameterMetadata(
+                description=(
+                    "Maximum entries per section, clamped to 1..100. Default 5 "
+                    "— entries carry full message content (~4KB each measured "
+                    "2026-08-01), so this is a page size, not a backlog size: "
+                    "page with the two cursors instead of raising it."
+                ),
+                required=False,
+                type=ParameterType.INTEGER,
+                default=PEER_INBOX_DEFAULT_LIMIT,
+            ),
+            "include_important": ParameterMetadata(
+                description=(
+                    "True (default) returns the durable catch-up view including "
+                    "messages whose sender used the IMPORTANT marker. False "
+                    "returns silent-bucket messages only."
+                ),
+                required=False,
+                type=ParameterType.BOOLEAN,
+                default=True,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "One page of the caller's peer inbox: an instance section (entries "
+            "+ next_after_created_at) and an independently-cursored role "
+            "section (role_entries + next_role_cursor + its fault-domain "
+            "status), plus the resolved recipient identity. Pull-surface "
+            "boundary (design §5): role_floor_applied is True when the "
+            "default drain's mark-bounded floor removed already-covered "
+            "rows this call; role_history_cursor, populated only on a "
+            "genuine floor-stop, is a deliberate-deep-read token."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description=(
+                "peer_inbox page — the exact shape emitted by "
+                "peer_inbox_view.serialize_peer_inbox_page (the same payload the "
+                "localhost /peer/inbox route and the MCP peer_inbox tool return)"
+            ),
+            properties={
+                "recipient_agent_id": ParameterMetadata(type=ParameterType.STRING),
+                "recipient_agent_instance_id": ParameterMetadata(
+                    type=ParameterType.STRING,
+                ),
+                "entries": ParameterMetadata(type=ParameterType.LIST),
+                "next_after_created_at": ParameterMetadata(
+                    type=ParameterType.STRING,
+                ),
+                "role_entries": ParameterMetadata(type=ParameterType.LIST),
+                "next_role_cursor": ParameterMetadata(type=ParameterType.STRING),
+                "role_section_status": ParameterMetadata(type=ParameterType.STRING),
+                "role_section_error": ParameterMetadata(type=ParameterType.STRING),
+                "role_floor_applied": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "role_history_cursor": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def peer_inbox_action(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002  # pyright: ignore[reportUnusedParameter]
+    ) -> dict[str, Any]:
+        """PULL receive path — read this session's own peer mail on demand.
+
+        Named ``peer_inbox_action``, not ``peer_inbox``: this plugin already
+        carries the typed ``AgentMessagingServiceInterface.peer_inbox``
+        delegation, so this is the platform's documented split-verb shape —
+        ``ActionProcessor._execute_plugin_method`` resolves ``peer_inbox`` from
+        the process key and then prefers the ``<verb>_action`` wrapper when it
+        carries the decorator's ``_platform_process_metadata`` marker. The
+        process key stays ``plugin::agent_messaging_plugin::peer_inbox``.
+
+        Dax Part 24: before this verb the ONLY read of the durable inbox was
+        the ``GET .../peer/inbox`` bridge route, whose identity comes from the
+        CALLING bridge's peer registration. ``homunculus call`` opens a fresh,
+        unregistered bridge, so a no-MCP session had no pull path at all —
+        streaming ``homunculus watch`` was the only receive, and a session
+        without a live watcher simply could not read its backlog.
+
+        Identity is therefore an explicit argument, but a caller may only name
+        its OWN session: ``agent_session_id`` is looked up in ``peer_binding``
+        and the recipient triple is taken from that row (the same three fields
+        the route reads off its own binding). An unknown or duplicated session
+        id is a loud error — never a silent read of an empty inbox.
+
+        Deliberately NOT done here: this read does not retire the re-emit /
+        escalation insurance on the rows it returns (the watcher long-poll ack
+        and the MCP ``/peer/drain`` reconcile remain the two consumption
+        authorities). Retiring insurance on a read that might not reach a model
+        turn risks destroying content, which is the worse failure; a session
+        that drains here may still see the same IMPORTANT rows re-emitted.
+        """
+        if not self._active or self._peer_registry is None:
+            return _failure_result(
+                code="bridge.not_running",
+                message=(
+                    "The agent messaging bridge is not active on this "
+                    "homunculus, so no inbox can be read. This is NOT an empty "
+                    "inbox — start the interface and retry."
+                ),
+            )
+        raw = params.get("parameters", params)
+        agent_session_id = str(raw.get("agent_session_id", "")).strip()
+        if not agent_session_id:
+            return _failure_result(
+                code="missing_argument",
+                message=(
+                    "peer_inbox requires the caller's own non-empty "
+                    "'agent_session_id' (the launcher exports it as "
+                    "$AGENT_SESSION_ID)."
+                ),
+            )
+        try:
+            binding = self._peer_registry.resolve_by_agent_session_id(
+                agent_session_id,
+            )
+        except PeerSessionAmbiguousError as exc:
+            return _failure_result(
+                code="peer_session_ambiguous",
+                message=str(exc),
+            )
+        if binding is None:
+            return _failure_result(
+                code="identity_not_registered",
+                message=(
+                    f"no live peer_binding for agent_session_id "
+                    f"{agent_session_id!r}. This usually means this session's "
+                    f"watcher or bridge is no longer registered — re-arm it "
+                    f"('<homunculus> watch --role <role>', or peer_register "
+                    f"over MCP) and retry. Read this as 'the reader is "
+                    f"unknown', never as 'the reader has no mail': the "
+                    f"messages are durable and still waiting. A wrong "
+                    f"agent_session_id produces this same error, so check the "
+                    f"value came from $AGENT_SESSION_ID and not a stale note."
+                ),
+            )
+        try:
+            request = _build_peer_inbox_request(raw, binding)
+        except ValueError as exc:
+            return _failure_result(code="invalid_after", message=str(exc))
+        try:
+            page = self._require_service().peer_inbox(request)
+        except AgentMessagingError as exc:
+            return _failure_result(
+                code="peer_inbox_rejected",
+                message=str(exc),
+            )
+        # The caller proved liveness by reading; keep "last active" in step with
+        # the delivery path, exactly as the /peer/inbox route does.
+        self._peer_registry.touch_binding(binding.agent_instance_id)
+        return _success_result(
+            data=serialize_peer_inbox_page(page, binding.agent_instance_id),
+        )
+
+    @platform_process(
+        name="peer_list",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        output_type="object",
+        output_description=(
+            "A snapshot of every live peer registered on this homunculus: "
+            "the sorted list of distinct agent_ids present, and per agent_id "
+            "the list of its live instances (agent_instance_id, "
+            "session_label, parent_pid, registered_at, created_at, "
+            "updated_at)."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description=(
+                "peer_list snapshot — the exact shape emitted by "
+                "peer_list_view.serialize_peer_list (the same payload the "
+                "localhost /peer/list route and the MCP peer_list tool "
+                "return)"
+            ),
+            properties={
+                "agent_ids": ParameterMetadata(type=ParameterType.LIST),
+                "instances": ParameterMetadata(type=ParameterType.DICT),
+            },
+        ),
+    )
+    def peer_list(
+        self,
+        params: dict[str, Any],  # noqa: ARG002  # pyright: ignore[reportUnusedParameter]
+        state: dict[str, Any],  # noqa: ARG002  # pyright: ignore[reportUnusedParameter]
+    ) -> dict[str, Any]:
+        """No-MCP peer enumeration — closes the peer-enumeration asymmetry.
+
+        WS-1a's ``peer_inbox`` gave a no-MCP session (``homunculus call``, no
+        registered bridge) a way to read its OWN mail. It left a companion
+        gap open: that same session had no way to see who ELSE was live —
+        ``peer_list`` existed only as an MCP-bridge HTTP route and its
+        Streamable/stdio MCP mirrors, all of which resolve identity from the
+        CALLING bridge's registration, something ``homunculus call`` never
+        has. This verb needs no such resolution: it is a global, unfiltered
+        registry snapshot, identical for every caller regardless of identity
+        — there is nothing to scope BY, so unlike ``peer_inbox`` it takes no
+        arguments and does no per-caller lookup.
+
+        No fencing beyond "reached this homunculus at all": localhost is the
+        existing trust boundary for enumerating peers on this MCP surface
+        (the pre-existing route and tool have never required more), and this
+        verb decides that explicitly rather than inheriting it silently —
+        see ``peer_list_view``'s module docstring for the field-set decision
+        that keeps the same boundary from silently widening (``bridge_id``
+        and ``agent_session_id`` stay unexposed, exactly as on the two
+        pre-existing surfaces).
+        """
+        if not self._active or self._peer_registry is None:
+            return _failure_result(
+                code="bridge.not_running",
+                message=(
+                    "The agent messaging bridge is not active on this "
+                    "homunculus, so no peer registry can be read. This is "
+                    "NOT an empty registry — start the interface and retry."
+                ),
+            )
+        snapshot = self._peer_registry.list_agent_ids()
+        return _success_result(data=serialize_peer_list(snapshot))
 
     # dead post-S3; removed with the full AB-role-WRITE retirement follow-up
     def _get_address_book_service(self) -> Any:
@@ -2124,6 +2710,7 @@ class AgentMessagingPlugin(
             idle_timeout_s=bridge_config.bridge_idle_timeout_seconds,
             max_pending_events=bridge_config.max_pending_events,
             long_poll_timeout_s=bridge_config.long_poll_timeout_seconds,
+            binding_liveness_window_s=bridge_config.binding_liveness_window_seconds,
             # M5 §14.4: lazy resolver — vault + ledger may not be live at
             # bridge-construction time (startup ordering); the closure
             # looks them up at session-open time via orchestrator.
@@ -2652,6 +3239,7 @@ class AgentMessagingPlugin(
         thread_id: str,
         message_id: str,
         reply_to_role: str = "",
+        sender_agent_session_id: str = "",
         delivery_meta: Mapping[str, object] | None = None,
     ) -> str:
         """Implement NativeWakeAdapter for agent_id='claude_code'.
@@ -2697,6 +3285,9 @@ class AgentMessagingPlugin(
             sender_agent_instance_id=sender_agent_instance_id,
             thread_id=thread_id,
             message_id=message_id,
+            # A2: the sender's stable session key, so a reply still resolves once
+            # the instance id in this hint has rotated.
+            sender_agent_session_id=sender_agent_session_id,
         )
         envelope = (
             f"[peer:{sender_agent_id}{label_segment} "
@@ -2820,6 +3411,10 @@ class AgentMessagingPlugin(
             flow_manager=flow_manager,
             compilation_context_builder=compilation_context_builder,
             bridge_manager=bridge_manager,
+            # §34.6: the surface resolves an unregistered caller's attribution
+            # key against the SAME registry peer_send_by_name routes over.
+            # Built at _build_peer_registry, before this call site.
+            peer_registry=self._peer_registry,
             process_registry=process_registry,
             discovery_service=orchestrator.get_service("discovery_service"),
             state_service=orchestrator.get_service("state_service"),
@@ -3934,6 +4529,63 @@ def _build_resume_action(row: dict[str, object]) -> dict[str, Any]:
     return action_def
 
 
+def _build_peer_inbox_request(
+    raw: dict[str, Any], binding: BridgeBinding,
+) -> PeerInboxRequest:
+    """Coerce caller args + the resolved binding into one ``PeerInboxRequest``.
+
+    The recipient triple comes from ``binding`` and never from ``raw`` — a
+    caller names only its own session, and the identity it reads with is the one
+    the registry holds for that session. The two cursors are read independently
+    and neither ever feeds the other. Raises ``ValueError`` for a malformed
+    ``after``: a broken cursor means the caller's paging is wrong, and silently
+    restarting from page one would turn that into an unbounded re-read.
+    """
+    after_raw = raw.get("after")
+    try:
+        after_created_at = (
+            datetime.fromisoformat(str(after_raw))
+            if after_raw not in (None, "")
+            else None
+        )
+    except ValueError as exc:
+        message = (
+            f"'after' must be an ISO-8601 datetime (the previous page's "
+            f"next_after_created_at): {exc}"
+        )
+        raise ValueError(message) from exc
+    role_after_raw = raw.get("role_after")
+    include_important = raw.get("include_important")
+    return PeerInboxRequest(
+        recipient_agent_id=binding.agent_id,
+        recipient_agent_instance_id=binding.agent_instance_id,
+        recipient_agent_session_id=binding.agent_session_id,
+        after_created_at=after_created_at,
+        limit=_clamp_peer_inbox_limit(raw.get("limit")),
+        include_important=(
+            True if include_important is None else bool(include_important)
+        ),
+        role_after=(
+            str(role_after_raw) if role_after_raw not in (None, "") else None
+        ),
+    )
+
+
+def _clamp_peer_inbox_limit(raw: object) -> int:
+    """Coerce a caller's ``limit`` to the supported page size.
+
+    Absent or non-numeric → the modest default (the flood guard is what makes
+    an unqualified ``peer_inbox`` call safe to advertise). Out-of-range values
+    clamp rather than error: the caller asked for "as much as you'll give me",
+    and a page size is not a correctness argument — unlike ``after`` /
+    ``role_after``, where a malformed value means the caller's paging is broken
+    and must fail loud.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return PEER_INBOX_DEFAULT_LIMIT
+    return max(PEER_INBOX_MIN_LIMIT, min(raw, PEER_INBOX_MAX_LIMIT))
+
+
 def _failure_result(*, code: str, message: str) -> dict[str, Any]:
     """Build a failed ``ActionResult`` dict with all required keys."""
     timestamp = _now_iso()
@@ -4019,7 +4671,12 @@ def _str_field(value: object) -> str:
 
 
 def _sender_from_role(
-    role_name: str, origin_instance: str, state_service: Any,
+    role_name: str,
+    origin_instance: str,
+    state_service: Any,
+    *,
+    fallback_agent_id: str = SYSTEM_AGENT_ID,
+    fallback_label: str = "",
 ) -> _RoleSendSender:
     """Sender identity for a role-stamped send: role reply-to + best-effort provenance.
 
@@ -4027,16 +4684,24 @@ def _sender_from_role(
     The current binding supplies honest sender provenance when resolvable;
     resolution is best-effort (degrade-silent) so a provenance fault never breaks
     the send — ``reply_to_role`` is set regardless, so two-way still works.
+
+    The fallbacks matter on the §34.6 attribution rung: there the caller's
+    ``agent_id`` and label were ALREADY resolved out of the peer registry, so
+    degrading them to the ``system`` sentinel when the separate role-binding
+    read faults would throw away identity we hold. Callers with no better
+    material keep the pre-existing defaults.
     """
-    agent_id, instance, label = SYSTEM_AGENT_ID, origin_instance, role_name
+    agent_id = fallback_agent_id or SYSTEM_AGENT_ID
+    instance = origin_instance
+    label = fallback_label or role_name
     try:
         binding = resolve_role_binding(state_service, role_name)
     except Exception:  # noqa: BLE001 — provenance is best-effort; never break the send
         binding = None
     if binding is not None:
-        agent_id = binding.agent_id or SYSTEM_AGENT_ID
+        agent_id = binding.agent_id or agent_id
         instance = binding.agent_instance_id or origin_instance
-        label = binding.session_label or role_name
+        label = binding.session_label or label
     return _RoleSendSender(
         agent_id=agent_id,
         agent_instance_id=instance,
@@ -4058,7 +4723,14 @@ def _resolve_role_send_sender(
       1. role present → :func:`_sender_from_role` (role reply-to + provenance).
       2. else originating agent_instance_id present → fire-and-forget by instance,
          honestly labelled, no reply-to-role.
-      3. else → genuine scheduler-originated send → the system scheduler sentinel
+      3. else CALLER ATTRIBUTION present (§34.6) → an unregistered caller — the
+         local CLI — whose opaque session key the SERVER already resolved
+         against the peer registry in
+         ``PlatformSurface._resolve_caller_attribution``. Its role rung is
+         preferred over its instance rung for the same reconnect-survival
+         reason as rung 1. Nothing here is caller-asserted: an unresolvable
+         key arrives all-empty and falls through to rung 4.
+      4. else → genuine scheduler-originated send → the system scheduler sentinel
          (pre-REL-01 behaviour, now reached ONLY when no caller identity rode the
          flow, e.g. scheduler / heartbeat-originated sends).
     """
@@ -4071,6 +4743,27 @@ def _resolve_role_send_sender(
             agent_id=SYSTEM_AGENT_ID,
             agent_instance_id=origin_instance,
             session_label="",
+            bridge_id=SYSTEM_SCHEDULER_ID,
+            reply_to_role="",
+        )
+    attributed_role = _str_field(state.get("caller_attribution_role"))
+    attributed_instance = _str_field(state.get("caller_attribution_instance_id"))
+    if attributed_role:
+        return _sender_from_role(
+            attributed_role,
+            attributed_instance,
+            state_service,
+            fallback_agent_id=_str_field(state.get("caller_attribution_agent_id")),
+            fallback_label=_str_field(state.get("caller_attribution_label")),
+        )
+    if attributed_instance:
+        return _RoleSendSender(
+            agent_id=(
+                _str_field(state.get("caller_attribution_agent_id"))
+                or SYSTEM_AGENT_ID
+            ),
+            agent_instance_id=attributed_instance,
+            session_label=_str_field(state.get("caller_attribution_label")),
             bridge_id=SYSTEM_SCHEDULER_ID,
             reply_to_role="",
         )

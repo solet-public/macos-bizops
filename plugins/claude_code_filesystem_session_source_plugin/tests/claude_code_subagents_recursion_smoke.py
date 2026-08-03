@@ -38,6 +38,7 @@ Verifications:
 
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 import time
@@ -91,7 +92,7 @@ def _plant_fixture(root: Path) -> None:
         encoding="utf-8",
     )
     # Project B — depth-2 root session only.
-    project_b = root / "-Users-dw-other"
+    project_b = root / "-Users-bob-other"
     project_b.mkdir()
     (project_b / "22222222-2222-2222-2222-222222222222.jsonl").write_text(
         '{"type":"session_meta","sessionId":"22222222-2222-2222-2222-222222222222"}\n',
@@ -104,7 +105,7 @@ def _plant_fixture(root: Path) -> None:
     # So cruft like ``.DS_Store.jsonl`` planted at depth-2 would erroneously
     # surface as a "root session" — that's a real-world concern callers solve
     # via the configured ``glob`` (the canonical pattern excludes leading dots).
-    project_c = root / "-Users-dw-cruft"
+    project_c = root / "-Users-bob-cruft"
     project_c.mkdir()
     # Wrong-prefix file under subagents/ — should be skipped (not match agent-).
     (project_c / "33333333-3333-3333-3333-333333333333.jsonl").write_text(
@@ -153,7 +154,7 @@ def test_classifier_directly() -> None:
         )
         # Wrong filename inside subagents/ → None.
         bad = (
-            root / "-Users-dw-cruft"
+            root / "-Users-bob-cruft"
             / "33333333-3333-3333-3333-333333333333"
             / "subagents" / "not-an-agent.jsonl"
         )
@@ -163,7 +164,7 @@ def test_classifier_directly() -> None:
         )
         # Depth-6 hypothetical sub-sub-agent → None.
         deep = (
-            root / "-Users-dw-cruft"
+            root / "-Users-bob-cruft"
             / "33333333-3333-3333-3333-333333333333"
             / "subagents" / "agent-xyz" / "subagents" / "agent-grandchild.jsonl"
         )
@@ -267,9 +268,33 @@ def test_discovery_idempotent_with_high_water_cursor() -> None:
         )
 
 
+_OPERATOR_USERNAME_TOKEN = "d" + "w"
+
+
+def test_source_carries_no_operator_username() -> None:
+    """RED-FIRST (operator-identity parameterization, 2026-07-31): the fake
+    ``~/.claude/projects/`` fixture directory names are arbitrary — the
+    classifier under test only cares about path SHAPE, not the project-name
+    text — so there is no functional reason for the real operator's OS
+    username to appear in a hyphen-flattened project directory name here.
+    This file ships whenever ``claude_code_filesystem_session_source_plugin``
+    is selected. Composed from two concatenated halves (see
+    ``_OPERATOR_USERNAME_TOKEN``) so this guard's own source never contains
+    the contiguous token it hunts for. Word-bounded so it does not collide
+    with an unrelated substring.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(_OPERATOR_USERNAME_TOKEN)}(?![A-Za-z0-9_])")
+    _expect(
+        pattern.search(source) is None,
+        "fixture source carries no bare operator-username token",
+    )
+
+
 def main() -> None:
     print("M6.5 Bug 3 — M3 subagents/ recursion smoke")
     print("=" * 60)
+    test_source_carries_no_operator_username()
     test_classifier_directly()
     test_discover_sessions_yields_both_shapes_and_skips_cruft()
     test_locate_session_file_finds_both_shapes()

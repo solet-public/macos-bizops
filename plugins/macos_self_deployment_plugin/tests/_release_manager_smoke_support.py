@@ -14,6 +14,7 @@ deliberately-stale one whose target dir is absent, for the §8.6 check).
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -129,8 +130,16 @@ def make_manager(
     mid_swap_hook: Callable[[], None] | None = None,
     ledger_write_hook: Callable[[str], None] | None = None,
     keep_releases: int = 3,
+    logger: logging.Logger | None = None,
 ) -> ReleaseManager:
-    """Build a ReleaseManager wired with deterministic clock + sha."""
+    """Build a ReleaseManager wired with deterministic clock + sha.
+
+    The dirty-tree gate's ``dirty_paths_resolver`` is deliberately NOT
+    injected: the gate's whole point is what real ``git status`` reports,
+    and a smoke that stubs it would measure the stub. Smokes whose
+    synthetic tree is not a git repo therefore attest ``tree_state:
+    unknown`` — which never refuses.
+    """
     return ReleaseManager(
         homunculus_name="smoke",
         source_root=source_root,
@@ -141,6 +150,7 @@ def make_manager(
         strict_pth_validation=strict_pth,
         mid_swap_hook=mid_swap_hook,
         ledger_write_hook=ledger_write_hook,
+        logger=logger,
     )
 
 

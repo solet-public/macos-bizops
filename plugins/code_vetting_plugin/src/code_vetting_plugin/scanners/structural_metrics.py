@@ -23,11 +23,13 @@ rank vocabulary and never converted — the two numbers are not comparable and t
 
 from __future__ import annotations
 
+import ast
 import re
 import statistics
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Final
 
 import lizard
 import lizard_languages
@@ -47,6 +49,10 @@ _MAX_FILE_BYTES = 1_000_000
 # Bound the persisted/rendered detail so the vetting_runs row + report stay bounded (F1 §3):
 # distributions + aggregates are the trend signal; the per-function detail is the worst-N only.
 _WORST_OFFENDERS_CAP = 100
+# Per-CLASS finding caps. These do not share one budget: band crossings and the nested-loop
+# class are separate registers, and collapsing them would let a flood of one silently starve
+# the other. The scanner's total finding bound is therefore _MAX_FINDINGS + _NESTED_LOOP_CAP,
+# and every truncation is disclosed on the coverage record rather than applied silently.
 _MAX_FINDINGS = 200
 
 # R9-B literal-frequency table (evidence-only — structurally NO Finding path). Trivial floor is the
@@ -150,6 +156,130 @@ class _LitAccum:
     files: set[str] = field(default_factory=set)
 
 
+# --- the NESTED-LOOP pattern class (loops within loops) -------------------------------
+#
+# Named explicitly per the 2026-07-31 scope ruling: performance BENCHMARKING is out of
+# scope, but static complexity / bad-pattern detection is IN, and loops-within-loops is
+# the named example. Before this, the class was caught only incidentally and unnamed —
+# lizard's ``nd`` extension reports ANY-nesting depth (if/for/while mixed), so a deeply
+# branched loop-free function and a genuine double loop are indistinguishable in it.
+#
+# ⚠ DENOMINATOR, declared rather than implied (coverage-artifact requirement): this
+# detector is PYTHON-ONLY. ``structural_metrics`` as a whole parses every lizard-supported
+# language, so this dimension is NARROWER than the scanner around it, and a target with no
+# Python is not "clean of nested loops" — it is UNEXAMINED for them. That distinction is
+# recorded in the coverage disclosure so a report cannot imply coverage it does not have.
+#
+# Python uses a real AST (stdlib ``ast``) rather than a token/brace heuristic ON PURPOSE:
+# brace-less single-statement bodies (``for (…) for (…) work();``) and indentation-
+# delimited blocks are exactly where a token scanner produces false positives, and a false
+# claim in a shipped verb is the failure class this lane exists to remove. Adding a
+# language means adding a precise parser for it to ``_NESTED_LOOP_PARSERS``, not widening
+# a regex.
+_NESTED_LOOP_LANGUAGES: Final[tuple[str, ...]] = ("python",)
+_NESTED_LOOP_CONSTRAINT: Final[str] = "complexity:nested_loops"
+# Depth 2 is the named class; depth 3+ is where it stops being ordinary (matrix-shaped
+# work is legitimately depth 2). Severity splits there; both are recorded in the payload.
+_NESTED_LOOP_MEDIUM_DEPTH: Final[int] = 3
+_NESTED_LOOP_CAP: Final[int] = 100
+
+_PY_LOOP_NODES: Final[tuple[type[ast.AST], ...]] = (ast.For, ast.AsyncFor, ast.While)
+# A nested function/lambda RESETS loop depth: a loop inside a closure defined in a loop is
+# not a loop-within-a-loop in the sense the ruling names — it does not multiply iterations
+# at that site. Comprehensions are deliberately NOT counted in v1 (a multi-generator
+# comprehension IS a nested loop, but folding it in here would change the finding count
+# without a separate decision); that exclusion is declared, not silent.
+_PY_SCOPE_NODES: Final[tuple[type[ast.AST], ...]] = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class NestedLoop:
+    """One loop that is lexically inside another loop, in the same function scope."""
+
+    file: str
+    line: int
+    language: str
+    depth: int  # 2 == a loop inside a loop; 3 == a loop inside a loop inside a loop
+
+    def to_dict(self) -> dict[str, object]:
+        return {"file": self.file, "line": self.line, "language": self.language, "depth": self.depth}
+
+
+def _walk_python_loops(node: ast.AST, rel: str, depth: int, out: list[NestedLoop]) -> None:
+    """Depth-first walk recording every loop whose enclosing loop depth is >= 1."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, _PY_SCOPE_NODES):
+            _walk_python_loops(child, rel, 0, out)  # new function scope → depth resets
+            continue
+        if isinstance(child, _PY_LOOP_NODES):
+            if depth >= 1:
+                out.append(
+                    NestedLoop(file=rel, line=int(child.lineno), language="python", depth=depth + 1)
+                )
+            _walk_python_loops(child, rel, depth + 1, out)
+            continue
+        _walk_python_loops(child, rel, depth, out)
+
+
+def _python_nested_loops(rel: str, code: str) -> list[NestedLoop] | None:
+    """Every nested loop in one Python file, or None when the file could not be examined.
+
+    ``[]`` and ``None`` are DIFFERENT answers and the caller must not conflate them: ``[]``
+    means "examined, no nested loops here", ``None`` means "not examined at all". Only the
+    former may count toward the coverage denominator — reporting an unexaminable file as
+    examined overstates the very number the denominator exists to make honest.
+
+    Two conditions yield None. A syntax/value error means the target's own source does not
+    parse, which is not this scanner's finding to make. A ``RecursionError`` means the file
+    parsed but out-nests the walker: ``_walk_python_loops`` costs one Python frame per AST
+    level, so a long chained expression (a generated constants table, a big literal) exhausts
+    the stack well under the ``_MAX_FILE_BYTES`` guard. That is a limit of this detector, not
+    a defect in the target, and it must degrade to a coverage note rather than abort the run.
+    The walk is inside the guarded block for that reason — the parse is not the only raiser.
+    """
+    found: list[NestedLoop] = []
+    try:
+        module = ast.parse(code)
+        _walk_python_loops(module, rel, 0, found)
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    return found
+
+
+# language label (lizard's primary name) → precise parser for that language.
+# A parser returns None for a file it could not examine; see _python_nested_loops.
+_NESTED_LOOP_PARSERS: Final[dict[str, Callable[[str, str], list[NestedLoop] | None]]] = {
+    "python": _python_nested_loops,
+}
+
+
+def _nested_loop_finding(loop: NestedLoop, run_id: str, context: ContextProfile) -> Finding:
+    severity = Severity.MEDIUM if loop.depth >= _NESTED_LOOP_MEDIUM_DEPTH else Severity.LOW
+    return Finding.build(
+        run_id=run_id,
+        layer=Layer.L1_DETERMINISTIC,
+        dimension=Dimension.COMPLEXITY,
+        severity=severity,
+        file=loop.file,
+        line=loop.line,
+        constraint_violated=_NESTED_LOOP_CONSTRAINT,
+        evidence=(
+            f"nested loop at depth {loop.depth} ({loop.language}) at {loop.file}:{loop.line} — "
+            "a loop inside a loop multiplies iteration count with input size"
+        ),
+        fix_suggestion=(
+            "Hoist invariant work out of the inner loop, or replace the inner scan with an "
+            "index/set lookup so the pass is linear rather than quadratic."
+        ),
+        provenance=Provenance(source=f"gate:{_SCANNER}", rule_id=_NESTED_LOOP_CONSTRAINT),
+        context_profile=context,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class StructuralMetricsReport:
     """The bounded, persisted/rendered structural-metrics payload for one run (ruling §E).
@@ -170,6 +300,17 @@ class StructuralMetricsReport:
     worst_offenders: tuple[FunctionMetric, ...]
     file_aggregates: tuple[FileAggregate, ...]
     literals: tuple[LiteralFrequency, ...]  # R9-B: top repeated non-trivial literals (evidence-only)
+    # The named nested-loop pattern class. ``nested_loop_files_examined`` is carried BESIDE the
+    # rows on purpose: it is this dimension's own denominator, and it is smaller than
+    # ``files_parsed`` because the detector is language-limited. Without it a reader cannot tell
+    # "no nested loops" from "nothing was examined for nested loops".
+    nested_loops: tuple[NestedLoop, ...] = ()
+    nested_loop_languages: tuple[str, ...] = _NESTED_LOOP_LANGUAGES
+    nested_loop_files_examined: int = 0
+    # The TRUE total, carried separately because ``nested_loops`` is capped for payload bounds.
+    # Rendering len(nested_loops) as "total" would understate it on any tree above the cap —
+    # the same false-claim shape this scanner's own findings are meant to avoid.
+    nested_loops_total: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -185,6 +326,12 @@ class StructuralMetricsReport:
             "worst_offenders": [fn.to_dict() for fn in self.worst_offenders],
             "file_aggregates": [agg.to_dict() for agg in self.file_aggregates[:_WORST_OFFENDERS_CAP]],
             "literals": [literal.to_dict() for literal in self.literals],
+            # The named nested-loop class travels WITH its denominator so a consumer can never
+            # read an empty list as "clean" when the real state is "not examined".
+            "nested_loops": [loop.to_dict() for loop in self.nested_loops],
+            "nested_loop_languages": list(self.nested_loop_languages),
+            "nested_loop_files_examined": self.nested_loop_files_examined,
+            "nested_loops_total": self.nested_loops_total,
         }
 
 
@@ -313,15 +460,21 @@ def _finalize_literals(counts: dict[tuple[str, str], _LitAccum]) -> tuple[Litera
     return tuple(floored[:_LITERAL_CAP])
 
 
-def _collect(tree: TargetTree) -> tuple[list[FunctionMetric], int, int, list[str], tuple[LiteralFrequency, ...]]:
+def _collect(
+    tree: TargetTree,
+) -> tuple[list[FunctionMetric], int, int, list[str], tuple[LiteralFrequency, ...], list[NestedLoop], int]:
     """Walk the enumerated tree ∩ lizard-supported suffixes; parse each (size-capped). Returns the
-    function metrics, files-parsed, files-skipped (oversize/unreadable), the language set, and the
-    repeated-literal table (R9-B — tokenized from the same file set)."""
+    function metrics, files-parsed, files-skipped (oversize/unreadable), the language set, the
+    repeated-literal table (R9-B — tokenized from the same file set), the nested-loop rows, and
+    the count of files actually EXAMINED for nested loops (the dimension's own denominator, which
+    is smaller than files-parsed because the detector is language-limited)."""
     allowlist = _load_tracked_debt(tree)
     literal_counts: dict[tuple[str, str], _LitAccum] = {}
     functions: list[FunctionMetric] = []
+    nested_loops: list[NestedLoop] = []
     parsed = 0
     skipped = 0
+    nested_loop_files = 0
     languages: set[str] = set()
     for rel in tree.all_files():
         language = _language_for(rel)
@@ -332,10 +485,28 @@ def _collect(tree: TargetTree) -> tuple[list[FunctionMetric], int, int, list[str
             skipped += 1
             continue
         functions.extend(_analyze_file(tree, rel, language, allowlist))
-        _accumulate_literals(literal_counts, rel, path.read_text(encoding="utf-8", errors="replace"))
+        code = path.read_text(encoding="utf-8", errors="replace")
+        _accumulate_literals(literal_counts, rel, code)
+        nested_loop_parser = _NESTED_LOOP_PARSERS.get(language)
+        if nested_loop_parser is not None:
+            file_loops = nested_loop_parser(rel, code)
+            # None == the parser could not examine this file; counting it would inflate the
+            # dimension's own denominator with a file nothing was ever looked at in.
+            if file_loops is not None:
+                nested_loops.extend(file_loops)
+                nested_loop_files += 1
         parsed += 1
         languages.add(language)
-    return functions, parsed, skipped, sorted(languages), _finalize_literals(literal_counts)
+    nested_loops.sort(key=lambda loop: (-loop.depth, loop.file, loop.line))
+    return (
+        functions,
+        parsed,
+        skipped,
+        sorted(languages),
+        _finalize_literals(literal_counts),
+        nested_loops,
+        nested_loop_files,
+    )
 
 
 def _bucket_ccn(functions: list[FunctionMetric]) -> dict[str, int]:
@@ -380,7 +551,13 @@ def _percentile(values: list[int], fraction: float) -> float:
 
 
 def _build_report(
-    functions: list[FunctionMetric], parsed: int, skipped: int, languages: list[str], literals: tuple[LiteralFrequency, ...]
+    functions: list[FunctionMetric],
+    parsed: int,
+    skipped: int,
+    languages: list[str],
+    literals: tuple[LiteralFrequency, ...],
+    nested_loops: list[NestedLoop],
+    nested_loop_files: int,
 ) -> StructuralMetricsReport:
     ccns = [fn.ccn for fn in functions]
     return StructuralMetricsReport(
@@ -396,6 +573,9 @@ def _build_report(
         worst_offenders=_worst_offenders(functions),
         file_aggregates=tuple(_file_aggregates(functions)),
         literals=literals,
+        nested_loops=tuple(nested_loops[:_NESTED_LOOP_CAP]),
+        nested_loop_files_examined=nested_loop_files,
+        nested_loops_total=len(nested_loops),
     )
 
 
@@ -457,8 +637,8 @@ def scan(tree: TargetTree, run_id: str) -> ScannerResult:
             f"{_SCANNER}: lizard {lizard.version} != pinned {LIZARD_PINNED_VERSION} — a version drift "
             "would silently corrupt CCN trend lines; re-pin deliberately with a re-baseline note."
         )
-    functions, parsed, skipped, languages, literals = _collect(tree)
-    report = _build_report(functions, parsed, skipped, languages, literals)
+    functions, parsed, skipped, languages, literals, nested_loops, nested_loop_files = _collect(tree)
+    report = _build_report(functions, parsed, skipped, languages, literals, nested_loops, nested_loop_files)
 
     # FT-2 tier-controlled emission (ruling §C), derived from target class. This mirrors
     # ``verify.tiers.active_tiers(foreign=...)`` — a FOREIGN target is UNIVERSAL-tier-only, so the
@@ -469,15 +649,36 @@ def scan(tree: TargetTree, run_id: str) -> ScannerResult:
     # ``verify/*``. `active_tiers(foreign=True)` == {UNIVERSAL} (no PROJECT_LOCAL → emit); self == both.
     emit = tree.foreign
     findings: list[Finding] = []
-    disclosure: str | None = None
+    notes: list[str] = []
     if emit:
         findings, total = _band_findings(functions, run_id, ContextProfile.PRODUCTION)
         if total > _MAX_FINDINGS:
-            disclosure = f"emitted {total} band-crossing metrics; first {_MAX_FINDINGS} rendered as findings"
-    if skipped and disclosure is None:
-        disclosure = f"{skipped} file(s) skipped (>{_MAX_FILE_BYTES // 1000}KB or unreadable)"
-
-    coverage = CoverageRecord(scanner=_SCANNER, ran=True, files_examined=parsed, gap_reason=disclosure)
+            notes.append(f"emitted {total} band-crossing metrics; first {_MAX_FINDINGS} rendered as findings")
+        findings.extend(
+            _nested_loop_finding(loop, run_id, ContextProfile.PRODUCTION)
+            for loop in nested_loops[:_NESTED_LOOP_CAP]
+        )
+    # Truncation is disclosed OUTSIDE the emit branch on purpose: the payload is capped on a
+    # self-vet too, and a silently-capped payload reads as a complete one.
+    if len(nested_loops) > _NESTED_LOOP_CAP:
+        notes.append(
+            f"found {len(nested_loops)} nested loops; {_NESTED_LOOP_CAP} carried in the payload"
+        )
+    if skipped:
+        notes.append(f"{skipped} file(s) skipped (>{_MAX_FILE_BYTES // 1000}KB or unreadable)")
+    # The nested-loop denominator is ALWAYS disclosed, but NOT here. `gap_reason` answers "was
+    # anything reduced?" — truncation, skipped files — and an entry appended on every single run
+    # makes the answer permanently "yes", which trains a reader to skip the column and buries the
+    # genuine reductions above. The denominator travels on its own always-populated channels
+    # instead: `nested_loop_files_examined` on the payload (machine-readable) and the report
+    # section's nested-loop block (human-readable), which renders even when no functions were
+    # analyzed. `gap_reason` stays None when nothing was actually reduced.
+    coverage = CoverageRecord(
+        scanner=_SCANNER,
+        ran=True,
+        files_examined=parsed,
+        gap_reason="; ".join(notes) if notes else None,
+    )
     return ScannerResult(findings=findings, coverage=coverage, structural_metrics=report)
 
 
@@ -523,6 +724,41 @@ def _repeated_literals_table(report: StructuralMetricsReport) -> list[str]:
     return lines
 
 
+def _nested_loops_block(report: StructuralMetricsReport) -> list[str]:
+    """The named nested-loop class, ALWAYS rendered with its denominator.
+
+    Rendered even when the count is zero: a reader must be able to tell "examined and none
+    found" from "not examined", and the language limit makes the second case common.
+    """
+    langs = ", ".join(report.nested_loop_languages)
+    lines = [
+        "**Nested loops** (loops within loops — a named static pattern class)",
+        "",
+        (
+            f"_Examined {report.nested_loop_files_examined} of {report.files_parsed} parsed file(s); "
+            f"detector languages: {langs}. Files in other languages were NOT examined for this "
+            "pattern — absence below is not evidence of absence in them._"
+        ),
+        "",
+    ]
+    if not report.nested_loops:
+        lines.append(f"_No nested loops found in the {report.nested_loop_files_examined} file(s) examined._")
+        return lines
+    lines.extend(("| location | depth | language |", "| --- | --- | --- |"))
+    lines.extend(
+        f"| `{loop.file}:{loop.line}` | {loop.depth} | {loop.language} |"
+        for loop in report.nested_loops[:10]
+    )
+    if report.nested_loops_total > len(report.nested_loops):
+        lines.append(
+            f"\n_{report.nested_loops_total} found; {len(report.nested_loops)} carried in the "
+            "payload (cap), 10 deepest shown._"
+        )
+    elif report.nested_loops_total > 10:
+        lines.append(f"\n_{report.nested_loops_total} found; 10 deepest shown._")
+    return lines
+
+
 def _headline(report: StructuralMetricsReport) -> str:
     over_10 = sum(count for label, count in report.ccn_distribution.items() if label in {"11-15", "16-30", ">30"})
     over_15 = sum(count for label, count in report.ccn_distribution.items() if label in {"16-30", ">30"})
@@ -534,14 +770,30 @@ def _headline(report: StructuralMetricsReport) -> str:
 
 
 def _empty_section(report: StructuralMetricsReport) -> str:
-    """The no-functions-analyzed block; still renders the literal table when literals were found."""
+    """The no-functions-analyzed block: the literal table when literals were found, and ALWAYS
+    the nested-loop block.
+
+    "No functions" does NOT mean "nothing was examined". lizard reports no functions for
+    module-level script code (MEASURED: ``function_list == []`` for a bare ``for``/``for``
+    file), so this path is reachable on a target that HAS nested loops and has already emitted
+    ``complexity:nested_loops`` findings for them. Omitting the block here printed "no functions
+    analyzed" over a run record carrying those rows, and silently withdrew the denominator
+    disclosure ``_nested_loops_block`` exists to guarantee — in the one case where the reader
+    most needs it.
+    """
     langs = ", ".join(report.languages) or "none"
-    head = (
-        "## Structural Quality Metrics\n\n"
-        f"_No functions analyzed — {report.files_parsed} file(s) parsed across {langs}; "
-        f"{report.files_skipped} skipped. lizard v{report.tool_version}._"
-    )
-    return f"{head}\n\n" + "\n".join(_repeated_literals_table(report)) if report.literals else head
+    blocks = [
+        "## Structural Quality Metrics",
+        "",
+        (
+            f"_No functions analyzed — {report.files_parsed} file(s) parsed across {langs}; "
+            f"{report.files_skipped} skipped. lizard v{report.tool_version}._"
+        ),
+    ]
+    if report.literals:
+        blocks.extend(("", "\n".join(_repeated_literals_table(report))))
+    blocks.extend(("", "\n".join(_nested_loops_block(report))))
+    return "\n".join(blocks)
 
 
 def render_structural_metrics_section(report: StructuralMetricsReport | None) -> str:
@@ -563,6 +815,7 @@ def render_structural_metrics_section(report: StructuralMetricsReport | None) ->
         "",
         "\n".join(_worst_offenders_table(report)),
     ]
+    blocks.extend(("", "\n".join(_nested_loops_block(report))))
     if report.literals:
         blocks.extend(("", "\n".join(_repeated_literals_table(report))))
     if report.files_skipped:

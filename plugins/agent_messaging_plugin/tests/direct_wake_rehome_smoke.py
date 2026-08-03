@@ -122,6 +122,7 @@ def _persist(
         sender_session_label="Claude-A",
         sender_bridge_id="agc-s",
         content=[TextPart(type="text", text="IMPORTANT: Lane C report")],
+        activity_at_emission=None,
     )
 
 

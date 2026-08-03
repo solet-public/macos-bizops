@@ -7,13 +7,15 @@ write-stopper. Every verb takes a connection NAME (never a DSN); the platform's
 own DB instance is refused role-independently (connection.assert_foreign_target).
 
 Verbs (all EDGE, all reads):
-  - run_query        — one read-only statement; rows inline, FAILS LOUD over
-    the inline caps (A4 — no blob spill)
+  - run_query        — one read-only statement; result written as a TSV file
+    at the caller's output_tsv_path (default 500 rows, up to 1000 with an
+    acknowledged override) — never rows inline, at any size
   - list_connections — the registered external_pg::* connection names
   - list_schemas / list_tables / describe_table — first-class introspection
-  - export_query     — full result written as a TSV file in the operator's
-    workspace (absolute output_tsv_path, contained under the
-    export_allowed_roots config; refuse-all when unset)
+  - export_query     — the N>>500 route: full result written as a TSV file in
+    the operator's workspace (absolute output_tsv_path, contained under the
+    export_allowed_roots config; refuse-all when unset), same override
+    mechanism as run_query with a higher hard cap (50,000)
   - test_connection  — server version, current role, read-only flag
 
 No plugin-owned vault keys (the per-connection password is chain-consumed through
@@ -54,10 +56,15 @@ from .constants import (
     CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
     CONFIG_KEY_PLATFORM_PG_PORT,
     CONFIG_KEY_STATEMENT_TIMEOUT_MS,
+    DEFAULT_ROW_LIMIT,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
     ERROR_API_ERROR,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
+    EXPORT_ROW_CAP,
+    MAX_ROWS_HARD_CAP,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
     PLATFORM_PG_PORT_DEFAULT,
     PLUGIN_NAME,
     RESULT_TYPE_DESCRIBE_TABLE,
@@ -292,7 +299,6 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
                 ExternalPgConfigError,
                 ExternalPgGuardError,
                 StatementGuardError,
-                query_actions.ResultTooLargeError,
                 export_containment.ExportPathRefusedError,
             ),
         ):
@@ -335,10 +341,21 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Run ONE read-only SQL statement against a registered foreign Postgres connection "
             "(by connection_name). Read leaders only (SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE); the "
-            "connection is read-only at the server, so writes/DDL are refused. Returns rows inline "
-            "(up to max_rows, default 200, capped 1000); fails loud with "
-            "external_pg.result_too_large over the inline caps — use export_query for bulk. "
-            "Use list_connections to see registered names."
+            "connection is read-only at the server, so writes/DDL are refused. The result is "
+            "ALWAYS written to the caller-supplied output_tsv_path, never returned inline — this "
+            "connection is an arbitrary customer database, so there is no vendor-imposed row "
+            f"ceiling to defer to; the limit below is entirely our own policy. Defaults to "
+            f"{DEFAULT_ROW_LIMIT} rows to avoid exhausting the target database and disk, and to "
+            "discourage pulling all rows for client-side filtering that a WHERE clause should do "
+            "instead. To fetch more, pass acknowledge_default_limit_override=true together with "
+            f"an explicit row_limit (up to {MAX_ROWS_HARD_CAP}) — both are required together, and "
+            f"a row_limit above {MAX_ROWS_HARD_CAP} is refused rather than silently clamped. For "
+            f"pulls beyond {MAX_ROWS_HARD_CAP} rows, use export_query instead (same override "
+            f"mechanism, hard cap {EXPORT_ROW_CAP}). Use list_connections to see registered names. "
+            "When the goal is validating that records exist or picking one to act on next, prefer "
+            "selecting stable ID columns over email addresses or other PII-bearing fields — the "
+            "query decides what columns come back, so a narrower SELECT is both cheaper and "
+            "lower-exposure."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -352,22 +369,63 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
                 required=True,
                 description="A single read-only SQL statement.",
             ),
-            "max_rows": ParameterMetadata(
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description=(
+                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
+                ),
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} rows. Requires understanding why the default "
+                    "exists: avoiding exhausted rate limits/disk, and pulling all rows to filter "
+                    "client-side instead of writing a proper WHERE clause."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description="Max rows to return inline (default 200, capped at 1000).",
+                description=(
+                    f"Explicit row ceiling, up to {MAX_ROWS_HARD_CAP}. Only honored together with "
+                    f"acknowledge_default_limit_override=true; refused (not clamped) above "
+                    f"{MAX_ROWS_HARD_CAP}."
+                ),
             ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Rows inline (columns/rows/row_count/spilled=false). Fails loud over the inline caps.",
+            description="A handle to the written TSV — never rows inline, at any size.",
+            properties={
+                "path": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Absolute path of the written TSV file.",
+                ),
+                "row_count": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Number of rows written.",
+                ),
+                "columns": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Column names, in query order.",
+                ),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="True when row_count hit the effective limit — more rows may exist.",
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def run_query(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         return self._run_on_connection(
-            params, lambda conn: query_actions.run_query(conn, params), "run_query"
+            params,
+            lambda conn: query_actions.run_query(conn, params, self._export_path_gate),
+            "run_query",
         )
 
     @platform_process(
@@ -497,11 +555,21 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         name="export_query",
         display_name="External Postgres: Export Query",
         description=(
-            "Run a read-only query against a registered foreign Postgres connection and write the "
-            "full result (up to 50000 rows) as ONE tab-separated .tsv file at an ABSOLUTE "
+            "The N>>500 route: run a read-only query against a registered foreign Postgres "
+            "connection and write the result as ONE tab-separated .tsv file at an ABSOLUTE "
             "output_tsv_path in the operator's workspace. The path must lie under an "
             "operator-configured export_allowed_roots entry (empty config refuses every export). "
-            "Same read-only rules as run_query. Requires connection_name, sql, and output_tsv_path."
+            "Same read-only rules and override mechanism as run_query, with a higher hard cap: "
+            "this connection is an arbitrary customer database, so there is no vendor-imposed row "
+            f"ceiling, only our own policy. Defaults to {DEFAULT_ROW_LIMIT} rows absent an "
+            "acknowledged override — for that common small/default case, run_query has an "
+            "identical interface with a lower ceiling. To fetch more, pass "
+            "acknowledge_default_limit_override=true together with an explicit row_limit (up to "
+            f"{EXPORT_ROW_CAP}) — both are required together, and a row_limit above "
+            f"{EXPORT_ROW_CAP} is refused rather than silently clamped. Requires connection_name, "
+            "sql, and output_tsv_path. When the goal is validating that records exist rather than "
+            "inspecting their content, prefer selecting stable ID columns over email addresses or "
+            "other PII-bearing fields — the query decides what columns land in the file."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -522,10 +590,47 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
                     "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
                 ),
             ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} rows. Requires understanding why the default "
+                    "exists: avoiding exhausted rate limits/disk, and pulling all rows to filter "
+                    "client-side instead of writing a proper WHERE clause."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit row ceiling, up to {EXPORT_ROW_CAP}. Only honored together with "
+                    f"acknowledge_default_limit_override=true; refused (not clamped) above "
+                    f"{EXPORT_ROW_CAP}."
+                ),
+            ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="path of the written TSV, plus columns, row_count, and truncated.",
+            description="A handle to the written TSV: path, columns, row_count, and truncated.",
+            properties={
+                "path": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Absolute path of the written TSV file.",
+                ),
+                "row_count": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Number of rows written.",
+                ),
+                "columns": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Column names, in query order.",
+                ),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="True when row_count hit the effective limit — more rows may exist.",
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,

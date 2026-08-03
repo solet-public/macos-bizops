@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::docs_batch_update",
   "display_name": "Docs: Batch Update",
   "description": "Apply a list of raw Google Docs API batchUpdate request objects (insert/replace text, formatting, etc.) to a document. Requires a connected account.",
-  "embedding_description": "Apply one or more raw Google Docs API batchUpdate request objects (for example insertText, replaceAllText, updateTextStyle, insertTable) to an existing document by id. The requests list is passed through verbatim to the Docs API — this is the low-level structural-edit verb, more powerful but less convenient than docs_create's simple initial-content option. Returns the batchUpdate replies array. Fails gsuite.invalid_params if requests is empty or not a list of request objects.",
+  "embedding_description": "Apply raw Google Docs API batchUpdate requests to an existing document by id - insertText, replaceAllText, updateTextStyle, insertTable and the rest - passed through verbatim. The low-level structural edit surface for documents, covering changes beyond what the higher-level verbs reach.",
   "result_processor_customizations": {
     "action_label": "Document batch-updated",
     "result_type": "g_suite_docs_batch_update_result",

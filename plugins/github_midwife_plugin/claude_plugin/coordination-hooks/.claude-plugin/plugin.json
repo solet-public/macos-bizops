@@ -1,10 +1,5 @@
 {
   "name": "coordination-hooks",
-  "version": "0.1.0",
-  "description": "Fleet coordination hooks for coordinator-style multi-session workflows: a knowledge-base-first reminder, a check-your-messages reminder, a role-binding reminder, an opt-in idle-wake waiter, and an opt-in git-mutation guard.",
-  "author": {
-    "name": "<<AUTHOR_NAME>>",
-    "email": "<<AUTHOR_EMAIL>>"
-  },
-  "homepage": "<<PLUGIN_HOMEPAGE_URL>>"
+  "version": "0.2.0",
+  "description": "Fleet coordination hooks for coordinator-style multi-session workflows: a knowledge-base-first reminder, a check-your-messages reminder, a role-binding reminder, an opt-in idle-wake waiter, and an opt-in git-mutation guard."
 }

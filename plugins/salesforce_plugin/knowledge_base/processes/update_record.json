@@ -2,7 +2,7 @@
   "process_key": "plugin::salesforce_plugin::update_record",
   "display_name": "Salesforce: Update Record",
   "description": "Apply a non-empty fields object to an existing record by sobject + id. This is a write action.",
-  "embedding_description": "Update one or more fields on an existing Salesforce record by its object type and id. Requires sobject, id, and a non-empty fields object of the values to set. A write action.",
+  "embedding_description": "Update fields on a Salesforce CRM record that already exists, using its object type, record id, and a non-empty field-value object. Applies the requested values in place to a known Account, Contact, Opportunity, or custom object. This is the single-record field-maintenance write.",
   "result_processor_customizations": {
     "action_label": "Salesforce record updated",
     "result_type": "salesforce_update_record_result",

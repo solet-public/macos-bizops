@@ -55,13 +55,16 @@ from .client import JiraClientFactory
 from .constants import (
     BLOB_NAMESPACE,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_ROW_LIMIT,
     DEFAULT_TOKEN_EXPIRY_WARN_DAYS,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
     ERROR_API_ERROR,
     ERROR_BLOB_STORAGE_NOT_AVAILABLE,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
-    INLINE_BYTE_CAP,
+    MAX_INTERNAL_CALLS,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
     PLUGIN_NAME,
     RESULT_TYPE_ADD_ATTACHMENT,
     RESULT_TYPE_ADD_COMMENT,
@@ -75,6 +78,7 @@ from .constants import (
     RESULT_TYPE_TEST_CONNECTION,
     RESULT_TYPE_TRANSITION_ISSUE,
     RESULT_TYPE_UPDATE_ISSUE,
+    ROW_LIMIT_CAP,
 )
 from .errors import JiraServiceError, classify_jira_error
 
@@ -220,15 +224,17 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         return self._blob_storage_service
 
     def _store_blob(self, content: bytes, filename: str, mime_type: str) -> str:
-        """Store downloaded/spilled bytes as a blob; return the blob id (the *_blob_key)."""
+        """Store an outgoing attachment's bytes as a blob; return the blob id (the *_blob_key).
+
+        Attachments only — jql_search/list_comments return inline (§5.4, jira
+        exited the spill floor); this is the plugin's only blob-write path.
+        """
         blob_service = self._blob_service()
         if blob_service is None:
             raise JiraServiceError(
                 ERROR_BLOB_STORAGE_NOT_AVAILABLE,
                 f"blob_storage_service is not available for blob storage: cannot store "
-                f"'{filename}' ({len(content)} bytes); query results over the "
-                f"{INLINE_BYTE_CAP}-byte inline cap require blob spill, so narrow the "
-                f"query (fewer rows/fields) until the result fits inline",
+                f"'{filename}' ({len(content)} bytes)",
             )
         result = blob_service.store_blob(
             BLOB_NAMESPACE, content, {"filename": filename, "mime_type": mime_type}
@@ -346,7 +352,25 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Search issues with a JQL query (e.g. \"project = PROJ AND status = 'In Progress' "
             "ORDER BY updated DESC\"). Returns trimmed rows (key/summary/status/assignee/updated) "
-            "and the total match count; large result sets spill to a blob."
+            f"INLINE, one complete result — up to {DEFAULT_ROW_LIMIT} issues by default. Jira "
+            "carries no PII risk (operator ruling: company-internal accounts only), so this verb "
+            "never spills to a file. Atlassian's /search/jql endpoint caps a single HTTP call at "
+            "100 issues; within the effective row limit this verb pages internally across that "
+            "ceiling and hands back one result — there is no caller-visible continuation token. "
+            f"At the default {DEFAULT_ROW_LIMIT}-row limit that is up to 5 sequential internal "
+            f"HTTP calls; at the {ROW_LIMIT_CAP}-row override cap it is up to 50 — each call is a "
+            "real round-trip, so a large row_limit has real latency cost. To raise the limit past "
+            f"{DEFAULT_ROW_LIMIT}, pass acknowledge_default_limit_override=true together with "
+            f"row_limit (up to {ROW_LIMIT_CAP}; above that is refused, never silently clamped). "
+            f"A defense-in-depth circuit breaker bounds the internal loop at "
+            f"{MAX_INTERNAL_CALLS} calls regardless of row_limit, well above the 50 calls today's "
+            "cap requires. Optional max_results narrows how many rows THIS call returns, at or below the "
+            "effective limit — it never widens it. If the vendor genuinely has more matches than "
+            "the effective limit, truncated is true and total is an approximate count (narrow the "
+            "JQL to see the rest — there is no resume token). Optional fields restricts which "
+            "ADDITIONAL columns are fetched beyond the fixed render set — prefer requesting stable "
+            "ID/status fields over free-text fields when the goal is validation rather than "
+            "content inspection."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -358,7 +382,11 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
             "max_results": ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description="Max issues to return (default 50, capped at 100).",
+                description=(
+                    "Issues to return in THIS call, at or below the effective row limit "
+                    "(default: the effective limit itself). Narrows only — never widens; "
+                    "widening the limit requires acknowledge_default_limit_override + row_limit."
+                ),
             ),
             "fields": ParameterMetadata(
                 type=ParameterType.LIST,
@@ -366,20 +394,64 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
                 description=(
                     "Optional list of ADDITIONAL issue field names to fetch. The standard "
                     "render set (summary/status/assignee/updated) is always fetched too, so "
-                    "the returned rows keep their fixed trimmed shape and are never hollow."
+                    "the returned rows keep their fixed trimmed shape and are never hollow. "
+                    "Prefer stable ID/status fields over email addresses or other PII-bearing "
+                    "fields when the goal is validation."
+                ),
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    f"Must be true, together with row_limit, to raise the effective row limit "
+                    f"above the {DEFAULT_ROW_LIMIT}-row default. Given alone (without row_limit) "
+                    "is refused."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"The raised effective row limit, up to {ROW_LIMIT_CAP}. Must be given "
+                    f"together with acknowledge_default_limit_override=true. Above "
+                    f"{ROW_LIMIT_CAP} is refused, never silently clamped."
                 ),
             ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Trimmed issue rows (or a result_blob_key on spill) plus the total count.",
+            description="Trimmed issue rows, inline, one complete result within the effective limit.",
+            properties={
+                "issues": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Trimmed issue rows (key/summary/status/assignee/updated/...).",
+                ),
+                "row_count": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Number of issue rows returned.",
+                ),
+                "total": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description=(
+                        "Exact match count when not truncated; an approximate count from a "
+                        "separate query when truncated is true."
+                    ),
+                ),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description=(
+                        "True when more matches exist beyond the effective row limit — narrow "
+                        "the JQL to see the rest; there is no resume token."
+                    ),
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def jql_search(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         return self._run(
-            lambda: issue_actions.jql_search(self._require_client(), params, self._store_blob),
+            lambda: issue_actions.jql_search(self._require_client(), params),
             "jql_search",
         )
 
@@ -389,7 +461,12 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Fetch one issue by key: summary, description (plain text), status, assignee, "
             "reporter, labels, and attachment metadata (id/filename/mime/size — not the bytes; "
-            "use download_attachment for those)."
+            "use download_attachment for those). Single-record reads like this stay inline "
+            "(2026-08-02 operator ruling: validation-shaped single-item reads are not the "
+            "mass-exposure risk the business-data limits migration targets). When the goal is "
+            "only confirming an issue exists or checking its status, jql_search's trimmed rows "
+            "(key/status) may already answer that without fetching the full description and "
+            "people fields."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -560,8 +637,23 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         name="list_comments",
         display_name="Jira: List Comments",
         description=(
-            "List an issue's comments (id/author/body/created), most recent last, capped at "
-            "'max' (default 50, cap 100)."
+            "List an issue's comments (id/author/body/created), most recent last, INLINE, one "
+            f"complete result — up to {DEFAULT_ROW_LIMIT} comments by default. Jira carries no "
+            "PII risk (operator ruling: company-internal accounts only), so this verb never "
+            "spills to a file. Atlassian caps a single HTTP call at 100 comments; within the "
+            "effective row limit this verb pages internally by offset across that ceiling and "
+            "hands back one result — there is no caller-visible offset or continuation token. "
+            f"At the default {DEFAULT_ROW_LIMIT}-row limit that is up to 5 sequential internal "
+            f"HTTP calls; at the {ROW_LIMIT_CAP}-row override cap it is up to 50 — each call is a "
+            "real round-trip, so a large row_limit has real latency cost. A defense-in-depth "
+            f"circuit breaker bounds the internal loop at {MAX_INTERNAL_CALLS} calls regardless "
+            "of row_limit, well above the 50 calls today's cap requires. To raise the limit past "
+            f"{DEFAULT_ROW_LIMIT}, pass acknowledge_default_limit_override=true together with "
+            f"row_limit (up to {ROW_LIMIT_CAP}; above that is refused, never silently clamped). "
+            "Optional max narrows how many comments THIS call returns, at or below the effective "
+            "limit — it never widens it. If the issue genuinely has more comments than the "
+            "effective limit, truncated is true (narrow the pull or raise the limit to see the "
+            "rest — there is no resume token)."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -573,12 +665,51 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
             "max": ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description="Max comments to return (default 50, capped at 100).",
+                description=(
+                    "Comments to return in THIS call, at or below the effective row limit "
+                    "(default: the effective limit itself). Narrows only — never widens; "
+                    "widening the limit requires acknowledge_default_limit_override + row_limit."
+                ),
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    f"Must be true, together with row_limit, to raise the effective row limit "
+                    f"above the {DEFAULT_ROW_LIMIT}-row default. Given alone (without row_limit) "
+                    "is refused."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"The raised effective row limit, up to {ROW_LIMIT_CAP}. Must be given "
+                    f"together with acknowledge_default_limit_override=true. Above "
+                    f"{ROW_LIMIT_CAP} is refused, never silently clamped."
+                ),
             ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Comment rows (id/author/body/created).",
+            description="Comment rows, inline, one complete result within the effective limit.",
+            properties={
+                "comments": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Comment rows (id/author/body/created), most recent last.",
+                ),
+                "row_count": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Number of comment rows returned.",
+                ),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description=(
+                        "True when more comments exist beyond the effective row limit or a "
+                        "call count was not confirmed complete — there is no resume token."
+                    ),
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
@@ -664,7 +795,7 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         display_name="Jira: Download Attachment",
         description=(
             "Download a Jira attachment (by attachment id, from get_issue's attachment metadata) "
-            "into blob storage and return its attachment_blob_key, filename, mime, and size."
+            "into blob storage and return its attachment_blob_key, namespace, filename, mime, and size."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -676,7 +807,7 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="attachment_blob_key referencing the stored bytes, plus filename/mime/size.",
+            description="attachment_blob_key + namespace referencing the stored bytes, plus filename/mime/size.",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,

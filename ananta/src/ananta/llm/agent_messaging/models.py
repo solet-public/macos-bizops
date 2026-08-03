@@ -330,6 +330,14 @@ class PeerSendRequest:
     # (REL-08 read-side / Fork-1a). Default "" for legacy / non-registry callers
     # (their threads stay instance-keyed, exactly as visible as today).
     peer_agent_session_id: str = ""
+    # The SENDER's stable per-logical-session key — the symmetric half of
+    # ``peer_agent_session_id`` above (WS-2c V4 / A2). Resolved SERVER-SIDE from
+    # the sender's registered binding, never accepted from the caller, and carried
+    # into the delivered reply hint ALONGSIDE (never replacing) the instance id, so
+    # a reply still resolves after the sender's instance has rotated. Default ""
+    # for callers with no registered binding — their hints stay instance-only,
+    # exactly as churnable as today.
+    sender_agent_session_id: str = ""
     # True when the sender used the IMPORTANT marker (the bridge has
     # already detected and stripped it from ``content`` before calling
     # the service).  Persisted as ``metadata.important`` so peer_inbox
@@ -377,6 +385,43 @@ class PeerInboxRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class RoleMessagePersisted:
+    """The durable handles a role-message write hands back to its dispatcher.
+
+    ``created_at`` is the PERSISTED ROW's timestamp, read back after the
+    upsert rather than synthesised at call time, because it is the exact
+    quantity the role-inbox section sorts and pages on
+    (``order_by (created_at, id) desc``) and therefore the only value a
+    watcher may compare its ``role_high_water`` mark against.
+
+    Reading it back is deliberate. A clock reading taken beside the write
+    (``datetime.now(UTC)``) is a DIFFERENT quantity: if it lands even
+    fractionally ahead of the row, a client marking with it skips a message
+    whose ``created_at`` is later — silent loss, in the one direction the
+    watcher-mark contract must never move. Same-quantity-by-construction is
+    worth one extra read on the IMPORTANT role path.
+    """
+
+    message_id: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class RoleCoveredMark:
+    """The durable 'covered through' mark for one role (pull-surface boundary
+    design §2). Returned by ``peer_mark_role_covered`` — the stored value on
+    a genuine advance, the PRE-EXISTING value on a monotonic no-op, so a
+    caller can always confirm what "covered" now means for the role.
+    """
+
+    recipient_key: str
+    covered_created_at: str
+    covered_id: str
+    covered_message_id: str
+    attested_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class PeerInboxEntry:
     """One peer-inbox row: a sender's message addressed to the recipient.
 
@@ -416,6 +461,16 @@ class PeerInbox:
     the error repr) while the instance section is still served, so a role-side
     fault never denies a caller its instance messages. Both default to the
     healthy state, preserving the existing construction sites.
+
+    Pull-surface boundary (design §5) adds ``role_floor_applied`` and
+    ``role_history_cursor`` ADDITIVELY, same non-breaking shape: ``False`` /
+    ``None`` when no ``role_covered_mark`` exists for any held role (today's
+    unbounded behavior, byte-for-byte, until a session calls
+    ``peer_mark_role_covered`` at least once). ``role_floor_applied=True``
+    means the default drain's floor removed at least one already-covered row
+    from this page; ``role_history_cursor`` is populated ONLY on a genuine
+    floor-stop (``next_role_cursor is None and role_floor_applied``) — echo it
+    back as ``role_after`` for a deliberate pre-mark read.
     """
 
     recipient_agent_id: str
@@ -425,6 +480,8 @@ class PeerInbox:
     next_role_cursor: str | None = None
     role_section_status: RoleSectionStatus = RoleSectionStatus.OK
     role_section_error: str | None = None
+    role_floor_applied: bool = False
+    role_history_cursor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

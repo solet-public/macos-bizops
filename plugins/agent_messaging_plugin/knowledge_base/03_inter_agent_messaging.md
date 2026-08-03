@@ -8,7 +8,7 @@ Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:t
 
 Article Tags: planning-stage:agent-to-agent-coordination, planning-stage:tool-discovery, evidence-category:peer-messaging-contracts, evidence-category:identity-model, domain:agent-messaging, domain:inter-agent-routing
 
-Embedding Description: How live agent sessions talk through the homunculus — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the `<name> wake` Stop-hook waker that turns a delivery to an idle watcher-held session into a session turn (spool tee + hook exit-2 wake, MCP-free and provider-agnostic), the IMPORTANT-marker loop-prevention contract, silent vs queued delivery (persisted_silent / queued_notification / queued_wake / queued_watcher), what IMPORTANT means for a watcher-held recipient (delivered into the watch stream, wakes an idle hooked session, next-look for a busy one, consumed on events-ack), peer_inbox catch-up semantics, multi-instance addressing, Claude Code native-channel wake routing, and the locally patched Codex peer-wake path.
+Embedding Description: How live agent sessions talk through the homunculus — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the `<name> wake` Stop-hook waker that turns a delivery to an idle watcher-held session into a session turn (spool tee + hook exit-2 wake, MCP-free and provider-agnostic), the IMPORTANT-marker loop-prevention contract, silent vs queued delivery (persisted_silent / queued_notification / queued_wake / queued_watcher), what IMPORTANT means for a watcher-held recipient (delivered into the watch stream, wakes an idle hooked session, next-look for a busy one, consumed on events-ack), peer_inbox catch-up semantics including how to read your own inbox on demand with NO MCP by calling the registered peer_inbox process with your own stable session id, the two independent inbox cursors and why role-section exhaustion is a null cursor rather than an ok status, whether the role you hold still has a live delivery route attached to its current holder, multi-instance addressing, Claude Code native-channel wake routing, and the locally patched Codex peer-wake path.
 
 ## Purpose
 
@@ -94,7 +94,13 @@ Every emitted line is a JSON object tagged `"watch": "armed" | "inbox" |
 "event"`; the armed line carries the claim result and the
 `agent_instance_id`. Ground truth for "is my role claimed" is
 `peer_holds_role` with the role name AND that `agent_instance_id` — an entry
-in raw peer-list output is connection presence, not a claim. The optional MCP
+in raw peer-list output is connection presence, not a claim. That verb also
+returns `delivery_route_attached`: whether the role's CURRENT holder still has
+an open bridge bound. A role binding is durable and outlives the session that
+claimed it, so `holds` and `delivery_route_attached` answer different
+questions and `holds=true` alongside `delivery_route_attached=false` is the
+normal reading of a claim whose receiver is gone. It reports that a route is
+bound, not that a wake will fire. The optional MCP
 bridge below is an alternative holder of the same registered presence for
 operators who explicitly chose MCP; it is required for nothing.
 
@@ -249,6 +255,52 @@ mcp__<server-name>__peer_inbox(include_important=False)                    # int
   and `sender_session_label`. Use the `sender_agent_instance_id` as
   the reply's `peer_agent_instance_id` to target the original sender
   (not just any session of that agent kind).
+
+### Reading the inbox without MCP
+
+The same read is a registered platform process, so a session with no MCP
+tools — and no live `watch` stream — can still pull its own mail:
+
+```
+<name> call plugin::agent_messaging_plugin::peer_inbox \
+  '{"agent_session_id": "'"$AGENT_SESSION_ID"'", "include_important": true}'
+```
+
+The MCP tool infers the reader from the calling bridge's registration. A
+`<name> call` opens a fresh, unregistered bridge, so the process takes the
+reader's own stable `agent_session_id` instead and resolves the rest of the
+identity from that session's live binding. The launcher exports the value as
+`AGENT_SESSION_ID`; `peer_register`, `current_identity`, and the watcher's
+armed line all echo it. An id with no live binding is an error, never an
+empty page — "the reader is unknown" and "the reader has no mail" are
+different answers and the verb keeps them different.
+
+### The role section is paged separately
+
+The response carries two sections with two independent cursors, and mixing
+them is the mistake this section exists to prevent:
+
+- `entries` + `next_after_created_at` — messages addressed to this instance,
+  paged by `after` (an ISO-8601 timestamp).
+- `role_entries` + `next_role_cursor` — messages addressed to any role this
+  session holds, merged across roles, paged by `role_after` (an opaque token).
+
+Passing `after` does nothing to the role section. `role_section_status` is a
+fault-domain flag, not a progress flag: `"ok"` means that section was computed
+without error and says nothing about whether it is drained. **The role section
+is exhausted only when `next_role_cursor` is null**; `"error"` means it failed
+(detail in `role_section_error`) while the instance section was still served.
+
+Page rather than widen. An entry carries the whole message — a 50-entry
+instance section plus a 50-entry role section measured 422,513 characters on
+2026-08-01, roughly 4 KB per entry — so `limit` bounds the count, not the
+bytes. The process defaults to a small page for that reason; the cursors are
+how a backlog gets drained.
+
+Reading here does not retire a message's re-emit or escalation insurance. The
+watcher's long-poll acknowledgement and the MCP drain reconcile remain the
+consumption authorities, so a message pulled this way may still be
+re-delivered.
 
 ## Sending to a specific instance
 

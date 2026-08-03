@@ -1,0 +1,26 @@
+{
+  "name": "coordination-hooks",
+  "version": "0.1.0+codex.20260802140834",
+  "description": "An unconditional project-orientation reminder, opt-in unread-message and role-binding reminders, an idle-wake Stop waiter, and a Git-Controller mistake-prevention gate for coordinated multi-session work.",
+  "author": {
+    "name": "seed-factory"
+  },
+  "keywords": [
+    "coordination",
+    "hooks",
+    "git-policy"
+  ],
+  "interface": {
+    "displayName": "Coordination Hooks",
+    "shortDescription": "Reviewable hooks for coordinated Codex sessions.",
+    "longDescription": "Adds an unconditional project-orientation reminder plus opt-in unread-message and role-binding reminders, a synchronous nudge-only idle-wake Stop waiter, and a Git-Controller mistake-prevention gate. Deployment-specific guidance stays in the project's native AGENTS.md instructions; launcher-owned watcher, inbox, and cutover integration ship in later reviewed units. Hook revocation remains an explicit operator action in Codex's supported /hooks surface.",
+    "developerName": "seed-factory",
+    "category": "Productivity",
+    "capabilities": [
+      "Hooks"
+    ],
+    "defaultPrompt": [
+      "Explain the installed coordination hook contract."
+    ]
+  }
+}

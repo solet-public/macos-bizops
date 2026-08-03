@@ -58,6 +58,15 @@ from ..peer_dispatch import (
     dispatch_peer_send,
     dispatch_role_send,
 )
+from ..peer_inbox_view import (
+    serialize_message as _serialize_message,
+)
+from ..peer_inbox_view import (
+    serialize_peer_inbox_page as _serialize_peer_inbox_page,
+)
+from ..peer_list_view import (
+    serialize_peer_list as _serialize_peer_list,
+)
 from ..peer_registry import PeerAmbiguousError, PeerUnreachableError
 from ..platform_surface import BridgeError
 from ..role_binding_store import (
@@ -410,7 +419,7 @@ def _invoke_tool_handler(
             _PEER_UNREACHABLE,
             str(exc),
             request_id=request_id,
-            data={"code": "peer_unreachable"},
+            data={"code": "peer_unreachable", **exc.response_data()},
         ) from exc
     except BridgeNotFoundError as exc:
         raise JsonRpcError(
@@ -594,25 +603,7 @@ def _tool_peer_list(
     session: StreamableSession,  # noqa: ARG001
     context: DispatchContext,
 ) -> dict[str, Any]:
-    snapshot = context.peer_registry.list_agent_ids()
-    instances: dict[str, list[dict[str, object]]] = {
-        agent_id: [
-            {
-                "agent_instance_id": b.agent_instance_id,
-                "session_label": b.session_label,
-                "parent_pid": b.parent_pid,
-                "registered_at": b.created_at,
-                "created_at": b.created_at,
-                "updated_at": b.updated_at,
-            }
-            for b in bindings
-        ]
-        for agent_id, bindings in snapshot.items()
-    }
-    return {
-        "agent_ids": sorted(snapshot.keys()),
-        "instances": instances,
-    }
+    return _serialize_peer_list(context.peer_registry.list_agent_ids())
 
 
 def _tool_peer_register(
@@ -686,6 +677,14 @@ def _tool_peer_send(
             _INVALID_PARAMS,
             "peer_send.peer_agent_instance_id must be a string when present",
         )
+    peer_agent_session_id = arguments.get("peer_agent_session_id")
+    if peer_agent_session_id is not None and not isinstance(
+        peer_agent_session_id, str,
+    ):
+        raise JsonRpcError(
+            _INVALID_PARAMS,
+            "peer_send.peer_agent_session_id must be a string when present",
+        )
     content_raw = arguments.get("content") or []
     if not isinstance(content_raw, list) or not content_raw:
         raise JsonRpcError(
@@ -704,6 +703,7 @@ def _tool_peer_send(
         peer_id=peer_id,
         peer_agent_instance_id=peer_agent_instance_id,
         content=content,
+        peer_agent_session_id=peer_agent_session_id,
     )
     return outcome.to_payload()
 
@@ -1133,23 +1133,6 @@ def _serialize_messages_page(page: Any) -> dict[str, Any]:
     }
 
 
-def _serialize_message(message: Any) -> dict[str, Any]:
-    import dataclasses  # noqa: PLC0415 — local heavy import
-    return {
-        "id": message.id,
-        "cursor": message.cursor,
-        "role": message.role.value,
-        "kind": message.kind.value,
-        "content": [{"type": p.type, "text": p.text} for p in message.content],
-        "action_id": message.action_id,
-        "backend_session_id": message.backend_session_id,
-        "error": message.error,
-        "artifacts": [dataclasses.asdict(a) for a in message.artifacts],
-        "metadata": message.metadata,
-        "created_at": message.created_at.isoformat(),
-    }
-
-
 def _serialize_thread_status(status: Any) -> dict[str, Any]:
     return {
         "thread_id": status.thread_id,
@@ -1160,41 +1143,6 @@ def _serialize_thread_status(status: Any) -> dict[str, Any]:
         "active_action_id": status.active_action_id,
         "active_flow_id": status.active_flow_id,
         "backend_session_id": status.backend_session_id,
-    }
-
-
-def _serialize_peer_inbox_entry(entry: Any) -> dict[str, Any]:
-    return {
-        "thread_id": entry.thread_id,
-        "sender_agent_id": entry.sender_agent_id,
-        "sender_agent_instance_id": entry.sender_agent_instance_id,
-        "sender_session_label": entry.sender_session_label,
-        "message": _serialize_message(entry.message),
-    }
-
-
-def _serialize_peer_inbox_page(
-    page: Any, recipient_agent_instance_id: str,
-) -> dict[str, Any]:
-    # The role section (role_entries + next_role_cursor) is emitted ADDITIVELY;
-    # the instance section keys are byte-for-byte unchanged. role_section_status
-    # / role_section_error carry the v10 Q1 fault-domain outcome so a caller can
-    # tell an empty role section (no role messages) from a failed one.
-    return {
-        "recipient_agent_id": page.recipient_agent_id,
-        "recipient_agent_instance_id": recipient_agent_instance_id,
-        "entries": [_serialize_peer_inbox_entry(entry) for entry in page.entries],
-        "next_after_created_at": (
-            page.next_after_created_at.isoformat()
-            if page.next_after_created_at is not None
-            else None
-        ),
-        "role_entries": [
-            _serialize_peer_inbox_entry(entry) for entry in page.role_entries
-        ],
-        "next_role_cursor": page.next_role_cursor,
-        "role_section_status": page.role_section_status.value,
-        "role_section_error": page.role_section_error,
     }
 
 

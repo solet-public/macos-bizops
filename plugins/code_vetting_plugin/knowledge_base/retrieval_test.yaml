@@ -66,6 +66,18 @@ tests:
   - query: "why is the 60 percent vulture confidence class evidence not a finding"
     expect: guidance_dead_symbols.md
 
+  # --- guidance_architecture_universal.md ---
+  - query: "generic architecture review for a foreign codebase with no platform rulebook"
+    expect: guidance_architecture_universal.md
+  - query: "is this import a layering violation or a god component"
+    expect: guidance_architecture_universal.md
+  - query: "judging coupling and circular dependencies on a repo we don't own"
+    expect: guidance_architecture_universal.md
+  - query: "does this class reach past the repository boundary into storage directly"
+    expect: guidance_architecture_universal.md
+  - query: "restored foreign-target architecture lens after RB rulebook lenses were skipped"
+    expect: guidance_architecture_universal.md
+
   # --- vet_codebase_ai_pass_joseki.md (joseki_catalog — the HOW-TO-RUN card; distinct from the overview's WHAT-IT-IS) ---
   - query: "how do I run the AI critic pass over a codebase"
     expect: vet_codebase_ai_pass_joseki.md
@@ -76,4 +88,6 @@ tests:
   - query: "AI vetting pass local vs subscription substrate dispatch"
     expect: vet_codebase_ai_pass_joseki.md
   - query: "run the full AI vet on a foreign target skipping the platform-local lenses"
+    expect: vet_codebase_ai_pass_joseki.md
+  - query: "how many L2 lenses run on a foreign target vs a self target"
     expect: vet_codebase_ai_pass_joseki.md

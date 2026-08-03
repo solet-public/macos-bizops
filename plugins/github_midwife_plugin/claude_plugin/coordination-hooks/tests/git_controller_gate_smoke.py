@@ -33,6 +33,7 @@ sys.dont_write_bytecode = True
 
 import json  # noqa: E402
 import os  # noqa: E402
+import re  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -64,14 +65,34 @@ sys.path.insert(0, str(_HOOK_DIR))
 # case_env_contract_literal pins the literal per copy.
 _EXPECTED_ENV = os.environ.get("GATE_SMOKE_EXPECTED_ENV") or "GIT_CONTROLLER_NAME"
 
-# The operator-facing refusal names the authority to escalate to, and the two
-# copies word it differently on purpose: this shipped copy says "the
-# designated controller session" (it speaks to whoever installs it), the
-# local copy says "a Coordinator session" (it speaks to a known fleet). That
-# noun is a per-copy binding, not part of the shared behavioural contract —
-# so it is parameterized rather than asserted as one shared literal, and each
-# copy still has to carry SOME authority noun.
+# The operator-facing refusal names the authority to route git through. The
+# two copies USED to word it differently — this shipped copy said "the
+# designated controller session", the local copy "a Coordinator session" —
+# and this constant was parameterized to tolerate that. As of A5 (operator
+# ruling, 2026-08-01) BOTH copies carry one ruled wording, and the local
+# copy's "Coordinator" referent is gone: it named a role that does not hold
+# git, so blocked sessions were pointed at the wrong peer. The
+# parameterization is kept (a per-copy refusal noun is still a legitimate
+# binding, and unifying by deletion is the standing tested-copy-is-not-
+# shipped-copy failure) but it is no longer papering over a live divergence.
+# The clause section itself IS asserted as one shared literal — see
+# case_exemption_clause_shared_across_copies.
 _EXPECTED_AUTHORITY_NOUN = os.environ.get("GATE_SMOKE_AUTHORITY_NOUN") or "controller"
+
+# Where THIS copy's PreToolUse routing is configured — the file that decides
+# which tool names ever reach the gate at all. The shipped copy carries its
+# own `hooks/hooks.json`; the local unshipped copy is wired from the clone's
+# `.claude/settings.json`, which its driver passes in here. Routing is a
+# per-copy binding, so it is parameterized exactly like the env contract
+# above rather than assumed.
+_ROUTING_CONFIG = Path(
+    os.environ.get("GATE_SMOKE_ROUTING_CONFIG") or (_HOOK_DIR / "hooks.json"),
+).resolve()
+
+# Tool names that must NOT be routed to the gate. `Task` is a prefix of three
+# unrelated task-TRACKING tools, and `Bash` of `BashOutput`; an unanchored
+# alternation in the matcher sweeps all of them in.
+_MUST_NOT_ROUTE = ("TaskCreate", "TaskUpdate", "TaskList", "BashOutput")
 
 # ruff: noqa: I001, E402
 # pyright: reportMissingImports=false
@@ -88,6 +109,10 @@ os.environ[gate.GIT_CONTROLLER_ENV] = GC
 
 _passed = 0
 _failed: list[str] = []
+# Cases that could not run at all. Printed in the tally and never counted as
+# passes — a skip that reads as a pass is the vacuity this suite exists to
+# avoid.
+_skipped: list[str] = []
 
 
 def _check(condition: object, label: str) -> None:
@@ -293,6 +318,52 @@ def case_dot_git_direct_mutation_bash() -> None:
     _expect_allow(gate.check_bash, ({"command": "rm /tmp/.git"}, SOME), "rm /tmp/.git (different path) allowed")
 
 
+def case_dot_git_scan_stops_at_command_separator() -> None:
+    """The `.git/` operand scan must not run past its own command segment.
+
+    ``_command_targets_dot_git`` walks forward from an fs-mutating verb or a
+    shell redirect looking for a `.git/` operand. Unbounded, that walk runs
+    to the end of the WHOLE compound command, so a redirect in one segment
+    plus an unrelated read-only `.git/` mention in a LATER segment reads as
+    a mutation. Measured: ``echo hi > out.txt; ls .git/`` blocked a
+    read-only `ls`, and ``find … 2>/dev/null; find … -path './.git/*'``
+    blocked a read-only find — a false BLOCK on ordinary inspection
+    commands, the same over-block family as a global flag before a
+    read-only subcommand.
+
+    Every true positive is single-segment, so bounding the scan costs no
+    coverage — the BLOCK half below is the discriminating control that says
+    so.
+    """
+    # ALLOW: the mutator/redirect and the `.git/` mention are in DIFFERENT segments.
+    _expect_allow(
+        gate.check_bash,
+        ({"command": "echo hi > out.txt; ls .git/"}, SOME),
+        "redirect in an earlier segment, read-only .git/ in a later one",
+    )
+    _expect_allow(
+        gate.check_bash,
+        ({"command": "find . -name x 2>/dev/null; find . -path './.git/*'"}, SOME),
+        "stderr redirect then an unrelated .git/ path operand",
+    )
+    _expect_allow(
+        gate.check_bash,
+        ({"command": "rm /tmp/scratch && ls .git/"}, SOME),
+        "rm on an unrelated path, then a read-only .git/ listing",
+    )
+    # BLOCK: same segment — bounding the scan must not lose these.
+    _expect_block(
+        gate.check_bash,
+        ({"command": "ls foo; rm .git/index"}, SOME),
+        "mutator and .git/ operand in the SAME later segment",
+    )
+    _expect_block(
+        gate.check_bash,
+        ({"command": "true && echo x > .git/HEAD"}, SOME),
+        "redirect into .git/ in the same later segment",
+    )
+
+
 def case_dot_git_edit_file_path() -> None:
     """Edit/Write into <repo_root>/.git/ blocked."""
     with tempfile.TemporaryDirectory() as repo:
@@ -357,6 +428,119 @@ def case_env_contract_literal() -> None:
     )
 
 
+def case_subagent_tool_names_literal() -> None:
+    """Pin the sub-agent tool-name set the gate dispatches on.
+
+    Claude Code renamed this tool from ``Task`` to ``Agent``; a harness may
+    send either. Dispatching on one name only is fail-OPEN — the gate returns
+    ALLOW for the exact tool it exists to block — and every ``check_task``
+    case above calls the decision function directly, so all of them stay
+    green while that happens. Same shape as ``case_env_contract_literal``:
+    the literal is the thing worth asserting, because dropping a name is
+    silent.
+    """
+    _check(
+        gate.SUBAGENT_TOOL_NAMES == frozenset({"Task", "Agent"}),
+        f"gate dispatches sub-agent spawning on both tool names "
+        f"(reads {set(gate.SUBAGENT_TOOL_NAMES)!r})",
+    )
+    _check(
+        gate.GATED_TOOL_NAMES >= gate.SUBAGENT_TOOL_NAMES,
+        "GATED_TOOL_NAMES covers the sub-agent names it dispatches on",
+    )
+
+
+def _routed_matchers(config_path: Path) -> list[str | None]:
+    """PreToolUse matchers of every entry that routes to ``git_controller_gate.py``.
+
+    Handles both routing-config shapes: the plugin's ``hooks.json`` (command
+    ``python3`` + ``args`` list) and a clone's ``.claude/settings.json``
+    (single shell-string ``command``). ``None`` means the entry carries no
+    matcher, which Claude Code treats as matching every tool.
+    """
+    data = json.loads(config_path.read_text())
+    entries = data.get("hooks", {}).get("PreToolUse", [])
+    matchers: list[str | None] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        blob = json.dumps(entry.get("hooks", []))
+        if "git_controller_gate.py" not in blob:
+            continue
+        matcher = entry.get("matcher")
+        matchers.append(matcher if isinstance(matcher, str) else None)
+    return matchers
+
+
+def _matcher_routes(matcher: str | None, tool_name: str) -> bool:
+    """Does this PreToolUse matcher route ``tool_name`` to the hook?
+
+    A missing matcher matches every tool. A present one is a regex, applied
+    unanchored (``re.search``) — the conservative reading, and the one that
+    makes an un-anchored alternation like ``...|Task`` sweep in ``TaskCreate``.
+    """
+    if matcher is None:
+        return True
+    return re.search(matcher, tool_name) is not None
+
+
+def case_routing_config_matches_dispatch() -> None:
+    """The PreToolUse matcher must route EXACTLY the tool names the gate dispatches on.
+
+    This is the case that the 150-case suite was missing. Layer A calls the
+    decision functions directly and Layer B only ever sent tool names the
+    matcher already listed, so a gate whose ROUTING never delivers the real
+    tool name reported 150/150 healthy while being a no-op on it. The
+    expected tool-name population is derived from the gate module at run
+    time — never restated here — so adding a dispatch branch without routing
+    it in is caught, and so is dropping one.
+    """
+    if not _ROUTING_CONFIG.is_file():
+        # Legitimate for the local copy on a clone that has not run
+        # setup_clone.sh: `.claude/settings.json` is gitignored and installed
+        # per clone. Never legitimate for the shipped copy, whose
+        # `hooks/hooks.json` is tracked — so this records a visible SKIP
+        # rather than passing.
+        _skipped.append(
+            f"case_routing_config_matches_dispatch: no routing config at "
+            f"{_ROUTING_CONFIG} (gate not wired in this clone)",
+        )
+        return
+    matchers = _routed_matchers(_ROUTING_CONFIG)
+    _check(
+        len(matchers) == 1,
+        f"exactly one PreToolUse entry routes to the gate in {_ROUTING_CONFIG} "
+        f"(found {len(matchers)})",
+    )
+    if not matchers:
+        return
+    matcher = matchers[0]
+    for tool_name in sorted(gate.GATED_TOOL_NAMES):
+        _check(
+            _matcher_routes(matcher, tool_name),
+            f"matcher {matcher!r} routes gated tool {tool_name!r} to the hook "
+            f"({_ROUTING_CONFIG.name})",
+        )
+    if matcher is None:
+        # An entry with no matcher routes every tool, so the coverage loop
+        # above passed trivially and the negatives below cannot apply. That
+        # is the local copy's real wiring (`.claude/settings.json` carries no
+        # matcher) — correct, but worth naming so a reader does not bank it
+        # as coverage. The shipped copy's hooks.json DOES carry a matcher and
+        # gets the full assertion.
+        _skipped.append(
+            "case_routing_config_matches_dispatch: entry has no matcher "
+            "(routes every tool) — over-match negatives not applicable",
+        )
+        return
+    for tool_name in _MUST_NOT_ROUTE:
+        _check(
+            not _matcher_routes(matcher, tool_name),
+            f"matcher {matcher!r} must NOT route unrelated tool {tool_name!r} "
+            f"({_ROUTING_CONFIG.name}) — anchor the alternation",
+        )
+
+
 def case_walker_basics() -> None:
     """walk_git_invocations returns the right shape on common inputs."""
     invs, ok = walk_git_invocations("git status")
@@ -413,9 +597,10 @@ def case_global_flags_before_subcommand() -> None:
         f"block reason names the commit subcommand ban, not a parse failure (got {reason!r})",
     )
 
-    original_allowlist = gate.ALLOWED_NO_FLAG_CHECK
+    policy_module = getattr(gate, "policy", gate)
+    original_allowlist = policy_module.ALLOWED_NO_FLAG_CHECK
     try:
-        gate.ALLOWED_NO_FLAG_CHECK = original_allowlist | frozenset({"commit"})
+        policy_module.ALLOWED_NO_FLAG_CHECK = original_allowlist | frozenset({"commit"})
         mutated_allowed, _ = gate.is_invocation_allowed(invocation)
         _check(
             mutated_allowed,
@@ -423,7 +608,7 @@ def case_global_flags_before_subcommand() -> None:
             "allowed -- if it doesn't, the block above wasn't coming from the ban",
         )
     finally:
-        gate.ALLOWED_NO_FLAG_CHECK = original_allowlist
+        policy_module.ALLOWED_NO_FLAG_CHECK = original_allowlist
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +668,27 @@ def case_subprocess_architect_git_stash_blocked() -> None:
         f"stderr names the escalation authority {_EXPECTED_AUTHORITY_NOUN!r} "
         f"(got {stderr[:200]!r})",
     )
-    _check("escalate" in stderr, f"stderr instructs escalation (got {stderr[:200]!r})")
+    # A5 / D-5a.3 POSITIVE LEG (the "3a" ruling, 2026-08-01): assert that the
+    # text a blocked session ACTUALLY RECEIVES is the text this copy carries.
+    # The clause-consistency leg proves the same words sit in four files; it
+    # cannot prove they ever render. This reads the payload off the real block
+    # path instead. CONTAINMENT, never whole-payload equality — the refusal
+    # legitimately interpolates caller identity and a command slice, so
+    # equality would either fail spuriously or force that interpolation out.
+    _check(
+        gate.POLICY_MESSAGE in stderr,
+        f"stderr renders this copy's POLICY_MESSAGE verbatim on the block "
+        f"path (got {stderr[:200]!r})",
+    )
+    # ⚠ DELIBERATE COVERAGE REMOVAL, disclosed rather than dropped silently.
+    # This case previously asserted `"escalate" in stderr`. The operator's
+    # ruled A5 wording (2026-08-01) contains NO escalation instruction — it
+    # names where git goes, not what the blocked session should do next. The
+    # assertion was removed because the ruled text is authoritative, NOT
+    # because the property stopped mattering: a refusal that does not tell a
+    # blocked session what to do next is a live regression in operator
+    # guidance, raised to Architect/Dawn and recorded in the lane note. If the
+    # operator restores escalation wording, restore this leg with it.
 
 
 def case_subprocess_gc_git_stash_allowed() -> None:
@@ -554,6 +759,63 @@ def case_subprocess_architect_task_explore_allowed() -> None:
     _check(code == 0, f"subprocess Architect Task Explore: exit=0 (got {code})")
 
 
+def case_subprocess_architect_agent_blocked() -> None:
+    """The tool name Claude Code ACTUALLY spawns sub-agents with, through the
+    real dispatch. ``check_task`` was already correct; ``_main_inner`` never
+    called it for this name, so the gate exited 0 on every real spawn."""
+    code, stderr = _run_hook_subprocess(
+        name=SOME,
+        payload={
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": "general-purpose", "description": "x", "prompt": "y"},
+        },
+    )
+    _check(code == 2, f"subprocess Architect Agent blocked: exit=2 (got {code})")
+    _check(
+        _EXPECTED_AUTHORITY_NOUN in stderr,
+        f"stderr names the escalation authority (got {stderr[:200]!r})",
+    )
+
+
+def case_subprocess_architect_agent_explore_allowed() -> None:
+    """The Explore exemption must survive the dispatch widening — a fix that
+    blocks every ``Agent`` call would take read-only exploration with it."""
+    code, _ = _run_hook_subprocess(
+        name=SOME,
+        payload={
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": "Explore", "description": "x", "prompt": "y"},
+        },
+    )
+    _check(code == 0, f"subprocess Architect Agent Explore: exit=0 (got {code})")
+
+
+def case_subprocess_task_prefixed_tracking_tools_allowed() -> None:
+    """``TaskCreate``/``TaskUpdate``/``TaskList`` are task-TRACKING tools that
+    spawn nothing. They share a prefix with the old sub-agent tool name, so a
+    dispatch written as ``startswith("Task")`` — the tempting fix — would
+    block ordinary progress tracking."""
+    for tool_name in ("TaskCreate", "TaskUpdate", "TaskList"):
+        code, _ = _run_hook_subprocess(
+            name=SOME,
+            payload={"tool_name": tool_name, "tool_input": {"description": "x"}},
+        )
+        _check(code == 0, f"subprocess {tool_name} allowed: exit=0 (got {code})")
+
+
+def case_subprocess_gc_agent_allowed() -> None:
+    """Identity routing holds for the new tool name: the controller's own
+    sub-agent spawn is still allowed."""
+    code, _ = _run_hook_subprocess(
+        name=GC,
+        payload={
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": "general-purpose", "description": "x", "prompt": "y"},
+        },
+    )
+    _check(code == 0, f"subprocess GC Agent: exit=0 (got {code})")
+
+
 def case_subprocess_unknown_tool_allowed() -> None:
     """Unknown tool names (MCP, etc.) are allowed by default — mistake-prevention scope."""
     code, _ = _run_hook_subprocess(
@@ -612,9 +874,12 @@ LAYER_A_CASES = (
     case_chain_separator_tokenization,
     case_path_qualified_git,
     case_dot_git_direct_mutation_bash,
+    case_dot_git_scan_stops_at_command_separator,
     case_dot_git_edit_file_path,
     case_task_tool_blocked,
     case_env_contract_literal,
+    case_subagent_tool_names_literal,
+    case_routing_config_matches_dispatch,
     case_walker_basics,
     case_is_invocation_allowed_basics,
     case_global_flags_before_subcommand,
@@ -627,6 +892,10 @@ LAYER_B_CASES = (
     case_subprocess_architect_edit_into_git_blocked,
     case_subprocess_architect_task_blocked,
     case_subprocess_architect_task_explore_allowed,
+    case_subprocess_architect_agent_blocked,
+    case_subprocess_architect_agent_explore_allowed,
+    case_subprocess_task_prefixed_tracking_tools_allowed,
+    case_subprocess_gc_agent_allowed,
     case_subprocess_unknown_tool_allowed,
     case_subprocess_read_tool_allowed,
     case_subprocess_malformed_stdin_allowed,
@@ -642,16 +911,23 @@ def main() -> int:
     print(f"Layer A: {len(LAYER_A_CASES)} case-groups (mistake-prevention scope)")
     print(f"Layer B: {len(LAYER_B_CASES)} subprocess fixtures")
     print("=" * 60)
-    for case in LAYER_A_CASES:
-        case()
-    for case in LAYER_B_CASES:
-        case()
+    # A case that RAISES is recorded as a failure rather than aborting the
+    # run: an aborted run prints no tally at all, and a missing tally is far
+    # too easy to read as "nothing to report".
+    for case in LAYER_A_CASES + LAYER_B_CASES:
+        try:
+            case()
+        except Exception as exc:  # noqa: BLE001 — a raising case is a failing case
+            _failed.append(f"{case.__name__} RAISED {type(exc).__name__}: {exc}")
+    for s in _skipped:
+        print(f"  SKIP  {s}")
+    suffix = f", {len(_skipped)} skipped" if _skipped else ""
     if _failed:
-        print(f"{_passed} passed, {len(_failed)} failed")
+        print(f"{_passed} passed, {len(_failed)} failed{suffix}")
         for f in _failed[:20]:
             print(f"  FAIL  {f}")
         return 1
-    print(f"{_passed} passed, 0 failed")
+    print(f"{_passed} passed, 0 failed{suffix}")
     return 0
 
 

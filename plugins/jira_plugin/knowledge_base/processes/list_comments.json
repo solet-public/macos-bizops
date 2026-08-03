@@ -1,17 +1,17 @@
 {
   "process_key": "plugin::jira_plugin::list_comments",
   "display_name": "Jira: List Comments",
-  "description": "List a Jira issue's comments (id/author/body/created), capped at 'max' (default 50, cap 100). Read action.",
-  "embedding_description": "Read the comment thread on a Jira issue — returns each comment's id, author display name, plain-text body, and created timestamp, up to a cap. Use this to review the discussion or hand-off notes on a ticket. Distinct from add_comment (post a new comment), get_issue (the issue's own summary/description), and jql_search (find issues).",
+  "description": "List a Jira issue's comments (id/author/body/created), most recent last, INLINE, one complete result, up to 500 comments by default -- jira carries no PII risk (operator ruling: company-internal accounts only), so this never spills to a file. Atlassian caps a single HTTP call at 100 comments; within the effective row limit this verb pages internally by offset across that ceiling and hands back one result -- no caller-visible offset or continuation token. At the 500-row default that is up to 5 sequential internal HTTP calls; at the 5,000-row override cap it is up to 50 -- each a real round-trip, so a large row_limit has real latency cost (a defense-in-depth circuit breaker caps the loop at 100 calls regardless). Pass acknowledge_default_limit_override=true with row_limit to raise the limit above 500, up to 5,000 (above that is refused, never clamped). If more comments exist than the effective limit, truncated is true -- there is no resume token. Read action.",
+  "embedding_description": "Read the comment thread on a Jira issue — returns each comment's id, author, plain-text body, and created timestamp inline, one complete result, paging internally past Atlassian's 100/call ceiling up to a 500-row default (raise with the override). Distinct from add_comment (post), get_issue (issue summary), and jql_search (find issues).",
   "result_processor_customizations": {
-    "action_label": "Jira comments listed",
+    "action_label": "Jira comments found",
     "result_type": "jira_list_comments_result",
-    "result_description": "Comment rows (id/author/body/created).",
-    "presentation_guidance": "Summarize the discussion. Comment bodies are free-text corporate content (sensitivity 0.6) — surface for the caller but do not treat as public."
+    "result_description": "Dict with comments (rows), row_count, and truncated. truncated is true when more comments exist beyond the effective row limit, or when completeness was not otherwise confirmed.",
+    "presentation_guidance": "Present the comment rows and row_count. If truncated is true, more comments may exist beyond the effective row limit -- say so and suggest raising row_limit (with acknowledge_default_limit_override) rather than implying the thread is fully shown. Comment bodies are free-text corporate content (sensitivity 0.6) -- prefer requesting only what's needed for the task."
   },
   "error_processor_customizations": {
-    "action_context": "List a Jira issue's comments.",
-    "error_interpretation": "jira.not_found: the issue key does not exist. jira.permission_denied: the account cannot view this issue's comments. jira.invalid_params: the key was missing.",
-    "recovery_guidance": "jira.not_found: verify the issue key. jira.permission_denied: grant the service account browse permission. jira.invalid_params: supply the issue key."
+    "action_context": "List a Jira issue's comments and return them inline.",
+    "error_interpretation": "jira.not_found: the issue key does not exist. jira.permission_denied: the account cannot view this issue's comments. jira.invalid_params: the key was missing, or acknowledge_default_limit_override and row_limit were not both given, or row_limit is not a positive integer, or row_limit exceeds the 5,000 hard cap.",
+    "recovery_guidance": "jira.not_found: verify the issue key. jira.permission_denied: grant the service account browse permission. jira.invalid_params: supply the issue key, and pass acknowledge_default_limit_override=true together with a row_limit at or below 5,000 (or omit both for the 500-row default)."
   }
 }

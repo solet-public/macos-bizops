@@ -12,7 +12,10 @@ in ``code_quality_check.py``; this runs the smokes.
 The register is a tracked, growing allowlist (it mirrors the god-class / radon
 allowlists): a smoke gates only once it is listed here, so adding a smoke to the
 gate is an explicit, reviewable act and the gate never silently broadens to
-smokes that need a live platform.
+smokes that need a live platform — with one ratified exception class (GTE-09,
+Coordinator-Day Q2): a smoke whose load-bearing proof genuinely requires a live
+external dependency may register if it fails LOUD on an unreachable dependency
+(see quality_gates/gate_smokes.txt's header for the full statement).
 
 Exit codes:
   0 - every listed smoke passed

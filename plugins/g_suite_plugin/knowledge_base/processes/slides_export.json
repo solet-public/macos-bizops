@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::slides_export",
   "display_name": "Slides: Export",
   "description": "Export a Google Slides presentation to pdf or pptx into blob storage and return its deck_blob_key. Requires a connected account.",
-  "embedding_description": "Export an existing presentation's rendered bytes (pdf or pptx format) via Drive's export_media into platform blob storage, returning a deck_blob_key reference (not the bytes themselves). Google-native presentations cannot be fetched with drive_download_file — this export verb is the correct path, exactly like sheets_export and docs_export for their respective product types. The returned deck_blob_key can be attached to email or handed to other plugins for viewing/printing. Fails gsuite.not_found if the id does not exist.",
+  "embedding_description": "Export a Google Slides presentation's rendered bytes as pdf or pptx into platform blob storage, returning a blob key rather than the bytes themselves. Google-native presentations need this export path to leave Drive as a file, and the result can then be emailed or handed to another plugin.",
   "result_processor_customizations": {
     "action_label": "Presentation exported to blob",
     "result_type": "g_suite_slides_export_result",

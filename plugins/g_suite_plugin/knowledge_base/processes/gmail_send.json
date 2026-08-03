@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::gmail_send",
   "display_name": "Gmail: Send Message",
   "description": "Send a plain-text email from the connected account. Optional 'attachments' is a list of blob ids (from blob storage) that are attached by filename + mime type. Returns the sent message id and thread id. Requires a connected account. This is a write action — it delivers real mail.",
-  "embedding_description": "Compose and send an outgoing email through the connected Gmail account. Takes a recipient address, an optional subject and plain-text body, and an optional list of blob-storage ids to attach as files. Builds a MIME message and hands it to Gmail's send API. Returns the created message id and thread id. Distinct from gmail_create_draft (which only saves a draft); this actually delivers. Fails gsuite.not_connected if no account is linked.",
+  "embedding_description": "Compose and send an outgoing email through the connected Gmail account: a recipient address, a subject, a plain-text body, and optionally files pulled from platform blob storage to attach. Builds the MIME message and hands it to Gmail for delivery. Returns the sent message id. The outbound mail verb.",
   "result_processor_customizations": {
     "action_label": "Gmail message sent",
     "result_type": "g_suite_gmail_send_result",

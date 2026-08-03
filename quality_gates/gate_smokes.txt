@@ -4,7 +4,13 @@
 # once it is listed here. This is a tracked, growing allowlist (same model as
 # god_class_allowlist.txt / radon_*_allowlist.txt): adding a smoke is an
 # explicit, reviewable act, and the gate never silently broadens to smokes that
-# need a live platform. Every entry MUST pass offline (no live homunculus / LM Studio).
+# need a live platform. Every entry MUST pass offline (no live homunculus / LM Studio),
+# with one ratified exception class (GTE-09, Coordinator-Day Q2): a smoke whose
+# LOAD-BEARING proof genuinely requires a live external dependency (e.g.
+# external_postgres_plugin's smoke_readonly.py, a real Postgres) may register if it
+# fails LOUD on an unreachable dependency (an unmissable banner, exit 1) rather than
+# a silent skip — the offline rule is about invisible scope creep, not about barring
+# a documented, disclosed live-dependency smoke.
 #
 # Seed set = the blue->green TRANSITION-critical smokes (the cutover must not be
 # confirmed with any of these red). Grow as new gate-relevant smokes land
@@ -17,6 +23,7 @@ plugins/macos_self_deployment_plugin/tests/rollback_release_smoke.py
 plugins/macos_self_deployment_plugin/tests/schema_preflight_smoke.py
 plugins/macos_self_deployment_plugin/tests/preflight_refusal_smoke.py
 plugins/macos_self_deployment_plugin/tests/release_manager_crash_consistency_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_builder_dirty_tree_gate_smoke.py
 plugins/macos_self_deployment_plugin/tests/supervisor_smoke.py
 plugins/macos_self_deployment_plugin/tests/backstop_loop_integration_smoke.py
 plugins/macos_self_deployment_plugin/tests/drain_sigterm_exit_smoke.py
@@ -119,6 +126,51 @@ plugins/agent_messaging_plugin/tests/bridge_health_readiness_probe_smoke.py
 # (arbitrary-role assertions per the operator's binding constraint). Offline stubs.
 plugins/agent_messaging_plugin/tests/role_two_way_reply_smoke.py
 
+# WS-2c V4 (A1) — the reply ADDRESS a delivery hands its recipient. The bridge
+# route for peer_send_by_name passed reply_to_role="" HARDCODED since e02beb860,
+# so every role-addressed send from an MCP session handed back an INSTANCE
+# reply-to on a healthy fleet (churn only decided when it hurt); the direct path
+# had no such parameter at all. Drives the REAL route impls — a test over
+# build_wake_reply_hint passes with the whole route wiring absent. Also pins the
+# EXACTLY-ONE-ROLE rule: sorted(roles)[0] is fine for a flow TAG and misroutes a
+# reply ADDRESS, so a multi-role sender keeps the instance reply-to (DEF-3).
+# Fixture is RealShapeState, not a bare stub: the predecessor stub DEGRADED
+# rather than raised, which made a role-hint assertion unfalsifiable.
+plugins/agent_messaging_plugin/tests/reply_address_role_smoke.py
+
+# WS-2c V4 (A2) — direct reply hints carry the sender's stable logical-session
+# key beside the exact instance id. The reachable peer_send path resolves the
+# instance FIRST and uses the session key only after peer_unreachable; unknown
+# keys preserve the original error and duplicate keys fail loud with candidate
+# ids. Real in-memory PeerRegistry filter; hermetic constructed rotation state,
+# explicitly NOT a live restart-wave claim. Both MCP schemas + stdio wire pinned.
+plugins/agent_messaging_plugin/tests/sender_session_reply_fallback_smoke.py
+
+# §34.6 — CLI-originated sends carry the caller's identity instead of the
+# "System (Scheduler)" sentinel. Drives the real chain: the bridge/open route
+# parks the caller's opaque launcher session key, PlatformSurface derives the
+# identity from the peer REGISTRY (never from the request) under a key family
+# separate from inference_vertex_*, the real ActionProcessor lift carries it,
+# and both send verbs stamp it — send_peer_message previously hardcoded the
+# sentinel on EVERY transport, MCP included. Carries the negative control that
+# keeps the rejected design out: attribution must never register a peer
+# identity, because PeerRegistry.register sweeps by session_label and
+# close_bridge unregisters by bridge_id, so a registering CLI call would evict
+# its own session's row. Offline stubs; in-memory registry store.
+plugins/agent_messaging_plugin/tests/cli_sender_attribution_smoke.py
+
+# WS-2d census batch 3 — the wake hook's footer, identity guard, and pairing.
+# D6: extracts the process key from the footer the model is ACTUALLY shown and
+# asserts the platform can answer it (decorated verb + registered KB process
+# JSON + declared arguments) — that string 500'd against the live registry for
+# as long as peer_inbox was unregistered and nothing would have noticed, because
+# nothing anywhere executes it as a check. D3: `wake` must stay silent for a
+# non-fleet session (the Stop hook is user-scoped) but be LOUD for a
+# half-configured one, matching `watch`, which dies loud on the same input.
+# D4: the watcher publishes its actual spool choice so `--spool` / `--no-spool`
+# can no longer decouple the pair invisibly. Hermetic; no bridge, no DB.
+plugins/agent_messaging_plugin/tests/wake_footer_and_pairing_smoke.py
+
 # REL-04 — role-claim handover notifications (peer_claim_role): a displaced prior
 # holder bound to a DIFFERENT instance is notified (best-effort); the claim NEVER
 # fails if that holder is unreachable (loud log); the new holder is confirmed so
@@ -126,6 +178,13 @@ plugins/agent_messaging_plugin/tests/role_two_way_reply_smoke.py
 # assertions). Drives the real _notify_role_handover orchestration + the real
 # best-effort _send_handover_notice (never-raises). Offline stubs.
 plugins/agent_messaging_plugin/tests/role_claim_handover_smoke.py
+
+# §4.3.3a takeover reachability — the advertised process, bridge, and watch
+# surfaces expose an explicit default-false takeover; false refuses a live
+# holder, true displaces + warns + notifies, vacant takeover is ordinary, the
+# authorization is consumed before reconnect exceptions, and a displaced
+# watcher exits loudly on its next refused plain re-claim rather than re-steal.
+plugins/agent_messaging_plugin/tests/takeover_route_reachability_smoke.py
 
 # S1-S3 agent_session_id splice — reconnect self-refresh for ROLE sends. Drives
 # the REAL /peer/register route END-TO-END (FastAPI TestClient + in-memory state):
@@ -218,6 +277,7 @@ plugins/agent_messaging_plugin/tests/role_delivery_smoke.py
 # instance (F3); and the F2 migration grandfathers delivered history so the new
 # drain predicate cannot flood-re-emit it (RED-FIRST: pre-migration it would).
 plugins/agent_messaging_plugin/tests/direct_wake_outbox_smoke.py
+plugins/agent_messaging_plugin/tests/quiet_gap_capture_at_emission_smoke.py
 #
 # REL-05 S4 — model-activity route total-classification: iterate the ACTUAL
 # FastAPI route table + assert every bridge route is in EXACTLY one of
@@ -263,6 +323,27 @@ plugins/agent_messaging_plugin/tests/role_wake_terminal_clear_smoke.py
 # sites. (The existing deaf-wake smokes seeded AWARE isoformat strings → the fake
 # never reproduced the naive-on-read the real column produces: the fidelity gap.)
 plugins/agent_messaging_plugin/tests/deaf_wake_naive_datetime_smoke.py
+#
+# Deaf-wake Guard-1 severity fix (Architect-ruled, workbench/2026-08-01_deaf_wake
+# _alarm_findings_claude_b.md "ANSWERED FROM THE ROWS" §6): cap_reached is
+# measured by Guard 1 — a LATER model-initiated platform call — which cannot see
+# a recipient doing local-only tool work, so a session at maximum effort looked
+# identical to a dead one. Heartbeat-as-CONSUMPTION was REJECTED (would silently
+# retire unread rows); what ships is heartbeat gating the escalation
+# NOTIFICATION's severity only. Three legs, each asserting BOTH which severity
+# fired AND that the row's terminal state (escalated=true, escalation_reason) is
+# byte-identical regardless — the second guard (severity) must not be provable
+# only by the first guard (the cap/time classifier) having short-circuited:
+# INFO when the recipient has a live registry binding (heartbeat, no model call
+# needed); ALARM when the recipient is not registered (negative control, same
+# terminal row); recipient_gone stays ALARM unconditionally even when the
+# recipient happens to be registered (heartbeat must not be consulted for that
+# reason at all). Also pins the H2 prose-narrowing: the MCP-route cap_reached
+# claim names exactly what Guard 1 measured ("no model-initiated platform call
+# ... since emission") and never uses the overclaiming "no consumption
+# acknowledgement" phrasing; the watcher route (an explicit cursor ack) keeps
+# its original wording, which is accurate there.
+plugins/agent_messaging_plugin/tests/deaf_wake_severity_smoke.py
 
 # Phase 6 "lifecycle hardening" (§4.3) — the authored-joseki lifecycle state
 # machine (draft->candidate->proven->superseded->archived) over the
@@ -304,6 +385,7 @@ plugins/default_knowledge_plugin/tests/plan_template_retrieval_smoke.py
 # and parse_article_path normalizes the symlink-relative + two real-path dialects
 # fixtures declare. Regression-proves 10/45 -> 44/44 addressable fixtures discovered
 # with zero parse errors against the real corpus on disk.
+plugins/default_knowledge_plugin/tests/retrieval_audit_fixture_discovery_smoke.py
 # 2026-07-26 retrieval-audit instrument repair (defect 3 + B-M6) — the new
 # EDGE_SINK cron-target sibling audit_retrieval_corpus_cron: dual-layer ABC
 # coverage (KnowledgeSearchInterface abstractmethod + both concrete
@@ -563,6 +645,21 @@ plugins/platform_dev_surface_plugin/tests/propose_patch_artifact_smoke.py
 # and the advancement consumer seam (whose except-guard would silently mask a
 # missed unwrap). Offline (stand-in at the plugin's internal backend seam).
 ananta/tests/core/substrate_contracts/memory_get_focused_dispatch_contract_smoke.py
+
+# refresh_plugin_process result-contract collision (result-processing lane (a),
+# 2026-08-01). The verb's return schema named its top-level field `process_key`
+# for the key it had just REFRESHED, while the result contract reserves that
+# name for the key of the verb that PRODUCED the result — so
+# _check_result_process_key_matches raised RESULT_CONTRACT_VIOLATION on EVERY
+# call, after the side-effect had landed and a completed row had been stored.
+# Callers saw success; the parent flow token was blocked. Renamed to
+# `refreshed_process_key`. Drives the REAL validate_common_success path and
+# DERIVES its payload from the code (decorator metadata + ast over the return
+# site), so it tracks the verb instead of a hand-typed dict. Mutation table
+# M1-M5 in workbench/2026-08-01_refresh_verb_mutation_harness_claude_a.py:
+# 5/5 red, incl. M4 which was BLIND until the envelope was bound to
+# execute_action's source too.
+ananta/tests/core/substrate_contracts/refresh_verb_result_contract_smoke.py
 
 # GTE-06 L2 fresh-source manifest-preflight probe (2026-07-06). S1 harness:
 # A5a never-raise + A5b conjunction classification (timeout group-kill, garbage/
@@ -953,6 +1050,14 @@ plugins/github_midwife_plugin/tests/command_launcher_smoke.py
 plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py
 plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py
 plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py
+# WS-3c — the operator-guidance channel, the plugin's ONLY verbatim-text
+# surface. Registered separately from reminder_hooks_smoke.py because its
+# arming contract differs (a label alone does not arm it; the event's own
+# guidance variable must also be set), so folding it into the reminder suite
+# would have made that suite's "armed" fixtures wrong. Asserts default-off,
+# byte-exact round trip behind the provenance prefix, refuse-whole over the
+# 4,000-char cap without echoing the refused value, and no cross-event leak
+# between the two variables.
 
 # github_midwife_plugin coordination-hooks git-mutation guard — the INVERSION
 # (2026-07-30, Git-Controller) — this is the sole hook with authority to block
@@ -976,6 +1081,48 @@ plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter
 # SECURITY.md's Verification table and in tests/README.md. Offline (tmpfs
 # dirs only, no repository, no network).
 plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/git_controller_gate_smoke.py
+
+# WS-4b.1 — stock-Codex Git-Controller adapter. The runner-neutral lexer,
+# walker, and decision policy have one canonical source and byte-identical
+# materializations in the independently cached Claude and Codex plugins. Codex
+# routes only the live-measured Bash payload in this unit and authorizes only
+# from launcher-owned AGENT_ROLE: a controller-looking display label, session
+# UUID, or hook thread id cannot grant the role. Hermetic subprocess fixtures
+# pin read-only allow, mutation block, controller allow, missing-role block,
+# wrapped mutation detection, malformed-input behavior, and the explicit
+# non-routing boundary for unmeasured edit/delegation tools.
+plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/git_controller_gate_smoke.py
+
+# A5 / D-5a.3 — four-copy consistency of the git gate's policy text and its
+# single-active-session exemption clause. Symbols:
+# case_clause_section_byte_equal_across_four_copies,
+# case_clause_is_actually_carried_by_the_shipped_message,
+# case_clause_names_no_mechanism_the_gate_lacks,
+# case_shipped_policy_copies_are_byte_identical,
+# case_env_var_divergence_is_preserved_not_unified,
+# case_policy_module_adds_no_platform_call_or_network.
+# Lives at plugin-repo scope, not inside either plugin's tests/, because it is
+# the only leg reaching the origin-repo-only .claude/hooks/ copy and the
+# shipped suites must stay standalone (their manifest_consistency_smoke.py
+# enforces that). Proves CONSISTENCY only; the matching EFFICACY leg — that a
+# blocked session actually receives the text — is asserted on the real block
+# path by the two gate smokes registered directly above. Mutation table run
+# 2026-08-02: clause drift in a shipped copy, clause drift in the origin copy
+# alone, clause defined but not concatenated, a forbidden "the gate detects"
+# claim, and env-var divergence unified by deletion each red; restore green.
+# Offline (no repository, no network, no subprocess).
+plugins/github_midwife_plugin/tests/git_policy_clause_consistency_smoke.py
+
+# WS-4b.2 — stock-Codex fixed coordination reminders and repo marketplace.
+# Hermetic checks pin the conservative 0.141 manifest inventory, fixed generic
+# context with no prompt/message/label relay, session-label opt-in, reviewed
+# entry-point/documentation consistency, and resolution of the repo marketplace
+# to these exact plugin bytes. Live Codex trust remains a separate acceptance
+# leg because an offline smoke cannot prove host trust state.
+plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/reminder_hooks_smoke.py
+plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/manifest_consistency_smoke.py
+plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/marketplace_consistency_smoke.py
+plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/wake_waiter_smoke.py
 
 # jira_plugin (Lane C of the Enterprise Connector Suite, 2026-07-09, Claude-C) —
 # hermetic connector smokes (faked address_book_service, faked JIRA client +
@@ -1035,8 +1182,8 @@ plugins/external_postgres_plugin/tests/smoke_spill.py
 # external_postgres_plugin LIVE read-only proof (the load-bearing 25006 proof a
 # MagicMock cannot give). GATE-SAFE: both self-skip (exit 0) when the local scratch
 # Postgres fixture (epg_smoke_scratch on the Homebrew cluster — NEVER a production DB) is
-# unreachable, and run for real (createdb+seed via psql, connect as the dw trust
-# superuser) where it is. smoke_readonly proves conn.read_only + SHOW
+# unreachable, and run for real (createdb+seed via psql, connect as the local
+# trust-auth superuser — the OS user running the smoke) where it is. smoke_readonly proves conn.read_only + SHOW
 # transaction_read_only=on in the SAME txn as the user query + 25006 on every write
 # incl. first-statement/no-window; smoke_multistatement proves the parser-bypass
 # defense-in-depth (a 2-stmt write still 25006). See the completion report's flag on
@@ -1088,18 +1235,41 @@ plugins/salesforce_plugin/tests/smoke_records.py
 # voided/cancelled through Zuora's own workflow). Pure REST — no SQL-shaped
 # strings anywhere, so the SQL-lockdown gate is silent for src/ (only the test
 # fixtures' ZOQL-shaped strings need the standard false-positive allowlisting).
-# THREE hermetic smokes (httpx.MockTransport, no network): smoke_auth (tenant
-# config resolve, repr redaction, bearer-token caching-until-near-expiry, a 401
-# triggering exactly ONE re-fetch-and-retry, a failed token mint raising
-# ZuoraAuthError), smoke_data_query (data_query row/byte-cap spill, bulk_export
-# csv/json + truncated flag, non-2xx raising ZuoraResponseError with the correct
-# is_query flag), smoke_objects (get/create/update_object CRUD, list_subscriptions/
-# get_invoice/list_invoices reads, TOPOLOGY-LEAK red-first on auth/rate-limit
-# classes vs. response-body detail on not-found/validation-failed).
+# FOUR hermetic smokes (httpx.MockTransport / MagicMock, no network): smoke_auth
+# (tenant config resolve, repr redaction, bearer-token caching-until-near-expiry,
+# a 401 triggering exactly ONE re-fetch-and-retry, a failed token mint raising
+# ZuoraAuthError), smoke_data_query (business-data limits + spill-floor migration,
+# 2026-08-02: data_query/bulk_export ALWAYS write to output_tsv_path, the queryMore
+# continuation loop over POST /v1/action/query + /v1/action/queryMore fixing the
+# previously vacuous BULK_EXPORT_ROW_CAP, the §5 override-friction 4-case set per
+# verb, export_containment red-first cases, non-2xx raising ZuoraResponseError with
+# the correct is_query flag), smoke_lists (same migration: list_subscriptions'
+# internal page/pageSize pagination — a regression guard against the prior
+# no-params call silently truncating at Zuora's own 20-record default — and
+# list_invoices' single-call write-side cap, both with the §5 override-friction set),
+# smoke_objects (get/create/update_object CRUD, get_invoice — single-record §1.2
+# exemption, unaffected by the migration — TOPOLOGY-LEAK red-first on auth/
+# rate-limit classes vs. response-body detail on not-found/validation-failed).
 # (smoke_export_deny retired 2026-07-15 — see external_postgres note above.)
 plugins/zuora_plugin/tests/smoke_auth.py
 plugins/zuora_plugin/tests/smoke_data_query.py
+plugins/zuora_plugin/tests/smoke_lists.py
 plugins/zuora_plugin/tests/smoke_objects.py
+
+# get_blob_metadata_resolved_path_smoke.py (2026-08-02, Dax 22.3/28.4 —
+# blob-spill retrieval): the spill fix across marketo/jira/zuora/g_suite left
+# a result_blob_key with no registered way to reach the bytes. Fix adds
+# resolved_path to get_blob_metadata (reusing resolve_blob_path) + fails loud
+# when metadata exists but the file is gone, rather than a silent null. Also
+# pins the RED-first refutation of the Lane C design doc's item 3.1 ("unique
+# spill filenames" to prevent last-write-wins): storage is keyed by the
+# state-generated blob_id, never by the metadata filename field, so two
+# spills sharing a filename land at two distinct paths with no collision —
+# see workbench/2026-07-31_architect_four_item_dispatch_designs.md and
+# Coordinator-Dawn's 2026-08-02 ruling dropping 3.1. Real FilesystemProvider
+# against a faithful in-memory state-service stand-in (same pattern as
+# s3_blob_storage_smoke.py's InMemoryMetadataState), real temp-dir bytes.
+plugins/default_blob_storage_plugin/tests/get_blob_metadata_resolved_path_smoke.py
 
 # marketo_plugin — marketing-automation REST connector (2026-07-28), same
 # auth-simplicity class as zuora_plugin (OAuth 2.0 client-credentials,
@@ -1113,27 +1283,52 @@ plugins/zuora_plugin/tests/smoke_objects.py
 # results (create_or_update_leads/delete_leads/add_leads_to_list/
 # remove_leads_from_list) stay success:true with per-record skipped/failed
 # entries — not classified as an error. No async Bulk Extract job flow in v1
-# (get_leads covers ad-hoc reads with the same inline-or-spill envelope the
-# other connectors use). Pure REST — no SQL-shaped strings anywhere, so the
-# SQL-lockdown gate is silent for this plugin (verified: zero findings).
-# THREE hermetic smokes (httpx.MockTransport / faked client, no network):
+# (get_leads covers ad-hoc reads via the caller-driven Pattern-B loop, §7.2).
+# Pure REST — no SQL-shaped strings anywhere, so the SQL-lockdown gate is
+# silent for this plugin (verified: zero findings).
+# Business-data limits + spill-floor migration (2026-08-02, §7.1): all six of
+# describe_lead_fields/get_leads/list_activity_types/get_activities/
+# list_campaigns/list_static_lists now ALWAYS write to a caller-supplied
+# output_tsv_path — blob storage retired from this plugin entirely.
+# Dax 29.2 hide-paging build (2026-08-03, operator ruling "the paging is an
+# implementation detail that should be hidden", design doc §5.4/§7.2 as
+# amended): get_leads/get_activities/list_campaigns/list_static_lists now
+# page INTERNALLY across Marketo's 300-per-call vendor ceiling up to a §5
+# acknowledge_default_limit_override/row_limit-governed effective limit
+# (default 500, hard cap 5,000) — no next_page_token/more_result field
+# survives on any of the four; a truncated boolean replaces them. Beyond the
+# hard cap: no resumption, re-invoke with a narrower filter/date-range.
+# describe_lead_fields/list_activity_types are unchanged (single call, no
+# pagination surface ever existed).
+# FIVE hermetic smokes (httpx.MockTransport / faked client, no network):
 # smoke_auth (instance config resolve, repr redaction, GET-based bearer-token
 # caching-until-near-expiry, a 601 envelope triggering exactly ONE
 # re-mint-and-retry, a failed token mint raising MarketoAuthError, EDGE
-# parity), smoke_leads (describe_lead_fields/get_leads inline-vs-spill shape,
+# parity), smoke_leads (describe_lead_fields/get_leads/get_activities/
+# list_activity_types TSV-handle shape via a throwaway tempfile + passthrough
+# gate, get_leads/get_activities internal-loop 2-page accumulation +
+# hidden-field regression guard, get_activities' empty-mid-stream-page and
+# tokenless-moreResult=true contract-violation loop behavior,
 # create_or_update_leads/delete_leads batch validation + tallies proving
 # partial-batch success is not an error, classify_marketo_envelope across the
 # sourced 601/606/702/1005/unmapped code spread), smoke_campaigns_lists
 # (list_campaigns/trigger_campaign/list_static_lists/add_leads_to_list
 # validation, remove_leads_from_list proving the DELETE-with-JSON-body path
-# uses delete_json, not post_json or httpx.Client.delete()).
+# uses delete_json, not post_json or httpx.Client.delete()),
+# smoke_internal_paging (Dax 29.2: the named request-500-gets-2-internal-
+# pages-one-complete-file acceptance scenario plus the shared §5
+# override-friction 4-case set, per verb, for all four internally-paginated
+# verbs), smoke_spill_floor (the REAL export_containment gate:
+# outside-root/empty-roots/misconfigured-root red-first cases, an admitted
+# path proceeding to the vendor call, and the regression guard that
+# check_setup's permission probes need NO export_allowed_roots configured at
+# all — a throwaway tempfile + passthrough gate, never the operator's real
+# workspace).
 plugins/marketo_plugin/tests/smoke_auth.py
 plugins/marketo_plugin/tests/smoke_leads.py
 plugins/marketo_plugin/tests/smoke_campaigns_lists.py
-# smoke_blob_spill.py: blob_storage_service is resolved
-# lazily at first spill (it does not exist yet at plugin readiness) and the
-# unavailable error self-describes payload size + inline cap.
-plugins/marketo_plugin/tests/smoke_blob_spill.py
+plugins/marketo_plugin/tests/smoke_internal_paging.py
+plugins/marketo_plugin/tests/smoke_spill_floor.py
 
 # trigger_poll dispatch-offload (2026-07-10 fleet-wide dispatch-wedge fix): the cron
 # heartbeat trigger_poll now SUBMITS the whole importer pass to a single-slot
@@ -1350,11 +1545,26 @@ plugins/agent_messaging_plugin/tests/role_binding_store_smoke.py
 # template parses as JSON, and TEMPLATE_VARS.md's file map matches disk.
 plugins/github_midwife_plugin/tests/hydration_templates_render_smoke.py
 
+# WS-4b.4 stock-Codex hydration receive surface: generated launcher identity
+# single-sourcing, parent-bound watch arm, runtime log, loud arm refusal, MCP
+# disarm, stock binary exec, and the repo-local Codex marketplace contract.
+plugins/github_midwife_plugin/tests/codex_hydration_launcher_smoke.py
+
 # hydration_guidance.md convention (Step 4b generalized, 2026-07-13): any plugin
 # needing hydration-time operator setup ships its own knowledge_base/hydration_guidance.md
 # (Pitch + Setup sections, proper headers). This smoke enforces the shape so a future
 # plugin author's file is actually processable by the runbook's generic discovery step.
 plugins/github_midwife_plugin/tests/hydration_guidance_convention_smoke.py
+
+# export_root_validation (2026-08-02, Tier-0 of the limits/spill-floor migration,
+# 07-29 ruling §3): the hydration-time mutual-containment check between a proposed
+# export root and app_home, and its idempotent, additive persistence into every
+# installed business-connector's export_allowed_roots. Red-first coverage for
+# root-contains-app_home / root-inside-app_home / valid-root-accepted-and-persisted;
+# the fourth named case (empty-allow-list refusal) is the connectors' own
+# pre-existing invariant, covered where that gate lives (external_postgres_plugin's
+# smoke_spill.py and siblings) — not reimplemented here.
+plugins/github_midwife_plugin/tests/export_root_validation_smoke.py
 
 # agent_messaging deaf-wake Fork-1a (2026-07-11) — direct-wake recipient-session
 # re-home + role-inbox session-visibility smokes, landing with the Fork-1a
@@ -1812,6 +2022,39 @@ plugins/code_vetting_plugin/tests/scheduled_self_vet_smoke.py
 # workbench/2026-07-18_mcp_free_local_invocation_cli_design.md.
 plugins/agent_messaging_plugin/tests/local_cli_smoke.py
 
+# WS-2a (Dax §34.1/§34.3) — watcher lifecycle. Real subprocesses under a
+# redirected XDG_RUNTIME_DIR, because flock is a property of a process's open
+# file description and an in-process runner cannot exercise it honestly. Covers
+# W1 (second arm REFUSES and leaves the incumbent undisturbed; a sequential
+# re-arm after a clean exit still succeeds, so the singleton is a live-holder
+# check and not a permanent lockout), W2 (SIGTERM exits 143 via the handler
+# rather than -15 by default disposition — the discriminator that proves the
+# bridge context manager got to unwind and evict the registry row), and the
+# --exit-with-parent probe (absent pid means gone; an unsignalable-but-live pid
+# does not).
+plugins/agent_messaging_plugin/tests/watch_lifecycle_smoke.py
+
+# WS-2a W3 (Dax §34.1) — the dispatch liveness gate. `append_event` succeeds
+# against ANY non-closed bridge, and a SIGKILLed watcher leaves its server-side
+# session standing, so `queued_watcher` was reported for up to the full 3_600s
+# idle sweep while nothing polled the queue. The SAFETY half is the priority
+# half: every "stale is refused" case is paired with a "fresh still delivers"
+# control, because an over-firing gate would stop delivery to healthy watchers —
+# a worse regression than the defect. The knob is exercised at NON-DEFAULT
+# values (300s and 30s) so a dropped config wiring cannot hide behind the 90s
+# default.
+plugins/agent_messaging_plugin/tests/watcher_liveness_gate_smoke.py
+
+# WS-2e §4.3.3a (Day's live route-theft find) — peer_register refuses to bind
+# under a session id a DIFFERENT LIVE session already holds. Without it, a
+# watcher launched from another session's shell inherits its AGENT_SESSION_ID
+# and the register self-refresh silently re-points EVERY role that session
+# holds. R7b is the safety half and the reason the gate is LIVENESS-gated
+# rather than existence-gated: a restart always brings a new instance id under
+# the same session id, so an existence gate would refuse every legitimate
+# succession — worse than the theft it prevents, and R7a alone cannot see it.
+plugins/agent_messaging_plugin/tests/register_session_conflict_smoke.py
+
 # F-AISLOP timestamp-fragility unification (2026-07-20) — the AI code-vetting
 # suite's ai_slop lens found ONE lexical ISO-8601 timestamp idiom copy-pasted
 # across 3 durable-queue serve-timeout/GC sites (false-mirror docstrings + a
@@ -1837,3 +2080,75 @@ plugins/macos_self_deployment_plugin/tests/steady_state_reassert_activation_smok
 # in one evening, each presenting as "that agent is ignoring me". Hermetic —
 # scripted _post, patched backoff, no bridge or network.
 plugins/agent_messaging_plugin/tests/register_identity_retry_smoke.py
+
+# KB retrieval-audit cron install with durable identity (2026-07-31). The
+# predecessor trigger `sch-2l18uk4q9et3a` fired daily from 2026-06-01 and executed
+# the audit ZERO times, for two independent reasons: it used the memory-tag
+# heartbeat shape (terminated at the poller's EDGE_SINK_SKIP branch with no
+# dispatch, forever, for headless crons), and it inherited the creating session's
+# id, dead since June. `ensure_kb_retrieval_audit_schedule` installs the EDGE_SINK
+# target with system-owned session_id AND flow_id -- both, because fixing only the
+# session id is a half-fix indistinguishable from a fix until it dies. The smoke
+# also pins the two properties that keep the retirement safe: the default tag must
+# NOT match the predecessor's (so the idempotent clear-by-tag step can never bare-
+# swap it), and the already-present check must compare the action's TARGET and not
+# only the cron (a right-cadence wrong-target schedule is the defect itself).
+# Hermetic -- shipped factory and shipped validator, no scheduler, no DB.
+plugins/default_scheduling_plugin/tests/ensure_kb_retrieval_audit_schedule_smoke.py
+
+# Dax Part 24 -- the peer_inbox platform process (the PULL receive path for
+# sessions with no MCP and no live watcher) plus peer_holds_role's additive
+# delivery_route_attached. Gates the layer the process owns: caller-identity
+# resolution off the peer_binding row, the two INDEPENDENT cursors, the page
+# bound, the loud-failure set (an inactive bridge must ERROR, never read as an
+# empty inbox), and the serialized shape the return_value_schema declares. Also
+# runs the wake footer's own advertised command through a shell and into the
+# process -- a shipped instruction that cannot execute is the defect this lane
+# closed. Hermetic: in-memory stores, no bridge, no DB.
+plugins/agent_messaging_plugin/tests/peer_inbox_process_smoke.py
+
+# Peer-enumeration asymmetry close (WS-1a follow-on, operator-prompted
+# 2026-08-02): peer_inbox let a no-MCP session read its OWN mail; peer_list
+# closes the companion gap -- the same session had no way to see who ELSE was
+# live. Global unfiltered registry snapshot, zero parameters (nothing to scope
+# by). Gates: an inactive bridge/missing registry ERRORs (bridge.not_running),
+# never reads as an empty snapshot; a genuinely empty registry still succeeds
+# with a real empty snapshot (the two must stay distinguishable); the
+# per-agent_id grouping and sorted agent_ids; the field-set decision pinned
+# explicitly -- bridge_id and agent_session_id must NEVER appear in the
+# serialized row even when present on the underlying binding, so the no-MCP
+# path never gets a wider exposure than the two pre-existing MCP surfaces
+# (localhost HTTP route, Streamable MCP tool) have ever had; three-surface
+# parity -- the process's output is asserted byte-identical to calling
+# peer_list_view.serialize_peer_list directly, proving delegation rather than
+# a hand-rolled copy that could drift; and the declared return_value_schema
+# matches the actual returned keys exactly. Hermetic: in-memory store, no
+# bridge, no DB.
+plugins/agent_messaging_plugin/tests/peer_list_process_smoke.py
+
+# Result-processing contracts (c) — a plugin's TYPED ErrorDetail must survive to
+# the stored action result. `_mark_action_failed` stored a constant
+# code="action_failed" on every failure, so every /process/call consumer
+# platform-wide saw one code and could not discriminate failure classes. The
+# constant was the symptom: the signature took `error_message: str` and all
+# three call sites stringified first — one of them threw away a full ErrorDetail
+# dict it already held. Drives the REAL _mark_action_failed (only the DB seams
+# and the downstream dispatch hop are stubbed) and asserts on what is STORED.
+# Carries the untyped control: no typing in => the historical constant out, so
+# the fix cannot be satisfied by inventing codes it does not have.
+ananta/tests/core/actions/action_failure_error_typing_smoke.py
+
+# peer_mark_role_covered (pull-surface boundary design, R1 identity fencing) --
+# the write's security surface. Refuses a call with no registered-route
+# identity (state["inference_vertex_session_id"] absent, the one-shot
+# `homunculus call` shape) and proves the CLI's caller_attribution_* family is
+# NEVER consulted as a fallback even when it names a valid role holder --
+# the exact instance-id-spoofing shape measured against peer_claim_role.
+# Covers the live ownership re-check (a displaced prior holder cannot advance
+# the mark past mail the new holder never saw), attest-by-message_id (a
+# caller can only ever name a pair that corresponds to a row that exists),
+# and the monotonic no-op (an older attestation never regresses the stored
+# mark). Hermetic: in-memory stores, no bridge, no DB. The floor/byte-ceiling
+# logic this mark feeds is covered separately in
+# ananta/tests/llm/agent_messaging/role_inbox_smoke.py.
+plugins/agent_messaging_plugin/tests/peer_mark_role_covered_smoke.py

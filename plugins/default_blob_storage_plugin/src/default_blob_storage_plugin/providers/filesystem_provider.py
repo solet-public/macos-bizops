@@ -359,7 +359,16 @@ class FilesystemProvider(BlobStorageServiceInterface):
                     f"Blob metadata not found: {blob_id}",
                 )
 
-            return create_success_response({"blob_id": blob_id, "metadata": metadata})
+            resolved_path = self.resolve_blob_path(f"blob://{blob_id}")
+            if resolved_path is None:
+                return create_error_response(
+                    BlobStorageErrorCode.BLOB_NOT_FOUND.value,
+                    f"Blob metadata exists for {blob_id} but its file is missing on disk",
+                )
+
+            return create_success_response(
+                {"blob_id": blob_id, "metadata": metadata, "resolved_path": resolved_path}
+            )
 
         except BlobValidationError as e:
             return create_error_response(e.error_code, e.message)

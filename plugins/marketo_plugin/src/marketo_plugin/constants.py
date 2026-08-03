@@ -46,10 +46,7 @@ _HOMUNCULUS: Final[str] = _homunculus_or_fail()
 # Plugin identity
 # ---------------------------------------------------------------------------
 PLUGIN_NAME: Final[str] = "marketo_plugin"
-PLUGIN_VERSION: Final[str] = "1.0.0"
-
-# Blob storage namespace (large describe/get_leads spills).
-BLOB_NAMESPACE: Final[str] = "marketo_plugin"
+PLUGIN_VERSION: Final[str] = "1.1.0"
 
 # ---------------------------------------------------------------------------
 # Chain-consumed vault key — the OAuth client_secret.
@@ -93,12 +90,45 @@ TOKEN_REFRESH_MARGIN_SECONDS: Final[float] = 30.0
 DEFAULT_TOKEN_TTL_SECONDS: Final[float] = 3600.0
 
 # ---------------------------------------------------------------------------
-# Caps + spill (Marketo's own documented batch limits)
+# Business-data limits + spill-floor migration (2026-08-02 —
+# workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md,
+# §7.1). describe_lead_fields, get_leads, list_activity_types, get_activities,
+# list_campaigns, and list_static_lists now ALWAYS write to a caller-supplied
+# output_tsv_path — never records inline, at any size (the former blob-spill/
+# INLINE_BYTE_CAP branch is deleted, not lowered; blob storage retires from
+# this plugin entirely). get_api_usage is UNCHANGED — small, bounded, no PII,
+# not part of the six verbs §7.1 touches.
+#
+# Dax 29.2 hide-paging build (2026-08-03, operator ruling "the paging is an
+# implementation detail that should be hidden", design doc §5.4/§7.2 as
+# amended, ruled doc-wide by Coordinator-Day). get_leads, get_activities,
+# list_campaigns, and list_static_lists now carry the standard §5
+# acknowledge_default_limit_override/row_limit pair for the first time —
+# reversing the original Tier-2 build's "nothing to bind on" reasoning, which
+# held only for the 300/call VENDOR ceiling (still true, still un-raisable,
+# see MARKETO_LIST_PAGE_ROW_CAP below) and not for the CUMULATIVE multi-call
+# fetch these verbs now perform internally. See marketing_actions.py's module
+# docstring for the full shape.
 # ---------------------------------------------------------------------------
-INLINE_BYTE_CAP: Final[int] = 200_000
-GET_LEADS_SPILL_FILENAME: Final[str] = "get_leads_results.json"
-DESCRIBE_SPILL_FILENAME: Final[str] = "describe_lead_fields_results.json"
+TSV_SUFFIX: Final[str] = ".tsv"
+CONFIG_KEY_EXPORT_ALLOWED_ROOTS: Final[str] = "export_allowed_roots"
+# Vendor per-call ceiling shared by get_leads/get_activities/list_campaigns/
+# list_static_lists — VENDOR-IMPOSED, citation: design doc §3 census,
+# "Get Lead Activities / list-style reads return 300/page server-side."
+MARKETO_LIST_PAGE_ROW_CAP: Final[int] = 300
 MIME_JSON: Final[str] = "application/json"
+
+# §5 override friction — default/hard-cap for the cumulative internal fetch
+# on get_leads/get_activities/list_campaigns/list_static_lists. 500/5,000
+# are the design doc's doc-wide defaults (§5.4), not marketo-specific
+# numbers — 5,000 matches zuora's LIST_ROW_LIMIT_CAP precedent exactly,
+# ruled by Coordinator-Day 2026-08-03 for any connector with no separate
+# bulk-export verb. Beyond the hard cap: no resumption — re-invoke with a
+# narrower filter/date-range (§5.4), never a carried-forward token.
+DEFAULT_ROW_LIMIT: Final[int] = 500
+MARKETO_LIST_ROW_LIMIT_CAP: Final[int] = 5_000
+PARAM_ACKNOWLEDGE_OVERRIDE: Final[str] = "acknowledge_default_limit_override"
+PARAM_ROW_LIMIT: Final[str] = "row_limit"
 
 # Get Multiple Leads — filterValues + Describe: Marketo caps most filter
 # batches at 300 values per call.
@@ -124,9 +154,7 @@ MAX_ACTIVITY_LEAD_IDS: Final[int] = 30
 MAX_ACTIVITY_TYPE_IDS: Final[int] = 10
 ACTIVITY_PAGING_TOKEN_PATH: Final[str] = "/rest/v1/activities/pagingtoken.json"
 ACTIVITIES_PATH: Final[str] = "/rest/v1/activities.json"
-ACTIVITIES_SPILL_FILENAME: Final[str] = "get_activities_results.json"
 ACTIVITY_TYPES_PATH: Final[str] = "/rest/v1/activities/types.json"
-ACTIVITY_TYPES_SPILL_FILENAME: Final[str] = "list_activity_types_results.json"
 API_USAGE_PATH: Final[str] = "/rest/v1/stats/usage.json"
 
 LEAD_ACTIONS: Final[frozenset[str]] = frozenset(
@@ -151,9 +179,9 @@ LEADS_DESCRIBE_PATH: Final[str] = "/rest/v1/leads/describe.json"
 # Error codes (marketo.* prefix — surfaced to callers of the verbs)
 # ---------------------------------------------------------------------------
 ERROR_ADDRESS_BOOK_NOT_AVAILABLE: Final[str] = "address_book_service_not_available"
-ERROR_BLOB_STORAGE_NOT_AVAILABLE: Final[str] = "blob_storage_service_not_available"
 ERROR_ADDRESS_BOOK_ENTRY_MISSING: Final[str] = "address_book_entry_missing"
 ERROR_ADDRESS_BOOK_ENTRY_INCOMPLETE: Final[str] = "address_book_entry_incomplete"
+ERROR_EXPORT_PATH_REFUSED: Final[str] = "marketo.export_path_refused"
 
 ERROR_NOT_CONFIGURED: Final[str] = "marketo.not_configured"
 ERROR_INVALID_PARAMS: Final[str] = "marketo.invalid_params"

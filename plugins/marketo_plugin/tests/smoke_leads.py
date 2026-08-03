@@ -3,13 +3,24 @@
 
 Hermetic — a faked client returning canned decoded envelope dicts (the shape
 ``http_client.MarketoClient.get_json``/``post_json``/``delete_json`` already
-return), no live instance.
+return), no live instance. describe_lead_fields/get_leads/list_activity_types/
+get_activities ALWAYS write to a caller-supplied output_tsv_path now
+(business-data limits + spill-floor migration, 2026-08-02) — these tests use a
+throwaway tempfile + a real passthrough gate (unit tests of marketing_actions
+functions directly, not the plugin's containment gate; see
+smoke_spill_floor.py for that) and read the written TSV back to assert
+content. get_api_usage is unaffected (out of the six migrated verbs, stays
+inline).
 
 Exercises:
-  1. describe_lead_fields — inline vs spill envelope shape plus the
-     instance-specific searchable_fields catalog
-  2. get_leads — instance-specific filter_type forwarding, paging fields
-     carried, spill trigger
+  1. describe_lead_fields — TSV-handle shape plus the instance-specific
+     searchable_fields catalog; an absent searchableFields key succeeds with
+     searchable_fields=None (Dax Part 32.1) while a present-but-malformed
+     value still raises (negative control)
+  2. get_leads — instance-specific filter_type forwarding, internal-loop
+     pagination across 2 vendor calls, truncated shape (Dax 29.2 hide-paging
+     build — no next_page_token/more_result field), over-cap filter_values
+     rejected
   3. create_or_update_leads — one describe preflight per batch, whole-batch
      refusal naming every REST read-only non-key field and its records,
      lookup-key anti-brick controls, absent-metadata fail-open, plus vendor
@@ -29,7 +40,13 @@ Exercises:
      own errors[].message text
   8. list_activity_types and get_api_usage — per-instance activity ids and
      current-day API consumption are exposed through pure reads
-  9. EDGE parity: validate_edge_process_provider raises nothing
+  9. get_activities — since_datetime mints the internal starting token
+     (no caller-visible next_page_token, Dax 29.2), the internal loop keeps
+     paging through an empty moreResult=true page (Adobe: short/empty does
+     not mean done), a tokenless moreResult=true contract violation stops
+     rather than spins and reports truncated honestly, activity_type_ids/
+     lead_ids caps and the missing-since_datetime/malformed-mint refusals
+ 10. EDGE parity: validate_edge_process_provider raises nothing
 
 Run:
     HOMUNCULUS_NAME=<name> .venv/bin/python3 \
@@ -40,7 +57,9 @@ Exits 0 on success, 1 on first failure.
 
 from __future__ import annotations
 
+import csv
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -49,12 +68,19 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "marketo_plugin" / "src"))
 
 from marketo_plugin import marketing_actions  # noqa: E402
-from marketo_plugin.constants import GET_LEADS_DEFAULT_FIELDS  # noqa: E402
+from marketo_plugin.constants import (  # noqa: E402
+    GET_LEADS_DEFAULT_FIELDS,
+    MARKETO_LIST_PAGE_ROW_CAP,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
+)
 from marketo_plugin.errors import MarketoEnvelopeError, classify_marketo_envelope  # noqa: E402
 from marketo_plugin.plugin import MarketoPlugin  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
+_TMP_DIR = tempfile.mkdtemp(prefix="marketo_smoke_leads_")
+_path_counter = {"n": 0}
 
 
 def _assert(label: str, cond: bool, msg: str = "") -> None:
@@ -74,8 +100,22 @@ def _fake_client(**method_returns: dict[str, Any]) -> Any:
     return client
 
 
-def _no_blob_writer(_content: bytes, _filename: str, _mime: str) -> str:
-    raise AssertionError("blob_writer should not be called for small results")
+def _tmp_tsv_path() -> str:
+    """A fresh throwaway .tsv path per call — these are unit tests of
+    marketing_actions functions directly, not the plugin's real containment
+    gate (see smoke_spill_floor.py for that)."""
+    _path_counter["n"] += 1
+    return str(Path(_TMP_DIR) / f"out_{_path_counter['n']}.tsv")
+
+
+def _passthrough_gate(path: str) -> str:
+    return path
+
+
+def _read_tsv(path: str) -> list[dict[str, str]]:
+    """Read a written TSV back into row dicts (all values come back as str)."""
+    with open(path, newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle, delimiter="\t"))
 
 
 def test_describe_lead_fields_inline() -> None:
@@ -93,16 +133,72 @@ def test_describe_lead_fields_inline() -> None:
             "searchableFields": ["email", "externalDedupeKey"],
         },
     )
-    result = marketing_actions.describe_lead_fields(client, {}, _no_blob_writer)
-    _assert("describe inline REST field name carried", result["records"][0]["rest"]["name"] == "email")
-    _assert("describe inline REST readOnly marker carried", result["records"][0]["rest"]["readOnly"] is False)
+    result = marketing_actions.describe_lead_fields(client, {"output_tsv_path": _tmp_tsv_path()}, _passthrough_gate)
+    rows = _read_tsv(result["path"])
+    _assert("describe inline REST field name carried", '"name": "email"' in rows[0]["rest"], rows[0]["rest"])
+    _assert("describe inline REST readOnly marker carried", '"readOnly": false' in rows[0]["rest"], rows[0]["rest"])
     _assert(
         "describe searchable_fields carried",
         result["searchable_fields"] == ["email", "externalDedupeKey"],
         str(result),
     )
     _assert("describe row_count", result["row_count"] == 1)
-    _assert("describe not spilled", result["spilled"] is False)
+    _assert("describe never returns records/spilled — always a TSV handle", "records" not in result and "spilled" not in result)
+
+
+def test_describe_lead_fields_missing_searchable_fields() -> None:
+    """Dax Part 32.1: the v1 describe endpoint's response never carries a top-level
+    searchableFields key on their live instance, so the call raised unconditionally
+    and describe_lead_fields could not succeed at all for them. Absence is not
+    evidence the instance has no searchable fields (the same discipline
+    _read_only_rest_field_names already applies to missing rest metadata), so the
+    call must succeed with searchable_fields carried through as None instead of
+    failing the whole read.
+    """
+    client = _fake_client(
+        get_json={
+            "success": True,
+            "result": [
+                {
+                    "id": 1,
+                    "displayName": "Email Address",
+                    "dataType": "string",
+                    "rest": {"name": "email", "readOnly": False},
+                },
+            ],
+            # No "searchableFields" key at all -- the live-instance shape.
+        },
+    )
+    result = marketing_actions.describe_lead_fields(client, {"output_tsv_path": _tmp_tsv_path()}, _passthrough_gate)
+    _assert(
+        "describe succeeds when searchableFields is absent",
+        result["searchable_fields"] is None,
+        str(result),
+    )
+    rows = _read_tsv(result["path"])
+    _assert("describe still carries field records when searchableFields is absent", '"name": "email"' in rows[0]["rest"], rows[0]["rest"])
+    _assert("describe row_count unaffected by missing searchableFields", result["row_count"] == 1)
+
+
+def test_describe_lead_fields_malformed_searchable_fields_still_raises() -> None:
+    """Negative control for the fix above: ABSENCE is tolerated, but a PRESENT
+    value of the wrong shape still fails loudly -- proving the relaxed check
+    does not silently accept any malformed response, only a genuinely missing
+    key.
+    """
+    client = _fake_client(
+        get_json={
+            "success": True,
+            "result": [],
+            "searchableFields": "email",  # present, but not a list
+        },
+    )
+    raised = False
+    try:
+        marketing_actions.describe_lead_fields(client, {"output_tsv_path": _tmp_tsv_path()}, _passthrough_gate)
+    except ValueError:
+        raised = True
+    _assert("describe still raises on a malformed (non-absent) searchableFields", raised)
 
 
 def test_get_leads_filter_forwarding() -> None:
@@ -110,7 +206,7 @@ def test_get_leads_filter_forwarding() -> None:
         get_json={
             "success": True,
             "result": [{"id": 1, "email": "a@b.com"}],
-            "nextPageToken": "tok-2",
+            "nextPageToken": None,
             "moreResult": False,
         }
     )
@@ -119,12 +215,15 @@ def test_get_leads_filter_forwarding() -> None:
         {
             "filter_type": "externalDedupeKey",
             "filter_values": ["a@b.com"],
+            "output_tsv_path": _tmp_tsv_path(),
         },
-        _no_blob_writer,
+        _passthrough_gate,
     )
-    _assert("get_leads records carried", result["records"][0]["email"] == "a@b.com")
-    _assert("get_leads next_page_token carried", result["next_page_token"] == "tok-2")
-    _assert("get_leads token overrides false vendor moreResult", result["more_result"] is True)
+    rows = _read_tsv(result["path"])
+    _assert("get_leads records carried", rows[0]["email"] == "a@b.com")
+    _assert("get_leads absent token not truncated", result["truncated"] is False)
+    _assert("get_leads has no next_page_token field — hidden per Dax 29.2", "next_page_token" not in result)
+    _assert("get_leads has no more_result field — hidden per Dax 29.2", "more_result" not in result)
     _assert(
         "instance-specific filter_type forwarded",
         client.get_json.call_args.kwargs["params"]["filterType"]
@@ -132,19 +231,30 @@ def test_get_leads_filter_forwarding() -> None:
         str(client.get_json.call_args),
     )
 
-    terminal_client = _fake_client(
-        get_json={"success": True, "result": [{"id": 2}], "moreResult": True}
-    )
+    # A token present but under the effective limit still terminates the
+    # collection HONESTLY — false vendor moreResult never overrides token
+    # presence; the internal loop follows the token until it runs out.
+    two_page_client = MagicMock()
+    two_page_client.get_json.side_effect = [
+        {"success": True, "result": [{"id": 2}], "nextPageToken": "tok-2", "moreResult": False},
+        {"success": True, "result": [{"id": 3}], "nextPageToken": None, "moreResult": False},
+    ]
     terminal = marketing_actions.get_leads(
-        terminal_client,
-        {"filter_type": "id", "filter_values": ["2"]},
-        _no_blob_writer,
+        two_page_client,
+        {"filter_type": "id", "filter_values": ["2"], "output_tsv_path": _tmp_tsv_path()},
+        _passthrough_gate,
     )
-    _assert("get_leads missing token overrides true vendor moreResult", terminal["more_result"] is False)
+    _assert("get_leads internal loop followed the token across 2 vendor calls", two_page_client.get_json.call_count == 2)
+    _assert("get_leads accumulated across both internal pages", terminal["row_count"] == 2)
+    _assert("get_leads fully drained collection not truncated", terminal["truncated"] is False)
 
     raised = False
     try:
-        marketing_actions.get_leads(client, {"filter_type": "id", "filter_values": [str(i) for i in range(301)]}, _no_blob_writer)
+        marketing_actions.get_leads(
+            client,
+            {"filter_type": "id", "filter_values": [str(i) for i in range(301)], "output_tsv_path": _tmp_tsv_path()},
+            _passthrough_gate,
+        )
     except ValueError:
         raised = True
     _assert("over-cap filter_values rejected", raised)
@@ -467,7 +577,7 @@ def test_check_setup_all_pass() -> None:
             "searchableFields": ["id"],
         },
     )
-    result = marketing_actions.check_setup(client, _no_blob_writer)
+    result = marketing_actions.check_setup(client)
     _assert("check_setup all-pass reads_verified", result["reads_verified"] is True)
     _assert("check_setup ran all 6 read probes", len(result["checks"]) == 6, str(result["checks"]))
     _assert(
@@ -497,7 +607,7 @@ def test_check_setup_mixed_pass_fail() -> None:
 
     client = MagicMock()
     client.get_json.side_effect = get_json_side_effect
-    result = marketing_actions.check_setup(client, _no_blob_writer)
+    result = marketing_actions.check_setup(client)
     _assert("check_setup mixed reads_verified false", result["reads_verified"] is False)
     failed = [c for c in result["checks"] if c["status"] == "failed"]
     _assert("exactly one failed probe", len(failed) == 1, str(failed))
@@ -541,8 +651,12 @@ def test_classify_marketo_envelope() -> None:
 
 
 def test_get_activities() -> None:
-    """§20.2 — the read that verifies what a destructive write actually caused."""
-    # since_datetime path: mints a paging token, THEN reads activities.
+    """§20.2 — the read that verifies what a destructive write actually caused.
+
+    Dax 29.2 hide-paging build: no caller-visible next_page_token exists on
+    this verb any more — since_datetime mints the internal starting token,
+    and the loop pages internally on moreResult, never exposing the token.
+    """
     client = MagicMock()
     client.get_json.side_effect = [
         {"success": True, "nextPageToken": "tok-mint"},
@@ -550,85 +664,101 @@ def test_get_activities() -> None:
             "success": True,
             "result": [{"id": 9, "leadId": 42, "activityTypeId": 6, "activityDate": "2026-07-28T12:00:00Z"}],
             "nextPageToken": "tok-next",
-            "moreResult": True,
+            "moreResult": False,
         },
     ]
     result = marketing_actions.get_activities(
         client,
-        {"since_datetime": "2026-07-28T00:00:00-07:00", "lead_ids": [42], "activity_type_ids": [6, 7]},
-        _no_blob_writer,
+        {
+            "since_datetime": "2026-07-28T00:00:00-07:00",
+            "lead_ids": [42],
+            "activity_type_ids": [6, 7],
+            "output_tsv_path": _tmp_tsv_path(),
+        },
+        _passthrough_gate,
     )
-    _assert("activities records carried", result["records"][0]["activityTypeId"] == 6)
-    _assert("activities next_page_token carried", result["next_page_token"] == "tok-next")
-    _assert("activities more_result carried", result["more_result"] is True)
+    rows = _read_tsv(result["path"])
+    _assert("activities records carried", rows[0]["activityTypeId"] == "6")
+    _assert("activities not truncated — moreResult went false", result["truncated"] is False)
+    _assert("activities has no next_page_token field — hidden per Dax 29.2", "next_page_token" not in result)
+    _assert("activities has no more_result field — hidden per Dax 29.2", "more_result" not in result)
     token_call, activities_call = client.get_json.call_args_list
     _assert("paging token minted from since_datetime", token_call.kwargs["params"]["sinceDatetime"] == "2026-07-28T00:00:00-07:00")
     _assert("minted token used for the activities read", activities_call.kwargs["params"]["nextPageToken"] == "tok-mint")
     _assert("lead_ids filter sent server-side", activities_call.kwargs["params"]["leadIds"] == "42")
     _assert("activity_type_ids filter sent server-side", activities_call.kwargs["params"]["activityTypeIds"] == "6,7")
 
-    # next_page_token path: continues WITHOUT re-minting (one call, not two).
-    client = _fake_client(
-        get_json={
-            "success": True,
-            "result": [],
-            "nextPageToken": "tok-bookmark",
-            "moreResult": False,
-        }
-    )
-    result = marketing_actions.get_activities(
-        client,
-        {"next_page_token": "tok-carry", "activity_type_ids": [6]},
-        _no_blob_writer,
-    )
-    _assert("continuation makes exactly one call", client.get_json.call_count == 1)
-    _assert("continuation reuses caller token", client.get_json.call_args.kwargs["params"]["nextPageToken"] == "tok-carry")
-    _assert("empty page still reports row_count 0", result["row_count"] == 0)
-    _assert("activity final-page bookmark is surfaced", result["next_page_token"] == "tok-bookmark")
-    _assert("activity false moreResult stops despite bookmark", result["more_result"] is False)
-
-    empty_midstream_client = _fake_client(
-        get_json={
-            "success": True,
-            "result": [],
-            "nextPageToken": "tok-after-empty",
-            "moreResult": True,
-        }
-    )
+    # moreResult=true across an EMPTY page must keep looping internally
+    # (Adobe: a short/empty page does not mean the end) — not stop early
+    # like a stall-detecting exemplar would.
+    empty_midstream_client = MagicMock()
+    empty_midstream_client.get_json.side_effect = [
+        {"success": True, "nextPageToken": "tok-mint2"},
+        {"success": True, "result": [], "nextPageToken": "tok-after-empty", "moreResult": True},
+        {"success": True, "result": [{"id": 10}], "nextPageToken": "tok-final", "moreResult": False},
+    ]
     empty_midstream = marketing_actions.get_activities(
         empty_midstream_client,
-        {"next_page_token": "tok-before-empty", "activity_type_ids": [6]},
-        _no_blob_writer,
+        {"since_datetime": "2026-07-28T00:00:00-07:00", "activity_type_ids": [6], "output_tsv_path": _tmp_tsv_path()},
+        _passthrough_gate,
     )
-    _assert("activity empty mid-stream page remains incomplete", empty_midstream["more_result"] is True)
+    _assert("activity loop continued past an empty mid-stream page", empty_midstream_client.get_json.call_count == 3)
+    _assert("activity loop accumulated the later page's record", empty_midstream["row_count"] == 1)
+    _assert("activity loop completed once moreResult went false", empty_midstream["truncated"] is False)
+
+    # moreResult=true with NO token to continue on: an unmeasured-reliability
+    # edge (documented-impossible per Adobe) — stop rather than spin, report
+    # truncated honestly.
+    contract_violation_client = MagicMock()
+    contract_violation_client.get_json.side_effect = [
+        {"success": True, "nextPageToken": "tok-mint3"},
+        {"success": True, "result": [{"id": 11}], "nextPageToken": None, "moreResult": True},
+    ]
+    violation_result = marketing_actions.get_activities(
+        contract_violation_client,
+        {"since_datetime": "2026-07-28T00:00:00-07:00", "activity_type_ids": [6], "output_tsv_path": _tmp_tsv_path()},
+        _passthrough_gate,
+    )
+    _assert("activity loop stops rather than spin on a tokenless moreResult=true", contract_violation_client.get_json.call_count == 2)
+    _assert("activity loop reports truncated honestly on the contract violation", violation_result["truncated"] is True)
 
     # activityTypeIds is mandatory in Marketo, not an optional filter.
     raised = False
     try:
         marketing_actions.get_activities(
             _fake_client(get_json={"success": True}),
-            {"next_page_token": "tok-carry"},
-            _no_blob_writer,
+            {"since_datetime": "2026-07-28T00:00:00-07:00", "output_tsv_path": _tmp_tsv_path()},
+            _passthrough_gate,
         )
     except ValueError:
         raised = True
     _assert("missing mandatory activity_type_ids rejected", raised)
 
-    # Neither param -> refuse rather than call an endpoint that cannot work.
-    raised = False
-    try:
-        marketing_actions.get_activities(_fake_client(get_json={"success": True}), {}, _no_blob_writer)
-    except ValueError:
-        raised = True
-    _assert("missing since_datetime AND next_page_token rejected", raised)
-
-    # Marketo's own server-side caps enforced here, not left to a 1003.
+    # since_datetime is now unconditionally required — no continuation path.
     raised = False
     try:
         marketing_actions.get_activities(
             _fake_client(get_json={"success": True}),
-            {"next_page_token": "t", "lead_ids": list(range(31))},
-            _no_blob_writer,
+            {"activity_type_ids": [6], "output_tsv_path": _tmp_tsv_path()},
+            _passthrough_gate,
+        )
+    except ValueError:
+        raised = True
+    _assert("missing since_datetime rejected", raised)
+
+    # Marketo's own server-side caps enforced here, not left to a 1003. The
+    # lead_ids check runs AFTER the internal token mint (unlike
+    # activity_type_ids, checked before it), so the fake client must supply a
+    # valid mint response — otherwise a mint failure would raise first and
+    # this wouldn't actually exercise the lead_ids cap.
+    over_cap_lead_ids_client = MagicMock()
+    over_cap_lead_ids_client.get_json.return_value = {"success": True, "nextPageToken": "tok-mint"}
+    raised = False
+    try:
+        marketing_actions.get_activities(
+            over_cap_lead_ids_client,
+            {"since_datetime": "2026-07-28T00:00:00-07:00", "lead_ids": list(range(31)), "output_tsv_path": _tmp_tsv_path()},
+            _passthrough_gate,
         )
     except ValueError:
         raised = True
@@ -638,8 +768,8 @@ def test_get_activities() -> None:
     try:
         marketing_actions.get_activities(
             _fake_client(get_json={"success": True}),
-            {"next_page_token": "t", "activity_type_ids": list(range(11))},
-            _no_blob_writer,
+            {"since_datetime": "2026-07-28T00:00:00-07:00", "activity_type_ids": list(range(11)), "output_tsv_path": _tmp_tsv_path()},
+            _passthrough_gate,
         )
     except ValueError:
         raised = True
@@ -649,7 +779,9 @@ def test_get_activities() -> None:
     raised = False
     try:
         marketing_actions.get_activities(
-            _fake_client(get_json={"success": True}), {"since_datetime": "nonsense"}, _no_blob_writer
+            _fake_client(get_json={"success": True}),
+            {"since_datetime": "nonsense", "activity_type_ids": [1], "output_tsv_path": _tmp_tsv_path()},
+            _passthrough_gate,
         )
     except ValueError:
         raised = True
@@ -685,8 +817,9 @@ def test_get_activities_fractional_seconds_contract() -> None:
             {
                 "since_datetime": supplied_since_datetime,
                 "activity_type_ids": [1],
+                "output_tsv_path": _tmp_tsv_path(),
             },
-            _no_blob_writer,
+            _passthrough_gate,
         )
 
         mint_call = client.get_json.call_args_list[0]
@@ -717,10 +850,11 @@ def test_list_activity_types_and_api_usage() -> None:
     )
     result = marketing_actions.list_activity_types(
         client,
-        {},
-        _no_blob_writer,
+        {"output_tsv_path": _tmp_tsv_path()},
+        _passthrough_gate,
     )
-    _assert("activity type records carried", result["records"][0]["id"] == 6)
+    rows = _read_tsv(result["path"])
+    _assert("activity type records carried", rows[0]["id"] == "6")
     _assert(
         "activity types use the authoritative endpoint",
         client.get_json.call_args.args[0] == "/rest/v1/activities/types.json",
@@ -754,42 +888,55 @@ def test_list_activity_types_and_api_usage() -> None:
 
 
 def test_list_paging_fields_surfaced() -> None:
-    """§20.3 — list_* verbs must expose truncation instead of silently slicing."""
-    client = _fake_client(
-        get_json={
-            "success": True,
-            "result": [{"id": 1, "name": "c1"}],
-            "nextPageToken": "camp-2",
-            "moreResult": False,
-        }
-    )
-    result = marketing_actions.list_campaigns(client, {}, _no_blob_writer)
-    _assert("list_campaigns next_page_token surfaced", result["next_page_token"] == "camp-2")
-    _assert("list_campaigns token overrides false vendor moreResult", result["more_result"] is True)
+    """§20.3 / Dax 29.2 — list_* verbs page internally and expose ``truncated``
+    instead of a caller-visible token, and instead of silently slicing."""
+    two_page_client = MagicMock()
+    two_page_client.get_json.side_effect = [
+        {"success": True, "result": [{"id": 1, "name": "c1"}], "nextPageToken": "camp-2", "moreResult": False},
+        {"success": True, "result": [{"id": 2, "name": "c2"}], "nextPageToken": None, "moreResult": False},
+    ]
+    result = marketing_actions.list_campaigns(two_page_client, {"output_tsv_path": _tmp_tsv_path()}, _passthrough_gate)
+    _assert("list_campaigns internal loop followed the token across 2 vendor calls", two_page_client.get_json.call_count == 2)
+    _assert("list_campaigns accumulated across both internal pages", result["row_count"] == 2)
+    _assert("list_campaigns fully drained collection not truncated", result["truncated"] is False)
+    _assert("list_campaigns has no next_page_token field — hidden per Dax 29.2", "next_page_token" not in result)
+    _assert("list_campaigns has no more_result field — hidden per Dax 29.2", "more_result" not in result)
 
-    result = marketing_actions.list_campaigns(client, {"next_page_token": "camp-2"}, _no_blob_writer)
-    _assert("list_campaigns forwards caller token", client.get_json.call_args.kwargs["params"]["nextPageToken"] == "camp-2")
-
-    lists_client = _fake_client(
-        get_json={
-            "success": True,
-            "result": [{"id": 5}],
-            "nextPageToken": "l-2",
-            "moreResult": False,
-        }
-    )
-    result = marketing_actions.list_static_lists(lists_client, {}, _no_blob_writer)
-    _assert("list_static_lists next_page_token surfaced", result["next_page_token"] == "l-2")
-    _assert("list_static_lists token overrides false vendor moreResult", result["more_result"] is True)
+    lists_client = MagicMock()
+    lists_client.get_json.side_effect = [
+        {"success": True, "result": [{"id": 5}], "nextPageToken": "l-2", "moreResult": False},
+        {"success": True, "result": [{"id": 6}], "nextPageToken": None, "moreResult": False},
+    ]
+    result = marketing_actions.list_static_lists(lists_client, {"output_tsv_path": _tmp_tsv_path()}, _passthrough_gate)
+    _assert("list_static_lists internal loop followed the token across 2 vendor calls", lists_client.get_json.call_count == 2)
+    _assert("list_static_lists accumulated across both internal pages", result["row_count"] == 2)
+    _assert("list_static_lists fully drained collection not truncated", result["truncated"] is False)
 
     # Without a usable token, the collection is terminal even when the raw
-    # vendor flag claims otherwise.
+    # vendor flag claims otherwise — a single call, not truncated.
     bare = _fake_client(
         get_json={"success": True, "result": [{"id": 1}], "moreResult": True}
     )
-    result = marketing_actions.list_campaigns(bare, {}, _no_blob_writer)
-    _assert("absent collection token surfaces None", result["next_page_token"] is None)
-    _assert("absent collection token overrides true vendor moreResult", result["more_result"] is False)
+    result = marketing_actions.list_campaigns(bare, {"output_tsv_path": _tmp_tsv_path()}, _passthrough_gate)
+    _assert("absent token ends the collection in one call", bare.get_json.call_count == 1)
+    _assert("absent collection token overrides true vendor moreResult — not truncated", result["truncated"] is False)
+
+    # Cap landing exactly on a full page boundary with a token still present
+    # IS truncated — more may exist, and we deliberately did not confirm.
+    boundary_client = MagicMock()
+    boundary_client.get_json.return_value = {
+        "success": True,
+        "result": [{"id": i} for i in range(MARKETO_LIST_PAGE_ROW_CAP)],
+        "nextPageToken": "camp-more",
+        "moreResult": False,
+    }
+    boundary_result = marketing_actions.list_campaigns(
+        boundary_client,
+        {"output_tsv_path": _tmp_tsv_path(), PARAM_ACKNOWLEDGE_OVERRIDE: True, PARAM_ROW_LIMIT: MARKETO_LIST_PAGE_ROW_CAP},
+        _passthrough_gate,
+    )
+    _assert("cap-on-boundary row_count equals the cap", boundary_result["row_count"] == MARKETO_LIST_PAGE_ROW_CAP)
+    _assert("cap-on-boundary truncated True — token still present, more may exist", boundary_result["truncated"] is True)
 
 
 def test_edge_parity() -> None:
@@ -822,6 +969,8 @@ def main() -> int:
     print("\nmarketo_plugin lead verb + envelope-classification smoke tests")
     print("=" * 63)
     test_describe_lead_fields_inline()
+    test_describe_lead_fields_missing_searchable_fields()
+    test_describe_lead_fields_malformed_searchable_fields_still_raises()
     test_get_leads_filter_forwarding()
     test_create_or_update_leads_partial_batch_is_not_an_error()
     test_documented_get_leads_default_fields_contract()

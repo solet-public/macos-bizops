@@ -15,7 +15,17 @@ merge + cursor behave exactly as they will over postgres/rds:
     delivered) vs explicit silent-only;
   * threadless ``PeerInboxEntry`` projection (targeted-reply fields present,
     ``message.id == message_id``, ``cursor == 0`` sentinel, content rebuilt);
-  * empty-holder → ``((), None)``.
+  * empty-holder → ``((), None)``;
+  * pull-surface boundary (design workbench/2026-08-02_pull_surface_boundary_design_claude_d.md):
+    the floor excludes rows at/below a directly-seeded ``role_covered_mark``
+    (nothing attests live in this suite, so the mark is seeded straight into
+    the fake state — see design §5b.vi) and reports
+    ``role_floor_applied``/a history cursor; echoing that history cursor back
+    reveals the pre-mark backlog; the byte ceiling truncates a page of
+    oversized entries SHORT of ``limit`` and still mints a real continuation
+    cursor (proven by asserting the returned page is shorter than ``limit``,
+    not just that a cursor was minted — a small-fixture byte-ceiling assertion
+    would be vacuously green because the row cap binds first).
 
 Run:
     .venv/bin/python3 ananta/tests/llm/agent_messaging/role_inbox_smoke.py
@@ -55,6 +65,7 @@ from ananta.llm.agent_messaging.schema import (  # noqa: E402
 )
 from ananta.llm.agent_messaging.schema import (  # noqa: E402
     TABLE_AGENT_ROLE_MESSAGE,
+    TABLE_ROLE_COVERED_MARK,
 )
 from ananta.llm.agent_messaging.service import (  # noqa: E402
     AgentMessagingConfig,
@@ -224,6 +235,36 @@ def _seed_role_msg(
     )
 
 
+def _seed_mark(
+    state: _FakeState, *, role: str, covered_created_at: str, covered_id: str,
+) -> None:
+    """Seed a ``role_covered_mark`` row directly — nothing attests it live in
+    this suite (design §5b.vi: the mark is inert until the verb is called;
+    ``peer_mark_role_covered``'s own identity fence is smoke-tested
+    separately at the plugin layer in
+    ``plugins/agent_messaging_plugin/tests/peer_mark_role_covered_smoke.py``,
+    where the write path is actually exercised)."""
+    state.upsert_state(
+        ROLE_NAMESPACE,
+        {
+            "table": TABLE_ROLE_COVERED_MARK,
+            "record": {
+                "external_id": f"role:{role}",
+                "recipient_key": role,
+                "covered_created_at": covered_created_at,
+                "covered_id": covered_id,
+                "covered_message_id": f"msg-{covered_id}",
+                "attested_by_agent_instance_id": "agi-attester",
+                "attested_by_agent_session_id": "sess-attester",
+                "attested_by_session_label": "Claude-D",
+                "attested_at": covered_created_at,
+                "is_deleted": 0,
+            },
+            "conflict_columns": ["external_id"],
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1. Cursor codec
 # ---------------------------------------------------------------------------
@@ -308,7 +349,7 @@ def test_multirole_kway_merge_pagination() -> None:
     cursor: str | None = None
     pages = 0
     while True:
-        entries, cursor = service.list_silent_for_roles(
+        entries, cursor, _, _ = service.list_silent_for_roles(
             agent_instance_id=_INSTANCE,
             include_important=False,
             limit=2,
@@ -338,7 +379,7 @@ def test_held_role_set_change_resets() -> None:
     _seed_two_role_grid(state)
     service = _make_service(state)
 
-    _, cursor = service.list_silent_for_roles(
+    _, cursor, _, _ = service.list_silent_for_roles(
         agent_instance_id=_INSTANCE, include_important=False, limit=2, role_after=None,
     )
     _check(cursor is not None, "page 1 returns a next_role_cursor")
@@ -346,7 +387,7 @@ def test_held_role_set_change_resets() -> None:
     # Holder ACQUIRES a third role mid-pagination, then replays the stale cursor.
     _seed_binding(state, "R3")
     _seed_role_msg(state, row_id="arm-009", role="R3", created_at="2026-06-19T09:05:00")
-    entries, _ = service.list_silent_for_roles(
+    entries, _, _, _ = service.list_silent_for_roles(
         agent_instance_id=_INSTANCE, include_important=False, limit=2, role_after=cursor,
     )
     # Scope changed → reset to page 1 of the NEW scope → newest row (R3 09:05)
@@ -386,7 +427,7 @@ def test_delivered_important_catchup() -> None:
     )
     service = _make_service(state)
 
-    silent, _ = service.list_silent_for_roles(
+    silent, _, _, _ = service.list_silent_for_roles(
         agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
     )
     _check(
@@ -394,7 +435,7 @@ def test_delivered_important_catchup() -> None:
         "include_important=False: delivered IMPORTANT excluded, silent only",
     )
 
-    catchup, _ = service.list_silent_for_roles(
+    catchup, _, _, _ = service.list_silent_for_roles(
         agent_instance_id=_INSTANCE, include_important=True, limit=10, role_after=None,
     )
     _check(
@@ -416,7 +457,7 @@ def test_projection_fields() -> None:
         text="ping",
     )
     service = _make_service(state)
-    entries, _ = service.list_silent_for_roles(
+    entries, _, _, _ = service.list_silent_for_roles(
         agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
     )
     _check(len(entries) == 1, "projection: one entry returned")
@@ -441,10 +482,13 @@ def test_projection_fields() -> None:
 def test_empty_holder() -> None:
     state = _FakeState()
     service = _make_service(state)
-    entries, cursor = service.list_silent_for_roles(
+    entries, cursor, floor_applied, history = service.list_silent_for_roles(
         agent_instance_id="agi-nobody", include_important=False, limit=10, role_after=None,
     )
-    _check(entries == () and cursor is None, "holder with no roles → ((), None)")
+    _check(
+        entries == () and cursor is None and floor_applied is False and history is None,
+        "holder with no roles → ((), None, False, None)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +532,168 @@ def test_drain_page_oldest_first() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 6. Pull-surface boundary — the floor + the byte ceiling (design
+#    workbench/2026-08-02_pull_surface_boundary_design_claude_d.md). The
+#    attestation verb's identity fence / monotonic no-op / message_id lookup
+#    are smoke-tested separately at the plugin layer, where the WRITE path
+#    is actually exercised:
+#    plugins/agent_messaging_plugin/tests/peer_mark_role_covered_smoke.py
+# ---------------------------------------------------------------------------
+
+
+def test_floor_excludes_covered_rows_and_reports_applied() -> None:
+    state = _FakeState()
+    _seed_binding(state, "R1")
+    _seed_role_msg(state, row_id="f01", role="R1", created_at="2026-06-19T08:00:00")
+    _seed_role_msg(state, row_id="f02", role="R1", created_at="2026-06-19T08:01:00")
+    # Mark: covered THROUGH f02 — f01/f02 already seen, f03/f04 are new.
+    _seed_mark(state, role="R1", covered_created_at="2026-06-19T08:01:00", covered_id="f02")
+    _seed_role_msg(state, row_id="f03", role="R1", created_at="2026-06-19T08:02:00")
+    _seed_role_msg(state, row_id="f04", role="R1", created_at="2026-06-19T08:03:00")
+    service = _make_service(state)
+
+    entries, cursor, floor_applied, history = service.list_silent_for_roles(
+        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+    )
+    _check(
+        _page_ids(entries) == ["msg-f04", "msg-f03"],
+        "floor: default drain returns only rows newer than the mark",
+    )
+    _check(cursor is None, "floor-stop: next_role_cursor is null (drain genuinely complete)")
+    _check(floor_applied is True, "floor-stop: role_floor_applied reports true")
+    _check(history is not None, "floor-stop: a history/resume cursor is minted")
+
+
+def test_history_cursor_reveals_pre_mark_backlog() -> None:
+    state = _FakeState()
+    _seed_binding(state, "R1")
+    _seed_role_msg(state, row_id="f01", role="R1", created_at="2026-06-19T08:00:00")
+    _seed_role_msg(state, row_id="f02", role="R1", created_at="2026-06-19T08:01:00")
+    _seed_mark(state, role="R1", covered_created_at="2026-06-19T08:01:00", covered_id="f02")
+    _seed_role_msg(state, row_id="f03", role="R1", created_at="2026-06-19T08:02:00")
+    service = _make_service(state)
+
+    _, _, _, history = service.list_silent_for_roles(
+        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+    )
+    assert history is not None
+    entries, _, floor_applied, _ = service.list_silent_for_roles(
+        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=history,
+    )
+    # Design §5b.vii disclosed edge: strictly OLDER than the mark, not the
+    # mark's own row (f02) — that row was already delivered to whichever
+    # session set the mark, since attestation only ever follows processing.
+    _check(
+        _page_ids(entries) == ["msg-f01"],
+        "history cursor: echoing it back reveals rows strictly older than the mark",
+    )
+    _check(floor_applied is False, "history read: the floor did not apply (deliberate deep read)")
+
+
+def test_history_token_wrong_scope_resets_and_refloors() -> None:
+    """A history token replayed after the held-role set changed must NOT
+    silently disable the floor forever — SCOPE_CHANGED resets to page 1 with
+    the floor RE-ENABLED (role_cursor.decode_role_cursor's own contract)."""
+    state = _FakeState()
+    _seed_binding(state, "R1")
+    _seed_role_msg(state, row_id="f01", role="R1", created_at="2026-06-19T08:00:00")
+    _seed_role_msg(state, row_id="f02", role="R1", created_at="2026-06-19T08:01:00")
+    _seed_mark(state, role="R1", covered_created_at="2026-06-19T08:01:00", covered_id="f02")
+    _seed_role_msg(state, row_id="f03", role="R1", created_at="2026-06-19T08:02:00")
+    service = _make_service(state)
+    _, _, _, history = service.list_silent_for_roles(
+        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+    )
+    assert history is not None
+
+    # Holder acquires a second role — held-role-set hash no longer matches
+    # the token's issuing scope.
+    _seed_binding(state, "R2")
+    entries, _, floor_applied, _ = service.list_silent_for_roles(
+        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=history,
+    )
+    _check(
+        _page_ids(entries) == ["msg-f03"],
+        "history token + scope change: resets to page-1 of the NEW scope, floor re-applied",
+    )
+    _check(
+        floor_applied is True,
+        "scope-changed reset still floors R1's f01/f02 — the history token's "
+        "floor-skip did NOT survive the reset (R1's mark still excludes them)",
+    )
+
+
+def test_floor_is_noop_without_a_mark() -> None:
+    state = _FakeState()
+    _seed_binding(state, "R1")
+    _seed_role_msg(state, row_id="f01", role="R1", created_at="2026-06-19T08:00:00")
+    service = _make_service(state)
+    entries, cursor, floor_applied, history = service.list_silent_for_roles(
+        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+    )
+    _check(
+        _page_ids(entries) == ["msg-f01"] and cursor is None
+        and floor_applied is False and history is None,
+        "no mark yet: today's behavior unchanged byte-for-byte (§12.3 fail-direction)",
+    )
+
+
+def test_byte_ceiling_truncates_short_of_the_row_limit() -> None:
+    """A fixture of small entries would let the row cap bind first and never
+    exercise the byte path — a vacuous-green risk flagged before this was
+    written. Pad content so entries blow the 200 KB ceiling well before
+    ``limit`` rows, and assert the returned page is SHORTER than ``limit``
+    (the actual proof the byte path fired), not just that a cursor minted.
+    """
+    state = _FakeState()
+    _seed_binding(state, "R1")
+    big_text = "x" * 60_000  # ~60KB/entry serialized; 4 entries ≈ 240KB > 200KB ceiling
+    for i in range(6):
+        _seed_role_msg(
+            state, row_id=f"b{i:02d}", role="R1",
+            created_at=f"2026-06-19T08:{i:02d}:00", text=big_text,
+        )
+    service = _make_service(state)
+    entries, cursor, floor_applied, history = service.list_silent_for_roles(
+        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+    )
+    _check(
+        0 < len(entries) < 10,
+        "byte ceiling: page truncated SHORT of the row limit (proves byte-stop fired)",
+    )
+    _check(cursor is not None, "byte-stop: a real continuation cursor is minted, never null")
+    _check(floor_applied is False, "byte-stop: no mark involved, floor did not apply")
+    _check(history is None, "byte-stop: no history cursor (that's the floor-stop branch only)")
+
+    remaining, _, _, _ = service.list_silent_for_roles(
+        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=cursor,
+    )
+    _check(
+        len(entries) + len(remaining) == 6,
+        "byte-stop: continuing the walk reaches every row across pages, none dropped",
+    )
+
+
+def test_byte_ceiling_admits_at_least_one_oversized_entry() -> None:
+    state = _FakeState()
+    _seed_binding(state, "R1")
+    huge_text = "x" * 250_000  # a single entry alone exceeds the 200KB ceiling
+    _seed_role_msg(state, row_id="next", role="R1", created_at="2026-06-19T08:00:00")
+    _seed_role_msg(
+        state, row_id="huge", role="R1", created_at="2026-06-19T08:01:00", text=huge_text,
+    )
+    service = _make_service(state)
+    entries, cursor, _, _ = service.list_silent_for_roles(
+        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+    )
+    _check(
+        _page_ids(entries) == ["msg-huge"],
+        "byte ceiling: a single over-ceiling entry still ships alone, newest first (R4)",
+    )
+    _check(cursor is not None, "byte ceiling: an over-ceiling single-entry page still mints a cursor")
+
+
+# ---------------------------------------------------------------------------
 # 9. Q1 role-section fault-domain boundary (peer_inbox._collect_role_section)
 # ---------------------------------------------------------------------------
 
@@ -511,9 +717,12 @@ def _inbox_request(role_after: str | None = None) -> PeerInboxRequest:
 
 def test_q1_boundary_isolates_query_failure() -> None:
     service = _make_service(_RaisingState())
-    entries, cursor, status, error = service._collect_role_section(_inbox_request())  # noqa: SLF001
+    entries, cursor, floor_applied, history, status, error = (
+        service._collect_role_section(_inbox_request())  # noqa: SLF001
+    )
     _check(
-        entries == () and cursor is None and status is RoleSectionStatus.ERROR,
+        entries == () and cursor is None and status is RoleSectionStatus.ERROR
+        and floor_applied is False and history is None,
         "Q1: role-query failure → empty role section + status=ERROR (not raised)",
     )
     _check(
@@ -528,7 +737,7 @@ def test_q1_boundary_malformed_cursor_isolated() -> None:
     state = _FakeState()
     _seed_binding(state, "Architect")
     service = _make_service(state)
-    _, _, status, error = service._collect_role_section(  # noqa: SLF001
+    _, _, _, _, status, error = service._collect_role_section(  # noqa: SLF001
         _inbox_request(role_after="not!a!valid!cursor"),
     )
     _check(
@@ -542,7 +751,9 @@ def test_q1_boundary_ok_passthrough() -> None:
     _seed_binding(state, "Architect")
     _seed_role_msg(state, row_id="q1", role="Architect", created_at="2026-06-19T08:00:00")
     service = _make_service(state)
-    entries, _cursor, status, error = service._collect_role_section(_inbox_request())  # noqa: SLF001
+    entries, _, _, _, status, error = (
+        service._collect_role_section(_inbox_request())  # noqa: SLF001
+    )
     _check(
         status is RoleSectionStatus.OK and error is None and len(entries) == 1,
         "Q1: healthy role section → status=OK, error=None, entries served",
@@ -560,6 +771,12 @@ def main() -> int:
     test_projection_fields()
     test_empty_holder()
     test_drain_page_oldest_first()
+    test_floor_excludes_covered_rows_and_reports_applied()
+    test_history_cursor_reveals_pre_mark_backlog()
+    test_history_token_wrong_scope_resets_and_refloors()
+    test_floor_is_noop_without_a_mark()
+    test_byte_ceiling_truncates_short_of_the_row_limit()
+    test_byte_ceiling_admits_at_least_one_oversized_entry()
     test_q1_boundary_isolates_query_failure()
     test_q1_boundary_malformed_cursor_isolated()
     test_q1_boundary_ok_passthrough()

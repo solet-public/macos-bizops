@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::drive_share",
   "display_name": "Drive: Share File",
   "description": "Grant a Google Drive file or folder permission to an email address at a given role (reader, commenter, writer). No notification email is sent. Requires a connected account.",
-  "embedding_description": "Grant Drive sharing access on a specific file or folder id to one email address, at exactly one role: reader (view only), commenter (view + comment), or writer (edit). Sends no notification email to the grantee. Returns an ok flag and the new permission id. This is an access-control write, distinct from every read/export verb in this plugin — use it after drive_upload_file or drive_create_folder to open access to a newly created item. Fails gsuite.invalid_params if role is not one of the three allowed values.",
+  "embedding_description": "Grant Drive sharing access on one file or folder id to a single email address at exactly one role: reader for view, commenter for view and comment, or writer for edit. Returns the new permission id. An access-control write against Drive, and the grantee receives no notification mail.",
   "result_processor_customizations": {
     "action_label": "Drive permission granted",
     "result_type": "g_suite_drive_share_result",

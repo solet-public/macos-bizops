@@ -2,7 +2,7 @@
   "process_key": "plugin::agent_messaging_plugin::peer_release_role",
   "display_name": "Release an agent role",
   "description": "Hard-delete the agent_role_binding state-table row for the named role. Used when a session deliberately vacates a role — operator runs /rename to a different label, the session shuts down cleanly, or the role is reassigned to a new session via a different /rename. v10 Control #2 made agent_role_binding the sole resolution authority, so the release is a HARD delete (soft_delete=False is required — a soft delete would still resolve and enumerate, i.e. not release at all). After release, subsequent peer_send_by_name calls return peer_role_vacant until a new session claims the role; the one-shot backfill marker (Control #2 B5) prevents a released role from being re-seeded on a later boot.",
-  "embedding_description": "Release a peer role binding by hard-deleting its agent_role_binding row, the row that backs peer_send_by_name routing for the named role (Coordinator, Architect, Git-Controller). Used when a session vacates its role on clean shutdown, operator-driven /rename, or role handoff. Subsequent peer_send_by_name returns peer_role_vacant until a new claim writes via peer_claim_role. v10 state-table authority that replaced the address book.",
+  "embedding_description": "Release a durable peer role binding, removing the row that routes role-addressed messages for names like Coordinator, Architect, or Git-Controller. Used when a session vacates its role on clean shutdown, an operator rename, or a handoff. Role-addressed sends then report the role vacant until someone claims it again.",
   "processor_policy_category": "edge",
   "result_processor_customizations": {
     "action_label": "Agent role released",

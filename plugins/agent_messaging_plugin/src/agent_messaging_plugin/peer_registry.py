@@ -40,6 +40,8 @@ from .schema import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .models import BridgeBinding, NativeWakeAdapter
 
 logger = logging.getLogger(__name__)
@@ -106,8 +108,12 @@ class PeerAmbiguousError(LookupError):
 class PeerUnreachableError(LookupError):
     """Raised when a peer_id (or specific instance) has no live binding."""
 
+    def response_data(self) -> dict[str, object]:
+        """Additional transport-neutral fields for a peer_unreachable result."""
+        return {}
 
-class PeerSessionAmbiguousError(LookupError):
+
+class PeerSessionAmbiguousError(PeerUnreachableError):
     """Raised when >1 live binding shares one ``agent_session_id`` (fail-loud dup).
 
     A stable ``agent_session_id`` identifies exactly one logical session, which
@@ -126,6 +132,13 @@ class PeerSessionAmbiguousError(LookupError):
             f"share agent_session_id {agent_session_id!r}: "
             f"{', '.join(candidate_instance_ids)}",
         )
+
+    def response_data(self) -> dict[str, object]:
+        """Expose the invariant-breach candidates without changing error code."""
+        return {
+            "peer_agent_session_id": self.agent_session_id,
+            "candidate_instance_ids": self.candidate_instance_ids,
+        }
 
 
 class PeerRegistry:
@@ -172,7 +185,12 @@ class PeerRegistry:
     # Binding lifecycle
     # ------------------------------------------------------------------
 
-    def register(self, binding: BridgeBinding) -> str:
+    def register(
+        self,
+        binding: BridgeBinding,
+        *,
+        is_live: Callable[[BridgeBinding], bool] | None = None,
+    ) -> str:
         """Add or replace ``binding`` under its ``agent_id`` bucket.
 
         Returns the **effective** ``session_label`` that landed in the
@@ -234,14 +252,30 @@ class PeerRegistry:
             {"agent_instance_id": binding.agent_instance_id},
             soft_delete=False,
         )
-        # Single-active-session-per-name invariant: evict any prior
-        # holder of this session_label so the registry never carries
-        # two rows answering to the same display name. Skipped when
-        # the effective label is empty (a transient pre-rename state
-        # that legitimately leaves the label slot vacant).
+        # Single-active-session-per-name — WS-2e §4.3.2 moves the EVICTION to
+        # claim-settle time. Here the label row is swept only when it is the
+        # SAME session or DEAD by the liveness window; a LIVE different-session
+        # row SURVIVES. The registry tolerates a duplicate label transiently
+        # (peer_list shows both, so the operator can SEE it) and the ROLE layer
+        # decides who holds the role.
+        #
+        # Measured rationale (Day's capture, 2026-08-01): two same-label
+        # watchers heartbeat-registering hard-deleted each other's rows, so
+        # role sends sampled an oscillating registry — 5 of 6 stranded in
+        # queued_for_replay because resolve found NO ROW. Sparing the live row
+        # closes the oscillator: both rows coexist, resolve always finds the
+        # holder.
+        #
+        # `is_live` UNKNOWN (None) spares a different-session row rather than
+        # sweeping it. That direction is deliberate: the cost of sparing is a
+        # transient duplicate label the design already tolerates, while the
+        # cost of sweeping is silently destroying a live session's receive
+        # path — which is the defect this change exists to remove.
         if effective_label:
-            self._bindings.delete(
-                {"session_label": effective_label}, soft_delete=False,
+            self._sweep_label_row(
+                effective_label,
+                claimant_agent_session_id=effective_agent_session_id,
+                is_live=is_live,
             )
         self._bindings.insert(
             {
@@ -378,6 +412,36 @@ class PeerRegistry:
             candidate_instance_ids=[c.agent_instance_id for c in candidates],
             candidate_session_labels=[c.session_label for c in candidates],
         )
+
+
+    def _sweep_label_row(
+        self,
+        effective_label: str,
+        *,
+        claimant_agent_session_id: str,
+        is_live: Callable[[BridgeBinding], bool] | None,
+    ) -> None:
+        """Evict a same-label row only when it is SELF or DEAD (§4.3.2)."""
+        rows = self._bindings.read({"session_label": effective_label})
+        for row in rows:
+            existing = _binding_from_row(row)
+            same_session = bool(
+                claimant_agent_session_id
+                and existing.agent_session_id == claimant_agent_session_id
+            )
+            # A row with no session id cannot be proven live and cannot be a
+            # different SESSION in any meaningful sense — sweep it as before so
+            # pre-S1 clients keep today's replace semantics.
+            unattributed = not existing.agent_session_id
+            if (
+                not (same_session or unattributed)
+                and (is_live is None or is_live(existing))
+            ):
+                continue  # LIVE (or unprovable) different session -> SPARE
+            self._bindings.delete(
+                {"agent_instance_id": existing.agent_instance_id},
+                soft_delete=False,
+            )
 
     def resolve_by_agent_session_id(
         self, agent_session_id: str,

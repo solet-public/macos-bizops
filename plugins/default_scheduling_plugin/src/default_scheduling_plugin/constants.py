@@ -56,3 +56,28 @@ DEFAULT_HEARTBEAT_CADENCE_MINUTES: Final[int] = 5
 # so we use stable system-owned identifiers instead.
 HEARTBEAT_SESSION_ID: Final[str] = "sess-heartbeat-global"
 HEARTBEAT_FLOW_ID: Final[str] = "flow-heartbeat-global"
+
+# KB retrieval-drift audit cron (SMIA Phase-0 baseline instrument).
+#
+# The predecessor trigger (`sch-2l18uk4q9et3a`, created 2026-06-01) used the
+# memory-tag heartbeat shape, whose action_def carries
+# ``result_processor_kind=None`` by construction; the action-queue poller's
+# EDGE_SINK_SKIP branch terminates it with no dispatch, so the audit never ran
+# — it fired daily for two months and executed zero times. The repaired target
+# is the EDGE_SINK verb ``audit_retrieval_corpus_cron``, which returns a
+# started/already-running receipt immediately and does the walk on a background
+# daemon thread.
+#
+# Distinct session/flow constants (not the heartbeat pair) so audit fires are
+# independently attributable in audit logs, matching the session_ledger
+# periodic-schedule convention. They must be system-owned: a cron that inherits
+# the creating session's id outlives that session and is left pointing at a
+# dead one — which is what the predecessor did.
+KB_RETRIEVAL_AUDIT_TAG: Final[str] = "kb_retrieval_audit:edge_sink"
+KB_RETRIEVAL_AUDIT_CRON: Final[str] = "0 6 * * *"
+KB_RETRIEVAL_AUDIT_LABEL: Final[str] = "KB retrieval drift audit (EDGE_SINK)"
+KB_RETRIEVAL_AUDIT_SESSION_ID: Final[str] = "sess-kb-retrieval-audit"
+KB_RETRIEVAL_AUDIT_FLOW_ID: Final[str] = "flow-kb-retrieval-audit"
+KB_RETRIEVAL_AUDIT_PROCESS_KEY: Final[str] = (
+    "service_interface::knowledge_service::audit_retrieval_corpus_cron"
+)

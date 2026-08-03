@@ -1,9 +1,7 @@
 """Marketo verb implementations — pure functions over a built ``MarketoClient``.
 
 Each function takes an already-built :class:`http_client.MarketoClient` and a
-``params`` dict, returning a plain result dict. Blob I/O is injected
-(``blob_writer``) for the five verbs whose result can be large (describe,
-get_leads, list_activity_types, list_campaigns, list_static_lists). Invalid parameters raise
+``params`` dict, returning a plain result dict. Invalid parameters raise
 ``ValueError`` (mapped to ``marketo.invalid_params``); ``success: false``
 envelopes raise ``MarketoEnvelopeError`` (carrying the payload for the
 plugin's classifier).
@@ -18,40 +16,86 @@ default-read echoes, before calling the write endpoint. Only a ``success:
 false`` envelope (structural fault — bad batch shape, auth, access) raises
 after a write is attempted.
 
+Business-data limits + spill-floor migration (2026-08-02 —
+workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md,
+§7.1). ``describe_lead_fields``, ``get_leads``, ``list_activity_types``,
+``get_activities``, ``list_campaigns``, and ``list_static_lists`` now ALWAYS
+write to the caller-supplied ``output_tsv_path`` and return a handle only —
+never records inline, at any size (the former blob-spill/``INLINE_BYTE_CAP``
+branches are deleted, not lowered; blob storage retires from this plugin
+entirely).
+
+Dax 29.2 hide-paging build (2026-08-03, operator ruling: "we need to deliver
+the results - the paging is an implementation detail that should be hidden",
+design doc §5.4/§7.2 as amended, ruled doc-wide by Coordinator-Day). This
+SUPERSEDES the original Tier-2 build's Pattern B (caller-driven external
+loop) for ``get_leads``, ``get_activities``, ``list_campaigns``, and
+``list_static_lists`` — the four verbs whose vendor per-call ceiling
+(``MARKETO_LIST_PAGE_ROW_CAP`` = 300) sits below the effective row limit.
+Each now carries the standard §5 ``acknowledge_default_limit_override``/
+``row_limit`` pair (default ``DEFAULT_ROW_LIMIT`` = 500, hard cap
+``MARKETO_LIST_ROW_LIMIT_CAP`` = 5,000, same numeric precedent as zuora's
+``LIST_ROW_LIMIT_CAP``) governing the CUMULATIVE fetch across as many
+internal 300-record vendor calls as it takes — ``_paginate_token_authoritative``
+and ``_paginate_activities`` do that looping, never the caller.
+``next_page_token``/``more_result`` are GONE from every one of these four
+verbs' surface, input and output alike (§5.4: "no pagination token, cursor,
+or 'call again to continue' parameter appears on the verb's surface as the
+default path") — a ``truncated`` boolean replaces them, honest about whether
+more data may exist beyond what was written. The 300/call VENDOR ceiling
+itself is unchanged and un-raisable (nothing here asks Marketo for more than
+300 in one call) and stays disclosed in each process description per §5.1's
+source-discipline rule; what changed is that the CALLER no longer loops to
+reach the 500/5,000-row policy ceiling.
+
+Beyond the row_limit hard cap (5,000): no resumption exists, by design
+(§5.4) — a caller who needs more re-invokes the verb with a narrower
+filter/date-range (e.g. ``get_leads`` with a tighter ``filter_values`` slice,
+``get_activities`` with a later ``since_datetime``), never by carrying a
+token forward. This is why Dax's originally-measured 45,325-lead job no
+longer fits in one ``get_leads`` call even at the cap (~17 internal vendor
+calls gets to 5,000) — its route is now several separate ``get_leads`` calls
+against non-overlapping filters, not a single call plus caller-side paging.
+
+``describe_lead_fields`` and ``list_activity_types`` are UNCHANGED by this
+build: both are single, unpaginated vendor calls with no continuation
+signal of any kind — nothing to hide.
+
 No bulk-extract verb exists (v1 scope): Marketo's async Bulk Extract job API
 (create -> enqueue -> poll status -> download file) is a materially different
-control-flow shape from every other verb here and is explicitly deferred —
-``get_leads`` covers ad-hoc reads with the same inline-or-spill envelope the
-other connectors use.
+control-flow shape from every other verb here and is explicitly deferred.
 """
 
 from __future__ import annotations
 
+import csv
+import io
 import json
+import os
 import re
+import tempfile
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Final
 
 from .constants import (
     ACTIVITIES_PATH,
-    ACTIVITIES_SPILL_FILENAME,
     ACTIVITY_PAGING_TOKEN_PATH,
     ACTIVITY_TYPES_PATH,
-    ACTIVITY_TYPES_SPILL_FILENAME,
     API_USAGE_PATH,
     CHECK_SETUP_PROBES,
     CHECK_SETUP_UNVERIFIED_WRITE_VERBS,
     DEFAULT_LEAD_ACTION,
     DEFAULT_LEAD_LOOKUP_FIELD,
-    DESCRIBE_SPILL_FILENAME,
+    DEFAULT_ROW_LIMIT,
     ERROR_AUTH_FAILED,
     ERROR_PARTITION_ACCESS_DENIED,
     ERROR_PERMISSION_DENIED,
     GET_LEADS_DEFAULT_FIELDS,
-    INLINE_BYTE_CAP,
     LEAD_ACTIONS,
     LEAD_ID_FIELD,
     LEADS_DESCRIBE_PATH,
+    MARKETO_LIST_PAGE_ROW_CAP,
+    MARKETO_LIST_ROW_LIMIT_CAP,
     MAX_ACTIVITY_LEAD_IDS,
     MAX_ACTIVITY_TYPE_IDS,
     MAX_BATCH_RECORDS,
@@ -59,45 +103,94 @@ from .constants import (
     MAX_MERGE_LOSING_LEADS,
     MAX_MERGE_LOSING_LEADS_CRM,
     MAX_TRIGGER_LEADS,
-    MIME_JSON,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
 )
 from .errors import MarketoEnvelopeError, classify_marketo_envelope
 
-# blob_writer(content, filename, mime_type) -> blob_id (the returned *_blob_key)
-BlobWriter = Callable[[bytes, str, str], str]
+# path_gate(output_tsv_path) -> realpath-resolved path to write, or raises
+# ExportPathRefusedError. Injected by the plugin, which binds the operator's
+# export_allowed_roots config (export_containment.assert_export_path_allowed).
+PathGate = Callable[[str], str]
 
 _ISO_8601_FRACTIONAL_SECONDS = re.compile(r"(T\d{2}:\d{2}:\d{2})\.\d+")
 
+# Defense-in-depth circuit breaker on the internal-pagination loops below —
+# sized off the requested cap (cap // MARKETO_LIST_PAGE_ROW_CAP calls are
+# needed to reach it on a full-page run) plus this margin for short pages;
+# never expected to bind in practice, matching zuora_plugin's
+# _MAX_QUERY_MORE_CALLS discipline.
+_PAGE_CALL_BREAKER_MARGIN: Final[int] = 8
 
-def describe_lead_fields(client: Any, _params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
-    """Fetch the full lead field metadata list (id, displayName, name, dataType, ...)."""
+
+def _resolve_effective_limit(params: dict[str, Any], *, verb: str) -> int:
+    """Resolve the §5 override pair into a cumulative fetch ceiling.
+
+    Absent (or ``acknowledge_default_limit_override`` not exactly ``True``)
+    with no ``row_limit``: returns ``DEFAULT_ROW_LIMIT`` (500). Both must be
+    given together — the override flag alone, or ``row_limit`` alone, fails
+    loud rather than silently honoring half. A ``row_limit`` above
+    ``MARKETO_LIST_ROW_LIMIT_CAP`` is refused, never silently clamped down.
+    Mirrors zuora_plugin.billing_actions._resolve_effective_limit exactly —
+    same platform-wide §5 mechanism, applied here for the first time.
+    """
+    override = params.get(PARAM_ACKNOWLEDGE_OVERRIDE)
+    row_limit = params.get(PARAM_ROW_LIMIT)
+    override_present = override is True
+    row_limit_present = row_limit is not None
+    if override_present != row_limit_present:
+        raise ValueError(
+            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
+            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
+            f"{PARAM_ROW_LIMIT}={row_limit!r}"
+        )
+    if not override_present:
+        return DEFAULT_ROW_LIMIT
+    if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
+    if row_limit > MARKETO_LIST_ROW_LIMIT_CAP:
+        raise ValueError(
+            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
+            f"{MARKETO_LIST_ROW_LIMIT_CAP}; refusing rather than silently clamping"
+        )
+    return row_limit
+
+
+def describe_lead_fields(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Fetch the full lead field metadata list; write it to output_tsv_path, return a handle.
+
+    ``searchableFields`` is absent on some instances (Dax Part 32.1: the v1
+    describe endpoint never carries a top-level ``searchableFields`` key on
+    their live instance). Absence is not evidence the instance has no
+    searchable fields, so it is carried through as ``None`` rather than
+    failing the whole call, matching ``_read_only_rest_field_names``'s
+    missing-metadata discipline below. A present-but-malformed value still
+    fails loudly, since that signals real response corruption rather than a
+    field the response simply does not carry.
+    """
+    output_tsv_path = _require_str(params, "output_tsv_path")
+    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
     payload = client.get_json(LEADS_DESCRIBE_PATH)
     fields = payload.get("result") or []
     searchable_fields = payload.get("searchableFields")
-    if not isinstance(searchable_fields, list):
-        raise ValueError("Marketo describe response omitted searchableFields")
-    envelope = _spill_envelope(
-        fields if isinstance(fields, list) else [],
-        blob_writer,
-        DESCRIBE_SPILL_FILENAME,
-    )
-    envelope["searchable_fields"] = searchable_fields
-    return envelope
+    if searchable_fields is not None and not isinstance(searchable_fields, list):
+        raise ValueError("Marketo describe response returned a malformed searchableFields")
+    result = _write_records_tsv(fields if isinstance(fields, list) else [], resolved_path)
+    result["searchable_fields"] = searchable_fields
+    return result
 
 
 def list_activity_types(
     client: Any,
-    _params: dict[str, Any],
-    blob_writer: BlobWriter,
+    params: dict[str, Any],
+    path_gate: PathGate,
 ) -> dict[str, Any]:
-    """Return the configured instance's authoritative activity type catalog."""
+    """Return the configured instance's authoritative activity type catalog as a workspace TSV."""
+    output_tsv_path = _require_str(params, "output_tsv_path")
+    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
     payload = client.get_json(ACTIVITY_TYPES_PATH)
     records = payload.get("result") or []
-    return _spill_envelope(
-        records if isinstance(records, list) else [],
-        blob_writer,
-        ACTIVITY_TYPES_SPILL_FILENAME,
-    )
+    return _write_records_tsv(records if isinstance(records, list) else [], resolved_path)
 
 
 def get_api_usage(client: Any, _params: dict[str, Any]) -> dict[str, Any]:
@@ -135,15 +228,21 @@ def get_api_usage(client: Any, _params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_leads(client: Any, params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
-    """Query leads by filterType/filterValues; optionally restrict returned fields.
+def get_leads(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Query leads by filterType/filterValues; write the results to output_tsv_path, return a handle.
 
-    A non-empty ``next_page_token`` is the authoritative continuation signal.
-    Marketo can return ``moreResult: false`` on a full page that still carries
-    a usable token, so ``more_result`` is normalized from token presence.
+    Pages internally across Marketo's MARKETO_LIST_PAGE_ROW_CAP (300)
+    per-call ceiling up to the effective row limit (§5: 500 default,
+    acknowledge_default_limit_override + row_limit raises it to
+    MARKETO_LIST_ROW_LIMIT_CAP). No pagination token or continuation
+    parameter exists on this verb — Dax 29.2's hide-paging ruling. Beyond the
+    hard cap: no resumption; re-invoke with a narrower filter_values slice.
     """
+    output_tsv_path = _require_str(params, "output_tsv_path")
+    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
     filter_type = _require_str(params, "filter_type")
     filter_values = _require_list(params, "filter_values", max_len=MAX_FILTER_VALUES)
+    effective_limit = _resolve_effective_limit(params, verb="get_leads")
     query: dict[str, Any] = {
         "filterType": filter_type,
         "filterValues": ",".join(str(v) for v in filter_values),
@@ -151,26 +250,23 @@ def get_leads(client: Any, params: dict[str, Any], blob_writer: BlobWriter) -> d
     fields = params.get("fields")
     if isinstance(fields, list) and fields:
         query["fields"] = ",".join(str(f) for f in fields)
-    _apply_next_page_token(query, params)
-    payload = client.get_json("/rest/v1/leads.json", params=query)
-    leads = payload.get("result") or []
-    envelope = _spill_envelope(leads if isinstance(leads, list) else [], blob_writer, "get_leads_results.json")
-    return _with_token_authoritative_paging(envelope, payload)
+    leads, truncated = _paginate_token_authoritative(client, "/rest/v1/leads.json", query, effective_limit)
+    result = _write_records_tsv(leads, resolved_path)
+    result["truncated"] = truncated
+    return result
 
 
-def get_activities(client: Any, params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
-    """Read the Marketo activity log — what a lead actually DID, or had done to it.
+def get_activities(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Read the Marketo activity log; write the results to output_tsv_path, return a handle.
 
     This is the read that lets a caller verify what a destructive write caused
     (e.g. whether a ``merge_leads`` call resulted in a Send Email / Send Alert
-    activity). Two shapes:
-
-      * ``since_datetime`` (ISO-8601) — mints a paging token for that instant
-        and reads the first page from it (two HTTP calls).
-      * ``next_page_token`` — continues a prior page (one HTTP call).
-
-    Exactly one is required; Marketo's ``activities.json`` cannot be called
-    without a token.
+    activity). ``since_datetime`` (ISO-8601) mints a paging token and pages
+    internally from that instant up to the effective row limit (§5: 500
+    default, acknowledge_default_limit_override + row_limit raises it to
+    MARKETO_LIST_ROW_LIMIT_CAP) — no pagination token or continuation
+    parameter exists on this verb, Dax 29.2's hide-paging ruling. Beyond the
+    hard cap: no resumption; re-invoke with a later since_datetime.
 
     HONEST SCOPE — this verb is an AFTER-THE-FACT audit, not a pre-flight
     guarantee. It answers "did anything notify a human since T", and it makes a
@@ -179,46 +275,50 @@ def get_activities(client: Any, params: dict[str, Any], blob_writer: BlobWriter)
     and how their filters match, which no activity read can predict. Do not let
     a clean result here be reported as "merges are safe".
 
-    PAGING — ``more_result`` is the ONLY USABLE continuation signal here, which
-    is not the same as a verified reliable one. Adobe documents that this
+    PAGING — ``moreResult`` is the ONLY USABLE continuation signal here
+    (:func:`_paginate_activities` drives the internal loop on it), which is
+    not the same as a verified reliable one. Adobe documents that this
     endpoint ALWAYS returns ``nextPageToken`` (Developer Guide → REST → Lead
     Database → Activities), so token presence cannot terminate the loop — the
-    exact inverse of :func:`_with_token_authoritative_paging`'s verbs, which
-    ignore the vendor flag because there the token IS the honest signal. Page
-    until ``more_result`` is false. Adobe also states the endpoint "can return
-    fewer than 300 activity items while setting ``moreResult`` to true", so a
-    SHORT page — including an empty one — does not mean the end of the data.
+    exact inverse of :func:`_paginate_token_authoritative`'s verbs, which
+    ignore the vendor flag because there the token IS the honest signal. Adobe
+    also states the endpoint "can return fewer than 300 activity items while
+    setting ``moreResult`` to true", so a SHORT page — including an empty one
+    — does not mean the end of the data, and the internal loop does not treat
+    it as one.
 
     ⚠ UNMEASURED, and this is the open risk: the flag's reliability on THIS
     endpoint has never been checked against a live instance. The only live
     measurement of ``moreResult`` anywhere found it VIOLATED on
     ``list_campaigns`` — a full 300-record page reporting false while carrying
-    a usable token (field-verified against a live instance). On the
-    token-authoritative verbs that
-    is survivable because token presence is a valid fallback; here there is NO
-    fallback, so if the flag under-reports, an activity read truncates
-    silently and no caller-side rule can detect it. The hermetic smokes assert
-    that this code implements the documented rule; they cannot and do not show
+    a usable token (field-verified against a live instance). Before this
+    build, that was survivable because the CALLER still held a token and
+    could keep going; now that the token is hidden, an under-reporting flag
+    means this verb returns incomplete data with ``truncated: false`` and
+    nothing for a caller to notice with — the ``truncated`` this code computes
+    is only as honest as Marketo's own flag. The hermetic smokes assert that
+    this code implements the documented rule; they cannot and do not show
     that Marketo honours it.
     """
+    output_tsv_path = _require_str(params, "output_tsv_path")
+    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
+    effective_limit = _resolve_effective_limit(params, verb="get_activities")
     query = _activity_query(client, params)
-    payload = client.get_json(ACTIVITIES_PATH, params=query)
-    activities = payload.get("result") or []
-    envelope = _spill_envelope(
-        activities if isinstance(activities, list) else [], blob_writer, ACTIVITIES_SPILL_FILENAME
-    )
-    return _with_activity_paging(envelope, payload)
+    activities, _last_token, truncated = _paginate_activities(client, query, effective_limit)
+    result = _write_records_tsv(activities, resolved_path)
+    result["truncated"] = truncated
+    return result
 
 
 def _activity_query(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Build activities.json's query with both server-required arguments."""
+    """Build activities.json's starting query with both server-required arguments."""
     type_ids = _require_list(
         params,
         "activity_type_ids",
         max_len=MAX_ACTIVITY_TYPE_IDS,
     )
     query: dict[str, Any] = {
-        "nextPageToken": _activity_token(client, params),
+        "nextPageToken": _activity_start_token(client, params),
         "activityTypeIds": ",".join(str(type_id) for type_id in type_ids),
     }
     if params.get("lead_ids") is not None:
@@ -227,18 +327,17 @@ def _activity_query(client: Any, params: dict[str, Any]) -> dict[str, Any]:
     return query
 
 
-def _activity_token(client: Any, params: dict[str, Any]) -> str:
-    """Resolve the paging token: carried from the caller, or minted from an instant."""
-    next_page_token = params.get("next_page_token")
-    if isinstance(next_page_token, str) and next_page_token:
-        return next_page_token
+def _activity_start_token(client: Any, params: dict[str, Any]) -> str:
+    """Mint the internal loop's starting paging token from since_datetime.
+
+    No caller-supplied next_page_token path exists — Dax 29.2's hide-paging
+    ruling removed resumption from this verb's surface entirely; a caller
+    wanting more after the hard cap re-invokes with a later since_datetime.
+    """
     since_datetime = params.get("since_datetime")
-    if isinstance(since_datetime, str) and since_datetime.strip():
-        return _mint_activity_paging_token(client, since_datetime.strip())
-    raise ValueError(
-        "'get_activities' requires either 'since_datetime' (ISO-8601, mints a "
-        "paging token) or 'next_page_token' (continues a prior page)"
-    )
+    if not (isinstance(since_datetime, str) and since_datetime.strip()):
+        raise ValueError("'get_activities' requires 'since_datetime' (ISO-8601)")
+    return _mint_activity_paging_token(client, since_datetime.strip())
 
 
 def _mint_activity_paging_token(client: Any, since_datetime: str) -> str:
@@ -310,18 +409,23 @@ def merge_leads(client: Any, params: dict[str, Any]) -> dict[str, Any]:
     return {"success": bool(payload.get("success", True)), "request_id": payload.get("requestId")}
 
 
-def list_campaigns(client: Any, params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
-    """List campaigns, optionally filtered by name and/or program name.
+def list_campaigns(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """List campaigns; write the results to output_tsv_path, return a handle.
 
-    Marketo caps a single page at 300 campaigns. This verb previously DISCARDED
-    the response's own paging fields, so an instance with more than 300
-    campaigns silently returned an arbitrary 300-campaign slice — and repeat
-    calls could return DIFFERENT slices, which reads as data rather than as
-    truncation across tens of thousands of campaigns. A non-empty
-    ``next_page_token`` is the authoritative continuation signal:
-    ``more_result`` is normalized to true whenever that token is present,
-    including when Marketo's raw ``moreResult`` flag incorrectly says false.
+    Marketo caps a single page at 300 campaigns; this verb previously
+    DISCARDED the response's own paging fields, so an instance with more than
+    300 campaigns silently returned an arbitrary 300-campaign slice — and
+    repeat calls could return DIFFERENT slices, which reads as data rather
+    than as truncation. Now pages internally up to the effective row limit
+    (§5: 500 default, acknowledge_default_limit_override + row_limit raises
+    it to MARKETO_LIST_ROW_LIMIT_CAP) — no pagination token or continuation
+    parameter exists on this verb, Dax 29.2's hide-paging ruling. Beyond the
+    hard cap: no resumption; re-invoke with a narrower names/program_names
+    filter.
     """
+    output_tsv_path = _require_str(params, "output_tsv_path")
+    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
+    effective_limit = _resolve_effective_limit(params, verb="list_campaigns")
     query: dict[str, Any] = {}
     names = params.get("names")
     if isinstance(names, list) and names:
@@ -329,13 +433,10 @@ def list_campaigns(client: Any, params: dict[str, Any], blob_writer: BlobWriter)
     program_names = params.get("program_names")
     if isinstance(program_names, list) and program_names:
         query["programName"] = [str(n) for n in program_names]
-    _apply_next_page_token(query, params)
-    payload = client.get_json("/rest/v1/campaigns.json", params=query or None)
-    campaigns = payload.get("result") or []
-    envelope = _spill_envelope(
-        campaigns if isinstance(campaigns, list) else [], blob_writer, "list_campaigns_results.json"
-    )
-    return _with_token_authoritative_paging(envelope, payload)
+    campaigns, truncated = _paginate_token_authoritative(client, "/rest/v1/campaigns.json", query, effective_limit)
+    result = _write_records_tsv(campaigns, resolved_path)
+    result["truncated"] = truncated
+    return result
 
 
 def trigger_campaign(client: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -353,25 +454,27 @@ def trigger_campaign(client: Any, params: dict[str, Any]) -> dict[str, Any]:
     return {"success": bool(payload.get("success", True)), "request_id": payload.get("requestId")}
 
 
-def list_static_lists(client: Any, params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
-    """List static lists, optionally filtered by name.
+def list_static_lists(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """List static lists; write the results to output_tsv_path, return a handle.
 
     Same page-cap exposure as :func:`list_campaigns` — it is a class of
-    defect, not one verb. A non-empty ``next_page_token`` is authoritative, so
-    ``more_result`` is normalized from token presence rather than Marketo's
-    unreliable raw flag.
+    defect, not one verb. Pages internally up to the effective row limit (§5:
+    500 default, acknowledge_default_limit_override + row_limit raises it to
+    MARKETO_LIST_ROW_LIMIT_CAP) — no pagination token or continuation
+    parameter exists on this verb, Dax 29.2's hide-paging ruling. Beyond the
+    hard cap: no resumption; re-invoke with a narrower names filter.
     """
+    output_tsv_path = _require_str(params, "output_tsv_path")
+    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
+    effective_limit = _resolve_effective_limit(params, verb="list_static_lists")
     query: dict[str, Any] = {}
     names = params.get("names")
     if isinstance(names, list) and names:
         query["name"] = [str(n) for n in names]
-    _apply_next_page_token(query, params)
-    payload = client.get_json("/rest/v1/lists.json", params=query or None)
-    lists_ = payload.get("result") or []
-    envelope = _spill_envelope(
-        lists_ if isinstance(lists_, list) else [], blob_writer, "list_static_lists_results.json"
-    )
-    return _with_token_authoritative_paging(envelope, payload)
+    lists_, truncated = _paginate_token_authoritative(client, "/rest/v1/lists.json", query, effective_limit)
+    result = _write_records_tsv(lists_, resolved_path)
+    result["truncated"] = truncated
+    return result
 
 
 def add_leads_to_list(client: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -392,7 +495,7 @@ def remove_leads_from_list(client: Any, params: dict[str, Any]) -> dict[str, Any
     return _batch_envelope(payload)
 
 
-def check_setup(client: Any, blob_writer: BlobWriter) -> dict[str, Any]:
+def check_setup(client: Any) -> dict[str, Any]:
     """Probe the configured API user's READ-ONLY capabilities; report gaps by name.
 
     Runs the six safe, side-effect-free read probes in :data:`CHECK_SETUP_PROBES`
@@ -403,13 +506,16 @@ def check_setup(client: Any, blob_writer: BlobWriter) -> dict[str, Any]:
     from_list, trigger_campaign) — there is no way to test those permissions
     without performing the action itself, so ``reads_verified`` is a PARTIAL
     guarantee: it names ``writes_unverified`` explicitly rather than implying
-    the whole setup is confirmed ready.
+    the whole setup is confirmed ready. The five spill-floor-migrated probes
+    write to a throwaway tempfile via a passthrough gate, never the operator's
+    real workspace — this is a permission probe, not an export, and must not
+    depend on export_allowed_roots being configured.
     """
     checks: list[dict[str, Any]] = []
     for verb, label, permission in CHECK_SETUP_PROBES:
         check: dict[str, Any] = {"capability": label, "verb": verb}
         try:
-            _run_read_probe(client, verb, blob_writer)
+            _run_read_probe(client, verb)
             check["status"] = "ok"
         except MarketoEnvelopeError as exc:
             code, message = classify_marketo_envelope(exc)
@@ -432,22 +538,57 @@ def check_setup(client: Any, blob_writer: BlobWriter) -> dict[str, Any]:
     }
 
 
-def _run_read_probe(client: Any, verb: str, blob_writer: BlobWriter) -> None:
-    """Invoke one read-only probe verb; raises MarketoEnvelopeError on failure."""
-    if verb == "describe_lead_fields":
-        describe_lead_fields(client, {}, blob_writer)
-    elif verb == "get_leads":
-        get_leads(client, {"filter_type": "id", "filter_values": ["0"]}, blob_writer)
-    elif verb == "list_activity_types":
-        list_activity_types(client, {}, blob_writer)
-    elif verb == "get_api_usage":
+def _run_read_probe(client: Any, verb: str) -> None:
+    """Invoke one read-only probe verb; raises MarketoEnvelopeError on failure.
+
+    The five TSV-writing verbs probe through a throwaway tempfile (cleaned up
+    unconditionally) with a passthrough gate — this is a permission check, not
+    an export, so it must not touch the operator's real export_allowed_roots
+    workspace or depend on it being configured at all.
+
+    get_leads/list_campaigns/list_static_lists explicitly force
+    row_limit=1 via the §5 override — a cheap probe should stay a single
+    minimal vendor call, never the now-internal-looping default of
+    DEFAULT_ROW_LIMIT (a quota-safety fix riding the Dax 29.2 hide-paging
+    build: before internal paging existed these three were already
+    single-call by construction; now they are not unless bounded here).
+    """
+    if verb == "get_api_usage":
         get_api_usage(client, {})
-    elif verb == "list_campaigns":
-        list_campaigns(client, {}, blob_writer)
-    elif verb == "list_static_lists":
-        list_static_lists(client, {}, blob_writer)
-    else:  # pragma: no cover — CHECK_SETUP_PROBES is the only caller-controlled source
-        raise ValueError(f"unknown check_setup probe verb {verb!r}")
+        return
+    fd, tmp_path = tempfile.mkstemp(suffix=".tsv", prefix="marketo_check_setup_")
+    os.close(fd)
+    probe_row_limit = {PARAM_ACKNOWLEDGE_OVERRIDE: True, PARAM_ROW_LIMIT: 1}
+    try:
+        if verb == "describe_lead_fields":
+            describe_lead_fields(client, {"output_tsv_path": tmp_path}, _passthrough_path_gate)
+        elif verb == "get_leads":
+            get_leads(
+                client,
+                {
+                    "filter_type": "id",
+                    "filter_values": ["0"],
+                    "output_tsv_path": tmp_path,
+                    **probe_row_limit,
+                },
+                _passthrough_path_gate,
+            )
+        elif verb == "list_activity_types":
+            list_activity_types(client, {"output_tsv_path": tmp_path}, _passthrough_path_gate)
+        elif verb == "list_campaigns":
+            list_campaigns(client, {"output_tsv_path": tmp_path, **probe_row_limit}, _passthrough_path_gate)
+        elif verb == "list_static_lists":
+            list_static_lists(client, {"output_tsv_path": tmp_path, **probe_row_limit}, _passthrough_path_gate)
+        else:  # pragma: no cover — CHECK_SETUP_PROBES is the only caller-controlled source
+            raise ValueError(f"unknown check_setup probe verb {verb!r}")
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def _passthrough_path_gate(path: str) -> str:
+    """check_setup's probe gate — no containment, a throwaway tempfile only."""
+    return path
 
 
 def _permission_guidance(error_code: str, permission: str | None) -> str:
@@ -487,58 +628,150 @@ def _permission_guidance(error_code: str, permission: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _apply_next_page_token(query: dict[str, Any], params: dict[str, Any]) -> None:
-    """Forward a caller-supplied ``next_page_token`` onto the outgoing query.
+def _paginate_token_authoritative(
+    client: Any,
+    path: str,
+    base_query: dict[str, Any],
+    cap: int,
+) -> tuple[list[Any], bool]:
+    """Page an endpoint whose ``nextPageToken`` presence is the authoritative
+    continuation signal (Marketo's own ``moreResult`` can be false on a full
+    page that still carries a usable token, so token presence wins, never the
+    flag). Used by ``get_leads``, ``list_campaigns``, and ``list_static_lists``.
 
-    Deliberately SELF-GATING: the token is sent only when the caller passes one,
-    and a caller can only have one because a prior response returned it. That
-    keeps this safe on any endpoint whose paging contract is unconfirmed — we
-    echo the vendor's own field back rather than inventing a request parameter
-    that might not be supported.
+    Loops internally until the token is absent, ``cap`` is reached, or a
+    generous call-count breaker trips (defense against a future contract
+    change; sized off ``cap`` itself, never expected to bind in practice).
+    ``base_query`` is reused unmodified as the first call's query and as the
+    template for every continuation call (only ``nextPageToken`` changes
+    between calls). Returns (records limited to cap, truncated) — truncated
+    is True whenever more data may exist beyond what was returned: cap was
+    reached with a token still present, a fetched page pushed past cap before
+    a token-absent confirmation, or the breaker tripped.
     """
-    next_page_token = params.get("next_page_token")
-    if isinstance(next_page_token, str) and next_page_token:
-        query["nextPageToken"] = next_page_token
+    records: list[Any] = []
+    query = dict(base_query)
+    max_calls = cap // MARKETO_LIST_PAGE_ROW_CAP + _PAGE_CALL_BREAKER_MARGIN
+    calls = 0
+    while calls < max_calls:
+        payload = client.get_json(path, params=query or None)
+        page = payload.get("result") or []
+        records.extend(page if isinstance(page, list) else [])
+        calls += 1
+        next_token = payload.get("nextPageToken")
+        has_more = isinstance(next_token, str) and bool(next_token)
+        if len(records) >= cap:
+            return records[:cap], has_more or len(records) > cap
+        if not has_more:
+            return records, False
+        query = dict(base_query)
+        query["nextPageToken"] = next_token
+    return records[:cap], True
 
 
-def _with_token_authoritative_paging(
-    envelope: dict[str, Any],
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    """Normalize collection paging from the usable continuation token.
+def _paginate_activities(
+    client: Any,
+    initial_query: dict[str, Any],
+    cap: int,
+) -> tuple[list[Any], str | None, bool]:
+    """Page the activity log internally while ``moreResult`` is true — the
+    ONLY usable continuation signal here (Adobe's endpoint ALWAYS returns a
+    token, so token presence can never terminate the loop; the inverse of
+    :func:`_paginate_token_authoritative`'s verbs). Adobe also documents that
+    a page can return FEWER than 300 items — including zero — while still
+    setting ``moreResult`` true, so, deliberately unlike a stall-detecting
+    exemplar, an empty page is NOT treated as an early-stop signal here; only
+    the call-count breaker below bounds a run that never sets ``moreResult``
+    false. The flag's reliability on this endpoint is documented but
+    UNMEASURED (see ``get_activities``' own docstring), so this loop is
+    written to degrade to an honest ``truncated=True`` rather than spin or
+    crash if the vendor's signal turns out to misbehave.
 
-    Used by ``get_leads``, ``list_campaigns``, and ``list_static_lists``:
-    Marketo's raw ``moreResult`` can be false while ``nextPageToken`` still
-    continues to another page, so token presence wins for these verbs.
+    Returns (records limited to cap, the last-seen next_page_token,
+    truncated). truncated is True whenever the loop stopped for any reason
+    other than the vendor's own ``moreResult: false`` — cap reached, the
+    breaker tripped, or the vendor claimed ``moreResult: true`` with no
+    usable token to continue on (a documented-impossible but
+    unmeasured-reliability edge).
     """
-    next_page_token = payload.get("nextPageToken")
-    envelope["next_page_token"] = next_page_token
-    envelope["more_result"] = bool(next_page_token)
-    return envelope
+    records: list[Any] = []
+    query = dict(initial_query)
+    last_token = query.get("nextPageToken")
+    more_result = True
+    max_calls = cap // MARKETO_LIST_PAGE_ROW_CAP + _PAGE_CALL_BREAKER_MARGIN
+    calls = 0
+    while more_result and len(records) < cap and calls < max_calls:
+        page_records, next_token, more_result = _fetch_activity_page(client, query)
+        records.extend(page_records)
+        calls += 1
+        if next_token is None and more_result:
+            # Vendor claims more data exists but gave no token to fetch it
+            # with — cannot continue; stop rather than loop forever, and let
+            # the truncated computation below report the shortfall honestly.
+            break
+        if next_token is not None:
+            last_token = next_token
+        query = dict(initial_query)
+        query["nextPageToken"] = last_token
+    truncated = more_result or len(records) > cap or calls >= max_calls
+    return records[:cap], last_token, truncated
 
 
-def _with_activity_paging(
-    envelope: dict[str, Any],
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    """Surface activity paging with Marketo's ``moreResult`` flag authoritative.
-
-    The activity token is a resumable bookmark that can be returned on the last
-    page too. Token presence therefore cannot determine whether to continue;
-    callers must keep paging through empty pages while ``more_result`` is true
-    and stop when it is false, even if ``next_page_token`` remains populated.
-    """
-    envelope["next_page_token"] = payload.get("nextPageToken")
-    envelope["more_result"] = bool(payload.get("moreResult", False))
-    return envelope
+def _fetch_activity_page(client: Any, query: dict[str, Any]) -> tuple[list[Any], str | None, bool]:
+    """One activities.json call: (page records, its nextPageToken if usable, moreResult)."""
+    payload = client.get_json(ACTIVITIES_PATH, params=query)
+    page = payload.get("result") or []
+    records = page if isinstance(page, list) else []
+    next_token = payload.get("nextPageToken")
+    next_token = next_token if isinstance(next_token, str) and next_token else None
+    return records, next_token, bool(payload.get("moreResult", False))
 
 
-def _spill_envelope(records: list[Any], blob_writer: BlobWriter, filename: str) -> dict[str, Any]:
-    payload = json.dumps(records, default=str).encode("utf-8")
-    if len(payload) > INLINE_BYTE_CAP:
-        blob_key = blob_writer(payload, filename, MIME_JSON)
-        return {"result_blob_key": blob_key, "row_count": len(records), "spilled": True}
-    return {"records": records, "row_count": len(records), "spilled": False}
+def _gate_and_check_parent(path_gate: PathGate, output_tsv_path: str) -> str:
+    resolved_path = path_gate(output_tsv_path)
+    parent_dir = os.path.dirname(resolved_path)
+    if not os.path.isdir(parent_dir):
+        raise ValueError(
+            f"the parent directory of output_tsv_path does not exist ({parent_dir}); "
+            "create it first — this verb writes one file, it does not create directories"
+        )
+    return resolved_path
+
+
+def _write_records_tsv(records: list[Any], resolved_path: str) -> dict[str, Any]:
+    dict_records = [r for r in records if isinstance(r, dict)]
+    columns = _ordered_columns(dict_records)
+    row_lists = [[_cell_value(record.get(column)) for column in columns] for record in dict_records]
+    with open(resolved_path, "wb") as handle:
+        handle.write(_to_tsv(columns, row_lists))
+    return {"path": resolved_path, "columns": columns, "row_count": len(row_lists)}
+
+
+def _ordered_columns(records: list[dict[str, Any]]) -> list[str]:
+    """Union of record keys in first-appearance order."""
+    columns: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        for key in record:
+            if key not in seen:
+                seen.add(key)
+                columns.append(key)
+    return columns
+
+
+def _cell_value(value: Any) -> Any:
+    """Coerce a record value to a TSV-safe form; nested objects become JSON text."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return json.dumps(value, default=str, ensure_ascii=False)
+
+
+def _to_tsv(columns: list[str], row_lists: list[list[Any]]) -> bytes:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter="\t", lineterminator="\n")
+    writer.writerow(columns)
+    writer.writerows(row_lists)
+    return buffer.getvalue().encode("utf-8")
 
 
 def _batch_envelope(payload: dict[str, Any]) -> dict[str, Any]:

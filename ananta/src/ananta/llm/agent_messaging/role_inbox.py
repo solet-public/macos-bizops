@@ -18,6 +18,7 @@ and never page by ``message.cursor``, so the sentinel cannot collide).
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from ananta.services.state_service.ordered_query import normalize_sort_value
@@ -30,10 +31,19 @@ from .models import (
     PeerInboxEntry,
     TextPart,
 )
-from .role_cursor import RoleCursorScope, encode_role_cursor
+from .role_cursor import RoleCursorScope, encode_role_cursor, encode_role_history_cursor
 
 _COL_CREATED_AT = "created_at"
 _COL_ID = "id"
+
+# Pull-surface boundary design §5b.v: picked at build time. ~4 KB/entry
+# measured (422,513 chars / 50+50 entries) means this binds after roughly 50
+# entries in the worst case — above the common-case limit=50 row cap (which
+# still binds first in the ordinary case) but low enough that a handful of
+# wide entries (the measured 108,741-char single-page specimen) still trips
+# it well under a context-blowing page. Page-level only (R4): bounds a whole
+# page's serialized size, never an individual entry.
+_ROLE_SECTION_BYTE_CEILING = 200_000
 
 
 def build_role_section(
@@ -41,40 +51,90 @@ def build_role_section(
     *,
     scope: RoleCursorScope,
     limit: int,
-) -> tuple[tuple[PeerInboxEntry, ...], str | None]:
+    any_floor_truncated: bool = False,
+    resume_seed: tuple[str, str] | None = None,
+) -> tuple[tuple[PeerInboxEntry, ...], str | None, bool, str | None]:
     """Merge per-role pages into the global top-``limit`` + the next cursor.
 
     ``per_role_records`` is one ``query_ordered`` result list per held role
-    (each already ``(created_at, id)``-descending and capped at ``limit``).
-    Returns the projected entries (newest-first) and ``next_role_cursor`` —
-    the opaque, scope-bound token of the last emitted row when a full page was
-    returned (there may be more), else ``None``.
+    (each already ``(created_at, id)``-descending, capped at ``limit``, and —
+    per the caller's own floor step — already excludes any row at/below that
+    role's ``role_covered_mark`` unless the caller echoed back a history
+    cursor). Returns ``(entries, next_role_cursor, role_floor_applied,
+    role_history_cursor)``.
+
+    Three DISTINCT mint outcomes (design §3/§4, R2/R4), checked in this
+    priority order so they stay distinguishable rather than conflated:
+
+    1. **Byte-stop** — the byte-aware merge truncated the page short of
+       ``limit`` rows. Mints a REAL continuation cursor from the last emitted
+       row (there is unambiguously more to fetch).
+    2. **Row-limit-hit** — ``len(merged) == limit`` with no byte truncation —
+       today's existing signal, unchanged. Also mints a REAL continuation
+       cursor (more rows may follow; the floor has no bearing on this case).
+    3. **Floor-stop** — no byte or row truncation, but the floor removed at
+       least one already-covered row from some role's fetch this call. Mints
+       ``next_role_cursor=None`` (the default drain genuinely IS complete)
+       plus the caller-supplied ``role_floor_applied=True`` and a
+       server-minted history cursor seeded at ``resume_seed`` (the MAX/newest
+       mark across held roles — over-page-safe per §12.3, see design §5b.iii)
+       so a caller that wants the pre-mark backlog has a named, unforgeable
+       route (R2) rather than an unconstructable "paging past the mark stays
+       available forever" claim. Disclosed edge (design §5b.vii): the
+       history cursor reveals rows STRICTLY OLDER than the mark, never the
+       mark's own row — that row was already delivered to whichever session
+       set the mark (attestation only ever follows processing).
+
+    Otherwise (genuine exhaustion, no floor involvement): ``next_role_cursor
+    =None``, ``role_floor_applied=False``, no history cursor — unchanged from
+    today.
     """
-    merged = _merge_top_n(per_role_records, limit)
+    flat = [record for records in per_role_records for record in records]
+    flat.sort(key=_merge_sort_key, reverse=True)
+    merged, byte_truncated = _take_within_byte_ceiling(flat, limit)
     entries = tuple(project_role_entry(record) for record in merged)
 
-    next_cursor: str | None = None
-    if merged and len(merged) == limit:
+    row_limit_hit = bool(merged) and len(merged) == limit and not byte_truncated
+    if byte_truncated or row_limit_hit:
         last = merged[-1]
         next_cursor = encode_role_cursor(
             scope,
             created_at_iso=normalize_sort_value(last.get(_COL_CREATED_AT)),
             row_id=str(last.get(_COL_ID, "")),
         )
-    return entries, next_cursor
+        return entries, next_cursor, any_floor_truncated, None
+
+    if any_floor_truncated and resume_seed is not None:
+        history_cursor = encode_role_history_cursor(
+            scope, created_at_iso=resume_seed[0], row_id=resume_seed[1],
+        )
+        return entries, None, True, history_cursor
+
+    return entries, None, any_floor_truncated, None
 
 
-def _merge_top_n(
-    per_role_records: list[list[dict[str, object]]], limit: int,
-) -> list[dict[str, object]]:
-    """Flatten the per-role pages and take the global ``(created_at, id)`` top-N.
+def _take_within_byte_ceiling(
+    flat: list[dict[str, object]], limit: int,
+) -> tuple[list[dict[str, object]], bool]:
+    """Row-limit cap, THEN a page-level byte ceiling (design §4/R4).
 
-    A role row matches exactly one role's query (``recipient_key`` is single-
-    valued), so flattening cannot duplicate a row across the per-role lists.
+    R4's edges: page-level only (never per-entry truncation), and a page
+    always admits AT LEAST ONE entry — a single over-ceiling entry ships
+    alone rather than starving the walk or minting a zero-row page.
+    ``byte_truncated`` is True only when the byte ceiling — not the row
+    limit — is what stopped the page short; the two are kept distinguishable
+    because the mint predicate above branches on which one fired.
     """
-    flat = [record for records in per_role_records for record in records]
-    flat.sort(key=_merge_sort_key, reverse=True)
-    return flat[:limit]
+    row_capped = flat[:limit]
+    kept: list[dict[str, object]] = []
+    running_bytes = 0
+    for record in row_capped:
+        size = len(json.dumps(record, default=str))
+        if kept and running_bytes + size > _ROLE_SECTION_BYTE_CEILING:
+            return kept, True
+        kept.append(record)
+        running_bytes += size
+    return kept, False
 
 
 def _merge_sort_key(record: dict[str, object]) -> tuple[str, str]:

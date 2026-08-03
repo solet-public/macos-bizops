@@ -126,8 +126,29 @@ PREVIOUS_LINK_NAME: Final[str] = "previous"
 
 # Source-tree subdirectories that make up the first-party ``code/`` clone
 # (design §4.2: ``code/`` = ``ananta/`` + ``plugins/``, NOT ``.git``).
+#
+# ONE constant, deliberately: it is the clone loop's path list AND the
+# dirty-tree gate's porcelain scope (Architect's dirty-tree ruling §2). Two
+# separate lists would mean that the day someone adds a third cloned subtree
+# the gate silently under-covers it — the same failure shape as a gate
+# registration that lands without its file. Both readers dereference this
+# module global at call time, so widening it widens both at once.
 CODE_SUBTREES: Final[tuple[str, ...]] = ("ananta", "plugins")
 VENV_SUBTREE: Final[str] = ".venv"
+
+# ``VERSION.tree_state`` tokens (dirty-tree ruling §3). The attestation is
+# POSITIVE IN BOTH DIRECTIONS: a clean build still writes the field, because
+# the one inference it must never support is "field absent ⇒ tree was clean".
+# Absence means only "this release predates the gate".
+#
+# UNKNOWN is the third state the ruling's table did not enumerate (it assumed
+# a git checkout): git could not answer at all — not a repo, git missing, or
+# the call timed out. It does NOT refuse the build (a hydrated seed clone may
+# legitimately carry no ``.git``, and refusing there would brick install-time
+# release-0 seeding), but it is never reported as clean and is logged loudly.
+TREE_STATE_CLEAN: Final[str] = "clean"
+TREE_STATE_DIRTY: Final[str] = "dirty"
+TREE_STATE_UNKNOWN: Final[str] = "unknown"
 
 # Ledger ``phase`` tokens (design §4.6 ordering).
 PHASE_CUTOVER: Final[str] = "cutover"
@@ -280,6 +301,41 @@ def _default_git_sha(source_root: Path) -> str:
     if result.returncode != 0:
         return GIT_SHA_UNKNOWN
     return result.stdout.strip() or GIT_SHA_UNKNOWN
+
+
+def _default_dirty_paths(
+    source_root: Path, subtrees: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    """Read-only ``git status --porcelain`` SCOPED to the shipped subtrees.
+
+    The dirty-tree gate's measurement (ruling §1). Returns the porcelain
+    lines — modified, staged, deleted, and untracked-unignored — or an
+    empty tuple when the shipped subtrees are clean.
+
+    Returns ``None`` when git cannot answer AT ALL (not a repo, git
+    unavailable, timeout). ``None`` is deliberately distinct from ``()``:
+    "could not measure" is not "measured clean", and collapsing the two is
+    exactly the inference :data:`TREE_STATE_UNKNOWN` exists to prevent.
+
+    The scope is what makes refuse-by-default survivable: this is a shared
+    checkout with a permanently dirty ``workbench/`` by design, and dirt
+    outside the cloned subtrees never reaches the artifact. Pathspecs
+    resolve against ``-C source_root``, so they mean the same directories
+    the clone loop copies.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source_root), "status", "--porcelain", "--", *subtrees],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return tuple(line for line in result.stdout.splitlines() if line.strip())
 
 
 def _fsync_file(path: Path) -> None:
@@ -591,6 +647,7 @@ class ReleaseBuilder:
         clone_timeout_seconds: float,
         clock: Callable[[], datetime],
         git_sha_resolver: Callable[[Path], str],
+        dirty_paths_resolver: Callable[[Path, tuple[str, ...]], tuple[str, ...] | None],
         strict_pth_validation: bool,
         logger: logging.Logger,
     ) -> None:
@@ -600,6 +657,7 @@ class ReleaseBuilder:
         self._clone_timeout = clone_timeout_seconds
         self._clock = clock
         self._git_sha_resolver = git_sha_resolver
+        self._dirty_paths_resolver = dirty_paths_resolver
         self._strict_pth_validation = strict_pth_validation
         self._logger = logger
 
@@ -608,6 +666,7 @@ class ReleaseBuilder:
         *,
         manifest_etag: str = "",
         schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = None,
+        allow_dirty: bool = False,
     ) -> CandidatePaths:
         """CoW-clone the working tree into a fresh immutable release.
 
@@ -626,8 +685,19 @@ class ReleaseBuilder:
         stored verbatim in ``VERSION`` under ``schema_snapshot`` and on
         ``CandidatePaths``. A raise propagates and fails the build (a
         snapshot-less release would silently defeat the gate).
+
+        ``allow_dirty`` is the ruled override for the dirty-tree gate: the
+        artifact is built from the WORKING TREE but IDENTIFIED by HEAD, so
+        by default a modification inside the cloned subtrees refuses rather
+        than shipping unreviewed code under a clean SHA. ``True`` builds
+        anyway and stamps the full porcelain list into ``VERSION`` at
+        WARNING volume — loud, not convenient, and caller-supplied only
+        (no environment-variable back door: a knob an env var passes
+        invisibly is worse than no knob). Its intended caller is the
+        operator-confirmation path.
         """
         self._releases_root.mkdir(parents=True, exist_ok=True)
+        tree_state, dirty_paths = self._attest_tree_state(allow_dirty=allow_dirty)
         git_sha = self._resolve_git_sha()
         release_id = self._mint_release_id(git_sha)
         final_dir = self._releases_root / release_id
@@ -642,6 +712,9 @@ class ReleaseBuilder:
 
         final_code_root = final_dir / CODE_DIRNAME
         self._build_into_staging(staging)
+        tree_state, dirty_paths = self._reattest_after_clone(
+            staging, before=dirty_paths, before_state=tree_state, allow_dirty=allow_dirty
+        )
         schema_snapshot = (
             schema_snapshot_fn(staging / CODE_DIRNAME)
             if schema_snapshot_fn is not None
@@ -655,6 +728,8 @@ class ReleaseBuilder:
             manifest_etag=manifest_etag,
             missing_pth=missing,
             schema_snapshot=schema_snapshot,
+            tree_state=tree_state,
+            dirty_paths=dirty_paths,
         )
         self._fsync_staging(staging)
         os.replace(staging, final_dir)
@@ -838,6 +913,8 @@ class ReleaseBuilder:
         manifest_etag: str,
         missing_pth: tuple[str, ...],
         schema_snapshot: dict[str, object] | None,
+        tree_state: str,
+        dirty_paths: tuple[str, ...],
     ) -> None:
         payload = {
             "release_id": release_id,
@@ -847,6 +924,15 @@ class ReleaseBuilder:
             "manifest_etag": manifest_etag,
             "missing_pth_targets": list(missing_pth),
             "schema_snapshot": schema_snapshot,
+            # Written on EVERY build, clean included: absence must never be
+            # readable as clean (dirty-tree ruling §3).
+            "tree_state": tree_state,
+            "dirty_paths": list(dirty_paths),
+            # What the attestation actually covers. ``.venv`` is cloned but
+            # gitignored, so porcelain cannot attest it (ruling §5); recording
+            # the scope keeps "tree_state: clean" from being read as "artifact
+            # fully attested".
+            "tree_state_scope": list(CODE_SUBTREES),
         }
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
@@ -860,6 +946,116 @@ class ReleaseBuilder:
     def _mint_release_id(self, git_sha: str) -> str:
         stamp = self._clock().strftime("%Y%m%dT%H%M%SZ")
         return f"{RELEASE_ID_PREFIX}{stamp}-{git_sha}"
+
+    def _attest_tree_state(self, *, allow_dirty: bool) -> tuple[str, tuple[str, ...]]:
+        """The dirty-tree gate: refuse by default on dirt the artifact SHIPS.
+
+        Runs BEFORE anything is staged, so a refusal leaves no ``.incoming``
+        dir and no finalized release behind.
+
+        Scoped to :data:`CODE_SUBTREES`, dereferenced here at call time so
+        the gate's population is the clone loop's population by construction
+        rather than by a second list somebody has to remember to update.
+
+        Returns the ``(tree_state, dirty_paths)`` pair recorded in
+        ``VERSION``. Raises :class:`ReleaseManagerError` — naming the
+        offending paths, since "the tree is dirty" without them is not
+        actionable — when the shipped subtrees are dirty and the caller did
+        not pass ``allow_dirty``.
+        """
+        subtrees = CODE_SUBTREES
+        dirty = self._dirty_paths_resolver(self._source_root, subtrees)
+        if dirty is None:
+            self._logger.warning(
+                "tree state UNATTESTABLE for %s (git could not report on %s); "
+                "recording tree_state=%r — this release is NOT attested clean",
+                self._source_root, ", ".join(subtrees), TREE_STATE_UNKNOWN,
+            )
+            return TREE_STATE_UNKNOWN, ()
+        if not dirty:
+            return TREE_STATE_CLEAN, ()
+        listed = "; ".join(dirty)
+        if not allow_dirty:
+            raise ReleaseManagerError(
+                f"refusing to build a release from a dirty working tree: "
+                f"{len(dirty)} uncommitted path(s) under {', '.join(subtrees)} "
+                f"would ship inside the artifact but be labelled with HEAD's sha "
+                f"— {listed}. Commit them, or pass allow_dirty=True to build "
+                f"anyway (the override is recorded in VERSION)."
+            )
+        self._logger.warning(
+            "allow_dirty override: building a release from a DIRTY working tree; "
+            "%d uncommitted path(s) ship under HEAD's sha — %s",
+            len(dirty), listed,
+        )
+        return TREE_STATE_DIRTY, dirty
+
+    def _reattest_after_clone(
+        self,
+        staging: Path,
+        *,
+        before: tuple[str, ...],
+        before_state: str,
+        allow_dirty: bool,
+    ) -> tuple[str, tuple[str, ...]]:
+        """Re-measure AFTER the clone and refuse if the tree moved underneath it.
+
+        NOT in Architect's ruling table; added from the live 2026-08-01 20:41Z
+        incident, where a lane kept editing while a release was being built and
+        five shipped files ended up matching NEITHER HEAD NOR the worktree.
+
+        The pre-clone gate cannot catch that on its own: ``cp -cR`` is not a
+        snapshot, so a tree that measures clean at gate time can be edited
+        while it is still being copied. The artifact then corresponds to no
+        commit and no working tree, which is strictly worse than "dirty" —
+        there is nothing to diff it against, so it cannot be reviewed at all.
+
+        Comparing the porcelain population before and after closes that window
+        to "changed during the clone ⇒ refused". It cannot cry wolf on the
+        permanently-dirty ``workbench/``: the population is scoped to the
+        shipped subtrees, so a build only fails here if the code actually
+        being copied moved mid-copy.
+
+        Skipped when the tree was UNATTESTABLE going in — there is no baseline
+        to compare against, and that release is already labelled ``unknown``.
+
+        Returns the ``(tree_state, dirty_paths)`` pair that ``VERSION`` must
+        actually record. This is NOT the pre-clone pair on the override path:
+        if the tree moved mid-clone under ``allow_dirty``, attesting the
+        pre-clone measurement would stamp ``clean`` (or a short list) onto a
+        torn artifact — reintroducing through the override exactly the
+        inference ruling §3 forbids, and breaking §4's "the override stamps
+        the FULL porcelain list".
+        """
+        if before_state == TREE_STATE_UNKNOWN:
+            return before_state, before
+        after = self._dirty_paths_resolver(self._source_root, CODE_SUBTREES)
+        if after is None:
+            # Measurable before, unmeasurable after: we cannot say the clone
+            # captured a clean tree, so we must not claim it did.
+            self._logger.warning(
+                "tree state became UNATTESTABLE during the clone of %s; "
+                "downgrading tree_state to %r rather than keeping %r",
+                self._source_root, TREE_STATE_UNKNOWN, before_state,
+            )
+            return TREE_STATE_UNKNOWN, before
+        if after == before:
+            return before_state, before
+        appeared = [line for line in after if line not in before]
+        if allow_dirty:
+            self._logger.warning(
+                "tree changed DURING the clone (allow_dirty override): %s",
+                "; ".join(appeared) or "population changed",
+            )
+            return TREE_STATE_DIRTY, after
+        shutil.rmtree(staging, ignore_errors=True)
+        raise ReleaseManagerError(
+            f"working tree changed while the release was being cloned: "
+            f"{'; '.join(appeared) or 'the dirty population changed'}. The "
+            f"artifact would be a torn snapshot matching neither HEAD nor the "
+            f"working tree, so it could not be reviewed against anything. "
+            f"Re-run the build once the tree is quiet."
+        )
 
     def _resolve_git_sha(self) -> str:
         sha = self._git_sha_resolver(self._source_root)
@@ -1219,6 +1415,9 @@ class ReleaseManager:
         clone_timeout_seconds: float = CLONE_TIMEOUT_SECONDS_DEFAULT,
         clock: Callable[[], datetime] | None = None,
         git_sha_resolver: Callable[[Path], str] | None = None,
+        dirty_paths_resolver: (
+            Callable[[Path, tuple[str, ...]], tuple[str, ...] | None] | None
+        ) = None,
         strict_pth_validation: bool = False,
         mid_swap_hook: Callable[[], None] | None = None,
         ledger_write_hook: Callable[[str], None] | None = None,
@@ -1246,6 +1445,7 @@ class ReleaseManager:
             clone_timeout_seconds=clone_timeout_seconds,
             clock=clock or _default_clock,
             git_sha_resolver=git_sha_resolver or _default_git_sha,
+            dirty_paths_resolver=dirty_paths_resolver or _default_dirty_paths,
             strict_pth_validation=strict_pth_validation,
             logger=self._logger,
         )
@@ -1285,6 +1485,7 @@ class ReleaseManager:
         *,
         manifest_etag: str = "",
         schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = None,
+        allow_dirty: bool = False,
     ) -> CandidatePaths:
         """Materialize a fresh immutable release; see :meth:`ReleaseBuilder.build`.
 
@@ -1293,9 +1494,16 @@ class ReleaseManager:
         invoked against the materialized clone's ``code/``, whose result
         is recorded in ``VERSION`` + on ``CandidatePaths`` and later read
         back via :meth:`current_schema_snapshot`.
+
+        ``allow_dirty`` overrides the dirty-tree gate (see
+        :meth:`ReleaseBuilder.build`). No production call site passes it
+        today — by design, since it is the operator-confirmation path's
+        knob, not a deploy-verb default.
         """
         return self._builder.build(
-            manifest_etag=manifest_etag, schema_snapshot_fn=schema_snapshot_fn,
+            manifest_etag=manifest_etag,
+            schema_snapshot_fn=schema_snapshot_fn,
+            allow_dirty=allow_dirty,
         )
 
     def candidate_for(self, release_id: str) -> CandidatePaths:

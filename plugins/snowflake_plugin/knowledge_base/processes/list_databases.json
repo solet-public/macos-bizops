@@ -2,7 +2,7 @@
   "process_key": "plugin::snowflake_plugin::list_databases",
   "display_name": "Snowflake: List Databases",
   "description": "List databases visible to the configured role in the Snowflake account.",
-  "embedding_description": "Enumerate the Snowflake databases the operator's read-only service role can see, as a first step before querying or exploring schemas and tables. No parameters.",
+  "embedding_description": "List the Snowflake databases the operator's read-only warehouse role can see. The starting point for exploring the data warehouse: begin here, then drill into a database's schemas and their tables before writing a query against it.",
   "result_processor_customizations": {
     "action_label": "Snowflake databases listed",
     "result_type": "snowflake_list_databases_result",

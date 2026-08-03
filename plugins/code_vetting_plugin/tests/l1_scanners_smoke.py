@@ -12,12 +12,15 @@ runner (``quality_gates/run_smokes.py``) or directly with
 
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from code_vetting_plugin.models import Dimension
-from code_vetting_plugin.scanners import deps, duplication, hidden_unicode, secrets
+from code_vetting_plugin.scanners import deps, duplication, hidden_unicode, patterns, secrets
 from code_vetting_plugin.targets import TargetTree
+from code_vetting_plugin.toolrun import tool_available
 
 # The fixture's hidden char is built from an escape so this source file carries no
 # literal zero-width character (which the hidden-unicode scanner would rightly flag).
@@ -107,6 +110,111 @@ def test_absent_tool_records_coverage_gap() -> None:
     assert not result.findings
 
 
+# --- operator-PII pattern is RUNTIME-DERIVED, never a hardcoded literal -------------
+#
+# RED-FIRST (2026-07-31). `scanners/patterns.py` ships in seeds, so a hardcoded operator
+# name/email there is simultaneously a contamination guard and the exact leak the
+# identity_leak dimension exists to catch. These checks prove the value is sourced from
+# the RUNNING operator's git identity.
+#
+# ⚠ These assertions deliberately carry NO real identity token — not even as the thing
+# they forbid. A test that spelled out a real name/email to assert its absence would
+# re-introduce the leak into a test file, and tests now ship in seeds. So absence is
+# asserted STRUCTURALLY (no operator_pii entry may be baked into the static tuple) and
+# derivation is asserted with a SENTINEL, which also keeps the check machine-independent:
+# it stays valid on a host whose git identity genuinely is the origin operator's.
+
+_PII_CONSTRAINT = "identity:operator_pii"
+_SENTINEL_NAME = "Smoke Sentinel Not A Real Operator"
+_SENTINEL_EMAIL = "smoke.sentinel@example.invalid"
+
+
+def test_operator_pii_is_not_baked_into_the_static_pattern_tuple() -> None:
+    # Structural absence: if anyone re-hardcodes the PII pattern, it lands back in
+    # _PATTERNS and this goes red — without this file naming a single real atom.
+    baked = [p for p in patterns._PATTERNS if p.constraint == _PII_CONSTRAINT]  # noqa: SLF001
+    assert not baked, f"operator PII must be runtime-composed, found baked pattern(s): {baked}"
+
+
+def test_operator_pii_pattern_follows_the_running_git_identity() -> None:
+    # A hardcoded literal would ignore the patch and fail to contain the sentinel.
+    with patch.object(patterns, "_git_global_config", side_effect=[_SENTINEL_NAME, _SENTINEL_EMAIL]):
+        composed = patterns._operator_pii_pattern()  # noqa: SLF001
+    assert composed is not None, "a derivable git identity must produce a pattern"
+    assert composed.constraint == _PII_CONSTRAINT
+    assert re.escape(_SENTINEL_NAME) in composed.regex, composed.regex
+    assert re.escape(_SENTINEL_EMAIL) in composed.regex, composed.regex
+
+
+def test_operator_pii_atoms_are_regex_escaped() -> None:
+    # An unescaped '.' would widen the pattern into a wildcard, so a derived identity
+    # of "a.c" must NOT match the unrelated string "abc".
+    with patch.object(patterns, "_git_global_config", side_effect=["a.c", ""]):
+        composed = patterns._operator_pii_pattern()  # noqa: SLF001
+    assert composed is not None
+    assert re.search(composed.regex, "abc") is None, f"unescaped wildcard leaked: {composed.regex}"
+    assert re.search(composed.regex, "a.c") is not None, composed.regex
+
+
+def test_underivable_operator_identity_records_a_gap_not_an_empty_pattern() -> None:
+    # Both atoms unset: the pattern must be OMITTED and the loss DISCLOSED. Interpolating
+    # "" would produce an empty alternation branch that matches every file.
+    #
+    # The composition half is HERMETIC and always runs. The scan()-wiring half needs `rg` on
+    # PATH, and ripgrep is one of the tools a born seed does not declare or install (Dax
+    # Part 31) — so it is guarded rather than allowed to red for a missing tool. Guarding is
+    # safe here because the assertion that actually carries the fix (no empty pattern is ever
+    # composed) is the unguarded one above it.
+    with patch.object(patterns, "_git_global_config", return_value=""):
+        assert patterns._operator_pii_pattern() is None  # noqa: SLF001
+        if not tool_available("rg"):
+            print("SKIP scan()-wiring half: rg not on PATH (composition half still asserted)")
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            result = patterns.scan(_make_tree(Path(tmp)), "rid")
+    assert result.coverage.ran, "the rest of the battery still runs"
+    assert result.coverage.gap_reason is not None, "the un-derivable PII pattern must be disclosed"
+    assert _PII_CONSTRAINT in result.coverage.gap_reason
+    assert not any(f.constraint_violated == _PII_CONSTRAINT for f in result.findings)
+
+
+def test_operator_pii_finding_redacts_the_matched_value() -> None:
+    """The detector must not reproduce the value it detects into its own report.
+
+    RED-FIRST: the composed pattern was built without ``redact=True``, so ``_pattern_findings``
+    took the ``else`` branch of ``shown = _redacted(...) if pattern.redact else first_match``
+    and wrote the matched identity verbatim into ``evidence`` — which is persisted to
+    ``vetting_runs.report`` and handed to third parties. A detector for "this value must not
+    travel" was therefore the thing that made it travel.
+
+    Asserting the FINDING FIRES is not enough to catch that; this asserts what the finding SAYS.
+    The value used is the sentinel, never a real identity — tests ship.
+    """
+    # Structural half: hermetic, no `rg` needed, and it is the assertion that pins the fix.
+    with patch.object(patterns, "_git_global_config", side_effect=[_SENTINEL_NAME, _SENTINEL_EMAIL]):
+        composed = patterns._operator_pii_pattern()  # noqa: SLF001
+    assert composed is not None
+    assert composed.redact, "the operator-PII pattern MUST redact its match; every secret pattern does"
+
+    # End-to-end half: prove the redaction actually reaches `evidence`. Guarded on `rg` for the
+    # same reason as the gap test above — a born seed does not declare ripgrep.
+    if not tool_available("rg"):
+        print("SKIP evidence half: rg not on PATH (redact flag still asserted structurally)")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        leak = root / "docs" / "leak.md"
+        leak.parent.mkdir(parents=True, exist_ok=True)
+        leak.write_text(f"contact: {_SENTINEL_EMAIL}\n", encoding="utf-8")
+        with patch.object(patterns, "_git_global_config", side_effect=[_SENTINEL_NAME, _SENTINEL_EMAIL]):
+            result = patterns.scan(TargetTree.from_walk(root), "rid-redact")
+    pii = [f for f in result.findings if f.constraint_violated == _PII_CONSTRAINT]
+    assert pii, "the sentinel identity must be detected at all, or the test below proves nothing"
+    for finding in pii:
+        assert _SENTINEL_EMAIL not in finding.evidence, f"matched value leaked into evidence: {finding.evidence}"
+        assert "<redacted" in finding.evidence, f"expected a redacted placeholder, got: {finding.evidence}"
+
+
 def main() -> int:
     tests = [
         test_hidden_unicode_flags_zero_width,
@@ -114,6 +222,11 @@ def main() -> int:
         test_license_flags_non_two_bucket_spdx,
         test_duplication_flags_exact_block,
         test_absent_tool_records_coverage_gap,
+        test_operator_pii_is_not_baked_into_the_static_pattern_tuple,
+        test_operator_pii_pattern_follows_the_running_git_identity,
+        test_operator_pii_atoms_are_regex_escaped,
+        test_underivable_operator_identity_records_a_gap_not_an_empty_pattern,
+        test_operator_pii_finding_redacts_the_matched_value,
     ]
     for test in tests:
         test()

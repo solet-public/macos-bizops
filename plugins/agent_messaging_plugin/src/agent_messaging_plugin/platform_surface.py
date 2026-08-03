@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
     from .bridge_sessions import BridgeSessionManager
     from .models import BridgeSessionState
+    from .peer_registry import PeerRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,38 @@ _PROCESS_SEARCH_MAX_RESULTS: Final[int] = 50
 _QUERY_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9]+")
 
 
+def _role_for_instance(
+    state_service: Any, agent_instance_id: str, *, purpose: str,
+) -> str:
+    """The durable role held by ``agent_instance_id``, or "" — degrade-silent.
+
+    Single lookup shared by the two role tags a ``process_call`` flow carries:
+    the originating bridge's own role (``inference_vertex_role``) and, for an
+    unregistered caller, the role of the session its §34.6 attribution key
+    resolved to (``caller_attribution_role``). ``purpose`` names the caller in
+    the degrade log so the two stay distinguishable in a fault trace.
+
+    Module-level rather than a method so it depends on the state service alone
+    — the surface's own methods are bound onto minimal duck-typed harnesses in
+    the smokes, and a method-to-method call would couple those to the whole
+    class.
+    """
+    if state_service is None or not agent_instance_id:
+        return ""
+    try:
+        roles = list_roles_for_agent_instance(state_service, agent_instance_id)
+    except Exception:  # noqa: BLE001 — degrade to roleless; never break dispatch
+        logger.warning(
+            "role lookup for %s failed (agent_instance_id=%s); degrading to "
+            "roleless tag — process_call dispatch proceeds",
+            purpose,
+            agent_instance_id,
+            exc_info=True,
+        )
+        return ""
+    return roles[0] if roles else ""
+
+
 class BridgeError(Exception):
     """Failure raised by :class:`PlatformSurface` methods.
 
@@ -96,6 +129,38 @@ class DownloadedBlob:
     mime_type: str
 
 
+@dataclass(frozen=True, slots=True)
+class CallerAttribution:
+    """§34.6: SERVER-DERIVED sender provenance for an unregistered caller.
+
+    An unregistered caller (the local CLI's one-shot bridge) asserts only an
+    opaque ``agent_session_id``; every field here is read out of the peer
+    registry row that key resolved to, never out of the request. All-empty is
+    the honest "could not resolve" state, and the send path treats it exactly
+    as it treats a caller that supplied nothing — the system sentinel.
+    """
+
+    agent_id: str = ""
+    agent_instance_id: str = ""
+    session_label: str = ""
+    role: str = ""
+
+    def as_trigger_fields(self) -> dict[str, object]:
+        """The ``caller_attribution_*`` keys for a flow's ``trigger_data``.
+
+        Deliberately a SEPARATE key family from ``inference_vertex_*``: that
+        one is consumed by the inference-vertex resolver to bind a per-bridge
+        ``SessionInferenceProvider``, so reusing it would route a CLI-triggered
+        flow's INFERENCE to the attributed session — far outside attribution.
+        """
+        return {
+            "caller_attribution_agent_id": self.agent_id,
+            "caller_attribution_instance_id": self.agent_instance_id,
+            "caller_attribution_label": self.session_label,
+            "caller_attribution_role": self.role,
+        }
+
+
 class PlatformSurface:
     """Façade over the platform services the bridge HTTP layer needs.
 
@@ -111,6 +176,7 @@ class PlatformSurface:
         flow_manager: Any,
         compilation_context_builder: Any,
         bridge_manager: BridgeSessionManager,
+        peer_registry: PeerRegistry | None = None,
         process_registry: dict[str, object] | None = None,
         discovery_service: Any | None = None,
         state_service: Any | None = None,
@@ -124,6 +190,7 @@ class PlatformSurface:
         self._flow_manager = flow_manager
         self._compilation_context_builder = compilation_context_builder
         self._bridge_manager = bridge_manager
+        self._peer_registry = peer_registry
         self._process_registry = process_registry
         self._discovery_service = discovery_service
         self._state_service = state_service
@@ -527,6 +594,7 @@ class PlatformSurface:
                 reason=reason,
                 inference_vertex_role=self._resolve_originating_role(bridge),
                 operator_equivalent=self._resolve_operator_equivalent(bridge),
+                caller_attribution=self._resolve_caller_attribution(bridge),
             ),
             priority=5,
         )
@@ -594,22 +662,65 @@ class PlatformSurface:
         MUST degrade to roleless here rather than break dispatch. Tag write
         can degrade, never break — swallow ANY lookup error and return "".
         """
-        if self._state_service is None or not bridge.agent_instance_id:
-            return ""
+        return _role_for_instance(
+            self._state_service,
+            bridge.agent_instance_id or "",
+            purpose="inference_vertex_role",
+        )
+
+    def _resolve_caller_attribution(
+        self, bridge: BridgeSessionState,
+    ) -> CallerAttribution:
+        """§34.6: derive sender provenance for an UNREGISTERED caller, or empty.
+
+        The local CLI opens a one-shot bridge and deliberately never registers
+        a peer identity (registering would sweep its own session's registry row
+        by ``session_label`` and delete it again at close), so
+        ``bridge.agent_instance_id`` is empty and every CLI-originated send was
+        stamped ``System (Scheduler)``. The caller instead supplies the opaque
+        launcher-exported ``agent_session_id`` at ``bridge/open``; the identity
+        is read HERE, out of the peer-registry row that key resolves to — the
+        caller asserts a routing key, the server binds the content.
+
+        Skipped entirely for a bridge that HAS registered: its own registered
+        identity already flows through ``inference_vertex_*`` and is strictly
+        better evidence than a key the caller typed.
+
+        Degrade-silent on every fault, matching
+        :meth:`_resolve_originating_role`: this runs outside the caller's error
+        envelope on every ``process_call``, and
+        ``resolve_by_agent_session_id`` raises ``PeerSessionAmbiguousError``
+        when one session id somehow carries two live bindings. Attribution is
+        best-effort provenance — never a precondition for dispatch.
+        """
+        if bridge.agent_instance_id or not bridge.caller_agent_session_id:
+            return CallerAttribution()
+        if self._peer_registry is None:
+            return CallerAttribution()
         try:
-            roles = list_roles_for_agent_instance(
-                self._state_service, bridge.agent_instance_id,
+            binding = self._peer_registry.resolve_by_agent_session_id(
+                bridge.caller_agent_session_id,
             )
-        except Exception:  # noqa: BLE001 — degrade to roleless; never break dispatch
+        except Exception:  # noqa: BLE001 — degrade to unattributed; never break dispatch
             logger.warning(
-                "role lookup for inference_vertex_role failed "
-                "(agent_instance_id=%s); degrading to roleless tag — "
-                "process_call dispatch proceeds",
-                bridge.agent_instance_id,
+                "caller attribution lookup failed (agent_session_id=%s); "
+                "degrading to the system sentinel — dispatch proceeds",
+                bridge.caller_agent_session_id,
                 exc_info=True,
             )
-            return ""
-        return roles[0] if roles else ""
+            return CallerAttribution()
+        if binding is None:
+            return CallerAttribution()
+        return CallerAttribution(
+            agent_id=binding.agent_id,
+            agent_instance_id=binding.agent_instance_id,
+            session_label=binding.session_label,
+            role=_role_for_instance(
+                self._state_service,
+                binding.agent_instance_id,
+                purpose="caller_attribution_role",
+            ),
+        )
 
     def set_operator_equivalent_check(
         self, callback: Callable[[str], bool],
@@ -656,6 +767,7 @@ class PlatformSurface:
         reason: str,
         inference_vertex_role: str,
         operator_equivalent: bool,
+        caller_attribution: CallerAttribution = CallerAttribution(),  # noqa: B008 — frozen+slots dataclass, immutable shared default
     ) -> dict[str, object]:
         """Build the per-call trigger_data carried through the flow service.
 
@@ -693,6 +805,13 @@ class PlatformSurface:
             # for roleless sessions. Empty string when the bridge holds no
             # role.
             "inference_vertex_role": inference_vertex_role,
+            # §34.6: SERVER-DERIVED provenance for an unregistered caller (the
+            # local CLI). A separate key family from ``inference_vertex_*`` on
+            # purpose — only the send verbs' sender-stamping reads these, so an
+            # attributed CLI call can never re-point the flow's inference
+            # vertex at the attributed session. All-empty for every registered
+            # caller and for an unresolvable key.
+            **caller_attribution.as_trigger_fields(),
         }
         if bridge.client_id:
             trigger["authenticated_principal"] = {

@@ -59,18 +59,21 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import marketing_actions
+from . import export_containment, marketing_actions
 from .app_config import AppConfigError, AppConfigLoader
 from .constants import (
-    BLOB_NAMESPACE,
+    CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
     CONFIG_KEY_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_ROW_LIMIT,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
     ERROR_API_ERROR,
-    ERROR_BLOB_STORAGE_NOT_AVAILABLE,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
-    INLINE_BYTE_CAP,
+    MARKETO_LIST_PAGE_ROW_CAP,
+    MARKETO_LIST_ROW_LIMIT_CAP,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
     PLUGIN_NAME,
     RESULT_TYPE_ADD_LEADS_TO_LIST,
     RESULT_TYPE_CHECK_SETUP,
@@ -106,7 +109,6 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         super().__init__()
         self.logger: logging.Logger | None = None
         self._address_book_service: Any | None = None
-        self._blob_storage_service: Any | None = None
         self._app_config_loader: AppConfigLoader | None = None
         self._client: MarketoClient | None = None
 
@@ -152,12 +154,6 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
                 f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires "
                 "address_book_service to resolve the marketo_instance credentials"
             )
-        # blob_storage is needed only for the four spilling reads and is
-        # resolved lazily at first use (_blob_service): the platform constructs
-        # blob_storage_service in the init_service_manager startup step, AFTER
-        # every plugin's prepare_for_readiness — resolving it here caches None
-        # forever and every spill hard-fails (field-verified on a live
-        # deployment).
         self._app_config_loader = AppConfigLoader(self._address_book_service)
         self.set_ready()
 
@@ -197,44 +193,33 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
-    def _blob_service(self) -> Any | None:
-        """Resolve blob_storage_service lazily at point of use (cached once found).
+    def _export_path_gate(self, output_tsv_path: str) -> str:
+        """Admit an export path via workspace-root containment; return the realpath.
 
-        Readiness-time resolution is a known trap: the platform constructs
-        blob_storage_service after every plugin's prepare_for_readiness, so a
-        readiness-time get_service() returns None and the miss would be cached
-        for the life of the plugin.
+        Binds the operator's ``export_allowed_roots`` config (yaml default
+        ``[]`` = refuse-all; no hardcoded callsite default per authoring trap
+        #10) to the own-copy containment gate. A malformed config value is a
+        loud config fault, never a silent admit-all or refuse-all.
         """
-        if self._blob_storage_service is None and self.orchestrator_ref is not None:
-            self._blob_storage_service = self.orchestrator_ref.get_service("blob_storage_service")
-        return self._blob_storage_service
-
-    def _store_blob(self, content: bytes, filename: str, mime_type: str) -> str:
-        """Store a spilled result as a blob; return the blob id (the *_blob_key)."""
-        blob_service = self._blob_service()
-        if blob_service is None:
-            raise MarketoServiceError(
-                ERROR_BLOB_STORAGE_NOT_AVAILABLE,
-                f"blob_storage_service is not available for result spill: the serialized "
-                f"result is {len(content)} bytes and the inline-return cap is "
-                f"{INLINE_BYTE_CAP} bytes; request fewer ids/fields (or a smaller page) "
-                f"so the result fits inline",
-            )
-        result = blob_service.store_blob(
-            BLOB_NAMESPACE, content, {"filename": filename, "mime_type": mime_type}
+        config = self.config_provider or {}
+        raw_roots = config.get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS)
+        roots: list[str] = []
+        if raw_roots is not None:
+            if not isinstance(raw_roots, list) or not all(
+                isinstance(entry, str) for entry in raw_roots
+            ):
+                raise MarketoServiceError(
+                    ERROR_NOT_CONFIGURED,
+                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory "
+                    "path strings",
+                )
+            roots = list(raw_roots)
+        return export_containment.assert_export_path_allowed(
+            output_tsv_path,
+            roots,
+            config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
+            plugin_name=self.name,
         )
-        if not isinstance(result, dict) or result.get("action_status") != "completed":
-            raise MarketoServiceError(
-                ERROR_BLOB_STORAGE_NOT_AVAILABLE,
-                f"failed to store result blob for '{filename}' ({len(content)} bytes)",
-            )
-        blob_id = (result.get("data") or {}).get("blob_id")
-        if not isinstance(blob_id, str) or not blob_id:
-            raise MarketoServiceError(
-                ERROR_BLOB_STORAGE_NOT_AVAILABLE,
-                f"blob storage returned no blob_id for '{filename}' ({len(content)} bytes)",
-            )
-        return blob_id
 
     def _run(self, produce: Callable[[MarketoClient], dict[str, Any]], endpoint_name: str) -> dict[str, Any]:
         """Shared error-classification path for every Marketo verb."""
@@ -245,7 +230,7 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             return self._error(ERROR_INVALID_PARAMS, str(exc))
         except AppConfigError as exc:
             return self._error(ERROR_NOT_CONFIGURED, str(exc))
-        except MarketoServiceError as exc:
+        except (MarketoServiceError, export_containment.ExportPathRefusedError) as exc:
             return self._error(exc.code, str(exc))
         except MarketoAuthError:
             return self._error("marketo.auth_failed", "Marketo OAuth token request failed.")
@@ -293,23 +278,41 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         name="describe_lead_fields",
         display_name="Marketo: Describe Lead Fields",
         description=(
-            "Fetch the full lead field metadata list and the instance-specific "
-            "searchable_fields accepted by get_leads.filter_type."
+            "Fetch the full lead field metadata list and the instance-specific searchable_fields "
+            "accepted by get_leads.filter_type, when the instance's describe response carries that "
+            "field. ALWAYS writes the field descriptors to the caller-supplied output_tsv_path, "
+            "never inline — this is a business-connector record-read verb under the 07-29 spill "
+            "floor even though its content is schema metadata, not customer PII."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={},
+        parameters={
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+            ),
+        },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description=(
-                "records (field descriptors) inline or result_blob_key on "
-                "spill, plus row_count and searchable_fields."
-            ),
+            description="A handle to the written TSV, plus searchable_fields.",
+            properties={
+                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
+                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of field descriptors written."),
+                "columns": ParameterMetadata(type=ParameterType.LIST, description="Field-descriptor column names, in first-appearance order."),
+                "searchable_fields": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Field names valid for get_leads.filter_type; null on an instance whose describe response omits it.",
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def describe_lead_fields(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: marketing_actions.describe_lead_fields(client, params, self._store_blob), "describe_lead_fields")
+        return self._run(
+            lambda client: marketing_actions.describe_lead_fields(client, params, self._export_path_gate),
+            "describe_lead_fields",
+        )
 
     @platform_process(
         name="get_api_usage",
@@ -345,10 +348,23 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         name="get_leads",
         display_name="Marketo: Get Leads",
         description=(
-            "Query leads by an instance-supported filter_type and up to 300 "
-            "filter_values. Read describe_lead_fields.searchable_fields to "
-            "discover valid standard and custom filter types first. Optional "
-            "fields restrict returned columns; next_page_token continues a page."
+            "Query leads by an instance-supported filter_type and up to 300 filter_values. Read "
+            "describe_lead_fields.searchable_fields to discover valid standard and custom filter "
+            "types first. ALWAYS writes the matching leads to output_tsv_path, never inline. Pages "
+            f"internally across Marketo's own {MARKETO_LIST_PAGE_ROW_CAP}-per-call ceiling (fixed "
+            "server-side, no query-side parameter to raise) up to the effective row limit — this "
+            f"verb never returns a partial page for you to continue; defaults to {DEFAULT_ROW_LIMIT} "
+            "to avoid exhausting vendor rate limits and disk, and to discourage pulling all records "
+            "for client-side filtering a vendor query should do instead. To fetch more, pass "
+            f"acknowledge_default_limit_override=true together with an explicit row_limit (up to "
+            f"{MARKETO_LIST_ROW_LIMIT_CAP}) — both required together, refused rather than clamped "
+            f"above {MARKETO_LIST_ROW_LIMIT_CAP}. Beyond the hard cap there is no resumption: "
+            "re-invoke with a narrower filter_values slice (e.g. a 45,000-lead job needs several "
+            f"non-overlapping calls, ~{MARKETO_LIST_ROW_LIMIT_CAP // MARKETO_LIST_PAGE_ROW_CAP} "
+            "internal vendor calls each) — check get_api_usage first if the daily quota is a "
+            "concern for a large pull. Optional fields restricts returned columns — prefer "
+            "requesting stable ID and status fields over email, phone, or address fields when the "
+            "goal is validation rather than a task that genuinely needs them."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -362,33 +378,75 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             ),
             "filter_values": ParameterMetadata(type=ParameterType.LIST, required=True, description="Up to 300 filter values to match."),
             "fields": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional list of lead field API names to return."),
-            "next_page_token": ParameterMetadata(type=ParameterType.STRING, required=False, description="Continue a prior get_leads page."),
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    f"Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} leads."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit record ceiling, up to {MARKETO_LIST_ROW_LIMIT_CAP}. Only honored "
+                    f"together with acknowledge_default_limit_override=true; refused (not clamped) "
+                    f"above {MARKETO_LIST_ROW_LIMIT_CAP}."
+                ),
+            ),
         },
         return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT, description="records inline or result_blob_key on spill, plus row_count, next_page_token, more_result."
+            type=ParameterType.OBJECT,
+            description="A handle to the written TSV — never records inline, at any size.",
+            properties={
+                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
+                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of leads written."),
+                "columns": ParameterMetadata(type=ParameterType.LIST, description="Lead field names, in first-appearance order."),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN, description="True when row_count hit the effective limit — more leads may exist.",
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def get_leads(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: marketing_actions.get_leads(client, params, self._store_blob), "get_leads")
+        return self._run(
+            lambda client: marketing_actions.get_leads(client, params, self._export_path_gate), "get_leads",
+        )
 
     @platform_process(
         name="list_activity_types",
         display_name="Marketo: List Activity Types",
         description=(
-            "List the configured Marketo instance's activity type ids and "
-            "metadata. Use these per-instance ids as the mandatory "
-            "activity_type_ids for get_activities."
+            "List the configured Marketo instance's activity type ids and metadata. Use these "
+            "per-instance ids as the mandatory activity_type_ids for get_activities. ALWAYS writes "
+            "the catalog to output_tsv_path, never inline — this is a business-connector "
+            "record-read verb under the 07-29 spill floor even though its content is instance "
+            "metadata, not customer PII."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={},
+        parameters={
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+            ),
+        },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description=(
-                "records (activity type descriptors) inline or result_blob_key "
-                "on spill, plus row_count."
-            ),
+            description="A handle to the written TSV.",
+            properties={
+                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
+                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of activity type descriptors written."),
+                "columns": ParameterMetadata(type=ParameterType.LIST, description="Descriptor column names, in first-appearance order."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
@@ -402,7 +460,7 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             lambda client: marketing_actions.list_activity_types(
                 client,
                 params,
-                self._store_blob,
+                self._export_path_gate,
             ),
             "list_activity_types",
         )
@@ -413,38 +471,38 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Read the Marketo activity log — what leads actually DID, or had done to them "
             "(emails sent/delivered, alerts, campaign requests, data value changes). Pass "
-            "since_datetime (ISO-8601) to start a new read, or next_page_token to continue. "
-            "The since_datetime boundary is second-granularity: a fractional-seconds component "
-            "is floor-truncated before the paging-token request because Marketo otherwise "
-            "rewinds that window to midnight UTC; every other byte is preserved. "
-            "activity_type_ids is mandatory on every page (max 10); discover valid ids with "
-            "list_activity_types. Optional lead_ids (max 30) filter server-side. "
+            "since_datetime (ISO-8601, second-granularity — a fractional-seconds component is "
+            "floor-truncated before the paging-token request because Marketo otherwise rewinds "
+            "that window to midnight UTC). activity_type_ids is mandatory (max 10); discover "
+            "valid ids with list_activity_types. Optional lead_ids (max 30) filter server-side. "
             "AFTER-THE-FACT audit: it reports what a write already caused; it cannot promise "
-            "that a future merge/update will stay silent. PAGING: more_result is the only usable "
-            "continuation signal here — Adobe documents that this endpoint always returns a "
-            "token, so token presence cannot terminate the loop (the inverse of get_leads/"
-            "list_campaigns/list_static_lists). Page until more_result is false; a page with "
-            "fewer than 300 items does not mean the end. The flag's reliability on this endpoint "
-            "is documented but UNMEASURED — the one live measurement of moreResult anywhere found "
-            "it violated on list_campaigns, and here there is no fallback."
+            "that a future merge/update will stay silent. ALWAYS writes to output_tsv_path, "
+            f"never inline. Pages internally across Marketo's own {MARKETO_LIST_PAGE_ROW_CAP}-"
+            "per-call ceiling up to the effective row limit — no pagination token appears on "
+            f"this verb; defaults to {DEFAULT_ROW_LIMIT}. To fetch more, pass "
+            "acknowledge_default_limit_override=true together with an explicit row_limit (up to "
+            f"{MARKETO_LIST_ROW_LIMIT_CAP}) — both required together, refused rather than clamped "
+            f"above {MARKETO_LIST_ROW_LIMIT_CAP}. Beyond the hard cap: no resumption, re-invoke "
+            "with a later since_datetime. moreResult is the ONLY usable vendor continuation "
+            "signal internally (Adobe documents this endpoint always returns a token, so token "
+            "presence can't terminate the loop, unlike get_leads/list_campaigns/list_static_lists) "
+            "and its reliability on this endpoint is documented but UNMEASURED — the one live "
+            "measurement of moreResult anywhere found it violated on list_campaigns, so "
+            "truncated=false here is only as honest as Marketo's own flag. Prefer requesting "
+            "stable ID and status fields for validation over email or other PII-bearing fields."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "since_datetime": ParameterMetadata(
                 type=ParameterType.STRING,
-                required=False,
+                required=True,
                 description=(
                     "Second-granularity ISO-8601 instant to read activities from "
                     "(e.g. 2026-07-28T00:00:00-07:00). A fractional-seconds "
                     "component is floor-truncated before the paging-token request; "
-                    "all other bytes are preserved. Required unless next_page_token "
-                    "is given."
+                    "all other bytes are preserved. To read further than the "
+                    "effective row limit reaches, re-invoke with a later instant."
                 ),
-            ),
-            "next_page_token": ParameterMetadata(
-                type=ParameterType.STRING,
-                required=False,
-                description="Continue a prior get_activities page. Required unless since_datetime is given.",
             ),
             "lead_ids": ParameterMetadata(
                 type=ParameterType.LIST,
@@ -454,25 +512,54 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             "activity_type_ids": ParameterMetadata(
                 type=ParameterType.LIST,
                 required=True,
+                description="One to 10 ids from list_activity_types for this Marketo instance.",
+            ),
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
                 description=(
-                    "One to 10 ids from list_activity_types for this Marketo "
-                    "instance. Required on every page."
+                    f"Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} activity items."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit record ceiling, up to {MARKETO_LIST_ROW_LIMIT_CAP}. Only honored "
+                    f"together with acknowledge_default_limit_override=true; refused (not clamped) "
+                    f"above {MARKETO_LIST_ROW_LIMIT_CAP}."
                 ),
             ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description=(
-                "records (activity items) + row_count + spilled=false inline, OR result_blob_key "
-                "+ row_count + spilled=true when large; plus next_page_token and more_result. "
-                "more_result true means keep paging even if records is empty."
-            ),
+            description="A handle to the written TSV — never records inline, at any size.",
+            properties={
+                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
+                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of activity items written."),
+                "columns": ParameterMetadata(type=ParameterType.LIST, description="Activity-item field names, in first-appearance order."),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description=(
+                        "True when row_count hit the effective limit or the vendor's own "
+                        "moreResult flag never went false — more activity items may exist."
+                    ),
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def get_activities(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: marketing_actions.get_activities(client, params, self._store_blob), "get_activities")
+        return self._run(
+            lambda client: marketing_actions.get_activities(client, params, self._export_path_gate), "get_activities",
+        )
 
     @platform_process(
         name="create_or_update_leads",
@@ -540,25 +627,63 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         name="list_campaigns",
         display_name="Marketo: List Campaigns",
         description=(
-            "List campaigns, optionally filtered by names and/or program_names. Marketo pages "
-            "at 300 campaigns — check more_result and continue with next_page_token, otherwise "
-            "an instance with more than 300 campaigns gives you an arbitrary slice."
+            "List campaigns, optionally filtered by names and/or program_names. ALWAYS writes to "
+            f"output_tsv_path, never inline. Pages internally across Marketo's own "
+            f"{MARKETO_LIST_PAGE_ROW_CAP}-per-call ceiling up to the effective row limit — no "
+            f"pagination token appears on this verb; defaults to {DEFAULT_ROW_LIMIT} to avoid "
+            "exhausting vendor rate limits and disk. To fetch more, pass "
+            "acknowledge_default_limit_override=true together with an explicit row_limit (up to "
+            f"{MARKETO_LIST_ROW_LIMIT_CAP}) — both required together, refused rather than clamped "
+            f"above {MARKETO_LIST_ROW_LIMIT_CAP}. Beyond the hard cap: no resumption, re-invoke "
+            "with a narrower names/program_names filter. Prefer selecting on stable campaign IDs "
+            "downstream over other fields when the goal is validation."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "names": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional list of exact campaign names to filter by."),
             "program_names": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional list of exact program names to filter by."),
-            "next_page_token": ParameterMetadata(type=ParameterType.STRING, required=False, description="Continue a prior list_campaigns page."),
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    f"Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} campaigns."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit record ceiling, up to {MARKETO_LIST_ROW_LIMIT_CAP}. Only honored "
+                    f"together with acknowledge_default_limit_override=true; refused (not clamped) "
+                    f"above {MARKETO_LIST_ROW_LIMIT_CAP}."
+                ),
+            ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="records inline or result_blob_key on spill, plus row_count, next_page_token, more_result.",
+            description="A handle to the written TSV — never records inline, at any size.",
+            properties={
+                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
+                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of campaigns written."),
+                "columns": ParameterMetadata(type=ParameterType.LIST, description="Campaign field names, in first-appearance order."),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN, description="True when row_count hit the effective limit — more campaigns may exist.",
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_campaigns(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: marketing_actions.list_campaigns(client, params, self._store_blob), "list_campaigns")
+        return self._run(
+            lambda client: marketing_actions.list_campaigns(client, params, self._export_path_gate), "list_campaigns",
+        )
 
     @platform_process(
         name="trigger_campaign",
@@ -567,9 +692,12 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             "Trigger (Request Campaign) a campaign for up to 100 leads, with optional campaign "
             "tokens. Destructive-class write action: the campaign's flow runs against real people, "
             "is irreversible, and is visible outside this system (it may send email, alert sales, "
-            "change scoring, or move program status). Marketo's REST API exposes no way to read a "
-            "campaign's flow steps first and no dry-run, so a caller cannot establish what this "
-            "will do before it happens — trigger only campaigns you authored."
+            "change scoring, or move program status). A Smart Campaign has two halves: the Smart "
+            "List (who/when it fires) IS inspectable via Marketo's Smart Lists Asset API with "
+            "includeRules=true; the Flow (what it actually does — Send Email, Change Data Value, "
+            "Wait, etc) is NOT — no REST endpoint dereferences a campaign's flowId into its steps, "
+            "and there is no dry-run. So a caller can see who/when but never what happens before "
+            "triggering — trigger only campaigns you authored."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -588,23 +716,63 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         name="list_static_lists",
         display_name="Marketo: List Static Lists",
         description=(
-            "List static lists, optionally filtered by names. Same 300-per-page cap as "
-            "list_campaigns — check more_result and continue with next_page_token."
+            "List static lists, optionally filtered by names. Same page-cap shape as "
+            "list_campaigns. ALWAYS writes to output_tsv_path, never inline. Pages internally "
+            f"across Marketo's own {MARKETO_LIST_PAGE_ROW_CAP}-per-call ceiling up to the "
+            f"effective row limit — no pagination token appears on this verb; defaults to "
+            f"{DEFAULT_ROW_LIMIT} to avoid exhausting vendor rate limits and disk. To fetch more, "
+            "pass acknowledge_default_limit_override=true together with an explicit row_limit "
+            f"(up to {MARKETO_LIST_ROW_LIMIT_CAP}) — both required together, refused rather than "
+            f"clamped above {MARKETO_LIST_ROW_LIMIT_CAP}. Beyond the hard cap: no resumption, "
+            "re-invoke with a narrower names filter. Prefer selecting on stable list IDs "
+            "downstream over other fields when the goal is validation."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "names": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional list of exact static list names to filter by."),
-            "next_page_token": ParameterMetadata(type=ParameterType.STRING, required=False, description="Continue a prior list_static_lists page."),
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    f"Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} static lists."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit record ceiling, up to {MARKETO_LIST_ROW_LIMIT_CAP}. Only honored "
+                    f"together with acknowledge_default_limit_override=true; refused (not clamped) "
+                    f"above {MARKETO_LIST_ROW_LIMIT_CAP}."
+                ),
+            ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="records inline or result_blob_key on spill, plus row_count, next_page_token, more_result.",
+            description="A handle to the written TSV — never records inline, at any size.",
+            properties={
+                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
+                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of static lists written."),
+                "columns": ParameterMetadata(type=ParameterType.LIST, description="Static-list field names, in first-appearance order."),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN, description="True when row_count hit the effective limit — more static lists may exist.",
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_static_lists(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: marketing_actions.list_static_lists(client, params, self._store_blob), "list_static_lists")
+        return self._run(
+            lambda client: marketing_actions.list_static_lists(client, params, self._export_path_gate),
+            "list_static_lists",
+        )
 
     @platform_process(
         name="add_leads_to_list",
@@ -688,7 +856,7 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
     )
     def check_setup(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         return self._run(
-            lambda client: marketing_actions.check_setup(client, self._store_blob), "check_setup"
+            lambda client: marketing_actions.check_setup(client), "check_setup"
         )
 
 

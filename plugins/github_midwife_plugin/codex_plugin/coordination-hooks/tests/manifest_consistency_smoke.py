@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+"""Pin the reviewed stock-Codex hook inventory and routing contract."""
+
+from __future__ import annotations
+
+import ast
+import importlib.util
+import json
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+sys.dont_write_bytecode = True
+
+from _harness import HOOKS_DIR, PLUGIN_ROOT, Results, preflight  # noqa: E402
+
+EXPECTED = Counter(
+    {
+        ("UserPromptSubmit", "", "step_zero_reminder.js"): 1,
+        ("UserPromptSubmit", "", "check_messages_reminder.js"): 1,
+        ("SessionStart", "startup|resume|clear", "check_messages_reminder.js"): 1,
+        ("SessionStart", "startup|resume|clear", "role_binding_reminder.js"): 1,
+        ("Stop", "", "wake_waiter.js"): 1,
+        ("PreToolUse", "^Bash$", "git_controller_gate.py"): 1,
+    }
+)
+COMMAND_RE = re.compile(
+    r"^(node|python3) \$\{PLUGIN_ROOT\}/hooks/([A-Za-z0-9_]+\.(?:js|py))$"
+)
+HOOK_KEYWORDS = {
+    "step_zero_reminder.js": ("project-orientation", "step-zero"),
+    "check_messages_reminder.js": ("coordination reminder", "unread-message"),
+    "role_binding_reminder.js": ("role-binding", "role binding"),
+    "wake_waiter.js": ("wake waiter", "idle-wake"),
+    "git_controller_gate.py": ("git-controller", "git controller"),
+}
+DOCUMENTS = (
+    "hooks/hooks.json",
+    "README.md",
+    "SECURITY.md",
+    ".codex-plugin/plugin.json",
+)
+NETWORK_MODULES = frozenset(
+    {"aiohttp", "http", "httpx", "requests", "socket", "urllib", "websocket", "websockets"}
+)
+PROCESS_MODULES = frozenset({"commands", "pty", "subprocess"})
+PYTHON_WRITE_CALLS = frozenset(
+    {"makedirs", "mkdir", "open", "remove", "rename", "replace", "unlink", "write_bytes", "write_text"}
+)
+NODE_WRITE_TOKENS = (
+    "appendFile",
+    "copyFile",
+    "createWriteStream",
+    "mkdir",
+    "rename",
+    "rmSync",
+    "unlink",
+    "writeFile",
+)
+NODE_PROCESS_TOKENS = ("child_process", "execFile", "execSync", "spawn(", "spawnSync")
+
+
+def _load_gate() -> ModuleType:
+    path = HOOKS_DIR / "git_controller_gate.py"
+    spec = importlib.util.spec_from_file_location("codex_gate_manifest_smoke", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _entry_points() -> set[str]:
+    return {
+        path.name
+        for path in HOOKS_DIR.iterdir()
+        if path.is_file()
+        and path.suffix in {".js", ".py"}
+        and not path.name.startswith("_")
+    }
+
+
+def _python_imports(tree: ast.AST) -> set[str]:
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            imports.add(node.module.split(".")[0])
+    return imports
+
+
+def _check_javascript_source(res: Results, path: Path, source: str) -> None:
+    requires = set(re.findall(r"require\(\s*['\"]([^'\"]+)['\"]\s*\)", source))
+    allowed_requires = {"fs", "child_process"} if path.name == "wake_waiter.js" else {"fs"}
+    res.check(
+        requires <= allowed_requires,
+        f"{path.name} requires only reviewed built-ins",
+        repr(requires),
+    )
+    res.check(
+        not any(token in source for token in NODE_WRITE_TOKENS),
+        f"{path.name} has no file-write primitive",
+    )
+    process_tokens = [token for token in NODE_PROCESS_TOKENS if token in source]
+    if path.name == "wake_waiter.js":
+        res.check(
+            requires == {"fs", "child_process"},
+            "wake_waiter.js requires exactly stdin and child-process built-ins",
+            repr(requires),
+        )
+        res.check(bool(process_tokens), "wake_waiter.js owns the sole child-process primitive")
+        res.check(
+            not any(token in source for token in ("execFile", "execSync", "spawnSync")),
+            "wake_waiter.js does not use an exec-family or synchronous process call",
+            repr(process_tokens),
+        )
+        res.check('spawn(cli, ["wake"]' in source, "wake_waiter.js argv is fixed")
+        res.check("shell: false" in source, "wake_waiter.js explicitly disables shell execution")
+        res.check(
+            'stdio: ["ignore", "ignore", "ignore"]' in source,
+            "wake_waiter.js discards every child stream unread",
+        )
+    else:
+        res.check(
+            not process_tokens,
+            f"{path.name} has no child-process primitive",
+            repr(process_tokens),
+        )
+
+
+def _check_python_source(res: Results, path: Path, source: str) -> None:
+    tree = ast.parse(source, filename=path.name)
+    imports = _python_imports(tree)
+    external = {
+        module
+        for module in imports
+        if module not in sys.stdlib_module_names
+        and not (HOOKS_DIR / f"{module}.py").is_file()
+    }
+    res.check(
+        not external,
+        f"{path.name} imports only stdlib or local modules",
+        repr(sorted(external)),
+    )
+    res.check(
+        not imports.intersection(NETWORK_MODULES),
+        f"{path.name} imports no network module",
+    )
+    res.check(
+        not imports.intersection(PROCESS_MODULES),
+        f"{path.name} imports no process module",
+    )
+    call_names = {
+        node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, (ast.Attribute, ast.Name))
+    }
+    write_calls = call_names.intersection(PYTHON_WRITE_CALLS)
+    res.check(
+        not write_calls,
+        f"{path.name} has no explicit file-write call",
+        repr(sorted(write_calls)),
+    )
+
+
+def _check_source_contract(res: Results) -> None:
+    for path in sorted(HOOKS_DIR.iterdir()):
+        if not path.is_file() or path.suffix not in {".js", ".py"}:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if path.suffix == ".js":
+            _check_javascript_source(res, path, source)
+            continue
+        _check_python_source(res, path, source)
+
+
+def _record_entry(
+    res: Results,
+    event: str,
+    matcher: str,
+    entry: object,
+    actual: Counter[tuple[str, str, str]],
+    referenced: set[str],
+) -> None:
+    res.check(isinstance(entry, dict), f"{event} hook entry is an object")
+    if not isinstance(entry, dict):
+        return
+    res.check(entry.get("type") == "command", f"{event} handler is a command")
+    command = entry.get("command")
+    match = COMMAND_RE.fullmatch(command) if isinstance(command, str) else None
+    res.check(
+        match is not None,
+        f"{event} command has the stock reviewed shape",
+        repr(command),
+    )
+    res.check(
+        isinstance(entry.get("timeout"), int) and entry["timeout"] > 0,
+        f"{event} timeout is a positive integer",
+    )
+    res.check(
+        isinstance(entry.get("statusMessage"), str) and bool(entry["statusMessage"]),
+        f"{event} statusMessage is non-empty",
+    )
+    if match is None:
+        return
+    script = match.group(2)
+    referenced.add(script)
+    actual[(event, matcher, script)] += 1
+
+
+def _record_group(
+    res: Results,
+    event: str,
+    group: object,
+    actual: Counter[tuple[str, str, str]],
+    referenced: set[str],
+) -> None:
+    res.check(isinstance(group, dict), f"{event} group is an object")
+    if not isinstance(group, dict):
+        return
+    matcher = group.get("matcher", "")
+    entries = group.get("hooks")
+    res.check(isinstance(matcher, str), f"{event} matcher is a string")
+    res.check(isinstance(entries, list), f"{event} group has a hook list")
+    if not isinstance(matcher, str) or not isinstance(entries, list):
+        return
+    for entry in entries:
+        _record_entry(res, event, matcher, entry, actual, referenced)
+
+
+def _collect_inventory(
+    res: Results, hooks: dict[object, object]
+) -> tuple[Counter[tuple[str, str, str]], set[str]]:
+    actual: Counter[tuple[str, str, str]] = Counter()
+    referenced: set[str] = set()
+    for event, groups in hooks.items():
+        res.check(isinstance(event, str), "event name is a string")
+        res.check(isinstance(groups, list), f"{event} groups are a list")
+        if not isinstance(event, str) or not isinstance(groups, list):
+            continue
+        for group in groups:
+            _record_group(res, event, group, actual, referenced)
+    return actual, referenced
+
+
+def _check_documentation(res: Results, referenced: set[str]) -> None:
+    entry_points = _entry_points()
+    res.check(
+        referenced == entry_points,
+        "every handler on disk is registered exactly by inventory",
+    )
+    documents = {
+        document: (PLUGIN_ROOT / document).read_text(encoding="utf-8").lower()
+        for document in DOCUMENTS
+    }
+    for name in sorted(referenced):
+        res.check((HOOKS_DIR / name).is_file(), f"registered handler exists: {name}")
+        terms = (name, *HOOK_KEYWORDS[name])
+        for document, text in documents.items():
+            res.check(
+                any(term in text for term in terms),
+                f"{document} names {name}",
+                f"none of {terms!r} present",
+            )
+
+
+def _check_gate_routing(
+    res: Results, actual: Counter[tuple[str, str, str]]
+) -> None:
+    gate = _load_gate()
+    routed = getattr(gate, "CODEX_GATED_TOOL_NAMES", None)
+    res.check(routed == frozenset({"Bash"}), "gate dispatch surface is exactly Bash")
+    pretool_matchers = {
+        matcher
+        for event, matcher, script in actual
+        if event == "PreToolUse" and script == "git_controller_gate.py"
+    }
+    res.check(
+        pretool_matchers == {"^Bash$"},
+        "manifest routes exactly the gate dispatch surface",
+    )
+
+
+def _check_security_claim(res: Results) -> None:
+    security = " ".join(
+        (PLUGIN_ROOT / "SECURITY.md").read_text(encoding="utf-8").split()
+    )
+    adversarial_claim = (
+        "even when `AGENT_IDENTITY`, `AGENT_INSTANCE_ID`, `AGENT_SESSION_LABEL`, "
+        "`AGENT_SESSION_ID`, and the hook payload's `session_id` are all set to "
+        "`Git-Controller`, a missing or non-controller `AGENT_ROLE` still blocks a "
+        "detected mutation."
+    )
+    res.check(
+        adversarial_claim in security,
+        "SECURITY.md pins the adversarial identity result",
+    )
+
+
+def _check_waiter_manifest(res: Results, hooks: dict[object, object]) -> None:
+    stop_groups = hooks.get("Stop")
+    res.check(isinstance(stop_groups, list) and len(stop_groups) == 1, "Stop has one matcher group")
+    if not isinstance(stop_groups, list) or len(stop_groups) != 1:
+        return
+    group = stop_groups[0]
+    if not isinstance(group, dict):
+        return
+    entries = group.get("hooks")
+    res.check(isinstance(entries, list) and len(entries) == 1, "Stop has one command handler")
+    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+        return
+    entry = entries[0]
+    res.check(entry.get("timeout") == 86400, "Stop hook timeout is the reviewed 24-hour bound")
+    res.check("async" not in entry, "Stop hook remains synchronous on stock Codex")
+
+
+def main() -> int:
+    preflight()
+    res = Results("Codex plugin-manifest consistency")
+    raw: Any = json.loads((HOOKS_DIR / "hooks.json").read_text(encoding="utf-8"))
+    res.check(isinstance(raw, dict), "hooks.json is an object")
+    if not isinstance(raw, dict):
+        return res.finish()
+    res.check(set(raw) == {"hooks"}, "stock manifest has only the top-level hooks key")
+    hooks = raw.get("hooks")
+    res.check(isinstance(hooks, dict), "hooks is an object")
+    if not isinstance(hooks, dict):
+        return res.finish()
+
+    actual, referenced = _collect_inventory(res, hooks)
+
+    res.check(actual == EXPECTED, "registered event/matcher/script inventory is exact", repr(actual))
+    _check_waiter_manifest(res, hooks)
+    _check_documentation(res, referenced)
+    _check_gate_routing(res, actual)
+    _check_source_contract(res)
+    _check_security_claim(res)
+    return res.finish()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

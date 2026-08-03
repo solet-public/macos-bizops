@@ -34,6 +34,12 @@ from datetime import UTC, datetime
 from enum import Enum, auto
 
 _CURSOR_VERSION = "v1"
+# Pull-surface boundary (design §5b.ii): a SECOND cursor kind, wire-distinct
+# from an ordinary continuation cursor, seeded at a role_covered_mark instead
+# of "now". Echoing this token back is the only way to disable the default
+# drain's floor for a deliberate pre-mark read (R2) — there is no separate
+# caller-supplied boolean, so an accidental deep read is unconstructable.
+_HISTORY_CURSOR_VERSION = "v1h"
 _FIELD_SEP = "|"
 _FIELD_COUNT = 5  # version | important | roles_hash | created_at_iso | id
 _ROLE_JOIN = "\n"  # role names cannot contain a newline
@@ -86,6 +92,7 @@ class RoleCursorDecoded:
     outcome: RoleCursorOutcome
     created_at: datetime | None = None
     row_id: str | None = None
+    is_history_token: bool = False
 
 
 def encode_role_cursor(
@@ -98,9 +105,31 @@ def encode_role_cursor(
     so a postgres ISO-string row and a bootstrap ``datetime`` row encode the
     same way).
     """
+    return _encode(_CURSOR_VERSION, scope, created_at_iso=created_at_iso, row_id=row_id)
+
+
+def encode_role_history_cursor(
+    scope: RoleCursorScope, *, created_at_iso: str, row_id: str,
+) -> str:
+    """Encode a pull-surface-boundary HISTORY cursor, seeded at a mark.
+
+    Wire-distinct from :func:`encode_role_cursor` (``v1h`` vs ``v1``).
+    Echoing this token back as ``role_after`` is the only way a caller
+    disables the default drain's floor (design §5b.ii) — it is a deliberate
+    deep read, never an accidental one, because the token is server-minted
+    and opaque like any other role cursor.
+    """
+    return _encode(
+        _HISTORY_CURSOR_VERSION, scope, created_at_iso=created_at_iso, row_id=row_id,
+    )
+
+
+def _encode(
+    version: str, scope: RoleCursorScope, *, created_at_iso: str, row_id: str,
+) -> str:
     important_flag = "1" if scope.include_important else "0"
     raw = _FIELD_SEP.join(
-        (_CURSOR_VERSION, important_flag, scope.roles_hash(), created_at_iso, row_id),
+        (version, important_flag, scope.roles_hash(), created_at_iso, row_id),
     )
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
 
@@ -110,11 +139,15 @@ def decode_role_cursor(token: str, scope: RoleCursorScope) -> RoleCursorDecoded:
 
     Returns :class:`RoleCursorDecoded` with ``SCOPE_CHANGED`` when the encoded
     visibility mode or held-role-set hash differs from ``scope`` (reset to page
-    1). Raises :class:`RoleCursorRejectedError` for a non-decodable, wrong-arity,
-    wrong-version, or non-ISO token.
+    1 — floor RE-ENABLED, since a scope change also invalidates history-token
+    status). Raises :class:`RoleCursorRejectedError` for a non-decodable,
+    wrong-arity, wrong-version, or non-ISO token. ``is_history_token`` is
+    ``True`` only for a ``VALID`` outcome decoded from a ``v1h`` token.
     """
     version, important_flag, roles_hash, created_at_iso, row_id = _decode_parts(token)
-    if version != _CURSOR_VERSION or important_flag not in ("0", "1"):
+    if version not in (_CURSOR_VERSION, _HISTORY_CURSOR_VERSION) or important_flag not in (
+        "0", "1",
+    ):
         raise RoleCursorRejectedError(f"unsupported role cursor: {token!r}")
     issued_important = important_flag == "1"
     if issued_important != scope.include_important or roles_hash != scope.roles_hash():
@@ -125,6 +158,7 @@ def decode_role_cursor(token: str, scope: RoleCursorScope) -> RoleCursorDecoded:
         outcome=RoleCursorOutcome.VALID,
         created_at=_parse_iso(created_at_iso),
         row_id=row_id,
+        is_history_token=version == _HISTORY_CURSOR_VERSION,
     )
 
 
@@ -164,4 +198,5 @@ __all__ = [
     "RoleCursorScope",
     "decode_role_cursor",
     "encode_role_cursor",
+    "encode_role_history_cursor",
 ]

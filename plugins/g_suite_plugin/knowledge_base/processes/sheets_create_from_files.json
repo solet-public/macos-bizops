@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::sheets_create_from_files",
   "display_name": "Sheets: Create Spreadsheet From Files",
   "description": "Create a new spreadsheet with one tab per entry, each tab's values loaded from a local .csv or .tsv file (delimiter from extension). Returns id, per-tab {name, sheet_id} pairs, and total cells written. Requires a connected account.",
-  "embedding_description": "Create a multi-tab Google spreadsheet in one call from an array of local delimited files: each tabs entry names a tab and points at an absolute .csv or .tsv file path whose rows become that tab's cell values, parsed with the delimiter implied by the extension and written as user-entered values so numbers, dates, currency, and percentages coerce to real types. All files are validated and parsed before anything is created, so a bad path, duplicate tab name, or unsupported extension fails without a half-built document. Returns the new spreadsheet id, each tab's name paired with its Google-assigned numeric sheetId ready for follow-on batchUpdate formatting, and the total updated cell count.",
+  "embedding_description": "Create a Google Sheets spreadsheet with one tab per local CSV or TSV file. The verb parses and validates every file and unique tab name before creating anything, then loads the values with user-entered interpretation. Returns the spreadsheet id, ordered tab names with Google sheet ids, and the total cells written.",
   "result_processor_customizations": {
     "action_label": "Spreadsheet created from files",
     "result_type": "g_suite_sheets_create_from_files_result",

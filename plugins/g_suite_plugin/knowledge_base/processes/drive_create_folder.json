@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::drive_create_folder",
   "display_name": "Drive: Create Folder",
   "description": "Create a Google Drive folder, optionally nested under a parent folder id. Returns the new folder's id. Requires a connected account.",
-  "embedding_description": "Create a new folder (a Drive file with the google-apps.folder mime type) in Google Drive, optionally as a child of an existing parent folder id. Returns the created folder's id, which can then be passed as the parent argument to drive_upload_file or drive_create_folder for nested structure, or as the id argument to drive_share to grant access to the whole folder. Fails gsuite.not_connected if no account is linked.",
+  "embedding_description": "Create a new folder in Google Drive, optionally nested inside an existing parent folder id. Returns the new folder's id, which can be passed as the parent when uploading files or creating further folders, so directory structure gets built up a level at a time.",
   "result_processor_customizations": {
     "action_label": "Drive folder created",
     "result_type": "g_suite_drive_create_folder_result",

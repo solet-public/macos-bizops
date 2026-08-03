@@ -1,6 +1,6 @@
-"""Smoke: the `hydration_guidance.md` convention (Step 4b, generic offer).
+"""Smoke: the `hydration_guidance.md` convention (Step 4c, generic offer).
 
-Step 4b of the hydration runbook globs `plugins/*/knowledge_base/hydration_guidance.md`
+Step 4c of the hydration runbook globs `plugins/*/knowledge_base/hydration_guidance.md`
 directly on the filesystem (NOT a KB search -- a plugin can be present-but-dormant,
 with no searchable KB yet) and pitches whatever it finds, each following the same
 Pitch/Setup shape. This is a convention with no code enforcing its shape -- a future
@@ -259,10 +259,11 @@ def _check_hydration_runbook_seed_neutral_and_no_mcp_primary() -> None:
         "missing implementation/debugging or router-vs-bridge managed-block guidance",
     )
     _check(
-        "hydration runbook: existing settings.json gets structural JSON merge guidance",
-        "parse the existing file and the rendered `claude_settings.json.template` as JSON" in content
-        and "Preserve unrelated top-level settings" in content,
-        "missing structural JSON merge guidance for existing settings.json",
+        "hydration runbook: coordination-hooks install uses the explicit CLI commands, not a hand JSON merge",
+        "claude plugin marketplace add <clone>" in content
+        and "claude plugin install coordination-hooks@<marketplace-name>" in content
+        and "never a\nhand-merged declaration alone" in content,
+        "missing explicit-CLI-install guidance for coordination-hooks",
     )
     _check(
         "hydration runbook: settings merge markers are documented",

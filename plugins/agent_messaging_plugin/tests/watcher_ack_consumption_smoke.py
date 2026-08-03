@@ -55,6 +55,7 @@ from ananta.llm.agent_messaging.models import (  # noqa: E402
     MessageKind,
     MessageRole,
     PeerInboxEntry,
+    RoleMessagePersisted,
     TextPart,
 )
 from ananta.llm.agent_messaging.repository import AgentMessagingRepository  # noqa: E402
@@ -71,6 +72,9 @@ from ananta.llm.agent_messaging.schema import (  # noqa: E402
 from ananta.llm.agent_messaging.service import (  # noqa: E402
     AgentMessagingService,
     role_message_external_id,
+)
+from ananta.services.state_service.ordered_query import (  # noqa: E402
+    normalize_sort_value,
 )
 from ananta.services.store import Store, open_store  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
@@ -216,8 +220,13 @@ class _FakeDispatchService:
     def persist_direct_wake(self, **_kwargs: Any) -> None:
         return None
 
-    def persist_role_message(self, **_kwargs: Any) -> None:
-        return None
+    def persist_role_message(self, **kwargs: Any) -> RoleMessagePersisted:
+        # Mirrors the real facade's widened return: the dispatcher reads
+        # ``.created_at`` off this to stamp the role-delivery wire meta.
+        return RoleMessagePersisted(
+            message_id=str(kwargs.get("message_id", "")),
+            created_at="2026-08-01T00:00:00.000001+00:00",
+        )
 
 
 def _register_binding(
@@ -386,6 +395,7 @@ def _persist_direct_row(svc: AgentMessagingService, *, message_id: str) -> None:
         sender_session_label="Sender",
         sender_bridge_id="agc-sender",
         content=[TextPart(type="text", text="IMPORTANT: ping")],
+        activity_at_emission=None,
     )
 
 
@@ -414,7 +424,7 @@ def test_events_ack_consumption() -> None:
     # An owed direct row + an owed role row, each with its wake event queued on
     # the watcher's bridge exactly as the dispatch transports append them.
     _persist_direct_row(svc, message_id="agm-d1")
-    svc.persist_role_message(
+    persisted_role = svc.persist_role_message(
         recipient_kind=RECIPIENT_KIND_ROLE,
         recipient_key="R",
         message_id="agm-r1",
@@ -423,6 +433,19 @@ def test_events_ack_consumption() -> None:
         sender_session_label="Sender",
         important=True,
         content=[TextPart(type="text", text="IMPORTANT: role ping")],
+    )
+    # (A) server half, against the REAL service rather than a fake: the
+    # created_at handed back is the PERSISTED ROW's — the same quantity the
+    # role-inbox section orders and pages on — which is the whole reason it is
+    # safe for a watcher to advance role_high_water against it. A clock read
+    # taken beside the write would be a different quantity and would fail here.
+    _check(
+        bool(persisted_role.created_at)
+        and persisted_role.created_at
+        == normalize_sort_value(
+            _row(state, TABLE_AGENT_ROLE_MESSAGE, "agm-r1")["created_at"],
+        ),
+        "A0: persist_role_message returns the persisted ROW's created_at",
     )
     role_external = role_message_external_id(RECIPIENT_KIND_ROLE, "R", "agm-r1")
     mgr.append_event(
@@ -500,6 +523,7 @@ def test_events_ack_is_watcher_only() -> None:
         sender_session_label="Sender",
         sender_bridge_id="agc-sender",
         content=[TextPart(type="text", text="IMPORTANT: ping")],
+        activity_at_emission=None,
     )
     mgr.append_event(
         live_bridge, EVENT_POST_MESSAGE, "ping",

@@ -2,12 +2,15 @@
 """Campaign + static-list verb smoke tests for marketo_plugin.
 
 Hermetic — a faked client returning canned decoded envelope dicts, no live
-instance.
+instance. list_campaigns/list_static_lists ALWAYS write to a caller-supplied
+output_tsv_path now (business-data limits + spill-floor migration,
+2026-08-02) — these tests use a throwaway tempfile + a real passthrough gate
+and read the written TSV back to assert content.
 
 Exercises:
-  1. list_campaigns — name/program_name query construction, spill envelope
+  1. list_campaigns — name/program_name query construction, TSV-handle shape
   2. trigger_campaign — token validation, batch cap (100), request_id carried
-  3. list_static_lists — name filter, spill envelope
+  3. list_static_lists — name filter, TSV-handle shape
   4. add_leads_to_list — batch cap (300), tallies shape
   5. remove_leads_from_list — DELETE-with-JSON-body path (asserts
      ``client.delete_json`` is the method invoked, not ``post_json``/plain
@@ -23,7 +26,9 @@ Exits 0 on success, 1 on first failure.
 
 from __future__ import annotations
 
+import csv
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -36,6 +41,8 @@ from marketo_plugin.http_client import MarketoClient  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
+_TMP_DIR = tempfile.mkdtemp(prefix="marketo_smoke_campaigns_")
+_path_counter = {"n": 0}
 
 
 def _assert(label: str, cond: bool, msg: str = "") -> None:
@@ -55,14 +62,27 @@ def _fake_client(**method_returns: dict[str, Any]) -> Any:
     return client
 
 
-def _no_blob_writer(_content: bytes, _filename: str, _mime: str) -> str:
-    raise AssertionError("blob_writer should not be called for small results")
+def _tmp_tsv_path() -> str:
+    _path_counter["n"] += 1
+    return str(Path(_TMP_DIR) / f"out_{_path_counter['n']}.tsv")
+
+
+def _passthrough_gate(path: str) -> str:
+    return path
+
+
+def _read_tsv(path: str) -> list[dict[str, str]]:
+    with open(path, newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle, delimiter="\t"))
 
 
 def test_list_campaigns() -> None:
     client = _fake_client(get_json={"success": True, "result": [{"id": 1, "name": "Welcome Series"}]})
-    result = marketing_actions.list_campaigns(client, {"names": ["Welcome Series"]}, _no_blob_writer)
-    _assert("campaign records carried", result["records"][0]["name"] == "Welcome Series")
+    result = marketing_actions.list_campaigns(
+        client, {"names": ["Welcome Series"], "output_tsv_path": _tmp_tsv_path()}, _passthrough_gate,
+    )
+    rows = _read_tsv(result["path"])
+    _assert("campaign records carried", rows[0]["name"] == "Welcome Series")
     called_params = client.get_json.call_args.kwargs.get("params")
     _assert("name query param built", called_params == {"name": ["Welcome Series"]}, str(called_params))
 
@@ -92,8 +112,11 @@ def test_trigger_campaign() -> None:
 
 def test_list_static_lists() -> None:
     client = _fake_client(get_json={"success": True, "result": [{"id": 9, "name": "VIP"}]})
-    result = marketing_actions.list_static_lists(client, {"names": ["VIP"]}, _no_blob_writer)
-    _assert("static list records carried", result["records"][0]["name"] == "VIP")
+    result = marketing_actions.list_static_lists(
+        client, {"names": ["VIP"], "output_tsv_path": _tmp_tsv_path()}, _passthrough_gate,
+    )
+    rows = _read_tsv(result["path"])
+    _assert("static list records carried", rows[0]["name"] == "VIP")
 
 
 def test_add_leads_to_list() -> None:

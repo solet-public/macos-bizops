@@ -298,6 +298,55 @@ def list_roles_for_agent_instance(
     return sorted(roles)
 
 
+def sole_role_for_reply_address(
+    state: StateManagementInterface | None, agent_instance_id: str,
+) -> str:
+    """The sender's role when it is usable as a durable REPLY ADDRESS, else ``""``.
+
+    Distinct from ``platform_surface._role_for_instance`` **on purpose, and the two
+    must not be merged.** That one answers "tag this flow with a role" and takes
+    ``sorted(roles)[0]`` — arbitrary-but-deterministic, and a wrong answer costs a
+    log line. This one answers "where should a reply be SENT", where the same
+    alphabetical pick would silently route replies to a role the sender was not
+    acting in: a wrong-RECIPIENT delivery, strictly worse than the stale-but-honest
+    instance reply-to it would replace.
+
+    So a multi-role holder yields ``""`` and the caller keeps the instance
+    reply-to: *stale but correct-session* beats *durable but wrong-session*. The
+    real fix — an optional sender-declared acting role, validated against the roles
+    actually held, because only the sender knows which role it acted in — is filed
+    as DEF-3 and deliberately NOT done here.
+
+    Degrade-silent: provenance must never break a dispatch, so any lookup fault
+    yields ``""`` (the pre-existing instance reply-to), never an exception.
+    """
+    if state is None or not agent_instance_id:
+        return ""
+    try:
+        roles = list_roles_for_agent_instance(state, agent_instance_id)
+    except Exception:  # noqa: BLE001 — a reply-address hint never breaks a send
+        logger.warning(
+            "reply-address role lookup failed for agent_instance_id=%s; "
+            "falling back to the instance reply-to",
+            agent_instance_id,
+            exc_info=True,
+        )
+        return ""
+    if len(roles) == 1:
+        return roles[0]
+    if roles:
+        # Named, not counted: whoever builds DEF-3 needs the population, and a
+        # bare "2 roles" line would make them go find out which.
+        logger.info(
+            "agent_instance_id=%s holds %d roles %r — using the instance "
+            "reply-to, not an arbitrary role (DEF-3)",
+            agent_instance_id,
+            len(roles),
+            roles,
+        )
+    return ""
+
+
 class RoleClaimContendedError(Exception):
     """The §5.1 claim CAS did not converge within the bounded attempt budget.
 

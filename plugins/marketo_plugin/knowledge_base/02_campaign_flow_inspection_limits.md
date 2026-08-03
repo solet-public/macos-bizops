@@ -82,11 +82,15 @@ consequence this API offers.
 
 One compounding trap in how a caller reaches this verb: `trigger_campaign` needs
 a `campaign_id`, and `list_campaigns` is the way to find one — but on a large
-instance paging that listing to the end exceeds the inline result cap and yields
-a `result_blob_key`. So the documented route asks a caller to pick from a list
-they may not be able to read in full, in order to fire a flow they cannot
-inspect. Prefer a campaign whose id is already known and whose flow the caller
-authored, over discovery by enumeration.
+instance the full set can exceed the effective row limit (500 default, 5,000
+with an acknowledged override — `list_campaigns` pages internally across
+Marketo's 300-per-call ceiling and hides that from the caller, Dax 29.2,
+2026-08-03), and even a complete listing means the caller is reading the
+result back out of a workspace TSV file, not an inline list. So the
+documented route asks a caller to pick from a list they may not be able to
+read in full, in order to fire a flow they cannot inspect. Prefer a campaign
+whose id is already known and whose flow the caller authored, over discovery
+by enumeration.
 
 ## Refused: a plugin-side dry-run
 

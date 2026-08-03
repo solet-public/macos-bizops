@@ -65,6 +65,7 @@ class NativeWakeAdapter(Protocol):
         thread_id: str,
         message_id: str,
         reply_to_role: str = "",
+        sender_agent_session_id: str = "",
         delivery_meta: Mapping[str, object] | None = None,
     ) -> str:
         """Push prose into the agent's native MCP surface.
@@ -77,6 +78,14 @@ class NativeWakeAdapter(Protocol):
         MUST surface a role reply-to hint (``peer_send_by_name name=<role>``) so
         the return leg survives a holder reconnect. Empty for a direct instance
         ``peer_send`` (which keeps the same-connection instance reply-to).
+
+        ``sender_agent_session_id`` (WS-2c V4 / A2): the sender's STABLE
+        per-logical-session key, resolved server-side from the sender's registered
+        binding. Implementations surface it ALONGSIDE the instance id — never
+        instead of it — so a reply still resolves after the sender's instance has
+        rotated, while a receiver that only knows the old field keeps working.
+        Empty when the sender has no registered binding; adapters MUST then omit
+        it rather than emit an unresolvable key.
 
         ``delivery_meta`` (v10 Control #5 / Q3-revised): extra bridge-event meta
         the adapter MUST merge onto the wake event. For a role-addressed send it
@@ -197,6 +206,14 @@ class BridgeSessionState:
     # routing key — only for human-facing display in peer_list,
     # peer_message meta, and native-wake envelopes.
     session_label: str = ""
+    # §34.6: the launcher-exported ``ases-...`` session key asserted by an
+    # UNREGISTERED caller (the local CLI's one-shot bridge) purely so its sends
+    # can be attributed. ATTRIBUTION ONLY — this is never a routing key, never
+    # a registration, and never persisted as identity: the server treats it as
+    # a lookup key into the peer registry and reads the identity out of the
+    # REGISTERED binding, so an unresolvable key degrades to the system
+    # sentinel rather than promoting an unverifiable claim.
+    caller_agent_session_id: str = ""
     # M5 §14.4: OAuth client_id that opened this bridge. Empty string
     # for legacy stdio bridges that never carried a bearer. Set at
     # bridge-establishment time from the validated BearerClaim.

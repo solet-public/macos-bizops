@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final
+from urllib.parse import quote
 
 import httpx
 from ananta.core.config.environment_config import EnvironmentConfig
@@ -56,6 +57,28 @@ class HomunculusIdentityError(RuntimeError):
 
 class BridgeCallError(RuntimeError):
     """A bridge HTTP call returned an error status or an unusable body."""
+
+
+class RoleClaimRejectedError(RuntimeError):
+    """A role claim the server REFUSED, carrying its stable failure code.
+
+    Distinct from ``BridgeCallError`` on purpose. The reconnect loop catches
+    transport errors and retries; a claim refusal must be classified by its
+    CODE before anything decides whether to retry or die, because the two
+    outcomes are opposite and indistinguishable from the HTTP status alone
+    (400 spans permanent and transient codes; 503 is transient).
+
+    The code survives only on this INFRA route. The MODEL_INITIATED
+    ``/process/call`` path runs through the action queue poller, which
+    overwrites every plugin failure code with the constant ``action_failed``
+    and nulls ``data`` — so a taxonomy keyed on that path cannot discriminate
+    at all. That is why the watcher's arm-claim uses this route.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
 
 
 class BridgeResultTimeoutError(RuntimeError):
@@ -139,6 +162,7 @@ class BridgeClient:
         *,
         transport: httpx.BaseTransport | None = None,
         request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
+        caller_agent_session_id: str = "",
     ) -> None:
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
@@ -146,6 +170,7 @@ class BridgeClient:
             transport=transport,
         )
         self._bridge_id: str | None = None
+        self._caller_agent_session_id = caller_agent_session_id
 
     def __enter__(self) -> BridgeClient:
         self.open()
@@ -160,8 +185,21 @@ class BridgeClient:
         self.close()
 
     def open(self) -> str:
-        """Open a bridge session and remember its id."""
-        payload = self._post(f"{API_PREFIX}/open", {"parent_pid": os.getpid()})
+        """Open a bridge session and remember its id.
+
+        ``caller_agent_session_id`` rides the open body as ATTRIBUTION ONLY: the
+        server stores the opaque key on its in-memory bridge state and resolves
+        it against the peer registry when stamping a send's sender, so a
+        CLI-originated message is attributed to the session that ran the command
+        instead of ``System (Scheduler)`` (§34.6). It is NOT a registration —
+        registering this one-shot bridge under the caller's identity would sweep
+        the caller's own registry row by ``session_label`` and then delete it
+        again at close, black-holing the session's receive path.
+        """
+        body: dict[str, Any] = {"parent_pid": os.getpid()}
+        if self._caller_agent_session_id:
+            body["caller_agent_session_id"] = self._caller_agent_session_id
+        payload = self._post(f"{API_PREFIX}/open", body)
         bridge_id = payload.get("bridge_id")
         if not isinstance(bridge_id, str):
             raise BridgeCallError(f"bridge open returned no bridge_id: {payload!r}")
@@ -301,7 +339,7 @@ class BridgeClient:
         never a PID.
         """
         bridge_id = self._require_bridge()
-        return self._post(
+        return self._post_or_reject(
             f"{API_PREFIX}/{bridge_id}/peer/register",
             {
                 "agent_id": agent_id,
@@ -313,14 +351,100 @@ class BridgeClient:
         )
 
     def peer_inbox(
-        self, *, include_important: bool, limit: int,
+        self,
+        *,
+        include_important: bool,
+        limit: int,
+        after: str | None = None,
+        role_after: str | None = None,
     ) -> dict[str, Any]:
-        """Read this registered identity's durable inbox (catch-up on start)."""
+        """Read this registered identity's durable inbox (catch-up on start).
+
+        The two cursors are INDEPENDENT and run in OPPOSITE directions — see
+        ``_drain_inbox``, which is the only caller that pages. ``after`` is an
+        ISO-8601 timestamp advancing FORWARD through the instance section;
+        ``role_after`` is an opaque token walking BACKWARD through the role
+        section. Passing one does nothing to the other's section.
+        """
         bridge_id = self._require_bridge()
+        query = [
+            f"include_important={str(include_important).lower()}",
+            f"limit={limit}",
+        ]
+        if after:
+            query.append(f"after={quote(after, safe='')}")
+        if role_after:
+            query.append(f"role_after={quote(role_after, safe='')}")
         return self._get(
-            f"{API_PREFIX}/{bridge_id}/peer/inbox"
-            f"?include_important={str(include_important).lower()}&limit={limit}",
+            f"{API_PREFIX}/{bridge_id}/peer/inbox?" + "&".join(query),
         )
+
+    def peer_claim_role(self, *, name: str, takeover: bool = False) -> dict[str, Any]:
+        """Claim NAME over the INFRA bridge route, preserving the failure code.
+
+        Body carries the role name and the optional one-shot ``takeover``:
+        every IDENTITY field is read from this bridge's REGISTERED binding
+        (REL-07), which is why `peer_register` must precede this call.
+        ``takeover`` is an authorization for THIS request, not an identity, so
+        the body is the right place for it — it is stored nowhere and cannot be
+        replayed by a later reconnect.
+
+        A refusal arrives as a non-2xx whose body is ``{"code", "message"}``.
+        It is raised as ``RoleClaimRejectedError`` rather than going through
+        ``_unwrap`` — ``_unwrap`` would flatten it into ``BridgeCallError``,
+        which the reconnect loop treats as transport churn and retries forever,
+        silently converting a designed refusal into an infinite loop.
+        """
+        bridge_id = self._require_bridge()
+        path = f"{API_PREFIX}/{bridge_id}/peer/claim_role"
+        response = self._client.post(path, json={"name": name, "takeover": takeover})
+        if response.status_code >= httpx.codes.BAD_REQUEST:
+            code, message = self._claim_failure(response)
+            raise RoleClaimRejectedError(code, message)
+        body = response.json()
+        if not isinstance(body, dict):
+            raise BridgeCallError(f"{path} returned a non-object body: {body!r}")
+        return body
+
+    @staticmethod
+    def _claim_failure(response: httpx.Response) -> tuple[str, str]:
+        """Pull ``{"code", "message"}`` off a refusal, degrading honestly.
+
+        A body that is not the expected shape yields an empty code, which the
+        caller's taxonomy treats as UNKNOWN -> transient. Inventing a code here
+        would let a malformed response masquerade as a permanent refusal and
+        kill a watcher for a parse failure.
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            return "", response.text[:200]
+        if not isinstance(body, dict):
+            return "", str(body)[:200]
+        code = body.get("code")
+        message = body.get("message")
+        return (
+            code if isinstance(code, str) else "",
+            message if isinstance(message, str) else str(body)[:200],
+        )
+
+    def _post_or_reject(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST, surfacing a `{"code","message"}` refusal as RoleClaimRejectedError.
+
+        `_unwrap` would flatten a refusal into BridgeCallError, which the
+        reconnect loop treats as transport churn and retries forever — so a
+        PERMANENT register refusal (§4.3.3a's live-session-id conflict) would
+        become an infinite silent loop. That is the same D2 inversion the claim
+        path already fixes, one layer earlier.
+        """
+        response = self._client.post(path, json=body)
+        if response.status_code >= httpx.codes.BAD_REQUEST:
+            code, message = self._claim_failure(response)
+            raise RoleClaimRejectedError(code, message)
+        parsed = response.json()
+        if not isinstance(parsed, dict):
+            raise BridgeCallError(f"{path} returned a non-object body: {parsed!r}")
+        return parsed
 
     def _require_bridge(self) -> str:
         if self._bridge_id is None:

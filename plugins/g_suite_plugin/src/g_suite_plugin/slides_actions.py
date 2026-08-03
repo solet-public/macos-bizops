@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .constants import SLIDES_DEFAULT_EXPORT_FORMAT, SLIDES_EXPORT_MIME_BY_FORMAT
+from .constants import BLOB_NAMESPACE, SLIDES_DEFAULT_EXPORT_FORMAT, SLIDES_EXPORT_MIME_BY_FORMAT
 from .drive_actions import BlobWriter, export_media_to_blob, resolve_export_mime
 
 
@@ -50,8 +50,9 @@ def export_presentation(drive: Any, params: dict[str, Any], blob_writer: BlobWri
     presentation_id = _require_str(params, "id")
     fmt = _as_str(params.get("format")) or SLIDES_DEFAULT_EXPORT_FORMAT
     mime = resolve_export_mime(fmt, SLIDES_EXPORT_MIME_BY_FORMAT)
-    blob_key = export_media_to_blob(drive, presentation_id, mime, f"{presentation_id}.{fmt}", blob_writer)
-    return {"deck_blob_key": blob_key}
+    filename = f"{presentation_id}.{fmt}"
+    blob_key = export_media_to_blob(drive, presentation_id, mime, filename, blob_writer)
+    return {"deck_blob_key": blob_key, "namespace": BLOB_NAMESPACE, "filename": filename}
 
 
 def _slide_row(slide: dict[str, Any]) -> dict[str, Any]:

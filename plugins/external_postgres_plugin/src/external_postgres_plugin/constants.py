@@ -120,14 +120,29 @@ READ_LEADERS: Final[frozenset[str]] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
-# Result caps (§1.7) — beyond either cap, run_query FAILS LOUD (A4, 2026-07-16).
+# Result caps (business-data limits + spill-floor migration, 2026-08-02 —
+# workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md).
+# Both run_query and export_query now ALWAYS write to a caller-supplied path
+# (07-29 spill floor, unconditional — the former INLINE_BYTE_CAP/inline-return
+# branch is deleted, not lowered: no record-read verb returns record values
+# inline at any size). DEFAULT_ROW_LIMIT is the fetch ceiling absent an
+# explicit, acknowledged override; MAX_ROWS_HARD_CAP is run_query's override
+# ceiling, EXPORT_ROW_CAP is export_query's (the "N>>500" Pattern-A route,
+# §7.2) — both are pushed into the fetch via ``fetchmany``, never
+# fetch-everything-then-truncate.
 # ---------------------------------------------------------------------------
-INLINE_ROW_CAP_DEFAULT: Final[int] = 200
+DEFAULT_ROW_LIMIT: Final[int] = 500
 MAX_ROWS_HARD_CAP: Final[int] = 1000
-INLINE_BYTE_CAP: Final[int] = 200_000
-# export_query always spills; it fetches up to this bound (a full-table export of
-# more than this is a v2 pagination concern — the truncation is flagged, never silent).
 EXPORT_ROW_CAP: Final[int] = 50_000
+
+# ---------------------------------------------------------------------------
+# Override friction (§5) — required together or not at all; absent means the
+# effective limit is DEFAULT_ROW_LIMIT. No vendor ceiling applies to this
+# connector: an arbitrary customer database has no API-level cap to defer to
+# (Reviewer-D's census, Part 1 — this row is OURS-ARBITRARY, not vendor-imposed).
+# ---------------------------------------------------------------------------
+PARAM_ACKNOWLEDGE_OVERRIDE: Final[str] = "acknowledge_default_limit_override"
+PARAM_ROW_LIMIT: Final[str] = "row_limit"
 
 # ---------------------------------------------------------------------------
 # Export (A2, 2026-07-15): bulk results land as TSV files in the operator's
@@ -155,7 +170,6 @@ ERROR_QUERY_FAILED: Final[str] = "external_pg.query_failed"
 ERROR_TIMEOUT: Final[str] = "external_pg.timeout"
 ERROR_API_ERROR: Final[str] = "external_pg.api_error"
 ERROR_EXPORT_PATH_REFUSED: Final[str] = "external_pg.export_path_refused"
-ERROR_RESULT_TOO_LARGE: Final[str] = "external_pg.result_too_large"
 
 # ---------------------------------------------------------------------------
 # Generic FIXED error messages (§1.6/F3). Driver exception strings embed

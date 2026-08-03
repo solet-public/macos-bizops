@@ -7,7 +7,9 @@
           {
             "type": "command",
             "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/step_zero_reminder.js"]
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/step_zero_reminder.js"
+            ]
           }
         ]
       },
@@ -16,7 +18,9 @@
           {
             "type": "command",
             "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/check_messages_reminder.js"]
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/check_messages_reminder.js"
+            ]
           }
         ]
       }
@@ -28,12 +32,16 @@
           {
             "type": "command",
             "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/check_messages_reminder.js"]
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/check_messages_reminder.js"
+            ]
           },
           {
             "type": "command",
             "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/role_binding_reminder.js"]
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/role_binding_reminder.js"
+            ]
           }
         ]
       }
@@ -44,7 +52,9 @@
           {
             "type": "command",
             "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/wake_waiter.js"],
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/wake_waiter.js"
+            ],
             "asyncRewake": true,
             "timeout": 86400
           }
@@ -53,12 +63,14 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Task",
+        "matcher": "^(Bash|Edit|Write|MultiEdit|NotebookEdit|Task|Agent)$",
         "hooks": [
           {
             "type": "command",
             "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/git_controller_gate.py"]
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/git_controller_gate.py"
+            ]
           }
         ]
       }

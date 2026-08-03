@@ -58,7 +58,11 @@ from .constants import (
     SYSTEM_ROLE_HANDOVER_ID,
     SYSTEM_ROLE_HANDOVER_LABEL,
 )
-from .peer_dispatch import NativeWakeError, dispatch_peer_send
+from .peer_dispatch import (
+    NativeWakeError,
+    binding_is_live,
+    dispatch_peer_send,
+)
 from .peer_registry import (
     PeerAmbiguousError,
     PeerSessionAmbiguousError,
@@ -66,7 +70,10 @@ from .peer_registry import (
 )
 from .role_binding_store import (
     HolderClaim,
+    RoleBindingMalformedError,
+    RoleBindingVacantError,
     claim_role_binding_v4,
+    resolve_role_binding_v4,
     session_claim_requires_session_id,
     upsert_role_entity,
 )
@@ -75,6 +82,7 @@ from .system_slots import SystemSlotClaimDecision, evaluate_system_slot_claim
 if TYPE_CHECKING:  # pragma: no cover — type-only references
     from .bridge_sessions import BridgeSessionManager
     from .peer_registry import PeerRegistry
+    from .role_binding_store import ResolvedRole
 
 logger = logging.getLogger(__name__)
 
@@ -143,11 +151,25 @@ def displaced_prose(name: str, new_agent_instance_id: str) -> str:
 
 
 def new_holder_prose(name: str) -> str:
-    """REL-04 new-holder confirmation. ``name`` is an opaque operator-defined role."""
+    """REL-04 new-holder confirmation. ``name`` is an opaque operator-defined role.
+
+    Names the full process key rather than a bare verb. Until Part 24 registered
+    ``plugin::agent_messaging_plugin::peer_inbox`` this notice instructed every
+    new role holder to call something only an MCP session could reach — a
+    no-MCP session read "drain your backlog with peer_inbox" and had no
+    peer_inbox to call. The key is copy-runnable on both transports, so the
+    instruction is now executable by whoever receives it.
+    """
     return (
         f"IMPORTANT: You now hold role {name!r}. Drain your role backlog with "
-        f"peer_inbox(include_important=true) — role-addressed messages sent to "
-        f"{name!r} while it was held by another session (or unclaimed) are waiting."
+        f"plugin::agent_messaging_plugin::peer_inbox (include_important=true, "
+        f"passing your own agent_session_id) — role-addressed messages sent to "
+        f"{name!r} while it was held by another session (or unclaimed) are "
+        f"waiting. Page the role section with role_after until next_role_cursor "
+        f"is null; role_section_status 'ok' does not mean drained. If the page "
+        f"reports role_floor_applied=true, the default drain stopped at this "
+        f"role's covered mark — echo the returned role_history_cursor back as "
+        f"role_after for a deliberate read of anything before it."
     )
 
 
@@ -369,36 +391,129 @@ def settle_role_handover(
     )
 
 
-def claim_role_for_session(
+
+def _current_holder(state_service: Any, name: str) -> ResolvedRole | None:
+    """The role's current holder, or ``None`` when there is nothing to protect.
+
+    A vacant or malformed binding reads as "no holder": this gate exists to
+    stop a silent hijack of a LIVE session, so an unreadable row must never
+    become a new way for a legitimate claim to fail.
+    """
+    try:
+        return resolve_role_binding_v4(state_service, name)
+    except (RoleBindingVacantError, RoleBindingMalformedError):
+        return None
+
+
+def _holder_is_live(
     *,
-    origin: RoleClaimOrigin,
+    bridge_manager: BridgeSessionManager,
+    peer_registry: PeerRegistry,
+    holder_session_id: str,
+) -> tuple[bool, bool]:
+    """``(is_live, ambiguous)`` for the holder's session.
+
+    Ambiguity counts as LIVE: more than one binding under one session id is
+    precisely the confusion this gate surfaces, so it must refuse rather than
+    wave a claim through on an unresolvable holder.
+    """
+    try:
+        binding = peer_registry.resolve_by_agent_session_id(holder_session_id)
+    except PeerSessionAmbiguousError:
+        return True, True
+    if binding is None:
+        return False, False
+    return binding_is_live(
+        bridge_manager=bridge_manager,
+        binding=binding,
+        window_seconds=bridge_manager.binding_liveness_window_s,
+    ), False
+
+
+def _protects_a_live_holder(
+    *,
+    holder: ResolvedRole,
+    agent_session_id: str,
+    agent_instance_id: str,
+) -> bool:
+    """Is this holder a DIFFERENT session than the claimant?
+
+    Self-refresh (same session id) and the same instance re-claiming are both
+    the claimant itself and are never refused.
+    """
+    if not holder.agent_session_id:
+        return False
+    if holder.agent_session_id == agent_session_id:
+        return False
+    return holder.agent_instance_id != agent_instance_id
+
+
+def _live_holder_refusal(
+    *,
+    state_service: Any,
+    bridge_manager: BridgeSessionManager | None,
+    peer_registry: PeerRegistry | None,
+    name: str,
+    agent_session_id: str,
+    agent_instance_id: str,
+    takeover: bool,
+) -> RoleClaimFailure | None:
+    """Refuse a claim against a LIVE different-session holder (§4.3.2).
+
+    Returns the refusal, or ``None`` to let the claim proceed. Fails OPEN on
+    every uncertainty — explicit takeover, a missing collaborator, a vacant or
+    unreadable binding, a holder with no live binding, or a holder DEAD by the
+    window all allow the claim. Crash succession in particular must stay cheap:
+    a gate that also refused dead holders would strand every role behind a
+    session that can no longer release it.
+    """
+    if takeover or bridge_manager is None or peer_registry is None:
+        return None
+    holder = _current_holder(state_service, name)
+    if holder is None or not _protects_a_live_holder(
+        holder=holder,
+        agent_session_id=agent_session_id,
+        agent_instance_id=agent_instance_id,
+    ):
+        return None
+    is_live, ambiguous = _holder_is_live(
+        bridge_manager=bridge_manager,
+        peer_registry=peer_registry,
+        holder_session_id=holder.agent_session_id,
+    )
+    if not is_live:
+        return None
+    where = "ambiguous (>1 live binding)" if ambiguous else "live"
+    return RoleClaimFailure(
+        code="role_held_live",
+        message=(
+            f"role {name!r} is held by a {where} session: label "
+            f"{holder.session_label!r}, instance {holder.agent_instance_id}, "
+            f"session {holder.agent_session_id}. Claiming would take its "
+            f"deliveries. Re-run with an explicit takeover after confirming "
+            f"with the operator, or wait for the holder to release it."
+        ),
+    )
+
+
+def _claim_preflight_refusal(
+    *,
     name: str,
     agent_id: str,
     agent_instance_id: str,
-    agent_session_id: str,
-    session_label: str,
     state_service: Any | None,
-    bridge_manager: BridgeSessionManager | None,
-    peer_registry: PeerRegistry | None,
-    agent_messaging_service: Any | None,
     call_context: Any | None,
-) -> RoleClaimResult:
-    """Claim-or-replace the ``agent_role_binding`` row for ``name`` (v10 #2.C).
+) -> RoleClaimFailure | None:
+    """Argument and reserved-keyspace checks — both fail-closed.
 
-    The single body behind both transports. ``origin`` is recorded, never acted
-    on — see the module docstring.
+    Split out of :func:`claim_role_for_session` so the decision table below
+    reads as the decision table it is. These are unrelated to liveness: they
+    refuse malformed input and a claim the caller may not make at all.
 
-    ``call_context`` MUST be the SERVER-BUILT context so the §6.1 reserved-
-    keyspace gate cannot be forged. The verb lifts it out of ``state``; the
-    bridge route passes ``None``, which is correct AND fail-closed: with no
-    plugin principal every ``sys:`` name is refused, and the forwarder has no
-    business claiming a system slot. A normal role is unaffected either way.
+    The ``state_service is None`` check deliberately stays in the caller: it is
+    what narrows the type for every downstream use, and extracting it would
+    force either a duplicate guard or an ``assert`` on a load-bearing path.
     """
-    name = name.strip()
-    agent_id = agent_id.strip()
-    agent_instance_id = agent_instance_id.strip()
-    agent_session_id = agent_session_id.strip()
-    session_label = session_label or name
     if not name or not agent_id or not agent_instance_id:
         return RoleClaimFailure(
             code="missing_argument",
@@ -418,6 +533,75 @@ def claim_role_for_session(
             code="system_slot_claim_denied",
             message=verdict.reason,
         )
+    return None
+
+
+def _log_operator_takeover(
+    *,
+    takeover: bool,
+    name: str,
+    agent_id: str,
+    agent_instance_id: str,
+    agent_session_id: str,
+    outcome: dict[str, Any],
+) -> None:
+    """Audit a successful explicit takeover with both routing identities."""
+    if not takeover or str(outcome.get("action") or "") != "displaced":
+        return
+    prior = outcome.get("prior")
+    logger.warning(
+        "operator-confirmed role takeover: name=%r claimer=%s/%s "
+        "session=%s displaced=%s/%s session=%s",
+        name,
+        agent_id,
+        agent_instance_id,
+        agent_session_id,
+        str(getattr(prior, "agent_id", "") or "unknown"),
+        str(getattr(prior, "agent_instance_id", "") or "unknown"),
+        str(getattr(prior, "agent_session_id", "") or "unknown"),
+    )
+
+
+def claim_role_for_session(
+    *,
+    origin: RoleClaimOrigin,
+    name: str,
+    agent_id: str,
+    agent_instance_id: str,
+    agent_session_id: str,
+    session_label: str,
+    state_service: Any | None,
+    bridge_manager: BridgeSessionManager | None,
+    peer_registry: PeerRegistry | None,
+    agent_messaging_service: Any | None,
+    call_context: Any | None,
+    takeover: bool = False,
+) -> RoleClaimResult:
+    """Claim-or-replace the ``agent_role_binding`` row for ``name`` (v10 #2.C).
+
+    The single body behind both transports. ``origin`` is recorded, never acted
+    on — see the module docstring.
+
+    ``call_context`` MUST be the SERVER-BUILT context so the §6.1 reserved-
+    keyspace gate cannot be forged. The verb lifts it out of ``state``; the
+    bridge route passes ``None``, which is correct AND fail-closed: with no
+    plugin principal every ``sys:`` name is refused, and the forwarder has no
+    business claiming a system slot. A normal role is unaffected either way.
+    """
+    name = name.strip()
+    agent_id = agent_id.strip()
+    agent_instance_id = agent_instance_id.strip()
+    agent_session_id = agent_session_id.strip()
+    session_label = session_label or name
+    preflight = _claim_preflight_refusal(
+        name=name,
+        agent_id=agent_id,
+        agent_instance_id=agent_instance_id,
+        state_service=state_service,
+        call_context=call_context,
+    )
+    if preflight is not None:
+        return preflight
     if state_service is None:
         return RoleClaimFailure(
             code="state_service_unavailable",
@@ -444,6 +628,25 @@ def claim_role_for_session(
                 "(launch with the session-id carrier exported, or pass it)."
             ),
         )
+    # WS-2e §4.3.2 claim decision table, evaluated BEFORE the CAS so a refusal
+    # mutates nothing. Only ONE row of the table refuses: a DIFFERENT session
+    # that is LIVE, claiming without explicit takeover.
+    #
+    # Every other row passes exactly as before — vacant, self-refresh, and
+    # crash-succession from a DEAD holder. Succession staying cheap is the
+    # load-bearing half: a liveness check that refused dead holders too would
+    # strand every role behind a session that can no longer release it.
+    held = _live_holder_refusal(
+        state_service=state_service,
+        bridge_manager=bridge_manager,
+        peer_registry=peer_registry,
+        name=name,
+        agent_session_id=agent_session_id,
+        agent_instance_id=agent_instance_id,
+        takeover=takeover,
+    )
+    if held is not None:
+        return held
     # §5.5 entity-first: upsert the role entity BEFORE the binding CAS (a lost CAS
     # then leaves at most a harmless orphan entity; resolve never reads it).
     upsert_role_entity(state_service, name=name)
@@ -459,6 +662,14 @@ def claim_role_for_session(
             agent_session_id=agent_session_id,
             session_label=session_label,
         ),
+    )
+    _log_operator_takeover(
+        takeover=takeover,
+        name=name,
+        agent_id=agent_id,
+        agent_instance_id=agent_instance_id,
+        agent_session_id=agent_session_id,
+        outcome=outcome,
     )
     settled = settle_role_handover(
         bridge_manager=bridge_manager,

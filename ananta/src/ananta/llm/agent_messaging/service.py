@@ -23,7 +23,7 @@ exceptions; the calling plugin maps them to HTTP responses.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,6 +56,8 @@ from .models import (
     PeerSendRequest,
     PeerSendResult,
     ReadThreadMessagesRequest,
+    RoleCoveredMark,
+    RoleMessagePersisted,
     RoleSectionStatus,
     SendAgentMessageRequest,
     TextPart,
@@ -83,10 +85,12 @@ from .role_cursor import (
 from .role_inbox import build_role_section, merge_undelivered_oldest_first
 from .routing import BackendResolutionError, BackendRouter
 from .schema import (
+    COL_ACTIVITY_AT_EMISSION,
     COL_CONSUMED,
     COL_CONSUMED_AT,
     COL_EMIT_COUNT,
     COL_EMITTED_TO_AGENT_INSTANCE_ID,
+    COL_EMITTED_TO_AGENT_SESSION_ID,
     COL_ESCALATED,
     COL_ESCALATED_AT,
     COL_ESCALATION_REASON,
@@ -96,6 +100,8 @@ from .schema import (
     ROLE_THREAD_PREFIX,
     TABLE_AGENT_DIRECT_WAKE,
     TABLE_AGENT_ROLE_MESSAGE,
+    TABLE_ROLE_COVERED_MARK,
+    role_covered_mark_external_id,
 )
 from .schema import NAMESPACE as _ROLE_NAMESPACE
 from .state_results import require_completed, require_records, require_updated
@@ -269,6 +275,69 @@ def _result_records(result: object) -> list[dict[str, object]]:
     return require_records(result)
 
 
+def _role_row_key(record: dict[str, object]) -> tuple[str, str]:
+    """The tie-safe ``(created_at, id)`` sort key for one role-message row.
+
+    Same shape and comparator (``normalize_sort_value``) as
+    ``role_inbox._merge_sort_key`` — deliberately duplicated rather than
+    imported, since importing it would put a private ``role_inbox`` symbol on
+    a cross-module boundary for a two-line function.
+    """
+    return (
+        normalize_sort_value(record.get("created_at")),
+        normalize_sort_value(record.get("id")),
+    )
+
+
+def _apply_role_floor(
+    records: list[dict[str, object]], mark: tuple[str, str] | None,
+) -> tuple[list[dict[str, object]], bool]:
+    """Drop rows at/below ``mark`` (design §5b.i — a post-fetch filter, not a
+    query-level ``after`` bound; see the design doc for why those are NOT the
+    same mechanism). Returns ``(kept, truncated)`` — ``truncated`` is True
+    iff at least one row was dropped, the signal ``list_silent_for_roles``
+    threads into ``build_role_section``'s floor-stop mint predicate.
+
+    ``mark is None`` (no attestation yet for this role) is a no-op — §12.3's
+    fail-direction: absent mark, unchanged query, over-page never under-page.
+    """
+    if mark is None:
+        return records, False
+    kept = [record for record in records if _role_row_key(record) > mark]
+    return kept, len(kept) < len(records)
+
+
+def _max_role_key(marks: Iterable[tuple[str, str]]) -> tuple[str, str] | None:
+    """The MAX (newest) ``(created_at, id)`` pair across a set of marks.
+
+    Design §5b.iii: the shared per-call ``role_after`` cursor is a single
+    value applied to every held role's query, so a role-specific floor can't
+    be resumed with one shared seed. MAX over-includes (a role whose own
+    mark is older resurfaces some already-covered rows on the resume walk);
+    MIN would under-include (a role whose own mark is newer would have
+    not-yet-resumed pre-mark history silently skipped). Over-page is
+    §12.3's fail direction, so MAX is the only safe choice.
+    """
+    values = list(marks)
+    if not values:
+        return None
+    return max(
+        values,
+        key=lambda pair: (normalize_sort_value(pair[0]), normalize_sort_value(pair[1])),
+    )
+
+
+def _project_role_covered_mark(record: dict[str, object]) -> RoleCoveredMark:
+    """Project a raw ``role_covered_mark`` row to the public dataclass."""
+    return RoleCoveredMark(
+        recipient_key=str(record.get("recipient_key", "")),
+        covered_created_at=str(record.get("covered_created_at", "")),
+        covered_id=str(record.get("covered_id", "")),
+        covered_message_id=str(record.get("covered_message_id", "")),
+        attested_at=str(record.get("attested_at", "")),
+    )
+
+
 # REL-05 re-emit window + cap defaults (plugin-config-surfaced; Q1). The window
 # is the minimum gap between emissions of the same owed message (most sessions
 # turn within it, so the first re-emit is genuine deafness, not impatience); the
@@ -287,18 +356,25 @@ TURN_BOUNDARY_QUIET_S = 45.0
 
 
 def _emitted_after_turn_boundary(
-    emitted: datetime, prev_activity_at: datetime | None,
+    emitted: datetime, activity_at_emission: datetime | None,
 ) -> bool:
     """True when ``emitted`` landed in a quiet gap long enough to be a turn start.
 
-    ``prev_activity_at`` is the model-activity stamp immediately preceding the one
-    being reconciled, so ``emitted - prev_activity_at`` is exactly the idle span
-    the emission arrived in. ``None`` (no prior activity on this session) means the
-    entire session so far was quiet — the gap is unbounded, so it qualifies.
+    ``activity_at_emission`` is the recipient's last model-activity stamp AS OF the
+    emission, captured on the row at emission time, so
+    ``emitted - activity_at_emission`` is exactly the idle span the emission
+    arrived in. It is deliberately NOT the bridge's live ``prev_model_activity_at``:
+    that slides forward on every model call, which made this span go negative for
+    any emission older than the recipient's two most recent calls and permanently
+    unconsumable thereafter.
+
+    ``None`` (no recorded activity at emission, including a pre-migration row)
+    means the entire preceding session was quiet — the gap is unbounded, so it
+    qualifies.
     """
-    if prev_activity_at is None:
+    if activity_at_emission is None:
         return True
-    return (emitted - prev_activity_at).total_seconds() >= TURN_BOUNDARY_QUIET_S
+    return (emitted - activity_at_emission).total_seconds() >= TURN_BOUNDARY_QUIET_S
 
 
 def _parse_iso(value: object) -> datetime | None:
@@ -761,9 +837,10 @@ class AgentMessagingService:
         # the error repr) — correct partial-failure semantics for a two-section
         # response. A genuine SHARED fault (state store down) still fails the
         # instance read above first, so this never masks a total outage.
-        role_entries, next_role_cursor, role_status, role_error = (
-            self._collect_role_section(request)
-        )
+        (
+            role_entries, next_role_cursor, role_floor_applied,
+            role_history_cursor, role_status, role_error,
+        ) = self._collect_role_section(request)
         return PeerInbox(
             recipient_agent_id=request.recipient_agent_id,
             entries=entries,
@@ -772,25 +849,34 @@ class AgentMessagingService:
             next_role_cursor=next_role_cursor,
             role_section_status=role_status,
             role_section_error=role_error,
+            role_floor_applied=role_floor_applied,
+            role_history_cursor=role_history_cursor,
         )
 
     def _collect_role_section(
         self, request: PeerInboxRequest,
-    ) -> tuple[tuple[PeerInboxEntry, ...], str | None, RoleSectionStatus, str | None]:
+    ) -> tuple[
+        tuple[PeerInboxEntry, ...], str | None, bool, str | None,
+        RoleSectionStatus, str | None,
+    ]:
         """Compute the role section inside the Q1 fault-domain boundary.
 
-        Returns ``(role_entries, next_role_cursor, status, error)``. On success:
-        the merged page + cursor + ``OK`` + ``None``. On ANY role-side failure:
-        empty page + no cursor + ``ERROR`` + ``repr(exc)`` (logged at ERROR with
+        Returns ``(role_entries, next_role_cursor, role_floor_applied,
+        role_history_cursor, status, error)``. On success: the merged page +
+        cursor + the pull-surface-boundary floor signal (design §3/§5b) +
+        ``OK`` + ``None``. On ANY role-side failure: empty page, no cursor, no
+        floor signal, ``ERROR`` + ``repr(exc)`` (logged at ERROR with
         traceback). The broad ``except`` is the deliberate fault-domain boundary
         — its scope is this one seam, so it cannot hide a fault anywhere else.
         """
         try:
-            role_entries, next_role_cursor = self.list_silent_for_roles(
-                agent_instance_id=request.recipient_agent_instance_id,
-                include_important=request.include_important,
-                limit=request.limit,
-                role_after=request.role_after,
+            role_entries, next_role_cursor, role_floor_applied, role_history_cursor = (
+                self.list_silent_for_roles(
+                    agent_instance_id=request.recipient_agent_instance_id,
+                    include_important=request.include_important,
+                    limit=request.limit,
+                    role_after=request.role_after,
+                )
             )
         except Exception as exc:  # noqa: BLE001 — the Q1 fault-domain boundary
             logger.exception(
@@ -799,8 +885,11 @@ class AgentMessagingService:
                 request.recipient_agent_instance_id,
                 request.role_after,
             )
-            return (), None, RoleSectionStatus.ERROR, repr(exc)
-        return role_entries, next_role_cursor, RoleSectionStatus.OK, None
+            return (), None, False, None, RoleSectionStatus.ERROR, repr(exc)
+        return (
+            role_entries, next_role_cursor, role_floor_applied,
+            role_history_cursor, RoleSectionStatus.OK, None,
+        )
 
     # ------------------------------------------------------------------
     # Role-addressed delivery store (v10 Control #1) — state-interface ONLY
@@ -822,7 +911,7 @@ class AgentMessagingService:
         sender_session_label: str | None,
         important: bool,
         content: MessageContent,
-    ) -> str:
+    ) -> RoleMessagePersisted:
         """Single authoritative write for a role-addressed message (B2 keystone).
 
         Exactly ONE persistence write — an idempotent ``upsert_state`` into
@@ -830,13 +919,23 @@ class AgentMessagingService:
         ``external_id``. No second table, no thread row, no
         ``core__agent_message`` projection — so there is no non-atomic
         dual-write and no "durable message with no delivery record" gap.
-        Returns the ``message_id`` (the durable handle the caller surfaces).
+
+        Returns the ``message_id`` (the durable handle the caller surfaces)
+        AND the persisted row's ``created_at``, read back after the write.
+        The read-back is required, not incidental: ``upsert_state`` returns
+        only ``{"generated_id", "upserted"}``, the column is set by the state
+        standardizer rather than written here, and ``created_at`` is the exact
+        quantity the role-inbox section orders and pages on — so it is the only
+        value a watcher may advance its ``role_high_water`` mark against.
+        See :class:`RoleMessagePersisted` for why a clock reading taken beside
+        the write is NOT an acceptable substitute.
         """
         self._require_enabled()
+        external_id = role_message_external_id(
+            recipient_kind, recipient_key, message_id,
+        )
         record: dict[str, object] = {
-            "external_id": role_message_external_id(
-                recipient_kind, recipient_key, message_id,
-            ),
+            "external_id": external_id,
             "recipient_kind": recipient_kind,
             "recipient_key": recipient_key,
             "message_id": message_id,
@@ -869,7 +968,19 @@ class AgentMessagingService:
             ),
             "upsert agent_role_message",
         )
-        return message_id
+        row = self._read_owed_row(TABLE_AGENT_ROLE_MESSAGE, external_id)
+        if row is None:
+            # The row was just written under this exact external_id; its absence
+            # means the write did not land as reported. Fail loudly rather than
+            # dispatching with an empty timestamp — a caller that received ""
+            # would silently stop advancing the watcher mark, which is a wake
+            # storm rather than a visible error.
+            raise AgentMessagingError(
+                f"role message {external_id!r} not readable immediately after "
+                "its own upsert reported success",
+            )
+        created_at = normalize_sort_value(row.get("created_at"))
+        return RoleMessagePersisted(message_id=message_id, created_at=created_at)
 
     def list_undelivered_for(
         self, *, recipient_kind: str, recipient_key: str, limit: int,
@@ -934,7 +1045,13 @@ class AgentMessagingService:
         )
 
     def mark_delivered_for_instance(
-        self, *, external_id: str, recipient_key: str, agent_instance_id: str,
+        self,
+        *,
+        external_id: str,
+        recipient_key: str,
+        agent_instance_id: str,
+        agent_session_id: str,
+        activity_at_emission: str | None,
     ) -> bool:
         """Ownership-fenced emission confirm (Control #5 fence + REL-05 F3).
 
@@ -946,6 +1063,11 @@ class AgentMessagingService:
         agent_instance_id`` — so the consumption stamp later requires activity
         from THIS instance, and displacement re-owes to the new holder. Returns
         ``True`` when recorded, ``False`` when the fence rejected.
+
+        QUIET-GAP binding (a): ``activity_at_emission`` — the recipient's
+        ``last_model_activity_at`` as of THIS emission — is re-captured on every
+        confirm, so each emission is tested against its own quiet gap rather than
+        against a pair that keeps sliding forward after the fact.
 
         emit_count precision note: the count is incremented per confirmed
         emission. A rare live-event-vs-repair-drain race for the same id can
@@ -969,11 +1091,83 @@ class AgentMessagingService:
                     COL_EMIT_COUNT: emit_count + 1,
                     COL_LAST_EMITTED_AT: self._clock().isoformat(),
                     COL_EMITTED_TO_AGENT_INSTANCE_ID: agent_instance_id,
+                    COL_EMITTED_TO_AGENT_SESSION_ID: agent_session_id,
+                    COL_ACTIVITY_AT_EMISSION: activity_at_emission,
                 },
             ),
             "confirm agent_role_message emission",
         )
         return True
+
+    def rehome_owed_role_wakes(
+        self, *, agent_session_id: str, new_agent_instance_id: str,
+    ) -> int:
+        """H1-role re-home — re-point this session's owed ROLE rows on reconnect.
+
+        The role sibling of :meth:`rehome_owed_direct_wakes`, and the third face
+        of one closure (Architect): the STABLE ``agent_session_id`` as the durable
+        join key — REL-08 gave the recipient half, A2 the sender half, this the
+        owed-row half. Stale instance ids as join keys are the recurring failure
+        class; this closes it for role rows.
+
+        The defect it cures, measured: ``emitted_to_agent_instance_id`` is stamped
+        at EMISSION time and nothing re-homed it, while the role BINDING *was*
+        re-pointed at register. After a genuine session restart the consumption
+        reconcile therefore joined against a DEAD instance id while the live
+        session acted under a new one, so the row could not consume and burned an
+        emission on every drain until the cap escalated it.
+
+        Two moves, mirroring the direct sibling exactly and returning their
+        combined rows-affected:
+
+        (a) **owed-and-live** rows (``consumed=false AND escalated=false``) —
+            re-point the join key; the successor's drain and reconcile adopt them.
+        (b) **recipient_gone** rows — the holder PROVABLY returned (it just
+            re-registered) and its terminality was the orphan bug, so re-point AND
+            clear the terminal marks. ``cap_reached`` rows are deliberately NOT
+            revived: those emissions were spent against a live-but-deaf recipient,
+            which is a different story, and reviving them would mask it.
+
+        An empty session id is NOT an identity — fail closed (return ``0``, touch
+        nothing); a DIFFERENT session id matches nothing.
+        """
+        if not agent_session_id:
+            return 0
+        moved = require_updated(
+            self._state.update_state(
+                _ROLE_NAMESPACE,
+                {
+                    "table": TABLE_AGENT_ROLE_MESSAGE,
+                    "filters": {
+                        COL_EMITTED_TO_AGENT_SESSION_ID: agent_session_id,
+                        COL_CONSUMED: False,
+                        COL_ESCALATED: False,
+                    },
+                },
+                {COL_EMITTED_TO_AGENT_INSTANCE_ID: new_agent_instance_id},
+            ),
+        )
+        revived = require_updated(
+            self._state.update_state(
+                _ROLE_NAMESPACE,
+                {
+                    "table": TABLE_AGENT_ROLE_MESSAGE,
+                    "filters": {
+                        COL_EMITTED_TO_AGENT_SESSION_ID: agent_session_id,
+                        COL_CONSUMED: False,
+                        COL_ESCALATED: True,
+                        COL_ESCALATION_REASON: ESCALATION_REASON_GONE,
+                    },
+                },
+                {
+                    COL_EMITTED_TO_AGENT_INSTANCE_ID: new_agent_instance_id,
+                    COL_ESCALATED: False,
+                    COL_ESCALATED_AT: None,
+                    COL_ESCALATION_REASON: None,
+                },
+            ),
+        )
+        return moved + revived
 
     def list_undelivered_for_instance(
         self,
@@ -1021,7 +1215,6 @@ class AgentMessagingService:
         *,
         agent_instance_id: str,
         activity_at: datetime,
-        prev_activity_at: datetime | None = None,
     ) -> list[str]:
         """Stamp ``consumed`` on role rows this instance provably entered a turn on.
 
@@ -1029,7 +1222,9 @@ class AgentMessagingService:
         it was EMITTED TO performs model-initiated activity AFTER the emission
         AND that emission landed in a turn-boundary quiet gap (QUIET-GAP; see
         :meth:`_stamp_consumed_rows` — activity after an emission does not prove
-        a turn SURFACED it when a turn was already running).
+        a turn SURFACED it when a turn was already running). The quiet-gap datum
+        is read from the ROW (captured at emission), so this method needs only
+        the live ``activity_at``.
         Marks every un-consumed role row whose ``emitted_to_agent_instance_id``
         is ``agent_instance_id`` and whose ``last_emitted_at`` precedes
         ``activity_at``; returns the external_ids stamped. Fenced to the
@@ -1051,7 +1246,6 @@ class AgentMessagingService:
             TABLE_AGENT_ROLE_MESSAGE,
             require_records(result),
             activity_at=activity_at,
-            prev_activity_at=prev_activity_at,
         )
 
     def mark_role_consumed_on_ack(self, *, external_id: str) -> bool:
@@ -1107,6 +1301,7 @@ class AgentMessagingService:
         sender_session_label: str | None,
         sender_bridge_id: str,
         content: MessageContent,
+        activity_at_emission: str | None,
     ) -> None:
         """Write the outbox row for an IMPORTANT direct send (idempotent).
 
@@ -1137,6 +1332,7 @@ class AgentMessagingService:
             COL_EMIT_COUNT: 1,
             COL_CONSUMED: False,
             COL_ESCALATED: False,
+            COL_ACTIVITY_AT_EMISSION: activity_at_emission,
         }
         require_completed(
             self._state.upsert_state(
@@ -1255,7 +1451,11 @@ class AgentMessagingService:
         )
 
     def mark_direct_emitted_for_instance(
-        self, *, message_id: str, agent_instance_id: str,
+        self,
+        *,
+        message_id: str,
+        agent_instance_id: str,
+        activity_at_emission: str | None,
     ) -> bool:
         """Record a re-emission of a direct-wake row (fenced to the recipient).
 
@@ -1264,6 +1464,12 @@ class AgentMessagingService:
         ``last_emitted_at=now`` and ``emit_count += 1``. Returns ``True`` when
         recorded, ``False`` when the fence rejected (no such owed row for this
         instance).
+
+        QUIET-GAP binding (a): ``activity_at_emission`` — the recipient's
+        ``last_model_activity_at`` as of THIS emission — is re-captured on every
+        re-emit, so each emission is tested against its own quiet gap. Capturing
+        only at row creation would leave a busy-at-first-emit recipient
+        unconsumable forever, replacing one false-alarm class with another.
         """
         row = self._read_owed_row(TABLE_AGENT_DIRECT_WAKE, message_id)
         if row is None:
@@ -1280,6 +1486,7 @@ class AgentMessagingService:
                 {
                     COL_EMIT_COUNT: _as_int(row.get(COL_EMIT_COUNT)) + 1,
                     COL_LAST_EMITTED_AT: self._clock().isoformat(),
+                    COL_ACTIVITY_AT_EMISSION: activity_at_emission,
                 },
             ),
             "confirm agent_direct_wake emission",
@@ -1291,7 +1498,6 @@ class AgentMessagingService:
         *,
         agent_instance_id: str,
         activity_at: datetime,
-        prev_activity_at: datetime | None = None,
     ) -> list[str]:
         """Stamp ``consumed`` on direct rows this recipient entered a turn on.
 
@@ -1315,7 +1521,6 @@ class AgentMessagingService:
             TABLE_AGENT_DIRECT_WAKE,
             require_records(result),
             activity_at=activity_at,
-            prev_activity_at=prev_activity_at,
         )
 
     def mark_direct_consumed_on_ack(
@@ -1456,16 +1661,17 @@ class AgentMessagingService:
         rows: list[dict[str, object]],
         *,
         activity_at: datetime,
-        prev_activity_at: datetime | None,
     ) -> list[str]:
         """Mark ``consumed`` on each row whose emission STARTED the next turn.
 
         Two guards, both Python (the state filter expresses neither):
 
         1. ``last_emitted_at < activity_at`` — a turn that began before an
-           emission cannot have surfaced it.
-        2. ``last_emitted_at - prev_activity_at >= TURN_BOUNDARY_QUIET_S`` — the
-           emission must have landed in a QUIET GAP long enough to be a turn
+           emission cannot have surfaced it. Evaluated against the LIVE stamp: a
+           condition that only ever becomes MORE true, so once the window opens
+           it never closes.
+        2. ``last_emitted_at - activity_at_emission >= TURN_BOUNDARY_QUIET_S`` —
+           the emission must have landed in a QUIET GAP long enough to be a turn
            boundary. Guard 1 alone was unsound in the direction that loses
            messages: a session already mid-turn issues its next model-initiated
            call within seconds, satisfying guard 1 and retiring the row from the
@@ -1476,10 +1682,22 @@ class AgentMessagingService:
            duplicate), which is the §4.3 posture the contract always claimed:
            tolerate a redundant re-emit, never a false-positive loss.
 
-        ``prev_activity_at`` of ``None`` means this is the session's FIRST
-        model-initiated call, so the whole preceding session is the quiet gap and
-        guard 2 passes. One ``update_state`` per row by ``external_id``
-        (equality). Returns the external_ids stamped.
+        Guard 2 reads ``activity_at_emission`` — the recipient's activity stamp
+        CAPTURED ON THE ROW at emission time — not the bridge's live
+        ``prev_model_activity_at``. The live pair slides forward on every model
+        call, so it answered "was the emission ≥45s after the session's
+        second-most-recent call *as of now*", which for any emission older than
+        the last two calls is negative and can never pass again. That made an
+        emission consumable only in the single drain window between the FIRST and
+        SECOND post-emission model call; miss it (two tool calls inside one 15s
+        repair tick) and a recipient who provably read and acted on the message
+        was recorded as deaf. The captured value is per-emission and frozen, which
+        is what the guard's own contract always described.
+
+        ``activity_at_emission`` of ``None`` — no recorded activity at emission,
+        or a pre-migration row — keeps the original None-rule: the whole preceding
+        session is the quiet gap, so guard 2 passes. One ``update_state`` per row
+        by ``external_id`` (equality). Returns the external_ids stamped.
         """
         stamped: list[str] = []
         consumed_at = activity_at.isoformat()
@@ -1487,7 +1705,9 @@ class AgentMessagingService:
             emitted = _parse_iso(row.get(COL_LAST_EMITTED_AT))
             if emitted is None or emitted >= activity_at:
                 continue
-            if not _emitted_after_turn_boundary(emitted, prev_activity_at):
+            if not _emitted_after_turn_boundary(
+                emitted, _parse_iso(row.get(COL_ACTIVITY_AT_EMISSION)),
+            ):
                 continue
             external_id = str(row.get("external_id") or "")
             if not external_id:
@@ -1520,41 +1740,55 @@ class AgentMessagingService:
         include_important: bool,
         limit: int,
         role_after: str | None,
-    ) -> tuple[tuple[PeerInboxEntry, ...], str | None]:
+    ) -> tuple[tuple[PeerInboxEntry, ...], str | None, bool, str | None]:
         """The role-inbox section — a global ``(created_at, id)`` k-way merge.
 
         Enumerates the roles ``agent_instance_id`` currently holds from
         ``agent_role_binding`` (NOT ``resolve_role``, which is per-name and
         cannot enumerate — Codex check #2), runs a per-role recent-first
-        ``query_ordered`` over ``agent_role_message``, k-way merges into the
-        global top-``limit``, and pages by an opaque scope-bound cursor.
+        ``query_ordered`` over ``agent_role_message``, applies the
+        pull-surface-boundary floor (design §3/§5b — post-fetch, per role,
+        against ``role_covered_mark``), k-way merges into the global
+        top-``limit`` (with the byte ceiling, §4), and pages by an opaque
+        scope-bound cursor.
 
         Default ``include_important=True`` is the catch-up/recovery view: it
         OMITS both the ``important`` and ``delivered`` filters so already-
         delivered IMPORTANT rows resurface (there is deliberately no
         ``core__agent_message`` projection to fall back on).
         ``include_important=False`` is an explicit silent-only status view.
-        Returns ``((), None)`` for a holder with no roles. Re-readable +
-        durable (rows are never consumed on read).
+        Returns ``((), None, False, None)`` for a holder with no roles.
+        Re-readable + durable (rows are never consumed on read).
         """
         held_roles = self._enumerate_held_roles(agent_instance_id)
         if not held_roles:
-            return (), None
+            return (), None, False, None
         scope = RoleCursorScope(
             include_important=include_important,
             held_roles=tuple(held_roles),
         )
-        after = self._decode_role_after(role_after, scope)
-        per_role_records = [
-            self._query_role_page(
+        after, skip_floor = self._decode_role_after(role_after, scope)
+        marks = {} if skip_floor else self._read_role_covered_marks(held_roles)
+        per_role_records: list[list[dict[str, object]]] = []
+        any_floor_truncated = False
+        for role in held_roles:
+            records = self._query_role_page(
                 recipient_key=role,
                 include_important=include_important,
                 limit=limit,
                 after=after,
             )
-            for role in held_roles
-        ]
-        return build_role_section(per_role_records, scope=scope, limit=limit)
+            records, truncated = _apply_role_floor(records, marks.get(role))
+            any_floor_truncated = any_floor_truncated or truncated
+            per_role_records.append(records)
+        resume_seed = _max_role_key(marks.values()) if marks else None
+        return build_role_section(
+            per_role_records,
+            scope=scope,
+            limit=limit,
+            any_floor_truncated=any_floor_truncated,
+            resume_seed=resume_seed,
+        )
 
     def _enumerate_held_roles(self, agent_instance_id: str) -> list[str]:
         """Roles currently bound to ``agent_instance_id`` (single state read).
@@ -1580,23 +1814,31 @@ class AgentMessagingService:
 
     def _decode_role_after(
         self, role_after: str | None, scope: RoleCursorScope,
-    ) -> tuple[object, ...] | None:
+    ) -> tuple[tuple[object, ...] | None, bool]:
         """Decode the inbound ``role_after`` cursor against the current scope.
 
-        ``None`` (no cursor) or a scope change (held-role set / visibility mode
-        differs from issue time) → first page (``after=None``), so a
-        newly-visible row is never silently skipped. A malformed/forged token
-        fails closed as :class:`AgentRequestInvalidError`.
+        Returns ``(after_cursor, skip_floor)``. ``None`` (no cursor) or a
+        scope change (held-role set / visibility mode differs from issue
+        time) → first page (``after=None``), so a newly-visible row is never
+        silently skipped. A malformed/forged token fails closed as
+        :class:`AgentRequestInvalidError`.
+
+        ``skip_floor`` is True ONLY when ``role_after`` decodes to a VALID
+        history token for the CURRENT scope (design §5b.ii) — the sole route
+        by which a caller disables the pull-surface-boundary floor. An
+        absent cursor, an ordinary continuation cursor, and a scope-changed
+        reset all leave the floor enabled: fail toward the floor being
+        applied (over-page-protected), never toward silently skipping it.
         """
         if role_after is None:
-            return None
+            return None, False
         try:
             decoded = decode_role_cursor(role_after, scope)
         except RoleCursorRejectedError as exc:
             raise AgentRequestInvalidError(str(exc)) from exc
         if decoded.outcome is RoleCursorOutcome.SCOPE_CHANGED:
-            return None
-        return (decoded.created_at, decoded.row_id)
+            return None, False
+        return (decoded.created_at, decoded.row_id), decoded.is_history_token
 
     def _query_role_page(
         self,
@@ -1626,6 +1868,117 @@ class AgentMessagingService:
             query["after"] = after
         result = self._state.query_ordered(_ROLE_NAMESPACE, query)
         return _result_records(result)
+
+    def _read_role_covered_marks(
+        self, held_roles: list[str],
+    ) -> dict[str, tuple[str, str]]:
+        """Point-lookup of the covered mark for each held role, by
+        ``external_id`` (the design §1 index: one row per role, point
+        lookups only — no range/IN-list query, so this reuses
+        ``_read_owed_row`` exactly as every other single-row read on this
+        service does, rather than a list-valued filter the state interface's
+        ``query_state`` grammar has no established contract for here).
+
+        A role absent from the returned dict has no mark — the floor applies
+        no bound for it (§12.3 fail-direction: absent mark ⇒ query unchanged
+        from today, over-page never under-page).
+        """
+        marks: dict[str, tuple[str, str]] = {}
+        for role in held_roles:
+            row = self._read_owed_row(
+                TABLE_ROLE_COVERED_MARK, role_covered_mark_external_id(role),
+            )
+            if row is None:
+                continue
+            created_at = row.get("covered_created_at")
+            row_id = row.get("covered_id")
+            if isinstance(created_at, str) and isinstance(row_id, str):
+                marks[role] = (created_at, row_id)
+        return marks
+
+    def mark_role_covered(
+        self,
+        *,
+        recipient_key: str,
+        message_id: str,
+        attested_by_agent_instance_id: str,
+        attested_by_agent_session_id: str,
+        attested_by_session_label: str,
+    ) -> RoleCoveredMark:
+        """Attest ``recipient_key`` covered through ``message_id`` (design §2).
+
+        Attest-BY-``message_id``, never by a caller-asserted ``(created_at,
+        id)`` pair: looks the row up via ``role_message_external_id`` — the
+        same deterministic key ``_read_owed_row`` already uses for the drain
+        — and stores THAT ROW's own pair. A caller can only ever name a pair
+        that corresponds to a row that exists; this is structural, not a
+        validation branch that could be skipped or gotten wrong later.
+
+        Monotonic: an attestation at or below the stored mark is a no-op,
+        returning the PRE-EXISTING mark unchanged. Compared via
+        ``normalize_sort_value`` on the ``(created_at, id)`` tuple — the same
+        comparator ``_merge_sort_key``/the floor filter already use, so this
+        can never disagree with them on an edge value.
+
+        Identity fencing (R1) is the CALLER's responsibility — this method
+        trusts its three ``attested_by_*`` arguments as already server-
+        sourced from the calling route's live ``peer_binding``, never from a
+        caller-supplied argument. See
+        ``plugin::agent_messaging_plugin::peer_mark_role_covered`` for the
+        registered-route-only fence and the live role-ownership re-check.
+        """
+        external_id = role_message_external_id(
+            RECIPIENT_KIND_ROLE, recipient_key, message_id,
+        )
+        row = self._read_owed_row(TABLE_AGENT_ROLE_MESSAGE, external_id)
+        if row is None:
+            raise AgentRequestInvalidError(
+                f"no role message {message_id!r} found for role "
+                f"{recipient_key!r} — cannot attest a row that does not exist",
+            )
+        new_key = (
+            normalize_sort_value(row.get("created_at")),
+            normalize_sort_value(row.get("id")),
+        )
+        mark_external_id = role_covered_mark_external_id(recipient_key)
+        existing = self._read_owed_row(TABLE_ROLE_COVERED_MARK, mark_external_id)
+        if existing is not None:
+            existing_key = (
+                normalize_sort_value(existing.get("covered_created_at")),
+                normalize_sort_value(existing.get("covered_id")),
+            )
+            if existing_key >= new_key:
+                return _project_role_covered_mark(existing)
+        attested_at = self._clock().isoformat()
+        record: dict[str, object] = {
+            "external_id": mark_external_id,
+            "recipient_key": recipient_key,
+            "covered_created_at": new_key[0],
+            "covered_id": new_key[1],
+            "covered_message_id": message_id,
+            "attested_by_agent_instance_id": attested_by_agent_instance_id,
+            "attested_by_agent_session_id": attested_by_agent_session_id,
+            "attested_by_session_label": attested_by_session_label,
+            "attested_at": attested_at,
+        }
+        require_completed(
+            self._state.upsert_state(
+                _ROLE_NAMESPACE,
+                {
+                    "table": TABLE_ROLE_COVERED_MARK,
+                    "record": record,
+                    "conflict_columns": ["external_id"],
+                },
+            ),
+            "upsert role_covered_mark",
+        )
+        return RoleCoveredMark(
+            recipient_key=recipient_key,
+            covered_created_at=new_key[0],
+            covered_id=new_key[1],
+            covered_message_id=message_id,
+            attested_at=attested_at,
+        )
 
     def close_thread(
         self, *, thread_id: str, bridge_id: str,

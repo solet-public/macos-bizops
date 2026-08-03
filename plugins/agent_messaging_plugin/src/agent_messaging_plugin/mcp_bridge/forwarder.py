@@ -1042,10 +1042,13 @@ class Forwarder:
         peer_id: str,
         content: list[dict[str, Any]],
         peer_agent_instance_id: str | None = None,
+        peer_agent_session_id: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"peer_id": peer_id, "content": content}
         if peer_agent_instance_id is not None:
             body["peer_agent_instance_id"] = peer_agent_instance_id
+        if peer_agent_session_id is not None:
+            body["peer_agent_session_id"] = peer_agent_session_id
 
         async def call() -> dict[str, Any]:
             return await self._post(self._bridge_path("/peer/send"), body)

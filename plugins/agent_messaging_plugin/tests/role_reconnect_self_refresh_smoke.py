@@ -106,6 +106,20 @@ class _NoOwedDirectWakeService:
         del agent_session_id, new_agent_instance_id
         return 0
 
+    def rehome_owed_role_wakes(
+        self, *, agent_session_id: str, new_agent_instance_id: str,
+    ) -> int:
+        """H1-role sibling. Present because the ROUTE calls it on every register.
+
+        Absent, every register in this smoke AttributeErrors into the product's
+        deliberate loud-but-non-fatal guard and the suite GREENS over a degraded
+        route — 19 swallowed faults across two files before this was measured. A
+        fake standing in for a service must track that service's interface, or it
+        silently stops exercising the thing the smoke claims to cover.
+        """
+        del agent_session_id, new_agent_instance_id
+        return 0
+
 
 def _service(state: StateManagementInterface) -> AgentMessagingService:
     return AgentMessagingService(
@@ -177,6 +191,46 @@ def _register(
 
 def _open_bridge(manager: BridgeSessionManager) -> str:
     return manager.open(homunculus_name="", parent_pid=123).bridge_id
+
+
+def test_rehome_tokens_never_report_error_on_register() -> None:
+    """RED-FIRST GUARD: a re-home that THREW must not read as a re-home that ran.
+
+    ``_role_wake_self_refresh`` / ``_direct_wake_self_refresh`` are deliberately
+    loud-but-non-fatal — a fault keeps the registration at 200 so a broken re-home
+    can never block a session coming up. Correct product behavior, but it means a
+    FAKE that has drifted from the service interface makes every register
+    AttributeError into that guard while the suite stays green: measured, 19
+    swallowed faults across two smokes, invisible to every black-box assertion
+    because the response is 200 either way.
+
+    So this asserts at the SOURCE signal instead — the register response's own
+    ``role_rehome`` / ``direct_rehome`` tokens, which report ``error`` on exactly
+    that path. Same class as the discards-unread lesson: when the product
+    deliberately swallows a failure, only a source-level assertion can see it.
+
+    Mutation that reddens this leg: delete ``rehome_owed_role_wakes`` from
+    ``_NoOwedDirectWakeService`` (its state before this fix) -> role_rehome
+    becomes ``error``.
+    """
+    manager, registry, state = _bridge_manager(), _fresh_peer_registry(), _state()
+    client = _client(manager, registry, state)
+    response = _register(
+        client,
+        _open_bridge(manager),
+        agent_instance_id="agi-rehome-token",
+        agent_session_id="sess-rehome-token",
+    )
+    payload = response.json()
+    _check(
+        payload.get("role_rehome") != "error",
+        f"role_rehome token is not 'error' (got {payload.get('role_rehome')!r}) "
+        f"— the role re-home ran rather than faulting into the silent guard",
+    )
+    _check(
+        payload.get("direct_rehome") != "error",
+        f"direct_rehome token is not 'error' (got {payload.get('direct_rehome')!r})",
+    )
 
 
 def test_reconnect_repoints_resolution() -> None:
@@ -443,6 +497,7 @@ def main() -> int:
     test_reconnect_repoints_resolution()
     test_backlog_redelivers_across_strand()
     test_multi_role_single_cas()
+    test_rehome_tokens_never_report_error_on_register()
     test_missing_carrier_fails_loud_no_mutation()
     test_empty_register_uses_preserved_session_id_for_self_refresh()
     test_state_fault_returns_error_token_still_200()

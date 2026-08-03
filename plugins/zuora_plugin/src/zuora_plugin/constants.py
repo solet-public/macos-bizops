@@ -35,10 +35,7 @@ _HOMUNCULUS: Final[str] = _homunculus_or_fail()
 # Plugin identity
 # ---------------------------------------------------------------------------
 PLUGIN_NAME: Final[str] = "zuora_plugin"
-PLUGIN_VERSION: Final[str] = "1.0.0"
-
-# Blob storage namespace (Data Query spills + bulk exports).
-BLOB_NAMESPACE: Final[str] = "zuora_plugin"
+PLUGIN_VERSION: Final[str] = "1.1.0"
 
 # ---------------------------------------------------------------------------
 # Chain-consumed vault key — the OAuth client_secret.
@@ -82,20 +79,62 @@ CONFIG_KEY_REQUEST_TIMEOUT_SECONDS: Final[str] = "request_timeout_seconds"
 TOKEN_REFRESH_MARGIN_SECONDS: Final[float] = 30.0
 
 # ---------------------------------------------------------------------------
-# Caps + spill
+# Caps + spill (business-data limits + spill-floor migration, 2026-08-02 —
+# workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md).
+# data_query, bulk_export, list_subscriptions, and list_invoices now ALWAYS
+# write to a caller-supplied output_tsv_path — never records inline, at any
+# size (07-29 spill floor, unconditional; the former INLINE_BYTE_CAP/blob-spill
+# branch is deleted, not lowered). DEFAULT_ROW_LIMIT is the fetch ceiling
+# absent an explicit, acknowledged override, matching salesforce/postgres's
+# reconciled default — zuora has no vendor-imposed ceiling below 500 for any
+# of these four verbs. get_object/get_invoice (single-record fetch-by-id,
+# §1.2) are unaffected and stay inline.
 # ---------------------------------------------------------------------------
-DATA_QUERY_DEFAULT_MAX_ROWS: Final[int] = 200
+DEFAULT_ROW_LIMIT: Final[int] = 500
+
+# data_query's override ceiling — a single /v1/action/query call comfortably
+# covers this (vendor per-call cap is 2000, see ZUORA_QUERY_PAGE_ROW_CAP), so
+# data_query never needs the queryMore loop. For pulls beyond this, use
+# bulk_export (same override mechanism, higher hard cap, queryMore-driven).
 DATA_QUERY_MAX_ROWS_CAP: Final[int] = 1000
-INLINE_BYTE_CAP: Final[int] = 200_000
-DATA_QUERY_SPILL_FILENAME: Final[str] = "data_query_results.json"
+
+# bulk_export's override ceiling — the N>>500 route (§7.2 Pattern A). Reachable
+# now via the queryMore continuation loop (billing_actions._run_zoql_query);
+# OURS-ARBITRARY, same class as postgres's EXPORT_ROW_CAP / salesforce's
+# SOQL_EXPORT_ROW_CAP, not a vendor ceiling.
 BULK_EXPORT_ROW_CAP: Final[int] = 50_000
 
-EXPORT_FORMAT_CSV: Final[str] = "csv"
-EXPORT_FORMAT_JSON: Final[str] = "json"
-EXPORT_FORMATS: Final[frozenset[str]] = frozenset({EXPORT_FORMAT_CSV, EXPORT_FORMAT_JSON})
-DEFAULT_EXPORT_FORMAT: Final[str] = EXPORT_FORMAT_CSV
-MIME_CSV: Final[str] = "text/csv"
-MIME_JSON: Final[str] = "application/json"
+# list_subscriptions / list_invoices override ceiling — Pattern B (caller's
+# script loops the ordinary read under the override), matching jira's
+# list_comments and marketo's get_leads. No dedicated bulk verb exists or is
+# being built for either (§7.3); this is the row_limit hard cap for the
+# internal per-account pagination loop.
+LIST_ROW_LIMIT_CAP: Final[int] = 5_000
+
+# Vendor per-call ceiling on Zuora's ZOQL query endpoint (POST /v1/action/query,
+# POST /v1/action/queryMore) — VENDOR-IMPOSED, citation: Zuora v1 API reference,
+# operationId Action_POSTquery, "Limitations": "The number of records returned
+# is limited to 2000 records." Continuation is a SEPARATE queryMore call keyed
+# on the queryLocator the query response returns whenever done=false.
+ZUORA_QUERY_PAGE_ROW_CAP: Final[int] = 2000
+
+# Vendor per-call ceiling on Zuora's page/pageSize-paginated list endpoints
+# (POST /v1/subscriptions/accounts/{account-key} today; list_invoices' legacy
+# endpoint's own pagination support is unconfirmed, see billing_actions'
+# module docstring) — VENDOR-IMPOSED, citation: Zuora v1 API reference,
+# component GLOBAL_REQUEST_pageSize, "maximum: 40, default: 20" (operationId
+# GET_SubscriptionsByAccount references this component directly).
+ZUORA_LIST_PAGE_SIZE_MAX: Final[int] = 40
+
+TSV_SUFFIX: Final[str] = ".tsv"
+CONFIG_KEY_EXPORT_ALLOWED_ROOTS: Final[str] = "export_allowed_roots"
+
+# ---------------------------------------------------------------------------
+# Override friction (§5) — required together or not at all; absent means the
+# effective limit is DEFAULT_ROW_LIMIT.
+# ---------------------------------------------------------------------------
+PARAM_ACKNOWLEDGE_OVERRIDE: Final[str] = "acknowledge_default_limit_override"
+PARAM_ROW_LIMIT: Final[str] = "row_limit"
 
 # ---------------------------------------------------------------------------
 # Object types this connector CRUDs (Object/Actions API).
@@ -108,7 +147,6 @@ SUPPORTED_OBJECT_TYPES: Final[frozenset[str]] = frozenset(
 # Error codes (zuora.* prefix — surfaced to callers of the verbs)
 # ---------------------------------------------------------------------------
 ERROR_ADDRESS_BOOK_NOT_AVAILABLE: Final[str] = "address_book_service_not_available"
-ERROR_BLOB_STORAGE_NOT_AVAILABLE: Final[str] = "blob_storage_service_not_available"
 ERROR_ADDRESS_BOOK_ENTRY_MISSING: Final[str] = "address_book_entry_missing"
 ERROR_ADDRESS_BOOK_ENTRY_INCOMPLETE: Final[str] = "address_book_entry_incomplete"
 
@@ -120,6 +158,7 @@ ERROR_VALIDATION_FAILED: Final[str] = "zuora.validation_failed"
 ERROR_RATE_LIMITED: Final[str] = "zuora.rate_limited"
 ERROR_QUERY_FAILED: Final[str] = "zuora.query_failed"
 ERROR_API_ERROR: Final[str] = "zuora.api_error"
+ERROR_EXPORT_PATH_REFUSED: Final[str] = "zuora.export_path_refused"
 
 # ---------------------------------------------------------------------------
 # Result types

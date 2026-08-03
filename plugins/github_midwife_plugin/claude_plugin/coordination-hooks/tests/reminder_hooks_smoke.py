@@ -59,7 +59,16 @@ INJECTION_LABELS = (
 
 
 def _armed(label: str = LABEL_A) -> dict[str, str]:
-    return {"AGENT_SESSION_LABEL": label}
+    """An env that arms every reminder that HAS an arm condition.
+
+    §7 re-key 2026-08-01: the three reminders no longer share one switch.
+    step_zero is always armed (no condition at all), check_messages arms on
+    AGENT_SESSION_ID (identity — the inbox is keyed on it), and role_binding
+    still arms on AGENT_SESSION_LABEL because the label IS its content. Both
+    variables are supplied here so "armed" means armed for all of them; the
+    per-hook preconditions are asserted separately by the disarm legs.
+    """
+    return {"AGENT_SESSION_LABEL": label, "AGENT_SESSION_ID": f"ases-{label}"}
 
 
 def _parse(res: Results, stdout: str, label: str) -> dict[str, Any] | None:
@@ -90,13 +99,101 @@ def _context(res: Results, hook: str, label: str, stdin: str = "") -> str | None
     return context
 
 
+#: Reminders that still have an arm condition, and the variable that arms them.
+#: step_zero is deliberately ABSENT — it has no condition at all (§7).
+_CONDITIONAL_REMINDERS = {
+    "check_messages_reminder.js": "AGENT_SESSION_ID",
+    "role_binding_reminder.js": "AGENT_SESSION_LABEL",
+}
+
+
 def check_disarmed_is_silent(res: Results) -> None:
-    """Default-off, verified against an environment that CANNOT leak a label in."""
-    for hook in REMINDERS:
+    """Each CONDITIONAL reminder is silent without ITS OWN variable.
+
+    ★ §7 2026-08-01 — this leg no longer covers step_zero, and the omission is
+    the point: step_zero is now unconditional, so a "disarmed step_zero" case
+    would assert the opposite of the contract. Its inverted leg is
+    `check_step_zero_fires_everywhere` below.
+
+    The environment CANNOT leak either variable in: the harness scrubs both via
+    GUARD_VARS, so a case that omits one is genuinely without it rather than
+    quietly inheriting the launcher's.
+    """
+    for hook, var in _CONDITIONAL_REMINDERS.items():
         proc = run_hook(hook, env={})
         res.check(proc.returncode == 0, f"{hook} disarmed exits 0", f"exit {proc.returncode}")
-        res.check(proc.stdout == "", f"{hook} disarmed writes no stdout", f"got {proc.stdout[:120]!r}")
+        res.check(proc.stdout == "", f"{hook} disarmed writes no stdout ({var} absent)",
+                  f"got {proc.stdout[:120]!r}")
         res.check(proc.stderr == "", f"{hook} disarmed writes no stderr", f"got {proc.stderr[:120]!r}")
+
+
+def check_step_zero_fires_everywhere(res: Results) -> None:
+    """★ INVERTED LEG (§7): step_zero fires with NO environment whatsoever.
+
+    The old leg asserted silence when unlabelled; that emission is now the
+    CONTRACT. The failure direction inverted with it: a silently disarmed
+    awareness reminder is a session never learning the platform exists — the
+    silent-absence class, now on the awareness side.
+
+    RED MUTATION for this leg: re-add ANY env condition to step_zero_reminder.js.
+
+    Byte-identical labelled vs unlabelled is asserted rather than merely
+    "non-empty", because a hook that emitted DIFFERENT text without fleet
+    context would still be leaking a deployment assumption into the literal.
+    """
+    hook = "step_zero_reminder.js"
+    bare = run_hook(hook, env={})
+    res.check(bare.returncode == 0, f"{hook} exits 0 with no env", f"exit {bare.returncode}")
+    res.check(bare.stdout != "", f"{hook} FIRES with no env at all (awareness is unconditional)",
+              "emitted nothing — a re-added env condition is the likely cause")
+    res.check(bare.stderr == "", f"{hook} writes no stderr with no env", f"got {bare.stderr[:120]!r}")
+    labelled = run_hook(hook, env=_armed())
+    res.check(bare.stdout == labelled.stdout,
+              f"{hook} output is BYTE-IDENTICAL labelled vs unlabelled",
+              "output differs — the literal is carrying fleet context")
+
+
+def check_step_zero_text_verify(res: Results) -> None:
+    """§33.1 / WS3C §7 new text-verify leg (Dax's finding): step_zero's literal
+    restores knowledge-first ORDERING primacy without becoming imperative,
+    deployment-specific, or naming a process verb -- and separates "check
+    before other work" (ordering) from "don't block on the async reply" (the
+    two claims the pre-fix wording conflated: "its result is not required
+    before proceeding" read as permission to skip the check, not just
+    permission not to block on the reply).
+
+    RED MUTATION: reintroduce "is not required before proceeding" (the old
+    conflated phrasing), drop "before other work" (the primacy claim), or add
+    a process-key/deployment-path literal.
+    """
+    context = _context(res, "step_zero_reminder.js", LABEL_A)
+    if context is None:
+        return
+    res.check(
+        "before other work" in context,
+        "step_zero restores an ordering-primacy claim ('before other work')",
+        f"got: {context!r}",
+    )
+    res.check(
+        "not required before proceeding" not in context,
+        "step_zero drops the old conflated 'not required before proceeding' phrasing",
+        f"got: {context!r}",
+    )
+    res.check(
+        "no need to block" in context,
+        "step_zero keeps the async clause narrowly scoped to NOT WAITING for the reply",
+        f"got: {context!r}",
+    )
+    res.check(
+        "must" not in context.lower() and "always " not in context.lower(),
+        "step_zero stays non-imperative (no 'must'/'always')",
+        f"got: {context!r}",
+    )
+    res.check(
+        "::" not in context and "/Users/" not in context and "homunculus call" not in context,
+        "step_zero names no process verb, deployment path, or fleet-specific command",
+        f"got: {context!r}",
+    )
 
 
 def check_armed_emits_valid_context(res: Results) -> None:
@@ -239,6 +336,8 @@ def main() -> int:
     preflight()
     res = Results("coordination-hooks — reminder hooks")
     check_disarmed_is_silent(res)
+    check_step_zero_fires_everywhere(res)
+    check_step_zero_text_verify(res)
     check_armed_emits_valid_context(res)
     check_never_blocks(res)
     check_event_echo(res)

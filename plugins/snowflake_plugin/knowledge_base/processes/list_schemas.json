@@ -2,7 +2,7 @@
   "process_key": "plugin::snowflake_plugin::list_schemas",
   "display_name": "Snowflake: List Schemas",
   "description": "List the schemas in a database of the configured Snowflake account. Requires database.",
-  "embedding_description": "Enumerate the schemas inside a specific Snowflake database, for exploring warehouse structure before writing a query. Requires the database name.",
+  "embedding_description": "List the schemas inside one Snowflake database, for exploring how the data warehouse is organised before writing a query. The middle level of Snowflake warehouse introspection, between listing the databases and listing one schema's tables.",
   "result_processor_customizations": {
     "action_label": "Snowflake schemas listed",
     "result_type": "snowflake_list_schemas_result",

@@ -112,7 +112,7 @@ never enters model context.
     field_type/value entries:
     - `client_id` = the literal ID
     - `client_secret` = `vault::<homunculus>.default_address_book_plugin.google_client_secret`
-    - `redirect_uri` — local: `http://localhost:<port>/oauth/google/callback`
+    - `redirect_uri` — local: `http://127.0.0.1:<port>/oauth/google/callback`
       (any free port; it only has to match what `start_interface` binds —
       nothing is registered with Google) · cloud: the exact HTTPS URI from
       step 6
@@ -158,17 +158,17 @@ holder session to dispatch and report the action id.
 | `connect_account` | — | `{authorize_url, state, redirect_uri, instructions}` |
 | `start_interface` | `host?`, `port?` | `{host, port, callback_url}` |
 | `stop_interface` | — | `{stopped}` |
-| `gmail_list_messages` | `query?`, `max?` | `{messages:[{id, thread_id}], count}` |
+| `gmail_list_messages` | `query?`, `max?` (default+cap 500) | `{messages:[{id, thread_id}], count}` |
 | `gmail_get_message` | `id` | `{id, thread_id, snippet, headers, body_text, attachments}` |
 | `gmail_send` | `to`, `subject?`, `body?`, `attachments?` | `{id, thread_id}` |
-| `drive_list_files` | `query?`, `max?` | `{files:[{id, name, mime, modified, size}], count}` |
+| `drive_list_files` | `query?`, `max?`, `acknowledge_default_limit_override?`, `row_limit?` (default 500, cap 1000) | `{files:[{id, name, mime, modified, size}], count}` |
 | `drive_download_file` | `id` | `{file_blob_key, name, mime}` |
 | `drive_upload_file` | `name`, `blob_key`, `parent?`, `mime?` | `{id, web_view_link}` |
 | `drive_create_folder` | `name`, `parent?` | `{id}` |
 | `drive_share` | `id`, `email`, `role` | `{ok, permission_id}` |
 | `sheets_create` | `title` | `{id}` |
 | `sheets_create_from_files` | `title`, `tabs` (`[{name, file_path}]`, absolute `.csv`/`.tsv` paths) | `{id, tabs:[{name, sheet_id}], updated_cells}` |
-| `sheets_get_values` | `id`, `range` | `{values}` |
+| `sheets_get_values` | `id`, `range`, `acknowledge_default_limit_override?`, `row_limit?` (default 500, cap 1000, post-fetch fail-loud) | `{values}` |
 | `sheets_update_values` | `id`, `range`, `values` | `{updated_cells}` |
 | `sheets_append_values` | `id`, `range`, `values` | `{updated_cells}` |
 | `sheets_batch_update` | `id`, `requests` | `{replies}` |
@@ -184,7 +184,48 @@ holder session to dispatch and report the action id.
 
 Errors are typed with the `gsuite.*` prefix: `gsuite.not_connected`,
 `gsuite.auth_expired`, `gsuite.permission_denied`, `gsuite.rate_limited`,
-`gsuite.not_found`, `gsuite.invalid_params`.
+`gsuite.not_found`, `gsuite.invalid_params`, `gsuite.result_too_large`
+(`sheets_get_values` only, see below).
+
+## Business-data limits migration (2026-08-02) — g_suite is LIMITS-ONLY
+
+Unlike jira_plugin/marketo_plugin/zuora_plugin's full spill-floor treatment
+(`workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md`),
+g_suite's three previously-ungoverned list/read verbs
+(`gmail_list_messages`, `drive_list_files`, `sheets_get_values`) got a
+**resource guard only** — operator scope refinement, arm-4f6174762777dfe2fa66b8d409bb373b:
+the mass-exposure/PII concern the spill floor exists for does not apply to
+g_suite. So there is **no containment gate, no caller-supplied-path
+requirement, and no inline-branch deletion** here — all three verbs still
+return inline, same as before; only the row bound changed.
+
+- **`gmail_list_messages`**: default AND cap both raised to 500 — Gmail's own
+  real single-call maximum (Reviewer-D's census), kept explicitly by the
+  operator. No `acknowledge_default_limit_override`/`row_limit` pair exists
+  on this verb: the default already sits at the vendor's per-call ceiling,
+  so there is nothing an override could raise to without building
+  `pageToken` pagination across multiple calls (out of this slice's scope).
+  A `max` above 500 clamps down silently — not the §5 flag-based friction,
+  since there's no ceiling for a flag to unlock here.
+- **`drive_list_files`**: default raised to 500 (the general policy number);
+  cap raised to 1000 (Drive's own real single-call maximum) — genuinely
+  reachable via `acknowledge_default_limit_override=true` + `row_limit`. An
+  optional `max` still lets a caller request FEWER within whatever ceiling
+  applies, without invoking the override.
+- **`sheets_get_values`**: the riskiest of the three pre-migration (no bound
+  of any kind). Default 500 / cap 1000 rows, but **OURS-ARBITRARY** — no
+  vendor citation exists for a `values.get` row ceiling (Sheets has no
+  server-side size parameter for this call at all, unlike `maxResults`/
+  `pageSize`). Enforced **POST-FETCH**: a returned grid over the effective
+  limit raises `ResultTooLargeError` (`gsuite.result_too_large`), never a
+  silent truncation — but this does **not** reduce the underlying vendor
+  call's size; narrowing the requested A1 range is still the caller's job
+  for that, and the process description says so explicitly.
+
+All three follow the same override-pair discipline as the full-floor
+connectors where an override exists (`drive_list_files`): both-or-neither
+fails loud, naming which half was missing; a `row_limit` above the hard cap
+is refused, never silently clamped.
 
 `drive_download_file` is the **worked blob-spill example**: it returns a
 `file_blob_key`, and its `get_edge_process_definitions()` entry declares

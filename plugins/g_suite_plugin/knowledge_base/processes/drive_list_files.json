@@ -1,8 +1,8 @@
 {
   "process_key": "plugin::g_suite_plugin::drive_list_files",
   "display_name": "Drive: List Files",
-  "description": "List Google Drive files matching a Drive search query (for example \"name contains 'budget' and mimeType='application/pdf'\"), newest first. Returns id, name, mime type, modified time, and size per file. Requires a connected account (run connect_account first).",
-  "embedding_description": "Search the connected Google Drive and return matching file descriptors. Accepts a Drive query using Drive's search grammar (name contains, mimeType, modifiedTime, trashed, parents in folder). Returns a list of files with id, name, mimeType, modifiedTime and size, ordered newest first, plus a count. Pair with drive_download_file to fetch a binary file's bytes. Fails gsuite.not_connected if no account is linked.",
+  "description": "List Google Drive files matching a Drive search query (for example \"name contains 'budget' and mimeType='application/pdf'\"), newest first. Returns id, name, mime type, modified time, and size per file. Defaults to 500 files to avoid exhausting rate limits and pulling more than needed. To fetch more, pass acknowledge_default_limit_override=true together with an explicit row_limit (up to 1000, Drive's own real single-call maximum, Google, current as of this writing) -- both are required together, and a row_limit above the cap is refused rather than silently clamped. Requires a connected account (run connect_account first).",
+  "embedding_description": "Search the connected Google Drive and return matching file descriptors using Drive's own search grammar - name contains, mimeType, modifiedTime, trashed, parents in a folder. Returns each file's id, name, mime type, modified time, size, newest first, defaulting to 500 files (raise to 1000 -- Drive's own single-call max -- via acknowledge_default_limit_override + row_limit).",
   "result_processor_customizations": {
     "action_label": "Drive files listed",
     "result_type": "g_suite_drive_list_result",

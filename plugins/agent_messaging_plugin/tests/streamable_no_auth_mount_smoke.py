@@ -324,30 +324,51 @@ def _build_mounted_app(
 
 
 def _check_mounted_surface(
-    app: FastAPI, plugin: AgentMessagingPlugin,
+    client: TestClient, plugin: AgentMessagingPlugin,
 ) -> str | None:
-    mounted_paths = {
-        route.path
-        for route in app.routes
-        if hasattr(route, "path")
+    """A mounted path that 404s must red this check.
+
+    Deliberately request-based, not route.path introspection: fastapi
+    0.139.2 wraps app.include_router(...) output (used at plugin.py's
+    _mount_streamable_transport call sites) in a private
+    _IncludedRouter(BaseRoute) that carries no .path attribute, so a
+    {route.path for route in app.routes if hasattr(route, "path")} scan
+    silently drops every route mounted that way and reds on a fully
+    working mount. A real request is immune to that internal
+    representation changing again. Status is checked only for != 404 —
+    401/422/whatever is "mounted"; the specific expected status per mode
+    (permissive vs enforced) is asserted by the checks that run after this
+    one.
+    """
+    probe_body = {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "tools/call",
+        "params": {"name": "not_a_real_tool", "arguments": {}},
     }
-    expected_paths: set[str] = {STREAMABLE_PATH, STREAMABLE_ALIAS_PATH}
-    missing_paths = expected_paths - mounted_paths
-    if missing_paths:
-        return f"missing mounted streamable paths: {sorted(missing_paths)}"
-    metadata_paths: set[str] = {
+    for path in (STREAMABLE_PATH, STREAMABLE_ALIAS_PATH):
+        resp = client.post(path, json=probe_body)
+        if resp.status_code == 404:
+            return f"mounted path returned 404 (not mounted): POST {path}"
+    for path in (
         OAUTH_AUTHORIZATION_SERVER_PATH,
         OAUTH_PROTECTED_RESOURCE_PATH,
-        OAUTH_PROTECTED_RESOURCE_PATH + "/{resource_path:path}",
         OAUTH_AUTHORIZE_PATH,
-        OAUTH_TOKEN_PATH,
-    }
-    missing_metadata_paths = metadata_paths - mounted_paths
-    if missing_metadata_paths:
+    ):
+        resp = client.get(path)
+        if resp.status_code == 404:
+            return f"mounted path returned 404 (not mounted): GET {path}"
+    # Path-templated resource-metadata route: probe with a known-good
+    # substitution rather than the bare template string.
+    resp = client.get(OAUTH_PROTECTED_RESOURCE_PATH + STREAMABLE_PATH)
+    if resp.status_code == 404:
         return (
-            "missing mounted OAuth metadata paths: "
-            f"{sorted(missing_metadata_paths)}"
+            "mounted path returned 404 (not mounted): GET "
+            f"{OAUTH_PROTECTED_RESOURCE_PATH}/{{resource_path:path}}"
         )
+    resp = client.post(OAUTH_TOKEN_PATH, data={"grant_type": "bogus"})
+    if resp.status_code == 404:
+        return f"mounted path returned 404 (not mounted): POST {OAUTH_TOKEN_PATH}"
     if plugin._streamable_session_manager is None:
         return "streamable session manager was not installed"
     return None
@@ -839,10 +860,10 @@ def _permissive_first_failure(
     plugin: AgentMessagingPlugin,
     platform_surface: _FakePlatformSurface,
 ) -> str | None:
-    structural = _check_mounted_surface(app, plugin)
+    client = TestClient(app, base_url=_BASE_URL)
+    structural = _check_mounted_surface(client, plugin)
     if structural is not None:
         return structural
-    client = TestClient(app, base_url=_BASE_URL)
     for check in (
         _check_protected_resource_metadata,
         _check_authorization_metadata,
@@ -860,13 +881,13 @@ def _enforced_first_failure(
 ) -> str | None:
     # Structural: the dynamic OAuth login surface must mount even under
     # enforcement (red-first — before the fix it was gated on no_auth).
-    structural = _check_mounted_surface(app, plugin)
+    client = TestClient(app, base_url=_BASE_URL)
+    structural = _check_mounted_surface(client, plugin)
     if structural is not None:
         return structural
     verifier_err = _check_enforced_verifier_is_real(plugin)
     if verifier_err is not None:
         return verifier_err
-    client = TestClient(app, base_url=_BASE_URL)
     interop_err = _check_enforced_token_interop(client, plugin)
     if interop_err is not None:
         return interop_err

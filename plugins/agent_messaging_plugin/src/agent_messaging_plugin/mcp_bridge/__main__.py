@@ -497,7 +497,11 @@ TOOLS: Final[list[Tool]] = [
                 "  Discover candidates via peer_list. For replies, take the",
                 "  sender_agent_instance_id from the inbox entry or the",
                 "  peer_message notification meta and pass it as",
-                "  peer_agent_instance_id here.",
+                "  peer_agent_instance_id here. When the reply hint also",
+                "  supplies peer_agent_session_id, pass both: peer_send resolves",
+                "  the exact instance FIRST and consults the stable session key",
+                "  only after that instance is peer_unreachable. A live instance",
+                "  always wins, even if the session key points elsewhere.",
                 "",
                 "Loop-prevention contract:",
                 "  Messages are ALWAYS persisted in the (sender_bridge, peer_instance)",
@@ -536,6 +540,14 @@ TOOLS: Final[list[Tool]] = [
                         "Specific instance to address when multiple instances "
                         "of peer_id are registered. Omit when only one "
                         "instance exists."
+                    ),
+                },
+                "peer_agent_session_id": {
+                    "type": "string",
+                    "description": (
+                        "Stable logical-session fallback from a reply hint. "
+                        "Used only after peer_agent_instance_id is unreachable; "
+                        "never overrides a live instance."
                     ),
                 },
                 "content": {
@@ -844,6 +856,7 @@ async def _tool_peer_send(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
         peer_id=str(a["peer_id"]),
         content=list(a.get("content") or []),
         peer_agent_instance_id=a.get("peer_agent_instance_id"),
+        peer_agent_session_id=a.get("peer_agent_session_id"),
     )
 
 

@@ -46,6 +46,7 @@ from g_suite_plugin.oauth.token_store import (  # noqa: E402
     TokenStoreError,
     _build_access_envelope,
 )
+from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -198,6 +199,38 @@ def test_redact_state() -> None:
     _assert("empty state labelled, not echoed", _redact("") == "empty")
 
 
+def _start_interface_host(config: dict[str, object], params: dict[str, object]) -> str:
+    plugin = GSuitePlugin()
+    plugin.initialize(config)
+    plugin._token_store = MagicMock(spec=TokenStore)
+    plugin._app_config_loader = MagicMock(spec=AppConfigLoader)
+    with patch.object(plugin._oauth_server, "start", return_value=8765) as start:
+        result = plugin.start_interface(params, {})
+    _assert(
+        "start_interface host probe completed",
+        result.get("action_status") == "completed",
+        str(result),
+    )
+    return str(start.call_args.kwargs["host"])
+
+
+def test_start_interface_host_selection() -> None:
+    """Dax Part 19.3: local-safe IPv4 default, explicit cloud bind preserved."""
+    _assert(
+        "local callback default is explicit IPv4 loopback",
+        _start_interface_host({}, {}) == "127.0.0.1",
+    )
+    _assert(
+        "cloud callback bind remains explicitly configurable",
+        _start_interface_host({"callback_host": "0.0.0.0"}, {}) == "0.0.0.0",
+    )
+    _assert(
+        "call argument overrides configured callback host",
+        _start_interface_host({"callback_host": "0.0.0.0"}, {"host": "127.0.0.1"})
+        == "127.0.0.1",
+    )
+
+
 def test_start_refuses_an_occupied_port() -> None:
     # Field-verified on a live deployment: start() used to set _started BEFORE
     # the socket bound and swallow the failure (uvicorn raises SystemExit,
@@ -271,6 +304,7 @@ def main() -> int:
     test_store_raises_on_vault_failure()
     test_callback_html_escapes()
     test_redact_state()
+    test_start_interface_host_selection()
     test_start_refuses_an_occupied_port()
     print()
     print(f"Results: {_passed} passed, {len(_failed)} failed")

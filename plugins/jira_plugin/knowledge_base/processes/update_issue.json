@@ -2,7 +2,7 @@
   "process_key": "plugin::jira_plugin::update_issue",
   "display_name": "Jira: Update Issue",
   "description": "Apply a non-empty fields object (summary, description, assignee, labels, custom fields, ...) to an existing Jira issue by key. Write action.",
-  "embedding_description": "Edit an existing Jira issue's fields in place — change its summary, rewrite the description, reassign it, add or remove labels, or set custom fields — by passing the issue key and a non-empty object of Jira fields to set. Does not change workflow status (use transition_issue for that) and does not add a comment (use add_comment). Distinct from create_issue (make a new issue) and transition_issue (move through workflow states).",
+  "embedding_description": "Edit fields on an existing Jira issue by key: change its summary or description, reassign it, adjust labels, or set custom fields through a non-empty fields object. Use this write for in-place field maintenance on a ticket whose key is already known.",
   "result_processor_customizations": {
     "action_label": "Jira issue updated",
     "result_type": "jira_update_issue_result",

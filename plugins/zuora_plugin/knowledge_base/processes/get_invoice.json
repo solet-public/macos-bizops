@@ -2,7 +2,7 @@
   "process_key": "plugin::zuora_plugin::get_invoice",
   "display_name": "Zuora: Get Invoice",
   "description": "Fetch one invoice by id.",
-  "embedding_description": "Retrieve a single Zuora invoice's fields (amounts, line items, status) by its id. Requires id.",
+  "embedding_description": "Read one Zuora invoice in full by its id: the amount charged, the outstanding balance, the invoice status, and the line items making up the total. Answers what a specific invoice says, what the customer was billed for on it, and whether any of it is still owed. A billing-document lookup against a known invoice id.",
   "result_processor_customizations": {
     "action_label": "Zuora invoice fetched",
     "result_type": "zuora_get_invoice_result",

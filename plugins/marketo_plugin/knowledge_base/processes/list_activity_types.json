@@ -1,22 +1,22 @@
 {
   "process_key": "plugin::marketo_plugin::list_activity_types",
   "display_name": "Marketo: List Activity Types",
-  "description": "List the configured Marketo instance's available activity type ids and metadata. Use these authoritative per-instance ids as the mandatory activity_type_ids for get_activities; do not rely on ids copied from another subscription.",
-  "embedding_description": "Enumerate the configured Marketo subscription's activity type catalog: the numeric activity type ids, names, descriptions, primary attributes and attribute definitions this instance defines. Call it to discover which type ids this particular subscription accepts, since the catalog is per-subscription rather than universal across Marketo.",
+  "description": "List the configured Marketo instance's available activity type ids and metadata. ALWAYS writes the catalog to the caller-supplied output_tsv_path, never inline -- this is a business-connector record-read verb under the 07-29 spill floor even though its content is instance metadata, not customer PII. Use these authoritative per-instance ids as the mandatory activity_type_ids for get_activities; do not rely on ids copied from another subscription.",
+  "embedding_description": "Enumerate the configured Marketo subscription's activity type catalog to a workspace TSV: numeric activity type ids, names, descriptions, and attribute definitions this instance defines. Call it to discover which type ids this subscription accepts, since the catalog is per-subscription, not universal across Marketo.",
   "result_processor_customizations": {
-    "action_label": "Marketo activity types listed",
+    "action_label": "Marketo activity types exported to a workspace TSV",
     "result_type": "marketo_list_activity_types_result",
-    "result_description": "Dict with records (activity type descriptors carrying id, name, description, primaryAttribute, and attributes) + row_count + spilled=false inline, OR result_blob_key + row_count + spilled=true when large.",
-    "presentation_guidance": "Report row_count and the requested activity type ids/names. Point to result_blob_key when the complete catalog spilled.",
+    "result_description": "Dict with path (the written .tsv file in the operator's workspace), columns, and row_count. Each row carries id, name, description, primaryAttribute (JSON text), and attributes (JSON text).",
+    "presentation_guidance": "Confirm the export: the written path, row_count, and the requested activity type ids/names. Name the path for downstream use but do not inline its contents.",
     "output_action_guidance": "When the caller is preparing get_activities, carry only ids returned for this configured instance and keep each request to at most 10 ids.",
     "field_sensitivities": {
-      "result_blob_key": 0.2,
+      "path": 0.2,
       "row_count": 0.1
     }
   },
   "error_processor_customizations": {
-    "action_context": "List the configured Marketo instance's activity type catalog.",
-    "error_interpretation": "marketo.auth_failed: OAuth credentials rejected. marketo.permission_denied: the API user's Role lacks Read-Only Activity. marketo.rate_limited: API rate limit exceeded.",
-    "recovery_guidance": "marketo.permission_denied: add Read-Only Activity to the API role, then re-run check_setup. marketo.rate_limited: retry after a short delay."
+    "action_context": "List the configured Marketo instance's activity type catalog and write it to a tab-separated file in the operator's workspace.",
+    "error_interpretation": "marketo.invalid_params: missing output_tsv_path or its parent directory does not exist. marketo.export_path_refused: the path is not absolute, not a .tsv, or not contained under any operator-configured export_allowed_roots entry (an empty export_allowed_roots refuses every export by default). marketo.auth_failed: OAuth credentials rejected. marketo.permission_denied: the API user's Role lacks Read-Only Activity. marketo.rate_limited: API rate limit exceeded.",
+    "recovery_guidance": "marketo.export_path_refused: pass an ABSOLUTE path ending in .tsv under a configured workspace root; if export_allowed_roots is empty, add the operator's export directory to the marketo_plugin config and reload it. marketo.permission_denied: add Read-Only Activity to the API role, then re-run check_setup. marketo.rate_limited: retry after a short delay."
   }
 }

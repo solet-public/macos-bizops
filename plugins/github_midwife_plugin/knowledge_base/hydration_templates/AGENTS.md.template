@@ -2,7 +2,7 @@
 
 <!-- BEGIN HOMUNCULUS HYDRATION -->
 
-This clone is the home of **{{HOMUNCULUS_NAME}}**, a homunculus on the Ananta
+This directory is the home of **{{HOMUNCULUS_NAME}}**, a homunculus on the Ananta
 platform: a named, persistent agentic instance with its own PostgreSQL schema,
 memories, knowledge bases, and plugins. You — the AGENTS.md-convention
 session reading this — are its driving agent. This managed block governs
@@ -40,13 +40,13 @@ the current messaging contract before assuming its transport.
 If `{{HOMUNCULUS_NAME}} call` itself fails (the homunculus process is not
 running — check with `{{HOMUNCULUS_NAME}} health`), the fallback is
 source-artifact recovery: read the KB source markdown directly under this
-clone's own knowledge-base directories (`ananta/knowledge_bases/`,
+deployment's own knowledge-base directories (`ananta/knowledge_bases/`,
 `ananta/knowledge_base/`, each plugin's `knowledge_base/`, and any real
 directories under `knowledge_bases/`) instead of the live search. This is an unranked,
 degraded recovery, not a substitute for the live path — it means the
 homunculus needs attention before claiming live retrieval; say so rather than
 treating the source read as sufficient. There is no offline query script shipped in
-this clone to try first: `default_knowledge_plugin`'s query script lives only
+this deployment to try first: `default_knowledge_plugin`'s query script lives only
 in the platform's own development repo and is pruned from every seed.
 
 Building on assumptions when a canonical answer exists in {{HOMUNCULUS_NAME}}'s
@@ -74,20 +74,61 @@ embedding rebuild and causes inference timeouts.
 
 ## Running {{HOMUNCULUS_NAME}}
 
-- Normal mode: the LaunchAgent `local.homunculus.{{HOMUNCULUS_NAME}}` (starts
-  at login, restarts on failure); stop/start with `launchctl unload -w` /
-  `load -w` on `~/Library/LaunchAgents/local.homunculus.{{HOMUNCULUS_NAME}}.plist`.
+- Picking up updated code or config for an ALREADY-INSTALLED plugin (a
+  brand-new plugin comes online via `install_plugin_from_path` instead):
+  check whether `macos_self_deployment_plugin` is in this homunculus's
+  plugin roster (`list_plugins`). If it is, `apply_manifest` swaps in the
+  new version through the per-homunculus blue-green router, verifying
+  before cutover, and leaves `previous` as an intact rollback target —
+  zero downtime for this no-MCP CLI path (an MCP-connected caller sees the
+  bridge go dark for roughly 30–60 seconds during cutover regardless).
+  Search the knowledge base for "picking up new code without a bare
+  restart apply_manifest" via Step Zero for the exact call shape (it needs
+  `new_manifest` and `reason`). If that plugin is absent, this homunculus
+  has no router and no blue-green path (single-color by design) — restart
+  the LaunchAgent below instead. Either way, a bare LaunchAgent restart is a
+  full stop that drops in-memory state (blob storage by default); prefer
+  `apply_manifest` whenever the router is present.
+- Normal mode (bringing the daemon up or down, not a code/config pickup):
+  the LaunchAgent `local.homunculus.{{HOMUNCULUS_NAME}}` (starts at login,
+  restarts on failure); stop/start with `launchctl unload -w` / `load -w`
+  on `~/Library/LaunchAgents/local.homunculus.{{HOMUNCULUS_NAME}}.plist`.
 - Foreground (debugging): `{{CLONE_DIR}}/client/bin/launch-{{HOMUNCULUS_NAME}}`
   (stop the LaunchAgent first — never run two instances).
 - The `{{HOMUNCULUS_NAME}}` CLI is on PATH via genesis's
   `~/.local/bin/{{HOMUNCULUS_NAME}}` symlink; no venv activation needed for
   `{{HOMUNCULUS_NAME}} call` / `{{HOMUNCULUS_NAME}} health`.
-- Hydration does not yet generate a named launcher for AGENTS.md-convention
-  sessions the way it does for Claude Code (no `codex-{{HOMUNCULUS_NAME}}` or
-  equivalent). Before making this session addressable by role name, retrieve
-  the available messaging and role-binding contract using the search terms
-  below. If no runner-specific wake contract is present, report that gap
-  rather than inferring a transport from this bootstrap file.
+- Start stock Codex through
+  `{{CLONE_DIR}}/client/bin/codex-{{HOMUNCULUS_NAME}} [role] [codex arguments ...]`.
+  The launcher exports one stable session ID, registers `agent_id=codex`, claims
+  the supplied durable role, and arms the parent-bound no-MCP watcher when the
+  selected fleet transport is `watch`. Do not substitute a locally patched
+  receive binary for the launcher's stock `codex` executable.
+
+## Stock Codex durable inbox
+
+The Stop hook carries only a fixed fact — that coordination deliveries are
+pending. It never places peer-message content into hook output. When that nudge
+creates a turn, or whenever a reminder says to check messages, read this
+session's own durable inbox through the local CLI:
+
+```bash
+{{HOMUNCULUS_NAME}} call plugin::agent_messaging_plugin::peer_inbox '{"agent_session_id":"'"$AGENT_SESSION_ID"'","include_important":true,"limit":5}'
+```
+
+The response has two independent sections and two independent cursors:
+
+- `entries` is oldest-first. If `next_after_created_at` is non-null, call again
+  with that exact timestamp as `"after":"<next_after_created_at>"`.
+- `role_entries` is newest-first. If `next_role_cursor` is non-null, call again
+  with that opaque token as `"role_after":"<next_role_cursor>"`. Continue until
+  it is null; `role_section_status: "ok"` means the section was computed, not
+  that its backlog is drained.
+
+Never mix the two cursors. Treat a repeated IMPORTANT message already handled
+as a duplicate delivery, not a new instruction. A queue or watcher receipt is
+not proof that a model turn read the inbox; completion evidence names the
+message ID and the action actually taken.
 
 ## Messaging, connectivity, and governance — found via Step Zero
 

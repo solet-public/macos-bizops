@@ -2,15 +2,32 @@
 
 Same shape as issue_actions: take an already-built ``jira.JIRA`` client + a
 ``params`` dict, return plain result dicts, ``raise ValueError`` on bad params.
-No blob I/O here. Nested Jira objects (comment author, transition target status)
-are flattened None-safely.
+Nested Jira objects (comment author, transition target status) are flattened
+None-safely.
+
+Business-data limits, 2026-08-03 operator revision (design doc §0.1/§5.4):
+jira EXITED the spill floor (operator veto — "no PII in Jira, just company
+internal accounts") and its "paging must be hidden" ruling retired the
+disclosure-only shape ``list_comments`` briefly had. ``list_comments`` is now
+LIMITS-ONLY, g_suite-class: results return INLINE, never to a file, no
+containment gate — but it pages INTERNALLY by offset (``start_at``, no
+continuation token exists on this endpoint) across Atlassian's 100/call
+ceiling up to the effective row limit and returns ONE complete result, with
+the full acknowledge_default_limit_override/row_limit mechanism (§5).
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from .constants import COMMENTS_DEFAULT_MAX, COMMENTS_MAX_CAP
+from .constants import (
+    COMMENTS_PAGE_SIZE,
+    DEFAULT_ROW_LIMIT,
+    MAX_INTERNAL_CALLS,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
+    ROW_LIMIT_CAP,
+)
 
 
 def add_comment(client: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -22,12 +39,92 @@ def add_comment(client: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_comments(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """List an issue's comments (author/body/created), capped."""
+    """List an issue's comments; return them inline, one complete result.
+
+    The effective row limit defaults to DEFAULT_ROW_LIMIT (500); an
+    acknowledged override may raise it up to ROW_LIMIT_CAP (5,000). Within
+    that limit, this pages internally by offset across Atlassian's 100/call
+    ceiling (COMMENTS_PAGE_SIZE) — the caller never sees ``start_at``. An
+    optional ``max`` lets a caller request FEWER than the effective limit in
+    this one call; it only narrows, never widens (widening requires the
+    override).
+    """
     key = _require_str(params, "key")
-    max_results = _clamp(params.get("max"), COMMENTS_DEFAULT_MAX, COMMENTS_MAX_CAP)
-    comments = client.comments(key, max_results=max_results)
-    rows = [_comment_row(c) for c in _as_list(comments)[:max_results]]
-    return {"comments": rows}
+    ceiling = _resolve_effective_limit(params, verb="list_comments")
+    target = _clamp_within_ceiling(params.get("max"), ceiling)
+    rows, truncated = _paginate_comments(client, key, target)
+    return {"comments": rows, "row_count": len(rows), "truncated": truncated}
+
+
+def _paginate_comments(client: Any, key: str, target: int) -> tuple[list[dict[str, Any]], bool]:
+    """Page internally by offset until ``target`` rows are collected or a
+    short page signals end-of-data (this endpoint has no continuation token,
+    unlike jql_search's ``nextPageToken`` — a page shorter than requested is
+    the vendor's own end-of-data signal, same discriminator as zuora's
+    ``_paginate_account_list``).
+
+    Returns (rows, truncated). ``truncated`` is False ONLY on an explicit
+    short-page signal (genuinely no more comments exist) — reaching
+    ``target`` via full pages, or tripping the circuit breaker before
+    reaching it, are both "we did not confirm this is everything" and
+    report True.
+    """
+    rows: list[dict[str, Any]] = []
+    start_at = 0
+    calls = 0
+    while len(rows) < target and calls < MAX_INTERNAL_CALLS:
+        page_size = min(COMMENTS_PAGE_SIZE, target - len(rows))
+        comments = client.comments(key, start_at=start_at, max_results=page_size)
+        page_rows = [_comment_row(c) for c in _as_list(comments)]
+        rows.extend(page_rows)
+        start_at += len(page_rows)
+        calls += 1
+        if len(page_rows) < page_size:
+            # A short page is the vendor's own end-of-data signal.
+            return rows[:target], False
+    return rows[:target], True
+
+
+def _resolve_effective_limit(params: dict[str, Any], *, verb: str) -> int:
+    """Resolve the effective row limit from the §5 override pair.
+
+    Absent (or ``acknowledge_default_limit_override`` not exactly ``True``)
+    with no ``row_limit``: returns DEFAULT_ROW_LIMIT. Both must be given
+    together — the override flag alone, or ``row_limit`` alone, fails loud
+    rather than silently honoring half. A ``row_limit`` above ROW_LIMIT_CAP
+    is refused, never silently clamped back down.
+    """
+    override = params.get(PARAM_ACKNOWLEDGE_OVERRIDE)
+    row_limit = params.get(PARAM_ROW_LIMIT)
+    override_present = override is True
+    row_limit_present = row_limit is not None
+    if override_present != row_limit_present:
+        raise ValueError(
+            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
+            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
+            f"{PARAM_ROW_LIMIT}={row_limit!r}"
+        )
+    if not override_present:
+        return DEFAULT_ROW_LIMIT
+    if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
+    if row_limit > ROW_LIMIT_CAP:
+        raise ValueError(
+            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
+            f"{ROW_LIMIT_CAP}; refusing rather than silently clamping"
+        )
+    return row_limit
+
+
+def _clamp_within_ceiling(value: Any, ceiling: int) -> int:
+    """A caller-requested per-call target, narrowed to at most the ceiling.
+
+    Never widens the ceiling — that is the override's job, resolved before
+    this is called. An absent/invalid value falls back to the ceiling itself.
+    """
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        return ceiling
+    return min(ceiling, value)
 
 
 def list_transitions(client: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -109,9 +206,3 @@ def _require_str(params: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"'{key}' is required and must be a non-empty string")
     return value
-
-
-def _clamp(value: Any, default: int, cap: int) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        return default
-    return max(1, min(cap, value))

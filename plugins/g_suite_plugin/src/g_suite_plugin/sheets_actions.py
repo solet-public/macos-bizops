@@ -18,12 +18,34 @@ from pathlib import Path
 from typing import Any
 
 from .constants import (
+    BLOB_NAMESPACE,
+    ERROR_RESULT_TOO_LARGE,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
     SHEETS_DEFAULT_EXPORT_FORMAT,
+    SHEETS_DEFAULT_ROW_LIMIT,
     SHEETS_EXPORT_MIME_BY_FORMAT,
+    SHEETS_ROW_LIMIT_CAP,
     SHEETS_TAB_FILE_DELIMITERS,
     SHEETS_VALUE_INPUT_OPTION_USER_ENTERED,
 )
 from .drive_actions import BlobWriter, export_media_to_blob, resolve_export_mime
+
+
+class ResultTooLargeError(RuntimeError):
+    """Raised when get_values' returned grid exceeds the effective row limit.
+
+    Business-data limits (2026-08-02, resource guard): Sheets' values.get has
+    no server-side per-call size parameter to push a limit into — it returns
+    whatever the requested A1 range contains. Fail LOUD over the effective
+    limit rather than silently truncate the grid. This does NOT reduce the
+    underlying vendor call's size; narrowing the requested range is still the
+    caller's job for that (disclosed in the process description).
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.code = ERROR_RESULT_TOO_LARGE
 
 
 def create_spreadsheet(sheets: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -34,13 +56,62 @@ def create_spreadsheet(sheets: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_values(sheets: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Read a cell range (A1 notation) as a 2D grid of values."""
+    """Read a cell range (A1 notation) as a 2D grid of values.
+
+    Business-data limits (2026-08-02, resource guard, not the spill floor):
+    defaults to SHEETS_DEFAULT_ROW_LIMIT (500) rows; acknowledge_default_
+    limit_override=true + an explicit row_limit (up to SHEETS_ROW_LIMIT_CAP,
+    1000, OURS-ARBITRARY -- no vendor citation exists for a values.get row
+    ceiling) may raise it. Enforced POST-FETCH (the vendor call itself is not
+    narrowed) -- a grid over the effective limit raises ResultTooLargeError,
+    never a silent truncation.
+    """
     spreadsheet_id = _require_str(params, "id")
     cell_range = _require_str(params, "range")
+    effective_limit = _resolve_effective_limit(params, verb="sheets_get_values")
     response = (
         sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=cell_range).execute()
     )
-    return {"values": response.get("values") or []}
+    values = response.get("values") or []
+    if len(values) > effective_limit:
+        raise ResultTooLargeError(
+            f"sheets_get_values: the range returned {len(values)} rows, over the effective "
+            f"limit of {effective_limit}; narrow the requested range, or pass "
+            f"{PARAM_ACKNOWLEDGE_OVERRIDE}=true with an explicit {PARAM_ROW_LIMIT} (up to "
+            f"{SHEETS_ROW_LIMIT_CAP}) to raise the limit"
+        )
+    return {"values": values}
+
+
+def _resolve_effective_limit(params: dict[str, Any], *, verb: str) -> int:
+    """Resolve the effective row limit from the §5 override pair.
+
+    Absent (or ``acknowledge_default_limit_override`` not exactly ``True``)
+    with no ``row_limit``: returns SHEETS_DEFAULT_ROW_LIMIT. Both must be
+    given together — the override flag alone, or ``row_limit`` alone, fails
+    loud rather than silently honoring half. A ``row_limit`` above
+    SHEETS_ROW_LIMIT_CAP is refused, never silently clamped down.
+    """
+    override = params.get(PARAM_ACKNOWLEDGE_OVERRIDE)
+    row_limit = params.get(PARAM_ROW_LIMIT)
+    override_present = override is True
+    row_limit_present = row_limit is not None
+    if override_present != row_limit_present:
+        raise ValueError(
+            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
+            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
+            f"{PARAM_ROW_LIMIT}={row_limit!r}"
+        )
+    if not override_present:
+        return SHEETS_DEFAULT_ROW_LIMIT
+    if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
+    if row_limit > SHEETS_ROW_LIMIT_CAP:
+        raise ValueError(
+            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
+            f"{SHEETS_ROW_LIMIT_CAP}; refusing rather than silently clamping"
+        )
+    return row_limit
 
 
 def update_values(sheets: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -214,8 +285,9 @@ def export_spreadsheet(drive: Any, params: dict[str, Any], blob_writer: BlobWrit
     spreadsheet_id = _require_str(params, "id")
     fmt = _as_str(params.get("format")) or SHEETS_DEFAULT_EXPORT_FORMAT
     mime = resolve_export_mime(fmt, SHEETS_EXPORT_MIME_BY_FORMAT)
-    blob_key = export_media_to_blob(drive, spreadsheet_id, mime, f"{spreadsheet_id}.{fmt}", blob_writer)
-    return {"sheet_blob_key": blob_key}
+    filename = f"{spreadsheet_id}.{fmt}"
+    blob_key = export_media_to_blob(drive, spreadsheet_id, mime, filename, blob_writer)
+    return {"sheet_blob_key": blob_key, "namespace": BLOB_NAMESPACE, "filename": filename}
 
 
 def _require_grid(params: dict[str, Any], key: str) -> list[list[Any]]:

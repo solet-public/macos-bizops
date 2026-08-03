@@ -55,34 +55,48 @@ the selected name and lets Marketo validate it. Do not constrain a caller to a
 static cross-instance list when the describe response exposes the real
 instance-specific contract.
 
-## Paging contracts differ by verb — do not generalize
+## Paging contracts differ by verb — internal now, but still not one signal
 
-The four paged reads do not share one safe raw continuation signal:
+**Dax 29.2 hide-paging build (2026-08-03, operator ruling "the paging is an
+implementation detail that should be hidden," design doc §5.4/§7.2 as
+amended).** `get_leads`, `list_campaigns`, `list_static_lists`, and
+`get_activities` all page INTERNALLY now — no `next_page_token` or
+`more_result` field exists on any of the four, input or output. A caller
+gets one call, one complete file up to the effective row limit (§5:
+`acknowledge_default_limit_override`/`row_limit`, default 500, hard cap
+5,000), and a `truncated` boolean. This section documents the internal
+mechanism (`marketing_actions._paginate_token_authoritative` /
+`_paginate_activities`) for anyone maintaining it — it is no longer a
+caller-facing contract, but the underlying vendor quirks it papers over are
+unchanged and still worth knowing.
 
-- `get_leads`: a non-empty `next_page_token` is authoritative. The plugin
-  normalizes `more_result` from token presence because Marketo can return a
-  usable token with raw `moreResult: false`.
-- `list_campaigns`: a non-empty `next_page_token` is authoritative for the
-  same reason. Keep paging until no token is returned.
-- `list_static_lists`: a non-empty `next_page_token` is authoritative. Keep
-  paging until no token is returned.
-- `get_activities`: `more_result` is authoritative. Its
-  `next_page_token` is a resumable bookmark that can remain populated on the
-  last page, so token presence alone would make paging never terminate.
+The four internally-paged reads do not share one safe raw continuation
+signal:
+
+- `get_leads`, `list_campaigns`, `list_static_lists`: a non-empty
+  `nextPageToken` is authoritative. The internal loop keeps calling because
+  Marketo can return a usable token with raw `moreResult: false`.
+- `get_activities`: `moreResult` is authoritative. Its `nextPageToken` is a
+  resumable bookmark that can remain populated on the last page, so token
+  presence alone would make the internal loop never terminate.
 
 This boundary is deliberate. A generic rule such as "always trust
-`more_result`" truncates lead/campaign/list enumeration, while "always trust
-the token" loops forever on the activity stream.
+`moreResult`" would truncate lead/campaign/list enumeration internally, while
+"always trust the token" would loop the activity fetch forever.
 
 **The asymmetry is OUR design decision, and the two sides do not rest on the
 same evidence.** The token-authoritative side is backed by a live measurement:
-`more_result` was observed reporting false on a full 300-record
+`moreResult` was observed reporting false on a full 300-record
 `list_campaigns` page that still returned a usable token. The
 activity side rests on Adobe's documented "this endpoint always returns
-`nextPageToken`" plus one narrow live read, so calling `more_result`
-"authoritative" there states what a caller must key off, not a verified
+`nextPageToken`" plus one narrow live read, so calling `moreResult`
+"authoritative" there states what the internal loop keys off, not a verified
 property of the vendor. Its reliability on `get_activities` is
-**UNVERIFIED** — see the evidence classes in the traps below.
+**UNVERIFIED** — see the evidence classes in the traps below, and note that
+before this build an under-reporting flag was survivable (the caller still
+held a token and could keep going); now it means `get_activities` returns
+`truncated: false` on an incomplete read with nothing for a caller to notice
+with.
 
 ## Verifying what a write actually DID — `get_activities`
 
@@ -95,11 +109,12 @@ side effect of a data-cleanup operation.
 `get_activities` is the read that lets a caller answer "did that write notify
 anybody?" — it reads the Marketo activity log (emails sent/delivered, alerts,
 sales emails, interesting moments, campaign requests, data value changes)
-either from an ISO-8601 instant (`since_datetime`, which mints a paging token)
-or by continuing a prior page (`next_page_token`). `activity_type_ids` is
-mandatory on every page and accepts 1-10 ids; `lead_ids` is optional with a
-maximum of 30. Both caps are Marketo's own and are enforced in-plugin rather
-than left to a server-side error.
+from an ISO-8601 instant (`since_datetime`, which mints the internal loop's
+starting token — required on every call, there is no caller-supplied
+continuation-token path since Dax 29.2). `activity_type_ids` is mandatory
+and accepts 1-10 ids; `lead_ids` is optional with a maximum of 30. Both caps
+are Marketo's own and are enforced in-plugin rather than left to a
+server-side error.
 
 **What this verb does NOT do — state this plainly to an operator who asks for
 assurance.** It is an AFTER-THE-FACT audit. It reports what already happened;
@@ -112,11 +127,17 @@ guarantee about the remaining batch.
 
 Three traps worth knowing:
 
-- **`more_result` is the authoritative activity continuation signal.**
-  `more_result: true` means KEEP PAGING, even when `records` is empty. Marketo
-  streams activities in ~300-item pages and an empty page mid-stream is normal.
-  Never report "nothing happened" from a partial read — continue until
-  `more_result` is false.
+- **`moreResult` is the internal loop's authoritative continuation signal —
+  and its unreliability now has a sharper consequence than before.**
+  `moreResult: true` means the internal loop KEEPS PAGING, even when a page's
+  `result` is empty. Marketo streams activities in ~300-item pages and an
+  empty page mid-stream is normal. Before Dax 29.2, an under-reporting flag
+  was survivable: the caller still held `next_page_token` and could keep
+  going manually. Now that the token is hidden, an under-reporting flag means
+  `get_activities` returns `truncated: false` on an incomplete read, with
+  nothing for a caller to notice with — never report "nothing happened" from
+  a result whose `truncated` came back false without independently trusting
+  that flag's reliability.
 
   **Name the evidence class before repeating the word "authoritative."** Three
   distinct claims sit behind it, and only two are observations:
@@ -125,17 +146,22 @@ Three traps worth knowing:
   |---|---|
   | The flag does not under-report at END OF STREAM | **Measured** — 2026-07-30, one live instance, ONE one-hour window paged to termination twice under two type filters 21 seconds apart. That is one sample measured twice, not two independent runs; the near-identical row totals follow from the shared window rather than replicating each other. Both terminations landed on a SHORT page, and a probe issued past the terminal token returned nothing. |
   | The flag does not under-report MID-STREAM | **No observation at all.** The truncating mode is the flag going false on a FULL page with another page behind the returned token — the shape actually seen on `list_campaigns`. It never occurred in that read, so it is UNEXERCISED, not refuted. |
-  | A page can carry fewer than 300 items while the flag is still true | **Documented** by Adobe, unobserved in that read (no short page appeared while `more_result` was true). Ten pages is not a sample and does not refute the vendor's statement — keep tolerating a short mid-stream page. |
+  | A page can carry fewer than 300 items while the flag is still true | **Documented** by Adobe, unobserved in that read (no short page appeared while `moreResult` was true). Ten pages is not a sample and does not refute the vendor's statement — the internal loop keeps tolerating a short mid-stream page rather than stopping early. |
 
   So the defensible summary is: no evidence the flag lies at end of stream, on
   one hour of one instance's traffic, and nothing at all about the mid-stream
   case, under load, or across a campaign send. It remains UNVERIFIED that
-  `more_result` is reliable on activities. Do not let the measurement retire
+  `moreResult` is reliable on activities. Do not let the measurement retire
   the hedge — there is no fallback signal here, so a lying flag truncates the
-  read silently.
-- **The activity token is a resumable bookmark, not proof of another page.**
-  Marketo can return `next_page_token` on the final page too. Stop when
-  `more_result` becomes false even if the token remains populated.
+  read silently, and it now does so behind a `truncated: false` a caller has
+  no way to independently check.
+- **The activity token is a resumable bookmark internally, not proof of
+  another page — and it never reaches the caller.** Marketo can return
+  `nextPageToken` on the final page too. The internal loop stops when
+  `moreResult` becomes false even if the token remains populated; if
+  `moreResult` claims true with no token to continue on (a
+  documented-impossible but unmeasured-reliability edge), the loop stops
+  rather than spins and reports `truncated: true`.
 - **Activity type ids are not guaranteed identical across subscriptions.**
   Call `list_activity_types` on the configured instance and pass only ids it
   returns. The vendor behavior that makes this load-bearing was measured
@@ -146,17 +172,22 @@ Three traps worth knowing:
   ids a given subscription accepts is a property of that instance, so it is
   not recorded here.
 
-## Enumerating campaigns and lists — paging is not optional
+## Enumerating campaigns and lists — completeness is `truncated`, not optional paging
 
-`list_campaigns` and `list_static_lists` return one Marketo page (300 records)
-per call. Both surface `next_page_token` and normalize `more_result` from
-whether that token is non-empty; the token is authoritative because Marketo's
-raw flag can say false while another page exists. **If `more_result` is true
-the result is an arbitrary slice, not the full set** — an instance holding tens
-of thousands of campaigns will otherwise hand back 300 of them, and repeat
-calls can return DIFFERENT 300s, which reads as data rather than as truncation. Any question of
-the form "which active trigger campaigns could this write fire?" requires
-draining the token chain first.
+`list_campaigns` and `list_static_lists` page internally across Marketo's
+300-record vendor ceiling up to the effective row limit (500 default, 5,000
+hard cap via the §5 override) — a caller gets one call and one file. The
+internal loop keys off `nextPageToken` presence, not Marketo's raw
+`moreResult` flag, because the flag can say false while another page exists
+(the one live violation of `moreResult` anywhere was observed here, on
+`list_campaigns`, exactly this shape). **If `truncated` is true the result is
+an arbitrary slice, not the full set** — an instance holding tens of
+thousands of campaigns will otherwise hand back only the effective-limit
+count, and without pushing `row_limit` up (or narrowing the filter), repeat
+calls return the SAME truncated slice, which reads as data rather than as
+truncation. Any question of the form "which active trigger campaigns could
+this write fire?" requires confirming `truncated` is false first, raising
+`row_limit` or narrowing `names`/`program_names` if it is not.
 
 ## Setup verification — `check_setup`, and the Role/User/Service prerequisite
 
@@ -198,6 +229,72 @@ this plugin there is nothing to 403, and the answer lives on an operator screen
 consumer verifies before depending on it, never as an assurance from us** — if
 an asset verb is ever added, the gap surfaces as a 403 at first real use rather
 than at setup, which is the failure mode `check_setup` exists to prevent.
+
+## Business-data limits + spill-floor migration (2026-08-02)
+
+`describe_lead_fields`, `get_leads`, `list_activity_types`, `get_activities`,
+`list_campaigns`, and `list_static_lists` ALWAYS write their result to the
+caller's `output_tsv_path` — never records inline, at any size
+(`workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md`,
+§7.1; the former blob-spill/`INLINE_BYTE_CAP` branch is deleted, not
+lowered). Blob storage has retired from this plugin entirely — `get_api_usage`
+is the only read verb untouched by this migration (small, bounded, no PII,
+outside the six §7.1 names). Neither destination is platform blob storage —
+the path must be absolute, end in `.tsv`, and lie under an
+operator-configured `export_allowed_roots` entry in this plugin's config
+(`export_containment.py`, realpath + `commonpath` containment mirroring
+`ledger_allowed_roots`; the default `[]` REFUSES every write).
+
+**Superseded by Dax 29.2 (2026-08-03) for four of the six — see below.** At
+Tier-2 landing, none of the six carried an `acknowledge_default_limit_override`/
+`row_limit` pair, because Marketo fixes every one of these verbs' per-call
+reads at (or below) 300 records server-side with no query-side size
+parameter to raise. That reasoning held only for the PER-CALL ceiling; it
+never addressed a CUMULATIVE multi-call fetch, because at the time nothing
+looped past one call. `describe_lead_fields` and `list_activity_types` are
+still exactly this shape (single, unpaginated call, nothing to raise, no
+override pair) — they are genuinely out of scope for the operator's
+mass-exposure floor's row-count mechanics.
+
+**`get_leads`, `list_campaigns`, `list_static_lists`, and `get_activities`
+now page INTERNALLY — operator ruling, 2026-08-03, verbatim: "we need to
+deliver the results - the paging is an implementation detail that should be
+hidden" (design doc §5.4/§7.2 as amended, ruled doc-wide by
+Coordinator-Day).** This reverses the wave's original Pattern B (`get_leads`
+as the approved N>>500 route via caller-driven `next_page_token` looping).
+Each of the four now carries the standard §5 override pair for the first
+time — default 500, hard cap 5,000 (`MARKETO_LIST_ROW_LIMIT_CAP`, matching
+zuora's `LIST_ROW_LIMIT_CAP` precedent) — governing the cumulative fetch
+across as many internal 300-record vendor calls as it takes
+(`marketing_actions._paginate_token_authoritative` /
+`_paginate_activities`). No `next_page_token`/`more_result` field survives
+on any of the four, input or output; a `truncated` boolean replaces them.
+Beyond the hard cap: **no resumption, by design** — a caller re-invokes the
+verb with a narrower `filter_values` slice (`get_leads`), a narrower
+`names`/`program_names` filter (`list_campaigns`/`list_static_lists`), or a
+later `since_datetime` (`get_activities`). For Dax's measured 45,325-lead
+case this means several separate `get_leads` calls against non-overlapping
+filters (~17 internal vendor calls each to reach the 5,000 cap), not one
+call plus caller-side paging — real latency and API-quota cost, disclosed in
+the process description with a `get_api_usage` check suggested first. The
+300/call VENDOR ceiling itself is unchanged and un-raisable; what changed is
+that the caller no longer loops to reach the 500/5,000-row policy ceiling.
+
+New error code: `marketo.export_path_refused` (path not absolute / not
+`.tsv` / not contained under any configured `export_allowed_roots` entry).
+
+**`check_setup`'s five migrated probes do NOT touch the operator's real
+export workspace, and force `row_limit=1` on the three now-internally-paged
+probes.** A permission probe must succeed whether or not
+`export_allowed_roots` is configured at all — `_run_read_probe` writes each
+probed verb's result to a throwaway tempfile via a passthrough gate, never
+the plugin's real `_export_path_gate`, and deletes the tempfile
+unconditionally afterward. `get_leads`/`list_campaigns`/`list_static_lists`'
+probes additionally pass `acknowledge_default_limit_override=true` +
+`row_limit=1`, a Dax 29.2 quota-safety fix — without it, a cheap permission
+probe on an instance with more than 300 campaigns/lists would now make a
+second internal vendor call to reach the new default, which a setup check
+has no business doing.
 
 ## Error model — envelope-first, not HTTP-status-first (the key divergence from zuora_plugin)
 
@@ -372,10 +469,9 @@ detail.
 Marketo's Bulk Extract API (create job → enqueue → poll status → download
 file) is a materially different, multi-call control-flow shape from every
 other verb in this connector and is explicitly deferred out of v1.
-`get_leads` covers ad-hoc reads with the same inline-or-spill envelope the
-other connectors use (`result_blob_key` + `row_count` when the result exceeds
-the inline byte cap), which covers the common case without the async job
-machinery.
+`get_leads`'s internal pagination up to its row_limit hard cap (see
+"Business-data limits + spill-floor migration" above) covers the common
+ad-hoc case without the async job machinery.
 
 ## SQL-lockdown gate note
 
@@ -393,5 +489,6 @@ silent for this plugin — no allowlist entry needed anywhere in `src/` or
 | `src/marketo_plugin/app_config.py` | Resolves `marketo_instance` from the address book; the client_secret is chain-consumed. |
 | `src/marketo_plugin/http_client.py` | `MarketoClient` — synchronous httpx client with cached, envelope-triggered re-mintable bearer auth (client-credentials grant, GET-based token mint). |
 | `src/marketo_plugin/errors.py` | Envelope-first error classification (`classify_marketo_envelope`) from the response body's `errors[]` list. |
-| `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `get_api_usage`, `list_activity_types`, `get_activities`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup`. |
-| `src/marketo_plugin/plugin.py` | The `MarketoPlugin` EDGE provider — client lifecycle, error mapping, EDGE registration. |
+| `src/marketo_plugin/export_containment.py` | Own-copy workspace-root containment gate (`assert_export_path_allowed`) binding `export_allowed_roots` — admits `output_tsv_path` for the six spill-floor-migrated read verbs. |
+| `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `get_api_usage`, `list_activity_types`, `get_activities`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup` — the six-verb spill-floor set write to `output_tsv_path` under the §7.1 migration (see above). |
+| `src/marketo_plugin/plugin.py` | The `MarketoPlugin` EDGE provider — client lifecycle, error mapping, EDGE registration, `_export_path_gate`. |

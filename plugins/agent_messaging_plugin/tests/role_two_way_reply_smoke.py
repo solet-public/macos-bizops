@@ -39,9 +39,18 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
 from ananta.core.actions.action_processor import ActionProcessor  # noqa: E402
-from ananta.llm.agent_messaging.models import TextPart  # noqa: E402
+from ananta.llm.agent_messaging.models import (  # noqa: E402
+    RoleMessagePersisted,
+    TextPart,
+)
+
+# Stands in for the persisted ROW's created_at (see role_dispatch_smoke).
+_ROW_CREATED_AT = "2026-08-01T00:00:00.000001+00:00"
 
 from agent_messaging_plugin import plugin as plugin_module  # noqa: E402
+from agent_messaging_plugin.bridge_sessions import (  # noqa: E402
+    DEFAULT_BINDING_LIVENESS_WINDOW_S,
+)
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.peer_dispatch import (  # noqa: E402
     DELIVERY_QUEUED_FOR_REPLAY,
@@ -300,9 +309,12 @@ class _FakeService:
         self.persisted: list[dict[str, Any]] = []
         self.delivered: list[str] = []
 
-    def persist_role_message(self, **kwargs: Any) -> str:
+    def persist_role_message(self, **kwargs: Any) -> RoleMessagePersisted:
         self.persisted.append(kwargs)
-        return str(kwargs["message_id"])
+        return RoleMessagePersisted(
+            message_id=str(kwargs["message_id"]),
+            created_at=_ROW_CREATED_AT,
+        )
 
     def mark_delivered(self, *, external_id: str) -> None:
         self.delivered.append(external_id)
@@ -344,6 +356,14 @@ class _FakePeerRegistry:
 
 
 class _FakeBridgeManager:
+
+    # WS-2a W3: the dispatch liveness gate reads this off its bridge_manager
+    # collaborator. A fake that omits it is not standing in for the real
+    # manager — and a defensive getattr in the production path would hide
+    # exactly that, so the CONTRACT is satisfied here instead.
+    @property
+    def binding_liveness_window_s(self) -> int:
+        return DEFAULT_BINDING_LIVENESS_WINDOW_S
     def __init__(self) -> None:
         self.events: list[tuple[str, str, str, dict[str, object]]] = []
 
