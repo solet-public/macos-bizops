@@ -20,6 +20,7 @@ Run directly or via run_smokes.py.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -137,10 +138,93 @@ def _check_flood_cap() -> None:
     _check("flood cap: parse yields all, the slice bounds to _MAX_TOOL_FINDINGS", len(findings) == _MAX_TOOL_FINDINGS + 5 and len(findings[:_MAX_TOOL_FINDINGS]) == _MAX_TOOL_FINDINGS, str(len(findings)))
 
 
+def _write_executable(path: Path, body: str) -> None:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _check_failed_shim_is_gap(base: Path) -> None:
+    """Dax 32.2: a PATH shim that exits 127 is incomplete coverage, never clean."""
+    fake_bin = base / "fake-bin"
+    fake_bin.mkdir()
+    target = base / "shim-target"
+    (target / "src").mkdir(parents=True)
+    (target / ".venv" / "bin").mkdir(parents=True)
+    (target / "pyproject.toml").write_text('[tool.mypy]\nfiles = ["src"]\n', encoding="utf-8")
+    (target / "src" / "bad.py").write_text("x: str = 1\n", encoding="utf-8")
+    _write_executable(
+        fake_bin / "mypy",
+        "#!/bin/sh\n"
+        'if [ "$PWD" != "$DAX_TYPECHECK_TARGET" ]; then\n'
+        "  printf '%s\\n' 'pyenv: mypy: command not found' >&2\n"
+        "  exit 127\n"
+        "fi\n"
+        'if [ "$1" = "--version" ]; then\n'
+        "  printf '%s\\n' 'mypy 9.9.9'\n"
+        "  exit 0\n"
+        "fi\n"
+        "printf '%s\\n' 'pyenv: mypy: command not found' >&2\n"
+        "exit 127\n",
+    )
+    prior_path = os.environ.get("PATH", "")
+    prior_target = os.environ.get("DAX_TYPECHECK_TARGET")
+    os.environ["PATH"] = f"{fake_bin}:{prior_path}"
+    os.environ["DAX_TYPECHECK_TARGET"] = str(target.resolve())
+    try:
+        result = scan(TargetTree.from_walk(target), "vr-dax-32-2", execute_target_toolchain=True)
+    finally:
+        os.environ["PATH"] = prior_path
+        if prior_target is None:
+            os.environ.pop("DAX_TYPECHECK_TARGET", None)
+        else:
+            os.environ["DAX_TYPECHECK_TARGET"] = prior_target
+    reason = result.coverage.gap_reason or ""
+    _check("Dax 32.2: failed pyenv shim marks coverage ran=False", result.coverage.ran is False, str(result.coverage))
+    _check("Dax 32.2: exit 127 is disclosed", "exited 127" in reason, reason)
+    _check("Dax 32.2: failed checker never reports zero diagnostics", "0 diagnostic(s)" not in reason, reason)
+
+
+def _check_diagnostic_exit_is_valid(base: Path) -> None:
+    """Exit 1 means findings for both supported checkers; do not reject it blindly."""
+    target = base / "diagnostic-target"
+    (target / "src").mkdir(parents=True)
+    local_bin = target / ".venv" / "bin"
+    local_bin.mkdir(parents=True)
+    (target / "pyproject.toml").write_text('[tool.pyright]\ninclude = ["src"]\n', encoding="utf-8")
+    (target / "src" / "bad.py").write_text("x: str = 1\n", encoding="utf-8")
+    payload = _pyright_json([
+        {
+            "file": str(target / "src" / "bad.py"),
+            "severity": "error",
+            "rule": "reportAssignmentType",
+            "message": "Type int is not assignable to str",
+            "range": {"start": {"line": 0, "character": 0}},
+        }
+    ])
+    _write_executable(
+        local_bin / "pyright",
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then\n'
+        "  printf '%s\\n' 'pyright 9.9.9'\n"
+        "  exit 0\n"
+        "fi\n"
+        f"printf '%s\\n' '{payload}'\n"
+        "exit 1\n",
+    )
+    result = scan(TargetTree.from_walk(target), "vr-diagnostic", execute_target_toolchain=True)
+    _check("diagnostic exit 1 completes coverage", result.coverage.ran is True, str(result.coverage))
+    _check("diagnostic exit 1 emits its finding", len(result.findings) == 1 and result.findings[0].constraint_violated == "pyright:reportAssignmentType", str(result.findings))
+
+
 def _check_self_vs_foreign(base: Path) -> None:
     # Self-suppress is deterministic (emitted = [] on a self-vet regardless of what the checkers found).
     self_result = scan(_fixture(base / "self", config=True, venv=True, foreign=False), "vr", execute_target_toolchain=True)
-    _check("SELF: finding rows SUPPRESSED (the --strict gate is sole self authority)", self_result.findings == [] and self_result.coverage.ran is True, str(self_result.coverage))
+    all_available = tool_available("pyright") and tool_available("mypy")
+    _check(
+        "SELF: finding rows SUPPRESSED (the --strict gate is sole self authority)",
+        self_result.findings == [] and self_result.coverage.ran is all_available,
+        str(self_result.coverage),
+    )
     # Foreign emit + version/env disclosure — absence-tolerant on the host checkers.
     if tool_available("pyright") or tool_available("mypy"):
         foreign = scan(_fixture(base / "fgn", config=True, venv=True, foreign=True), "vr", execute_target_toolchain=True)
@@ -193,6 +277,10 @@ def main() -> int:
         _check_pyright_parse()
         _check_mypy_parse()
         _check_flood_cap()
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_failed_shim_is_gap(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_diagnostic_exit_is_valid(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_self_vs_foreign(Path(tmp))
     except SmokeFailureError as exc:

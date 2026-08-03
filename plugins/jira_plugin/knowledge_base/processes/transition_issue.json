@@ -2,7 +2,7 @@
   "process_key": "plugin::jira_plugin::transition_issue",
   "display_name": "Jira: Transition Issue",
   "description": "Move a Jira issue through a workflow transition (by transition id from list_transitions), optionally adding a comment. Returns the new status. Write action.",
-  "embedding_description": "Advance a Jira issue through its workflow — for example from To Do to In Progress, or to Done/Closed — by applying a specific transition id (obtained from list_transitions), optionally attaching a comment as you move it. Returns the issue's resulting status. Transition ids are workflow-specific, so call list_transitions first. Distinct from update_issue (edit fields without changing status) and delete_issue (remove the issue entirely).",
+  "embedding_description": "Apply a chosen workflow transition id to an existing Jira issue, moving the ticket from its current status to the transition's target status and optionally posting a comment during the move. Returns the resulting status. This is the workflow-state write for a selected transition.",
   "result_processor_customizations": {
     "action_label": "Jira issue transitioned",
     "result_type": "jira_transition_issue_result",

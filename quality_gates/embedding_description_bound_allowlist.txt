@@ -50,105 +50,31 @@
 
 
 # agent_messaging_plugin — 6 above
-plugins/agent_messaging_plugin/knowledge_base/processes/submit_autonomic_completion.json::plugin::agent_messaging_plugin::submit_autonomic_completion  # 581 chars, above
-plugins/agent_messaging_plugin/knowledge_base/processes/peer_holds_role.json::plugin::agent_messaging_plugin::peer_holds_role  # 510 chars, above
-plugins/agent_messaging_plugin/knowledge_base/processes/peer_send_by_name.json::plugin::agent_messaging_plugin::peer_send_by_name  # 510 chars, above
-plugins/agent_messaging_plugin/knowledge_base/processes/set_autonomic_slot.json::plugin::agent_messaging_plugin::set_autonomic_slot  # 462 chars, above
-plugins/agent_messaging_plugin/knowledge_base/processes/peer_release_role.json::plugin::agent_messaging_plugin::peer_release_role  # 434 chars, above
-plugins/agent_messaging_plugin/knowledge_base/processes/peer_claim_role.json::plugin::agent_messaging_plugin::peer_claim_role  # 428 chars, above
 
 # audio_processing_plugin — 1 above
-plugins/audio_processing_plugin/knowledge_base/processes/import_tagged_file_to_blob.json::plugin::audio_processing_plugin::import_tagged_file_to_blob  # 406 chars, above
 
 # chatgpt_export_session_source_plugin — 1 above
-plugins/chatgpt_export_session_source_plugin/knowledge_base/processes/ingest_export.json::plugin::chatgpt_export_session_source_plugin::ingest_export  # 460 chars, above
 
 # claude_ai_export_session_source_plugin — 1 above
-plugins/claude_ai_export_session_source_plugin/knowledge_base/processes/ingest_export.json::plugin::claude_ai_export_session_source_plugin::ingest_export  # 492 chars, above
 
 # claude_code_cloud_session_source_plugin — 1 above
-plugins/claude_code_cloud_session_source_plugin/knowledge_base/processes/backfill_from_cloud.json::plugin::claude_code_cloud_session_source_plugin::backfill_from_cloud  # 444 chars, above
 
 # code_vetting_plugin — 4 above
-plugins/code_vetting_plugin/knowledge_base/processes/vet_codebase.json::plugin::code_vetting_plugin::vet_codebase  # 638 chars, above
-plugins/code_vetting_plugin/knowledge_base/processes/scan_quality_guidelines.json::plugin::code_vetting_plugin::scan_quality_guidelines  # 590 chars, above
-plugins/code_vetting_plugin/knowledge_base/processes/get_vetting_run.json::plugin::code_vetting_plugin::get_vetting_run  # 479 chars, above
-plugins/code_vetting_plugin/knowledge_base/processes/trigger_scheduled_self_vet.json::plugin::code_vetting_plugin::trigger_scheduled_self_vet  # 442 chars, above
 
 # external_postgres_plugin — 7 above
-plugins/external_postgres_plugin/knowledge_base/processes/test_connection.json::plugin::external_postgres_plugin::test_connection  # 786 chars, above
-plugins/external_postgres_plugin/knowledge_base/processes/run_query.json::plugin::external_postgres_plugin::run_query  # 762 chars, above
-plugins/external_postgres_plugin/knowledge_base/processes/export_query.json::plugin::external_postgres_plugin::export_query  # 696 chars, above
-plugins/external_postgres_plugin/knowledge_base/processes/list_connections.json::plugin::external_postgres_plugin::list_connections  # 646 chars, above
-plugins/external_postgres_plugin/knowledge_base/processes/describe_table.json::plugin::external_postgres_plugin::describe_table  # 569 chars, above
-plugins/external_postgres_plugin/knowledge_base/processes/list_schemas.json::plugin::external_postgres_plugin::list_schemas  # 547 chars, above
-plugins/external_postgres_plugin/knowledge_base/processes/list_tables.json::plugin::external_postgres_plugin::list_tables  # 511 chars, above
 
 # g_suite_plugin — 19 above
-plugins/g_suite_plugin/knowledge_base/processes/drive_upload_file.json::plugin::g_suite_plugin::drive_upload_file  # 708 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/sheets_create_from_files.json::plugin::g_suite_plugin::sheets_create_from_files  # 695 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/sheets_update_values.json::plugin::g_suite_plugin::sheets_update_values  # 627 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/docs_export.json::plugin::g_suite_plugin::docs_export  # 595 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/sheets_append_values.json::plugin::g_suite_plugin::sheets_append_values  # 595 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/slides_batch_update.json::plugin::g_suite_plugin::slides_batch_update  # 581 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/sheets_batch_update.json::plugin::g_suite_plugin::sheets_batch_update  # 572 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/sheets_export.json::plugin::g_suite_plugin::sheets_export  # 568 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/drive_download_file.json::plugin::g_suite_plugin::drive_download_file  # 542 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/slides_export.json::plugin::g_suite_plugin::slides_export  # 526 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/slides_get.json::plugin::g_suite_plugin::slides_get  # 515 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/drive_share.json::plugin::g_suite_plugin::drive_share  # 514 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/docs_get.json::plugin::g_suite_plugin::docs_get  # 497 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/docs_batch_update.json::plugin::g_suite_plugin::docs_batch_update  # 480 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/connect_account.json::plugin::g_suite_plugin::connect_account  # 464 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/gmail_send.json::plugin::g_suite_plugin::gmail_send  # 439 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/sheets_get_values.json::plugin::g_suite_plugin::sheets_get_values  # 435 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/drive_create_folder.json::plugin::g_suite_plugin::drive_create_folder  # 417 chars, above
-plugins/g_suite_plugin/knowledge_base/processes/drive_list_files.json::plugin::g_suite_plugin::drive_list_files  # 413 chars, above
 
 # github_midwife_plugin — 1 above
-plugins/github_midwife_plugin/knowledge_base/processes/birth_homunculus.json::plugin::github_midwife_plugin::birth_homunculus  # 733 chars, above
 
 # jira_plugin — 11 above
-plugins/jira_plugin/knowledge_base/processes/jql_search.json::plugin::jira_plugin::jql_search  # 627 chars, above
-plugins/jira_plugin/knowledge_base/processes/get_issue.json::plugin::jira_plugin::get_issue  # 517 chars, above
-plugins/jira_plugin/knowledge_base/processes/create_issue.json::plugin::jira_plugin::create_issue  # 491 chars, above
-plugins/jira_plugin/knowledge_base/processes/download_attachment.json::plugin::jira_plugin::download_attachment  # 489 chars, above
-plugins/jira_plugin/knowledge_base/processes/test_connection.json::plugin::jira_plugin::test_connection  # 464 chars, above
-plugins/jira_plugin/knowledge_base/processes/add_attachment.json::plugin::jira_plugin::add_attachment  # 439 chars, above
-plugins/jira_plugin/knowledge_base/processes/transition_issue.json::plugin::jira_plugin::transition_issue  # 439 chars, above
-plugins/jira_plugin/knowledge_base/processes/delete_issue.json::plugin::jira_plugin::delete_issue  # 430 chars, above
-plugins/jira_plugin/knowledge_base/processes/update_issue.json::plugin::jira_plugin::update_issue  # 430 chars, above
-plugins/jira_plugin/knowledge_base/processes/list_transitions.json::plugin::jira_plugin::list_transitions  # 428 chars, above
-plugins/jira_plugin/knowledge_base/processes/add_comment.json::plugin::jira_plugin::add_comment  # 409 chars, above
 
 # macos_self_deployment_plugin — 3 above
-plugins/macos_self_deployment_plugin/knowledge_base/processes/rollback_release.json::plugin::macos_self_deployment_plugin::rollback_release  # 779 chars, above
-plugins/macos_self_deployment_plugin/knowledge_base/processes/stop_self.json::plugin::macos_self_deployment_plugin::stop_self  # 428 chars, above
-plugins/macos_self_deployment_plugin/knowledge_base/processes/restart_with_manifest.json::plugin::macos_self_deployment_plugin::restart_with_manifest  # 408 chars, above
 
 # salesforce_plugin — 2 above, 4 below
-plugins/salesforce_plugin/knowledge_base/processes/export_soql.json::plugin::salesforce_plugin::export_soql  # 712 chars, above
-plugins/salesforce_plugin/knowledge_base/processes/soql_query.json::plugin::salesforce_plugin::soql_query  # 516 chars, above
-plugins/salesforce_plugin/knowledge_base/processes/get_record.json::plugin::salesforce_plugin::get_record  # 198 chars, below
-plugins/salesforce_plugin/knowledge_base/processes/test_connection.json::plugin::salesforce_plugin::test_connection  # 194 chars, below
-plugins/salesforce_plugin/knowledge_base/processes/list_sobjects.json::plugin::salesforce_plugin::list_sobjects  # 176 chars, below
-plugins/salesforce_plugin/knowledge_base/processes/update_record.json::plugin::salesforce_plugin::update_record  # 175 chars, below
 
 # seed_factory_plugin — 3 above
-plugins/seed_factory_plugin/knowledge_base/processes/publish_seed.json::plugin::seed_factory_plugin::publish_seed  # 1152 chars, above
-plugins/seed_factory_plugin/knowledge_base/processes/assemble_seed.json::plugin::seed_factory_plugin::assemble_seed  # 942 chars, above
-plugins/seed_factory_plugin/knowledge_base/processes/validate_and_seal_seed_bundle.json::plugin::seed_factory_plugin::validate_and_seal_seed_bundle  # 907 chars, above
 
 # snowflake_plugin — 2 above, 3 below
-plugins/snowflake_plugin/knowledge_base/processes/export_query.json::plugin::snowflake_plugin::export_query  # 677 chars, above
-plugins/snowflake_plugin/knowledge_base/processes/run_query.json::plugin::snowflake_plugin::run_query  # 558 chars, above
-plugins/snowflake_plugin/knowledge_base/processes/describe_table.json::plugin::snowflake_plugin::describe_table  # 188 chars, below
-plugins/snowflake_plugin/knowledge_base/processes/list_databases.json::plugin::snowflake_plugin::list_databases  # 160 chars, below
-plugins/snowflake_plugin/knowledge_base/processes/list_schemas.json::plugin::snowflake_plugin::list_schemas  # 145 chars, below
 
 # zuora_plugin — 5 below
-plugins/zuora_plugin/knowledge_base/processes/update_object.json::plugin::zuora_plugin::update_object  # 168 chars, below
-plugins/zuora_plugin/knowledge_base/processes/get_object.json::plugin::zuora_plugin::get_object  # 150 chars, below
-plugins/zuora_plugin/knowledge_base/processes/list_subscriptions.json::plugin::zuora_plugin::list_subscriptions  # 141 chars, below
-plugins/zuora_plugin/knowledge_base/processes/list_invoices.json::plugin::zuora_plugin::list_invoices  # 126 chars, below
-plugins/zuora_plugin/knowledge_base/processes/get_invoice.json::plugin::zuora_plugin::get_invoice  # 94 chars, below

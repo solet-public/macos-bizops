@@ -22,6 +22,16 @@ dependencies = [
     "vulture==2.16",
 ]
 
+[project.optional-dependencies]
+# R9-E foreign-Python type-check scanner (python_type_check.py) is absence-tolerant
+# by design — a missing checker is a disclosed coverage gap, never a gate failure
+# (Dax #31.2). This extra is how an operator opts INTO full live pyright/mypy
+# coverage against foreign targets; it is never required to pass the gate.
+typecheck = [
+    "pyright>=1.1",
+    "mypy>=1.0",
+]
+
 [project.entry-points."ananta.plugins"]
 code_vetting_plugin = "code_vetting_plugin.plugin:CodeVettingPlugin"
 

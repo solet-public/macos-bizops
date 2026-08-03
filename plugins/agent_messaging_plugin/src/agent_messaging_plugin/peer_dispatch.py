@@ -32,6 +32,7 @@ from ananta.llm.agent_messaging.schema import (
     META_KEY_DELIVERY_EXTERNAL_ID,
     META_KEY_RECIPIENT_KEY,
     META_KEY_RECIPIENT_KIND,
+    META_KEY_ROLE_CREATED_AT,
     RECIPIENT_KIND_ROLE,
     ROLE_THREAD_PREFIX,
 )
@@ -99,7 +100,6 @@ DELIVERY_QUEUED_WATCHER: Final[str] = "queued_watcher"
 # durable and Control #5's repair loop re-delivers on the holder's next attach.
 DELIVERY_QUEUED_FOR_REPLAY: Final[str] = "queued_for_replay"
 
-
 @dataclass(frozen=True, slots=True)
 class PeerSendOutcome:
     """Typed result of a peer_send dispatch.
@@ -149,6 +149,24 @@ class NativeWakeError(Exception):
         self.peer_agent_id: str = peer_agent_id
 
 
+def _recipient_activity_stamp(
+    bridge_manager: BridgeSessionManager, recipient: BridgeBinding,
+) -> str | None:
+    """The RECIPIENT's ``last_model_activity_at`` right now, or ``None``.
+
+    The QUIET-GAP capture (H2) must describe the RECIPIENT's activity state as of
+    the emission, so it is read from the recipient's own live bridge — reading the
+    sender's would record the wrong session entirely. ``None`` when the recipient
+    has no live bridge (a ``queued_for_replay`` send) or has never made a
+    model-initiated call; both mean "no recorded activity at emission", which the
+    guard's None-rule already treats as an unbounded quiet gap.
+    """
+    bridge = bridge_manager.get(recipient.bridge_id)
+    if bridge is None:
+        return None
+    return bridge.last_model_activity_at or None
+
+
 def dispatch_peer_send(
     *,
     bridge_manager: BridgeSessionManager,
@@ -162,8 +180,17 @@ def dispatch_peer_send(
     peer_id: str,
     peer_agent_instance_id: str | None,
     content: list[TextPart],
+    peer_agent_session_id: str | None = None,
+    reply_to_role: str = "",
 ) -> PeerSendOutcome:
     """Dispatch a peer_send and return the typed outcome.
+
+    ``reply_to_role`` is the SENDER's own durable role, when it has exactly one
+    (:func:`role_binding_store.sole_role_for_reply_address`). A direct send used to
+    hand the recipient an instance-only reply-to unconditionally, so every reply
+    address the fleet handed out churned on the next restart wave — the WS-2c V4
+    defect. Empty (roleless or multi-role sender) preserves the previous
+    instance reply-to exactly.
 
     Raises:
         :class:`PeerAmbiguousError`: multiple instances of ``peer_id``
@@ -177,7 +204,20 @@ def dispatch_peer_send(
         :class:`NativeWakeError`: a registered native wake adapter
             raised during IMPORTANT delivery.
     """
-    recipient = peer_registry.resolve(peer_id, peer_agent_instance_id)
+    recipient = _resolve_peer_recipient(
+        peer_registry=peer_registry,
+        peer_id=peer_id,
+        peer_agent_instance_id=peer_agent_instance_id,
+        peer_agent_session_id=peer_agent_session_id,
+    )
+    # A2: the SENDER's stable session key, resolved SERVER-SIDE from the sender's
+    # own registered binding — never accepted from the caller, so it is a routing
+    # key the registry vouches for rather than an identity claim. "" when the
+    # sender has no binding (the CLI's one-shot bridge), which keeps that hint
+    # instance-only rather than fabricating an unresolvable key.
+    sender_agent_session_id = peer_registry.agent_session_id_for_instance(
+        sender_agent_instance_id,
+    )
     prose = "\n".join(part.text for part in content)
     marker_match = IMPORTANT_MARKER_RE.match(prose)
     important = marker_match is not None
@@ -193,6 +233,7 @@ def dispatch_peer_send(
             # REL-08 read-side: stamp the recipient's stable session key onto the
             # peer thread at creation so its inbox survives instance rotation.
             peer_agent_session_id=recipient.agent_session_id,
+            sender_agent_session_id=sender_agent_session_id,
             content=content,
             important=important,
         ),
@@ -223,6 +264,24 @@ def dispatch_peer_send(
     # checker happy without a runtime cost.
     assert marker_match is not None
     delivered_prose = prose[marker_match.end():]
+    # WS-2a W3, direct-send half. The message row is ALREADY persisted at this
+    # point, so raising here loses nothing — it tells the sender immediately
+    # that nobody is polling, instead of returning `queued_watcher` and letting
+    # them discover it with a stopwatch (Dax's repro waited 20s and then had to
+    # infer it). The prose says where the message still is, because "unreachable"
+    # without that reads as "lost".
+    if _watcher_is_silent(
+        bridge_manager=bridge_manager,
+        recipient=recipient,
+        window_seconds=bridge_manager.binding_liveness_window_s,
+    ):
+        raise PeerUnreachableError(
+            f"{peer_id} instance {recipient.agent_instance_id} is a watcher whose "
+            f"bridge {recipient.bridge_id} has not polled within "
+            f"{bridge_manager.binding_liveness_window_s}s — nothing is draining it. The "
+            f"message IS persisted (message_id {result.message_id}) and readable "
+            f"from that identity's inbox; it was not delivered to a live session.",
+        )
     adapter = peer_registry.wake_adapter_for(peer_id)
     if adapter is not None:
         try:
@@ -234,6 +293,12 @@ def dispatch_peer_send(
                 sender_session_label=sender_session_label,
                 thread_id=result.thread_id,
                 message_id=result.message_id,
+                # WS-2c V4: the sender's own role, when it holds exactly one, so the
+                # return leg survives the sender's next reconnect. Empty keeps the
+                # historical instance reply-to.
+                reply_to_role=reply_to_role,
+                # A2: rides ALONGSIDE the instance id in the hint, never replacing it.
+                sender_agent_session_id=sender_agent_session_id,
             )
         except Exception as exc:  # noqa: BLE001 — adapter contract: any exception is failure
             logger.exception("native wake failed for %s", peer_id)
@@ -253,6 +318,7 @@ def dispatch_peer_send(
         meta = build_peer_message_meta(
             sender_agent_id=sender_agent_id,
             sender_agent_instance_id=sender_agent_instance_id,
+            sender_agent_session_id=sender_agent_session_id,
             sender_session_label=sender_session_label,
             sender_parent_pid=sender_parent_pid,
             sender_bridge_id=sender_bridge_id,
@@ -295,6 +361,14 @@ def dispatch_peer_send(
         sender_session_label=sender_session_label,
         sender_bridge_id=sender_bridge_id,
         content=content,
+        # QUIET-GAP capture (H2): the RECIPIENT's activity stamp as of THIS
+        # emission — read from the recipient's own live bridge, never the
+        # sender's. Frozen on the row so guard 2 tests the gap this emission
+        # actually landed in, instead of a pair that slides forward afterwards.
+        # None when the recipient has no live bridge (queued_for_replay) or has
+        # never made a model-initiated call: the whole preceding session is then
+        # the quiet gap, which is the documented None-rule.
+        activity_at_emission=_recipient_activity_stamp(bridge_manager, recipient),
     )
     return PeerSendOutcome(
         thread_id=str(result.thread_id),
@@ -307,6 +381,36 @@ def dispatch_peer_send(
         delivery=delivery_kind,
         delivered_to_bridge_id=delivered_bridge,
     )
+
+
+def _resolve_peer_recipient(
+    *,
+    peer_registry: PeerRegistry,
+    peer_id: str,
+    peer_agent_instance_id: str | None,
+    peer_agent_session_id: str | None,
+) -> BridgeBinding:
+    """Resolve exact instance first, then its stable-session fallback (A2).
+
+    The try covers registry resolution alone. A later PeerUnreachableError can
+    mean an already-resolved watcher stopped polling after persistence; routing
+    that error elsewhere would duplicate the message and violate live-instance
+    precedence.
+    """
+    try:
+        return peer_registry.resolve(peer_id, peer_agent_instance_id)
+    except PeerUnreachableError as original_error:
+        if not peer_agent_session_id:
+            raise
+        recipient = peer_registry.resolve_by_agent_session_id(
+            peer_agent_session_id,
+        )
+        # A stable key is a fallback routing key, not permission to change the
+        # requested agent kind. Unknown and cross-kind keys preserve the exact
+        # original instance error.
+        if recipient is None or recipient.agent_id != peer_id:
+            raise original_error
+        return recipient
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +446,60 @@ class RoleSendOutcome:
         }
 
 
+def binding_is_live(
+    *,
+    bridge_manager: BridgeSessionManager,
+    binding: BridgeBinding,
+    window_seconds: int,
+    now: datetime | None = None,
+) -> bool:
+    """Is this binding's bridge actually being polled right now? (WS-2a W3)
+
+    The shared liveness discriminator of WS-2e §4.3.2 — this is consumer 1
+    (dispatch labelling); consumer 2 (the duplicate-role claim gate) keys on
+    the same window so the two layers can never disagree about who is alive.
+
+    A MISSING bridge is not live: it was closed or swept. A present bridge is
+    live iff its ``last_seen_at`` is within ``window_seconds``, because both
+    transports long-poll continuously and a healthy bridge is touched on every
+    poll. An unparseable timestamp is treated as NOT live — a bridge whose
+    liveness cannot be established should not be told to anyone as reachable.
+    """
+    bridge = bridge_manager.get(binding.bridge_id)
+    if bridge is None or bridge.closed:
+        return False
+    try:
+        last_seen = datetime.fromisoformat(bridge.last_seen_at)
+    except (TypeError, ValueError):
+        return False
+    return (
+        (now or datetime.now(UTC)) - last_seen
+    ).total_seconds() <= window_seconds
+
+
+def _watcher_is_silent(
+    *,
+    bridge_manager: BridgeSessionManager,
+    recipient: BridgeBinding,
+    window_seconds: int,
+) -> bool:
+    """True when a WATCHER binding resolves to a bridge nobody is polling.
+
+    Scoped to watcher bindings on purpose. ``append_event`` succeeds against
+    any non-closed bridge session, and a SIGKILLed watcher leaves its
+    server-side session standing — so the send is labelled ``queued_watcher``
+    ("a queue accepted it") while nothing will ever poll that queue, for up to
+    the full 3_600s idle sweep. Detecting it here lets the EXISTING
+    unreachable path produce ``queued_for_replay``, which is both honest and
+    already re-delivered by the owed-delivery machinery.
+    """
+    return recipient.is_watcher and not binding_is_live(
+        bridge_manager=bridge_manager,
+        binding=recipient,
+        window_seconds=window_seconds,
+    )
+
+
 def _deliver_important_to_binding(
     *,
     bridge_manager: BridgeSessionManager,
@@ -359,6 +517,7 @@ def _deliver_important_to_binding(
     recipient_kind: str,
     recipient_key: str,
     delivery_external_id: str,
+    role_created_at: str,
     reply_to_role: str = "",
 ) -> tuple[str, str]:
     """Deliver an IMPORTANT role message to a resolved recipient binding.
@@ -383,6 +542,20 @@ def _deliver_important_to_binding(
     ``/peer/delivered`` is the SOLE delivered-authority for both (v10 Q3-revised,
     Codex BLOCKER-3).
     """
+    # WS-2a W3 (Dax §34.1): refuse to report `queued_watcher` against a bridge
+    # nobody is polling. Raising here routes into dispatch_role_send's EXISTING
+    # PeerUnreachableError branch, which already returns `queued_for_replay` —
+    # honest, durable, and re-delivered. No new label, no schema change.
+    if _watcher_is_silent(
+        bridge_manager=bridge_manager,
+        recipient=recipient,
+        window_seconds=bridge_manager.binding_liveness_window_s,
+    ):
+        raise PeerUnreachableError(
+            f"watcher binding {recipient.agent_instance_id} resolves to bridge "
+            f"{recipient.bridge_id}, which has not polled within "
+            f"{bridge_manager.binding_liveness_window_s}s — treating as unreachable",
+        )
     adapter = peer_registry.wake_adapter_for(recipient.agent_id)
     if adapter is not None:
         try:
@@ -406,6 +579,7 @@ def _deliver_important_to_binding(
                     META_KEY_RECIPIENT_KIND: recipient_kind,
                     META_KEY_RECIPIENT_KEY: recipient_key,
                     META_KEY_DELIVERY_EXTERNAL_ID: delivery_external_id,
+                    META_KEY_ROLE_CREATED_AT: role_created_at,
                 },
             )
         except Exception as exc:  # noqa: BLE001 — adapter contract: any exception is failure
@@ -433,6 +607,7 @@ def _deliver_important_to_binding(
     meta[META_KEY_RECIPIENT_KIND] = recipient_kind
     meta[META_KEY_RECIPIENT_KEY] = recipient_key
     meta[META_KEY_DELIVERY_EXTERNAL_ID] = delivery_external_id
+    meta[META_KEY_ROLE_CREATED_AT] = role_created_at
     # REL-01 Fork 4 (Codex blocker): the no-adapter path serves Codex + streamable
     # recipients (no native wake adapter). Carry the reply-to on the PROSE so
     # two-way ROLE addressing works for them too — the SAME helper the native wake
@@ -497,7 +672,7 @@ def dispatch_role_send(
     prose = "\n".join(part.text for part in content)
     marker_match = IMPORTANT_MARKER_RE.match(prose)
     important = marker_match is not None
-    agent_messaging_service.persist_role_message(
+    persisted = agent_messaging_service.persist_role_message(
         recipient_kind=RECIPIENT_KIND_ROLE,
         recipient_key=role_name,
         message_id=message_id,
@@ -539,6 +714,11 @@ def dispatch_role_send(
             recipient_kind=RECIPIENT_KIND_ROLE,
             recipient_key=role_name,
             delivery_external_id=delivery_external_id,
+            # Control #5 / (A): the persisted ROW's created_at, so the holder's
+            # watcher advances its role mark on the same quantity the role-inbox
+            # section pages on. Never a clock read taken here — see
+            # RoleMessagePersisted.
+            role_created_at=persisted.created_at,
             reply_to_role=reply_to_role,
         )
     except (
@@ -583,6 +763,7 @@ def build_wake_reply_hint(
     sender_agent_instance_id: str,
     thread_id: str,
     message_id: str,
+    sender_agent_session_id: str = "",
 ) -> str:
     """The reply-to hint carried on an IMPORTANT delivery (REL-01 Fork 4).
 
@@ -602,9 +783,19 @@ def build_wake_reply_hint(
             f'prefix prose with "IMPORTANT: " only if you need a response. '
             f"thread_id={thread_id}, message_id={message_id}.)"
         )
+    # WS-2c V4 / A2: the sender's STABLE session key rides ALONGSIDE the instance
+    # id, never replacing it — old receivers keep reading the field they already
+    # know, and a receiver whose stored instance id has rotated has a second key
+    # that survives. Omitted entirely when the sender has no registered binding,
+    # so an unresolvable hint is never fabricated.
+    session_hint = (
+        f", peer_agent_session_id={sender_agent_session_id}"
+        if sender_agent_session_id
+        else ""
+    )
     return (
         f"(reply via peer_send with peer_id={sender_agent_id}, "
-        f"peer_agent_instance_id={sender_agent_instance_id}; "
+        f"peer_agent_instance_id={sender_agent_instance_id}{session_hint}; "
         f'prefix prose with "IMPORTANT: " only if you need a response. '
         f"thread_id={thread_id}, message_id={message_id}.)"
     )
@@ -622,9 +813,10 @@ def build_peer_message_meta(
     thread_id: str,
     message_id: str,
     thread_cursor: int,
+    sender_agent_session_id: str = "",
 ) -> dict[str, object]:
     """Construct the ``peer_message`` channel-event metadata dict."""
-    return {
+    meta: dict[str, object] = {
         "thread_id": thread_id,
         "message_id": message_id,
         "thread_cursor": thread_cursor,
@@ -638,6 +830,9 @@ def build_peer_message_meta(
         "important": True,
         "sent_at": datetime.now(UTC).isoformat(),
     }
+    if sender_agent_session_id:
+        meta["from_agent_session_id"] = sender_agent_session_id
+    return meta
 
 
 __all__ = [

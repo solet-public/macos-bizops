@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::drive_upload_file",
   "display_name": "Drive: Upload File",
   "description": "Upload bytes to Google Drive from a blob (blob_key). Content comes from platform blob storage only — to upload a local file, ingest it into blob storage first (blob_storage_service.store_blob_from_file) and pass the resulting blob_key. Optional parent folder id and mime type override. Returns the new file's id and web view link. Requires a connected account.",
-  "embedding_description": "Create a new binary file in Google Drive by uploading bytes sourced from platform blob storage via a required blob_key. Accepts a display name, an optional parent folder id to place it inside, and an optional mime type override (otherwise taken from the blob). Returns the created Drive file's id plus its webViewLink for sharing. This is the write counterpart to drive_download_file (which reads Drive bytes into a blob); use drive_create_folder first if you need a destination folder id. The verb never reads an arbitrary local filesystem path — to upload a local file, first ingest it into blob storage with store_blob_from_file, then pass the blob_key. Fails gsuite.invalid_params if blob_key is missing.",
+  "embedding_description": "Upload bytes from platform blob storage into Google Drive as a new binary file, with a required display name and optional parent folder or MIME override. Returns the created Drive file id and web link. Use this write path to place a platform-held blob in Drive after local files have been ingested into blob storage.",
   "result_processor_customizations": {
     "action_label": "File uploaded to Drive",
     "result_type": "g_suite_drive_upload_result",

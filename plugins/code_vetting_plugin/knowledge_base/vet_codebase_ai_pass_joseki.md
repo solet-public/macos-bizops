@@ -4,7 +4,7 @@ Article Layer: 2
 Article Role: joseki_catalog
 Article Tags: planning-stage:post-approval, planning-stage:wbs-execution, evidence-category:joseki, domain:code-vetting
 
-Embedding Description: The joseki card that drives the AI layer of the code-vetting suite over a completed deterministic run — dispatching the tier-aware L2 critic lenses as inference steps whose prompts and judgment standards are retrieved from the plugin knowledge base, then the L3 adversarial verification that re-stamps each candidate confirmed or refuted, over the L1 evidence payloads routed by run_id through the read-verb. Covers the single-card phase sequence (the L1 deterministic run carrying the rulebook-integrity gate, the L2 lens fan-out, the L3 verify, the report persist), the substrate split by which a local run is fully self-serve on platform inference while a subscription run is agent-driven from the same card, the target-class-aware lens roster where a foreign target skips the two platform-local lenses with a coverage record, and the run_id-through-read-verb payload-routing constraint that deterministic steps cannot pipe a prior step's runtime result.
+Embedding Description: The joseki card that drives the AI layer of the code-vetting suite over a completed deterministic run — dispatching the tier-aware L2 critic lenses as inference steps whose prompts and judgment standards are retrieved from the plugin knowledge base, then the L3 adversarial verification that re-stamps each candidate confirmed or refuted, over the L1 evidence payloads routed by run_id through the read-verb. Covers the single-card phase sequence (the L1 deterministic run carrying the rulebook-integrity gate, the L2 lens fan-out, the L3 verify, the report persist), the substrate split by which a local run is fully self-serve on platform inference while a subscription run is agent-driven from the same card, the target-class-aware lens roster where a foreign target skips one remaining platform-local lens with a coverage record, and the run_id-through-read-verb payload-routing constraint that deterministic steps cannot pipe a prior step's runtime result.
 
 **When you need this**: running the full AI critic pass over a codebase after the deterministic vet_codebase run; understanding how the L2 lenses retrieve their judgment guidance and consume the L1 evidence payloads; how a foreign-target run trims its lens roster; why a stale rulebook blocks the AI pass; how the local-substrate and subscription-substrate runs share one card.
 
@@ -22,7 +22,7 @@ Embedding Description: The joseki card that drives the AI layer of the code-vett
 
 ## Output Contract
 
-- A persisted `vetting_runs` record + a severity-ranked report for `run_id`, with L2 candidates re-stamped confirmed/refuted by L3, an integrity banner if the rulebook was stale, and per-lens coverage records (including the skipped platform-local lenses on a foreign run).
+- A persisted `vetting_runs` record + a severity-ranked report for `run_id`, with L2 candidates re-stamped confirmed/refuted by L3, an integrity banner if the rulebook was stale, and per-lens coverage records (including the skipped platform-local lens, kb_doc_fidelity, on a foreign run).
 - No commit is authorized (advisory; the commit gate is untouched).
 
 ## Sequence (single card, phases inline)
@@ -72,16 +72,30 @@ Embedding Description: The joseki card that drives the AI layer of the code-vett
 
 [ ] 3. Dispatch the tier-aware L2 critic lenses (one inference step per lens in the roster)
     RESULT_PROCESSOR_KIND: inference
-    # Roster is TARGET-CLASS aware: a SELF target runs all six lenses; a FOREIGN target runs
-    # the four universal lenses and SKIPS the two platform-local lenses (kb_doc_fidelity + the platform-tuned
-    # architecture pass) WITH a coverage record per skip (skip is recorded, never silently dropped;
-    # protects the per-lens L2→L3 survival metric). Each lens is ONE inference step of the shape:
+    # Roster is TARGET-CLASS aware: a SELF target runs all six of its lenses (unchanged by this
+    # restoration); a FOREIGN target runs the FIVE universal lenses (the four pre-existing generic
+    # lenses plus architecture_universal, restored 2026-07-31 per operator RULING A and the
+    # programme brief's §6.4 gap-2 split) and SKIPS the ONE remaining platform-local lens
+    # (kb_doc_fidelity) WITH a coverage record per skip (skip is recorded, never silently dropped;
+    # protects the per-lens L2→L3 survival metric). The platform-tuned architecture_conformance
+    # lens stays SELF-ONLY — it judges conformance to the platform's own ratified rulebook (RB-STATE,
+    # RB-NAMESPACE, RB-SERVICE, ...), which has no meaning on a target the suite does not own.
+    # architecture_universal is a DISTINCT lens with distinct judgment content, retrieved under
+    # its own name — never a reframing of architecture_conformance (the 2026-07-20 foreign-target
+    # ruling's explicit bar: reusing a lens name with different content poisons that lens's
+    # per-lens precision metric). architecture_universal is scoped foreign-only, matching this
+    # restoration's own arithmetic (foreign 4→5, self unchanged); whether self should ALSO gain it
+    # is OPEN — architecture_conformance's remit overlaps it only on god-components, so self has no
+    # coupling/layering/circular-dependency coverage under either lens today — see
+    # guidance_architecture_universal.md's own "Relationship to architecture_conformance" section.
+    # Each lens is ONE inference step of the shape:
     #   a) Retrieve this lens's prompt + judgment guidance from the plugin KB (lens prompt BY
     #      REFERENCE): a knowledge_service::search inference step over the assembled-rulebook
     #      universal tier + the lens's guidance article, then the model applies it to the run's
     #      evidence (from step 2) and emits F1 candidate findings naming the rule each breaks.
-    #   The judgment guidance each lens retrieves (these ride the rulebook + existing lenses,
-    #   NOT a new lens):
+    #   The judgment guidance each lens retrieves (most ride the rulebook + existing lenses, NOT a
+    #   new lens; architecture_universal below is the one exception — a genuinely new, distinctly
+    #   named lens, not guidance folded into an existing one):
     #     - ai_slop / correctness lens over the literal-frequency table → retrieve
     #       "Magic-Strings Judgment — Which Repeated Literals Are Real" (guidance_magic_strings.md):
     #       which repeated literals are config/enum/constant candidates vs i18n/test/path noise.
@@ -93,9 +107,15 @@ Embedding Description: The joseki card that drives the AI layer of the code-vett
     #       own guidance: name the specific untested behavior + the regression it misses, never a %.
     #     - security / architecture lenses over the L1 SAST + structural evidence → the security /
     #       architecture-conformance guidance.
+    #     - architecture_universal lens (FOREIGN TARGET ONLY) over the L1 structural metrics +
+    #       import/dependency graph → retrieve "Universal Architecture Judgment — Coupling,
+    #       Layering, and Boundary Integrity" (guidance_architecture_universal.md): closed-world,
+    #       technology-agnostic coupling / layering / god-component / boundary-integrity judgment
+    #       that holds for any codebase; never a stack-idiomatic ("in React you should...") claim,
+    #       which is open-world and belongs to a later Ruling-C-flow stage, not this lens.
     #   Each lens's retrieval step binds its search query to the lens's target article + tier; the
     #   card cites the article TITLES so lens-prompt evolution never re-authors the card.
-    # Sub-step count = size(roster): 6 self, 4 foreign. Emitted candidates carry dimension +
+    # Sub-step count = size(roster): 6 self, 5 foreign. Emitted candidates carry dimension +
     # constraint_violated + provenance{critic_lens} + verdict=candidate.
 
 [ ] 4. L3 adversarial verification — re-stamp each L2 candidate confirmed | refuted
@@ -126,7 +146,7 @@ Embedding Description: The joseki card that drives the AI layer of the code-vett
 
 ## Expected Step Count
 
-5 phases. Sub-step count varies with the L2 roster: 6 lens sub-steps on a self target, 4 on a foreign target (the two platform-local lenses are skipped-with-coverage-record, not omitted from the count silently).
+5 phases. Sub-step count varies with the L2 roster: 6 lens sub-steps on a self target, 5 on a foreign target (the one remaining platform-local lens, kb_doc_fidelity, is skipped-with-coverage-record, not omitted from the count silently).
 
 ## Binding Guidance
 
@@ -141,7 +161,7 @@ Embedding Description: The joseki card that drives the AI layer of the code-vett
 
 - The AI pass runs ONLY on a fresh L1 run's evidence for the same run_id — never a stale or foreign run_id (the read-verb is the single source; no step re-derives L1 output).
 - A stale rulebook HALTS at step 1's gate: no L2/L3 step runs, because every AI verdict would be computed against a moat that no longer matches canon (the run's trust chain is broken). Do not waiver the rulebook gate to "just get the AI verdicts" — a stale-moat verdict is worse than no verdict.
-- A foreign target's skipped platform-local lenses are RECORDED as coverage rows, never silently dropped — the report's coverage-honesty matrix shows them as not-applicable, and the per-lens survival metric is not polluted by a phantom zero.
+- A foreign target's skipped platform-local lens (kb_doc_fidelity) is RECORDED as a coverage row, never silently dropped — the report's coverage-honesty matrix shows it as not-applicable, and the per-lens survival metric is not polluted by a phantom zero.
 - L3 creates no findings — it only re-stamps L2 candidates by preserved id. A candidate with no L3 verdict is unverified and is not rendered as confirmed.
 - Report-not-gate: a confirmed blocker here does NOT block a commit; it informs. The Git-Controller gate run remains the sole commit authority.
 - Foreign-target residual: STALE (as opposed to CORRUPT) rulebook drift is only detectable by rulebook_sync on a self tree; a foreign AI pass therefore trusts the artifact within the window since the last self run — the W3C-3 daily L1-only heartbeat bounds that window to ≤1 day. If the heartbeat is not yet live, run a self L1 pass first when moat-trust matters.

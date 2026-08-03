@@ -42,6 +42,12 @@ from .constants import (
     HEARTBEAT_FLOW_ID,
     HEARTBEAT_SESSION_ID,
     HEARTBEAT_TAG,
+    KB_RETRIEVAL_AUDIT_CRON,
+    KB_RETRIEVAL_AUDIT_FLOW_ID,
+    KB_RETRIEVAL_AUDIT_LABEL,
+    KB_RETRIEVAL_AUDIT_PROCESS_KEY,
+    KB_RETRIEVAL_AUDIT_SESSION_ID,
+    KB_RETRIEVAL_AUDIT_TAG,
     PLUGIN_NAME,
     SchedulerErrorCode,
     SchedulerJobStatus,
@@ -2326,6 +2332,260 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 },
             )
 
+    # Text fields (display_name, description, embedding_description) are defined in
+    # knowledge_base/processes/ensure_kb_retrieval_audit_schedule.json — the builder merges
+    # them at startup, overwriting any values set here in the decorator.
+    @platform_process(
+        name="ensure_kb_retrieval_audit_schedule",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_discoverable=False,
+        error_processor_customizations=MergeErrorProcessorCustomizations(
+            retryable=True
+        ),
+        parameters={
+            "cron_expression": ParameterMetadata(
+                description="Cron expression (UTC). Default: 0 6 * * * (daily 06:00).",
+                required=False,
+                type=ParameterType.STRING,
+                default=KB_RETRIEVAL_AUDIT_CRON,
+            ),
+            "tag": ParameterMetadata(
+                description=(
+                    "Schedule tag. Default kb_retrieval_audit:edge_sink — deliberately "
+                    "NOT the predecessor's tag, so this never clears the old trigger."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+                default=KB_RETRIEVAL_AUDIT_TAG,
+            ),
+        },
+        output_type="object",
+        output_description="Ensure result for the KB retrieval-drift audit cron",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="KB retrieval-audit schedule ensure result",
+            properties={
+                "status": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="One of: created, already_present, normalized",
+                ),
+                "schedule_id": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Active KB retrieval-audit schedule ID",
+                ),
+                "tag": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Schedule tag",
+                ),
+                "cron_expression": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Cron expression for the audit",
+                ),
+                "process_key": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Cron-target process key the schedule invokes",
+                ),
+                "cleared_count": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Number of stale/duplicate schedules cleared during normalization",
+                ),
+                "message": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Human-readable status message",
+                ),
+            },
+        ),
+    )
+    def ensure_kb_retrieval_audit_schedule(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Idempotently install the KB retrieval-drift audit cron with system-owned IDs.
+
+        Mirrors :meth:`ensure_global_heartbeat`, with one deliberate difference:
+        the action is an EDGE_SINK ``action_definitions`` entry naming
+        ``audit_retrieval_corpus_cron``, not a memory-tag heartbeat. The
+        memory-tag shape is precisely what made the predecessor trigger
+        (``sch-2l18uk4q9et3a``) fire daily for two months and execute the audit
+        zero times: that shape sets ``result_processor_kind=None`` by
+        construction, and the poller's EDGE_SINK_SKIP branch terminates it with
+        no dispatch, forever, for headless crons.
+
+        ``session_id``/``flow_id`` are system-owned constants rather than the
+        caller's. A cron that inherits the creating session's id outlives that
+        session and is left pointing at a dead one — which is what the
+        predecessor did (``sess-2l18il2eddp47``, dead since June). There is no
+        caller-supplied session/flow parameter here by design: letting a caller
+        name a session identity is a wider blast radius than the defect it fixes.
+
+        The default tag is deliberately NOT the predecessor's
+        (``kb_retrieval_audit``), so this verb creates the new schedule
+        **alongside** the old one and never clears it. Retiring the predecessor
+        is a separate, explicit step, taken only after one real firing of this
+        schedule has been confirmed — a bare swap would leave a silent failure
+        indistinguishable from a fix.
+        """
+        try:
+            p = ScheduleFactory.extract_params(params)
+
+            tag = str(p.get("tag", KB_RETRIEVAL_AUDIT_TAG))
+            cron_expression = str(p.get("cron_expression", KB_RETRIEVAL_AUDIT_CRON))
+            if not validate_cron_expression(cron_expression):
+                raise PluginError(
+                    f"Invalid cron expression: {cron_expression!r}",
+                    SchedulerErrorCode.PARAMETER_ERROR,
+                    plugin_name=PLUGIN_NAME,
+                )
+
+            # 1. Find existing schedules carrying this tag.
+            schedules = self._load_schedules()
+            scheduled_actions = schedules.get("scheduled_actions", {})
+            matching = {
+                sid: data
+                for sid, data in scheduled_actions.items()
+                if tag in data.get("tags", [])
+            }
+
+            # 2. Exactly one, already correct, already pointed at the EDGE_SINK
+            #    verb -> nothing to do. Checked against the action's process key
+            #    and not only the cron, because a schedule with the right cadence
+            #    and the wrong target is the defect being repaired.
+            already_present = self._check_existing_audit_schedule(
+                matching, cron_expression, tag
+            )
+            if already_present is not None:
+                return already_present
+
+            # 3. Normalize: clear duplicates or a stale/mis-targeted entry.
+            cleared_count = clear_stale_heartbeats(
+                matching, self._scheduler_manager, self._delete_schedule
+            )
+
+            # 4. Create the EDGE_SINK cron. No result_processor_kind: omitting it
+            #    is canonical for EDGE_SINK and is what validate_cron_action_def
+            #    requires (it rejects only 'inference', which needs a session
+            #    context a headless cron does not have).
+            actions_list = [
+                ActionData(
+                    name=KB_RETRIEVAL_AUDIT_PROCESS_KEY,
+                    parameters={},
+                    result_processor=None,
+                    result_processor_kind=None,
+                )
+            ]
+
+            schedule_data = ScheduleFactory.create_cron_schedule_data(
+                cron_expression=cron_expression,
+                label=KB_RETRIEVAL_AUDIT_LABEL,
+                tags=[tag],
+                actions=actions_list,
+                action_name=KB_RETRIEVAL_AUDIT_PROCESS_KEY,
+                action_parameters={},
+                # System-owned, never the caller's: see the docstring and the
+                # sibling constants beside HEARTBEAT_SESSION_ID/FLOW_ID.
+                session_id=KB_RETRIEVAL_AUDIT_SESSION_ID,
+                flow_id=KB_RETRIEVAL_AUDIT_FLOW_ID,
+            )
+
+            schedule_id = self._save_schedule(schedule_data)
+            if not schedule_id:
+                raise PluginError(
+                    "Failed to save KB retrieval-audit schedule",
+                    SchedulerErrorCode.SCHEDULE_CREATE_ERROR,
+                    plugin_name=PLUGIN_NAME,
+                )
+
+            register_heartbeat_job(
+                schedule_id,
+                schedule_data,
+                cron_expression,
+                self._scheduler_manager,
+                self._execute_action,
+            )
+
+            result_status = "normalized" if cleared_count > 0 else "created"
+            message = (
+                f"KB retrieval-audit schedule {result_status}: {schedule_id} "
+                f"({cron_expression}) -> {KB_RETRIEVAL_AUDIT_PROCESS_KEY}"
+            )
+            self.logger.info(message)
+
+            return build_response(
+                ActionStatus.COMPLETED.value,
+                {
+                    "status": result_status,
+                    "schedule_id": schedule_id,
+                    "tag": tag,
+                    "cron_expression": cron_expression,
+                    "process_key": KB_RETRIEVAL_AUDIT_PROCESS_KEY,
+                    "cleared_count": cleared_count,
+                    "message": message,
+                },
+            )
+
+        except Exception as e:
+            self.logger.error(
+                f"Failed to ensure KB retrieval-audit schedule: {e}", exc_info=True
+            )
+            return build_response(
+                ActionStatus.ERROR.value,
+                {},
+                {
+                    "type": "scheduling_error",
+                    "code": SchedulerErrorCode.EXECUTION_ERROR,
+                    "message": str(e),
+                    "plugin_name": PLUGIN_NAME,
+                },
+            )
+
+    @staticmethod
+    def _check_existing_audit_schedule(
+        matching: dict[str, dict[str, Any]],
+        desired_cron: str,
+        tag: str,
+    ) -> dict[str, Any] | None:
+        """Return an ``already_present`` response when exactly one correct schedule exists.
+
+        "Correct" means: one schedule, the desired cron, AND an action naming the
+        EDGE_SINK cron target. The process-key check is load-bearing rather than
+        defensive — the defect this whole path repairs is a schedule with the
+        right cadence and the wrong target, which a cron-only comparison would
+        report as already present and leave dead.
+        """
+        if len(matching) != 1:
+            return None
+
+        schedule_id, data = next(iter(matching.items()))
+        if data.get("cron_expression") != desired_cron:
+            return None
+
+        actions = data.get("actions") or []
+        targets = {
+            action.get("name")
+            for action in actions
+            if isinstance(action, dict)
+        }
+        if KB_RETRIEVAL_AUDIT_PROCESS_KEY not in targets:
+            return None
+
+        message = (
+            f"KB retrieval-audit schedule already present: {schedule_id} "
+            f"({desired_cron}) -> {KB_RETRIEVAL_AUDIT_PROCESS_KEY}"
+        )
+        return build_response(
+            ActionStatus.COMPLETED.value,
+            {
+                "status": "already_present",
+                "schedule_id": schedule_id,
+                "tag": tag,
+                "cron_expression": desired_cron,
+                "process_key": KB_RETRIEVAL_AUDIT_PROCESS_KEY,
+                "cleared_count": 0,
+                "message": message,
+            },
+        )
+
     def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
         """Return edge process definitions for Scheduling plugin.
 
@@ -2383,6 +2643,17 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             ),
             "ensure_global_heartbeat": EdgeProcessDefinition(
                 name="ensure_global_heartbeat",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True
+                ),
+            ),
+            # Declared-side half of the EdgeProcessProvider decorated<->declared
+            # parity contract. An EDGE process that is decorated but not declared
+            # here fails `edge_definition_customizations_smoke` at boot parity.
+            "ensure_kb_retrieval_audit_schedule": EdgeProcessDefinition(
+                name="ensure_kb_retrieval_audit_schedule",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(
                 ),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(

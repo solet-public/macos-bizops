@@ -46,6 +46,70 @@ prod/sandbox flag:
 | EU Production | `https://rest.eu.zuora.com` |
 | Sandbox | `https://rest.apisandbox.zuora.com` |
 
+## Business-data limits + spill-floor migration (2026-08-02)
+
+`data_query`, `bulk_export`, `list_subscriptions`, and `list_invoices` ALWAYS
+write their result to the caller's `output_tsv_path` — never records inline,
+at any size (`workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md`;
+the former blob-spill/`INLINE_BYTE_CAP` branch on `data_query`/`bulk_export`
+is deleted, not lowered). Neither destination is platform blob storage — the
+path must be absolute, end in `.tsv`, and lie under an operator-configured
+`export_allowed_roots` entry in this plugin's config (`export_containment.py`,
+realpath + `commonpath` containment mirroring `ledger_allowed_roots`; the
+default `[]` REFUSES every write). `get_object`/`get_invoice` (single-record
+fetch-by-id) are unaffected and stay inline.
+
+Each of the four defaults to 500 records absent an acknowledged override:
+
+| Verb | Params | Override ceiling | Vendor mechanism |
+|---|---|---|---|
+| `data_query` | `zoql`, `output_tsv_path`, `acknowledge_default_limit_override=false`, `row_limit?` | 1000 | Single `POST /v1/action/query` call (vendor cap 2000/call) |
+| `bulk_export` | `zoql`, `output_tsv_path`, `acknowledge_default_limit_override=false`, `row_limit?` | 50000 (the N>>500 route) | `POST /v1/action/query` + `POST /v1/action/queryMore` continuation loop, following the vendor's own `queryLocator`/`done` signal past the 2000/call ceiling |
+| `list_subscriptions` | `account_id`, `output_tsv_path`, `acknowledge_default_limit_override=false`, `row_limit?` | 5000 | Internal `page`/`pageSize` pagination against `GET /v1/subscriptions/accounts/{account_id}` (vendor cap 40/call, documented `GET_SubscriptionsByAccount` operation) |
+| `list_invoices` | `account_id`, `output_tsv_path`, `acknowledge_default_limit_override=false`, `row_limit?` | 5000 | Single call to `GET /v1/invoices/accounts/{account_id}`; `row_limit` caps what is WRITTEN, not a confirmed pre-fetch ceiling — see the note below |
+
+`acknowledge_default_limit_override=true` together with an explicit
+`row_limit` requests more than the default — both are required together, and
+a `row_limit` above the verb's hard cap is refused, never silently clamped.
+Nested objects (e.g. a subscription's rate plans) serialize as JSON text in
+their TSV cells.
+
+**`data_query`/`bulk_export` fixed a pre-existing, independently-confirmed
+defect**, not just added the override mechanism: `bulk_export`'s
+`BULK_EXPORT_ROW_CAP` (50,000) was vacuous — the verb posted to the same
+synchronous query endpoint as `data_query` and never called `queryMore`, so
+the vendor's own ~2,000-record ceiling was hit first every time and the
+50,000 figure could never be reached. Both verbs now call the documented,
+current Zuora Actions pair (`POST /v1/action/query` / `POST /v1/action/queryMore`,
+operationIds `Action_POSTquery`/`Action_POSTqueryMore`) rather than the
+undocumented legacy `/v1/query` alias this module used previously — the same
+underlying ZOQL mechanism, but with a citable current contract for the
+queryMore continuation this fix depends on.
+
+**`list_subscriptions` fixed a second pre-existing defect: silent
+truncation.** `GET /v1/subscriptions/accounts/{account_id}` is a documented,
+page/pageSize-paginated endpoint (component `GLOBAL_REQUEST_pageSize`: max
+40, default 20) — the prior implementation passed neither parameter, so it
+silently returned at most 20 subscriptions with no signal more existed. This
+build pages internally up to the effective row limit.
+
+**`list_invoices`' endpoint is NOT independently confirmed.**
+`GET /v1/invoices/accounts/{account_id}` (like the legacy `/v1/query` alias
+above) is absent from Zuora's current published OpenAPI bundle, but unlike
+`/v1/query` — which is independently verified live via `data_query`'s own
+2,000-record-cap behavior — there is no equivalent live-behavior evidence for
+this endpoint, and no documented pagination contract to build against.
+Zuora's documented CURRENT account-scoped billing-document listing,
+`GET /v1/billing-documents`, mixes invoices with credit/debit memos and has
+no `documentType` query filter — migrating to it is a verb-contract change
+outside this wave's approved scope (flagged for a ruling separately, not
+built silently). `list_invoices` therefore still issues a single call and
+applies `row_limit` as a cap on what is WRITTEN, disclosed as such in the
+process description rather than presented as a confirmed guarantee.
+
+New error code: `zuora.export_path_refused` (path not absolute / not `.tsv` /
+not contained under any configured `export_allowed_roots` entry).
+
 ## Security posture (mirrors the Jira/Snowflake/Salesforce/external-Postgres wave)
 
 - **Foreign-target invariant.** No `base_url`/environment parameter on any
@@ -72,11 +136,14 @@ prod/sandbox flag:
 
 ## SQL-lockdown gate note
 
-This connector composes NO SQL-shaped strings anywhere — ZOQL queries flow
-through as a caller-supplied JSON body field (`queryString`), never a
-literal string the gate's S2 heuristic would match, and there is no database
-driver import (`S0`). The SQL-lockdown gate is silent for this plugin — no
-allowlist entry needed anywhere in `src/` or `tests/`.
+`src/` composes NO SQL-shaped strings anywhere — ZOQL queries flow through as
+a caller-supplied JSON body field (`queryString`), never a literal string the
+gate's S2 heuristic would match, and there is no database driver import
+(`S0`). The gate's S2 heuristic DOES fire on the ZOQL-shaped literal test
+fixtures in `tests/smoke_data_query.py` (query strings like `"SELECT Id, Name
+FROM Account"` standing alone as a Python string literal) — foreign-tenant
+ZOQL text, never platform SQL, allowlisted in
+`quality_gates/sql_access_allowlist.txt`.
 
 ## Design provenance
 
@@ -99,5 +166,6 @@ posture section above.)
 | `src/zuora_plugin/app_config.py` | Resolves `zuora_tenant` from the address book; the client_secret is chain-consumed. |
 | `src/zuora_plugin/http_client.py` | `ZuoraClient` — synchronous httpx client with cached, re-mintable bearer auth (client-credentials grant). |
 | `src/zuora_plugin/errors.py` | Topology-safe error classification (`classify_zuora_response`) from the response body's `reasons` list. |
-| `src/zuora_plugin/billing_actions.py` | Pure verb implementations: `data_query`, `get_object`, `create_object`, `update_object`, `list_subscriptions`, `get_invoice`, `list_invoices`, `bulk_export`. |
-| `src/zuora_plugin/plugin.py` | The `ZuoraPlugin` EDGE provider — client lifecycle, error mapping, EDGE registration. |
+| `src/zuora_plugin/export_containment.py` | Own-copy workspace-root containment gate (`assert_export_path_allowed`) binding `export_allowed_roots` — admits `output_tsv_path` for `data_query`/`bulk_export`/`list_subscriptions`/`list_invoices`. |
+| `src/zuora_plugin/billing_actions.py` | Pure verb implementations: `data_query`, `get_object`, `create_object`, `update_object`, `list_subscriptions`, `get_invoice`, `list_invoices`, `bulk_export` — the latter four write to `output_tsv_path` under the §5 override mechanism (see the migration section above). |
+| `src/zuora_plugin/plugin.py` | The `ZuoraPlugin` EDGE provider — client lifecycle, error mapping, EDGE registration, `_export_path_gate`. |

@@ -24,10 +24,13 @@ from typing import Any
 from googleapiclient.http import MediaInMemoryUpload
 
 from .constants import (
+    BLOB_NAMESPACE,
     DRIVE_DEFAULT_PAGE_SIZE,
     DRIVE_FOLDER_MIME_TYPE,
     DRIVE_PAGE_SIZE_CAP,
     DRIVE_SHARE_ALLOWED_ROLES,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
 )
 from .gmail_actions import AttachmentLoader
 
@@ -39,10 +42,23 @@ _GOOGLE_NATIVE_PREFIX = "application/vnd.google-apps"
 
 
 def list_files(drive: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """List Drive files matching a Drive query (newest first)."""
+    """List Drive files matching a Drive query (newest first).
+
+    Business-data limits (2026-08-02, resource guard, not the spill floor —
+    g_suite is limits-only): the CEILING defaults to DRIVE_DEFAULT_PAGE_SIZE
+    (500); ``acknowledge_default_limit_override=true`` + an explicit
+    ``row_limit`` (up to DRIVE_PAGE_SIZE_CAP, Drive's own real single-call
+    maximum) may raise it. Within whatever ceiling applies, an optional
+    ``max`` still lets a caller request FEWER in one call (e.g. 20, without
+    invoking the override) — ``max`` can only narrow the ceiling, never
+    widen it; widening requires the override. Pushed directly into the
+    vendor's own ``pageSize`` — never a fetch-everything-then-truncate.
+    """
     query = _as_str(params.get("query"))
+    ceiling = _resolve_effective_limit(params, verb="drive_list_files")
+    page_size = _clamp_within_ceiling(params.get("max"), ceiling)
     kwargs: dict[str, Any] = {
-        "pageSize": _clamp_page_size(params.get("max")),
+        "pageSize": page_size,
         "fields": _LIST_FIELDS,
         "orderBy": "modifiedTime desc",
     }
@@ -51,6 +67,48 @@ def list_files(drive: Any, params: dict[str, Any]) -> dict[str, Any]:
     response = drive.files().list(**kwargs).execute()
     rows = [_file_row(item) for item in (response.get("files") or [])]
     return {"files": rows, "count": len(rows)}
+
+
+def _clamp_within_ceiling(value: Any, ceiling: int) -> int:
+    """A caller-requested per-call size, narrowed to at most the ceiling.
+
+    Never widens the ceiling — that is the override's job, resolved before
+    this is called. An absent/invalid value falls back to the ceiling itself.
+    """
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        return ceiling
+    return min(ceiling, value)
+
+
+def _resolve_effective_limit(params: dict[str, Any], *, verb: str) -> int:
+    """Resolve the effective page size from the §5 override pair.
+
+    Absent (or ``acknowledge_default_limit_override`` not exactly ``True``)
+    with no ``row_limit``: returns DRIVE_DEFAULT_PAGE_SIZE. Both must be
+    given together — the override flag alone, or ``row_limit`` alone, fails
+    loud rather than silently honoring half. A ``row_limit`` above
+    DRIVE_PAGE_SIZE_CAP is refused, never silently clamped back down.
+    """
+    override = params.get(PARAM_ACKNOWLEDGE_OVERRIDE)
+    row_limit = params.get(PARAM_ROW_LIMIT)
+    override_present = override is True
+    row_limit_present = row_limit is not None
+    if override_present != row_limit_present:
+        raise ValueError(
+            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
+            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
+            f"{PARAM_ROW_LIMIT}={row_limit!r}"
+        )
+    if not override_present:
+        return DRIVE_DEFAULT_PAGE_SIZE
+    if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
+    if row_limit > DRIVE_PAGE_SIZE_CAP:
+        raise ValueError(
+            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
+            f"{DRIVE_PAGE_SIZE_CAP}; refusing rather than silently clamping"
+        )
+    return row_limit
 
 
 def download_file(drive: Any, params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
@@ -73,7 +131,7 @@ def download_file(drive: Any, params: dict[str, Any], blob_writer: BlobWriter) -
     if not isinstance(content, (bytes, bytearray)):
         raise ValueError(f"Drive returned non-bytes content for '{name}'")
     blob_key = blob_writer(bytes(content), name, mime)
-    return {"file_blob_key": blob_key, "name": name, "mime": mime}
+    return {"file_blob_key": blob_key, "namespace": BLOB_NAMESPACE, "name": name, "mime": mime}
 
 
 def upload_file(
@@ -192,9 +250,3 @@ def _require_str(params: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"'{key}' is required and must be a non-empty string")
     return value
-
-
-def _clamp_page_size(value: Any) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        return DRIVE_DEFAULT_PAGE_SIZE
-    return max(1, min(DRIVE_PAGE_SIZE_CAP, value))

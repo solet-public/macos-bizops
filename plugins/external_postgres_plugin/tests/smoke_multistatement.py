@@ -29,10 +29,14 @@ unreachable fixture.
 
 from __future__ import annotations
 
+import getpass
+import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "external_postgres_plugin" / "src"))
@@ -47,7 +51,7 @@ from external_postgres_plugin.statement_guard import (  # noqa: E402
 _SCRATCH_DB = "epg_smoke_scratch"
 _HOST = "localhost"
 _PORT = 5432
-_USER = "dw"
+_USER = getpass.getuser()
 _PROBE = "epg_probe"
 _READ_ONLY_SQLSTATE = "25006"
 
@@ -144,14 +148,81 @@ def _unreachable_fail(detail: str) -> int:
     print("SKIPPED-LIVE-DB-UNREACHABLE — FAILING LOUD (not a silent pass)")
     print(f"  {detail}")
     print("  The LIVE parser-bypass 25006 defense-in-depth proof DID NOT RUN.")
-    print("  Bring up local Postgres (dw @ localhost:5432 + createdb/psql) and re-run.")
+    print("  Bring up local Postgres (the local trust-auth user @ localhost:5432 + createdb/psql) and re-run.")
     print("=" * 70)
     return 1
+
+
+_fresh_load_counter = [0]
+
+
+def _load_module_fresh() -> Any:
+    """Load a FRESH copy of this same file (unique module name, never cached)
+    so a test can observe its module-level ``_USER`` under a patched
+    ``getpass.getuser`` (a normal import would reuse ``sys.modules`` and freeze
+    the first-seen value). Mirrors
+    ``bootstrap_stdlib_only_smoke.py:_load_bootstrap_module_fresh``.
+    """
+    _fresh_load_counter[0] += 1
+    module_name = f"_smoke_multistatement_fresh_{_fresh_load_counter[0]}"
+    spec = importlib.util.spec_from_file_location(module_name, __file__)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not build an import spec for {__file__}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _check_user_is_dynamic_getuser() -> None:
+    """RED-FIRST (operator-identity parameterization, 2026-07-31): ``_USER``
+    must resolve to ``getpass.getuser()`` at import time, NOT a hardcoded
+    operator username. Proven the same way ``bootstrap_stdlib_only_smoke.py``
+    proves ``_ADMIN_ROLE`` (:99-117): load this module fresh with
+    ``getpass.getuser`` patched to a sentinel — a dynamically-sourced constant
+    picks the sentinel up; a hardcoded literal would ignore the patch (RED).
+    Offline; never touches Postgres.
+    """
+    sentinel = "smoke_epg_user_sentinel_not_a_real_user"
+    with patch.object(getpass, "getuser", return_value=sentinel):
+        fresh = _load_module_fresh()
+    _assert(
+        "_USER is dynamically sourced from getpass.getuser() (not a hardcoded username)",
+        fresh._USER == sentinel,
+        f"got {fresh._USER!r}; a hardcoded user would ignore the patched getuser()",
+    )
+    real_user = getpass.getuser()
+    _assert(
+        "the resolved _USER equals getpass.getuser() and is non-empty",
+        bool(real_user) and _USER == real_user,
+        f"got {_USER!r} vs getpass.getuser()={real_user!r}",
+    )
+
+
+_OPERATOR_USERNAME_TOKEN = "d" + "w"
+
+
+def _check_source_carries_no_operator_username() -> None:
+    """Companion to the dynamic-getuser proof above: even with ``_USER``
+    correctly derived, a literal could still leak elsewhere in this file's
+    prose. Composed from two concatenated halves (see
+    ``_OPERATOR_USERNAME_TOKEN``) so this guard's own source never contains
+    the contiguous token it hunts for. Word-bounded so it does not collide
+    with an unrelated substring.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(_OPERATOR_USERNAME_TOKEN)}(?![A-Za-z0-9_])")
+    _assert(
+        "source carries no bare operator-username token",
+        pattern.search(source) is None,
+    )
 
 
 def main() -> int:
     print("\nexternal_postgres_plugin LIVE single-statement / defense-in-depth smoke")
     print("=" * 68)
+    _check_user_is_dynamic_getuser()
+    _check_source_carries_no_operator_username()
     test_parser_belt()
     if _failed:
         print("FAILED (belt):", _failed)

@@ -15,7 +15,7 @@ import logging
 import os
 import re
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -238,6 +238,31 @@ class IOInterfaceServiceProtocol(Protocol):
     ) -> list[dict[str, object]]:
         """Prepare and normalize attachments from explicit list or job reference."""
         ...
+
+
+def _typed_error_detail(value: object) -> Mapping[str, object] | None:
+    """Extract a typed ``ErrorDetail`` mapping from a failure, or ``None``.
+
+    The failure paths into ``_mark_action_failed`` carry one of three things:
+    an :class:`AnantaError` subclass (which already renders itself via
+    ``to_dict()``), a plugin's ``ErrorDetail`` dict lifted off a failed
+    ActionResult, or a bare string / arbitrary exception with no typing at all.
+    Only the first two can contribute a code; the third legitimately yields
+    ``None`` and keeps the generic constant.
+
+    Returning ``None`` rather than a synthesized stub is deliberate: a fabricated
+    code would be indistinguishable from a real one downstream, which is the
+    failure this whole change exists to end.
+    """
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        rendered = to_dict()
+        if isinstance(rendered, Mapping) and rendered.get("code"):
+            return rendered
+        return None
+    if isinstance(value, Mapping) and value.get("code"):
+        return value
+    return None
 
 
 class ActionQueuePoller:
@@ -856,8 +881,11 @@ class ActionQueuePoller:
 
             except Exception as e:
                 logger.error(f"Failed to process action {action.id}: {e}", exc_info=True)
-                # Mark action as failed
-                self._mark_action_failed(action.id, str(e))
+                # Mark action as failed, carrying the exception's typing when it
+                # has any — str(e) alone discards an AnantaError's error_code.
+                self._mark_action_failed(
+                    action.id, str(e), error_detail=_typed_error_detail(e),
+                )
 
     def _requires_main_thread(self, process_key: str) -> bool:
         """
@@ -1399,7 +1427,15 @@ class ActionQueuePoller:
                 # Only mark as failed if there was an immediate error during dispatch
                 error_value = result.get("error", "Unknown error")
                 error_msg = str(error_value) if error_value is not None else "Unknown error"
-                self._mark_action_failed(action.id, error_msg, action.flow_token_id)
+                # ``error_value`` is frequently a full plugin ErrorDetail dict;
+                # str() above keeps the readable message, and the typed copy
+                # rides alongside it instead of being thrown away.
+                self._mark_action_failed(
+                    action.id,
+                    error_msg,
+                    action.flow_token_id,
+                    error_detail=_typed_error_detail(error_value),
+                )
                 logger.error(f"Action {action.id} failed to dispatch: {error_msg}")
 
             # Tool use recording disabled - context already contains tool execution info
@@ -1410,7 +1446,12 @@ class ActionQueuePoller:
         except Exception as e:
             # Immediate dispatch failure
             logger.error(f"Failed to dispatch action {action.id}: {e}", exc_info=True)
-            self._mark_action_failed(action.id, str(e), action.flow_token_id)
+            self._mark_action_failed(
+                action.id,
+                str(e),
+                action.flow_token_id,
+                error_detail=_typed_error_detail(e),
+            )
 
     def _prepare_action_for_execution(self, action: QueuedAction) -> bool:
         """Returns True if the action is ready for execution, False if it was rejected."""
@@ -3067,8 +3108,24 @@ class ActionQueuePoller:
         error_message: str,
         flow_token_id: str | None = None,
         canonical_schema: dict[str, object] | None = None,
+        error_detail: Mapping[str, object] | None = None,
     ) -> None:
-        """Mark action as failed with error message and invoke error_processor if present."""
+        """Mark action as failed with error message and invoke error_processor if present.
+
+        ``error_detail`` carries the caller's TYPED failure information — a
+        plugin's ``ErrorDetail`` mapping (``{type, code, message, details,
+        severity, timestamp}``) or an :class:`AnantaError`'s ``to_dict()``.
+        Without it this method could only ever store a constant
+        ``code="action_failed"``, because ``error_message`` is a string and the
+        typing had already been destroyed at the call site. Every
+        ``/process/call`` consumer platform-wide reads that code, so the
+        constant made failure classes indistinguishable — against the
+        fast-fail / no-silent-fallback rules.
+
+        Omitting it is legitimate and keeps the historical constant: some
+        failures genuinely have no typing to carry. The parameter ADDS typing
+        where typing exists; it never invents it.
+        """
         self._update_action_status_to_failed(action_id, error_message)
 
         details = self._retrieve_failed_action_details(action_id)
@@ -3090,10 +3147,17 @@ class ActionQueuePoller:
         logger.info(f"ACTION FAILED: {process_key} (id={action_id}) - {error_message}")
         failed_arguments = self._parse_failed_arguments(parameters_raw)
 
-        # Store error result for console display
+        # Store error result for console display. The typed detail wins when the
+        # caller had one; the generic code remains the honest answer when it did
+        # not. ``message`` is always the operator-facing string this method was
+        # called with, so typing never costs readability.
+        stored_error: dict[str, object] = {"message": error_message, "code": "action_failed"}
+        if error_detail is not None:
+            stored_error = {**dict(error_detail), "message": error_message}
+            stored_error.setdefault("code", "action_failed")
         error_result: dict[str, object] = {
             "action_status": "failed",
-            "error": {"message": error_message, "code": "action_failed"},
+            "error": stored_error,
             "data": None,
         }
         self._store_action_result(action_id, error_result, process_key)

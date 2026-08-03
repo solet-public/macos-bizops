@@ -16,10 +16,11 @@ config:
   callback_host:
     type: string
     required: false
-    default: "0.0.0.0"
+    default: "127.0.0.1"
     description: >
-      Host the OAuth callback uvicorn server binds to. Use 0.0.0.0 for cloud
-      deployment (ALB-fronted).
+      Host the OAuth callback uvicorn server binds to. The default is explicit
+      IPv4 loopback for a local homunculus. Cloud ALB-fronted deployments must
+      set 0.0.0.0 explicitly.
   callback_port:
     type: integer
     required: false

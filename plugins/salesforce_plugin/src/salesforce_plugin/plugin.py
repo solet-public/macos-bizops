@@ -59,11 +59,14 @@ from .constants import (
     CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
     CONFIG_KEY_SF_CLI_PATH,
     DEFAULT_API_VERSION,
+    DEFAULT_ROW_LIMIT,
     DEFAULT_SF_CLI_PATH,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
     ERROR_API_ERROR,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
     PLUGIN_NAME,
     RESULT_TYPE_CREATE_RECORD,
     RESULT_TYPE_DELETE_RECORD,
@@ -74,6 +77,8 @@ from .constants import (
     RESULT_TYPE_SOQL_QUERY,
     RESULT_TYPE_TEST_CONNECTION,
     RESULT_TYPE_UPDATE_RECORD,
+    SOQL_EXPORT_ROW_CAP,
+    SOQL_MAX_RECORDS_CAP,
 )
 from .errors import SalesforceServiceError, classify_salesforce_error
 
@@ -227,7 +232,6 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             return self._error(ERROR_NOT_CONFIGURED, str(exc))
         except (
             SalesforceServiceError,
-            soql_actions.ResultTooLargeError,
             export_containment.ExportPathRefusedError,
         ) as exc:
             return self._error(exc.code, str(exc))
@@ -297,34 +301,88 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         display_name="Salesforce: SOQL Query",
         description=(
             "Run a SOQL query (e.g. \"SELECT Id, Name FROM Account WHERE …\") against the "
-            "configured Salesforce org. Capped at max_records (default 200, capped 1000) — "
-            "never an unbounded fetch. Returns records inline; fails loud with "
-            "sf.result_too_large over the inline byte cap — use export_soql for bulk."
+            "configured Salesforce org. The result is ALWAYS written to the caller-supplied "
+            "output_tsv_path, never returned inline — this plugin never executes Apex, so the "
+            "50,000-record Apex governor limit does not apply to it; the actual Salesforce fact "
+            "for this call path (sf CLI -> jsforce REST client) is a 2,000-record REST query "
+            "batch size with no vendor total ceiling, and jsforce's autoFetch already pages past "
+            f"that internally. The limit below is entirely our own policy. Defaults to "
+            f"{DEFAULT_ROW_LIMIT} records to avoid exhausting API request limits and disk, and to "
+            "discourage pulling all records for client-side filtering that a SOQL WHERE clause "
+            "should do instead. To fetch more, pass acknowledge_default_limit_override=true "
+            f"together with an explicit row_limit (up to {SOQL_MAX_RECORDS_CAP}) — both are "
+            f"required together, and a row_limit above {SOQL_MAX_RECORDS_CAP} is refused rather "
+            f"than silently clamped. For pulls beyond {SOQL_MAX_RECORDS_CAP} records, use "
+            f"export_soql instead (same override mechanism, hard cap {SOQL_EXPORT_ROW_CAP}). When "
+            "the goal is validating that records exist or picking one to act on next, prefer "
+            "selecting stable ID fields over email addresses or other PII-bearing fields — the "
+            "SOQL SELECT list decides what comes back, so a narrower query is both cheaper and "
+            "lower-exposure."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "query": ParameterMetadata(
                 type=ParameterType.STRING, required=True, description="The SOQL query string."
             ),
-            "max_records": ParameterMetadata(
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description=(
+                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
+                ),
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} records. Requires understanding why the default "
+                    "exists: avoiding exhausted API request limits/disk, and pulling all records "
+                    "to filter client-side instead of writing a proper SOQL WHERE clause."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description="Max records to return (default 200, capped at 1000).",
+                description=(
+                    f"Explicit record ceiling, up to {SOQL_MAX_RECORDS_CAP}. Only honored together "
+                    f"with acknowledge_default_limit_override=true; refused (not clamped) above "
+                    f"{SOQL_MAX_RECORDS_CAP}."
+                ),
             ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description=(
-                "Records inline (records/total_size/row_count/spilled=false). Fails loud with "
-                "sf.result_too_large over the inline byte cap — use export_soql for bulk."
-            ),
+            description="A handle to the written TSV — never records inline, at any size.",
+            properties={
+                "path": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Absolute path of the written TSV file.",
+                ),
+                "row_count": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Number of records written.",
+                ),
+                "total_size": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Salesforce's own total matching-record count for the query.",
+                ),
+                "columns": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Field names, in SOQL SELECT order.",
+                ),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="True when row_count hit the effective limit — more records may exist.",
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def soql_query(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         return self._run(
-            lambda executor: soql_actions.soql_query(executor, params),
+            lambda executor: soql_actions.soql_query(executor, params, self._export_path_gate),
             "soql_query",
         )
 
@@ -332,11 +390,24 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="export_soql",
         display_name="Salesforce: Export SOQL",
         description=(
-            "Run a SOQL query and write the full result (up to 50000 records) as ONE "
-            "tab-separated .tsv file at an ABSOLUTE output_tsv_path in the operator's "
-            "workspace. The path must lie under an operator-configured export_allowed_roots "
-            "entry (empty config refuses every export). Nested relationship objects are "
-            "serialized as JSON text in their cells. Requires query and output_tsv_path."
+            "The N>>500 route: run a SOQL query and write the result as ONE tab-separated .tsv "
+            "file at an ABSOLUTE output_tsv_path in the operator's workspace. The path must lie "
+            "under an operator-configured export_allowed_roots entry (empty config refuses every "
+            "export). Nested relationship objects are serialized as JSON text in their cells. Same "
+            "read rules and override mechanism as soql_query, with a higher hard cap: this plugin "
+            "never executes Apex, so the 50,000-record Apex governor limit does not apply; the "
+            "actual Salesforce fact for this call path is a 2,000-record REST query batch size "
+            "with no vendor total ceiling, and jsforce's autoFetch already pages past that "
+            f"internally via the SF_ORG_MAX_QUERY_LIMIT env override. Defaults to "
+            f"{DEFAULT_ROW_LIMIT} records absent an acknowledged override — for that common "
+            "small/default case, soql_query has an identical interface with a lower ceiling. To "
+            "fetch more, pass acknowledge_default_limit_override=true together with an explicit "
+            f"row_limit (up to {SOQL_EXPORT_ROW_CAP}) — both are required together, and a "
+            f"row_limit above {SOQL_EXPORT_ROW_CAP} is refused rather than silently clamped. "
+            "Requires query and output_tsv_path. When the goal is validating that records exist "
+            "rather than inspecting their content, prefer selecting stable ID fields over email "
+            "addresses or other PII-bearing fields — the SOQL SELECT list decides what lands in "
+            "the file."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -350,10 +421,51 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
                     "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
                 ),
             ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} records. Requires understanding why the default "
+                    "exists: avoiding exhausted API request limits/disk, and pulling all records "
+                    "to filter client-side instead of writing a proper SOQL WHERE clause."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit record ceiling, up to {SOQL_EXPORT_ROW_CAP}. Only honored together "
+                    f"with acknowledge_default_limit_override=true; refused (not clamped) above "
+                    f"{SOQL_EXPORT_ROW_CAP}."
+                ),
+            ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="path of the written TSV, plus columns, row_count, total_size, and truncated.",
+            description="A handle to the written TSV: path, columns, row_count, total_size, and truncated.",
+            properties={
+                "path": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Absolute path of the written TSV file.",
+                ),
+                "row_count": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Number of records written.",
+                ),
+                "total_size": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Salesforce's own total matching-record count for the query.",
+                ),
+                "columns": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Field names, in SOQL SELECT order.",
+                ),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="True when row_count hit the effective limit — more records may exist.",
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,

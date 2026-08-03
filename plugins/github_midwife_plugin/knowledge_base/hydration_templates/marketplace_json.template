@@ -1,0 +1,11 @@
+{
+  "name": "{{MARKETPLACE_NAME}}",
+  "owner": { "name": "seed-factory" },
+  "plugins": [
+    {
+      "name": "coordination-hooks",
+      "source": "./plugins/github_midwife_plugin/claude_plugin/coordination-hooks",
+      "description": "Session-coordination hooks: knowledge-base-first reminders, a role-binding reminder, an idle-wake waiter, and an opt-in git-mutation guard."
+    }
+  ]
+}

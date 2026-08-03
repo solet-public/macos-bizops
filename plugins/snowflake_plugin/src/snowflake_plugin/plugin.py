@@ -7,13 +7,15 @@ the statement-leader guard here is FAST-FAIL ONLY — the TRUE developer-proof
 boundary is the read-only ROLE the connection is pinned to.
 
 Verbs (all EDGE, all reads):
-  - run_query       — one read-only statement; rows inline, FAILS LOUD over
-    the inline caps (A4 — no blob spill)
+  - run_query       — one read-only statement; result written as a TSV file
+    at the caller's output_tsv_path (default 500 rows, up to 1000 with an
+    acknowledged override) — never rows inline, at any size
   - list_databases  — databases visible to the current role
   - list_schemas / list_tables / describe_table — introspection
-  - export_query    — full result written as a TSV file in the operator's
-    workspace (absolute output_tsv_path, contained under the
-    export_allowed_roots config; refuse-all when unset)
+  - export_query    — the N>>500 route: full result written as a TSV file in
+    the operator's workspace (absolute output_tsv_path, contained under the
+    export_allowed_roots config; refuse-all when unset), same override
+    mechanism as run_query with a higher hard cap (50,000)
   - test_connection — account, user, role, warehouse, version
 
 No plugin-owned vault keys (the private key is chain-consumed through the
@@ -53,10 +55,15 @@ from .constants import (
     CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
     CONFIG_KEY_LOGIN_TIMEOUT_SECONDS,
     CONFIG_KEY_STATEMENT_TIMEOUT_SECONDS,
+    DEFAULT_ROW_LIMIT,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
+    EXPORT_ROW_CAP,
     LOGIN_TIMEOUT_SECONDS_DEFAULT,
+    MAX_ROWS_HARD_CAP,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
     PLUGIN_NAME,
     RESULT_TYPE_DESCRIBE_TABLE,
     RESULT_TYPE_EXPORT_QUERY,
@@ -258,7 +265,6 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
             (
                 SnowflakeConfigError,
                 StatementGuardError,
-                query_actions.ResultTooLargeError,
                 export_containment.ExportPathRefusedError,
             ),
         ):
@@ -301,9 +307,21 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Run ONE read-only SQL statement against the configured Snowflake account. Read "
             "leaders only (SELECT/SHOW/DESCRIBE/EXPLAIN/WITH); the operator-granted role is "
-            "expected to be read-only. Returns rows inline (up to max_rows, default 200, capped "
-            "1000); fails loud with snowflake.result_too_large over the inline caps — use "
-            "export_query for bulk."
+            "expected to be read-only. The result is ALWAYS written to the caller-supplied "
+            "output_tsv_path, never returned inline — Snowflake's own Python connector "
+            "documentation imposes no vendor row ceiling on a query result (arraysize/"
+            f"client_prefetch_threads are client-side performance knobs, not caps); the limit "
+            f"below is entirely our own policy. Defaults to {DEFAULT_ROW_LIMIT} rows to avoid "
+            "exhausting warehouse compute and disk, and to discourage pulling all rows for "
+            "client-side filtering that a WHERE clause should do instead. To fetch more, pass "
+            "acknowledge_default_limit_override=true together with an explicit row_limit (up to "
+            f"{MAX_ROWS_HARD_CAP}) — both are required together, and a row_limit above "
+            f"{MAX_ROWS_HARD_CAP} is refused rather than silently clamped. For pulls beyond "
+            f"{MAX_ROWS_HARD_CAP} rows, use export_query instead (same override mechanism, hard "
+            f"cap {EXPORT_ROW_CAP}). When the goal is validating that records exist or picking "
+            "one to act on next, prefer selecting stable ID columns over email addresses or "
+            "other PII-bearing fields — the query decides what columns come back, so a narrower "
+            "SELECT is both cheaper and lower-exposure."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -312,22 +330,61 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
                 required=True,
                 description="A single read-only SQL statement.",
             ),
-            "max_rows": ParameterMetadata(
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description=(
+                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
+                ),
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} rows. Requires understanding why the default "
+                    "exists: avoiding exhausted warehouse compute/disk, and pulling all rows to "
+                    "filter client-side instead of writing a proper WHERE clause."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description="Max rows to return inline (default 200, capped at 1000).",
+                description=(
+                    f"Explicit row ceiling, up to {MAX_ROWS_HARD_CAP}. Only honored together with "
+                    f"acknowledge_default_limit_override=true; refused (not clamped) above "
+                    f"{MAX_ROWS_HARD_CAP}."
+                ),
             ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Rows inline (columns/rows/row_count/spilled=false). Fails loud over the inline caps.",
+            description="A handle to the written TSV — never rows inline, at any size.",
+            properties={
+                "path": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Absolute path of the written TSV file.",
+                ),
+                "row_count": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Number of rows written.",
+                ),
+                "columns": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Column names, in query order.",
+                ),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="True when row_count hit the effective limit — more rows may exist.",
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def run_query(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         return self._run_on_connection(
-            lambda conn: query_actions.run_query(conn, params), "run_query"
+            lambda conn: query_actions.run_query(conn, params, self._export_path_gate), "run_query"
         )
 
     @platform_process(
@@ -416,11 +473,20 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         name="export_query",
         display_name="Snowflake: Export Query",
         description=(
-            "Run a read-only query and write the full result (up to 50000 rows) as ONE "
-            "tab-separated .tsv file at an ABSOLUTE output_tsv_path in the operator's workspace. "
-            "The path must lie under an operator-configured export_allowed_roots entry (empty "
-            "config refuses every export). Same read-only rules as run_query. Requires sql and "
-            "output_tsv_path."
+            "The N>>500 route: run a read-only query and write the result as ONE tab-separated "
+            ".tsv file at an ABSOLUTE output_tsv_path in the operator's workspace. The path must lie under an "
+            "operator-configured export_allowed_roots entry (empty config refuses every export). "
+            "Same read-only rules and override mechanism as run_query, with a higher hard cap: "
+            "Snowflake's own Python connector documentation imposes no vendor row ceiling, only "
+            f"our own policy. Defaults to {DEFAULT_ROW_LIMIT} rows absent an acknowledged override "
+            "— for that common small/default case, run_query has an identical interface with a "
+            "lower ceiling. To fetch more, pass acknowledge_default_limit_override=true together "
+            f"with an explicit row_limit (up to {EXPORT_ROW_CAP}) — both are required together, "
+            f"and a row_limit above {EXPORT_ROW_CAP} is refused rather than silently clamped. "
+            "Requires sql and output_tsv_path. When the goal is validating that records exist "
+            "rather than inspecting their content, prefer selecting stable ID columns over email "
+            "addresses or other PII-bearing fields — the query decides what columns land in the "
+            "file."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -434,10 +500,47 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
                     "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
                 ),
             ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} rows. Requires understanding why the default "
+                    "exists: avoiding exhausted warehouse compute/disk, and pulling all rows to "
+                    "filter client-side instead of writing a proper WHERE clause."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit row ceiling, up to {EXPORT_ROW_CAP}. Only honored together with "
+                    f"acknowledge_default_limit_override=true; refused (not clamped) above "
+                    f"{EXPORT_ROW_CAP}."
+                ),
+            ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="path of the written TSV, plus columns, row_count, and truncated.",
+            description="A handle to the written TSV: path, columns, row_count, and truncated.",
+            properties={
+                "path": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Absolute path of the written TSV file.",
+                ),
+                "row_count": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Number of rows written.",
+                ),
+                "columns": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Column names, in query order.",
+                ),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="True when row_count hit the effective limit — more rows may exist.",
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,

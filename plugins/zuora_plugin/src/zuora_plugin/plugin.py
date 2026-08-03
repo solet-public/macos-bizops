@@ -48,19 +48,23 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import billing_actions
+from . import billing_actions, export_containment
 from .app_config import AppConfigError, AppConfigLoader
 from .billing_actions import ZuoraResponseError
 from .constants import (
-    BLOB_NAMESPACE,
+    BULK_EXPORT_ROW_CAP,
+    CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
     CONFIG_KEY_REQUEST_TIMEOUT_SECONDS,
+    DATA_QUERY_MAX_ROWS_CAP,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_ROW_LIMIT,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
     ERROR_API_ERROR,
-    ERROR_BLOB_STORAGE_NOT_AVAILABLE,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
-    INLINE_BYTE_CAP,
+    LIST_ROW_LIMIT_CAP,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
     PLUGIN_NAME,
     RESULT_TYPE_BULK_EXPORT,
     RESULT_TYPE_CREATE_OBJECT,
@@ -71,6 +75,8 @@ from .constants import (
     RESULT_TYPE_LIST_SUBSCRIPTIONS,
     RESULT_TYPE_TEST_CONNECTION,
     RESULT_TYPE_UPDATE_OBJECT,
+    ZUORA_LIST_PAGE_SIZE_MAX,
+    ZUORA_QUERY_PAGE_ROW_CAP,
 )
 from .errors import ZuoraServiceError, classify_zuora_response
 from .http_client import ZuoraAuthError, ZuoraClient
@@ -90,7 +96,6 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         super().__init__()
         self.logger: logging.Logger | None = None
         self._address_book_service: Any | None = None
-        self._blob_storage_service: Any | None = None
         self._app_config_loader: AppConfigLoader | None = None
         self._client: ZuoraClient | None = None
 
@@ -136,12 +141,6 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
                 f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires "
                 "address_book_service to resolve the zuora_tenant credentials"
             )
-        # blob_storage is needed only for data_query spill / bulk_export and is
-        # resolved lazily at first use (_blob_service): the platform constructs
-        # blob_storage_service in the init_service_manager startup step, AFTER
-        # every plugin's prepare_for_readiness — resolving it here caches None
-        # forever and every spill hard-fails (field-verified on a live
-        # deployment).
         self._app_config_loader = AppConfigLoader(self._address_book_service)
         self.set_ready()
 
@@ -181,44 +180,33 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
-    def _blob_service(self) -> Any | None:
-        """Resolve blob_storage_service lazily at point of use (cached once found).
+    def _export_path_gate(self, output_tsv_path: str) -> str:
+        """Admit an export path via workspace-root containment; return the realpath.
 
-        Readiness-time resolution is a known trap: the platform constructs
-        blob_storage_service after every plugin's prepare_for_readiness, so a
-        readiness-time get_service() returns None and the miss would be cached
-        for the life of the plugin.
+        Binds the operator's ``export_allowed_roots`` config (yaml default
+        ``[]`` = refuse-all; no hardcoded callsite default per authoring trap
+        #10) to the own-copy containment gate. A malformed config value is a
+        loud config fault, never a silent admit-all or refuse-all.
         """
-        if self._blob_storage_service is None and self.orchestrator_ref is not None:
-            self._blob_storage_service = self.orchestrator_ref.get_service("blob_storage_service")
-        return self._blob_storage_service
-
-    def _store_blob(self, content: bytes, filename: str, mime_type: str) -> str:
-        """Store a spilled/exported result as a blob; return the blob id (the *_blob_key)."""
-        blob_service = self._blob_service()
-        if blob_service is None:
-            raise ZuoraServiceError(
-                ERROR_BLOB_STORAGE_NOT_AVAILABLE,
-                f"blob_storage_service is not available for result spill: the serialized "
-                f"result is {len(content)} bytes and the inline-return cap is "
-                f"{INLINE_BYTE_CAP} bytes; narrow the query (fewer rows/columns or a "
-                f"smaller page) so the result fits inline",
-            )
-        result = blob_service.store_blob(
-            BLOB_NAMESPACE, content, {"filename": filename, "mime_type": mime_type}
+        config = self.config_provider or {}
+        raw_roots = config.get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS)
+        roots: list[str] = []
+        if raw_roots is not None:
+            if not isinstance(raw_roots, list) or not all(
+                isinstance(entry, str) for entry in raw_roots
+            ):
+                raise ZuoraServiceError(
+                    ERROR_NOT_CONFIGURED,
+                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory "
+                    "path strings",
+                )
+            roots = list(raw_roots)
+        return export_containment.assert_export_path_allowed(
+            output_tsv_path,
+            roots,
+            config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
+            plugin_name=self.name,
         )
-        if not isinstance(result, dict) or result.get("action_status") != "completed":
-            raise ZuoraServiceError(
-                ERROR_BLOB_STORAGE_NOT_AVAILABLE,
-                f"failed to store result blob for '{filename}' ({len(content)} bytes)",
-            )
-        blob_id = (result.get("data") or {}).get("blob_id")
-        if not isinstance(blob_id, str) or not blob_id:
-            raise ZuoraServiceError(
-                ERROR_BLOB_STORAGE_NOT_AVAILABLE,
-                f"blob storage returned no blob_id for '{filename}' ({len(content)} bytes)",
-            )
-        return blob_id
 
     def _run(self, produce: Callable[[ZuoraClient], dict[str, Any]], endpoint_name: str) -> dict[str, Any]:
         """Shared error-classification path for every Zuora verb."""
@@ -229,7 +217,7 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             return self._error(ERROR_INVALID_PARAMS, str(exc))
         except AppConfigError as exc:
             return self._error(ERROR_NOT_CONFIGURED, str(exc))
-        except ZuoraServiceError as exc:
+        except (ZuoraServiceError, export_containment.ExportPathRefusedError) as exc:
             return self._error(exc.code, str(exc))
         except ZuoraAuthError:
             return self._error("zuora.auth_failed", "Zuora OAuth token request failed.")
@@ -286,24 +274,74 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         display_name="Zuora: Data Query",
         description=(
             "Run a ZOQL query (e.g. \"SELECT Id, Name FROM Account\") against the configured Zuora "
-            "tenant. Returns records inline (up to max_rows, default 200, capped 1000) or a "
-            "result_blob_key when the result is large."
+            "tenant. The result is ALWAYS written to the caller-supplied output_tsv_path, never "
+            "returned inline. Zuora's own ZOQL query call (POST /v1/action/query) returns at most "
+            f"{ZUORA_QUERY_PAGE_ROW_CAP} records per call; this verb follows the vendor's own "
+            "queryMore continuation automatically when more remain. The row limit below is "
+            f"entirely our own policy. Defaults to {DEFAULT_ROW_LIMIT} records to avoid exhausting "
+            "API request limits and disk, and to discourage pulling all records for client-side "
+            "filtering that a ZOQL WHERE clause should do instead. To fetch more, pass "
+            f"acknowledge_default_limit_override=true together with an explicit row_limit (up to "
+            f"{DATA_QUERY_MAX_ROWS_CAP}) — both are required together, and a row_limit above "
+            f"{DATA_QUERY_MAX_ROWS_CAP} is refused rather than silently clamped. For pulls beyond "
+            f"{DATA_QUERY_MAX_ROWS_CAP} records, use bulk_export instead (same override mechanism, "
+            f"hard cap {BULK_EXPORT_ROW_CAP}). When the goal is validating that records exist or "
+            "picking one to act on next, prefer selecting stable ID fields over email addresses or "
+            "other PII-bearing fields — the ZOQL SELECT list decides what comes back, so a "
+            "narrower query is both cheaper and lower-exposure."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "zoql": ParameterMetadata(type=ParameterType.STRING, required=True, description="The ZOQL query string."),
-            "max_rows": ParameterMetadata(
-                type=ParameterType.INTEGER, required=False, description="Max rows to return inline (default 200, capped 1000)."
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description=(
+                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
+                ),
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} records. Requires understanding why the default "
+                    "exists: avoiding exhausted API request limits/disk, and pulling all records "
+                    "to filter client-side instead of writing a narrower ZOQL WHERE clause."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit record ceiling, up to {DATA_QUERY_MAX_ROWS_CAP}. Only honored "
+                    f"together with acknowledge_default_limit_override=true; refused (not clamped) "
+                    f"above {DATA_QUERY_MAX_ROWS_CAP}."
+                ),
             ),
         },
         return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT, description="Records inline or a result_blob_key on spill."
+            type=ParameterType.OBJECT,
+            description="A handle to the written TSV — never records inline, at any size.",
+            properties={
+                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
+                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of records written."),
+                "total_size": ParameterMetadata(
+                    type=ParameterType.INTEGER, description="Zuora's own total-match count from the last query page fetched.",
+                ),
+                "columns": ParameterMetadata(type=ParameterType.LIST, description="Field names, in ZOQL SELECT order."),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN, description="True when row_count hit the effective limit — more records may exist.",
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def data_query(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: billing_actions.data_query(client, params, self._store_blob), "data_query")
+        return self._run(
+            lambda client: billing_actions.data_query(client, params, self._export_path_gate), "data_query",
+        )
 
     @platform_process(
         name="get_object",
@@ -366,17 +404,65 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="list_subscriptions",
         display_name="Zuora: List Subscriptions",
-        description="List an account's subscriptions. Requires account_id.",
+        description=(
+            "List an account's subscriptions; ALWAYS writes the result to the caller-supplied "
+            "output_tsv_path, never inline. Requires account_id. Zuora's own endpoint "
+            "(GET /v1/subscriptions/accounts/{account_id}) pages internally at "
+            f"{ZUORA_LIST_PAGE_SIZE_MAX} subscriptions per call — this verb follows that "
+            "pagination automatically up to the effective row limit. The row limit below is "
+            f"entirely our own policy. Defaults to {DEFAULT_ROW_LIMIT} to avoid exhausting API "
+            "request limits and disk. To fetch more, pass acknowledge_default_limit_override=true "
+            f"together with an explicit row_limit (up to {LIST_ROW_LIMIT_CAP}) — both are required "
+            f"together, and a row_limit above {LIST_ROW_LIMIT_CAP} is refused rather than silently "
+            "clamped. Prefer selecting on stable subscription/account IDs downstream over "
+            "billing-contact PII fields when the goal is validation."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "account_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The Zuora account id."),
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} subscriptions."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit record ceiling, up to {LIST_ROW_LIMIT_CAP}. Only honored together "
+                    f"with acknowledge_default_limit_override=true; refused (not clamped) above "
+                    f"{LIST_ROW_LIMIT_CAP}."
+                ),
+            ),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="subscriptions: a list of subscription objects."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="A handle to the written TSV — never records inline, at any size.",
+            properties={
+                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
+                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of subscriptions written."),
+                "columns": ParameterMetadata(type=ParameterType.LIST, description="Field names, in first-appearance order."),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN, description="True when row_count hit the effective limit — more subscriptions may exist.",
+                ),
+            },
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_subscriptions(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: billing_actions.list_subscriptions(client, params), "list_subscriptions")
+        return self._run(
+            lambda client: billing_actions.list_subscriptions(client, params, self._export_path_gate),
+            "list_subscriptions",
+        )
 
     @platform_process(
         name="get_invoice",
@@ -396,38 +482,138 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="list_invoices",
         display_name="Zuora: List Invoices",
-        description="List an account's invoices. Requires account_id.",
+        description=(
+            "List an account's invoices; ALWAYS writes the result to the caller-supplied "
+            "output_tsv_path, never inline. Requires account_id. NOTE on this call's ceiling: "
+            "Zuora's own pagination support for this specific endpoint "
+            "(GET /v1/invoices/accounts/{account_id}) is not independently confirmed in current "
+            "vendor documentation, so row_limit is applied as a cap on what is WRITTEN from "
+            "Zuora's single-call response rather than a guaranteed pre-fetch ceiling — if an "
+            "account has more invoices than Zuora returns in one call, truncated may under-report. "
+            f"Defaults to {DEFAULT_ROW_LIMIT} to avoid exhausting disk on an unexpectedly large "
+            "account. To raise the cap, pass acknowledge_default_limit_override=true together with "
+            f"an explicit row_limit (up to {LIST_ROW_LIMIT_CAP}) — both are required together, and "
+            f"a row_limit above {LIST_ROW_LIMIT_CAP} is refused rather than silently clamped. "
+            "Prefer selecting on stable invoice/account IDs downstream over billing-contact PII "
+            "fields when the goal is validation."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "account_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The Zuora account id."),
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Must be exactly true, together with row_limit, to write more than the "
+                    f"default {DEFAULT_ROW_LIMIT} invoices."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit record ceiling, up to {LIST_ROW_LIMIT_CAP}. Only honored together "
+                    f"with acknowledge_default_limit_override=true; refused (not clamped) above "
+                    f"{LIST_ROW_LIMIT_CAP}."
+                ),
+            ),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="invoices: a list of invoice objects."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="A handle to the written TSV — never records inline, at any size.",
+            properties={
+                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
+                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of invoices written."),
+                "columns": ParameterMetadata(type=ParameterType.LIST, description="Field names, in first-appearance order."),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="True when row_count hit the effective limit — more invoices may exist (see the ceiling note above).",
+                ),
+            },
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_invoices(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: billing_actions.list_invoices(client, params), "list_invoices")
+        return self._run(
+            lambda client: billing_actions.list_invoices(client, params, self._export_path_gate),
+            "list_invoices",
+        )
 
     @platform_process(
         name="bulk_export",
         display_name="Zuora: Bulk Export",
         description=(
-            "Run a ZOQL query and export the full result (up to 50000 rows) to a csv or json blob; "
-            "returns a result_blob_key. Requires zoql; format is csv (default) or json."
+            "The N>>500 route: run a ZOQL query and write the result as ONE tab-separated .tsv "
+            "file at an ABSOLUTE output_tsv_path in the operator's workspace. The path must lie "
+            "under an operator-configured export_allowed_roots entry (empty config refuses every "
+            "export). Nested objects are serialized as JSON text in their cells. Same read rules "
+            "and override mechanism as data_query, with a higher hard cap: Zuora's own ZOQL query "
+            f"call returns at most {ZUORA_QUERY_PAGE_ROW_CAP} records per call, and this verb "
+            "follows the vendor's own queryMore continuation automatically to reach the effective "
+            f"limit. Defaults to {DEFAULT_ROW_LIMIT} records absent an acknowledged override — for "
+            "that common small/default case, data_query has an identical interface with a lower "
+            "ceiling. To fetch more, pass acknowledge_default_limit_override=true together with an "
+            f"explicit row_limit (up to {BULK_EXPORT_ROW_CAP}) — both are required together, and a "
+            f"row_limit above {BULK_EXPORT_ROW_CAP} is refused rather than silently clamped. "
+            "Requires zoql and output_tsv_path. When the goal is validating that records exist "
+            "rather than inspecting their content, prefer selecting stable ID fields over email "
+            "addresses or other PII-bearing fields — the ZOQL SELECT list decides what lands in "
+            "the file."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "zoql": ParameterMetadata(type=ParameterType.STRING, required=True, description="The ZOQL query string."),
-            "format": ParameterMetadata(type=ParameterType.STRING, required=False, description="Export format: 'csv' (default) or 'json'."),
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Must be exactly true, together with row_limit, to fetch more than the "
+                    f"default {DEFAULT_ROW_LIMIT} records."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit record ceiling, up to {BULK_EXPORT_ROW_CAP}. Only honored together "
+                    f"with acknowledge_default_limit_override=true; refused (not clamped) above "
+                    f"{BULK_EXPORT_ROW_CAP}."
+                ),
+            ),
         },
         return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT, description="result_blob_key referencing the exported bytes, plus row_count and format."
+            type=ParameterType.OBJECT,
+            description="A handle to the written TSV: path, columns, row_count, total_size, and truncated.",
+            properties={
+                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
+                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of records written."),
+                "total_size": ParameterMetadata(
+                    type=ParameterType.INTEGER, description="Zuora's own total-match count from the last query page fetched.",
+                ),
+                "columns": ParameterMetadata(type=ParameterType.LIST, description="Field names, in ZOQL SELECT order."),
+                "truncated": ParameterMetadata(
+                    type=ParameterType.BOOLEAN, description="True when row_count hit the effective limit — more records may exist.",
+                ),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def bulk_export(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: billing_actions.bulk_export(client, params, self._store_blob), "bulk_export")
+        return self._run(
+            lambda client: billing_actions.bulk_export(client, params, self._export_path_gate), "bulk_export",
+        )
 
     @platform_process(
         name="test_connection",

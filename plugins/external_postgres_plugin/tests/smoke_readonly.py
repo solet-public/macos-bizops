@@ -7,15 +7,16 @@ Postgres (MagicMock cannot prove SQLSTATE 25006), so it runs against a local
 SCRATCH database — NEVER the platform's own DB.
 
 FIXTURE (documented): a local Homebrew Postgres, database ``epg_smoke_scratch``,
-connected as ``dw`` (the passwordless trust SUPERUSER) over ``localhost:5432``,
-``sslmode=disable``. Connecting as the superuser is deliberate — it proves that
-even an OVER-PRIVILEGED registered credential cannot write through this tool
-(the read-only characteristic binds regardless of role). Setup/teardown of the
+connected as the local OS user running this smoke (``getpass.getuser()`` —
+the passwordless trust SUPERUSER) over ``localhost:5432``, ``sslmode=disable``.
+Connecting as the superuser is deliberate — it proves that even an
+OVER-PRIVILEGED registered credential cannot write through this tool (the
+read-only characteristic binds regardless of role). Setup/teardown of the
 probe table go through ``psql`` (a read-WRITE path) so this smoke never needs a
 raw driver import.
 
-LOUD-ON-UNREACHABLE (Coordinator-Day Q2 ruling, GTE-09): if Postgres/``dw``/
-``psql`` are unavailable the smoke FAILS LOUD (exit 1) with an unmissable
+LOUD-ON-UNREACHABLE (Coordinator-Day Q2 ruling, GTE-09): if Postgres/the local
+trust role/``psql`` are unavailable the smoke FAILS LOUD (exit 1) with an unmissable
 SKIPPED-LIVE-DB-UNREACHABLE banner — NOT a silent exit-0 skip. run_smokes only
 surfaces a smoke's output on FAIL, so a silent skip would be invisible in the
 suite (the GTE-09 rot); failing loud makes "the 25006 proof did not run"
@@ -45,10 +46,14 @@ failure OR when the fixture is unreachable (loud, never silent).
 
 from __future__ import annotations
 
+import getpass
+import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "external_postgres_plugin" / "src"))
@@ -60,7 +65,7 @@ from external_postgres_plugin.connection import connect  # noqa: E402
 _SCRATCH_DB = "epg_smoke_scratch"
 _HOST = "localhost"
 _PORT = 5432
-_USER = "dw"
+_USER = getpass.getuser()
 _SSLMODE = "disable"
 _PROBE = "epg_probe"
 _READ_ONLY_SQLSTATE = "25006"
@@ -201,17 +206,91 @@ def _unreachable_fail(detail: str) -> int:
     print("SKIPPED-LIVE-DB-UNREACHABLE — FAILING LOUD (not a silent pass)")
     print(f"  {detail}")
     print("  The LIVE read-only 25006 proof DID NOT RUN. Bring up local Postgres")
-    print("  (dw @ localhost:5432 + createdb/psql) and re-run.")
+    print("  (the local trust-auth user @ localhost:5432 + createdb/psql) and re-run.")
     print("=" * 70)
     return 1
+
+
+_fresh_load_counter = [0]
+
+
+def _load_module_fresh() -> Any:
+    """Load a FRESH copy of this same file (unique module name, never cached)
+    so a test can observe its module-level ``_USER`` under a patched
+    ``getpass.getuser`` (a normal import would reuse ``sys.modules`` and freeze
+    the first-seen value). Mirrors
+    ``bootstrap_stdlib_only_smoke.py:_load_bootstrap_module_fresh``.
+    """
+    _fresh_load_counter[0] += 1
+    module_name = f"_smoke_readonly_fresh_{_fresh_load_counter[0]}"
+    spec = importlib.util.spec_from_file_location(module_name, __file__)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not build an import spec for {__file__}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _check_user_is_dynamic_getuser() -> None:
+    """RED-FIRST (operator-identity parameterization, 2026-07-31): ``_USER``
+    must resolve to ``getpass.getuser()`` at import time, NOT a hardcoded
+    operator username. Proven the same way ``bootstrap_stdlib_only_smoke.py``
+    proves ``_ADMIN_ROLE`` (:99-117): load this module fresh with
+    ``getpass.getuser`` patched to a sentinel — a dynamically-sourced constant
+    picks the sentinel up; a hardcoded literal would ignore the patch (RED).
+    Offline; never touches Postgres — runs even when the live fixture is
+    unreachable, so a regression here is never masked by the
+    unreachable-skip path.
+    """
+    sentinel = "smoke_epg_user_sentinel_not_a_real_user"
+    with patch.object(getpass, "getuser", return_value=sentinel):
+        fresh = _load_module_fresh()
+    _assert(
+        "_USER is dynamically sourced from getpass.getuser() (not a hardcoded username)",
+        fresh._USER == sentinel,
+        f"got {fresh._USER!r}; a hardcoded user would ignore the patched getuser()",
+    )
+    real_user = getpass.getuser()
+    _assert(
+        "the resolved _USER equals getpass.getuser() and is non-empty",
+        bool(real_user) and _USER == real_user,
+        f"got {_USER!r} vs getpass.getuser()={real_user!r}",
+    )
+
+
+_OPERATOR_USERNAME_TOKEN = "d" + "w"
+
+
+def _check_source_carries_no_operator_username() -> None:
+    """Companion to the dynamic-getuser proof above: even with ``_USER``
+    correctly derived, a literal could still leak elsewhere in this file's
+    prose (docstring, print, error string). Composed from two concatenated
+    halves (see ``_OPERATOR_USERNAME_TOKEN``) so this guard's own source
+    never contains the contiguous token it hunts for. Word-bounded so it does
+    not collide with an unrelated substring.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(_OPERATOR_USERNAME_TOKEN)}(?![A-Za-z0-9_])")
+    _assert(
+        "source carries no bare operator-username token",
+        pattern.search(source) is None,
+    )
 
 
 def main() -> int:
     print("\nexternal_postgres_plugin LIVE read-only smoke")
     print("=" * 44)
+    _check_user_is_dynamic_getuser()
+    _check_source_carries_no_operator_username()
+    if _failed:
+        print()
+        print(f"Results: {_passed} passed, {len(_failed)} failed")
+        print("FAILED:", _failed)
+        return 1
     if not _setup():
         return _unreachable_fail(
-            "scratch Postgres fixture unreachable (createdb/psql/dw/localhost:5432)."
+            "scratch Postgres fixture unreachable (createdb/psql/local-trust-user/localhost:5432)."
         )
     try:
         _run_live_checks()

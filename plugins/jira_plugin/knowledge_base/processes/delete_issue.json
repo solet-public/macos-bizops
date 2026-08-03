@@ -2,7 +2,7 @@
   "process_key": "plugin::jira_plugin::delete_issue",
   "display_name": "Jira: Delete Issue",
   "description": "Permanently delete a Jira issue by key. Destructive write action taking an EXPLICIT target — the issue key is required and there is no bulk form.",
-  "embedding_description": "Permanently remove a single Jira issue (ticket) from the site, identified by its exact key. This is irreversible and deletes the issue and its comments and attachments. It requires the specific issue key — there is no wildcard or bulk delete — so a mistaken argument cannot wipe more than one ticket. Distinct from transition_issue (which moves an issue to a Closed/Done status without deleting it) and update_issue (edit fields).",
+  "embedding_description": "Permanently delete exactly one Jira issue by its required key, including the ticket's comments and attachments. This irreversible destructive write has a single-record target. Use it when the Jira record itself must be erased from the site.",
   "result_processor_customizations": {
     "action_label": "Jira issue deleted",
     "result_type": "jira_delete_issue_result",

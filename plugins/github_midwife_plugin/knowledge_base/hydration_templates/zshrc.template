@@ -6,7 +6,7 @@
 #   mv {{BACKUP_PATH}} ~/.zshrc
 # Merge anything you need from it yourself — the agent never reads that file.
 #
-# Everything {{HOMUNCULUS_NAME}}-related lives in the clone (git-updatable);
+# Everything {{HOMUNCULUS_NAME}}-related lives in the deployment directory (git-updatable);
 # this file stays minimal and should not need to change again.
 
 [ -f "{{CLONE_DIR}}/client/{{HOMUNCULUS_NAME}}.zsh" ] && source "{{CLONE_DIR}}/client/{{HOMUNCULUS_NAME}}.zsh"

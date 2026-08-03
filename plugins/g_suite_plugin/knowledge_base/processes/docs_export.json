@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::docs_export",
   "display_name": "Docs: Export",
   "description": "Export a Google Docs document to pdf, docx, or txt into blob storage and return its doc_blob_key. Requires a connected account.",
-  "embedding_description": "Export an existing document's fully-formatted bytes (pdf, docx, or txt format) via Drive's export_media into platform blob storage, returning a doc_blob_key reference (not the bytes themselves). Google-native documents cannot be fetched with drive_download_file — this export verb is the correct path, exactly like sheets_export and slides_export for their respective product types. Preserves formatting/images (pdf, docx) unlike docs_get's plain-text-only body_text. The returned doc_blob_key can be attached to email or handed to other plugins. Fails gsuite.not_found if the id does not exist.",
+  "embedding_description": "Export a Google Docs document through Drive into platform blob storage as PDF, DOCX, or plain TXT. PDF and DOCX preserve rendered formatting and images; TXT carries plain text. Returns a document blob key for email attachments or downstream plugins.",
   "result_processor_customizations": {
     "action_label": "Document exported to blob",
     "result_type": "g_suite_docs_export_result",

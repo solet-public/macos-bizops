@@ -53,18 +53,40 @@ DEFAULT_API_VERSION: Final[str] = "62.0"
 CONFIG_KEY_API_VERSION: Final[str] = "api_version"
 
 # ---------------------------------------------------------------------------
-# Caps + export (A3/A4, 2026-07-16): interactive reads are inline-only and
-# fail loud over the caps; bulk results land as ONE workspace .tsv file via
-# export_soql, gated by realpath+commonpath containment under the
-# operator-configured roots.
+# Caps + export (business-data limits + spill-floor migration, 2026-08-02 —
+# workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md).
+# Both soql_query and export_soql now ALWAYS write to a caller-supplied path
+# (07-29 spill floor, unconditional — the former INLINE_BYTE_CAP/inline-return
+# branch is deleted, not lowered: no record-read verb returns record values
+# inline at any size). DEFAULT_ROW_LIMIT is the fetch ceiling absent an
+# explicit, acknowledged override; SOQL_MAX_RECORDS_CAP is soql_query's
+# override ceiling, SOQL_EXPORT_ROW_CAP is export_soql's (the "N>>500"
+# Pattern-A route, §7.2) — both are pushed into the sf CLI's own
+# SF_ORG_MAX_QUERY_LIMIT env override (soql_actions._run_soql), never
+# fetch-everything-then-truncate.
 # ---------------------------------------------------------------------------
-SOQL_DEFAULT_MAX_RECORDS: Final[int] = 200
+DEFAULT_ROW_LIMIT: Final[int] = 500
 SOQL_MAX_RECORDS_CAP: Final[int] = 1000
-INLINE_BYTE_CAP: Final[int] = 200_000
-# export_soql fetches up to this bound (truncation is flagged, never silent).
+# SOQL_EXPORT_ROW_CAP reconciled per Reviewer-D's §3.2 adjudication + Dawn's
+# ruling (2026-08-02): the number is REAL and REACHABLE (jsforce autoFetch
+# pages through the REST API's own nextRecordsUrl up to the passed
+# SF_ORG_MAX_QUERY_LIMIT), but its attribution is OURS-ARBITRARY, not a
+# Salesforce-imposed ceiling — 50,000 is the Apex governor limit (SOQL run
+# from inside Apex code), a different call path this plugin never uses (it
+# shells to the sf CLI -> jsforce REST client, whose actual vendor fact is a
+# 2,000/call REST query batch size with no vendor total ceiling). Never cite
+# 50,000 as a Salesforce limit in a process description; cite the 2,000/call
+# REST fact if a vendor number is wanted at all.
 SOQL_EXPORT_ROW_CAP: Final[int] = 50_000
 TSV_SUFFIX: Final[str] = ".tsv"
 CONFIG_KEY_EXPORT_ALLOWED_ROOTS: Final[str] = "export_allowed_roots"
+
+# ---------------------------------------------------------------------------
+# Override friction (§5) — required together or not at all; absent means the
+# effective limit is DEFAULT_ROW_LIMIT.
+# ---------------------------------------------------------------------------
+PARAM_ACKNOWLEDGE_OVERRIDE: Final[str] = "acknowledge_default_limit_override"
+PARAM_ROW_LIMIT: Final[str] = "row_limit"
 
 # ---------------------------------------------------------------------------
 # Error codes (sf.* prefix — surfaced to callers of the verbs)
@@ -82,7 +104,6 @@ ERROR_NOT_FOUND: Final[str] = "sf.not_found"
 ERROR_MALFORMED_QUERY: Final[str] = "sf.malformed_query"
 ERROR_RATE_LIMITED: Final[str] = "sf.rate_limited"
 ERROR_API_ERROR: Final[str] = "sf.api_error"
-ERROR_RESULT_TOO_LARGE: Final[str] = "sf.result_too_large"
 ERROR_EXPORT_PATH_REFUSED: Final[str] = "sf.export_path_refused"
 
 # ---------------------------------------------------------------------------

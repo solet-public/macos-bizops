@@ -2,7 +2,7 @@
   "process_key": "plugin::external_postgres_plugin::list_schemas",
   "display_name": "External Postgres: List Schemas",
   "description": "List the non-system schemas in a registered foreign Postgres connection. Requires connection_name. System schemas (pg_catalog, information_schema, pg_toast) are excluded.",
-  "embedding_description": "Introspect the schema namespace of an external/foreign Postgres database registered as a connection, returning the names of its user schemas. Excludes the internal system schemas (pg_catalog, information_schema, pg_toast). This is the top level of the read-only introspection surface for the foreign-Postgres 'super Datagrip' — use it to see what schemas exist before drilling into list_tables for a schema and describe_table for a table. Requires only a connection_name; composes a bound information_schema query against the read-only connection.",
+  "embedding_description": "List the user schemas in a registered external Postgres database, leaving the internal system namespaces out of the result. The top level of foreign-database introspection: start here to see how a database is organised before drilling into a schema's contents.",
   "result_processor_customizations": {
     "action_label": "Foreign Postgres schemas listed",
     "result_type": "external_postgres_list_schemas_result",

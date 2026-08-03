@@ -17,9 +17,18 @@ internally (verified by reading the CLI's own source,
 ``@salesforce/plugin-data/lib/commands/data/query.js``) — it already collects
 every page up to a fetch cap before returning. This module passes
 ``SF_ORG_MAX_QUERY_LIMIT`` as a subprocess env override so the CLI stops
-fetching at ``max_records`` server-side (never the unbounded default), then
-slices the returned list to ``max_records`` again client-side as
+fetching at the effective limit server-side (never the unbounded default),
+then slices the returned list to that limit again client-side as
 defense-in-depth.
+
+Both ``soql_query`` and ``export_soql`` ALWAYS write their result to the
+caller-supplied ``output_tsv_path`` and return a handle only — never records
+inline, at any size (business-data limits + spill-floor migration,
+2026-08-02; the former inline-return/``INLINE_BYTE_CAP`` branch is deleted,
+not lowered). The effective record ceiling is DEFAULT_ROW_LIMIT unless the
+caller supplies BOTH ``acknowledge_default_limit_override=true`` and an
+explicit ``row_limit`` (up to the verb's hard cap) — see
+``_resolve_effective_limit``.
 """
 
 from __future__ import annotations
@@ -34,9 +43,9 @@ from typing import Any
 
 from .client import SalesforceCliExecutor
 from .constants import (
-    ERROR_RESULT_TOO_LARGE,
-    INLINE_BYTE_CAP,
-    SOQL_DEFAULT_MAX_RECORDS,
+    DEFAULT_ROW_LIMIT,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
     SOQL_EXPORT_ROW_CAP,
     SOQL_MAX_RECORDS_CAP,
 )
@@ -45,14 +54,6 @@ from .constants import (
 # ExportPathRefusedError. Injected by the plugin, which binds the operator's
 # export_allowed_roots config (export_containment.assert_export_path_allowed).
 PathGate = Callable[[str], str]
-
-
-class ResultTooLargeError(RuntimeError):
-    """An interactive read overflowed the inline caps (A4: fail loud, no spill)."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.code = ERROR_RESULT_TOO_LARGE
 
 
 def fetch_org_id(executor: SalesforceCliExecutor) -> str:
@@ -69,29 +70,88 @@ def fetch_org_id(executor: SalesforceCliExecutor) -> str:
     return ""
 
 
-def soql_query(executor: SalesforceCliExecutor, params: dict[str, Any]) -> dict[str, Any]:
-    """Run a SOQL query, capped at max_records (server-side env cap + client-side slice)."""
+def soql_query(
+    executor: SalesforceCliExecutor, params: dict[str, Any], path_gate: PathGate,
+) -> dict[str, Any]:
+    """Run a SOQL query; write the result to output_tsv_path, return a handle.
+
+    Defaults to DEFAULT_ROW_LIMIT records; an acknowledged override may
+    request up to SOQL_MAX_RECORDS_CAP. For pulls beyond that ceiling, use
+    export_soql (up to SOQL_EXPORT_ROW_CAP with the same override).
+    """
+    effective_limit = _resolve_effective_limit(
+        params, default=DEFAULT_ROW_LIMIT, hard_cap=SOQL_MAX_RECORDS_CAP, verb="soql_query",
+    )
     query = _require_str(params, "query")
-    max_records = _clamp(params.get("max_records"), SOQL_DEFAULT_MAX_RECORDS, SOQL_MAX_RECORDS_CAP)
-    result = _run_soql(executor, query, max_records)
-    records = _strip_attributes(result.get("records") or [] if isinstance(result, dict) else [])
-    total_size = _as_int(result.get("totalSize") if isinstance(result, dict) else None, default=len(records))
-    records = records[:max_records]
-    return _query_envelope(records, total_size)
+    output_tsv_path = _require_str(params, "output_tsv_path")
+    return _run_and_write_tsv(executor, query, effective_limit, path_gate, output_tsv_path)
 
 
 def export_soql(
     executor: SalesforceCliExecutor, params: dict[str, Any], path_gate: PathGate
 ) -> dict[str, Any]:
-    """Export a SOQL query's full result (up to SOQL_EXPORT_ROW_CAP) as a workspace TSV.
+    """Export a SOQL query's result as a workspace TSV — the N>>500 route.
 
-    Mirrors the A2 contract on external_postgres/snowflake: the full result
-    set lands as ONE tab-separated file at the caller's absolute
-    ``output_tsv_path`` — admitted by the injected containment gate, never
-    platform blob storage. The gate runs BEFORE the query is sent.
+    Same caller-supplied-path destination and override mechanism as
+    soql_query; only the override's hard cap differs (SOQL_EXPORT_ROW_CAP,
+    not SOQL_MAX_RECORDS_CAP). Absent the override this also defaults to
+    DEFAULT_ROW_LIMIT — for the common small/default case, soql_query has an
+    identical interface with a lower ceiling. The gate runs BEFORE the query
+    is sent.
     """
+    effective_limit = _resolve_effective_limit(
+        params, default=DEFAULT_ROW_LIMIT, hard_cap=SOQL_EXPORT_ROW_CAP, verb="export_soql",
+    )
     query = _require_str(params, "query")
     output_tsv_path = _require_str(params, "output_tsv_path")
+    return _run_and_write_tsv(executor, query, effective_limit, path_gate, output_tsv_path)
+
+
+def _resolve_effective_limit(
+    params: dict[str, Any], *, default: int, hard_cap: int, verb: str,
+) -> int:
+    """Resolve the effective fetch ceiling from the §5 override pair.
+
+    Absent (or ``acknowledge_default_limit_override`` not exactly ``True``)
+    with no ``row_limit``: returns ``default``. Both must be given together —
+    the override flag alone, or ``row_limit`` alone, fails loud rather than
+    silently honoring half. A ``row_limit`` above ``hard_cap`` is refused,
+    never silently clamped back down.
+    """
+    override = params.get(PARAM_ACKNOWLEDGE_OVERRIDE)
+    row_limit = params.get(PARAM_ROW_LIMIT)
+    override_present = override is True
+    row_limit_present = row_limit is not None
+    if override_present != row_limit_present:
+        raise ValueError(
+            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
+            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
+            f"{PARAM_ROW_LIMIT}={row_limit!r}"
+        )
+    if not override_present:
+        return default
+    if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
+    if row_limit > hard_cap:
+        raise ValueError(
+            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
+            f"{hard_cap}; refusing rather than silently clamping"
+        )
+    return row_limit
+
+
+def _run_and_write_tsv(
+    executor: SalesforceCliExecutor,
+    query: str,
+    cap: int,
+    path_gate: PathGate,
+    output_tsv_path: str,
+) -> dict[str, Any]:
+    """Admit the path, run the SOQL query up to ``cap`` records, write a TSV, return a handle.
+
+    The containment gate runs BEFORE the query is sent, so a refused path
+    never sends it.
+    """
     resolved_path = path_gate(output_tsv_path)
     parent_dir = os.path.dirname(resolved_path)
     if not os.path.isdir(parent_dir):
@@ -99,13 +159,14 @@ def export_soql(
             f"the parent directory of output_tsv_path does not exist ({parent_dir}); "
             "create it first — this verb writes one file, it does not create directories"
         )
-    result = _run_soql(executor, query, SOQL_EXPORT_ROW_CAP)
+    result = _run_soql(executor, query, cap)
     records = _strip_attributes(result.get("records") or [] if isinstance(result, dict) else [])
     total_size = _as_int(result.get("totalSize") if isinstance(result, dict) else None, default=len(records))
     # Salesforce's own incompleteness signal: done=false means more data
     # remains server-side even when totalSize equals the fetched count
-    # (Codex Wave-3 review, A3-1) — never report such an export as complete.
+    # (Codex Wave-3 review, A3-1) — never report such a fetch as complete.
     done_false = isinstance(result, dict) and result.get("done") is False
+    records = records[:cap]
     columns = _ordered_columns(records)
     row_lists = [[_cell_value(record.get(column)) for column in columns] for record in records]
     with open(resolved_path, "wb") as handle:
@@ -117,7 +178,7 @@ def export_soql(
         "total_size": total_size,
         "truncated": (
             done_false
-            or len(row_lists) >= SOQL_EXPORT_ROW_CAP
+            or len(row_lists) >= cap
             or total_size > len(row_lists)
         ),
     }
@@ -134,23 +195,6 @@ def _run_soql(executor: SalesforceCliExecutor, query: str, max_records: int) -> 
         )
     finally:
         os.unlink(path)
-
-
-def _query_envelope(
-    records: list[dict[str, Any]],
-    total_size: int,
-) -> dict[str, Any]:
-    """Return records inline; FAIL LOUD over the byte cap (A4 — no blob spill)."""
-    payload = json.dumps(records, default=str).encode("utf-8")
-    if len(payload) > INLINE_BYTE_CAP:
-        raise ResultTooLargeError(
-            f"the result is too large to return inline ({len(payload)} bytes > "
-            f"{INLINE_BYTE_CAP}-byte cap across {len(records)} records); narrow the "
-            "query (add a WHERE/LIMIT or lower max_records) for an interactive "
-            "answer, or use export_soql with an absolute output_tsv_path to land "
-            "the full result set as a workspace TSV file"
-        )
-    return {"records": records, "total_size": total_size, "row_count": len(records), "spilled": False}
 
 
 def _ordered_columns(records: list[dict[str, Any]]) -> list[str]:
@@ -205,7 +249,3 @@ def _require_str(params: dict[str, Any], key: str) -> str:
     return value
 
 
-def _clamp(value: Any, default: int, cap: int) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        return default
-    return max(1, min(cap, value))

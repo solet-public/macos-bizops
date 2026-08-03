@@ -34,7 +34,7 @@ from typing import Any
 from ..coverage import CoverageRecord, ScannerResult
 from ..models import ContextProfile, Dimension, Finding, Layer, Provenance, Severity
 from ..targets import TargetTree
-from ..toolrun import run, tool_available
+from ..toolrun import ToolOutcome, run, tool_available
 
 _SCANNER = "python_type_check"
 _PYRIGHT = "pyright"
@@ -72,6 +72,7 @@ class _CheckerRun:
 
     findings: list[Finding]
     disclosure: str
+    completed: bool
 
 
 def _relativize(root: Path, path_field: str) -> str:
@@ -132,10 +133,37 @@ def _resolve_binary(tree: TargetTree, venv_name: str, checker: str) -> str | Non
     return checker if tool_available(checker) else None
 
 
-def _binary_version(binary: str) -> str | None:
-    outcome = run([binary, "--version"], timeout_s=30, raise_on_timeout=False)
+def _outcome_detail(outcome: ToolOutcome) -> str:
+    """One bounded line suitable for a coverage disclosure, never a fake version."""
+    text = outcome.stderr.strip() or outcome.stdout.strip()
+    if not text:
+        return "no output"
+    return " ".join(text.splitlines()[0].split())[:240]
+
+
+def _binary_version(binary: str, root: Path) -> tuple[str | None, str | None]:
+    """Return ``(version, failure)`` from the SAME cwd the checker will use.
+
+    Pyenv shims resolve by directory.  A PATH hit is therefore only a candidate;
+    a successful version probe in the target cwd is the executable proof.
+    """
+    try:
+        outcome = run(
+            [binary, "--version"],
+            cwd=str(root),
+            timeout_s=30,
+            raise_on_timeout=False,
+        )
+    except RuntimeError as exc:
+        return None, str(exc)
+    if outcome.timed_out:
+        return None, "version probe timed out"
+    if outcome.returncode != 0:
+        return None, f"version probe exited {outcome.returncode}: {_outcome_detail(outcome)}"
     text = outcome.stdout.strip() or outcome.stderr.strip()
-    return text.splitlines()[0] if text else None
+    if not text:
+        return None, "version probe returned no version text"
+    return text.splitlines()[0], None
 
 
 # RIDER-2 (ruled): mypy resolves its check SCOPE from a files/packages/modules config key; a config
@@ -175,9 +203,11 @@ def _as_str(value: Any) -> str:  # noqa: ANN401 — narrows untyped tool JSON
 def _pyright_findings(stdout: str, root: Path, venv_name: str, run_id: str, version: str | None) -> tuple[list[Finding], int]:
     """Parse ``pyright --outputjson`` diagnostics (0-indexed lines) into TYPE_COVERAGE findings."""
     parsed: Any = json.loads(stdout or "{}")
-    diagnostics = parsed.get("generalDiagnostics") if isinstance(parsed, dict) else None
+    if not isinstance(parsed, dict):
+        raise ValueError("pyright output was not a JSON object")
+    diagnostics = parsed.get("generalDiagnostics")
     if not isinstance(diagnostics, list):
-        return [], 0
+        raise ValueError("pyright output omitted generalDiagnostics")
     findings: list[Finding] = []
     dropped = 0
     for diag in diagnostics:
@@ -240,29 +270,104 @@ _CHECKER_ARGV: dict[str, list[str]] = {
 _CHECKER_PARSE = {_PYRIGHT: _pyright_findings, _MYPY: _mypy_findings}
 
 
+def _execute_checker(
+    argv: list[str],
+    root: Path,
+) -> tuple[ToolOutcome | None, str | None]:
+    """Run a checker and turn every non-diagnostic execution state into a gap."""
+    try:
+        outcome = run(argv, cwd=str(root), timeout_s=_TOOL_TIMEOUT_S, raise_on_timeout=False)
+    except RuntimeError as exc:
+        return None, f"checker could not start ({exc})"
+    if outcome.timed_out:
+        return None, "timed out"
+    if outcome.returncode not in {0, 1}:
+        return None, f"checker exited {outcome.returncode}: {_outcome_detail(outcome)}"
+    return outcome, None
+
+
+def _parse_checker_outcome(
+    checker: str,
+    outcome: ToolOutcome,
+    tree: TargetTree,
+    venv_name: str,
+    run_id: str,
+    version: str | None,
+) -> tuple[list[Finding] | None, int, str | None]:
+    """Parse a completed checker run, distinguishing diagnostics from malformed output."""
+    try:
+        findings, dropped = _CHECKER_PARSE[checker](
+            outcome.stdout,
+            tree.root,
+            venv_name,
+            run_id,
+            version,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        return None, 0, f"checker output could not be parsed ({exc})"
+    if outcome.returncode == 1 and not findings and dropped == 0:
+        return (
+            None,
+            0,
+            f"checker exited 1 without parseable diagnostics: {_outcome_detail(outcome)}",
+        )
+    return findings, dropped, None
+
+
 def _run_checker(tree: TargetTree, venv_name: str, checker: str, run_id: str) -> _CheckerRun:
     """Resolve + run one configured checker over the target's own config; parse → findings."""
     binary = _resolve_binary(tree, venv_name, checker)
     if binary is None:
-        return _CheckerRun(findings=[], disclosure=f"{checker}: not available (target env + scan host)")
-    version = _binary_version(binary)
+        return _CheckerRun(
+            findings=[],
+            disclosure=f"{checker}: not available (target env + scan host)",
+            completed=False,
+        )
+    version, version_failure = _binary_version(binary, tree.root)
+    if version_failure is not None:
+        return _CheckerRun(
+            findings=[],
+            disclosure=f"{checker}: not runnable ({version_failure})",
+            completed=False,
+        )
     argv = [binary, *_CHECKER_ARGV[checker]]
     scope_parts: list[str] = []
     if checker == _MYPY:  # RIDER-2: provide the enumerated scope only when the config declares none
         scope_args, scope_note = _mypy_scope_args(tree)
         argv.extend(scope_args)
         scope_parts.append(scope_note)
-    outcome = run(argv, cwd=str(tree.root), timeout_s=_TOOL_TIMEOUT_S, raise_on_timeout=False)
-    if outcome.timed_out:
-        return _CheckerRun(findings=[], disclosure=f"{checker}: timed out")
-    findings, dropped = _CHECKER_PARSE[checker](outcome.stdout, tree.root, venv_name, run_id, version)
+    outcome, execution_failure = _execute_checker(argv, tree.root)
+    if outcome is None:
+        return _CheckerRun(
+            findings=[],
+            disclosure=f"{checker}: {execution_failure}",
+            completed=False,
+        )
+    findings, dropped, parse_failure = _parse_checker_outcome(
+        checker,
+        outcome,
+        tree,
+        venv_name,
+        run_id,
+        version,
+    )
+    if findings is None:
+        return _CheckerRun(
+            findings=[],
+            disclosure=f"{checker}: {parse_failure}",
+            completed=False,
+        )
     total = len(findings)
     parts = [f"{checker} v{version or '?'}: {total} diagnostic(s)", *scope_parts]
     if total > _MAX_TOOL_FINDINGS:
         parts.append(f"first {_MAX_TOOL_FINDINGS} kept")
     if dropped:
         parts.append(f"{dropped} env-anchored dropped")
-    return _CheckerRun(findings=findings[:_MAX_TOOL_FINDINGS], disclosure="; ".join(parts))
+    return _CheckerRun(
+        findings=findings[:_MAX_TOOL_FINDINGS],
+        disclosure="; ".join(parts),
+        completed=True,
+    )
 
 
 def scan(tree: TargetTree, run_id: str, *, execute_target_toolchain: bool = False) -> ScannerResult:
@@ -283,12 +388,21 @@ def scan(tree: TargetTree, run_id: str, *, execute_target_toolchain: bool = Fals
         return _gap(_MATERIALIZATION_GAP)
     findings: list[Finding] = []
     disclosures = [f"env={venv_name}"]
+    checker_runs: list[_CheckerRun] = []
     for checker in checkers:
         checker_run = _run_checker(tree, venv_name, checker, run_id)
+        checker_runs.append(checker_run)
         findings.extend(checker_run.findings)
         disclosures.append(checker_run.disclosure)
     emitted = findings if tree.foreign else []  # self-suppress: the --strict gate owns the self surface (R8 §C)
+    completed = all(checker_run.completed for checker_run in checker_runs)
+    examined = len(tree.python_files()) if any(checker_run.completed for checker_run in checker_runs) else 0
     return ScannerResult(
         findings=emitted,
-        coverage=CoverageRecord(scanner=_SCANNER, ran=True, files_examined=len(tree.python_files()), gap_reason="; ".join(disclosures)),
+        coverage=CoverageRecord(
+            scanner=_SCANNER,
+            ran=completed,
+            files_examined=examined,
+            gap_reason="; ".join(disclosures),
+        ),
     )

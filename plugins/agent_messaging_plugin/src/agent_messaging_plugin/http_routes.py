@@ -66,12 +66,23 @@ from .peer_dispatch import (
     EVENT_POST_MESSAGE,
     IMPORTANT_MARKER_RE,
     NativeWakeError,
+    binding_is_live,
     dispatch_peer_send,
     dispatch_role_send,
+)
+from .peer_inbox_view import (
+    serialize_message as _serialize_message,
+)
+from .peer_inbox_view import (
+    serialize_peer_inbox_page,
+)
+from .peer_list_view import (
+    serialize_peer_list,
 )
 from .peer_registry import (
     PeerAmbiguousError,
     PeerRegistry,
+    PeerSessionAmbiguousError,
     PeerUnreachableError,
 )
 from .platform_surface import BridgeError, PlatformSurface
@@ -83,6 +94,7 @@ from .role_binding_store import (
     list_roles_for_agent_instance,
     refresh_role_binding_cas,
     resolve_role_binding,
+    sole_role_for_reply_address,
 )
 from .role_claim import (
     RoleClaimFailure,
@@ -134,9 +146,15 @@ _BRIDGE_ERROR_STATUS: Final[dict[str, int]] = {
 
 
 class OpenBridgeBody(BaseModel):
-    """Optional parent_pid for sibling-bridge pairing inside one OS tree."""
+    """Optional parent_pid for sibling-bridge pairing inside one OS tree.
+
+    ``caller_agent_session_id`` (§34.6) is the launcher-exported ``ases-...``
+    key an UNREGISTERED caller supplies so its sends can be attributed. It is
+    a lookup key, not an identity claim, and never reaches the registry.
+    """
 
     parent_pid: int | None = None
+    caller_agent_session_id: str = ""
 
 
 class ProcessSearchBody(BaseModel):
@@ -191,6 +209,10 @@ class PeerSendBody(BaseModel):
     # the service-call boundary inside _peer_send_impl.
     peer_id: str
     peer_agent_instance_id: str | None = None
+    # A2: stable logical-session fallback carried beside (never instead of) the
+    # instance id in reply hints. Dispatch consults it only after the exact
+    # instance is unreachable; a live instance always wins.
+    peer_agent_session_id: str | None = None
     content: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -204,6 +226,14 @@ class PeerClaimRoleBody(BaseModel):
     # caller-supplied identity — the ``/rename`` skill threads values it read
     # from its own ``peer_register`` response.
     name: str
+    # Explicit escape hatch for a LIVE holder (§4.3.3a). Typed bool, so the
+    # transport rejects a string rather than this route having to guess what
+    # "false" meant. ONE-SHOT BY CONSTRUCTION: it authorizes the claim carried
+    # in THIS request body and is stored nowhere, so the watcher's reconnect and
+    # heartbeat re-claims — which post their own bodies without it — cannot
+    # replay a takeover. That is the whole reason it lives in the body and not
+    # in the bridge's registered binding.
+    takeover: bool = False
 
 
 class PeerSendByNameBody(BaseModel):
@@ -361,6 +391,12 @@ def _register_bridge_lifecycle_routes(
         bridge = bridge_manager.open(
             homunculus_name="", parent_pid=body.parent_pid,
         )
+        # §34.6 sender attribution: park the caller's opaque session key on the
+        # in-memory bridge state ONLY. No registry write, no agent_instance_id,
+        # no delivery route — an unregistered caller stays unregistered. The
+        # identity is derived server-side from the REGISTERED binding this key
+        # resolves to, at trigger-data-build time.
+        bridge.caller_agent_session_id = body.caller_agent_session_id.strip()
         return JSONResponse(
             content={
                 "bridge_id": bridge.bridge_id,
@@ -693,6 +729,55 @@ def _direct_wake_self_refresh(
     return "no_owed"
 
 
+def _role_wake_self_refresh(
+    agent_messaging_service: Any | None,
+    *,
+    agent_session_id: str,
+    new_agent_instance_id: str,
+) -> str:
+    """Reconnect self-refresh for owed ROLE rows (H1-role).
+
+    The role sibling of :func:`_direct_wake_self_refresh`. ``_state_table_self_refresh``
+    above re-points the role BINDING on reconnect, but the owed ROLE ROWS kept the
+    dead ``emitted_to_agent_instance_id``, so the consumption reconcile joined a
+    corpse while the live session acted under its successor — measured as an
+    emission burned per drain until the cap escalated. Keyed on the stable
+    ``agent_session_id`` stamped at emission.
+
+    Same loud-but-non-fatal posture as its siblings: a fault brings the bridge up
+    200 with rows NOT re-homed (they strand until the next reconnect); no retry
+    queue.
+
+    Tokens: ``rehomed:<n>`` / ``no_owed`` / ``no_session_key`` / ``no_service`` /
+    ``error``.
+    """
+    if not agent_session_id or agent_session_id == UNCLAIMED_SESSION_ID:
+        return "no_session_key"
+    if agent_messaging_service is None:
+        return "no_service"
+    try:
+        rehomed = agent_messaging_service.rehome_owed_role_wakes(
+            agent_session_id=agent_session_id,
+            new_agent_instance_id=new_agent_instance_id,
+        )
+    except Exception:  # noqa: BLE001 — loud-but-non-fatal; the bridge MUST still register
+        logger.exception(
+            "peer/register: role-wake re-home FAULTED (session %r, new agi=%s); "
+            "registration kept 200 but owed role rows were NOT re-homed and will "
+            "strand until the next reconnect",
+            agent_session_id, new_agent_instance_id,
+        )
+        return "error"
+    if rehomed >= 1:
+        logger.info(
+            "peer/register: re-homed %d owed role-wake row(s) to "
+            "agent_instance_id=%s on reconnect (session %r)",
+            rehomed, new_agent_instance_id, agent_session_id,
+        )
+        return f"rehomed:{rehomed}"
+    return "no_owed"
+
+
 def _effective_registration_agent_session_id(
     peer_registry: PeerRegistry,
     *,
@@ -752,6 +837,20 @@ def _register_peer_routes(
             agent_instance_id=agent_instance_id,
             incoming_agent_session_id=body.agent_session_id,
         )
+        # WS-2e §4.3.3a — refuse to bind under a session id a DIFFERENT LIVE
+        # session already holds. Registering here would not merely add a row:
+        # the S2 self-refresh below re-points EVERY role that session holds at
+        # the newcomer's instance, silently, which is how a watcher armed from
+        # another session's shell inherits its AGENT_SESSION_ID and takes its
+        # routes. Refused BEFORE register so nothing is mutated on the way out.
+        refusal = _session_id_conflict(
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
+            agent_session_id=effective_agent_session_id,
+            agent_instance_id=agent_instance_id,
+        )
+        if refusal is not None:
+            return refusal
         # Import here to avoid a circular import at module load time;
         # models is pulled in via TYPE_CHECKING for the type hints.
         from .models import BridgeBinding  # noqa: PLC0415
@@ -769,7 +868,18 @@ def _register_peer_routes(
         # response + the bridge.session_label cache MUST reflect that
         # restored value, otherwise the peer-side reconnect announcement
         # interpolates the wrong (empty) label.
-        effective_label = peer_registry.register(binding)
+        # §4.3.2: the label sweep now spares a LIVE different-session row.
+        # The predicate is supplied here because the registry is a store
+        # wrapper with no bridge manager; passing it explicitly is what makes
+        # the knob real rather than a default nobody reaches.
+        effective_label = peer_registry.register(
+            binding,
+            is_live=lambda existing: binding_is_live(
+                bridge_manager=bridge_manager,
+                binding=existing,
+                window_seconds=bridge_manager.binding_liveness_window_s,
+            ),
+        )
         bridge.session_label = effective_label
         # D-IF7 sidecar populate (v4 §4) — bind the per-bridge inference
         # vertex AFTER peer_registry.register succeeds so the wrapper can
@@ -815,6 +925,15 @@ def _register_peer_routes(
             agent_session_id=effective_agent_session_id,
             new_agent_instance_id=agent_instance_id,
         )
+        # H1-role: the same move for owed ROLE rows. The role BINDING was
+        # re-pointed by the state-table self-refresh above, but the owed rows'
+        # emitted_to join key was not — so the consumption reconcile joined a
+        # dead instance while the live session acted under its successor.
+        role_rehome_action = _role_wake_self_refresh(
+            agent_messaging_service,
+            agent_session_id=effective_agent_session_id,
+            new_agent_instance_id=agent_instance_id,
+        )
         # INF-01 Trigger-1 (§D.9): fill a vacant / dead-holder sys:autonomic
         # slot with the just-registered session. Runs AFTER the sidecar
         # populate (a provider must exist for the claim to serve) and AFTER
@@ -849,6 +968,7 @@ def _register_peer_routes(
                 "status": "registered",
                 "self_refresh": self_refresh_action,
                 "direct_rehome": direct_rehome_action,
+                "role_rehome": role_rehome_action,
                 "autonomic": autonomic_action,
                 "session_role_held": session_role_held,
             },
@@ -859,31 +979,7 @@ def _register_peer_routes(
     async def peer_list_route(bridge_id: str) -> JSONResponse:
         _ = bridge_id
         snapshot = peer_registry.list_agent_ids()
-        instances: dict[str, list[dict[str, object]]] = {
-            agent_id: [
-                {
-                    "agent_instance_id": b.agent_instance_id,
-                    "session_label": b.session_label,
-                    "parent_pid": b.parent_pid,
-                    # ``registered_at`` is a deprecated alias for
-                    # ``created_at`` — kept for one release so older
-                    # MCP clients keep working.  New consumers should
-                    # read ``created_at`` + ``updated_at``.
-                    "registered_at": b.created_at,
-                    "created_at": b.created_at,
-                    "updated_at": b.updated_at,
-                }
-                for b in bindings
-            ]
-            for agent_id, bindings in snapshot.items()
-        }
-        return JSONResponse(
-            content={
-                "agent_ids": sorted(snapshot.keys()),
-                "instances": instances,
-            },
-            status_code=200,
-        )
+        return JSONResponse(content=serialize_peer_list(snapshot), status_code=200)
 
     @app.get(f"{API_PREFIX}/{{bridge_id}}/current_identity")
     async def current_identity_route(bridge_id: str) -> JSONResponse:
@@ -930,6 +1026,7 @@ def _register_peer_routes(
             bridge_manager=bridge_manager,
             peer_registry=peer_registry,
             agent_messaging_service=agent_messaging_service,
+            state_service=state_service,
         )
 
     @app.post(f"{API_PREFIX}/{{bridge_id}}/peer/claim_role")
@@ -1039,23 +1136,22 @@ def _register_peer_routes(
         agent_instance_id = sender_binding.agent_instance_id
         limit = max(1, min(body.limit, 100))
         activity_at = _parse_iso_after(bridge.last_model_activity_at or None)
-        # QUIET-GAP: the reconcilers also need the stamp PRECEDING this one, so
-        # they can require the emission to have landed in a turn-boundary quiet
-        # gap. Without it, a session already mid-turn consumes every arriving
-        # wake on its first emit (its next call satisfies "activity after the
-        # emission") and the row leaves the owed set unseen.
-        prev_activity_at = _parse_iso_after(bridge.prev_model_activity_at or None)
+        # QUIET-GAP: the reconcilers need the emission's own quiet-gap datum too,
+        # but they read it FROM THE ROW (``activity_at_emission``, captured at
+        # emission time) rather than from this bridge's live stamp pair. The live
+        # ``prev_model_activity_at`` slides forward on every model call, so an
+        # emission was consumable only in the one drain window between the first
+        # and second post-emission call — miss it and a recipient who provably
+        # acted was recorded deaf. Only the LIVE stamp is needed here (guard 1).
         try:
             if activity_at is not None:
                 agent_messaging_service.reconcile_role_consumption(
                     agent_instance_id=agent_instance_id,
                     activity_at=activity_at,
-                    prev_activity_at=prev_activity_at,
                 )
                 agent_messaging_service.reconcile_direct_consumption(
                     agent_instance_id=agent_instance_id,
                     activity_at=activity_at,
-                    prev_activity_at=prev_activity_at,
                 )
             rows = agent_messaging_service.list_undelivered_for_instance(
                 agent_instance_id=agent_instance_id,
@@ -1109,6 +1205,15 @@ def _register_peer_routes(
                 external_id=body.external_id,
                 recipient_key=body.recipient_key,
                 agent_instance_id=sender_binding.agent_instance_id,
+                # H1-role: stamp the STABLE session key beside the instance id so
+                # a restart's re-home can find this row (the instance id rotates,
+                # this does not).
+                agent_session_id=sender_binding.agent_session_id,
+                # QUIET-GAP capture: this bridge IS the recipient confirming its
+                # own emission, so its CURRENT last_model_activity_at is exactly
+                # "the recipient's activity state as of this emission". Frozen on
+                # the row so guard 2 cannot drift afterwards.
+                activity_at_emission=bridge.last_model_activity_at or None,
             )
         except AgentMessagingError as exc:
             return _agent_messaging_error_response(exc)
@@ -1135,6 +1240,8 @@ def _register_peer_routes(
             flagged = agent_messaging_service.mark_direct_emitted_for_instance(
                 message_id=body.message_id,
                 agent_instance_id=sender_binding.agent_instance_id,
+                # QUIET-GAP capture — the direct sibling; see the role confirm.
+                activity_at_emission=bridge.last_model_activity_at or None,
             )
         except AgentMessagingError as exc:
             return _agent_messaging_error_response(exc)
@@ -1293,6 +1400,7 @@ def _peer_send_impl(
     bridge_manager: BridgeSessionManager,
     peer_registry: PeerRegistry,
     agent_messaging_service: Any,
+    state_service: Any | None = None,
 ) -> JSONResponse:
     """Thin route adapter — validate inputs, delegate to :mod:`peer_dispatch`.
 
@@ -1330,6 +1438,14 @@ def _peer_send_impl(
             peer_id=body.peer_id,
             peer_agent_instance_id=body.peer_agent_instance_id,
             content=content,
+            peer_agent_session_id=body.peer_agent_session_id,
+            # WS-2c V4, direct-send half: the sender's own role (when it holds
+            # exactly one) so the reply address survives the SENDER's next
+            # reconnect. Previously omitted entirely, so every direct send handed
+            # out an instance id that a restart wave invalidates.
+            reply_to_role=sole_role_for_reply_address(
+                state_service, sender_binding.agent_instance_id,
+            ),
         )
     except PeerAmbiguousError as exc:
         return JSONResponse(
@@ -1344,7 +1460,11 @@ def _peer_send_impl(
         )
     except PeerUnreachableError as exc:
         return JSONResponse(
-            content={"code": "peer_unreachable", "message": str(exc)},
+            content={
+                "code": "peer_unreachable",
+                "message": str(exc),
+                **exc.response_data(),
+            },
             status_code=404,
         )
     except BridgeNotFoundError as exc:
@@ -1445,6 +1565,12 @@ _CLAIM_ROLE_ERROR_STATUS: Final[dict[str, int]] = {
     "missing_argument": 400,
     "missing_session_id": 400,
     "system_slot_claim_denied": 403,
+    # A LIVE holder refused displacement (§4.3.2). 409 rather than 403: this is
+    # a conflict with current state, not a permissions decision, and the state
+    # can change. MUST be listed — the lookup below defaults an unmapped code
+    # to 400, so an omission here would not fail loudly, it would just make the
+    # wire status quietly wrong while the code stayed correct.
+    "role_held_live": 409,
     "state_service_unavailable": 503,
 }
 
@@ -1502,6 +1628,7 @@ def _peer_claim_role_impl(
         peer_registry=peer_registry,
         agent_messaging_service=agent_messaging_service,
         call_context=None,
+        takeover=body.takeover,
     )
     if isinstance(result, RoleClaimFailure):
         return JSONResponse(
@@ -1548,7 +1675,15 @@ def _peer_send_by_name_impl(
             sender_parent_pid=sender.parent_pid,
             content=[TextPart(type="text", text=body.content)],
             message_id=f"arm-{secrets.token_hex(16)}",
-            reply_to_role="",
+            # WS-2c V4 (MEASURED): this was hardcoded ``""`` since the route
+            # landed, so EVERY role-addressed send originated by an MCP session
+            # handed the recipient an INSTANCE reply-to — on a healthy fleet, not
+            # only after churn. The platform verb resolved it correctly all along
+            # (``plugin.py::peer_send_by_name``); only this transport caller froze
+            # the default.
+            reply_to_role=sole_role_for_reply_address(
+                state_service, sender.agent_instance_id,
+            ),
         )
     except AgentMessagingError as exc:
         return _agent_messaging_error_response(exc)
@@ -1643,24 +1778,6 @@ def _serialize_messages_page(page: Any) -> dict[str, Any]:
     }
 
 
-def _serialize_message(message: Any) -> dict[str, Any]:
-    return {
-        "id": message.id,
-        "cursor": message.cursor,
-        "role": message.role.value,
-        "kind": message.kind.value,
-        "content": [
-            {"type": p.type, "text": p.text} for p in message.content
-        ],
-        "action_id": message.action_id,
-        "backend_session_id": message.backend_session_id,
-        "error": message.error,
-        "artifacts": [dataclasses.asdict(a) for a in message.artifacts],
-        "metadata": message.metadata,
-        "created_at": message.created_at.isoformat(),
-    }
-
-
 def _serialize_thread_status(status: Any) -> dict[str, Any]:
     return {
         "thread_id": status.thread_id,
@@ -1674,37 +1791,8 @@ def _serialize_thread_status(status: Any) -> dict[str, Any]:
     }
 
 
-def _serialize_peer_inbox_entry(entry: Any) -> dict[str, Any]:
-    return {
-        "thread_id": entry.thread_id,
-        "sender_agent_id": entry.sender_agent_id,
-        "sender_agent_instance_id": entry.sender_agent_instance_id,
-        "sender_session_label": entry.sender_session_label,
-        "message": _serialize_message(entry.message),
-    }
-
-
 def _serialize_peer_inbox(page: Any, sender_binding: BridgeBinding) -> dict[str, Any]:
-    # The role section (role_entries + next_role_cursor) is emitted ADDITIVELY;
-    # the instance section keys are byte-for-byte unchanged. role_section_status
-    # / role_section_error carry the v10 Q1 fault-domain outcome so a caller can
-    # tell an empty role section (no role messages) from a failed one.
-    return {
-        "recipient_agent_id": page.recipient_agent_id,
-        "recipient_agent_instance_id": sender_binding.agent_instance_id,
-        "entries": [_serialize_peer_inbox_entry(entry) for entry in page.entries],
-        "next_after_created_at": (
-            page.next_after_created_at.isoformat()
-            if page.next_after_created_at is not None
-            else None
-        ),
-        "role_entries": [
-            _serialize_peer_inbox_entry(entry) for entry in page.role_entries
-        ],
-        "next_role_cursor": page.next_role_cursor,
-        "role_section_status": page.role_section_status.value,
-        "role_section_error": page.role_section_error,
-    }
+    return serialize_peer_inbox_page(page, sender_binding.agent_instance_id)
 
 
 def _role_drain_prose(content_raw: object) -> str:
@@ -1818,6 +1906,75 @@ def _validation_error(code: str, message: str) -> JSONResponse:
     return JSONResponse(
         content={"code": code, "message": message},
         status_code=400,
+    )
+
+
+# WS-2e §4.3.3a. 409 rather than 400 or 403: this is a conflict with current
+# state, not a malformed request or a permissions decision, and the state can
+# change (the incumbent may exit). Same reasoning as `role_held_live`.
+SESSION_ID_BOUND_TO_LIVE_SESSION: Final[str] = "session_id_bound_to_live_session"
+
+
+def _session_id_conflict(
+    *,
+    peer_registry: PeerRegistry,
+    bridge_manager: BridgeSessionManager,
+    agent_session_id: str,
+    agent_instance_id: str,
+) -> JSONResponse | None:
+    """Refuse a register that would steal a LIVE session's routes (§4.3.3a).
+
+    Returns a 409 refusal, or ``None`` to allow. Three cases pass deliberately:
+
+    * no session id — nothing to conflict with (streamable / older clients);
+    * SAME instance id — that is a re-arm or reconnect, which must keep its
+      existing replace semantics;
+    * a DEAD incumbent — subprocess succession, which must stay cheap. This is
+      why the gate is liveness-gated rather than existence-gated: an existence
+      gate would refuse every legitimate restart, since a restart always brings
+      a new instance id under the same session id.
+
+    Ambiguity counts as LIVE and refuses: >1 binding for one session id is
+    precisely the confusion this exists to stop, so it must never wave through.
+    """
+    if not agent_session_id:
+        return None
+    try:
+        incumbent = peer_registry.resolve_by_agent_session_id(agent_session_id)
+    except PeerSessionAmbiguousError as exc:
+        return JSONResponse(
+            content={
+                "code": SESSION_ID_BOUND_TO_LIVE_SESSION,
+                "message": (
+                    f"agent_session_id {agent_session_id!r} already resolves to "
+                    f"more than one binding ({exc}); refusing to add another."
+                ),
+            },
+            status_code=409,
+        )
+    if incumbent is None or incumbent.agent_instance_id == agent_instance_id:
+        return None
+    if not binding_is_live(
+        bridge_manager=bridge_manager,
+        binding=incumbent,
+        window_seconds=bridge_manager.binding_liveness_window_s,
+    ):
+        return None
+    bridge = bridge_manager.get(incumbent.bridge_id)
+    last_seen = bridge.last_seen_at if bridge is not None else "unknown"
+    return JSONResponse(
+        content={
+            "code": SESSION_ID_BOUND_TO_LIVE_SESSION,
+            "message": (
+                f"agent_session_id {agent_session_id!r} is already held by a LIVE "
+                f"session: label {incumbent.session_label!r}, instance "
+                f"{incumbent.agent_instance_id}, last seen {last_seen}. "
+                f"Registering {agent_instance_id} under it would re-point every "
+                f"role that session holds. Export a distinct AGENT_SESSION_ID "
+                f"for this process, or stop the incumbent first."
+            ),
+        },
+        status_code=409,
     )
 
 

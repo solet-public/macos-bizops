@@ -74,6 +74,77 @@ def test_wake_fires_on_pending_spool_content() -> None:
     assert int(offset.read_text().strip()) == len(line) + 1
 
 
+def test_wake_commits_the_offset_only_after_the_packet_is_emitted() -> None:
+    """D5: emit-then-commit, so a crash re-wakes instead of losing silently.
+
+    The offset flip is this path's ``/peer/delivered``; REL-05 already ruled
+    emit-before-flip on the MCP half, so both delivery halves are now
+    confirm-then-commit. Pre-fix the offset was written INSIDE
+    ``_block_until_delivery``, before the packet existed, so a kill in that
+    window (crash, /clear, operator ^C, hook timeout) recorded the lines as
+    consumed while nothing had ever been shown -- at-most-once, silently.
+
+    Red mutation: move ``_write_offset`` back above the ``click.echo``.
+    """
+    spool = _tmp_spool()
+    line = json.dumps({"watch": "event", "event": {"content": "ping-D5"}})
+    spool.write_text(line + "\n", encoding="utf-8")
+    offset_file = spool_mod.spool_offset_path(spool)
+
+    # Crash exactly in the window: the packet write raises, so nothing was
+    # shown. The offset must NOT have advanced.
+    def _boom(_message: object, **_kw: object) -> None:
+        raise RuntimeError("killed mid-emit")
+
+    with patch.object(wake_mod.click, "echo", _boom):
+        crashed = _invoke_wake(spool)
+    assert crashed.exit_code != wake_mod.WAKE_EXIT_SIGNAL, crashed.output
+    assert not offset_file.exists() or int(offset_file.read_text().strip()) == 0, (
+        "the offset advanced for lines that were never emitted"
+    )
+
+    # The next wake resurfaces them -- at-least-once, and visibly.
+    recovered = _invoke_wake(spool)
+    assert recovered.exit_code == wake_mod.WAKE_EXIT_SIGNAL, recovered.output
+    assert "ping-D5" in recovered.stderr
+    assert int(offset_file.read_text().strip()) == len(line) + 1
+
+
+def test_the_post_emit_crash_window_costs_exactly_one_duplicate() -> None:
+    """The residual is BOUNDED, and the bound is the contract.
+
+    A crash AFTER the packet is written but BEFORE the offset flip re-emits the
+    same bytes once. "Duplicates are possible" is not a contract; "exactly one
+    per crash, content-recognizable" is -- so assert the count, not the
+    possibility. The singleton flock is what bounds concurrency to one waker.
+    """
+    spool = _tmp_spool()
+    line = json.dumps({"watch": "event", "event": {"content": "ping-dup"}})
+    spool.write_text(line + "\n", encoding="utf-8")
+    offset_file = spool_mod.spool_offset_path(spool)
+
+    real_write = wake_mod._write_offset
+
+    def _die_after_emit(path: Path, value: int) -> None:  # noqa: ARG001
+        raise RuntimeError("killed after emit, before commit")
+
+    with patch.object(wake_mod, "_write_offset", _die_after_emit):
+        first = _invoke_wake(spool)
+    assert "ping-dup" in first.stderr, first.stderr
+
+    assert wake_mod._write_offset is real_write
+    second = _invoke_wake(spool)
+    assert second.exit_code == wake_mod.WAKE_EXIT_SIGNAL, second.output
+    assert second.stderr.count("ping-dup") == 1, second.stderr
+
+    # ...and exactly one. The third wake is idle, so the duplicate does not
+    # repeat: the commit landed on the second run.
+    third = _invoke_wake(spool)
+    assert third.exit_code == 0, third.output
+    assert "ping-dup" not in third.stderr, third.stderr
+    assert int(offset_file.read_text().strip()) == len(line) + 1
+
+
 def test_wake_expires_idle_without_waking() -> None:
     # Fully-consumed spool + no new deliveries -> --max-wait expiry, exit 0.
     spool = _tmp_spool()

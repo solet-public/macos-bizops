@@ -47,6 +47,8 @@ from googleapiclient.errors import HttpError
 from . import docs_actions, drive_actions, gmail_actions, sheets_actions, slides_actions
 from .constants import (
     BLOB_NAMESPACE,
+    DRIVE_DEFAULT_PAGE_SIZE,
+    DRIVE_PAGE_SIZE_CAP,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
     ERROR_API_ERROR,
     ERROR_BLOB_STORAGE_NOT_AVAILABLE,
@@ -57,6 +59,10 @@ from .constants import (
     ERROR_RATE_LIMITED,
     ERROR_SERVER_START_FAILED,
     ERROR_VAULT_NOT_AVAILABLE,
+    GMAIL_DEFAULT_MAX_RESULTS,
+    GMAIL_MAX_RESULTS_CAP,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
     PLUGIN_NAME,
     RESULT_TYPE_CONNECT,
     RESULT_TYPE_DOCS_BATCH_UPDATE,
@@ -84,6 +90,8 @@ from .constants import (
     RESULT_TYPE_SLIDES_CREATE,
     RESULT_TYPE_SLIDES_EXPORT,
     RESULT_TYPE_SLIDES_GET,
+    SHEETS_DEFAULT_ROW_LIMIT,
+    SHEETS_ROW_LIMIT_CAP,
     VAULT_KEY_ACCESS_TOKEN,
     VAULT_KEY_REFRESH_TOKEN,
 )
@@ -282,7 +290,7 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
             data = produce()
         except ValueError as exc:
             return self._error(ERROR_INVALID_PARAMS, str(exc))
-        except TokenStoreError as exc:
+        except (TokenStoreError, sheets_actions.ResultTooLargeError) as exc:
             return self._error(exc.code, str(exc))
         except HttpError as exc:
             code, message = _classify_http_error(exc)
@@ -484,7 +492,11 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
             "host": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=False,
-                description="Bind host (default: 0.0.0.0 for ALB-fronted cloud deployment).",
+                description=(
+                    "Bind host (default: 127.0.0.1 for a local homunculus). "
+                    "ALB-fronted cloud deployments must pass or configure "
+                    "0.0.0.0 explicitly."
+                ),
             ),
             "port": ParameterMetadata(
                 type=ParameterType.INTEGER,
@@ -500,7 +512,7 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
     )
     def start_interface(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         config = self.config_provider or {}
-        host = str(params.get("host") or config.get("callback_host") or "0.0.0.0")
+        host = str(params.get("host") or config.get("callback_host") or "127.0.0.1")
         port_val = params.get("port") or config.get("callback_port")
         preferred_port: int | None = int(str(port_val)) if port_val is not None else None
         try:
@@ -545,8 +557,14 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         display_name="Gmail: List Messages",
         description=(
             "List Gmail message ids matching a Gmail search query (e.g. 'from:alice is:unread "
-            "newer_than:7d'). Returns message + thread ids only; use gmail_get_message for content. "
-            "Requires a connected account (run connect_account first)."
+            f"newer_than:7d'). Defaults to {GMAIL_DEFAULT_MAX_RESULTS} results, matching Gmail's "
+            f"own real single-call maximum (Google, current as of this writing) — there is no "
+            "acknowledge_default_limit_override/row_limit pair on this verb, since the default "
+            "already sits at the vendor's per-call ceiling (nothing for an override to raise to "
+            "without building pageToken pagination across multiple calls, which this verb does not "
+            "do). Returns message + thread ids only, never message content; use gmail_get_message "
+            "for one message's content once you have its id. Requires a connected account (run "
+            "connect_account first)."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -558,12 +576,16 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
             "max": ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description="Max messages to return (default 25, capped at 100).",
+                description=(
+                    f"Messages to return (default {GMAIL_DEFAULT_MAX_RESULTS}, hard-capped at "
+                    f"{GMAIL_MAX_RESULTS_CAP} — Gmail's own single-call maximum, not this "
+                    "connector's choice)."
+                ),
             ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Matching message + thread ids.",
+            description="Matching message + thread ids — never message content.",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
@@ -659,7 +681,12 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         description=(
             "List Google Drive files matching a Drive search query (for example "
             "\"name contains 'budget' and mimeType='application/pdf'\"), newest first. Returns "
-            "id/name/mime/modified/size per file. Requires a connected account."
+            f"id/name/mime/modified/size per file. Defaults to {DRIVE_DEFAULT_PAGE_SIZE} files to "
+            "avoid exhausting rate limits and pulling more than needed. To fetch more, pass "
+            f"acknowledge_default_limit_override=true together with an explicit row_limit (up to "
+            f"{DRIVE_PAGE_SIZE_CAP}, Drive's own real single-call maximum, Google, current as of "
+            "this writing) — both are required together, and a row_limit above the cap is refused "
+            "rather than silently clamped. Requires a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -671,7 +698,30 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
             "max": ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description="Max files to return (default 25, capped at 100).",
+                description=(
+                    "Request FEWER files than the current ceiling in this one call (e.g. 20) — "
+                    "never widens the ceiling; raising the ceiling itself requires "
+                    "acknowledge_default_limit_override + row_limit below."
+                ),
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Must be exactly true, together with row_limit, to raise the ceiling past the "
+                    f"default {DRIVE_DEFAULT_PAGE_SIZE} files. Requires understanding why the "
+                    "default exists: avoiding exhausted rate limits and pulling more than the "
+                    "task needs."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit ceiling, up to {DRIVE_PAGE_SIZE_CAP}. Only honored "
+                    f"together with acknowledge_default_limit_override=true; refused (not "
+                    f"clamped) above {DRIVE_PAGE_SIZE_CAP}."
+                ),
             ),
         },
         return_value_schema=ReturnValueSchema(
@@ -705,7 +755,7 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="file_blob_key referencing the stored bytes, plus name and mime.",
+            description="file_blob_key + namespace referencing the stored bytes, plus name and mime.",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
@@ -916,7 +966,15 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         display_name="Sheets: Get Values",
         description=(
             "Read a cell range (A1 notation, e.g. 'Sheet1!A1:C10') as a 2D grid of values. "
-            "Requires a connected account."
+            f"Defaults to a {SHEETS_DEFAULT_ROW_LIMIT}-row effective limit to avoid an unbounded "
+            "grid landing in context — Sheets' values.get has no server-side size parameter, so "
+            "this is enforced AFTER the fetch: a range returning more rows than the effective "
+            "limit is refused loud (gsuite.result_too_large), never silently truncated, and the "
+            "underlying vendor call itself is NOT narrowed by this limit — request a smaller A1 "
+            "range if the goal is a smaller call. To raise the limit, pass "
+            "acknowledge_default_limit_override=true together with an explicit row_limit (up to "
+            f"{SHEETS_ROW_LIMIT_CAP}) — both are required together, and a row_limit above the cap "
+            "is refused rather than silently clamped. Requires a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -930,10 +988,28 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
                 required=True,
                 description="A1-notation range, e.g. 'Sheet1!A1:C10'.",
             ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Must be exactly true, together with row_limit, to raise the effective "
+                    f"{SHEETS_DEFAULT_ROW_LIMIT}-row limit. Requires understanding why the "
+                    "default exists: avoiding an unbounded grid landing in context."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Explicit row-count ceiling, up to {SHEETS_ROW_LIMIT_CAP}. Only honored "
+                    f"together with acknowledge_default_limit_override=true; refused (not "
+                    f"clamped) above {SHEETS_ROW_LIMIT_CAP}."
+                ),
+            ),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="2D grid of cell values.",
+            description="2D grid of cell values, bounded by the effective row limit.",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
@@ -1076,7 +1152,7 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="sheet_blob_key referencing the exported bytes.",
+            description="sheet_blob_key + namespace + filename referencing the exported bytes.",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
@@ -1206,7 +1282,7 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="doc_blob_key referencing the exported bytes.",
+            description="doc_blob_key + namespace + filename referencing the exported bytes.",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
@@ -1331,7 +1407,7 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="deck_blob_key referencing the exported bytes.",
+            description="deck_blob_key + namespace + filename referencing the exported bytes.",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,

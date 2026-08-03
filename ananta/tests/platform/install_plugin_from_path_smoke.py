@@ -43,10 +43,12 @@ C1a extension (2026-07-10, install_plugin_from_path failure-atomicity):
            the just-installed plugin atomically (stop -> de-register -> pop ->
            allowlist-remove -> pip rollback), victim untouched.
   Case 7 - single-writer invariant: an AST guard that the install path
-           (install_plugin_from_path + its helpers) mutates the roster ONLY
-           via plugin_manager.installer.{install,remove}, never a
-           clear-and-rebuild. Method-scoped for C1a (set_plugin_enabled is
-           still legacy until C1b); the whole-file scan lands in C1b.
+           (install_plugin_from_path + its helpers) plus set_plugin_enabled's
+           enable-if-absent branch (LIF-01/C1b, 2026-08-02) mutate the roster
+           ONLY via plugin_manager.installer.{install,remove}, never a
+           clear-and-rebuild. Still method-scoped, not whole-file: the
+           disable path's `.pop()` (plugin_installer.py:196-199's
+           discovery-vector caveat on `remove`) is its own tracked slice.
 
 !!! NON-GATE / BUILD-VERIFY ONLY — do NOT rot, do NOT delete !!!
 This smoke shells out to REAL `pip install -e` / `pip uninstall` several
@@ -591,9 +593,13 @@ def _is_plugins_subscript(target: ast.expr) -> bool:
     )
 
 
-# Roster mutations the install path must never contain — clear-and-rebuild
-# calls and direct dict mutations on a `.plugins` attribute. C1a scopes the
-# guard to the install path; set_plugin_enabled's legacy pop is rewired in C1b.
+# Roster mutations the scanned methods must never contain — clear-and-rebuild
+# calls and direct dict mutations on a `.plugins` attribute. Covers the
+# install path (C1a) and set_plugin_enabled's enable-if-absent branch
+# (LIF-01/C1b); the disable path's `.pop()` is not scanned (own tracked slice).
+# `_rediscover_plugins` no longer exists in service.py (deleted with C1b,
+# zero remaining callers) — kept here as a defensive name in case a future
+# edit reintroduces a same-named helper.
 _FORBIDDEN_ROSTER_CALLS = frozenset({
     "discover_plugins",
     "_rediscover_plugins",
@@ -796,6 +802,13 @@ def _case7_single_writer_guard() -> None:
         "_stage_commit_or_rollback",
         "_wire_plugin_instance",
         "_unwind_committed_install",
+        # LIF-01/C1b: set_plugin_enabled's enable-if-absent branch now routes
+        # through the same installer; disable's `.pop()` is still its own
+        # tracked slice (plugin_installer.py:196-199's discovery-vector
+        # caveat on `remove`), not scanned here.
+        "_apply_plugin_enable",
+        "_install_plugin_for_enable",
+        "_entry_point_not_found_result",
     }
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
     violations: list[str] = []

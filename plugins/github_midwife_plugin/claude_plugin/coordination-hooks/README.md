@@ -5,7 +5,9 @@ Fleet coordination hooks for multi-session Claude Code workflows:
 - **Knowledge-base-first reminder** (`UserPromptSubmit`) — suggests checking
   this project's documented conventions before non-trivial work. A reminder,
   not an enforced gate: the underlying search this suggests is asynchronous,
-  so the hook cannot block on its result.
+  so the hook cannot block on its result. Unconditionally armed — no
+  environment variable disarms it, unlike every other hook below — so a
+  session never silently loses awareness that the mechanism exists.
 - **Check-your-messages reminder** (`SessionStart` + `UserPromptSubmit`) —
   a plain nudge to check for unread coordination messages. Intentionally has
   no backend dependency: it always fires the same reminder and lets the
@@ -17,8 +19,8 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   cannot tell whether a binding is actually stale, and deliberately does not
   try. It echoes the session's own `AGENT_SESSION_LABEL` and leaves both
   verification and re-assertion to the session's own tools.
-- **Idle-wake waiter** (`Stop`) — opt-in, nudge-only. When a labeled
-  session goes idle, invokes exactly `$AGENT_WAKE_CLI wake` (fixed argv, no
+- **Idle-wake waiter** (`Stop`) — opt-in, nudge-only. When a session with
+  an `AGENT_SESSION_ID` goes idle, invokes exactly `$AGENT_WAKE_CLI wake` (fixed argv, no
   shell) — the operator-configured coordination CLI's blocking wait verb —
   and **discards its output entirely**. On the wake signal (exit 2) it
   emits its own fixed nudge: deliveries are pending in the peer inbox. The
@@ -27,15 +29,30 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   "deliveries pending" — plus timing; it never relays message content.
 - **Git-mutation guard** (`PreToolUse`) — opt-in, nameable gate that blocks
   git mutations (commit, push, checkout, merge, rebase, etc.) and subagent
-  spawning (the `Task` tool) from any session other than a designated
-  controller session. Scope is peer *mistake* prevention, not adversarial
-  security — a session that wants to bypass the hook can edit it.
+  spawning (the `Agent` tool, and `Task` under its former name) from any
+  session other than the designated *git controller* session, regardless of
+  which directory or repository a command targets. Scope is peer *mistake*
+  prevention, not adversarial security — a session that wants to bypass the
+  hook can edit it. See `SECURITY.md` for the cross-repository reach this
+  implies and the disclosed residual.
+
+  The refusal text carries a **single-active-session exemption**: where only
+  one session is active, the policy does not apply. That exemption is
+  language-level and the gate implements no part of it — it detects nothing
+  new. A solo deployment's hydration simply never sets the arming variable,
+  so the gate never arms at all; the clause exists for the transiently solo
+  *fleet*, where a session relying on it must have a checkable basis and must
+  cite that basis in band. An operator instruction to proceed always
+  overrides.
 
 ## Configuration
 
-Every hook is guarded on the `AGENT_SESSION_LABEL` environment variable and
-is a silent no-op when it is unset, so unrelated Claude Code sessions on the
-same machine are never affected.
+Four of the five hooks are guarded on an environment variable and are
+silent no-ops when it is unset, so unrelated Claude Code sessions on the
+same machine are unaffected by them. The knowledge-base-first reminder is
+the one exception: it is unconditionally armed. `check_messages_reminder.js`
+and the idle-wake waiter key on `AGENT_SESSION_ID`; the role-binding
+reminder keys on `AGENT_SESSION_LABEL`.
 
 The git-mutation guard is separately opt-in via `GIT_CONTROLLER_NAME`: unset,
 the guard is fully OFF (every session may run git and spawn subagents).
@@ -46,10 +63,12 @@ blocked.
 The idle-wake waiter is separately opt-in via `AGENT_WAKE_CLI`: unset, it is
 fully OFF. Set it to the coordination CLI the hook should invoke; the hook
 runs exactly that executable with the single fixed argument `wake`, no shell
-involved. A declared non-watch transport (`FLEET_TRANSPORT` set to anything
-other than `watch`) disarms it even when the CLI variable is set, so
-deployments whose live bridge connection already does the waking never
-double-arm.
+involved. A declared non-watch transport (`FLEET_TRANSPORT` set to any
+**non-empty** value other than `watch`) disarms it even when the CLI variable
+is set, so deployments whose live bridge connection already does the waking
+never double-arm. An unset **or empty** `FLEET_TRANSPORT` is not a
+declaration and leaves the waiter armed — a hydration bug that exports an
+empty value must not silently kill wakes on a watch deployment.
 
 ## Design notes
 

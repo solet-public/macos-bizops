@@ -2,7 +2,7 @@
   "process_key": "plugin::external_postgres_plugin::describe_table",
   "display_name": "External Postgres: Describe Table",
   "description": "Describe a table's columns in a registered foreign Postgres connection: name, data type, nullability, and default. Requires connection_name, schema, and table.",
-  "embedding_description": "Introspect the column structure of one table in an external/foreign Postgres database registered as a connection, returning each column's name, data type, whether it is nullable, and its default expression, in ordinal order. Schema and table are passed as bound parameters, never interpolated. This is the leaf level of the read-only introspection surface for the foreign-Postgres 'super Datagrip' — call list_schemas then list_tables to locate a table, then this verb to learn its shape before writing a run_query SELECT. Requires a connection_name, schema, and table.",
+  "embedding_description": "Introspect one table's columns in a registered external Postgres database: each column's name, data type, nullability, and default expression, in ordinal order. The leaf level of foreign-database introspection - use it to learn a table's shape before writing a SELECT against it.",
   "result_processor_customizations": {
     "action_label": "Foreign Postgres table described",
     "result_type": "external_postgres_describe_table_result",

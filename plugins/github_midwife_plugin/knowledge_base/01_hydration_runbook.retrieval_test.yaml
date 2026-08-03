@@ -28,11 +28,19 @@ target_queries:
   - "second homunculus on the same machine database credential pipe"
   - "pg_hba scram line for a new homunculus database negative auth check"
   - "how do I know the newborn homunculus is alive checklist"
+  - "coordination-hooks plugin registered in settings.json but hooks never fire"
+  - "explicit CLI command to install the coordination-hooks plugin during hydration"
+  - "what does my homunculus capture and embed from my sessions"
+  - "does peer messaging get ingested into the knowledge base"
+  - "where does ingested session content get embedded, local or cloud"
+  - "how do I see which session sources this homunculus is actually ingesting from"
+  - "can I opt out of or redact session transcript ingestion"
 
 forbidden_queries:
   - "how do I birth a local homunculus on macOS"        # 13_homunculus_setup/08 should win
   - "how do I assemble and publish a seed bundle"       # seed factory design surface should win
   - "how do I transfer a secret between homunculi"      # macos_vault_plugin articles should win
+  - "ledger allowed roots allow-list containment enforcement"  # 19_session_ledger/07_ledger_allowed_roots_authz should win — this article discloses ingestion exists, that one owns the containment mechanism
 
 min_rank: 3
 forbidden_min_rank: 4
@@ -41,3 +49,5 @@ process_key_assertions:
   - plugin::github_midwife_plugin::birth_homunculus
   - service_interface::knowledge_service::search
   - plugin::agent_messaging_plugin::peer_claim_role
+  - service_interface::session_ledger_service::list_sources
+  - service_interface::session_ledger_service::drain_event_embeddings

@@ -404,6 +404,60 @@ def check_artifact_is_self_contained(res: Results) -> None:
             )
 
 
+def check_plugin_manifest_loads(res: Results) -> None:
+    """The manifest that MOUNTS every hook must itself be loadable.
+
+    Claude Code validates `.claude-plugin/plugin.json` as a whole: one
+    malformed optional field rejects the ENTIRE manifest and registers zero
+    hooks. Every other check in this file — and all 176 gate cases next door
+    — verifies hook scripts that, in that state, never run at all. Measured
+    2026-07-31: `"homepage": "<<PLUGIN_HOMEPAGE_URL>>"` failed URL validation
+    and Claude Code reported "Registered 0 hooks from 1 plugins".
+
+    So: no unsubstituted `<<…>>` placeholder may survive anywhere in the
+    manifest, and `homepage`, if present, must be a real absolute URL. This
+    is the manifest-level member of the same family as the gate's routing
+    bug — the thing that carries input to the checked code is as much part
+    of the artifact as the code.
+    """
+    relative = ".claude-plugin/plugin.json"
+    path = PLUGIN_ROOT / relative
+    if not res.check(path.is_file(), f"plugin manifest exists: {relative}"):
+        return
+    raw = path.read_text(encoding="utf-8")
+
+    placeholders = sorted(set(re.findall(r"<<[^<>]+>>", raw)))
+    res.check(
+        not placeholders,
+        f"no unsubstituted placeholder survives in {relative}",
+        f"found {placeholders} — no substitution machinery exists for the "
+        f"`<<…>>` form, so these ship verbatim",
+    )
+    try:
+        manifest = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        res.check(False, f"{relative} is valid JSON", str(exc))
+        return
+
+    homepage = manifest.get("homepage")
+    if homepage is not None:
+        res.check(
+            isinstance(homepage, str)
+            and re.match(r"^https?://[^\s<>]+\.[^\s<>]+", homepage) is not None,
+            "manifest 'homepage' is an absolute http(s) URL",
+            f"got {homepage!r} — this field alone rejects the whole manifest",
+        )
+    author = manifest.get("author")
+    if author is not None:
+        email = author.get("email") if isinstance(author, dict) else None
+        if email is not None:
+            res.check(
+                isinstance(email, str) and re.match(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$", email) is not None,
+                "manifest author.email is a real address",
+                f"got {email!r}",
+            )
+
+
 def main() -> int:
     preflight()
     res = Results("coordination-hooks — manifest and security-claim consistency")
@@ -434,6 +488,7 @@ def main() -> int:
     check_stdlib_only(res, hooks, siblings, builtins)
     check_verification_section(res)
     check_artifact_is_self_contained(res)
+    check_plugin_manifest_loads(res)
 
     return res.finish()
 

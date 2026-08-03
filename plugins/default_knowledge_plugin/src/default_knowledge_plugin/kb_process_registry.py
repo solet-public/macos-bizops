@@ -241,7 +241,12 @@ def do_refresh_plugin_process(
     return {
         "status": "success" if not result_errors else "error",
         "plugin_name": plugin_name,
-        "process_key": process_key,
+        # NOT "process_key": at the top level of a result envelope that name is
+        # reserved for the key of the verb that PRODUCED the result, and the
+        # result-contract invariant enforces it. Using it for the key being
+        # refreshed made every call raise RESULT_CONTRACT_VIOLATION *after* the
+        # side-effect had already landed and the row was stored completed.
+        "refreshed_process_key": process_key,
         "updated": bool(result.get("updated_count", 0)),
         "errors": result_errors,
     }

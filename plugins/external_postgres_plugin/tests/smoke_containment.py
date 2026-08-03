@@ -15,7 +15,7 @@ Exercises (``dbname=<platform>`` means the LIVE platform DB name, derived from
 ``PLATFORM_DBNAME`` at runtime — never hardcoded, so the refusal is proven
 against whatever homunculus actually runs this smoke):
   1. user=ananta, dbname=<platform>, platform host:port  -> REFUSED
-  2. user=dw,     dbname=<platform>, platform host:port  -> REFUSED (F-D1 role-independent)
+  2. user=trustuser, dbname=<platform>, platform host:port  -> REFUSED (F-D1 role-independent)
   3. host="" (unix socket),  dbname=<platform>, port     -> REFUSED (blank-host socket)
   4. host="/tmp" (socket dir), dbname=<platform>, port   -> REFUSED (/-prefixed socket)
   5. blank port (resolver -> 5432), dbname=<platform>    -> REFUSED (blank-port bypass closed)
@@ -33,6 +33,7 @@ Exits 0 on success, 1 on first failure.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -98,26 +99,29 @@ def test_refused_ananta() -> None:
     )
 
 
-def test_refused_dw() -> None:
-    # The F-D1 role-independent case: dw is the passwordless trust superuser that
-    # reaches the SAME platform DB. The refusal keys on the instance, not the role.
+def test_refused_trust_role() -> None:
+    # The F-D1 role-independent case: an arbitrary non-"ananta" role reaching
+    # the SAME platform DB (named "trustuser" to echo smoke_readonly.py's
+    # documented local passwordless-trust fixture role, but the identity of
+    # the role is not load-bearing here — ANY role proves the point). The
+    # refusal keys on the instance, not the role.
     _assert(
-        f"dw+{PLATFORM_DBNAME}+localhost:5432 REFUSED (role-independent)",
-        _is_refused(_dsn("localhost", 5432, PLATFORM_DBNAME, "dw")),
+        f"trustuser+{PLATFORM_DBNAME}+localhost:5432 REFUSED (role-independent)",
+        _is_refused(_dsn("localhost", 5432, PLATFORM_DBNAME, "trustuser")),
     )
 
 
 def test_refused_socket_blank() -> None:
     _assert(
         f"blank-host socket + {PLATFORM_DBNAME} + port REFUSED",
-        _is_refused(_dsn("", 5432, PLATFORM_DBNAME, "dw")),
+        _is_refused(_dsn("", 5432, PLATFORM_DBNAME, "trustuser")),
     )
 
 
 def test_refused_socket_path() -> None:
     _assert(
         f"/tmp socket-dir + {PLATFORM_DBNAME} + port REFUSED",
-        _is_refused(_dsn("/tmp", 5432, PLATFORM_DBNAME, "dw")),
+        _is_refused(_dsn("/tmp", 5432, PLATFORM_DBNAME, "trustuser")),
     )
     _assert(
         f"/var/run/postgresql socket-dir + {PLATFORM_DBNAME} + port REFUSED",
@@ -133,7 +137,7 @@ def test_refused_blank_port_via_resolver() -> None:
         {"field_type": "host", "value": "127.0.0.1"},
         {"field_type": "port", "value": ""},
         {"field_type": "dbname", "value": PLATFORM_DBNAME},
-        {"field_type": "user", "value": "dw"},
+        {"field_type": "user", "value": "trustuser"},
         {"field_type": "password", "value": "x"},
     ]
     dsn = AppConfigLoader(_FakeAddressBook(entries)).resolve("sneaky")
@@ -148,7 +152,7 @@ def test_allowed_localhost_dev_db() -> None:
 def test_allowed_platform_dbname_different_port() -> None:
     _assert(
         f"{PLATFORM_DBNAME} on a DIFFERENT port ALLOWED",
-        not _is_refused(_dsn("localhost", 5544, PLATFORM_DBNAME, "dw")),
+        not _is_refused(_dsn("localhost", 5544, PLATFORM_DBNAME, "trustuser")),
     )
 
 
@@ -167,11 +171,33 @@ def test_normalize_host() -> None:
     _assert("real host preserved", _normalize_host("Warehouse.example.com") == "warehouse.example.com")
 
 
+_OPERATOR_USERNAME_TOKEN = "d" + "w"
+
+
+def test_source_carries_no_operator_username() -> None:
+    """RED-FIRST (operator-identity parameterization, 2026-07-31): the DSN
+    role-name fixtures in this file are arbitrary — ``test_refused_trust_role``
+    proves refusal is ROLE-INDEPENDENT, so any role string proves the same
+    point — there is no functional reason for the real operator's OS username
+    to appear here. Composed from two concatenated halves (see
+    ``_OPERATOR_USERNAME_TOKEN``) so this guard's own source never contains
+    the contiguous token it hunts for. Word-bounded so it does not collide
+    with an unrelated substring.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(_OPERATOR_USERNAME_TOKEN)}(?![A-Za-z0-9_])")
+    _assert(
+        "fixture source carries no bare operator-username token",
+        pattern.search(source) is None,
+    )
+
+
 def main() -> int:
     print("\nexternal_postgres_plugin containment smoke tests")
     print("=" * 48)
+    test_source_carries_no_operator_username()
     test_refused_ananta()
-    test_refused_dw()
+    test_refused_trust_role()
     test_refused_socket_blank()
     test_refused_socket_path()
     test_refused_blank_port_via_resolver()

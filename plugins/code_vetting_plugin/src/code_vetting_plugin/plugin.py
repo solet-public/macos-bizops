@@ -395,7 +395,7 @@ def _vetting_run_record_schema() -> ReturnValueSchema:
             "survival_rate": ParameterMetadata(type=ParameterType.FLOAT, description="L2->L3 precision proxy; null when nothing was verified."),
             "coverage_gaps": ParameterMetadata(type=ParameterType.LIST, description="Scanners that could not run, each with its reason."),
             "allowlist_delta": ParameterMetadata(type=ParameterType.OBJECT, description="Tracked-debt burn-down snapshot."),
-            "structural_metrics": ParameterMetadata(type=ParameterType.OBJECT, description="R8-1: per-run complexity/length/params/nesting distribution + aggregates + worst-offenders + the repeated-literal table (magic-string candidates); null when the structural-metrics scanner did not run."),
+            "structural_metrics": ParameterMetadata(type=ParameterType.OBJECT, description="R8-1: per-run complexity/length/params/nesting distribution + aggregates + worst-offenders + the repeated-literal table (magic-string candidates) + the named nested-loop pattern class (nested_loops[] {file,line,language,depth} capped, nested_loops_total = the true pre-cap count, nested_loop_languages[] + nested_loop_files_examined = the class's own denominator, narrower than files_parsed because the detector is language-limited); null when the structural-metrics scanner did not run."),
             "dead_symbols": ParameterMetadata(type=ParameterType.OBJECT, description="R9-A: candidate-dead-symbols payload (60%-confidence family — L2 targeting evidence, the test_reach pattern); null when the dead-code scanner did not run."),
             "report": ParameterMetadata(type=ParameterType.STRING, description="The severity-ranked markdown report text for this run; null for a metrics-only subset run."),
         },

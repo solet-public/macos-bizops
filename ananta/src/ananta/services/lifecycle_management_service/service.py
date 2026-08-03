@@ -1743,23 +1743,75 @@ class LifecycleManagementService(LifecycleManagementAPI):
         """Enable a plugin live: load if absent; start if LifecycleManaged."""
         plugin = plugin_manager.plugins.get(plugin_name)
         if plugin is None:
-            self._rediscover_plugins(plugin_manager)
-            plugin = plugin_manager.plugins.get(plugin_name)
-
-        if plugin is None:
-            return self._enable_result(
-                plugin_name, applied=False, restart_required=True,
-                detail=(
-                    "enabled=true persisted but the plugin's entry-point was not "
-                    "found via discovery; install or restart to load it"
-                ),
-            )
+            return self._install_plugin_for_enable(plugin_manager, plugin_name)
 
         self._start_lifecycle_plugin_if_managed(plugin, plugin_name)
         self._refresh_registry_for_plugin(plugin_name)
         return self._enable_result(
             plugin_name, applied=True, restart_required=False,
             detail="enabled and active in the live roster",
+        )
+
+    def _install_plugin_for_enable(
+        self, plugin_manager: Any, plugin_name: str
+    ) -> dict[str, Any]:
+        """Load a not-yet-loaded plugin via the atomic installer (C1b).
+
+        Stages, wires (``_wire_plugin_instance`` — the same boot-order replay
+        used by ``install_plugin_from_path``), and commits with a single
+        atomic dict store. Unlike the legacy ``_rediscover_plugins`` path,
+        this never touches any other roster entry: a failure here leaves the
+        live roster, allowlist, and every pre-existing plugin instance
+        byte-identical.
+
+        ``phase="staging_discovery"`` (entry-point genuinely not installed,
+        OR excluded by the homunculus's profile manifest allowlist) is the
+        ONLY ``restart_required=True`` case — same wording as before, so the
+        card's contract does not change shape. Every other phase
+        (``contract_validation``, ``wiring``) reports an error with the
+        platform unchanged, instead of the pre-fix silent roster-wide brick.
+
+        The manifest check runs BEFORE the installer call: ``installer.install``
+        stages discovery scoped to ``{plugin_name}`` alone (it has no notion
+        of the manifest), so an entry-point that exists on disk but is
+        deliberately excluded from this homunculus's profile would otherwise
+        load anyway and get unioned into the live allowlist — silently
+        overriding the manifest's exclusion. Pre-fix, ``_rediscover_plugins``
+        re-ran full discovery scoped to the real ``_allowed_plugins``, so a
+        manifest-excluded plugin never appeared and this case fell through to
+        the same "not found" envelope; this check preserves that.
+        """
+        allowed_plugins = plugin_manager._allowed_plugins  # noqa: SLF001
+        if allowed_plugins is not None and plugin_name not in allowed_plugins:
+            return self._entry_point_not_found_result(plugin_name)
+
+        try:
+            plugin_manager.installer.install(
+                plugin_name,
+                wire=lambda p: self._wire_plugin_instance(plugin_manager, p),
+            )
+        except PluginInstallError as exc:
+            if exc.phase == "staging_discovery":
+                return self._entry_point_not_found_result(plugin_name)
+            return self._error_result(
+                f"Failed to enable plugin {plugin_name!r} at phase {exc.phase}: "
+                f"{exc}; live roster unchanged"
+            )
+
+        self._refresh_registry_for_plugin(plugin_name)
+        return self._enable_result(
+            plugin_name, applied=True, restart_required=False,
+            detail="enabled and active in the live roster",
+        )
+
+    def _entry_point_not_found_result(self, plugin_name: str) -> dict[str, Any]:
+        """The one ``restart_required=True`` envelope for a not-yet-loadable enable."""
+        return self._enable_result(
+            plugin_name, applied=False, restart_required=True,
+            detail=(
+                "enabled=true persisted but the plugin's entry-point was not "
+                "found via discovery; install or restart to load it"
+            ),
         )
 
     def _apply_plugin_disable(
@@ -1851,19 +1903,6 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 f"{completed.stderr.strip() or completed.stdout.strip()}"
             )
         logger.info("Installed plugin source %s via pip install -e", source)
-
-    def _rediscover_plugins(self, plugin_manager: Any) -> None:
-        """Trigger a fresh ``discover_plugins`` pass on the plugin manager.
-
-        Legacy clear-and-rebuild path still used by ``set_plugin_enabled``'s
-        enable-if-absent branch (C1a keeps it; the collapse to
-        ``enable_plugin``/``disable_plugin`` routing through the atomic
-        installer lands in C1b). ``install_plugin_from_path`` no longer calls
-        any rediscovery — it stages and commits atomically via
-        ``plugin_manager.installer``.
-        """
-        config_manager = getattr(self._orchestrator, "config", None)
-        plugin_manager.discover_plugins(config_manager)
 
     def _invalidate_importlib_caches(self) -> None:
         """Reset import + metadata caches AND refresh sys.path after pip install.

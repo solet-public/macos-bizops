@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -355,18 +356,57 @@ def _check_unreadable_gaps(fingerprint: dict[str, object]) -> None:
     )
 
 
+# The expected status of every capability selected at the root scope. A table rather than a
+# chain of `and`s so adding a capability does not add a branch to the assertion.
+_EXPECTED_ROOT_STATUSES: dict[str, str] = {
+    "expo_project_health": "adapter_missing",
+    "foreign_framework_architecture": "dynamic_guidance_required",
+    "deno_check_lint_test": "adapter_missing",
+    "supabase_db_rls_static_review": "adapter_missing",
+    # Performance BENCHMARKING is out of scope by ruling — `adapter_missing` here would
+    # assert an intent we do not have. See _technology_fingerprint_capabilities.
+    "runtime_performance": "out_of_scope",
+    "typescript_target_toolchain": "available_opt_in",
+}
+
+
+def _statuses_at(needs: Sequence[Mapping[str, object]], scope: str) -> dict[str, str]:
+    return {str(item["capability_key"]): str(item["status"]) for item in needs if item["scope"] == scope}
+
+
 def _check_capability_statuses(fingerprint: dict[str, object]) -> None:
     needs = fingerprint["capability_needs"]
-    need_status = {item["capability_key"]: item["status"] for item in needs if item["scope"] == "."}
+    assert isinstance(needs, list)
+    need_status = _statuses_at(needs, ".")
     _check(
         "minimum capability needs are selected with fixed statuses",
-        need_status["expo_project_health"] == "adapter_missing"
-        and need_status["foreign_framework_architecture"] == "dynamic_guidance_required"
-        and need_status["deno_check_lint_test"] == "adapter_missing"
-        and need_status["supabase_db_rls_static_review"] == "adapter_missing"
-        and need_status["runtime_performance"] == "adapter_missing"
-        and need_status["typescript_target_toolchain"] == "available_opt_in",
+        all(need_status.get(key) == want for key, want in _EXPECTED_ROOT_STATUSES.items()),
         str(need_status),
+    )
+    _check_runtime_performance_at_both_sites(needs)
+
+
+def _check_runtime_performance_at_both_sites(needs: Sequence[Mapping[str, object]]) -> None:
+    """SCOPE-COSTUME GUARD (2026-07-31).
+
+    `runtime_performance` is emitted at TWO sites — `_component_capability_rows` (expo) and
+    `_deno_capability_rows` (deno). At scope "." BOTH emit, but `_ordered_capabilities` dedups
+    on (scope, capability_key) first-row-wins and expo rows are appended first, so the deno
+    row's STATUS is discarded there. The root-scope assertion therefore covers the EXPO site
+    only: reverting the deno site alone left the whole suite GREEN (measured). `supabase/functions`
+    is the one scope where the deno site's status is observable, so it is asserted by name.
+    """
+    deno_only = _statuses_at(needs, "supabase/functions")
+    _check(
+        "the deno emission site's runtime_performance status is out_of_scope (not the expo row)",
+        deno_only.get("runtime_performance") == "out_of_scope",
+        f"deno-only scope statuses: {deno_only}",
+    )
+    seen = {str(item["status"]) for item in needs if item["capability_key"] == "runtime_performance"}
+    _check(
+        "no capability row anywhere still claims runtime_performance needs an adapter",
+        seen == {"out_of_scope"},
+        str(sorted(seen)),
     )
 
 

@@ -92,11 +92,66 @@ def test_list_files_shape() -> None:
     _assert("query passed through as q", kwargs.get("q") == "name contains 'x'")
 
 
-def test_list_files_clamp() -> None:
+def test_list_files_default_is_500() -> None:
+    """Business-data limits (2026-08-02): default raised from 25 to 500 (the
+    general policy default; Drive's real single-call max is 1,000, reachable
+    via the override below)."""
     drive = _fake_drive()
-    list_files(drive, {"max": 500})
+    list_files(drive, {})
     kwargs = drive.files.return_value.list.call_args.kwargs
-    _assert("pageSize clamped to 100", kwargs.get("pageSize") == 100)
+    _assert("no max, no override -> pageSize 500", kwargs.get("pageSize") == 500)
+
+
+def test_list_files_max_below_ceiling_honored() -> None:
+    drive = _fake_drive()
+    list_files(drive, {"max": 10})
+    kwargs = drive.files.return_value.list.call_args.kwargs
+    _assert("a smaller explicit max is honored", kwargs.get("pageSize") == 10)
+
+
+def test_list_files_max_cannot_widen_without_override() -> None:
+    drive = _fake_drive()
+    list_files(drive, {"max": 5000})
+    kwargs = drive.files.return_value.list.call_args.kwargs
+    _assert("max never widens past the 500 default without override", kwargs.get("pageSize") == 500)
+
+
+def test_list_files_override_reaches_above_default() -> None:
+    """4-case set, case 2: a valid override raises the ceiling, not silently
+    capped back to 500."""
+    drive = _fake_drive()
+    list_files(drive, {"acknowledge_default_limit_override": True, "row_limit": 800})
+    kwargs = drive.files.return_value.list.call_args.kwargs
+    _assert("override reaches above 500", kwargs.get("pageSize") == 800)
+
+
+def test_list_files_override_pair_required_together() -> None:
+    """4-case set, case 3: either half alone fails loud, names which was missing."""
+    drive = _fake_drive()
+    raised_flag_only = False
+    try:
+        list_files(drive, {"acknowledge_default_limit_override": True})
+    except ValueError as exc:
+        raised_flag_only = "row_limit" in str(exc)
+    _assert("override flag alone fails loud, names row_limit", raised_flag_only)
+
+    raised_limit_only = False
+    try:
+        list_files(drive, {"row_limit": 800})
+    except ValueError as exc:
+        raised_limit_only = "acknowledge_default_limit_override" in str(exc)
+    _assert("row_limit alone fails loud, names the override flag", raised_limit_only)
+
+
+def test_list_files_override_above_hard_cap_refused() -> None:
+    """4-case set, case 4: above the hard cap is refused, names the cap, never clamped."""
+    drive = _fake_drive()
+    raised = False
+    try:
+        list_files(drive, {"acknowledge_default_limit_override": True, "row_limit": 1001})
+    except ValueError as exc:
+        raised = "1000" in str(exc)
+    _assert("row_limit above the 1000 hard cap is refused, names the cap", raised)
 
 
 def test_download_writes_blob() -> None:
@@ -332,7 +387,12 @@ def main() -> int:
     print("\ng_suite_plugin Drive smoke tests")
     print("=" * 40)
     test_list_files_shape()
-    test_list_files_clamp()
+    test_list_files_default_is_500()
+    test_list_files_max_below_ceiling_honored()
+    test_list_files_max_cannot_widen_without_override()
+    test_list_files_override_reaches_above_default()
+    test_list_files_override_pair_required_together()
+    test_list_files_override_above_hard_cap_refused()
     test_download_writes_blob()
     test_download_rejects_native_doc()
     test_download_requires_id()

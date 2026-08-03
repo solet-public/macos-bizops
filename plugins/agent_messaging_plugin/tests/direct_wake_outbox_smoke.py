@@ -144,6 +144,7 @@ def _persist_direct(
     recipient_session: str = "sess-R",
     sender_instance: str = "agi-S",
     sender_bridge_id: str = "agc-s",
+    activity_at_emission: str | None = None,
 ) -> None:
     svc.persist_direct_wake(
         message_id=message_id,
@@ -156,6 +157,7 @@ def _persist_direct(
         sender_session_label="Sender",
         sender_bridge_id=sender_bridge_id,
         content=[TextPart(type="text", text="IMPORTANT: ping")],
+        activity_at_emission=activity_at_emission,
     )
 
 
@@ -289,12 +291,17 @@ def test_quiet_gap_midturn_arrival_is_not_consumed() -> None:
     state = RealShapeState()
     clock = _Clock(T0)
     svc = _service(state, clock)
-    _persist_direct(svc)  # last_emitted_at = T0
+    # The session called the homunculus 6s BEFORE the wake landed → it was
+    # mid-turn, and that fact is CAPTURED ON THE ROW at emission time (it used to
+    # be read from the bridge's live sliding pair at drain time, which is the
+    # defect this fixture now pins).
+    _persist_direct(
+        svc,
+        activity_at_emission=(T0 - timedelta(seconds=6)).isoformat(),
+    )  # last_emitted_at = T0
     stamped = svc.reconcile_direct_consumption(
         agent_instance_id="agi-R",
         activity_at=T0 + timedelta(seconds=40),
-        # The session called the homunculus 6s BEFORE the wake landed → it was mid-turn.
-        prev_activity_at=T0 - timedelta(seconds=6),
     )
     clock.advance(301)
     owed = svc.list_owed_direct_for_instance(
@@ -311,13 +318,15 @@ def test_quiet_gap_idle_arrival_is_consumed() -> None:
     state = RealShapeState()
     clock = _Clock(T0)
     svc = _service(state, clock)
-    _persist_direct(svc)  # last_emitted_at = T0
+    # Last call was long before the wake → the session was quiet; this wake is
+    # what started the next turn. Captured on the row at emission.
+    _persist_direct(
+        svc,
+        activity_at_emission=(T0 - timedelta(seconds=600)).isoformat(),
+    )  # last_emitted_at = T0
     stamped = svc.reconcile_direct_consumption(
         agent_instance_id="agi-R",
         activity_at=T0 + timedelta(seconds=5),
-        # Last call was long before the wake → the session was quiet; this wake
-        # is what started the next turn.
-        prev_activity_at=T0 - timedelta(seconds=600),
     )
     _check(
         stamped == ["agm-1"],
@@ -357,8 +366,12 @@ def test_s2_window_cap_escalation() -> None:
     )
     _check(len(owed_past) == 1, "S2: past the window → owed for re-emit")
     # Two confirmed re-emits take emit_count 1 → 3 (the cap).
-    svc.mark_direct_emitted_for_instance(message_id="agm-1", agent_instance_id="agi-R")
-    svc.mark_direct_emitted_for_instance(message_id="agm-1", agent_instance_id="agi-R")
+    svc.mark_direct_emitted_for_instance(
+        message_id="agm-1", agent_instance_id="agi-R", activity_at_emission=None,
+    )
+    svc.mark_direct_emitted_for_instance(
+        message_id="agm-1", agent_instance_id="agi-R", activity_at_emission=None,
+    )
     owed_cap = svc.list_owed_direct_for_instance(
         agent_instance_id="agi-R",
         limit=50,
@@ -388,11 +401,14 @@ def test_s2_window_cap_escalation() -> None:
         len(events) == 1
         and events[0].event_type == "post_message"
         and "deaf_wake_escalation" in events[0].content
-        and "qualifying model-activity consumption acknowledgement"
+        and "severity=alarm" in events[0].content
+        and "no model-initiated platform call from this session since emission"
         in events[0].content
         and "does not prove the recipient failed to see or act" in events[0].content
         and "never entered a turn" not in events[0].content,
-        "S2: sender gets ONE factual MCP escalation (no unproved non-turn claim)",
+        "S2: sender gets ONE factual MCP escalation (no unproved non-turn claim); "
+        "recipient agi-R was never registered, so heartbeat-liveness resolves "
+        "alarm-class, not the narrowed info-class",
     )
     last_cursor = events[-1].cursor
     again = reconciler.reconcile()
@@ -538,7 +554,11 @@ def test_f3_mark_delivered_records_emitted_to() -> None:
         created_at=T0.isoformat(),
     )
     flagged = svc.mark_delivered_for_instance(
-        external_id="role:R:agm-r2", recipient_key="R", agent_instance_id="agi-A",
+        external_id="role:R:agm-r2",
+        recipient_key="R",
+        agent_instance_id="agi-A",
+        agent_session_id="ases-A",
+        activity_at_emission=None,
     )
     row = next(
         r for r in state.rows(NAMESPACE, TABLE_AGENT_ROLE_MESSAGE)
@@ -554,7 +574,11 @@ def test_f3_mark_delivered_records_emitted_to() -> None:
         "last_emitted_at + delivered",
     )
     denied = svc.mark_delivered_for_instance(
-        external_id="role:R:agm-r2", recipient_key="R", agent_instance_id="agi-Z",
+        external_id="role:R:agm-r2",
+        recipient_key="R",
+        agent_instance_id="agi-Z",
+        agent_session_id="ases-Z",
+        activity_at_emission=None,
     )
     _check(
         denied is False,

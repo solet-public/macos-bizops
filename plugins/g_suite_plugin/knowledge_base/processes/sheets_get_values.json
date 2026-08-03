@@ -1,17 +1,17 @@
 {
   "process_key": "plugin::g_suite_plugin::sheets_get_values",
   "display_name": "Sheets: Get Values",
-  "description": "Read a cell range (A1 notation, e.g. 'Sheet1!A1:C10') from a spreadsheet as a 2D grid of values. Requires a connected account.",
-  "embedding_description": "Read cell values out of an existing Google Sheets spreadsheet by spreadsheet id and an A1-notation range (for example 'Sheet1!A1:C10' or a bare 'Sheet1' for the whole tab). Returns a 2D grid (list of row lists) exactly as Sheets returns it — empty trailing cells are omitted per Google's convention. This is the read counterpart to sheets_update_values/sheets_append_values. Fails gsuite.not_found if the spreadsheet id does not exist.",
+  "description": "Read a cell range (A1 notation, e.g. 'Sheet1!A1:C10') from a spreadsheet as a 2D grid of values. Defaults to a 500-row effective limit to avoid an unbounded grid landing in context -- Sheets' values.get has no server-side size parameter, so this is enforced AFTER the fetch: a range returning more rows than the effective limit is refused loud (gsuite.result_too_large), never silently truncated, and the underlying vendor call itself is NOT narrowed by this limit -- request a smaller A1 range if the goal is a smaller call. To raise the limit, pass acknowledge_default_limit_override=true together with an explicit row_limit (up to 1000) -- both are required together, and a row_limit above the cap is refused rather than silently clamped. Requires a connected account.",
+  "embedding_description": "Read cell values out of an existing Google Sheets spreadsheet by spreadsheet id and A1-notation range, such as a specific block or a bare tab name for a whole tab. Returns a grid of row values, capped at a 500-row effective limit -- a larger returned grid fails loud (gsuite.result_too_large) rather than truncating; raise the limit via acknowledge_default_limit_override + row_limit (up to 1000).",
   "result_processor_customizations": {
     "action_label": "Spreadsheet values read",
     "result_type": "g_suite_sheets_get_values_result",
-    "result_description": "Dict with a values 2D grid (list of row lists).",
+    "result_description": "Dict with a values 2D grid (list of row lists), bounded by the effective row limit.",
     "presentation_guidance": "Summarize the shape of the data (rows/columns) and show a few sample rows. Cell contents may be sensitive corporate data — treat as moderately sensitive."
   },
   "error_processor_customizations": {
     "action_context": "Read a cell range from a Google Sheets spreadsheet.",
-    "error_interpretation": "gsuite.invalid_params: missing id or range. gsuite.not_found: the spreadsheet id or range's sheet name does not exist. gsuite.not_connected: no account linked.",
-    "recovery_guidance": "gsuite.invalid_params: supply both id and an A1-notation range. gsuite.not_found: verify the spreadsheet id and sheet/tab name. gsuite.not_connected: run connect_account."
+    "error_interpretation": "gsuite.invalid_params: missing id or range, or the override/row_limit pair was only half-given. gsuite.result_too_large: the range returned more rows than the effective limit (default 500, or the acknowledged override up to 1000) -- never silently truncated. gsuite.not_found: the spreadsheet id or range's sheet name does not exist. gsuite.not_connected: no account linked.",
+    "recovery_guidance": "gsuite.invalid_params: supply both id and an A1-notation range, and pass acknowledge_default_limit_override + row_limit together if overriding. gsuite.result_too_large: narrow the requested range, or pass acknowledge_default_limit_override=true with an explicit row_limit (up to 1000). gsuite.not_found: verify the spreadsheet id and sheet/tab name. gsuite.not_connected: run connect_account."
   }
 }

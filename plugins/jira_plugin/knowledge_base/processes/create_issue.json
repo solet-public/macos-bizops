@@ -2,7 +2,7 @@
   "process_key": "plugin::jira_plugin::create_issue",
   "display_name": "Jira: Create Issue",
   "description": "Create a Jira issue in a project of a given type with a summary and optional plain-text description; optional additional fields merge in. Returns the new issue's key and id. Write action.",
-  "embedding_description": "Open a brand-new Jira issue (ticket) in a project — supply the project key, the issue type name (Task, Bug, Story, ...), a one-line summary, and an optional plain-text description; an optional fields object sets additional Jira fields such as priority, labels, or custom fields. Returns the created issue's key and numeric id. This actually files a ticket. Distinct from update_issue (edit an existing issue), add_comment (annotate an issue), and transition_issue (move it through workflow).",
+  "embedding_description": "Open a brand-new Jira issue in a project: supply the project key, the issue type such as Task, Bug or Story, a one-line summary, and an optional description, with an optional fields object for priority, labels, or custom fields. Files a real ticket and returns its key and numeric id.",
   "result_processor_customizations": {
     "action_label": "Jira issue created",
     "result_type": "jira_create_issue_result",

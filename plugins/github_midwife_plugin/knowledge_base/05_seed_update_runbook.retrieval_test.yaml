@@ -12,6 +12,14 @@ target_queries:
   - "do I need to rebuild the venv after pulling a seed update"
   - "apply a new seed version without losing homunculus state"
   - "seed update added a new plugin but it is not active"
+  - "shipped hook fix but the installed claude code plugin still runs the old version"
+  - "verify installed claude plugin cache matches the pulled deployment source"
+  - "plugin update says already at latest version but hook content did not change"
+  - "how to force claude code to re-copy a plugin without bumping its version"
+  - "does this release fix business connectors putting records in agent context"
+  - "business connector reads fail loud after updating, no workspace root configured"
+  - "configure export root on an already-hydrated homunculus"
+  - "should I use apply_manifest or launchctl to restart after a seed update"
 min_rank: 3
 
 forbidden_queries:

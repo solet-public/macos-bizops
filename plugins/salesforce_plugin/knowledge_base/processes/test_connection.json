@@ -2,7 +2,7 @@
   "process_key": "plugin::salesforce_plugin::test_connection",
   "display_name": "Salesforce: Test Connection",
   "description": "Verify the org binding by querying the org record through the sf CLI. Returns ok, org_id, the verified username, and the pinned api_version.",
-  "embedding_description": "Verify the Salesforce connector is configured and reachable, and surface the resolved org id, username, and API version — useful for diagnosing a connection or credential problem. No parameters.",
+  "embedding_description": "Verify the Salesforce connector is configured and reachable, surfacing the resolved org id, the authenticated username, and the API version in use. A health check for diagnosing a credential or connection problem before relying on the query and record verbs.",
   "result_processor_customizations": {
     "action_label": "Salesforce connection tested",
     "result_type": "salesforce_test_connection_result",

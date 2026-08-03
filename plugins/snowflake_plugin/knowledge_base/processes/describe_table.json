@@ -2,7 +2,7 @@
   "process_key": "plugin::snowflake_plugin::describe_table",
   "display_name": "Snowflake: Describe Table",
   "description": "Describe a table's columns (name, type, nullability, default) in the configured Snowflake account. Requires database, schema, and table.",
-  "embedding_description": "Get the column schema (names, types, nullability, defaults) of a specific Snowflake table, for understanding a table's shape before querying it. Requires database, schema, and table names.",
+  "embedding_description": "Show the columns of one Snowflake warehouse table: each column's name, data type, nullability and default value. Use it to learn a table's shape inside a Snowflake database and schema before writing SQL against the warehouse. Snowflake-specific table metadata for query authoring.",
   "result_processor_customizations": {
     "action_label": "Snowflake table described",
     "result_type": "snowflake_describe_table_result",

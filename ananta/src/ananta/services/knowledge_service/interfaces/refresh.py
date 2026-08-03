@@ -39,13 +39,33 @@ class KnowledgeRefreshAPI(ABC):
             description="Refresh result with updated process count",
             type=ParameterType.OBJECT,
             properties={
+                "status": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description=(
+                        "'success' when every merge applied cleanly, 'partial' when some "
+                        "reported errors"
+                    ),
+                ),
+                "plugin_name": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Plugin whose knowledge base the process JSONs were read from",
+                ),
                 "updated_count": ParameterMetadata(
                     type=ParameterType.INTEGER,
                     description="Number of processes updated",
                 ),
                 "process_keys": ParameterMetadata(
                     type=ParameterType.LIST,
-                    description="List of updated process keys",
+                    description=(
+                        "List of updated process keys. Deliberately PLURAL: at the top level "
+                        "of a result envelope the singular 'process_key' names the verb that "
+                        "PRODUCED the result, so a singular spelling here would collide with "
+                        "the result-contract invariant"
+                    ),
+                ),
+                "errors": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Errors reported by the registry merge; empty on a clean refresh",
                 ),
             },
         ),
@@ -78,13 +98,34 @@ class KnowledgeRefreshAPI(ABC):
             description="Refresh result for single process",
             type=ParameterType.OBJECT,
             properties={
-                "process_key": ParameterMetadata(
+                "status": ParameterMetadata(
                     type=ParameterType.STRING,
-                    description="The refreshed process key",
+                    description=(
+                        "'success' when the merge applied cleanly, 'error' when it reported "
+                        "errors"
+                    ),
+                ),
+                "plugin_name": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Plugin whose knowledge base the process JSON was read from",
+                ),
+                "refreshed_process_key": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description=(
+                        "The process key that was refreshed — an echo of the request's "
+                        "process_key argument. Deliberately NOT named 'process_key': at the "
+                        "top level of a result envelope that name is reserved for the key of "
+                        "the verb that PRODUCED the result, and the collision made every call "
+                        "raise RESULT_CONTRACT_VIOLATION after the side-effect had landed"
+                    ),
                 ),
                 "updated": ParameterMetadata(
                     type=ParameterType.BOOLEAN,
                     description="Whether the process was successfully updated",
+                ),
+                "errors": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Errors reported by the registry merge; empty on a clean refresh",
                 ),
             },
         ),

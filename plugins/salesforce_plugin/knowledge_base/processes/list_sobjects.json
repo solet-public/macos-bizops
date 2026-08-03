@@ -2,7 +2,7 @@
   "process_key": "plugin::salesforce_plugin::list_sobjects",
   "display_name": "Salesforce: List SObjects",
   "description": "List the org's sobjects (API name and label). No parameters.",
-  "embedding_description": "Enumerate every Salesforce object (standard and custom) visible to the CLI's authenticated user, as a first step before querying or describing a specific object. No parameters.",
+  "embedding_description": "List every Salesforce object visible to the authenticated user, standard and custom alike, with their API names. The discovery step before querying or describing a particular object, for when you need to know what the org actually contains.",
   "result_processor_customizations": {
     "action_label": "Salesforce sobjects listed",
     "result_type": "salesforce_list_sobjects_result",

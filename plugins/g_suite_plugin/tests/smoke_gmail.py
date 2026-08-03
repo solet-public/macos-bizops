@@ -72,11 +72,32 @@ def test_list_messages_shape() -> None:
     _assert("list rows carry id+thread_id", result["messages"][0] == {"id": "a", "thread_id": "t1"})
 
 
-def test_list_messages_clamp() -> None:
+def test_list_messages_default_is_500() -> None:
+    """Business-data limits (2026-08-02): default raised to Gmail's own real
+    single-call maximum (500, Reviewer-D's census) -- operator-kept explicitly."""
     gmail = _fake_gmail({"messages": []})
-    list_messages(gmail, {"max": 500})
+    list_messages(gmail, {})
     kwargs = gmail.users.return_value.messages.return_value.list.call_args.kwargs
-    _assert("max clamped to 100", kwargs.get("maxResults") == 100)
+    _assert("no max -> default 500", kwargs.get("maxResults") == 500)
+
+
+def test_list_messages_clamp() -> None:
+    """No override mechanism exists on this verb (§5.3 disclosure-only shape --
+    the default already sits at Gmail's real per-call ceiling, nothing for an
+    override to raise to without pageToken pagination, which this verb does not
+    build): a caller-requested max above 500 clamps DOWN to 500, it does not
+    fail loud and it cannot be raised by any parameter."""
+    gmail = _fake_gmail({"messages": []})
+    list_messages(gmail, {"max": 5000})
+    kwargs = gmail.users.return_value.messages.return_value.list.call_args.kwargs
+    _assert("max clamped to the 500 ceiling", kwargs.get("maxResults") == 500)
+
+
+def test_list_messages_max_below_default_honored() -> None:
+    gmail = _fake_gmail({"messages": []})
+    list_messages(gmail, {"max": 10})
+    kwargs = gmail.users.return_value.messages.return_value.list.call_args.kwargs
+    _assert("a smaller explicit max is honored", kwargs.get("maxResults") == 10)
 
 
 def test_get_message_parse() -> None:
@@ -149,7 +170,9 @@ def main() -> int:
     print("\ng_suite_plugin Gmail smoke tests")
     print("=" * 40)
     test_list_messages_shape()
+    test_list_messages_default_is_500()
     test_list_messages_clamp()
+    test_list_messages_max_below_default_honored()
     test_get_message_parse()
     test_get_message_requires_id()
     test_send_text_only()

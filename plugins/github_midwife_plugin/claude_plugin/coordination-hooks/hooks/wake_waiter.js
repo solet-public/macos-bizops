@@ -17,8 +17,14 @@
 // from the peer inbox (the durable store; the watcher's spool is a tee of
 // notifications, so discarding it here loses nothing).
 //
-// Armed ONLY when ALL of the following hold (silent no-op otherwise):
-//   - AGENT_SESSION_LABEL is set (this is a labeled coordination session);
+// Armed ONLY when ALL of the following hold (silent no-op otherwise). Each is a
+// MECHANICAL precondition — something the waiter needs in order to do anything
+// at all — never a protection:
+//   - AGENT_SESSION_ID is set: the per-session watch spool path DERIVES from
+//     it, so without one there is no spool to wait on and the waiter would
+//     block for ~24h on nothing (a measured failure class). Re-keyed from
+//     AGENT_SESSION_LABEL on 2026-08-01: the label was only ever a PROXY for
+//     having a spool, and the ID is the thing the path is actually built from.
 //   - AGENT_WAKE_CLI is set (the operator's launcher names the CLI to run);
 //   - FLEET_TRANSPORT is unset or "watch" (a declared non-watch transport,
 //     e.g. "mcp", disarms this hook even if the CLI variable is exported —
@@ -30,11 +36,11 @@
 // a one-line fixed-format note carrying only the numeric status — a broken
 // wake path must never trap the session in a failing Stop hook.
 
-const label = process.env.AGENT_SESSION_LABEL;
+const sessionId = process.env.AGENT_SESSION_ID;
 const cli = process.env.AGENT_WAKE_CLI;
 const transport = process.env.FLEET_TRANSPORT;
 
-if (!label || !cli || (transport && transport !== "watch")) {
+if (!sessionId || !cli || (transport && transport !== "watch")) {
   process.exit(0);
 }
 

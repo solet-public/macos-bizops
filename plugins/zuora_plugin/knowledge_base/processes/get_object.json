@@ -2,7 +2,7 @@
   "process_key": "plugin::zuora_plugin::get_object",
   "display_name": "Zuora: Get Object",
   "description": "Fetch one Account/Subscription/Invoice/Payment/Product object by type + id. Requires type and id.",
-  "embedding_description": "Retrieve a single Zuora billing object's fields by its object type (Account, Subscription, Invoice, Payment, or Product) and id. Requires type and id.",
+  "embedding_description": "Read one Zuora billing record of any supported type by id - Account, Subscription, Invoice, Payment, or Product - returning that object's fields. The general-purpose single-record read for Zuora, for when the object type is known but varies at call time; the dedicated invoice and subscription verbs serve the common billing lookups more directly.",
   "result_processor_customizations": {
     "action_label": "Zuora object fetched",
     "result_type": "zuora_get_object_result",

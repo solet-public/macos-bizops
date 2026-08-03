@@ -35,6 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "g_suite_plugin" / "src"))
 
 from g_suite_plugin.sheets_actions import (  # noqa: E402
+    ResultTooLargeError,
     append_values,
     batch_update,
     create_spreadsheet,
@@ -96,6 +97,92 @@ def test_get_values_missing_defaults_empty() -> None:
     sheets = _fake_sheets(get_value={})
     result = get_values(sheets, {"id": "sp1", "range": "Sheet1!A1:B2"})
     _assert("missing values -> empty list", result["values"] == [])
+
+
+def _grid(n_rows: int) -> list[list[str]]:
+    return [[f"r{i}c0", f"r{i}c1"] for i in range(n_rows)]
+
+
+def test_get_values_under_default_returns_inline() -> None:
+    """Business-data limits (2026-08-02, resource guard): a grid within the
+    500-row default returns normally, no error."""
+    sheets = _fake_sheets(get_value={"values": _grid(10)})
+    result = get_values(sheets, {"id": "sp1", "range": "Sheet1!A1:B10"})
+    _assert("under-default grid returns inline", len(result["values"]) == 10)
+
+
+def test_get_values_over_default_fails_loud() -> None:
+    """4-case set, case 1: over the default, fail loud (gsuite.result_too_large
+    via ResultTooLargeError) -- never a silent truncation of the grid."""
+    sheets = _fake_sheets(get_value={"values": _grid(501)})
+    raised = False
+    try:
+        get_values(sheets, {"id": "sp1", "range": "Sheet1!A1:Z100000"})
+    except ResultTooLargeError as exc:
+        raised = True
+        _assert("error names the observed row count", "501" in str(exc), str(exc))
+        _assert("error names the override mechanism", "acknowledge_default_limit_override" in str(exc), str(exc))
+    _assert("501 rows (over the 500 default) fails loud, never truncated", raised)
+
+
+def test_get_values_override_reaches_above_default() -> None:
+    """4-case set, case 2: a valid override raises the effective limit, not
+    silently capped back to 500."""
+    sheets = _fake_sheets(get_value={"values": _grid(800)})
+    result = get_values(
+        sheets,
+        {"id": "sp1", "range": "Sheet1!A1:Z100000", "acknowledge_default_limit_override": True, "row_limit": 900},
+    )
+    _assert("800 rows under an 900 override limit returns inline", len(result["values"]) == 800)
+
+
+def test_get_values_override_pair_required_together() -> None:
+    """4-case set, case 3: either half alone fails loud, names which was missing."""
+    sheets = _fake_sheets(get_value={"values": _grid(5)})
+    raised_flag_only = False
+    try:
+        get_values(sheets, {"id": "sp1", "range": "Sheet1!A1:B5", "acknowledge_default_limit_override": True})
+    except ValueError as exc:
+        raised_flag_only = "row_limit" in str(exc)
+    _assert("override flag alone fails loud, names row_limit", raised_flag_only)
+
+    raised_limit_only = False
+    try:
+        get_values(sheets, {"id": "sp1", "range": "Sheet1!A1:B5", "row_limit": 900})
+    except ValueError as exc:
+        raised_limit_only = "acknowledge_default_limit_override" in str(exc)
+    _assert("row_limit alone fails loud, names the override flag", raised_limit_only)
+
+
+def test_get_values_override_above_hard_cap_refused() -> None:
+    """4-case set, case 4: above the hard cap is refused, names the cap, never clamped."""
+    sheets = _fake_sheets(get_value={"values": _grid(5)})
+    raised = False
+    try:
+        get_values(
+            sheets,
+            {
+                "id": "sp1",
+                "range": "Sheet1!A1:B5",
+                "acknowledge_default_limit_override": True,
+                "row_limit": 1001,
+            },
+        )
+    except ValueError as exc:
+        raised = "1000" in str(exc)
+    _assert("row_limit above the 1000 hard cap is refused, names the cap", raised)
+
+
+def test_get_values_does_not_narrow_the_vendor_call() -> None:
+    """Disclosed limitation: the post-fetch check does not reduce the underlying
+    vendor request size -- the fake vendor is instructed to return exactly what
+    was asked, so the SAME range/spreadsheet_id reach the API regardless of the
+    effective limit (narrowing the requested A1 range is still the caller's
+    job for that)."""
+    sheets = _fake_sheets(get_value={"values": _grid(5)})
+    get_values(sheets, {"id": "sp1", "range": "Sheet1!A1:Z999999"})
+    kwargs = sheets.spreadsheets.return_value.values.return_value.get.call_args.kwargs
+    _assert("the full requested range reaches the vendor call, unmodified", kwargs.get("range") == "Sheet1!A1:Z999999")
 
 
 def test_update_values() -> None:
@@ -343,6 +430,12 @@ def main() -> int:
     test_create_spreadsheet()
     test_get_values_shape()
     test_get_values_missing_defaults_empty()
+    test_get_values_under_default_returns_inline()
+    test_get_values_over_default_fails_loud()
+    test_get_values_override_reaches_above_default()
+    test_get_values_override_pair_required_together()
+    test_get_values_override_above_hard_cap_refused()
+    test_get_values_does_not_narrow_the_vendor_call()
     test_update_values()
     test_update_values_rejects_non_grid()
     test_append_values()

@@ -47,6 +47,7 @@ running homunculus needed).
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -450,8 +451,8 @@ def test_insert_source_strips_text_fields() -> None:
     repo = SessionLedgerRepository(stub)  # type: ignore[arg-type]
     repo.insert_source(
         source_kind=IngestSourceKind.CLAUDE_CODE_LOCAL,
-        root_uri=f"file:///home/dw/.claude/projects{NUL}",
-        account_label=f"dw{NUL}operator",
+        root_uri=f"file:///home/alice/.claude/projects{NUL}",
+        account_label=f"alice{NUL}operator",
     )
     source_writes = [w for w in stub.writes if w.table == TABLE_SOURCE]
     _check(len(source_writes) == 1, "one source write_state issued")
@@ -462,10 +463,10 @@ def test_insert_source_strips_text_fields() -> None:
             "no NUL in insert_source record",
         )
         _check(
-            rec["root_uri"] == "file:///home/dw/.claude/projects",
+            rec["root_uri"] == "file:///home/alice/.claude/projects",
             f"stripped root_uri in record (got {rec['root_uri']!r})",
         )
-        _check(rec["account_label"] == "dwoperator", "stripped account_label in record")
+        _check(rec["account_label"] == "aliceoperator", "stripped account_label in record")
 
 
 # ─── record_attachment ───────────────────────────────────────────────────────
@@ -523,6 +524,32 @@ def test_validator_still_runs_after_strip() -> None:
     )
 
 
+# ─── operator-identity guard ─────────────────────────────────────────────────
+
+_OPERATOR_USERNAME_TOKEN = "d" + "w"
+
+
+def test_source_carries_no_operator_username() -> None:
+    """RED-FIRST (operator-identity parameterization, 2026-07-31): this smoke's
+    own fixture data must never carry the real operator's OS username as a
+    decorative literal — this file ships in every seed (ananta/tests/ is
+    unconditional in seed_manifest.yaml's ``copy:``). The fixture values
+    (``root_uri``, ``account_label``) are arbitrary strings the NUL-stripping
+    logic under test does not interpret, so any neutral placeholder proves the
+    same behavior; there is no functional reason for the real username to
+    appear here. Composed from two concatenated halves (see
+    ``_OPERATOR_USERNAME_TOKEN``) so this guard's OWN source never contains the
+    contiguous token it hunts for. Word-bounded so it does not collide with an
+    unrelated substring.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(_OPERATOR_USERNAME_TOKEN)}(?![A-Za-z0-9_])")
+    _check(
+        pattern.search(source) is None,
+        "fixture source carries no bare operator-username token",
+    )
+
+
 def main() -> int:
     print("=== nul_byte_sanitization_smoke (operator ruling 2026-06-01 option B) ===")
     test_strip_nuls_helper_contract()
@@ -536,6 +563,7 @@ def main() -> int:
     test_insert_source_strips_text_fields()
     test_record_attachment_strips_mime_and_filename()
     test_validator_still_runs_after_strip()
+    test_source_carries_no_operator_username()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

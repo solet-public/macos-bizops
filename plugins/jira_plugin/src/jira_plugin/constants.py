@@ -93,16 +93,42 @@ ADDRESS_BOOK_FIELD_EXPIRES_AT: Final[str] = "expires_at"
 ADDRESS_BOOK_FIELD_SCOPE_NOTE: Final[str] = "scope_note"
 
 # ---------------------------------------------------------------------------
-# Caps + spill
+# Caps (business-data limits, 2026-08-03 operator revision —
+# workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md
+# §0.1/§5.4). Jira EXITED the spill floor (operator veto, "no PII in Jira —
+# just company internal accounts"): jql_search/list_comments are LIMITS-ONLY,
+# g_suite-class -- inline returns, no containment gate, no caller-supplied
+# path. §5.4 (paging-must-be-hidden ruling) also retired §5.3's "nothing to
+# raise to" disposition: the connector now pages INTERNALLY across
+# Atlassian's 100/call vendor ceiling (JQL_PAGE_SIZE / COMMENTS_PAGE_SIZE
+# below) up to the effective row limit and returns ONE complete result --
+# no caller-visible continuation token. That means there IS something for an
+# override to raise (how many internal calls happen), so both verbs get the
+# full acknowledge_default_limit_override/row_limit mechanism (§5), which
+# they previously did not.
 # ---------------------------------------------------------------------------
-JQL_DEFAULT_MAX_RESULTS: Final[int] = 50
-JQL_MAX_RESULTS_CAP: Final[int] = 100
-COMMENTS_DEFAULT_MAX: Final[int] = 50
-COMMENTS_MAX_CAP: Final[int] = 100
-# Beyond this serialized-byte size the JQL result rows spill to a blob instead
-# of returning inline (umbrella design §1.7).
-INLINE_BYTE_CAP: Final[int] = 200_000
-JQL_SPILL_FILENAME: Final[str] = "jql_results.json"
+JQL_PAGE_SIZE: Final[int] = 100
+COMMENTS_PAGE_SIZE: Final[int] = 100
+
+# Effective-limit override pair (§5, §5.4) -- shared by both verbs. CAP=5,000
+# is §5.4's doc-wide default for connectors with no separate bulk-export verb
+# (zuora's LIST_ROW_LIMIT_CAP precedent; Claude-D landed marketo on the same
+# number independently). Latency math (Day-required, §5.4): at DEFAULT_ROW_
+# LIMIT, ceil(500/100)=5 internal calls; at ROW_LIMIT_CAP, ceil(5000/100)=50
+# internal calls -- each a sequential HTTP round-trip inside one verb
+# invocation, disclosed in both verbs' process descriptions.
+DEFAULT_ROW_LIMIT: Final[int] = 500
+ROW_LIMIT_CAP: Final[int] = 5_000
+PARAM_ACKNOWLEDGE_OVERRIDE: Final[str] = "acknowledge_default_limit_override"
+PARAM_ROW_LIMIT: Final[str] = "row_limit"
+
+# Defense-in-depth circuit breaker on the internal pagination loop --
+# independent of ROW_LIMIT_CAP, bounds worst-case call count even if a future
+# cap is raised well past today's 5,000 (mirrors zuora's
+# _MAX_QUERY_MORE_CALLS=64 pattern; sized up since jira's cap/page-size ratio
+# needs 50 calls at today's cap, so 100 gives real headroom). Never expected
+# to bind in practice.
+MAX_INTERNAL_CALLS: Final[int] = 100
 
 # ---------------------------------------------------------------------------
 # Error codes (jira.* prefix — surfaced to callers of the verbs)

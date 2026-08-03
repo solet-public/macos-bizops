@@ -4,11 +4,17 @@
 Hermetic — a faked client returning canned ``httpx.Response`` objects, no
 live tenant.
 
+list_subscriptions / list_invoices moved to smoke_lists.py (business-data
+limits + spill-floor migration, 2026-08-02 — they now write to a
+caller-supplied output_tsv_path under the §5 override mechanism, not an
+inline shape). get_invoice is unaffected (single-record fetch-by-id, §1.2
+exemption) and stays here.
+
 Exercises:
   1. get_object — field passthrough; rejects an unsupported type
   2. create_object — id/success shape; rejects empty fields
   3. update_object — success shape; rejects empty fields
-  4. list_subscriptions / get_invoice / list_invoices — shape
+  4. get_invoice — shape
   5. TOPOLOGY-LEAK (SECURITY): auth/rate-limit classes classify to a GENERIC
      message that NEVER contains the response body's tenant-host marker;
      not-found/validation-failed classes carry response-body detail
@@ -96,22 +102,10 @@ def test_update_object() -> None:
     _assert("update success True", result["success"] is True)
 
 
-def test_list_subscriptions() -> None:
-    client = _fake_client(_response(200, {"subscriptions": [{"Id": "s1"}, {"Id": "s2"}]}))
-    result = billing_actions.list_subscriptions(client, {"account_id": "acc1"})
-    _assert("subscriptions shape", result["subscriptions"] == [{"Id": "s1"}, {"Id": "s2"}])
-
-
 def test_get_invoice() -> None:
     client = _fake_client(_response(200, {"Id": "inv1", "Amount": 100}))
     result = billing_actions.get_invoice(client, {"id": "inv1"})
     _assert("invoice fields carried", result["invoice"]["Amount"] == 100)
-
-
-def test_list_invoices() -> None:
-    client = _fake_client(_response(200, {"invoices": [{"Id": "inv1"}, {"Id": "inv2"}]}))
-    result = billing_actions.list_invoices(client, {"account_id": "acc1"})
-    _assert("invoices shape", result["invoices"] == [{"Id": "inv1"}, {"Id": "inv2"}])
 
 
 def test_classify_topology_leak() -> None:
@@ -162,9 +156,7 @@ def main() -> int:
     test_get_object()
     test_create_object()
     test_update_object()
-    test_list_subscriptions()
     test_get_invoice()
-    test_list_invoices()
     test_classify_topology_leak()
     test_edge_parity()
     print()

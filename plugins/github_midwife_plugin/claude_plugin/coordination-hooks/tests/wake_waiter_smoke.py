@@ -79,9 +79,20 @@ def _stub(directory: Path, name: str, *, exit_code: int | None, chatty: bool = F
 
 
 def _env(marker: Path, cli: Path | str | None, *, label: str | None = LABEL, transport: str | None = None) -> dict[str, str]:
+    """Build a child env for the waiter.
+
+    ★ §7 RE-KEY 2026-08-01: the waiter arms on AGENT_SESSION_ID (identity), not
+    AGENT_SESSION_LABEL. The spool path DERIVES from the id, so the id is the
+    functional precondition; the label was only ever a proxy for having a spool.
+    The `label` parameter is kept and mapped onto the id so every existing
+    disarm-matrix case keeps its meaning — a case that passes `label=None` is
+    asserting "no identity, therefore no spool, therefore silent no-op", which
+    is exactly what it asserted before, now keyed on the variable that is
+    actually load-bearing.
+    """
     env = {MARKER_ENV: str(marker)}
     if label is not None:
-        env["AGENT_SESSION_LABEL"] = label
+        env["AGENT_SESSION_ID"] = label
     if cli is not None:
         env["AGENT_WAKE_CLI"] = str(cli)
     if transport is not None:
@@ -113,11 +124,17 @@ def check_arm_matrix(res: Results, work: Path) -> None:
     cases = (
         ("transport unset", None),
         ("transport watch", "watch"),
-        # Documented divergence, not a ruling: an EMPTY FLEET_TRANSPORT arms the
-        # hook, because `transport && transport !== "watch"` is falsy on "".
-        # The rename skill reads ${FLEET_TRANSPORT:-mcp}, which resolves empty to
-        # "mcp" and would DISarm. Recorded here so a change to either side
-        # surfaces as a test diff rather than a silent behaviour drift.
+        # RULED 2026-07-31 (Architect): an empty FLEET_TRANSPORT is EQUIVALENT
+        # TO UNSET — empty is not a declaration — so it ARMS. This is the
+        # contract, no longer a documented divergence: a hydration bug that
+        # exports "" must never silently kill wakes on a watch deployment.
+        # The hook already behaves this way (`transport && transport !== "watch"`
+        # is falsy on ""); this case pins it so a "tidying" change to that
+        # condition surfaces as a red rather than a silent loss of wakes.
+        # NOTE the asymmetry with the rename skill, which reads
+        # ${FLEET_TRANSPORT:-mcp} and resolves empty to "mcp": that is a
+        # different question (which transport to USE) from this one (was a
+        # transport DECLARED at all), and the two may legitimately differ.
         ("transport empty string", ""),
     )
     for label, transport in cases:

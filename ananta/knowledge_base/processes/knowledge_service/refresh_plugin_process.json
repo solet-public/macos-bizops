@@ -6,7 +6,7 @@
   "result_processor_customizations": {
     "action_label": "Plugin process refreshed",
     "result_type": "process_refresh_result",
-    "result_description": "Confirmation of the single process update with its process key",
+    "result_description": "Confirmation of the single-process refresh: refreshed_process_key (the process key that was reloaded), updated (whether the live registry entry changed), and errors (empty on a clean refresh)",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },

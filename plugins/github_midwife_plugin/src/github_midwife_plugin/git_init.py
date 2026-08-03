@@ -80,6 +80,13 @@ profile/config/vault/
 !.claude/hooks/
 !.claude/commands/
 
+# Business-record classification convention (24_operator_communication/
+# 08_business_record_classification_convention.md): address/value data stays
+# staged here, never committed; logs/reports/checkpoints carry stable
+# identifiers instead. Rename this entry if you use a different staging
+# directory name for the same convention.
+staging/
+
 # OS / IDE
 .DS_Store
 Thumbs.db

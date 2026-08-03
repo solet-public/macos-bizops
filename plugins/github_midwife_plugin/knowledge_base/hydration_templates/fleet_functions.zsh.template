@@ -1,7 +1,7 @@
 # {{HOMUNCULUS_NAME}}-fleet.zsh — OPTIONAL multi-role session functions.
-# Sourced by <clone>/client/{{HOMUNCULUS_NAME}}.zsh ONLY if the operator
+# Sourced by the deployment's client/{{HOMUNCULUS_NAME}}.zsh ONLY if the operator
 # accepted the Step 4a fleet-coordination offer in the hydration runbook.
-# Lives in the clone, same as the single-session launcher, so it arrives
+# Lives in the deployment directory, same as the single-session launcher, so it arrives
 # via `git pull`, never another ~/.zshrc replacement.
 #
 # This is a DIFFERENT trust level than claude-{{HOMUNCULUS_NAME}} (the
@@ -56,6 +56,22 @@
 # machine whose policy blocks MCP there is NO provider setting under which
 # it works. The hydration wizard's MCP path sets both variables together.
 # Defaults are watch + channels OFF; do not suggest MCP unprompted.
+#
+# GIT_CONTROLLER_NAME names the ONE role allowed to mutate git while several
+# sessions share this deployment directory -- the collision this file's whole
+# existence creates, so this is where the gate matters most. The coordination-
+# hooks git gate reads NO session label: its arming boundary is this variable's
+# PRESENCE, which makes the export below the only thing deciding where the gate
+# evaluates. Hydration renders the role name the operator chose in the runbook's
+# git-safety conversation; a solo deployment DELETES the line, and that absence
+# IS the exemption -- no session-count probe implements it, because configuration
+# already does. Both shipped copies (Claude and Codex) read an empty value as
+# unset, so a line rendered blank is disarmed rather than half-armed. Keep this
+# line identical here and in claude-{{HOMUNCULUS_NAME}}: arming one launcher and
+# not the other creates a session class that escapes the gate by which launcher
+# started it. The gate is FAIL-OPEN when unset, so "no block happened" is not
+# evidence it is armed -- prove one real block from a non-controller session
+# before believing it (runbook Step 4a).
 _claude_for_{{HOMUNCULUS_NAME}}() {
   local role="$1"
   local model="$2"    # optional CLI model alias; empty = settings.json default
@@ -67,10 +83,12 @@ _claude_for_{{HOMUNCULUS_NAME}}() {
   [[ "${{{HOMUNCULUS_NAME}}_FLEET_SKIP_PERMISSIONS:-0}" == "1" ]] && extra_flags+=(--dangerously-skip-permissions)
   [[ "${{{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS:-0}" == "1" ]] && extra_flags+=(--dangerously-load-development-channels server:{{HOMUNCULUS_NAME}})
 
+  HOMUNCULUS_NAME="{{HOMUNCULUS_NAME}}" \
   FLEET_TRANSPORT="${{{HOMUNCULUS_NAME}}_FLEET_TRANSPORT:-watch}" \
   AGENT_SESSION_LABEL="$role" \
   AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
   AGENT_WAKE_CLI="{{HOMUNCULUS_NAME}}" \
+  GIT_CONTROLLER_NAME="{{GIT_CONTROLLER_NAME}}" \
   exec claude \
       --name "$role" \
       --remote-control "$role" \

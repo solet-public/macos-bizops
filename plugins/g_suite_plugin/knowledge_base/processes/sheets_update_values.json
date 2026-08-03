@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::sheets_update_values",
   "display_name": "Sheets: Update Values",
   "description": "Overwrite a cell range (A1 notation) in a spreadsheet with a 2D grid of values. Requires a connected account.",
-  "embedding_description": "Overwrite cells in an existing Google Sheets spreadsheet: given a spreadsheet id, an A1-notation range, and a 2D grid of values (a list of row lists), writes those values starting at the range's top-left cell using USER_ENTERED input (so formulas and formatted numbers/dates are interpreted, not stored as literal text). Existing cells in the range not covered by the new grid are left untouched. Distinct from sheets_append_values, which adds new rows after the last row of a table instead of overwriting a fixed range. Returns the count of cells updated. Fails gsuite.invalid_params if values is empty or not a list of lists.",
+  "embedding_description": "Write a 2D grid into an existing Google Sheets spreadsheet, starting at the top-left cell of an A1 range and interpreting formulas, dates, and formatted numbers as user-entered values. The grid dimensions define the cells replaced; the rest of the named range retains its existing contents.",
   "result_processor_customizations": {
     "action_label": "Spreadsheet values updated",
     "result_type": "g_suite_sheets_update_values_result",

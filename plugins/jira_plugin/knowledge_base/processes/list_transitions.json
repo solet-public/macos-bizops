@@ -2,7 +2,7 @@
   "process_key": "plugin::jira_plugin::list_transitions",
   "display_name": "Jira: List Transitions",
   "description": "List the workflow transitions available from a Jira issue's current status (id/name/to_status). Read action.",
-  "embedding_description": "Discover which workflow moves are currently possible for a Jira issue — returns each available transition's id, name, and the target status it leads to, given the issue's present state and the project's workflow. Call this before transition_issue to choose the right transition id (they are workflow-specific, not global). Distinct from transition_issue (actually perform a move) and get_issue (the issue's current status only).",
+  "embedding_description": "Discover which workflow moves are currently available for a Jira issue: each possible transition's id, name, and the status it leads to, given the issue's present state and its project's workflow. Call it to choose a transition id before moving an issue, since the ids are workflow-specific rather than global.",
   "result_processor_customizations": {
     "action_label": "Jira transitions listed",
     "result_type": "jira_list_transitions_result",

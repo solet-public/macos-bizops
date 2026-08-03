@@ -42,6 +42,9 @@ from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
 )
 
 from agent_messaging_plugin import role_claim as role_claim_module  # noqa: E402
+from agent_messaging_plugin.bridge_sessions import (  # noqa: E402
+    DEFAULT_BINDING_LIVENESS_WINDOW_S,
+)
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.peer_registry import PeerUnreachableError  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
@@ -389,11 +392,21 @@ class _DirectRegistry:
     def wake_adapter_for(self, agent_id: str) -> _WakeAdapter | None:
         return self._adapter
 
+    def agent_session_id_for_instance(self, agent_instance_id: str) -> str:
+        del agent_instance_id
+        return "ases-sender"
+
     def touch_binding(self, agent_instance_id: str) -> int:
         return 0
 
 
 class _DirectManager:
+
+    # WS-2a W3: the dispatch liveness gate reads this off its bridge_manager
+    # collaborator, so a stand-in must carry it too.
+    @property
+    def binding_liveness_window_s(self) -> int:
+        return DEFAULT_BINDING_LIVENESS_WINDOW_S
     def get(self, bridge_id: str) -> None:
         return None
 
@@ -473,6 +486,73 @@ def test_prose_is_role_agnostic() -> None:
     conf = _new_holder_prose(_ARBITRARY_ROLE)
     _check(_ARBITRARY_ROLE in disp, "displaced prose carries the arbitrary role verbatim")
     _check(_ARBITRARY_ROLE in conf, "new-holder prose carries the arbitrary role verbatim")
+
+
+def test_new_holder_notice_names_the_pull_contract() -> None:
+    """Walkback Fix (B), §7/§10.2 — the notice text is the load-bearing guard.
+
+    (B) makes the role section seed silently on an empty ``role_high_water``;
+    that is only safe because a new role holder is told, at claim time, to
+    pull its own backlog. The Architect's ruling
+    (workbench/2026-08-01_architect_walkback_per_section_seeding_ruling.md
+    §10.2) retired the previously-cited guard —
+    ``handover_notice_runnable_smoke`` has never existed in the tree or the
+    gate register (Claude-B, repo-wide ``rg -F`` sweep, zero test-file hits) —
+    and required a NEW content-level leg in its place.
+
+    Asserted on the STRING ``notify_role_handover`` actually dispatches
+    through the real orchestration (via ``_RecordingNotifier``, which
+    monkeypatches the shared ``send_handover_notice`` seam both the verb and
+    the bridge route call), never a source grep: the prose is assembled from
+    f-string fragments spanning more than one literal in ``new_holder_prose``,
+    so a literal-string search over source would miss a wrapped instruction.
+    """
+    plugin = _RecordingNotifier()
+    plugin.notify(
+        name=_ARBITRARY_ROLE,
+        new_agent_id="claude_code",
+        new_agent_instance_id="agi-new",
+        new_agent_session_id="sess-new",
+        prior=None,
+    )
+    prose = plugin.notices[-1]["prose"]
+    _check("peer_inbox" in prose, "notice names the peer_inbox process key")
+    _check(
+        "include_important=true" in prose,
+        "notice tells the holder to pass include_important=true",
+    )
+    _check(
+        "role_after" in prose and "next_role_cursor" in prose,
+        "notice tells the holder to page role_after until next_role_cursor is null",
+    )
+
+
+def test_new_holder_notice_is_pull_shaped_never_a_push_claim() -> None:
+    """(B) bindings — pin as a leg, not a commit-time grep (Claude-B, binding 5).
+
+    Checked CLEAN at the time: the notice makes no push claim in either
+    direction — every verb is pull-shaped (drain, page, waiting) — and (B)'s
+    entire safety argument depends on that staying true, since (B) itself
+    pushes nothing for an empty role mark. A grep run once is not a guard;
+    this pins it.
+    """
+    plugin = _RecordingNotifier()
+    plugin.notify(
+        name=_ARBITRARY_ROLE,
+        new_agent_id="claude_code",
+        new_agent_instance_id="agi-new",
+        new_agent_session_id="sess-new",
+        prior=None,
+    )
+    prose = plugin.notices[-1]["prose"]
+    _check("drain" in prose.lower(), "notice uses a pull verb (drain)")
+    _check(
+        not any(
+            phrase in prose.lower()
+            for phrase in ("will be pushed", "you will receive", "will be sent to you")
+        ),
+        "notice makes no push-delivery claim",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -717,6 +797,8 @@ def main() -> int:
     test_notice_unreachable_never_raises_claim_survives()
     test_notice_skipped_when_bridge_not_started()
     test_prose_is_role_agnostic()
+    test_new_holder_notice_names_the_pull_contract()
+    test_new_holder_notice_is_pull_shaped_never_a_push_claim()
     test_settle_public_result_is_json_serializable()
     test_settle_public_result_covers_every_declared_schema_property()
     test_startup_backfills_no_legacy_role_write()

@@ -35,8 +35,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
-from ananta.llm.agent_messaging.models import TextPart  # noqa: E402
+from ananta.llm.agent_messaging.models import (  # noqa: E402
+    RoleMessagePersisted,
+    TextPart,
+)
 
+from agent_messaging_plugin.bridge_sessions import (  # noqa: E402
+    DEFAULT_BINDING_LIVENESS_WINDOW_S,
+)
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.peer_dispatch import (  # noqa: E402
     DELIVERY_PERSISTED_SILENT,
@@ -47,6 +53,11 @@ from agent_messaging_plugin.peer_dispatch import (  # noqa: E402
 )
 from agent_messaging_plugin.peer_registry import PeerUnreachableError  # noqa: E402
 from agent_messaging_plugin.peer_role_management import ResolvedRole  # noqa: E402
+
+# A fake stands in for the persisted ROW's created_at. Distinctive on purpose:
+# a test asserting the wire meta carries THIS value cannot accidentally pass on
+# a clock reading taken inside the code under test.
+_ROW_CREATED_AT = "2026-08-01T00:00:00.000001+00:00"
 
 _passed = 0
 _failed: list[str] = []
@@ -67,9 +78,12 @@ class _FakeService:
         self.persisted: list[dict[str, Any]] = []
         self.delivered: list[str] = []
 
-    def persist_role_message(self, **kwargs: Any) -> str:
+    def persist_role_message(self, **kwargs: Any) -> RoleMessagePersisted:
         self.persisted.append(kwargs)
-        return str(kwargs["message_id"])
+        return RoleMessagePersisted(
+            message_id=str(kwargs["message_id"]),
+            created_at=_ROW_CREATED_AT,
+        )
 
     def mark_delivered(self, *, external_id: str) -> None:
         self.delivered.append(external_id)
@@ -113,6 +127,14 @@ class _FakePeerRegistry:
 
 
 class _FakeBridgeManager:
+
+    # WS-2a W3: the dispatch liveness gate reads this off its bridge_manager
+    # collaborator. A fake that omits it is not standing in for the real
+    # manager — and a defensive getattr in the production path would hide
+    # exactly that, so the CONTRACT is satisfied here instead.
+    @property
+    def binding_liveness_window_s(self) -> int:
+        return DEFAULT_BINDING_LIVENESS_WINDOW_S
     def __init__(self) -> None:
         self.events: list[tuple[str, str, str, dict[str, object]]] = []
 
@@ -215,6 +237,15 @@ def test_important_live_channel_event() -> None:
         and meta.get("delivery_external_id") == "role:Architect:arm-test",
         "queued_notification event carries recipient_kind/recipient_key/delivery_external_id",
     )
+    # (A) server half: the PERSISTED ROW's created_at rides the wire, so the
+    # holder's watcher can advance role_high_water from a live delivery using
+    # the same quantity the role-inbox section pages on. Asserted as the exact
+    # value the persistence layer returned — a clock read taken inside dispatch
+    # would be a different quantity and would fail here.
+    _check(
+        meta.get("role_created_at") == _ROW_CREATED_AT,
+        "queued_notification event carries the persisted row's created_at",
+    )
 
 
 def test_important_native_wake() -> None:
@@ -242,6 +273,14 @@ def test_important_native_wake() -> None:
         and wake_meta.get("recipient_key") == "Architect"
         and wake_meta.get("delivery_external_id") == "role:Architect:arm-test",
         "native wake carries the role keys (delivery_meta) for forwarder confirmation",
+    )
+    # (A) server half, BOTH transports. The native wake is the same bridge
+    # queue, so a watcher woken this way must be able to advance its mark too —
+    # stamping only the channel-event path would leave wake-delivered role mail
+    # replaying forever on the arm after it.
+    _check(
+        wake_meta.get("role_created_at") == _ROW_CREATED_AT,
+        "native wake carries the persisted row's created_at (delivery_meta)",
     )
 
 

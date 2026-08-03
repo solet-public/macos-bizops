@@ -63,9 +63,10 @@ Salesforce SDK dependency at all. Three CLI surfaces are in play:
   expose. No manual pagination: `sf data query` runs on jsforce with
   `autoFetch: true` internally, so it already collects every page up to a
   fetch cap before returning; `SF_ORG_MAX_QUERY_LIMIT` is passed as a
-  subprocess env override to cap that fetch at `max_records` server-side,
-  and the result is sliced to `max_records` again client-side as
-  defense-in-depth.
+  subprocess env override to cap that fetch at the effective row limit
+  server-side (500 by default, up to 1000 with an acknowledged override —
+  see the verb map below), and the result is sliced to that same limit
+  again client-side as defense-in-depth.
 
 The org binding (host pin) is verified exactly ONCE per process lifetime,
 lazily, on first call (`client.py::SalesforceCliExecutor._verify_org_binding`
@@ -166,8 +167,8 @@ that user's permissions, and its audit trail shows that user.
 | Verb | Args | Returns |
 |---|---|---|
 | `test_connection` | — | `{ok, org_id, username, api_version}` |
-| `soql_query` | `query`, `max_records?` | `{records, total_size, row_count, spilled=false}` inline; fails loud with `sf.result_too_large` over the inline byte cap |
-| `export_soql` | `query`, `output_tsv_path` | `{path, columns, row_count, total_size, truncated}` — full result (up to 50000 records) written as ONE `.tsv` file at the caller's ABSOLUTE path |
+| `soql_query` | `query`, `output_tsv_path`, `acknowledge_default_limit_override=false`, `row_limit?` | `{path, columns, row_count, total_size, truncated}` — written as ONE `.tsv` file at the caller's ABSOLUTE path, never records inline; defaults to 500 records, up to 1000 with an acknowledged override |
+| `export_soql` | `query`, `output_tsv_path`, `acknowledge_default_limit_override=false`, `row_limit?` | `{path, columns, row_count, total_size, truncated}` — the N>>500 route: same shape as soql_query, defaults to 500 records, up to 50000 with an acknowledged override |
 | `get_record` | `sobject`, `id`, `fields?` | `{record}` |
 | `describe_sobject` | `sobject` | `{fields:[{name, type, label, nillable, updateable}]}` |
 | `list_sobjects` | — | `{sobjects:[{name, label}]}` |
@@ -175,20 +176,30 @@ that user's permissions, and its audit trail shows that user.
 | `update_record` | `sobject`, `id`, `fields` | `{success}` |
 | `delete_record` | `sobject`, `id` | `{success}` (permanent — see read/write posture) |
 
-`export_soql` writes to the operator's OWN workspace, never platform blob
-storage (operator ruling 2026-07-15). The path must be absolute, end in
-`.tsv`, and lie under an operator-configured `export_allowed_roots` entry in
-this plugin's config — realpath + `commonpath` containment mirroring
-`ledger_allowed_roots`; the default `[]` REFUSES every export. Nested
-relationship objects serialize as JSON text in their cells. `soql_query` is
-the interactive sibling: inline only, no blob spill — an over-cap result
-fails loud pointing at `export_soql`.
+Both `soql_query` and `export_soql` ALWAYS write their result to the
+caller's `output_tsv_path` — never records inline, at any size
+(business-data limits + spill-floor migration, 2026-08-02; the former
+inline-return/byte-cap branch is deleted, not lowered). Neither destination
+is platform blob storage (operator ruling 2026-07-15); the path must be
+absolute, end in `.tsv`, and lie under an operator-configured
+`export_allowed_roots` entry in this plugin's config — realpath +
+`commonpath` containment mirroring `ledger_allowed_roots`; the default `[]`
+REFUSES every write. Nested relationship objects serialize as JSON text in
+their cells. Each defaults to 500 records absent an acknowledged override;
+`soql_query`'s override ceiling is 1000, `export_soql`'s is 50000 (the
+N>>500 route). `acknowledge_default_limit_override=true` together with an
+explicit `row_limit` requests more than the default — both are required
+together, and a `row_limit` above the verb's hard cap is refused, never
+silently clamped. Neither verb has a vendor-imposed ceiling to defer to:
+this plugin never executes Apex, so the 50,000-record Apex governor limit
+does not apply; the actual Salesforce fact for this call path is a
+2,000-record REST query batch size with no vendor total ceiling, and
+jsforce's `autoFetch` already pages past that internally.
 
 Errors are typed with the `sf.*` prefix: `sf.not_configured`,
 `sf.invalid_params`, `sf.auth_failed`, `sf.session_expired`,
 `sf.permission_denied`, `sf.not_found`, `sf.malformed_query`,
-`sf.rate_limited`, `sf.api_error`, `sf.result_too_large`,
-`sf.export_path_refused`.
+`sf.rate_limited`, `sf.api_error`, `sf.export_path_refused`.
 
 ## Security posture (mirrors the Jira/Snowflake/external-Postgres wave)
 

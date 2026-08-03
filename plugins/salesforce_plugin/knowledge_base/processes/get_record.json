@@ -2,7 +2,7 @@
   "process_key": "plugin::salesforce_plugin::get_record",
   "display_name": "Salesforce: Get Record",
   "description": "Fetch one record by sobject + id, optionally trimmed to specific fields. Requires sobject and id.",
-  "embedding_description": "Retrieve a single Salesforce record's fields by its object type and id (e.g. a specific Account or Contact), optionally limited to a chosen field list. Requires sobject (the object API name) and id.",
+  "embedding_description": "Read one Salesforce CRM record by object type and record id, optionally limiting the response to a chosen field list. Use this focused single-record lookup when you already hold the API object name and id for an Account, Contact, Opportunity, or custom object.",
   "result_processor_customizations": {
     "action_label": "Salesforce record fetched",
     "result_type": "salesforce_get_record_result",

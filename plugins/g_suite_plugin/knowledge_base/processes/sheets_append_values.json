@@ -2,7 +2,7 @@
   "process_key": "plugin::g_suite_plugin::sheets_append_values",
   "display_name": "Sheets: Append Values",
   "description": "Append a 2D grid of values after the last row of a range's table in a spreadsheet. Requires a connected account.",
-  "embedding_description": "Append new rows to a Google Sheets spreadsheet: given a spreadsheet id, an A1-notation table range, and a 2D grid of values (a list of row lists), Google Sheets finds the last row of data in that table and inserts the new rows immediately after it, using USER_ENTERED input. Distinct from sheets_update_values, which overwrites a fixed range instead of growing a table. Use this for log-style or growing datasets where you do not want to track the current last row yourself. Returns the count of cells updated by the append. Fails gsuite.invalid_params if values is empty or not a list of lists.",
+  "embedding_description": "Append new rows to a Google Sheets spreadsheet: given the spreadsheet id, an A1-notation table range, and a grid of row values, Sheets finds the last populated row in that table and inserts the new rows immediately after it. Values are entered as a user would type them. Adds rows while leaving existing data in place.",
   "result_processor_customizations": {
     "action_label": "Spreadsheet rows appended",
     "result_type": "g_suite_sheets_append_values_result",

@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 "use strict";
 
-// SessionStart + UserPromptSubmit hook. Silent no-op unless AGENT_SESSION_LABEL
-// is set. Reads the hook_event_name Claude Code passes on stdin so the same
-// script serves both events without guessing which one fired.
+// SessionStart + UserPromptSubmit hook. Reads the hook_event_name Claude Code
+// passes on stdin so the same script serves both events without guessing which
+// one fired.
+//
+// ARM CONDITION: AGENT_SESSION_ID present — IDENTITY, not label. This is a
+// FUNCTIONAL precondition, never a protection: the inbox is keyed on identity,
+// so without one there is no addressable inbox and the reminder would advertise
+// an action that cannot resolve. Re-keyed from AGENT_SESSION_LABEL on
+// 2026-08-01; the label was never what made the inbox reachable.
 
-const label = process.env.AGENT_SESSION_LABEL;
-if (!label) {
+const sessionId = process.env.AGENT_SESSION_ID;
+if (!sessionId) {
   process.exit(0);
 }
 

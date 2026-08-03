@@ -71,6 +71,15 @@ _STATIC_REVIEW_BOUNDARY: Final[dict[str, str]] = {
     "network": "not_used_by_fingerprint",
     "sandbox": "not_entered",
 }
+# Performance BENCHMARKING is out of scope by ruling (2026-07-31): this is not a
+# performance-analysis toolset. `adapter_missing` asserted an INTENT we do not have
+# ("we should do this and lack the adapter"); this status asserts the truth instead.
+# The row is KEPT rather than dropped so the coverage artifact can state what was not
+# covered with the denominator visible — an out-of-scope row is the shape that carries.
+# ⚠ The execution boundary deliberately STAYS `_TARGET_TOOL_BOUNDARY`: the status
+# records our intent, the boundary records a PROPERTY of the capability (performing it
+# would run target-controlled code), and that property is still true of the hypothetical.
+_OUT_OF_SCOPE_STATUS: Final[str] = "out_of_scope"
 _FINGERPRINT_COVERAGE_AUTHORITY: Final[str] = (
     "The fingerprint selects routing needs only and never reports execution, pass, or clean."
 )
@@ -138,7 +147,7 @@ def _component_capability_rows(
         ),
         (
             "runtime_performance",
-            "adapter_missing",
+            _OUT_OF_SCOPE_STATUS,
             "eligible direct client-runtime declaration",
             _RUNTIME_PERFORMANCE_COMPONENTS,
             _TARGET_TOOL_BOUNDARY,
@@ -200,20 +209,23 @@ def _manifest_evidence(item: Mapping[str, object], key: str) -> list[dict[str, s
 def _deno_capability_rows(
     deno_scopes: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
+    # Status is per-spec, not per-loop: `runtime_performance` is out of scope by ruling
+    # while `deno_check_lint_test` genuinely lacks an adapter. A single hardcoded status
+    # here would have silently re-asserted the false claim for the deno emission site.
     specs = (
-        ("deno_check_lint_test", "eligible parsed deno runtime manifest"),
-        ("runtime_performance", "eligible parsed deno runtime manifest"),
+        ("deno_check_lint_test", "adapter_missing", "eligible parsed deno runtime manifest"),
+        ("runtime_performance", _OUT_OF_SCOPE_STATUS, "eligible parsed deno runtime manifest"),
     )
     rows: list[dict[str, object]] = []
     for runtime in deno_scopes:
         if runtime.get("status") != "runtime_declared" or not _routing_eligible(runtime):
             continue
-        for capability_key, trigger in specs:
+        for capability_key, status, trigger in specs:
             rows.append(
                 _capability_row(
                     capability_key=capability_key,
                     scope=str(runtime["scope"]),
-                    status="adapter_missing",
+                    status=status,
                     trigger=trigger,
                     evidence=_manifest_evidence(runtime, "manifest_evidence"),
                     boundary=_TARGET_TOOL_BOUNDARY,

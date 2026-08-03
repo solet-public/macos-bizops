@@ -10,7 +10,7 @@ import dataclasses
 import json
 import logging
 import re
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from ananta.core.domain.enums import ActionStatus
 from ananta.core.domain.status import is_status_match
@@ -36,6 +36,22 @@ class IOInterfaceRegistryProtocol(Protocol):
         ...
 
 logger = logging.getLogger(__name__)
+
+# Non-secret ROUTING/display identity a bridge process_call flow carries into
+# the handler's ``state`` (never an authenticated principal — that rides
+# ``authenticated_principal`` and is lifted separately). Two families:
+# ``inference_vertex_*`` is the originating bridge's OWN registered identity
+# (REL-01 Fork 4); ``caller_attribution_*`` is the server-derived provenance of
+# a caller holding no registered bridge identity of its own (§34.6, the local
+# CLI). Every value is a plain string, so one copy loop lifts both.
+_CALLER_IDENTITY_KEYS: Final[tuple[str, ...]] = (
+    "inference_vertex_role",
+    "inference_vertex_session_id",
+    "caller_attribution_agent_id",
+    "caller_attribution_instance_id",
+    "caller_attribution_label",
+    "caller_attribution_role",
+)
 
 
 class ActionRecorderProtocol(Protocol):
@@ -991,6 +1007,14 @@ class ActionProcessor:
         (reconnect-surviving) rather than ``system:scheduler``, making role-addressed
         sends two-way. Degrade-silent: a missing / roleless / lookup-failed
         ``trigger_data`` leaves ``state`` untouched — roleless is a valid path.
+
+        §34.6 adds the sibling ``caller_attribution_*`` family, stamped by
+        ``PlatformSurface._resolve_caller_attribution`` for a caller that holds
+        no registered bridge identity of its own (the local CLI's one-shot
+        bridge). Its content is likewise SERVER-DERIVED — read out of the peer
+        registry, never out of the request — and it is a separate key family on
+        purpose: the send verbs stamp a sender from it, while nothing routes
+        inference by it.
         """
         if not action.flow_id:
             return
@@ -1000,12 +1024,10 @@ class ActionProcessor:
             return
         if not isinstance(trigger_data, dict):
             return
-        role = trigger_data.get("inference_vertex_role")
-        if isinstance(role, str) and role:
-            state["inference_vertex_role"] = role
-        origin_instance = trigger_data.get("inference_vertex_session_id")
-        if isinstance(origin_instance, str) and origin_instance:
-            state["inference_vertex_session_id"] = origin_instance
+        for key in _CALLER_IDENTITY_KEYS:
+            value = trigger_data.get(key)
+            if isinstance(value, str) and value:
+                state[key] = value
 
     def _execute_plugin_method(
         self,

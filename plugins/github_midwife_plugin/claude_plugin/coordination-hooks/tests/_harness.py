@@ -50,6 +50,14 @@ TESTS_DIR = PLUGIN_ROOT / "tests"
 # reach a child process unless the calling case passes it explicitly.
 GUARD_VARS = (
     "AGENT_SESSION_LABEL",
+    # ⚠ LOAD-BEARING for every identity-keyed negative control. The fleet
+    # launcher EXPORTS AGENT_SESSION_ID, so a "negative" case that merely
+    # declines to set it would INHERIT the parent session's real id, arm the
+    # hook it meant to disarm, and pass vacuously. Scrubbing it here is the
+    # `env -u` discipline applied at the harness rather than per-case.
+    # Added 2026-08-01 with the §7 re-key, which moved check_messages and
+    # wake_waiter off the label and onto this variable.
+    "AGENT_SESSION_ID",
     "AGENT_WAKE_CLI",
     "FLEET_TRANSPORT",
     "GIT_CONTROLLER_NAME",

@@ -2,11 +2,17 @@
 
 Same shape as g_suite's action modules: take an already-built (read-only)
 connection and a ``params`` dict, return plain result dicts. Export-path
-containment (``path_gate``, export_query) is injected. Interactive reads are
-inline-only: an over-cap result raises ``ResultTooLargeError`` (A4 — no blob
-spill). Invalid params raise ``ValueError`` (-> external_pg.invalid_params);
-guard violations raise ``StatementGuardError``; psycopg errors propagate to
-the plugin's ``classify_pg_error``.
+containment (``path_gate``) is injected. Both ``run_query`` and
+``export_query`` ALWAYS write their result to the caller-supplied
+``output_tsv_path`` and return a handle only — never rows inline, at any size
+(business-data limits + spill-floor migration, 2026-08-02; the former
+inline-return/``INLINE_BYTE_CAP`` branch is deleted, not lowered). The
+effective row ceiling is DEFAULT_ROW_LIMIT unless the caller supplies BOTH
+``acknowledge_default_limit_override=true`` and an explicit ``row_limit`` (up
+to the verb's hard cap) — see ``_resolve_effective_limit``. Invalid params
+raise ``ValueError`` (-> external_pg.invalid_params); guard violations raise
+``StatementGuardError``; psycopg errors propagate to the plugin's
+``classify_pg_error``.
 
 This module is S2-exempt (whole-file): its ``information_schema`` SELECTs and the
 caller's own ``run_query``/``export_query`` text target the FOREIGN database only
@@ -19,17 +25,16 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import os
 from collections.abc import Callable
 from typing import Any
 
 from .constants import (
-    ERROR_RESULT_TOO_LARGE,
+    DEFAULT_ROW_LIMIT,
     EXPORT_ROW_CAP,
-    INLINE_BYTE_CAP,
-    INLINE_ROW_CAP_DEFAULT,
     MAX_ROWS_HARD_CAP,
+    PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_ROW_LIMIT,
 )
 from .statement_guard import assert_read_statement, assert_single_statement
 
@@ -38,25 +43,24 @@ from .statement_guard import assert_read_statement, assert_single_statement
 # export_allowed_roots config (export_containment.assert_export_path_allowed).
 PathGate = Callable[[str], str]
 
-
-class ResultTooLargeError(RuntimeError):
-    """An interactive read overflowed the inline caps (A4: fail loud, no spill)."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.code = ERROR_RESULT_TOO_LARGE
-
 _SYSTEM_SCHEMAS = ("pg_catalog", "information_schema", "pg_toast")
 
 
-def run_query(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Run one read-only statement; return rows inline (fails loud over the caps)."""
+def run_query(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Run one read-only statement; write the result to output_tsv_path, return a handle.
+
+    Defaults to DEFAULT_ROW_LIMIT rows; an acknowledged override may request
+    up to MAX_ROWS_HARD_CAP. For pulls beyond that ceiling, use export_query
+    (up to EXPORT_ROW_CAP with the same override).
+    """
+    effective_limit = _resolve_effective_limit(
+        params, default=DEFAULT_ROW_LIMIT, hard_cap=MAX_ROWS_HARD_CAP, verb="run_query",
+    )
     sql = _require_str(params, "sql")
-    max_rows = _clamp_max_rows(params.get("max_rows"))
+    output_tsv_path = _require_str(params, "output_tsv_path")
     assert_single_statement(sql)
     assert_read_statement(sql)
-    columns, rows = _execute_fetch(conn, sql, max_rows)
-    return _shape_rows(columns, rows, max_rows)
+    return _execute_and_write_tsv(conn, sql, effective_limit, path_gate, output_tsv_path)
 
 
 def list_schemas(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -137,15 +141,72 @@ def test_connection(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def export_query(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
-    """Export a read-only query's full result (up to EXPORT_ROW_CAP) as a workspace TSV.
+    """Export a read-only query's result as a workspace TSV — the N>>500 route.
 
-    The full result set lands as ONE tab-separated file at the caller's
-    absolute ``output_tsv_path`` — admitted by the injected containment gate,
-    never platform blob storage (A2, operator-ruled 2026-07-15). The gate runs
-    BEFORE the statement executes, so a refused path never sends the query.
+    Same caller-supplied-path destination and override mechanism as
+    run_query; only the override's hard cap differs (EXPORT_ROW_CAP, not
+    MAX_ROWS_HARD_CAP). Absent the override this also defaults to
+    DEFAULT_ROW_LIMIT — for the common small/default case, run_query has an
+    identical interface with a lower ceiling. The gate runs BEFORE the
+    statement executes, so a refused path never sends the query.
     """
+    effective_limit = _resolve_effective_limit(
+        params, default=DEFAULT_ROW_LIMIT, hard_cap=EXPORT_ROW_CAP, verb="export_query",
+    )
     sql = _require_str(params, "sql")
     output_tsv_path = _require_str(params, "output_tsv_path")
+    assert_single_statement(sql)
+    assert_read_statement(sql)
+    return _execute_and_write_tsv(conn, sql, effective_limit, path_gate, output_tsv_path)
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
+
+def _resolve_effective_limit(
+    params: dict[str, Any], *, default: int, hard_cap: int, verb: str,
+) -> int:
+    """Resolve the effective fetch ceiling from the §5 override pair.
+
+    Absent (or ``acknowledge_default_limit_override`` not exactly ``True``)
+    with no ``row_limit``: returns ``default``. Both must be given together —
+    the override flag alone, or ``row_limit`` alone, fails loud rather than
+    silently honoring half. A ``row_limit`` above ``hard_cap`` is refused,
+    never silently clamped back down.
+    """
+    override = params.get(PARAM_ACKNOWLEDGE_OVERRIDE)
+    row_limit = params.get(PARAM_ROW_LIMIT)
+    override_present = override is True
+    row_limit_present = row_limit is not None
+    if override_present != row_limit_present:
+        raise ValueError(
+            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
+            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
+            f"{PARAM_ROW_LIMIT}={row_limit!r}"
+        )
+    if not override_present:
+        return default
+    if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
+    if row_limit > hard_cap:
+        raise ValueError(
+            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
+            f"{hard_cap}; refusing rather than silently clamping"
+        )
+    return row_limit
+
+
+def _execute_and_write_tsv(
+    conn: Any, sql: str, cap: int, path_gate: PathGate, output_tsv_path: str,
+) -> dict[str, Any]:
+    """Admit the path, fetch up to ``cap`` rows, write a TSV, return a handle.
+
+    The containment gate runs BEFORE the statement executes, so a refused
+    path never sends the query. ``fetchmany(cap)`` bounds the fetch at the
+    cursor/network level — never fetch-everything-then-truncate.
+    """
     resolved_path = path_gate(output_tsv_path)
     parent_dir = os.path.dirname(resolved_path)
     if not os.path.isdir(parent_dir):
@@ -153,9 +214,7 @@ def export_query(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict
             f"the parent directory of output_tsv_path does not exist ({parent_dir}); "
             "create it first — this verb writes one file, it does not create directories"
         )
-    assert_single_statement(sql)
-    assert_read_statement(sql)
-    columns, rows = _execute_fetch(conn, sql, EXPORT_ROW_CAP)
+    columns, rows = _execute_fetch(conn, sql, cap)
     row_lists = [_row_to_list(r) for r in rows]
     with open(resolved_path, "wb") as handle:
         handle.write(_to_tsv(columns, row_lists))
@@ -163,13 +222,8 @@ def export_query(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict
         "path": resolved_path,
         "row_count": len(row_lists),
         "columns": columns,
-        "truncated": len(row_lists) >= EXPORT_ROW_CAP,
+        "truncated": len(row_lists) >= cap,
     }
-
-
-# ---------------------------------------------------------------------------
-# Internals
-# ---------------------------------------------------------------------------
 
 
 def _execute_fetch(conn: Any, sql: str, cap: int) -> tuple[list[str], list[tuple[Any, ...]]]:
@@ -180,45 +234,8 @@ def _execute_fetch(conn: Any, sql: str, cap: int) -> tuple[list[str], list[tuple
     return columns, rows
 
 
-def _shape_rows(
-    columns: list[str], rows: list[tuple[Any, ...]], max_rows: int
-) -> dict[str, Any]:
-    # rows are list-of-lists PARALLEL to columns (NOT dicts) so duplicate column
-    # names — routine in JOINs, e.g. SELECT a.id, b.id — never collapse and lose
-    # a value. Column order + duplicates are preserved faithfully.
-    row_lists = [_row_to_list(r) for r in rows]
-    payload = _to_json(columns, row_lists)
-    # The row bound is the CALLER'S effective max_rows (already clamped to the
-    # hard cap) — comparing against the 200 default here made every legal
-    # max_rows=201..1000 request fail loud after a successful fetch (found live
-    # on the snowflake sibling, 2026-07-16; same copy-pasted arm here). The row
-    # arm survives only as a belt against a driver that over-returns
-    # fetchmany(cap); the byte cap is the absolute guardrail.
-    if len(row_lists) > max_rows or len(payload) > INLINE_BYTE_CAP:
-        # A4 (2026-07-16): FAIL LOUD, never spill to platform blob storage.
-        raise ResultTooLargeError(
-            f"the result is too large to return inline ({len(row_lists)} rows / "
-            f"{len(payload)} bytes vs caps {max_rows} rows / "
-            f"{INLINE_BYTE_CAP} bytes); narrow the query (LIMIT / max_rows) for an "
-            "interactive answer, or use export_query with an absolute "
-            "output_tsv_path to land the full result set as a workspace TSV file"
-        )
-    return {
-        "columns": columns,
-        "rows": row_lists,
-        "row_count": len(row_lists),
-        "spilled": False,
-    }
-
-
 def _row_to_list(row: tuple[Any, ...]) -> list[Any]:
     return [_jsonable(val) for val in row]
-
-
-def _to_json(columns: list[str], row_lists: list[list[Any]]) -> bytes:
-    return json.dumps(
-        {"columns": columns, "rows": row_lists}, default=str, ensure_ascii=False
-    ).encode("utf-8")
 
 
 def _to_tsv(columns: list[str], row_lists: list[list[Any]]) -> bytes:
@@ -234,12 +251,6 @@ def _jsonable(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     return str(value)
-
-
-def _clamp_max_rows(raw: Any) -> int:
-    if not isinstance(raw, int) or isinstance(raw, bool):
-        return INLINE_ROW_CAP_DEFAULT
-    return max(1, min(MAX_ROWS_HARD_CAP, raw))
 
 
 def _require_str(params: dict[str, Any], key: str) -> str:

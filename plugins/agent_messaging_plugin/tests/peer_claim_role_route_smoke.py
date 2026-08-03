@@ -103,6 +103,20 @@ class _NoOwedDirectWakeService:
         del agent_session_id, new_agent_instance_id
         return 0
 
+    def rehome_owed_role_wakes(
+        self, *, agent_session_id: str, new_agent_instance_id: str,
+    ) -> int:
+        """H1-role sibling. Present because the ROUTE calls it on every register.
+
+        Absent, every register in this smoke AttributeErrors into the product's
+        deliberate loud-but-non-fatal guard and the suite GREENS over a degraded
+        route — 19 swallowed faults across two files before this was measured. A
+        fake standing in for a service must track that service's interface, or it
+        silently stops exercising the thing the smoke claims to cover.
+        """
+        del agent_session_id, new_agent_instance_id
+        return 0
+
 
 class _Harness:
     """A live bridge + registry + state, with handover notices RECORDED.
@@ -164,6 +178,29 @@ class _Harness:
             f"/api/v1/bridge/{bridge_id}/peer/claim_role", json={"name": name},
         )
 
+    def claim_with_takeover(self, *, agi: str, session_id: str, name: str = _ROLE) -> Any:
+        """Drive the SHARED claim body with an explicit takeover.
+
+        This older smoke remains scoped to the shared MODEL_TURN body. The
+        caller-reachable INFRA route and ``homunculus watch --takeover`` escape
+        hatch are pinned separately by ``takeover_route_reachability_smoke``;
+        keeping this helper direct avoids duplicating that route fixture here.
+        """
+        return role_claim_module.claim_role_for_session(
+            origin=role_claim_module.RoleClaimOrigin.MODEL_TURN,
+            name=name,
+            agent_id="claude_code",
+            agent_instance_id=agi,
+            agent_session_id=session_id,
+            session_label="lbl",
+            state_service=self.state,
+            bridge_manager=self.manager,
+            peer_registry=self.registry,
+            agent_messaging_service=cast("Any", _NoOwedDirectWakeService()),
+            call_context=None,
+            takeover=True,
+        )
+
 
 def test_fresh_claim_returns_the_outcome_synchronously() -> None:
     """The response IS the outcome — no receipt, no EDGE_SINK notification.
@@ -215,8 +252,17 @@ def test_self_reclaim_reports_updated_and_wakes_nobody() -> None:
         h.close()
 
 
-def test_displacement_notifies_prior_and_new_holder() -> None:
-    """A real displacement must still wake both parties — the skip is narrow."""
+def test_live_holder_is_refused_without_takeover() -> None:
+    """WS-2e §4.3.2 — a LIVE different session cannot be displaced silently.
+
+    This is the row of the claim decision table that refuses, and the reason
+    `role_held_live` exists. Before it, ANY different session claiming took the
+    role and the incumbent learned only from the displacement notice — which is
+    how a mistaken second launch split a brain.
+
+    The refusal must NAME the holder: a refusal an operator cannot act on just
+    moves the confusion.
+    """
     h = _Harness()
     try:
         first = h.session(agi="agi-A", session_id="sess-A")
@@ -225,8 +271,41 @@ def test_displacement_notifies_prior_and_new_holder() -> None:
         second = h.session(agi="agi-B", session_id="sess-B")
         resp = h.claim(second)
         _check(
-            resp.json().get("action") == "displaced",
-            "a different session claiming reports action='displaced'",
+            resp.status_code == 409,
+            "a LIVE different session is REFUSED with 409",
+        )
+        body = resp.json()
+        _check(
+            body.get("code") == "role_held_live",
+            "refusal carries the stable role_held_live code",
+        )
+        _check("agi-A" in body.get("message", ""), "refusal names the live holder")
+        _check(
+            h.notices == [],
+            "a REFUSED claim wakes nobody — no displacement happened",
+        )
+    finally:
+        h.close()
+
+
+def test_displacement_notifies_prior_and_new_holder() -> None:
+    """A real displacement must still wake both parties — the skip is narrow.
+
+    Post-§4.3.2 this path requires an explicit takeover: the INFRA route never
+    passes it, so the harness drives the same shared body the MODEL_TURN verb
+    uses. What is asserted is unchanged — displacement still notifies both
+    parties; only the way you GET here is now deliberate.
+    """
+    h = _Harness()
+    try:
+        first = h.session(agi="agi-A", session_id="sess-A")
+        h.claim(first)
+        h.notices.clear()
+        h.session(agi="agi-B", session_id="sess-B")
+        outcome = h.claim_with_takeover(agi="agi-B", session_id="sess-B")
+        _check(
+            getattr(outcome, "action", None) == "displaced",
+            "an explicit takeover reports action='displaced'",
         )
         _check(
             [n["kind"] for n in h.notices] == ["displaced-holder", "new-holder"],
