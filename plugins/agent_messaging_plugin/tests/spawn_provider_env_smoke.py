@@ -68,7 +68,13 @@ def _check(condition: object, label: str) -> None:
 
 class _FakeVault:
     """Records-only stand-in for the injected VaultServiceProxy — returns the
-    same success-envelope shape ``vault.retrieve`` produces."""
+    REAL ActionResult envelope ``macos_vault_plugin.retrieve`` produces:
+    ``action_status == 'completed'`` with ``data.value`` on a hit, and the
+    same ``completed`` status with no ``value`` on a not-found (its
+    ``_success``/``_not_found`` shape). Keying on the wrong field here is
+    exactly the bug this smoke's live counterpart caught (2026-08-10): a
+    fake that returned ``{"status": "success"}`` would have passed a
+    _vault_retrieve_value that never matched the real envelope."""
 
     def __init__(self, secrets: dict[str, str]) -> None:
         self._secrets = secrets
@@ -76,8 +82,8 @@ class _FakeVault:
     def retrieve(self, key: str) -> dict[str, Any]:
         value = self._secrets.get(key)
         if value is None:
-            return {"status": "success", "data": {}}
-        return {"status": "success", "data": {"value": value}}
+            return {"action_status": "completed", "data": {"found": False, "key": key}}
+        return {"action_status": "completed", "data": {"key": key, "value": value}}
 
 
 def test_coerce_provider_env() -> None:

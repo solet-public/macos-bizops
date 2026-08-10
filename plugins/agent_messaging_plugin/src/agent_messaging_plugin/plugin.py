@@ -422,11 +422,20 @@ def _bedrock_vault_name(credential: str) -> str:
 
 
 def _vault_retrieve_value(vault: Any, key: str) -> str | None:
-    """Return a vault secret's plaintext value, or None when absent — the
-    same success-envelope shape :func:`_load_or_create_bearer_hmac_key`
-    reads."""
+    """Return a vault secret's plaintext value, or None when absent.
+
+    The vault plugin's ``retrieve`` returns the standard ActionResult
+    envelope — ``{"action_status": "completed", "data": {"value": ...}}`` on
+    a hit, and the same ``completed`` status with no ``value`` on a
+    business-level not-found (macos_vault_plugin ``_success``/``_not_found``,
+    the shape its OWN in-process consumers key on, e.g. the address-book
+    ``resolve_with_secrets`` path at ``action_status ==
+    ActionStatus.COMPLETED.value``). Key on ``action_status == 'completed'``
+    plus a present, non-empty ``value``; a missing credential is therefore a
+    clean ``None`` (the caller turns that into a fail-loud
+    ``provider_env_unresolved``), never a false hit."""
     retrieved = vault.retrieve(key)
-    if isinstance(retrieved, dict) and retrieved.get("status") == "success":
+    if isinstance(retrieved, dict) and retrieved.get("action_status") == "completed":
         value = retrieved.get("data", {}).get("value")
         if isinstance(value, str) and value:
             return value
@@ -441,12 +450,19 @@ def _load_or_create_bearer_hmac_key(vault: Any) -> bytes:
     ``secrets.token_bytes(HMAC_KEY_BYTE_LENGTH)`` and persist its
     base64 encoding before returning. The value is base64-encoded in
     storage because the vault's ``store`` interface accepts a string.
+
+    Reads through :func:`_vault_retrieve_value`, which keys on the vault's
+    real ``action_status == 'completed'`` envelope. A prior inline check
+    here keyed on ``status == 'success'`` — a shape the vault plugin never
+    returns — so an EXISTING key was never recognized on a hit and this
+    function silently re-minted it every boot, rotating the HMAC secret and
+    invalidating every outstanding bearer token each time. Fixed as part of
+    the same class of bug found in the provider-credential read
+    (2026-08-10).
     """
-    retrieved = vault.retrieve(_BEARER_HMAC_KEY_VAULT_NAME)
-    if isinstance(retrieved, dict) and retrieved.get("status") == "success":
-        stored_value = retrieved.get("data", {}).get("value")
-        if isinstance(stored_value, str) and stored_value:
-            return base64.b64decode(stored_value)
+    stored_value = _vault_retrieve_value(vault, _BEARER_HMAC_KEY_VAULT_NAME)
+    if stored_value is not None:
+        return base64.b64decode(stored_value)
     fresh = secrets.token_bytes(HMAC_KEY_BYTE_LENGTH)
     vault.store(
         _BEARER_HMAC_KEY_VAULT_NAME,
