@@ -2,7 +2,8 @@
 
 The heuristic dispatcher decides structurally and ignores this text, but the
 prompt is a first-class Wave-1 deliverable: it is exactly what a live skeptic
-(``agent_thread_open`` backend) receives at Wave-2 integration. Each prompt
+(dispatched over the platform's peer-messaging bridge) receives at Wave-2
+integration. Each prompt
 seeds the reviewer with the full F2 rulebook, the finding under review, the
 lens-specific refute directive, and the precision contract (default to refuted
 when uncertain) — that seeding is why our verifier beats a context-blind one.

@@ -63,10 +63,17 @@ const sessionId = process.env.AGENT_SESSION_ID;
 const cli = process.env.AGENT_WAKE_CLI;
 const transport = process.env.FLEET_TRANSPORT;
 
-// Unlike the Claude compatibility hook, stock-Codex arms only under an
-// explicitly selected watch transport. Unset/empty transport is not enough:
-// this prevents accidental double-wake while the patched MCP path is active.
-if (!sessionId || !cli || transport !== "watch") {
+// Armed on unset/empty/"watch" FLEET_TRANSPORT, disarmed on any OTHER
+// declared value (e.g. "mcp") -- the same rule claude_plugin's wake_waiter.js
+// pins (Architect-ruled 2026-07-31: empty is not a declaration, so it arms).
+// This hook originally diverged on purpose, disarming on unset to avoid a
+// double-wake against the then-live patched-Codex MCP wake path. That
+// rationale retired with the patch-the-application pipeline itself
+// (fleet-watch-transport-migration, codex-watch-migration lane, 2026-08-06):
+// stock Codex has no other wake mechanism once the patch is gone, so an
+// unset transport must arm this hook, not silently leave the session
+// unwakeable.
+if (!sessionId || !cli || (transport && transport !== "watch")) {
   emitNoop();
   process.exit(0);
 }

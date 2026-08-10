@@ -16,7 +16,24 @@ TRUE developer-proof boundary is the read-only ROLE the connection is pinned
 to (GRANT SELECT/USAGE only). Single-statement is NATIVE
 (``MULTI_STATEMENT_COUNT`` defaults to 1 and this plugin never uses
 ``execute_string``), so no statement-splitting parser is needed here (unlike
-the Postgres connector's ``sqlparse`` belt).
+the Postgres connector's ``sqlparse`` belt) — including for the write verb,
+``run_statement`` (query_actions.py), verified live against the operator's own
+account: a two-statement string is refused by the driver itself.
+
+The write verb also opens no differently-configured connection: there is no
+``connect()``-time flag equivalent to postgres's ``read_only=False`` to pass,
+because there is nothing to flip — the connection this module builds is
+identical for every verb, read or write; the registered role's own grants
+decide what any of them can do (operator ruling 2026-08-09 + Amendment 1,
+"vendor RBAC is the control plane"). What DOES differ for ``run_statement`` is
+transactional, not connection-level: Snowflake defaults every session to
+``AUTOCOMMIT=TRUE`` (each statement commits or rolls back on its own the
+instant it finishes — confirmed against the installed
+``snowflake-connector-python`` source and Snowflake's own transactions
+documentation), so ``run_statement`` explicitly disables it on its own
+connection before executing, to support a conditional rollback its RETURNING-
+style branch needs. Every other verb runs unaffected under the normal
+per-statement autocommit default.
 """
 
 from __future__ import annotations

@@ -3,8 +3,8 @@
 This plugin wears three hats (see plugin.yaml for the headline summary):
 
 1. **AgentMessagingServiceInterface** — durable ``core__agent_thread`` /
-   ``core__agent_message`` schema host plus the ``run_turn`` EDGE
-   process that drives a single agent conversation turn.
+   ``core__agent_message`` schema host for peer messaging and the
+   session-ledger's unscoped thread/message reads.
 2. **IOInterfacePlugin** — ``start_interface`` / ``stop_interface`` /
    ``post_message`` / ``get_supported_capabilities``.  The homunculus
    delivers prose to Claude Code (or any MCP-connected peer) through this surface.
@@ -18,7 +18,8 @@ The plugin intentionally does NOT register through the service-binding
 system (``ServiceName`` enum + ``service_bindings.json``).  Bound
 ServiceProviders are skipped from the ``plugin::<name>::*`` registry
 namespace by ``process_registry/builder.py::_should_skip_plugin``,
-which would hide ``run_turn`` from ``submit_action_definition``.
+which would hide ``send_peer_message`` / ``peer_send_by_name`` / the
+session-lifecycle EDGE processes from ``submit_action_definition``.
 ``AgentMessagingServiceInterface`` is satisfied by structural
 delegation; callers resolve us via
 ``plugin_manager.plugins["agent_messaging_plugin"]`` and call our
@@ -29,12 +30,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
 import os
 import secrets
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
@@ -69,7 +71,6 @@ from ananta.llm.agent_messaging.role_binding import (
     SYS_AUTONOMIC_SLOT,
     is_system_role,
 )
-from ananta.llm.agent_messaging.routing import make_router
 from ananta.llm.agent_messaging.schema import (
     get_agent_direct_wake_schema,
     get_agent_messaging_schema,
@@ -81,7 +82,6 @@ from ananta.llm.agent_messaging.service import (
     AgentMessagingError,
     AgentMessagingService,
     AgentRequestInvalidError,
-    _BridgeDeliveryEndpoint,
 )
 from ananta.services.inference_service.completion_request_queue import (
     SERVE_SERVED,
@@ -115,11 +115,32 @@ from .bridge_sessions import (
     BridgeQueueFullError,
     BridgeSessionManager,
 )
+from .budget_report import build_budget_report as lifecycle_build_budget_report
+from .choreography_verbs import (
+    ACTION_GENERATE_CURATION_REPORT,
+    ACTION_RESTART_SESSION,
+    ACTION_ROTATE_SESSION,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_ERROR,
+    JOB_STATUS_PROCESSING,
+    JOB_STATUS_QUEUED,
+    PROVIDER_PLUGIN_NAME,
+    GenerateCurationReportDispatchRequest,
+    RestartSessionDispatchRequest,
+    RotateSessionDispatchRequest,
+    dispatch_generate_curation_report,
+    dispatch_restart_session,
+    dispatch_rotate_session,
+)
+from .choreography_verbs import (
+    check_choreography_job_status as lifecycle_check_choreography_job_status,
+)
 from .constants import (
     PLUGIN_NAME,
     SYSTEM_AGENT_ID,
 )
-from .direct_wake_reconcile import DirectWakeReconciler
+from .context_status_verbs import report_context_status as lifecycle_report_context_status
+from .context_status_verbs import session_context_status as lifecycle_session_context_status
 from .http_routes import register_routes
 from .mcp_streamable import (
     BearerVerifier,
@@ -135,6 +156,13 @@ from .mcp_streamable.oauth import (
     build_oauth_router,
 )
 from .mcp_streamable.router import STREAMABLE_ALIAS_PATH, STREAMABLE_PATH
+from .memory_curation_verbs import (
+    build_curation_report,
+    build_fact_index,
+    origin_tag,
+    resolve_memory_id_by_slug,
+    slug_to_slot_tag,
+)
 from .message_important_backfill import backfill_message_important
 from .peer_dispatch import (
     EVENT_POST_MESSAGE,
@@ -169,14 +197,53 @@ from .role_claim import (
     claim_role_for_session,
     send_handover_notice,
 )
+from .role_class_backfill import backfill_role_class
 from .role_message_consumed_backfill import backfill_role_message_consumed
 from .route_activity import make_model_activity_middleware
 from .schema import (
     get_agent_role_binding_schema_definition,
     get_peer_binding_schema_definition,
     get_role_model_schema_definition,
+    get_session_lifecycle_schema_definition,
+)
+from .session_claude_mapping_ingest import (
+    detect_hook_absent_sessions as lifecycle_detect_hook_absent_sessions,
+)
+from .session_claude_mapping_ingest import (
+    drain_session_claude_mapping_spool as lifecycle_drain_session_claude_mapping_spool,
+)
+from .session_claude_mapping_store import (
+    list_session_claude_mappings as lifecycle_list_session_claude_mappings,
 )
 from .session_inference_provider import SessionInferenceProvider
+from .session_lifecycle_store import format_directed_by
+from .session_lifecycle_store import resolve_lane_charter as lifecycle_resolve_lane_charter
+from .session_lifecycle_verbs import (
+    ArmSessionDependencyRequest,
+    CaptureLaneCharterRequest,
+    LegislateRoleRequest,
+    SpawnSessionRequest,
+    VerbError,
+)
+from .session_lifecycle_verbs import arm_session_dependency as lifecycle_arm_session_dependency
+from .session_lifecycle_verbs import capture_lane_charter as lifecycle_capture_lane_charter
+from .session_lifecycle_verbs import clear_session as lifecycle_clear_session
+from .session_lifecycle_verbs import compact_session as lifecycle_compact_session
+from .session_lifecycle_verbs import drive_session as lifecycle_drive_session
+from .session_lifecycle_verbs import legislate_role as lifecycle_legislate_role
+from .session_lifecycle_verbs import list_sessions as lifecycle_list_sessions
+from .session_lifecycle_verbs import report_alive as lifecycle_report_alive
+from .session_lifecycle_verbs import retire_session as lifecycle_retire_session
+from .session_lifecycle_verbs import session_status as lifecycle_session_status
+from .session_lifecycle_verbs import spawn_session as lifecycle_spawn_session
+from .session_lifecycle_verbs import terminate_session as lifecycle_terminate_session
+from .session_role_claim_store import delete_session_role_claim_if_still_holds
+from .session_sweep import (
+    SessionRoleClaimPruner,
+    sweep_deadline_dependencies,
+    sweep_lane_closed_dependencies,
+    sweep_overdue_sessions,
+)
 from .system_slots import (
     validate_system_slot_declarations,
 )
@@ -186,21 +253,14 @@ if TYPE_CHECKING:  # pragma: no cover — type-only references
 
     from ananta.core.orchestration.interfaces import ISessionManager
     from ananta.core.orchestration.managers.flow_manager import FlowManager
+    from ananta.core.state.async_job_manager import AsyncJobManager
     from ananta.llm.agent_messaging.models import (
-        AgentMessageQueued,
-        AgentMessagesPage,
-        AgentThreadClosed,
         AgentThreadMessagesPage,
-        AgentThreadOpened,
         AgentThreadsPage,
-        AgentThreadStatus,
-        ListAgentMessagesRequest,
         ListAgentThreadsRequest,
-        OpenAgentThreadRequest,
         PeerSendRequest,
         PeerSendResult,
         ReadThreadMessagesRequest,
-        SendAgentMessageRequest,
     )
     from ananta.types.schema_types import SchemaDefinition
     from fastapi import FastAPI
@@ -234,12 +294,6 @@ class _UploadRouteAuth(Protocol):
 
     def __call__(self, authorization_header: str | None) -> object: ...
 
-
-# Bridge-delivery endpoint — the consolidated plugin owns the EDGE_SINK
-# pair itself; bridge-bound flows route deliver_result / deliver_error
-# back to this same plugin namespace.
-_DELIVER_RESULT_PROCESS_KEY = f"plugin::{PLUGIN_NAME}::deliver_result"
-_DELIVER_ERROR_PROCESS_KEY = f"plugin::{PLUGIN_NAME}::deliver_error"
 
 # Bridge namespace error tokens for deliver_result / deliver_error.
 _ERR_NO_ACTIVE_BRIDGE = "bridge.no_active_bridge"
@@ -408,7 +462,7 @@ class _BridgeRuntimeConfig:
     # Consumer 1 (here): dispatch refuses to report ``queued_watcher`` against
     # a bridge nobody is polling — a SIGKILLed watcher leaves its server-side
     # session alive, so ``append_event`` succeeds and the label lies for up to
-    # the full idle sweep (~65 min), which is Dax §34.1.
+    # the full idle sweep (~65 min).
     # Consumer 2 (pending operator sign-off): the duplicate-role claim gate.
     binding_liveness_window_seconds: int = DEFAULT_BINDING_LIVENESS_WINDOW_S
     # INF-02: serve window for autonomic-routed completion requests. A
@@ -501,6 +555,65 @@ class _BridgeRuntimeConfig:
         return value if value is not None else default
 
 
+@dataclass(frozen=True, slots=True)
+class _SessionLifecyclePolicyConfig:
+    """Fleet session-management Phase B, §6 L3 rule 1 policy config.
+
+    Kept separate from :class:`AgentMessagingConfig` for the same reason as
+    :class:`_BridgeRuntimeConfig`: a distinct concern (spawn-time defaults for
+    the L1 verb surface) reads its own settings without forcing the
+    core agent-messaging service config to grow fields it doesn't use.
+
+    ``work_class_defaults`` is operator-editable policy DATA (``plugin.yaml``'s
+    ``config:`` block), not a code default: "cheapest capable model per
+    work_class" is a values-laden business call this module does not make
+    unilaterally (the same posture ``FLEET_HEADLESS_PERMISSION_MODE`` already
+    takes for permission mode). Empty (the shipped default) means
+    ``spawn_session`` behaves exactly as it did before this config existed —
+    an unconfigured work_class leaves ``model``/``effort`` at whatever the
+    caller passed (usually empty).
+
+    ``work_class_tool_allowlists`` is the §6 permission-mode design's
+    (2026-08-03) spawn-time tool allowlist, consumed by
+    ``headless_adapter.py``'s PreToolUse gate
+    (``.claude/hooks/headless_tool_allowlist_gate.py``). Operator ruling,
+    same day, effective now ("we don't have any restrictions now"): shipped
+    empty means the gate is UNARMED by default (``headless_adapter.py``'s
+    ``_spawn_env`` only sets the hook's env var when an allowlist is
+    actually non-empty) — the mechanism stays landed as shelf capability,
+    armed per-``work_class`` whenever usage data argues for it, not
+    exercised by default.
+
+    ``headless_permission_mode`` is declared config (not a process env var —
+    a config value is as declared as an env var, no LaunchAgent edit needed
+    to change it). Shipped default ``"bypassPermissions"`` (flipped from
+    ``"default"`` — D2 finding: Claude Code's own ``"default"`` interactive-
+    approval mode leaves an unattended spawn with EMPTY effective grants,
+    since ``--setting-sources project`` excludes every allowlist and no
+    human exists to approve a prompt). Per the same operator ruling, no
+    value (including ``"bypassPermissions"``) is rejected here — the knob is
+    fail-closed only when it resolves to NOTHING at all
+    (``headless_adapter.py.verify_config()``'s separate, unconditional
+    floor), which is operational sanity, not a restriction.
+
+    ``default_fleet_transport`` is the fleet-watch-transport-migration
+    lane's single declared default-transport knob (phase 2 slice 2), the
+    ONE configuration point the operator's verbatim charter's "easy to
+    change later" clause names. Shipped default ``"watch"`` — the charter's
+    own instruction that non-MCP must be the fleet's PRIMARY transport now,
+    MCP retained as backup/chat-class only. Landed as shelf capability
+    ahead of its consumers (same posture ``work_class_tool_allowlists``
+    shipped in before ``headless_adapter.py`` read it): phase-2 slice 1
+    wires the host adapters to read this value when building spawn env: it
+    is not yet consumed by any spawn path as of this slice.
+    """
+
+    work_class_defaults: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    work_class_tool_allowlists: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    headless_permission_mode: str = ""
+    default_fleet_transport: str = ""
+
+
 class AgentMessagingPlugin(
     ServicePlugin,
     IOInterfacePlugin,
@@ -513,16 +626,17 @@ class AgentMessagingPlugin(
     underlying :class:`AgentMessagingService`; implements
     :class:`IOInterfacePlugin` directly via ``start_interface`` /
     ``stop_interface`` / ``post_message`` / ``get_supported_capabilities``.
-    Exposes ``run_turn`` plus the bridge-delivery and IO EDGE_SINK
-    processes through ``@platform_process`` decorators.
+    Exposes ``send_peer_message``, the session-lifecycle EDGE processes,
+    and the bridge-delivery and IO EDGE_SINK processes through
+    ``@platform_process`` decorators.
 
     NOTE: This plugin intentionally does NOT declare
     ``service_interfaces`` (the property would mark it as a
     ServiceProvider).  Bound ServiceProviders are skipped from the
     ``plugin::<name>::*`` registry namespace
     (process_registry/builder.py::_should_skip_plugin), which would
-    hide ``run_turn`` from ``submit_action_definition``.  Instead,
-    callers resolve us via
+    hide those EDGE processes from ``submit_action_definition``.
+    Instead, callers resolve us via
     ``plugin_manager.plugins["agent_messaging_plugin"]`` and use our
     public methods directly.
     """
@@ -548,6 +662,7 @@ class AgentMessagingPlugin(
         # Bridge / IO runtime state — populated by start_interface.
         self._bridge_manager: BridgeSessionManager | None = None
         self._peer_registry: PeerRegistry | None = None
+        self._session_role_claim_pruner: SessionRoleClaimPruner | None = None
         self._platform_surface: PlatformSurface | None = None
         # D-IF7/D-IF8 sidecar: per-bridge SessionInferenceProvider keyed
         # by agent_instance_id. Populated post-success in the stdio
@@ -570,9 +685,6 @@ class AgentMessagingPlugin(
         # REL-09: the idle-sweep driver (sweep_idle had NO caller before) —
         # routes every expired bridge through unregister's full cleanup.
         self._bridge_sweeper: BridgeLifecycleSweeper | None = None
-        # REL-05: the server-side escalation reconciler; rides the sweeper's
-        # on_tick. Built in start_interface once the collaborators exist.
-        self._direct_wake_reconciler: DirectWakeReconciler | None = None
         self._port: int | None = None
         self._host: str | None = None
         self._app: FastAPI | None = None
@@ -598,6 +710,19 @@ class AgentMessagingPlugin(
         # at request time (by which point startup is complete).
         self._streamable_bearer_verifier: BearerVerifier | None = None
         self._active: bool = True
+        # maintenance-verbs M1 choreography jobs (rotate_session/restart_session,
+        # D0.3-ratified deferred-completion shape). AsyncJobManager is lazily
+        # pulled from orchestrator_ref (comfyui_image_generation_plugin's own
+        # `_try_acquire_job_manager` precedent — there is no generic per-plugin
+        # push-injection for it), not pushed at boot. Single dedicated worker
+        # thread per the architect-pass constraint: FlowManager._sequence_cache
+        # is an unlocked shared dict hit on every action submission, and the
+        # comfyui pattern is only race-free because it runs exactly one
+        # background worker — this thread must stay single and serialized,
+        # never spawn a second concurrent choreography worker.
+        self._async_job_manager: AsyncJobManager | None = None
+        self._choreography_stop_event: threading.Event = threading.Event()
+        self._choreography_worker_thread: threading.Thread | None = None
 
     @property
     def bridge_port(self) -> int | None:
@@ -634,6 +759,30 @@ class AgentMessagingPlugin(
     def set_memory_service(self, memory_service: Any) -> None:
         logger.info("%s set_memory_service called", self.name)
         self._memory_service = memory_service
+
+    def set_async_job_manager(self, async_job_manager: AsyncJobManager) -> None:
+        """Accept an AsyncJobManager if ever pushed generically (no injection
+        loop calls this today — see ``_try_acquire_async_job_manager`` for
+        the actual lazy-pull path, mirroring
+        ``comfyui_image_generation_plugin``'s identical precedent)."""
+        logger.info("%s set_async_job_manager called", self.name)
+        self._async_job_manager = async_job_manager
+
+    def _try_acquire_async_job_manager(self) -> AsyncJobManager | None:
+        """Lazily pull ``AsyncJobManager`` from ``orchestrator_ref`` the first
+        time it's needed — the same pattern
+        ``comfyui_image_generation_plugin._try_acquire_job_manager`` uses,
+        verified at source (2026-08-09): there is no generic per-plugin
+        push-injection for this service, only the attribute sitting on the
+        orchestrator once platform boot wires it."""
+        if self._async_job_manager is not None:
+            return self._async_job_manager
+        if not self.orchestrator_ref:
+            return None
+        job_manager = getattr(self.orchestrator_ref, "async_job_manager", None)
+        if job_manager:
+            self.set_async_job_manager(job_manager)
+        return self._async_job_manager
 
     def set_vault_service(self, vault_service: object) -> None:
         """Receive caller-bound VaultServiceProxy from lifecycle injection.
@@ -679,6 +828,7 @@ class AgentMessagingPlugin(
     async def start_services(self) -> ActionResult:
         self._services_started = True
         self._service_started_at = _now_iso()
+        self._start_choreography_worker()
         return ActionResult(
             action_status="completed",
             data={
@@ -691,6 +841,13 @@ class AgentMessagingPlugin(
         )
 
     async def stop_services(self) -> ActionResult:
+        # D1 §5: terminate every tracked headless worker so a graceful
+        # shutdown/restart never leaves an orphaned Claude Code process
+        # burning tokens with nothing tracking it (start_new_session=True
+        # detaches it from this process's own group on purpose).
+        from .session_hosts import shutdown_all_drivers  # noqa: PLC0415
+        shutdown_all_drivers()
+        self._stop_choreography_worker()
         self._services_started = False
         self._service = None
         self._service_started_at = None
@@ -701,6 +858,487 @@ class AgentMessagingPlugin(
             error=None,
             timestamp=_now_iso(),
         )
+
+    # ------------------------------------------------------------------
+    # maintenance-verbs M1 choreography worker (rotate_session/restart_session)
+    # ------------------------------------------------------------------
+
+    _CHOREOGRAPHY_POLL_INTERVAL_SECONDS = 2.0
+    _CHOREOGRAPHY_DIRECTED_BY = "agent_messaging_plugin.choreography_worker"
+
+    def _start_choreography_worker(self) -> None:
+        """Start the SINGLE dedicated choreography worker thread — mirrors
+        ``comfyui_image_generation_plugin``'s ``_worker_thread`` lifecycle
+        exactly (started in ``start_services``, joined with a timeout in
+        ``stop_services``). Deliberately ONE thread, never a pool: the
+        architect-pass constraint (2026-08-09) is that
+        ``FlowManager._sequence_cache`` is an unlocked shared dict hit on
+        every action submission, and single-worker execution is what keeps
+        this safe without fixing that race — do not parallelize this loop."""
+        self._choreography_stop_event.clear()
+        self._choreography_worker_thread = threading.Thread(
+            target=self._choreography_worker_loop,
+            name=f"{PLUGIN_NAME}-choreography-worker",
+            daemon=True,
+        )
+        self._choreography_worker_thread.start()
+
+    def _stop_choreography_worker(self) -> None:
+        self._choreography_stop_event.set()
+        thread = self._choreography_worker_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=30.0)
+            if thread.is_alive():
+                logger.error("%s choreography worker did not stop within timeout", self.name)
+        self._choreography_worker_thread = None
+
+    def _next_queued_choreography_job(
+        self, job_manager: AsyncJobManager, provider_name: str,
+    ) -> dict[str, Any] | None:
+        """The oldest queued job for one provider_name, or ``None``. Split out
+        of :func:`_choreography_worker_loop` to keep it a straight-line
+        dispatcher (radon cc)."""
+        jobs_result = job_manager.list_jobs(
+            status=JOB_STATUS_QUEUED, provider_name=provider_name, limit=1,
+            order_by="created_at ASC",
+        )
+        jobs = (jobs_result.get("data") or {}).get("jobs", [])
+        if not isinstance(jobs, list) or not jobs:
+            return None
+        job = jobs[0]
+        return job if isinstance(job, dict) else None
+
+    def _poll_and_process_one_choreography_job(
+        self, job_manager: AsyncJobManager, state_service: Any,
+    ) -> None:
+        """One tick's worth of work: check rotate, restart, then
+        curation-report's queue for a single oldest job and process it —
+        split out of :func:`_choreography_worker_loop` to keep it a
+        straight-line dispatcher (radon cc)."""
+        for provider_name in (
+            f"{PROVIDER_PLUGIN_NAME}.{ACTION_ROTATE_SESSION}",
+            f"{PROVIDER_PLUGIN_NAME}.{ACTION_RESTART_SESSION}",
+            f"{PROVIDER_PLUGIN_NAME}.{ACTION_GENERATE_CURATION_REPORT}",
+        ):
+            if self._choreography_stop_event.is_set():
+                return
+            job = self._next_queued_choreography_job(job_manager, provider_name)
+            if job is not None:
+                self._process_choreography_job(job, job_manager, state_service)
+
+    def _choreography_worker_loop(self) -> None:
+        """Poll for queued rotate_session/restart_session jobs and process
+        them ONE AT A TIME, serially — never concurrently (see the
+        single-worker constraint on ``_start_choreography_worker``). Modeled
+        directly on ``comfyui_image_generation_plugin._worker_loop``: a
+        top-level ``except Exception`` per tick so one bad job can never kill
+        the loop, and a wait-based poll interval rather than a hot spin."""
+        while not self._choreography_stop_event.is_set():
+            try:
+                job_manager = self._try_acquire_async_job_manager()
+                state_service = self._get_state_service()
+                if job_manager is not None and state_service is not None:
+                    self._poll_and_process_one_choreography_job(job_manager, state_service)
+            except Exception:
+                logger.exception("%s choreography worker loop error", self.name)
+            self._choreography_stop_event.wait(self._CHOREOGRAPHY_POLL_INTERVAL_SECONDS)
+        logger.debug("%s choreography worker loop exited", self.name)
+
+    def _update_choreography_progress(
+        self, job_manager: AsyncJobManager, job_id: str, *, progress_percent: int, leg: str,
+    ) -> None:
+        """One ``update_status`` call per choreography leg, per the D0.3-ratified
+        shape. Logs the leg name for operator observability — the job ledger's
+        own ``progress_percent`` is the only durable per-leg signal
+        ``AsyncJobManager`` exposes; there is no free-text leg-name column."""
+        logger.info("%s choreography job %s: leg=%s", self.name, job_id, leg)
+        job_manager.update_job(
+            job_id, {"status": JOB_STATUS_PROCESSING, "progress_percent": progress_percent},
+        )
+
+    def _complete_choreography_job(
+        self, job_manager: AsyncJobManager, job_id: str, result: dict[str, Any],
+    ) -> None:
+        job_manager.update_job(job_id, {"status": JOB_STATUS_COMPLETED, "result": result})
+
+    def _fail_choreography_job(
+        self, job_manager: AsyncJobManager, job_id: str, code: str, message: str,
+    ) -> None:
+        job_manager.update_job(
+            job_id, {"status": JOB_STATUS_ERROR, "error": {"code": code, "message": message}},
+        )
+
+    def _resolve_choreography_job_request(
+        self, job: dict[str, Any], job_manager: AsyncJobManager,
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        """``(job_id, provider_name, request_data)``, or ``None`` after
+        already failing the job itself — split out of
+        :func:`_process_choreography_job` to keep it a straight-line
+        dispatcher (radon cc). The caller only needs to check for ``None``;
+        every failure path here has already reached a terminal job status."""
+        job_id = str(job.get("id") or "")
+        provider_name = str(job.get("provider_name") or "")
+        if not job_id or not provider_name:
+            logger.error("%s choreography job missing id/provider_name: %r", self.name, job)
+            return None
+        payload_result = job_manager.get_job_payload(job_id, "request")
+        if payload_result.get("action_status") != "completed":
+            self._fail_choreography_job(
+                job_manager, job_id, "request_payload_missing",
+                "could not read the job's own request payload",
+            )
+            return None
+        payload_data = payload_result.get("data")
+        request_data = payload_data.get("payload") if isinstance(payload_data, dict) else None
+        if not isinstance(request_data, dict):
+            self._fail_choreography_job(
+                job_manager, job_id, "request_payload_invalid",
+                "job request payload was not an object",
+            )
+            return None
+        return job_id, provider_name, request_data
+
+    def _process_choreography_job(
+        self, job: dict[str, Any], job_manager: AsyncJobManager, state_service: Any,
+    ) -> None:
+        """Dispatch one queued job to the rotate/restart/curation-report
+        runner by ``provider_name`` suffix, and guarantee it reaches a
+        TERMINAL status — every exception path here ends in
+        ``_fail_choreography_job``, never a job left stranded at
+        ``processing`` (the D0.3 doc's own named crash/reap gap is a
+        platform-level absence this function must not add to by letting an
+        exception escape uncaught)."""
+        resolved = self._resolve_choreography_job_request(job, job_manager)
+        if resolved is None:
+            return
+        job_id, provider_name, request_data = resolved
+        try:
+            if provider_name.endswith(f".{ACTION_ROTATE_SESSION}"):
+                self._run_rotate_session_job(job_id, request_data, job_manager, state_service)
+            elif provider_name.endswith(f".{ACTION_RESTART_SESSION}"):
+                self._run_restart_session_job(job_id, request_data, job_manager, state_service)
+            elif provider_name.endswith(f".{ACTION_GENERATE_CURATION_REPORT}"):
+                self._run_generate_curation_report_job(job_id, request_data, job_manager)
+            else:
+                self._fail_choreography_job(
+                    job_manager, job_id, "unknown_action",
+                    f"unrecognized provider_name {provider_name!r}",
+                )
+        except VerbError as exc:
+            logger.error(
+                "%s choreography job %s failed: code=%s message=%s",
+                self.name, job_id, exc.code, exc.message,
+            )
+            self._fail_choreography_job(job_manager, job_id, exc.code, exc.message)
+        except Exception as exc:  # noqa: BLE001 — a job must reach a terminal status, never strand
+            logger.exception("%s choreography job %s crashed", self.name, job_id)
+            self._fail_choreography_job(job_manager, job_id, "internal_error", str(exc))
+
+    # 2026-08-10 fix: measured live in gsuite-async's first production
+    # rotation (job-2ns5on395r9xz) — the real post-clear first-turn latency
+    # in a loaded production lane was ~77s from drive_session, and the new
+    # claude_session_id was captured only ~6.7s after the OLD 60s window's
+    # deadline had already declared verify_timeout on an otherwise-healthy
+    # rotation (session_claude_mapping rows: drive_session leg logged
+    # 2026-08-10T03:48:54.824Z, new id captured_at 2026-08-10T03:50:11.977Z).
+    # A healthy rotation reporting as an error is a false negative any
+    # job-status-driven automation would be misled by (the plausibility-
+    # fence-below-the-plausible-range class). Raised with real margin, not
+    # tuned tightly to this one sample.
+    _ROTATE_VERIFY_MAX_WAIT_SECONDS = 300.0
+    _ROTATE_VERIFY_POLL_INTERVAL_SECONDS = 5.0
+    _RESTART_VERIFY_MAX_WAIT_SECONDS = 90.0
+    _RESTART_VERIFY_POLL_INTERVAL_SECONDS = 5.0
+
+    def _check_for_new_claude_session(
+        self, state_service: Any, agent_instance_id: str, existing_ids: set[str],
+    ) -> list[str]:
+        """One point-in-time check for a ``claude_session_id`` outside
+        ``existing_ids`` — split out of :func:`_wait_for_new_claude_session`
+        so the poll loop and its post-deadline final re-check share exactly
+        one query+diff, never two copies to drift."""
+        current_ids = {
+            str(m.get("claude_session_id") or "")
+            for m in lifecycle_list_session_claude_mappings(state_service, agent_instance_id)
+        }
+        new_ids = current_ids - existing_ids
+        new_ids.discard("")
+        return sorted(new_ids)
+
+    def _wait_for_new_claude_session(
+        self, state_service: Any, agent_instance_id: str, existing_ids: set[str],
+        max_wait_seconds: float, poll_interval_seconds: float,
+    ) -> list[str]:
+        """Poll ``list_session_claude_mappings`` until a ``claude_session_id``
+        outside ``existing_ids`` appears, or the deadline passes — plus ONE
+        final check immediately after the deadline, closing the narrow race
+        where the id lands in the gap between the last poll and the
+        deadline rather than genuinely never arriving. A NEW id appearing is
+        a positive, mechanically-checked observation that a fresh session
+        generation actually started (the SessionStart hook fired) — the
+        ARMED-vs-FIRED distinction the M0 design names explicitly, not a
+        bare status re-read or a fixed sleep."""
+        deadline = datetime.now(UTC).timestamp() + max_wait_seconds
+        while (
+            datetime.now(UTC).timestamp() < deadline
+            and not self._choreography_stop_event.is_set()
+        ):
+            new_ids = self._check_for_new_claude_session(
+                state_service, agent_instance_id, existing_ids,
+            )
+            if new_ids:
+                return new_ids
+            self._choreography_stop_event.wait(poll_interval_seconds)
+        return self._check_for_new_claude_session(state_service, agent_instance_id, existing_ids)
+
+    def _wait_for_role_claim(self, role_name: str, agent_instance_id: str) -> bool:
+        """Poll ``peer_holds_role`` (called as a plain method — ``@platform_process``
+        is a metadata-only decorator, verified at source, so this executes
+        identically to a dispatched call) until the new session claims
+        ``role_name``, or the deadline passes."""
+        deadline = datetime.now(UTC).timestamp() + self._RESTART_VERIFY_MAX_WAIT_SECONDS
+        while (
+            datetime.now(UTC).timestamp() < deadline
+            and not self._choreography_stop_event.is_set()
+        ):
+            result = self.peer_holds_role(
+                {"parameters": {"name": role_name, "agent_instance_id": agent_instance_id}}, {},
+            )
+            if result.get("action_status") == "completed":
+                data = result.get("data")
+                if isinstance(data, dict) and data.get("holds") is True:
+                    return True
+            self._choreography_stop_event.wait(self._RESTART_VERIFY_POLL_INTERVAL_SECONDS)
+        return False
+
+    def _run_rotate_session_job(
+        self, job_id: str, request_data: dict[str, Any], job_manager: AsyncJobManager,
+        state_service: Any,
+    ) -> None:
+        """§2.1 choreography, run OFF the dispatch path: resolve -> durable
+        pickup -> clear -> drive -> verify. Every VerbError raised by a
+        composed lifecycle verb propagates to :func:`_process_choreography_job`,
+        which fails the job with that verb's own code/message — no
+        catch-and-continue here."""
+        agent_instance_id = _str_field(request_data.get("agent_instance_id"))
+        role_name = _str_field(request_data.get("role_name"))
+        pickup_text = _str_field(request_data.get("pickup_text"))
+        park_first = bool(request_data.get("park_first", False))
+
+        self._update_choreography_progress(
+            job_manager, job_id, progress_percent=10, leg="resolve_ledger_row",
+        )
+        lifecycle_session_status(state_service, agent_instance_id)
+
+        existing_ids = {
+            str(m.get("claude_session_id") or "")
+            for m in lifecycle_list_session_claude_mappings(state_service, agent_instance_id)
+        }
+
+        self._update_choreography_progress(
+            job_manager, job_id, progress_percent=25, leg="durable_pickup_dispatch",
+        )
+        send_result = self.peer_send_by_name(
+            {"parameters": {"name": role_name, "content": pickup_text}}, {},
+        )
+        if send_result.get("action_status") != "completed":
+            raise VerbError(
+                "pickup_dispatch_failed",
+                f"peer_send_by_name to role {role_name!r} did not complete cleanly: "
+                f"{send_result!r}",
+            )
+
+        self._update_choreography_progress(
+            job_manager, job_id, progress_percent=45, leg="clear_session",
+        )
+        lifecycle_clear_session(
+            state_service, agent_instance_id=agent_instance_id, park=park_first,
+            directed_by=self._CHOREOGRAPHY_DIRECTED_BY,
+        )
+
+        self._update_choreography_progress(
+            job_manager, job_id, progress_percent=65, leg="drive_session",
+        )
+        lifecycle_drive_session(
+            state_service, agent_instance_id=agent_instance_id, text=pickup_text,
+            directed_by=self._CHOREOGRAPHY_DIRECTED_BY,
+        )
+
+        self._update_choreography_progress(job_manager, job_id, progress_percent=85, leg="verify")
+        new_ids = self._wait_for_new_claude_session(
+            state_service, agent_instance_id, existing_ids,
+            self._ROTATE_VERIFY_MAX_WAIT_SECONDS, self._ROTATE_VERIFY_POLL_INTERVAL_SECONDS,
+        )
+        if not new_ids:
+            raise VerbError(
+                "verify_timeout",
+                f"no new claude_session_id observed for {agent_instance_id!r} within "
+                f"{self._ROTATE_VERIFY_MAX_WAIT_SECONDS}s of drive_session — the turn "
+                "may not have started (ARMED ≠ FIRED).",
+            )
+        self._complete_choreography_job(
+            job_manager, job_id, {"turn_observed": True, "new_claude_session_ids": new_ids},
+        )
+
+    def _build_restart_spawn_params(
+        self, old_row: dict[str, Any], role_class: str, lane_id: str, role_name: str,
+    ) -> dict[str, Any]:
+        """Carry the old ledger row's dispatch config forward into the fresh
+        spawn's raw params — split out of :func:`_run_restart_session_job` to
+        keep it a straight-line dispatcher (radon cc: each field extraction's
+        own truthiness check lives here, not stacked onto the caller's
+        count). Feeds :func:`_spawn_session_request_from_params`, the SAME
+        raw-params builder ``spawn_session()`` itself uses (2026-08-10 fix:
+        this path previously built a ``SpawnSessionRequest`` directly and
+        skipped every policy-resolution step spawn_session() runs —
+        permission_mode/allowed_tools/transport are not columns on
+        managed_session, so they were silently lost every restart; routing
+        through the shared params+policy path closes that class of drift for
+        good, not just this one field)."""
+        return {
+            "role_class": role_class,
+            "lane_id": lane_id,
+            "brief_ref": _str_field(old_row.get("brief_ref")),
+            "work_class": _str_field(old_row.get("work_class")),
+            "budget_line": _str_field(old_row.get("budget_line")),
+            "role_name": role_name,
+            "host": _str_field(old_row.get("host")),
+            "visibility": _str_field(old_row.get("visibility")),
+            "model": _str_field(old_row.get("model")),
+            "effort": _str_field(old_row.get("effort")),
+            "spawned_by_role": self._CHOREOGRAPHY_DIRECTED_BY,
+        }
+
+    def _run_restart_session_job(
+        self, job_id: str, request_data: dict[str, Any], job_manager: AsyncJobManager,
+        state_service: Any,
+    ) -> None:
+        """§2.2 choreography, run OFF the dispatch path: capture -> terminate
+        -> spawn -> (conditional) role-reclaim drive -> verify. Per the M0
+        design's own gap finding, the role-reclaim drive defaults to ALWAYS
+        firing unless a lane charter is already on file (option (b), coordinator-
+        seat ruled default) — never trusts the automatic first turn alone to carry
+        the role-claim instruction."""
+        old_agent_instance_id = _str_field(request_data.get("agent_instance_id"))
+        role_name = _str_field(request_data.get("role_name"))
+        role_class = _str_field(request_data.get("role_class"))
+        grace_seconds_raw = request_data.get("grace_seconds")
+        grace_seconds = grace_seconds_raw if isinstance(grace_seconds_raw, int) else 30
+
+        self._update_choreography_progress(
+            job_manager, job_id, progress_percent=10, leg="capture_old_row",
+        )
+        old_row = lifecycle_session_status(state_service, old_agent_instance_id)
+        lane_id = _str_field(old_row.get("lane_id"))
+
+        self._update_choreography_progress(
+            job_manager, job_id, progress_percent=25, leg="terminate_session",
+        )
+        lifecycle_terminate_session(
+            state_service, agent_instance_id=old_agent_instance_id,
+            directed_by=self._CHOREOGRAPHY_DIRECTED_BY, grace_seconds=grace_seconds,
+        )
+
+        self._update_choreography_progress(
+            job_manager, job_id, progress_percent=45, leg="spawn_session",
+        )
+        raw_params = self._build_restart_spawn_params(old_row, role_class, lane_id, role_name)
+        spawn_req = _spawn_session_request_from_params(raw_params, self._CHOREOGRAPHY_DIRECTED_BY)
+        spawn_req = _apply_spawn_session_policy(spawn_req, self._build_session_lifecycle_policy_config())
+        spawn_result = lifecycle_spawn_session(state_service, spawn_req)
+        new_agent_instance_id = str(spawn_result.get("agent_instance_id") or "")
+        if not new_agent_instance_id:
+            raise VerbError(
+                "spawn_failed", "restart_session: spawn_session returned no agent_instance_id.",
+            )
+
+        self._update_choreography_progress(
+            job_manager, job_id, progress_percent=65, leg="role_reclaim_drive",
+        )
+        charter = lifecycle_resolve_lane_charter(state_service, lane_id) if lane_id else None
+        role_reclaim_driven = charter is None
+        if role_reclaim_driven:
+            lifecycle_drive_session(
+                state_service, agent_instance_id=new_agent_instance_id,
+                text=(
+                    f"claim role '{role_name}' via the rename skill / arm a watch "
+                    f"process for it — this is a restart continuing lane {lane_id!r}, "
+                    "not a fresh unbriefed spawn."
+                ),
+                directed_by=self._CHOREOGRAPHY_DIRECTED_BY,
+            )
+
+        self._update_choreography_progress(job_manager, job_id, progress_percent=85, leg="verify")
+        holds = self._wait_for_role_claim(role_name, new_agent_instance_id)
+        if not holds:
+            raise VerbError(
+                "verify_timeout",
+                f"new session {new_agent_instance_id!r} never claimed role "
+                f"{role_name!r} within {self._RESTART_VERIFY_MAX_WAIT_SECONDS}s of "
+                "spawn (claim circle not broken — ARMED ≠ FIRED).",
+            )
+        self._complete_choreography_job(
+            job_manager, job_id,
+            {
+                "old_agent_instance_id": old_agent_instance_id,
+                "new_agent_instance_id": new_agent_instance_id,
+                "role_reclaim_driven": role_reclaim_driven,
+                "role_reclaim_verified": True,
+            },
+        )
+
+    def _run_generate_curation_report_job(
+        self, job_id: str, request_data: dict[str, Any], job_manager: AsyncJobManager,
+    ) -> None:
+        """M2.2 choreography, run OFF the dispatch path: fetch this origin's
+        memory records once, build the fact index, rank the caller-supplied
+        head lines. Raises ``VerbError`` (``memory_service_unavailable``,
+        ``homunculus_name_unset``, ``memory_fetch_failed``) on any precondition
+        this job cannot proceed without — propagates to
+        :func:`_process_choreography_job`, which fails the job with that
+        code/message, same contract as rotate/restart."""
+        head_lines_raw = request_data.get("head_lines")
+        head_lines = [str(x) for x in head_lines_raw] if isinstance(head_lines_raw, list) else []
+        bottom_n_raw = request_data.get("bottom_n")
+        bottom_n = bottom_n_raw if isinstance(bottom_n_raw, int) else 10
+        byte_budget_raw = request_data.get("byte_budget")
+        byte_budget = byte_budget_raw if isinstance(byte_budget_raw, int) else 17_000
+        line_budget_raw = request_data.get("line_budget")
+        line_budget = line_budget_raw if isinstance(line_budget_raw, int) else 132
+
+        self._update_choreography_progress(
+            job_manager, job_id, progress_percent=25, leg="fetch_memory_records",
+        )
+        if self._memory_service is None:
+            raise VerbError(
+                "memory_service_unavailable", "memory_service is not bound on this homunculus.",
+            )
+        homunculus_name = _resolve_homunculus_name_for_memory_tags()
+        if not homunculus_name:
+            raise VerbError(
+                "homunculus_name_unset",
+                "Could not resolve a homunculus name to scope the memory fetch to this "
+                "origin -- HOMUNCULUS_NAME is unset, root_manifest.yaml is unreadable or "
+                "still carries its unwritten placeholder, and CLAUDE_PROJECT_DIR is unset "
+                "(the final fallback needs it too).",
+            )
+        fetch_result = self._memory_service.get_memories_by_tag(tag=origin_tag(homunculus_name))
+        records = fetch_result.get("memories") if isinstance(fetch_result, dict) else None
+        if not isinstance(records, list):
+            raise VerbError(
+                "memory_fetch_failed",
+                f"get_memories_by_tag returned no usable 'memories' list: {fetch_result!r}",
+            )
+
+        self._update_choreography_progress(
+            job_manager, job_id, progress_percent=65, leg="build_index_and_rank",
+        )
+        fact_index = build_fact_index(records, homunculus_name)
+        report = build_curation_report(
+            head_lines, fact_index,
+            bottom_n=bottom_n, byte_budget=byte_budget, line_budget=line_budget,
+        )
+        self._complete_choreography_job(job_manager, job_id, report)
 
     def set_active(self, active: bool) -> None:
         """L3 blue-green Slice D color-active gate (peer dispatch + inbox poll).
@@ -789,11 +1427,7 @@ class AgentMessagingPlugin(
         return {IOCapability.TEXT}
 
     def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
-        """Declare ``run_turn`` — the only EDGE process this plugin owns.
-
-        ``run_turn`` is dispatched only by ``AgentMessagingService``
-        (never by the inference model) and its result is bridge-delivered
-        via ``ResultProcessorKind.BRIDGE_DELIVERY``.
+        """Declare the EDGE processes this plugin owns.
 
         EDGE_SINK processes (``deliver_result``, ``deliver_error``,
         ``post_message``, ``start_interface``, ``stop_interface``) are
@@ -805,14 +1439,6 @@ class AgentMessagingPlugin(
         ``claude_code_channel_plugin`` for the same pattern).
         """
         return {
-            "run_turn": EdgeProcessDefinition(
-                name="run_turn",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=False,
-                ),
-            ),
             "send_peer_message": EdgeProcessDefinition(
                 name="send_peer_message",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(
@@ -853,6 +1479,231 @@ class AgentMessagingPlugin(
                     retryable=False,
                 ),
             ),
+            "spawn_session": EdgeProcessDefinition(
+                name="spawn_session",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "legislate_role": EdgeProcessDefinition(
+                name="legislate_role",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "capture_lane_charter": EdgeProcessDefinition(
+                name="capture_lane_charter",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    # A fresh INSERT, not idempotent on conflict -- an
+                    # automatic retry after an uncertain result would write
+                    # a SECOND charter row, which resolve_lane_charter would
+                    # then treat as the superseding one. Never safe to retry
+                    # blind.
+                    retryable=False,
+                ),
+            ),
+            "arm_session_dependency": EdgeProcessDefinition(
+                name="arm_session_dependency",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    # A fresh INSERT, not idempotent on conflict (unlike
+                    # legislate_role's on_conflict=do_nothing) -- an
+                    # automatic retry after an uncertain result would arm a
+                    # SECOND edge for the same condition, never safe.
+                    retryable=False,
+                ),
+            ),
+            "list_sessions": EdgeProcessDefinition(
+                name="list_sessions",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "budget_report": EdgeProcessDefinition(
+                name="budget_report",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    # Read-only (issues no writes) -- always safe to retry.
+                    retryable=True,
+                ),
+            ),
+            "drain_session_claude_mapping_spool": EdgeProcessDefinition(
+                name="drain_session_claude_mapping_spool",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    # Idempotent by construction (upsert on the spool
+                    # filename's own conflict triple) -- an automatic retry
+                    # after an uncertain result is always safe, unlike
+                    # arm_session_dependency's fresh-INSERT-only sibling above.
+                    retryable=True,
+                ),
+            ),
+            # usage-capture-attribution D2 follow-on (2026-08-06, workbench
+            # 2026-08-06_usage_capture_attribution_findings_usage-capture-impl.md):
+            # a read-only listing verb over session_claude_mapping, so a
+            # future budget_report diagnosis can read the mapping table
+            # directly instead of inferring its contents (as this lane's own
+            # D1/D2 had to).
+            "list_session_claude_mappings": EdgeProcessDefinition(
+                name="list_session_claude_mappings",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    # Read-only (issues no writes) -- always safe to retry.
+                    retryable=True,
+                ),
+            ),
+            "session_status": EdgeProcessDefinition(
+                name="session_status",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "clear_session": EdgeProcessDefinition(
+                name="clear_session",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "compact_session": EdgeProcessDefinition(
+                name="compact_session",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "drive_session": EdgeProcessDefinition(
+                name="drive_session",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "terminate_session": EdgeProcessDefinition(
+                name="terminate_session",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "retire_session": EdgeProcessDefinition(
+                name="retire_session",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "report_alive": EdgeProcessDefinition(
+                name="report_alive",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            # maintenance-verbs M1 (workbench
+            # 2026-08-09_maintenance_verbs_m0_design_mverbs-impl.md §2.3).
+            # Retryable: an overwrite upsert of the caller's OWN latest
+            # snapshot is idempotent-on-repeat by construction (same row,
+            # same conflict key) — a retry after a transient fault can never
+            # double-record or corrupt an earlier value.
+            "report_context_status": EdgeProcessDefinition(
+                name="report_context_status",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # Read-only (issues no writes) -- always safe to retry.
+            "session_context_status": EdgeProcessDefinition(
+                name="session_context_status",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # maintenance-verbs M1, D0.3-ratified deferred-completion shape.
+            # NOT retryable: a repeat call creates a SECOND choreography job
+            # (AsyncJobManager.create_job mints a fresh job_id every call, no
+            # idempotency key) -- a naive retry after a transient dispatch
+            # fault would double-drive the same worker. The caller re-checks
+            # via check_choreography_job_status before ever re-dispatching.
+            "rotate_session": EdgeProcessDefinition(
+                name="rotate_session",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "restart_session": EdgeProcessDefinition(
+                name="restart_session",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            # Read-only (issues no writes) -- always safe to retry. Also
+            # serves generate_curation_report's job family -- it is a
+            # generic AsyncJobManager job-row reader, not scoped to
+            # rotate/restart specifically (verified at source).
+            "check_choreography_job_status": EdgeProcessDefinition(
+                name="check_choreography_job_status",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # M2.2, same D0.3 dispatch shape as rotate/restart_session above.
+            # NOT retryable for the identical reason: a repeat call mints a
+            # SECOND job (no idempotency key on create_job), double-queuing
+            # the same report -- the caller re-checks via
+            # check_choreography_job_status before ever re-dispatching.
+            "generate_curation_report": EdgeProcessDefinition(
+                name="generate_curation_report",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            # Idempotent in effect (a second reinforce on the same slug just
+            # adds another retrieval timestamp) but NOT marked retryable --
+            # a naive retry after a transient dispatch fault would still
+            # double-reinforce the target memory, over-counting
+            # retrieval_count for a citation that only happened once. Mirrors
+            # peer_claim_role's own "side effect, so don't auto-retry" stance.
+            "reinforce_by_slug": EdgeProcessDefinition(
+                name="reinforce_by_slug",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
             # Pull-surface boundary (design §2). Retryable: the write is
             # monotonic (an attestation at or below the stored mark is a
             # no-op), so a retry after a transient fault re-attests the same
@@ -865,7 +1716,7 @@ class AgentMessagingPlugin(
                     retryable=True,
                 ),
             ),
-            # Dax Part 24.1/24.2 pull receive verb. Retryable: it is a pure
+            # Pull receive verb. Retryable: it is a pure
             # read whose only write is the liveness touch, so a repeat is
             # harmless and a transient state-read fault is worth re-running.
             "peer_inbox": EdgeProcessDefinition(
@@ -920,19 +1771,6 @@ class AgentMessagingPlugin(
     # AgentMessagingServiceInterface — delegation
     # ------------------------------------------------------------------
 
-    def open_thread(self, request: OpenAgentThreadRequest) -> AgentThreadOpened:
-        return self._require_service().open_thread(request)
-
-    def send_message(
-        self, request: SendAgentMessageRequest,
-    ) -> AgentMessageQueued:
-        return self._require_service().send_message(request)
-
-    def list_messages(
-        self, request: ListAgentMessagesRequest,
-    ) -> AgentMessagesPage:
-        return self._require_service().list_messages(request)
-
     def list_threads(
         self, request: ListAgentThreadsRequest,
     ) -> AgentThreadsPage:
@@ -942,20 +1780,6 @@ class AgentMessagingPlugin(
         self, request: ReadThreadMessagesRequest,
     ) -> AgentThreadMessagesPage:
         return self._require_service().read_thread_messages(request)
-
-    def get_status(
-        self, *, thread_id: str, bridge_id: str,
-    ) -> AgentThreadStatus:
-        return self._require_service().get_status(
-            thread_id=thread_id, bridge_id=bridge_id,
-        )
-
-    def close_thread(
-        self, *, thread_id: str, bridge_id: str,
-    ) -> AgentThreadClosed:
-        return self._require_service().close_thread(
-            thread_id=thread_id, bridge_id=bridge_id,
-        )
 
     def peer_send(self, request: PeerSendRequest) -> PeerSendResult:
         if not self._active:
@@ -985,6 +1809,7 @@ class AgentMessagingPlugin(
             get_peer_binding_schema_definition(),
             get_agent_role_binding_schema_definition(),
             get_role_model_schema_definition(),
+            get_session_lifecycle_schema_definition(),
         ]
 
     # ------------------------------------------------------------------
@@ -1012,14 +1837,6 @@ class AgentMessagingPlugin(
                 description="Message text to deliver to the peer.",
                 required=True,
                 type=ParameterType.STRING,
-            ),
-            "important": ParameterMetadata(
-                description=(
-                    "When true, prepends 'IMPORTANT: ' to content so the platform "
-                    "triggers a native wake on the recipient session."
-                ),
-                required=False,
-                type=ParameterType.BOOLEAN,
             ),
         },
         output_type="object",
@@ -1066,16 +1883,20 @@ class AgentMessagingPlugin(
         peer_id = str(raw.get("peer_id", ""))
         peer_agent_instance_id = raw.get("peer_agent_instance_id") or None
         content_text = str(raw.get("content", ""))
-        important = bool(raw.get("important", False))
-        if important:
-            content_text = f"IMPORTANT: {content_text}"
         content: list[TextPart] = [TextPart(type="text", text=content_text)]
-        sender = _resolve_role_send_sender(state, self._get_state_service())
+        # Unchanged from before this lane: state_service may be None (not yet
+        # bound at bootstrap) and _resolve_role_send_sender already degrades
+        # gracefully on that — never hard-fail this verb over it. The new
+        # dispatch_peer_send param accepts None for exactly this case
+        # (drive_on_delivery is best-effort and no-ops without one).
+        state_service = self._get_state_service()
+        sender = _resolve_role_send_sender(state, state_service)
         try:
             outcome = dispatch_peer_send(
                 bridge_manager=self._bridge_manager,
                 peer_registry=self._peer_registry,
                 agent_messaging_service=self._require_service(),
+                state_service=state_service,
                 sender_bridge_id=SYSTEM_SCHEDULER_ID,
                 sender_agent_id=sender.agent_id,
                 sender_agent_instance_id=sender.agent_instance_id,
@@ -1125,9 +1946,12 @@ class AgentMessagingPlugin(
             ),
             "content": ParameterMetadata(
                 description=(
-                    "Message text. Prefix with 'IMPORTANT: ' to trigger a "
-                    "native wake on the resolved recipient (same loop-"
-                    "prevention contract as peer_send)."
+                    "Message text. Delivery is a transport property, not a "
+                    "sender-declared one (A4, 2026-08-04): every send is "
+                    "delivery-attempted against the resolved recipient's "
+                    "live binding, waking it if a native adapter is "
+                    "registered. A leading 'IMPORTANT:' is stripped as "
+                    "input hygiene only; it no longer changes delivery."
                 ),
                 required=True,
                 type=ParameterType.STRING,
@@ -1217,6 +2041,7 @@ class AgentMessagingPlugin(
             bridge_manager=self._bridge_manager,
             peer_registry=self._peer_registry,
             agent_messaging_service=self._require_service(),
+            state_service=state_service,
             role_name=name,
             role=role,
             sender_bridge_id=sender.bridge_id,
@@ -1248,6 +2073,7 @@ class AgentMessagingPlugin(
             bridge_manager=self._bridge_manager,
             peer_registry=self._peer_registry,
             agent_messaging_service=self._handover_service(),
+            state_service=self._get_state_service(),
             peer_id=peer_id,
             peer_agent_instance_id=peer_agent_instance_id,
             prose=prose,
@@ -1463,9 +2289,1436 @@ class AgentMessagingPlugin(
                 code="state_service_unavailable",
                 message="state_service is not bound on this homunculus.",
             )
+        # Fleet session-management Phase B, D1 (§2 rule 3, Architect ratification
+        # #2): capture the PRE-release holder's agent_session_id so the
+        # session_role_claim row can be pruned AFTER the binding release —
+        # binding-release strictly precedes the session-key-row delete (never
+        # the reverse: row-first + a crash between lets a fresh INSERT for a
+        # new role slip past the still-standing old binding, a double-claim).
+        prior_session_id = ""
+        with contextlib.suppress(RoleBindingVacantError, RoleBindingMalformedError):
+            prior_session_id = resolve_role_binding_v4(state_service, name).agent_session_id
         # §9 CUTOVER: hard-delete the v4 role_binding row (no-tombstone §5.1).
         outcome = release_role_binding_v4(state_service, name)
+        if prior_session_id and not is_system_role(name):
+            delete_session_role_claim_if_still_holds(
+                state_service, agent_session_id=prior_session_id, expected_held_role=name,
+            )
         return _success_result(data=outcome)
+
+    @platform_process(
+        name="spawn_session",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "role_class": ParameterMetadata(
+                description=(
+                    "ephemeral | project | principal (§2 taxonomy; primary/chat "
+                    "are never spawn-assigned)."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "lane_id": ParameterMetadata(
+                description="The lane this session is spawned for (provenance).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "brief_ref": ParameterMetadata(
+                description="Workbench path or dispatch id backing the spawn (provenance).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "work_class": ParameterMetadata(
+                description="read_only | analysis_deliverable | production_mutation.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "budget_line": ParameterMetadata(
+                description="The token-budget ledger key this spawn rolls up to.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "role_name": ParameterMetadata(
+                description=(
+                    "Named role to fill on boot (project: may mint; principal: "
+                    "fill-never-mint, must already be legislated). Empty for ephemeral."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "host": ParameterMetadata(
+                description=(
+                    "Per-spawn host override (tmux | headless | operator). Empty "
+                    "falls to FLEET_SESSION_HOST env, then the platform default."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "visibility": ParameterMetadata(
+                description="visible | headless (spawn-time operator/primary parameter).",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "model": ParameterMetadata(
+                description="Dispatch model override.", required=False, type=ParameterType.STRING,
+            ),
+            "effort": ParameterMetadata(
+                description="Dispatch effort override.", required=False, type=ParameterType.STRING,
+            ),
+            "allowed_tools": ParameterMetadata(
+                description=(
+                    "Explicit tool-name allowlist override for the headless "
+                    "PreToolUse gate (§6 permission-mode ruling, 2026-08-03). "
+                    "Omitted -> resolved from plugin.yaml's per-work_class "
+                    "work_class_tool_allowlists; unconfigured -> empty (the "
+                    "spawn is still gated, just with nothing extra allowed)."
+                ),
+                required=False,
+                type=ParameterType.LIST,
+            ),
+            "permission_mode": ParameterMetadata(
+                description=(
+                    "Explicit --permission-mode override for the headless host "
+                    "driver (§6 permission-mode design, 2026-08-03). Omitted -> "
+                    "resolved from plugin.yaml's headless_permission_mode. No "
+                    "value is rejected (operator ruling, 2026-08-03: 'we don't "
+                    "have any restrictions now'); the driver still refuses if "
+                    "this and the config both resolve to nothing at all."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "report_by_seconds": ParameterMetadata(
+                description="Initial report-or-die deadline, in seconds from spawn.",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+            "ttl_seconds": ParameterMetadata(
+                description="Optional hard TTL, in seconds from spawn.",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+            "spawned_by_instance_id": ParameterMetadata(
+                description="Lineage: the spawning session's own agent_instance_id.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "spawned_by_role": ParameterMetadata(
+                description="Lineage: the spawning session's role name at spawn time, if any.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "spawn_session outcome: the new session's identity + host dispatch result."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="spawn_session outcome (D1 §4)",
+            properties={
+                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "host": ParameterMetadata(type=ParameterType.STRING),
+                "host_ref": ParameterMetadata(type=ParameterType.STRING),
+                "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
+                "first_turn_source": ParameterMetadata(
+                    description="charter | fallback — which text was driven as turn 1 "
+                    "(phase 2 slice 6).",
+                    type=ParameterType.STRING,
+                ),
+                "first_turn_delivered": ParameterMetadata(
+                    description="Whether the first-turn send succeeded. False never blocks "
+                    "the spawn itself; the failure is logged separately.",
+                    type=ParameterType.BOOLEAN,
+                ),
+                "first_turn_error": ParameterMetadata(
+                    description="Non-empty error detail when first_turn_delivered is False; "
+                    "empty on success.",
+                    type=ParameterType.STRING,
+                ),
+            },
+        ),
+    )
+    def spawn_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """§4 ``spawn_session`` — validate, write the ledger row (spawning,
+        BEFORE host dispatch), dispatch through the resolved host driver.
+
+        ``operator`` (degenerate, cannot spawn), ``headless`` (D1, the
+        registered default), and ``tmux`` (D2) all ship registered — see
+        ``session_hosts.py`` for the current registry. A call with
+        ``host="operator"`` (or an unconfigured ``headless``/``tmux``
+        environment) still ends in ``host_cannot_spawn``, with the specific
+        remedies in the error; an undeclared/typo'd host name ends in
+        ``host_mechanism_missing``.
+        """
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        req = _spawn_session_request_from_params(raw, format_directed_by(state.get("call_context")))
+        req = _apply_spawn_session_policy(req, self._build_session_lifecycle_policy_config())
+        try:
+            result = lifecycle_spawn_session(state_service, req)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="legislate_role",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "name": ParameterMetadata(
+                description=(
+                    "The role name to legislate (e.g. 'Coordinator-Main' for a "
+                    "role_class='primary' seat)."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "role_class": ParameterMetadata(
+                description=(
+                    "primary | principal — the ONE two-value taxonomy this "
+                    "governance act may assign; project/ephemeral/chat are "
+                    "minted, never legislated."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "brief_ref": ParameterMetadata(
+                description=(
+                    "Workbench path, dispatch id, or ruling reference "
+                    "authorizing this act (provenance — mirrors spawn_session's "
+                    "brief_ref)."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description="legislate_role outcome: the legislated name + role_class.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="legislate_role outcome (D4 Part B item 1)",
+            properties={
+                "action": ParameterMetadata(type=ParameterType.STRING),
+                "name": ParameterMetadata(type=ParameterType.STRING),
+                "role_class": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def legislate_role(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """D4 Part B item 1 — governance-act creation of a ``role`` row with
+        an authority-carrying ``role_class`` (``primary``/``principal``)
+        stamped at birth. The ONE sanctioned path outside ``peer_claim_role``
+        (§3.1 Q1: claim-time is enforce-by-class, never class-assignment).
+
+        ``directed_by`` is server-built from ``call_context`` via
+        ``format_directed_by`` — the SAME provenance convention
+        ``spawn_session`` uses, never caller-supplied.
+        """
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        req = LegislateRoleRequest(
+            name=str(raw.get("name") or ""),
+            role_class=str(raw.get("role_class") or ""),
+            brief_ref=str(raw.get("brief_ref") or ""),
+            directed_by=format_directed_by(state.get("call_context")),
+        )
+        try:
+            result = lifecycle_legislate_role(state_service, req)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="capture_lane_charter",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "lane_id": ParameterMetadata(
+                description="The lane this charter founds.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "charter_text": ParameterMetadata(
+                description=(
+                    "The operator's verbatim founding words, captured byte-exact. "
+                    "Driven unmodified as a spawned worker's literal first turn "
+                    "(spawn_session resolves the LATEST captured row for the "
+                    "worker's lane_id)."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "captured_at": ParameterMetadata(
+                description=(
+                    "ISO-8601 timestamp of when the operator spoke these words in "
+                    "the seat conversation — NOT the row-write time."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "brief_ref": ParameterMetadata(
+                description="Workbench path or dispatch id this charter accompanies.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description="capture_lane_charter outcome: the newly written charter row.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="capture_lane_charter outcome (phase 2 slice 6)",
+            properties={
+                "lane_id": ParameterMetadata(type=ParameterType.STRING),
+                "charter_text": ParameterMetadata(type=ParameterType.STRING),
+                "brief_ref": ParameterMetadata(type=ParameterType.STRING),
+                "captured_at": ParameterMetadata(type=ParameterType.STRING),
+                "directed_by": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def capture_lane_charter(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Phase 2 slice 6, design check-in ruling item 3(a) — the seat-
+        invoked governance act that writes a ``lane_charter`` row.
+        Insert-only: calling this again for the same ``lane_id`` supersedes
+        by recency, it never edits a prior charter's text in place.
+
+        ``directed_by`` is server-built from ``call_context`` via
+        ``format_directed_by`` — the SAME provenance convention
+        ``spawn_session``/``legislate_role`` use, never caller-supplied.
+        """
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        req = CaptureLaneCharterRequest(
+            lane_id=str(raw.get("lane_id") or ""),
+            charter_text=str(raw.get("charter_text") or ""),
+            captured_at=str(raw.get("captured_at") or ""),
+            brief_ref=str(raw.get("brief_ref") or ""),
+            directed_by=format_directed_by(state.get("call_context")),
+        )
+        try:
+            result = lifecycle_capture_lane_charter(state_service, req)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="arm_session_dependency",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "waiter_instance_id": ParameterMetadata(
+                description=(
+                    "The waiting session's agent_instance_id. Required — v1 is "
+                    "session-scoped ONLY; lane-scoped arming is unsupported by "
+                    "construction (there is no waiter_lane_id parameter)."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "condition_kind": ParameterMetadata(
+                description="lane_closed | session_terminal | deadline.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "condition_ref": ParameterMetadata(
+                description=(
+                    "The condition_kind's referent: a lane_id (lane_closed), "
+                    "an agent_instance_id (session_terminal), or an ISO-8601 "
+                    "timestamp (deadline). Shape-checked per kind."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "arm_session_dependency outcome (drive-on-delivery lane rider) — "
+            "the armed wake edge."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="arm_session_dependency outcome",
+            properties={
+                "waiter_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "condition_kind": ParameterMetadata(type=ParameterType.STRING),
+                "condition_ref": ParameterMetadata(type=ParameterType.STRING),
+                "armed": ParameterMetadata(type=ParameterType.BOOLEAN),
+            },
+        ),
+    )
+    def arm_session_dependency(
+        self, params: dict[str, Any], state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Rider verb (drive-on-delivery lane, slice 2, 2026-08-04) — the
+        FIRST caller of the D1 ``session_dependency`` wake-edge machinery.
+        See :func:`session_lifecycle_verbs.arm_session_dependency` for the
+        full contract (session-scoped only, no waiter-existence check,
+        per-kind ``condition_ref`` shape validation)."""
+        del state
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        req = ArmSessionDependencyRequest(
+            waiter_instance_id=str(raw.get("waiter_instance_id") or ""),
+            condition_kind=str(raw.get("condition_kind") or ""),
+            condition_ref=str(raw.get("condition_ref") or ""),
+        )
+        try:
+            result = lifecycle_arm_session_dependency(state_service, req)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="drain_session_claude_mapping_spool",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        output_type="object",
+        output_description=(
+            "T1 usage-capture lane — drains the SessionStart hook's "
+            "file-per-firing spool into session_claude_mapping."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="drain_session_claude_mapping_spool outcome",
+            properties={
+                "files_seen": ParameterMetadata(type=ParameterType.INTEGER),
+                "upserted": ParameterMetadata(type=ParameterType.INTEGER),
+                "skipped_malformed": ParameterMetadata(type=ParameterType.INTEGER),
+            },
+        ),
+    )
+    def drain_session_claude_mapping_spool(
+        self, params: dict[str, Any], state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """T1 usage-capture lane (ruling 2026-08-05) — testable/on-demand
+        entry point for :func:`session_claude_mapping_ingest.
+        drain_session_claude_mapping_spool`; the SAME function is also
+        called directly from ``_run_session_lifecycle_sweep`` (the sweep-tick
+        wiring the ruling requires — a verb nobody calls is bound-in-name-only)."""
+        del params, state
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        result = lifecycle_drain_session_claude_mapping_spool(state_service)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="list_sessions",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "lane_id": ParameterMetadata(
+                description="Filter to one lane_id.", required=False, type=ParameterType.STRING,
+            ),
+            "work_class": ParameterMetadata(
+                description="Filter to one work_class.", required=False, type=ParameterType.STRING,
+            ),
+            "host": ParameterMetadata(
+                description="Filter to one host.", required=False, type=ParameterType.STRING,
+            ),
+            "lifecycle_state": ParameterMetadata(
+                description="Filter to one lifecycle_state.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description="§4 list_sessions — the ONE fleet list.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="list_sessions outcome",
+            properties={
+                "sessions": ParameterMetadata(type=ParameterType.LIST),
+            },
+        ),
+    )
+    def list_sessions(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+        """§4 ``list_sessions`` — the ONE fleet list (operator-managed rows
+        included by construction, via the normal registration path)."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        filters = {
+            key: str(raw[key])
+            for key in ("lane_id", "work_class", "host", "lifecycle_state")
+            if raw.get(key)
+        }
+        return _success_result(data=lifecycle_list_sessions(state_service, filters or None))
+
+    @platform_process(
+        name="budget_report",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "lane_id": ParameterMetadata(
+                description="Filter to one lane_id.", required=False, type=ParameterType.STRING,
+            ),
+            "budget_line": ParameterMetadata(
+                description="Filter to one budget_line.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "T1 S3 -- per-budget_line token-usage rollup, joining managed_session/"
+            "session_claude_mapping against session_ledger's session/event tables."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="budget_report outcome",
+            properties={
+                "budget_lines": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description=(
+                        "One entry per distinct budget_line among matching "
+                        "managed_session rows. Each entry: budget_line (str), "
+                        "sessions_covered (int, contributed >=1 usage-bearing "
+                        "session_ledger event), sessions_uncovered (int, no "
+                        "mapping row or no ledger usage events -- the S2c "
+                        "absence-detection population), as_of (ISO-8601 str or "
+                        "null -- the latest event_at among included usage "
+                        "events; null when sessions_covered is 0), usage "
+                        "(dict[str, number] -- per-field sums of whatever "
+                        "numeric keys actually appear in the vendor's verbatim "
+                        "usage_json, no fixed schema), and by_model (dict "
+                        "keyed on managed_session.model, empty string for "
+                        "unset, each value the same "
+                        "sessions_covered/sessions_uncovered/as_of/usage shape "
+                        "scoped to that model)."
+                    ),
+                ),
+            },
+        ),
+    )
+    def budget_report(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+        """T1 S3 -- read-only token-usage rollup per budget_line. See
+        ``budget_report.py``'s module docstring for the join mechanism (the
+        first cross-plugin state read against session_ledger's own tables)
+        and the seat's three S3 design rails (staleness marker, coverage
+        disclosure, compile-time schema coupling)."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        result = lifecycle_build_budget_report(
+            state_service,
+            lane_id=str(raw.get("lane_id") or ""),
+            budget_line=str(raw.get("budget_line") or ""),
+        )
+        return _success_result(data=result)
+
+    @platform_process(
+        name="list_session_claude_mappings",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The managed_session whose mapping rows to list.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "usage-capture-attribution D2 follow-on -- every live "
+            "session_claude_mapping row observed for one agent_instance_id."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="list_session_claude_mappings outcome",
+            properties={
+                "mappings": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description=(
+                        "Every live session_claude_mapping row for the given "
+                        "agent_instance_id, oldest-observation-order NOT "
+                        "guaranteed (callers needing order sort by "
+                        "captured_at themselves). Each row: agent_instance_id "
+                        "(str), claude_session_id (str, the Claude Code "
+                        "session_id this firing captured), captured_at "
+                        "(ISO-8601 str, the hook payload's own timestamp), "
+                        "capture_source (str: hook:startup | hook:clear | "
+                        "hook:resume | init_event), plus the standard "
+                        "state-layer row fields (id, namespace, created_at, "
+                        "updated_at, created_by, updated_by, name, "
+                        "is_deleted, external_id) every state-managed table "
+                        "carries. An empty list means no mapping has EVER "
+                        "been observed for this worker (SessionStart hook "
+                        "never fired, or the worker predates the capture "
+                        "landing) -- not an error."
+                    ),
+                ),
+            },
+        ),
+    )
+    def list_session_claude_mappings(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """usage-capture-attribution D2 follow-on (workbench
+        2026-08-06_usage_capture_attribution_findings_usage-capture-impl.md)
+        -- a read-only listing verb over session_claude_mapping, named
+        during that lane's D1 diagnosis as the missing piece that forced
+        inference instead of measurement. Read-only, issues no writes;
+        thin wrapper over the same store-layer function budget_report.py
+        already uses internally."""
+        raw = params.get("parameters", params)
+        agent_instance_id = str(raw.get("agent_instance_id") or "")
+        if not agent_instance_id:
+            return _failure_result(
+                code="missing_agent_instance_id",
+                message="list_session_claude_mappings requires a non-empty agent_instance_id.",
+            )
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        mappings = lifecycle_list_session_claude_mappings(state_service, agent_instance_id)
+        return _success_result(data={"mappings": mappings})
+
+    @platform_process(
+        name="session_status",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The managed_session to look up.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description="§4 session_status — the ledger row.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="The live managed_session row.",
+            properties={
+                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "agent_session_id": ParameterMetadata(type=ParameterType.STRING),
+                "agent_id": ParameterMetadata(type=ParameterType.STRING),
+                "spawned_by_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "spawned_by_role": ParameterMetadata(type=ParameterType.STRING),
+                "lane_id": ParameterMetadata(type=ParameterType.STRING),
+                "brief_ref": ParameterMetadata(type=ParameterType.STRING),
+                "model": ParameterMetadata(type=ParameterType.STRING),
+                "effort": ParameterMetadata(type=ParameterType.STRING),
+                "work_class": ParameterMetadata(type=ParameterType.STRING),
+                "budget_line": ParameterMetadata(type=ParameterType.STRING),
+                "visibility": ParameterMetadata(type=ParameterType.STRING),
+                "host": ParameterMetadata(type=ParameterType.STRING),
+                "host_ref": ParameterMetadata(type=ParameterType.STRING),
+                "capability_report": ParameterMetadata(type=ParameterType.OBJECT),
+                "report_by": ParameterMetadata(type=ParameterType.STRING),
+                "expires_at": ParameterMetadata(type=ParameterType.STRING),
+                "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
+                "last_transition_at": ParameterMetadata(type=ParameterType.STRING),
+                "directed_by": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def session_status(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+        """§4 ``session_status`` — the ledger row. (Host-liveness enrichment
+        is deferred to whichever caller has the host driver registry; this
+        verb's contract is the ledger truth, always available.)"""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        try:
+            row = lifecycle_session_status(state_service, str(raw.get("agent_instance_id", "")))
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=row)
+
+    @platform_process(
+        name="clear_session",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The managed_session to clear.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "park": ParameterMetadata(
+                description=(
+                    "When true, also drives live/idle/overdue -> parked "
+                    "(L3 rule 2, steward direction) after the clear is sent."
+                ),
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
+        },
+        output_type="object",
+        output_description="§4 clear_session (AMEND 5b) — context hygiene via the driver channel.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="clear_session outcome",
+            properties={
+                "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
+                "parked": ParameterMetadata(type=ParameterType.BOOLEAN),
+            },
+        ),
+    )
+    def clear_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """§4 ``clear_session`` (AMEND 5b) — fire-and-forget ``/clear`` over
+        the resolved host driver's channel; ``park=True`` additionally
+        drives the row to ``parked`` (the only writer of that edge)."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        try:
+            result = lifecycle_clear_session(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                park=bool(raw.get("park", False)),
+                directed_by=format_directed_by(state.get("call_context")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="compact_session",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The managed_session to compact.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "§4 compact_session (AMEND 5b) — context hygiene via the driver channel."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="compact_session outcome",
+            properties={
+                "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def compact_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+        """§4 ``compact_session`` (AMEND 5b) — fire-and-forget ``/compact``
+        over the driver channel; no park mode, no lifecycle transition."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        try:
+            result = lifecycle_compact_session(
+                state_service, agent_instance_id=str(raw.get("agent_instance_id", "")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="drive_session",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The managed_session to dispatch the work turn into.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "text": ParameterMetadata(
+                description=(
+                    "The work turn to send over the driver channel — a "
+                    "self-contained dispatch (brief text or a workbench "
+                    "brief pointer plus instructions). Must be non-empty."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "drive_session (D2-window rider) — work dispatch via the driver channel."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="drive_session outcome",
+            properties={
+                "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
+                "unparked": ParameterMetadata(type=ParameterType.BOOLEAN),
+            },
+        ),
+    )
+    def drive_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """``drive_session`` (D2-window rider, 2026-08-04) — fire-and-forget
+        work dispatch over the resolved host driver's channel; owns the §3.2
+        ``parked -> live`` edge and re-arms ``report_by`` on every dispatch."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        try:
+            result = lifecycle_drive_session(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                text=str(raw.get("text", "")),
+                directed_by=format_directed_by(state.get("call_context")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="terminate_session",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The managed_session to terminate.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "grace_seconds": ParameterMetadata(
+                description=(
+                    "Seconds to wait for a graceful host-level stop before "
+                    "SIGKILL. Default 30."
+                ),
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "§4 terminate_session — graceful stop -> kill after grace -> "
+            "ledger -> terminated. Also fires + best-effort delivers any "
+            "armed session_terminal dependency edges waiting on this "
+            "session, on both the transition and already-terminal paths."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="terminate_session outcome",
+            properties={
+                "already_terminal": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
+                "session_terminal_edges_fired": ParameterMetadata(type=ParameterType.INTEGER),
+            },
+        ),
+    )
+    def terminate_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """§4 ``terminate_session`` — resolves the row's host driver and
+        calls its real ``terminate()`` (driver-level stop, SIGKILL after
+        grace) BEFORE the ledger write, so the ledger never claims
+        ``terminated`` over a process still running. ``host='operator'``
+        rows (degenerate driver, never spawned by us) still land the ledger
+        transition — see ``session_lifecycle_verbs.terminate_session``'s
+        docstring for why that's not a silent degradation. Idempotent on an
+        already-terminal row."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        grace_raw = raw.get("grace_seconds")
+        try:
+            result = lifecycle_terminate_session(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                directed_by=format_directed_by(state.get("call_context")),
+                **({"grace_seconds": int(grace_raw)} if grace_raw is not None else {}),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="retire_session",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The managed_session to retire (the lane-landing verb).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "§4 retire_session — terminate + release + fire dependency edges + retired."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="retire_session outcome",
+            properties={
+                "already_retired": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "dependencies_fired": ParameterMetadata(type=ParameterType.INTEGER),
+            },
+        ),
+    )
+    def retire_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """§4 ``retire_session`` — the lane-landing verb; four idempotent
+        steps, re-drivable by construction (session_lifecycle_verbs module
+        docstring)."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        try:
+            result = lifecycle_retire_session(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                directed_by=format_directed_by(state.get("call_context")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="report_alive",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The reporting managed_session.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "status": ParameterMetadata(
+                description="working | idle.", required=True, type=ParameterType.STRING,
+            ),
+            "status_note": ParameterMetadata(
+                description="Optional free-text note, recorded on the audit trail.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description="§4 report_alive — re-arms report_by; status drives live<->idle.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="report_alive outcome",
+            properties={
+                "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
+                "recovered": ParameterMetadata(type=ParameterType.BOOLEAN),
+            },
+        ),
+    )
+    def report_alive(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """§4 ``report_alive`` — re-arms ``report_by``; a late report from
+        ``overdue`` recovers and sets ``recovered=True``."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        try:
+            result = lifecycle_report_alive(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                status=str(raw.get("status", "")),
+                status_note=str(raw.get("status_note", "") or ""),
+                directed_by=format_directed_by(state.get("call_context")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="rotate_session",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The ledger agent_instance_id to rotate (from list_sessions — "
+                "NEVER a peer_list/role-thread watch id).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "role_name": ParameterMetadata(
+                description="The durable role this ledger row currently holds — used for "
+                "the durable pickup dispatch (peer_send_by_name).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "pickup_text": ParameterMetadata(
+                description="Pickup pointer driven as the post-clear turn (e.g. pointing "
+                "at the worker's own handoff note + inbox).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "park_first": ParameterMetadata(
+                description="Pass through to clear_session's park flag.",
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "maintenance-verbs M1, D0.3-ratified deferred-completion shape — dispatches "
+            "a rotate_session choreography job and returns immediately; poll "
+            "check_choreography_job_status for the outcome."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="rotate_session dispatch outcome",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def rotate_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """§2.1 ``rotate_session`` — ms-scale dispatch only (D0.3 mechanic 1);
+        the actual clear/drive/verify choreography runs in the plugin's own
+        single dedicated background worker (never inline in this handler)."""
+        raw = params.get("parameters", params)
+        job_manager = self._try_acquire_async_job_manager()
+        if job_manager is None:
+            return _failure_result(
+                code="async_job_manager_unavailable",
+                message="AsyncJobManager is not available on this homunculus.",
+            )
+        req = RotateSessionDispatchRequest(
+            agent_instance_id=str(raw.get("agent_instance_id", "")),
+            role_name=str(raw.get("role_name", "")),
+            pickup_text=str(raw.get("pickup_text", "")),
+            park_first=bool(raw.get("park_first", False)),
+        )
+        try:
+            result = dispatch_rotate_session(job_manager, req, state)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="restart_session",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The dying worker's ledger agent_instance_id.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "role_name": ParameterMetadata(
+                description="The durable role the fresh spawn must reclaim.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "role_class": ParameterMetadata(
+                description="The role_class to spawn under (managed_session carries no "
+                "role_class column of its own — required from the caller).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "grace_seconds": ParameterMetadata(
+                description="Pass through to terminate_session's grace_seconds.",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "maintenance-verbs M1, D0.3-ratified deferred-completion shape — dispatches "
+            "a restart_session choreography job and returns immediately; poll "
+            "check_choreography_job_status for the outcome."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="restart_session dispatch outcome",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def restart_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """§2.2 ``restart_session`` — ms-scale dispatch only (D0.3 mechanic 1);
+        the actual terminate/spawn/role-reclaim/verify choreography runs in
+        the plugin's own single dedicated background worker."""
+        raw = params.get("parameters", params)
+        job_manager = self._try_acquire_async_job_manager()
+        if job_manager is None:
+            return _failure_result(
+                code="async_job_manager_unavailable",
+                message="AsyncJobManager is not available on this homunculus.",
+            )
+        req = RestartSessionDispatchRequest(
+            agent_instance_id=str(raw.get("agent_instance_id", "")),
+            role_name=str(raw.get("role_name", "")),
+            role_class=str(raw.get("role_class", "")),
+            grace_seconds=int(raw.get("grace_seconds", 30) or 30),
+        )
+        try:
+            result = dispatch_restart_session(job_manager, req, state)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="check_choreography_job_status",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "job_id": ParameterMetadata(
+                description="The job_id returned by rotate_session/restart_session.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "maintenance-verbs M1 — the caller-side polling answer for a "
+            "rotate_session/restart_session job (the check_generation_status "
+            "precedent); these jobs configure no completion_handlers, so this "
+            "poll is the only way a direct caller learns the outcome."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Choreography job status",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
+                "progress_percent": ParameterMetadata(type=ParameterType.INTEGER),
+                "result": ParameterMetadata(type=ParameterType.OBJECT),
+                "error": ParameterMetadata(type=ParameterType.OBJECT),
+            },
+        ),
+    )
+    def check_choreography_job_status(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """Read-only poll of a rotate_session/restart_session/
+        generate_curation_report job's ledger row + terminal payload, if
+        any — a generic ``AsyncJobManager`` job-row reader, not scoped to
+        any one action name."""
+        raw = params.get("parameters", params)
+        job_manager = self._try_acquire_async_job_manager()
+        if job_manager is None:
+            return _failure_result(
+                code="async_job_manager_unavailable",
+                message="AsyncJobManager is not available on this homunculus.",
+            )
+        try:
+            result = lifecycle_check_choreography_job_status(
+                job_manager, str(raw.get("job_id", "")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="generate_curation_report",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "head_lines": ParameterMetadata(
+                description="The current curated head's lines, already split by the "
+                "caller (index_render.split_head's output) — this plugin cannot import "
+                "that local-CLI-only module itself.",
+                required=True,
+                type=ParameterType.LIST,
+            ),
+            "bottom_n": ParameterMetadata(
+                description="How many lowest-activation demotion candidates to return.",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+            "byte_budget": ParameterMetadata(
+                description="The head's byte budget (index_render.DEFAULT_BYTE_BUDGET, "
+                "17000 as of M2.2 — kept in sync by convention until M2.3's index-"
+                "manifest record removes the need for this duplication).",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+            "line_budget": ParameterMetadata(
+                description="The head's line budget (index_render.DEFAULT_LINE_BUDGET, "
+                "132 as of M2.2 — same sync caveat as byte_budget).",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "maintenance-verbs M2.2, D0.3-ratified deferred-completion shape — dispatches "
+            "an activation-ranked curation-report job and returns immediately; poll "
+            "check_choreography_job_status for the outcome."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="generate_curation_report dispatch outcome",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def generate_curation_report(
+        self, params: dict[str, Any], state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """M2.2 ``generate_curation_report`` — ms-scale dispatch only (D0.3
+        mechanic 1, same shape as rotate/restart_session); the actual
+        memory_service query + ranking runs in the plugin's own single
+        dedicated background worker (never inline in this handler)."""
+        raw = params.get("parameters", params)
+        job_manager = self._try_acquire_async_job_manager()
+        if job_manager is None:
+            return _failure_result(
+                code="async_job_manager_unavailable",
+                message="AsyncJobManager is not available on this homunculus.",
+            )
+        head_lines_raw = raw.get("head_lines")
+        head_lines = tuple(str(x) for x in head_lines_raw) if isinstance(head_lines_raw, list) else ()
+        req = GenerateCurationReportDispatchRequest(
+            head_lines=head_lines,
+            bottom_n=int(raw.get("bottom_n") or 10),
+            byte_budget=int(raw.get("byte_budget") or 17_000),
+            line_budget=int(raw.get("line_budget") or 132),
+        )
+        try:
+            result = dispatch_generate_curation_report(job_manager, req, state)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="reinforce_by_slug",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "slug": ParameterMetadata(
+                description="The memory fact's slug — its local file name minus '.md' "
+                "(e.g. 'feedback_operator_delegates_routine_operations_end_to_end'). "
+                "Resolved to the canonical memory_id server-side via the fact's own "
+                "slot tag; never pass a memory_id here.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "maintenance-verbs M2.2 — resolve a memory fact's slug to its canonical "
+            "memory_id via the slot tag convention, then reinforce it (ACT-R activation "
+            "boost). Use when a fact is actually applied — cited in an incident, invoked "
+            "in a review — never on a schedule or automatically."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="reinforce_by_slug outcome",
+            properties={
+                "memory_id": ParameterMetadata(type=ParameterType.STRING),
+                "slug": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def reinforce_by_slug(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """M2.2 cite->reinforce wiring: resolves ``slug`` to a ``memory_id``
+        via ``get_memories_by_tag`` on the fact's own slot tag (never a local
+        export file — this plugin calls the injected ``memory_service``
+        directly, the same dependency-injection seam ``store_interaction``
+        already uses elsewhere in this file), then reinforces it. This verb
+        IS the wiring the charter asks for; WHEN to call it (citation
+        detection) stays a human/agent judgment call this slice, not an
+        automated hook — disclosed, not silently assumed."""
+        raw = params.get("parameters", params)
+        slug = str(raw.get("slug", "")).strip()
+        if not slug:
+            return _failure_result(
+                code="missing_argument", message="reinforce_by_slug requires a non-empty slug.",
+            )
+        if self._memory_service is None:
+            return _failure_result(
+                code="memory_service_unavailable",
+                message="memory_service is not bound on this homunculus.",
+            )
+        homunculus_name = _resolve_homunculus_name_for_memory_tags()
+        if not homunculus_name:
+            return _failure_result(
+                code="homunculus_name_unset",
+                message="Could not resolve a homunculus name to resolve a slug's slot tag "
+                "-- HOMUNCULUS_NAME is unset, root_manifest.yaml is unreadable or still "
+                "carries its unwritten placeholder, and CLAUDE_PROJECT_DIR is unset (the "
+                "final fallback needs it too).",
+            )
+        tag = slug_to_slot_tag(homunculus_name, slug)
+        lookup = self._memory_service.get_memories_by_tag(tag=tag)
+        matches = lookup.get("memories") if isinstance(lookup, dict) else None
+        try:
+            memory_id = resolve_memory_id_by_slug(matches if isinstance(matches, list) else [], slug)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        self._memory_service.reinforce(memory_id=memory_id)
+        return _success_result(data={"memory_id": memory_id, "slug": slug})
+
+    @platform_process(
+        name="report_context_status",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The reporting session's own id (ledger id for a worker; "
+                "its own AGENT_INSTANCE_ID for the seat).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "claude_session_id": ParameterMetadata(
+                description="The Claude Code session_id this snapshot was measured against.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "model": ParameterMetadata(
+                description="Transcript message.model at measurement time.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "current_tokens": ParameterMetadata(
+                description="input+cache_creation+cache_read tokens from the most recent turn.",
+                required=True,
+                type=ParameterType.INTEGER,
+            ),
+            "ceiling": ParameterMetadata(
+                description="rotation_thresholds.resolve_ceiling(model) at measurement time.",
+                required=True,
+                type=ParameterType.INTEGER,
+            ),
+            "measured_at": ParameterMetadata(
+                description="When the reporting hook computed this snapshot (ISO timestamp).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "maintenance-verbs M1 — overwrite the caller's own latest "
+            "context-status snapshot (shape (a) cache write)."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="report_context_status outcome",
+            properties={
+                "status": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def report_context_status(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """maintenance-verbs M1 — plain state upsert of a measurement the
+        CALLER already took client-side; this handler does no file/subprocess
+        I/O of its own (born-async-clean, no D0.3 dependency — sanctioned
+        ms-scale state work)."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        try:
+            result = lifecycle_report_context_status(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                claude_session_id=str(raw.get("claude_session_id", "")),
+                model=str(raw.get("model", "")),
+                current_tokens=int(raw.get("current_tokens", 0) or 0),
+                ceiling=int(raw.get("ceiling", 0) or 0),
+                measured_at=str(raw.get("measured_at", "")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="session_context_status",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The session to read the cached context-status snapshot for.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "maintenance-verbs M1 — the cached context-window occupancy for "
+            "one session; resolved=False (never a raised error) when no "
+            "report has landed for it yet."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="session_context_status outcome",
+            properties={
+                "resolved": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "resolution_error": ParameterMetadata(type=ParameterType.STRING),
+                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "claude_session_id": ParameterMetadata(type=ParameterType.STRING),
+                "model": ParameterMetadata(type=ParameterType.STRING),
+                "current_tokens": ParameterMetadata(type=ParameterType.INTEGER),
+                "ceiling": ParameterMetadata(type=ParameterType.INTEGER),
+                "fraction": ParameterMetadata(type=ParameterType.FLOAT),
+                "per_prompt_carriage_estimate_tokens": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                ),
+                "rotation_due": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "measured_at": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def session_context_status(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """maintenance-verbs M1 — trivial state read of the cached snapshot
+        `report_context_status` writes; this handler never reads a
+        transcript or resolves a path itself."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this homunculus.",
+            )
+        try:
+            result = lifecycle_session_context_status(
+                state_service, agent_instance_id=str(raw.get("agent_instance_id", "")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
 
     @platform_process(
         name="peer_holds_role",
@@ -1685,7 +3938,7 @@ class AgentMessagingPlugin(
     ) -> bool:
         """Does the role's CURRENT holder have a live bridge bound right now?
 
-        Dax Part 24.3: a role binding outlives the session that claimed it, so
+        A role binding outlives the session that claimed it, so
         ``holds=True`` can be reported for a role whose holder has no receiver
         left — the claim is durable, the route is not. This measures the route:
         the holder's stable session id resolves to a ``peer_binding`` row, and
@@ -1776,16 +4029,6 @@ class AgentMessagingPlugin(
                 type=ParameterType.INTEGER,
                 default=PEER_INBOX_DEFAULT_LIMIT,
             ),
-            "include_important": ParameterMetadata(
-                description=(
-                    "True (default) returns the durable catch-up view including "
-                    "messages whose sender used the IMPORTANT marker. False "
-                    "returns silent-bucket messages only."
-                ),
-                required=False,
-                type=ParameterType.BOOLEAN,
-                default=True,
-            ),
         },
         output_type="object",
         output_description=(
@@ -1838,7 +4081,7 @@ class AgentMessagingPlugin(
         carries the decorator's ``_platform_process_metadata`` marker. The
         process key stays ``plugin::agent_messaging_plugin::peer_inbox``.
 
-        Dax Part 24: before this verb the ONLY read of the durable inbox was
+        Before this verb the ONLY read of the durable inbox was
         the ``GET .../peer/inbox`` bridge route, whose identity comes from the
         CALLING bridge's peer registration. ``homunculus call`` opens a fresh,
         unregistered bridge, so a no-MCP session had no pull path at all —
@@ -2079,6 +4322,20 @@ class AgentMessagingPlugin(
             consumed.get("status"),
             len(consumed_updated) if isinstance(consumed_updated, list) else 0,
         )
+        # Fleet session-management Phase B, D1 (§3.1): stamp role_class on
+        # pre-Phase-B role rows + report (never auto-fix) any pre-existing
+        # >1-named-role holder for the operator cleanup pass (Dawn ruling).
+        role_class = backfill_role_class(state_service)
+        role_class_stamped = role_class.get("stamped")
+        role_class_violations = role_class.get("cardinality_violations")
+        logger.info(
+            "%s: role_class backfill status=%s (%d row(s) stamped, %d "
+            "cardinality violation(s) reported)",
+            self.name,
+            role_class.get("status"),
+            len(role_class_stamped) if isinstance(role_class_stamped, list) else 0,
+            len(role_class_violations) if isinstance(role_class_violations, list) else 0,
+        )
 
     # ------------------------------------------------------------------
     # IO interface lifecycle — start_interface / stop_interface
@@ -2133,20 +4390,38 @@ class AgentMessagingPlugin(
         holder's ``agent_instance_id`` then maps to the bridge-open-gated
         provider.
 
+        D2-window ruling (2026-08-04, pulled forward on measured runaway —
+        ~25 redeliveries/hr into the seat vs the ~4/hr the earmark accepted):
+        a PEER-SESSION holder has no protocol surface for raw vertex turns
+        (the serve verb needs an ``icr-`` completion request id these lack),
+        so while a peer session holds the slot the VERTEX lane always answers
+        ``None`` — ``resolve_autonomic``'s existing ``None`` → DEFER flip then
+        lands the turn in the durable no-loss queue instead of destroying it
+        against a session that cannot act. Completion-request forwarding
+        (``_forward_completion_request`` → ``get_inference_provider``) is a
+        DIFFERENT path and still reaches peer-session holders — that class IS
+        servable. Every provider this plugin can mint today is a peer session
+        (``SessionInferenceProvider``), so the guard is unconditional here;
+        the ad hoc inference capability that will properly own this slot
+        registers a different provider kind and reworks this accessor when it
+        lands (its designed home, per the 08-03 sitting).
+
         Returns ``None`` when the slot is VACANT
-        (:class:`RoleBindingVacantError`) or its holder has no live provider
-        (bridge swept/closed — the gate above). The caller
-        (``InferenceService._route_vertex``) then falls to the local default:
-        vacant → LOCAL is the sub-slice-1 interim (nothing CLAIMS the slot until
-        the sub-slice-2 auto-assignment lands, at which point the policy flips to
-        vacant → DEFER — see that call site).
+        (:class:`RoleBindingVacantError`) — the sub-slice-2 vacancy → DEFER
+        flip, unchanged — and now also for a HELD slot, per the ruling above.
         """
         state = self._get_state_service()
         try:
             resolved = resolve_role_binding_v4(state, SYS_AUTONOMIC_SLOT)
         except RoleBindingVacantError:
             return None
-        return self.get_inference_provider(resolved.agent_instance_id)
+        logger.info(
+            "sys:autonomic vertex turn: slot held by peer session agi=%s — "
+            "vertex lane DEFERs to the durable queue (peer sessions cannot "
+            "serve raw vertex turns; D2-window ruling 2026-08-04)",
+            resolved.agent_instance_id,
+        )
+        return None
 
     def _has_live_inference_provider(self, agent_instance_id: str) -> bool:
         """Bridge-open-gated provider presence — the §D.9 candidate filter (D1)."""
@@ -2542,15 +4817,19 @@ class AgentMessagingPlugin(
 
     def _on_sweep_tick(self) -> None:
         """Composed REL-09 sweeper on_tick rider: INF-02 serve-timeout sweep +
-        INF-06 forwarded-vertex re-drive + terminal-row GC + REL-05 deaf-wake
-        escalation.
+        INF-06 forwarded-vertex re-drive + terminal-row GC + D1 session sweep.
 
         Each rider is fault-isolated so one fault never skips the rest of the
-        tick: the INF-02 sweep and the REL-05 reconciler can raise, so they are
-        wrapped HERE (the sweeper's single outer guard would otherwise abort the
-        tick before later riders run); the two INF-06 riders self-isolate
-        (internal try/except → never raise, return counts) so they are called
-        directly. Every rider runs every tick.
+        tick: the INF-02 sweep can raise, so it is wrapped HERE (the sweeper's
+        single outer guard would otherwise abort the tick before later riders
+        run); the two INF-06 riders self-isolate (internal try/except → never
+        raise, return counts) so they are called directly. Every rider runs
+        every tick.
+
+        A4 (2026-08-04): the REL-05 deaf-wake escalation rider (DirectWakeReconciler)
+        retired here — sweep_overdue_sessions + _notify_steward_of_overdue
+        (session_sweep.py, D1) is its sole successor, keyed off the recipient's
+        own report_by promise instead of a message-level heuristic.
         """
         autonomic = self._autonomic_assignment
         if autonomic is not None:
@@ -2558,19 +4837,57 @@ class AgentMessagingPlugin(
                 autonomic.completions.sweep_serve_timeouts()
             except Exception:  # noqa: BLE001 — one rider's fault must not skip the other
                 logger.exception(
-                    "serve-timeout sweep rider FAULTED; continuing to REL-05 "
-                    "escalation",
+                    "serve-timeout sweep rider FAULTED; continuing",
                 )
             # INF-06 reliability: re-drive forwarded vertices whose holder died /
             # timed out, then reap aged terminal 'failed' rows. Both self-isolate.
             autonomic.forwarded.sweep_serve_timeouts()
             autonomic.forwarded.gc_terminal_rows()
-        reconciler = self._direct_wake_reconciler
-        if reconciler is not None:
-            try:
-                reconciler.reconcile()
-            except Exception:  # noqa: BLE001 — the reaper must survive a state fault, loudly
-                logger.exception("REL-05 deaf-wake escalation FAULTED; sweeper continues")
+        try:
+            self._run_session_lifecycle_sweep()
+        except Exception:  # noqa: BLE001 — one rider's fault must not skip the others
+            logger.exception("D1 session-lifecycle sweep FAULTED; sweeper continues")
+
+    def _run_session_lifecycle_sweep(self) -> None:
+        """D1 platform sweep rider (§3.4/§6 rule 3, Architect ratification #3):
+        marks overdue sessions (+ best-effort steward notice, D2-lane-tail
+        follow-up #3), fires+delivers armed 'deadline'/'lane_closed'
+        dependency edges, and prunes stale session_role_claim rows. See
+        ``session_sweep.py``'s module docstring for the exact scope boundary
+        ('session_terminal' firing stays retire_session's job)."""
+        state_service = self._get_state_service()
+        # peer_registry/bridge_manager are OPTIONAL on this call (unlike the
+        # two dependency sweeps below, which require them and are gated by
+        # the `if` below) -- sweep_overdue_sessions must still mark overdue
+        # rows on an early-boot tick before the bridge service is up; it
+        # just skips the notify step internally when either is None.
+        overdue = sweep_overdue_sessions(
+            state_service, peer_registry=self._peer_registry, bridge_manager=self._bridge_manager,
+        )
+        if overdue:
+            logger.info("D1 sweep: marked %d session(s) overdue", overdue)
+        _run_session_claude_mapping_riders(state_service)
+        if self._peer_registry is not None and self._bridge_manager is not None:
+            fired = sweep_deadline_dependencies(
+                state_service,
+                peer_registry=self._peer_registry,
+                bridge_manager=self._bridge_manager,
+            )
+            if fired:
+                logger.info("D1 sweep: fired %d 'deadline' dependency edge(s)", fired)
+            lane_fired = sweep_lane_closed_dependencies(
+                state_service,
+                peer_registry=self._peer_registry,
+                bridge_manager=self._bridge_manager,
+            )
+            if lane_fired:
+                logger.info("D1 sweep: fired %d 'lane_closed' dependency edge(s)", lane_fired)
+            if self._session_role_claim_pruner is not None:
+                pruned = self._session_role_claim_pruner.sweep(
+                    state_service, peer_registry=self._peer_registry,
+                )
+                if pruned:
+                    logger.info("D1 sweep: pruned %d stale session_role_claim row(s)", pruned)
 
     def was_inference_provider_bound(self, agent_instance_id: str) -> bool:
         """◆R2 case 3b: True if ``agent_instance_id`` held a provider earlier
@@ -2747,14 +5064,10 @@ class AgentMessagingPlugin(
             forward_attempts_cap=bridge_config.forward_attempts_cap,
             terminal_gc_after_seconds=bridge_config.terminal_gc_after_seconds,
         )
-        # REL-05: the server-side escalation reconciler (rides the sweeper
-        # on_tick below alongside the INF-02 serve-timeout sweep).
-        self._direct_wake_reconciler = DirectWakeReconciler(
-            service=self._require_service(),
-            bridge_manager=self._bridge_manager,
-            peer_registry=self._peer_registry,
-            cap=bridge_config.re_emit_cap,
-            re_emit_window_s=float(bridge_config.re_emit_window_seconds),
+        # D1 §3.4/§2 rule 4: the session-role-claim staleness pruner (Architect
+        # ratification #3) rides the on_tick cadence — stateful (grace-window
+        # tracking), so it is constructed once and held.
+        self._session_role_claim_pruner = SessionRoleClaimPruner(
             clock=lambda: datetime.now(UTC),
         )
         # REL-09: drive the idle sweep — every expired bridge gets the SAME
@@ -3096,135 +5409,6 @@ class AgentMessagingPlugin(
         )
 
     # ------------------------------------------------------------------
-    # run_turn — durable agent-messaging EDGE
-    # ------------------------------------------------------------------
-
-    @platform_process(
-        name="run_turn",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=False,
-        ),
-        parameters={
-            "thread_id": ParameterMetadata(
-                type=ParameterType.STRING,
-                required=True,
-                description="Agent thread the originator message belongs to.",
-            ),
-            "message_id": ParameterMetadata(
-                type=ParameterType.STRING,
-                required=True,
-                description="Originator message id triggering this turn.",
-            ),
-        },
-        output_type="object",
-        output_description=(
-            "Structured turn result; bridge-delivered to the originating "
-            "agent_channel bridge."
-        ),
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description=(
-                "Per-turn result payload — same shape on success, "
-                "interruption, and error.  Discriminated by 'status'."
-            ),
-            properties={
-                "thread_id": ParameterMetadata(
-                    type=ParameterType.STRING, required=True,
-                    description="Thread the turn belongs to.",
-                ),
-                "request_message_id": ParameterMetadata(
-                    type=ParameterType.STRING, required=True,
-                    description="Originator message that triggered the turn.",
-                ),
-                "response_message_id": ParameterMetadata(
-                    type=ParameterType.STRING, required=False,
-                    description=(
-                        "Agent message id (success/interruption); null on "
-                        "error paths where no agent row was persisted."
-                    ),
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, required=True,
-                    description="One of 'idle', 'interrupted', 'error'.",
-                ),
-                "backend": ParameterMetadata(
-                    type=ParameterType.STRING, required=False,
-                    description=(
-                        "Resolved backend name; may be null if the failure "
-                        "happened before backend resolution."
-                    ),
-                ),
-                "backend_session_id": ParameterMetadata(
-                    type=ParameterType.STRING, required=False,
-                    description="Backend's internal session id, if any.",
-                ),
-                "text": ParameterMetadata(
-                    type=ParameterType.STRING, required=True,
-                    description=(
-                        "Backend response text (empty string on error)."
-                    ),
-                ),
-                "interrupted": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, required=True,
-                    description="True iff backend reported interrupted=True.",
-                ),
-                "interrupted_on": ParameterMetadata(
-                    type=ParameterType.STRING, required=False,
-                    description=(
-                        "Reason backend reported (e.g. 'timeout', "
-                        "'watch_phrase'); null when not interrupted."
-                    ),
-                ),
-                "artifacts": ParameterMetadata(
-                    type=ParameterType.LIST, required=True,
-                    description="Blob-ref artifact list; [] on error.",
-                ),
-                "metrics": ParameterMetadata(
-                    type=ParameterType.OBJECT, required=True,
-                    description="Backend metrics dict; {} on error.",
-                ),
-                "error": ParameterMetadata(
-                    type=ParameterType.OBJECT, required=False,
-                    description=(
-                        "Structured failure info {code, message} when "
-                        "status='error'; null on success/interruption."
-                    ),
-                ),
-            },
-        ),
-    )
-    def run_turn(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],  # noqa: ARG002  # pyright: ignore[reportUnusedParameter]
-    ) -> dict[str, Any]:
-        thread_id = str(params.get("thread_id") or "").strip()
-        message_id = str(params.get("message_id") or "").strip()
-        if not thread_id or not message_id:
-            return _failure_result(
-                code="agent_messaging.run_turn.missing_arguments",
-                message="run_turn requires both thread_id and message_id",
-            )
-        # ``execute_turn`` always returns a structured payload (success
-        # or failure shape, distinguished by ``payload.status``).  We
-        # always return a *successful* ActionResult here so the bridge
-        # dispatcher routes through ``deliver_result`` — the platform's
-        # ``deliver_error`` builder strips most of the structured
-        # context (thread_id / request_message_id / stable code), so
-        # we keep failures inside the success channel.
-        try:
-            payload = self._require_service().execute_turn(
-                thread_id=thread_id, message_id=message_id,
-            )
-        except Exception as exc:  # noqa: BLE001 — last-resort safety
-            return _failure_result(
-                code="agent_messaging.run_turn.unhandled",
-                message=f"unhandled execute_turn failure: {exc}",
-            )
-        return _success_result(data=payload)
-
-    # ------------------------------------------------------------------
     # NativeWakeAdapter — claude_code self-wake
     # ------------------------------------------------------------------
 
@@ -3332,40 +5516,8 @@ class AgentMessagingPlugin(
             raise RuntimeError(
                 f"{self.name}: state_service unavailable",
             )
-        flow_manager = self._flow_manager or orchestrator.get_service("flow_service")
-        if flow_manager is None:
-            raise RuntimeError(
-                f"{self.name}: flow_service unavailable; cannot build service yet",
-            )
-        # PluginBase.set_action_factory stores into self.action_factory.
-        action_factory = getattr(self, "action_factory", None)
-        if action_factory is None:
-            action_factory = getattr(orchestrator, "action_factory", None)
-        if action_factory is None:
-            raise RuntimeError(
-                f"{self.name}: action_factory unavailable",
-            )
-        compilation_context_builder = (
-            self._compilation_context_builder
-            or getattr(orchestrator, "compilation_context_builder", None)
-        )
-        if compilation_context_builder is None:
-            raise RuntimeError(
-                f"{self.name}: compilation_context_builder unavailable",
-            )
-        plugin_manager = getattr(orchestrator, "plugin_manager", None)
-        if plugin_manager is None:
-            raise RuntimeError(
-                f"{self.name}: plugin_manager unavailable",
-            )
         config = self._build_config()
         repository = AgentMessagingRepository(state_service)
-        router = make_router(plugin_manager)
-        bridge = _BridgeDeliveryEndpoint(
-            plugin_namespace=PLUGIN_NAME,
-            deliver_result_process_key=_DELIVER_RESULT_PROCESS_KEY,
-            deliver_error_process_key=_DELIVER_ERROR_PROCESS_KEY,
-        )
         logger.info(
             "%s service constructed (allowed_backends=%s, max_message_bytes=%d)",
             self.name,
@@ -3375,11 +5527,6 @@ class AgentMessagingPlugin(
         return AgentMessagingService(
             repository=repository,
             state_service=state_service,
-            backend_router=router,
-            flow_manager=flow_manager,
-            action_factory=action_factory,
-            compilation_context_builder=compilation_context_builder,
-            bridge_delivery=bridge,
             config=config,
         )
 
@@ -4088,6 +6235,23 @@ class AgentMessagingPlugin(
             ),
         )
 
+    def _build_session_lifecycle_policy_config(self) -> _SessionLifecyclePolicyConfig:
+        provider = self._resolve_config_provider()
+        return _SessionLifecyclePolicyConfig(
+            work_class_defaults=_as_work_class_defaults(
+                _provider_get(provider, "work_class_defaults"),
+            ),
+            work_class_tool_allowlists=_as_work_class_tool_allowlists(
+                _provider_get(provider, "work_class_tool_allowlists"),
+            ),
+            headless_permission_mode=_as_str(
+                _provider_get(provider, "headless_permission_mode"), "bypassPermissions",
+            ),
+            default_fleet_transport=_as_str(
+                _provider_get(provider, "default_fleet_transport"), "watch",
+            ),
+        )
+
     # ------------------------------------------------------------------
     # Internals — Streamable HTTP MCP transport
     # ------------------------------------------------------------------
@@ -4463,6 +6627,155 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _run_session_claude_mapping_riders(state_service: Any) -> None:
+    """Split out of ``_run_session_lifecycle_sweep`` to keep it under the
+    radon cc threshold (mirrors ``session_sweep.py``'s own
+    ``_mark_one_overdue`` split and ``_spawn_session_request_from_params``
+    above -- same "thin dispatch" rationale) -- the two T1 usage-capture
+    riders that share the same no-peer_registry/no-bridge_manager-dependency
+    call-site pattern as the overdue marking: ``drain_session_claude_mapping_spool``
+    (ruling 2026-08-05, Q1(d)) and ``detect_hook_absent_sessions`` (S2c,
+    named follow-up) both run every tick regardless of bridge availability.
+    A verb nobody calls is bound-in-name-only. A module-level function
+    (not a method) -- it touches no instance state, only ``state_service``."""
+    drain_result = lifecycle_drain_session_claude_mapping_spool(state_service)
+    if drain_result["upserted"] or drain_result["skipped_malformed"]:
+        logger.info(
+            "D1 sweep: session_claude_mapping spool drain -- files_seen=%d "
+            "upserted=%d skipped_malformed=%d",
+            drain_result["files_seen"], drain_result["upserted"],
+            drain_result["skipped_malformed"],
+        )
+    # S2c: detects a genuinely BROKEN SessionStart hook installation (as
+    # opposed to the cross-check's not-yet-fired case, which is not an error).
+    hook_absent = lifecycle_detect_hook_absent_sessions(state_service)
+    if hook_absent:
+        logger.warning("D1 sweep: hook-absence detected for %d session(s)", hook_absent)
+
+
+def _spawn_dispatch_overrides_from_params(raw: dict[str, Any]) -> dict[str, Any]:
+    """The dispatch-override subset of ``spawn_session``'s params (host,
+    model, effort, allowed_tools, permission_mode) — split out of
+    ``_spawn_session_request_from_params`` to keep it under the radon cc
+    threshold; these five fields share one purpose (per-spawn dispatch
+    overrides), so grouping them is a real seam, not an arbitrary split."""
+    return {
+        "host": (str(raw["host"]) if raw.get("host") else None),
+        "model": str(raw.get("model", "") or ""),
+        "effort": str(raw.get("effort", "") or ""),
+        "allowed_tools": _as_str_tuple(raw.get("allowed_tools"), default=()),
+        "permission_mode": str(raw.get("permission_mode", "") or ""),
+    }
+
+
+def _spawn_session_request_from_params(
+    raw: dict[str, Any], directed_by: str,
+) -> SpawnSessionRequest:
+    """Build the ``spawn_session`` verb's typed request from raw transport
+    params. Split out of the ``spawn_session`` method so the transport shim
+    stays a thin dispatch (radon cc)."""
+    return SpawnSessionRequest(
+        role_class=str(raw.get("role_class", "")),
+        lane_id=str(raw.get("lane_id", "")),
+        brief_ref=str(raw.get("brief_ref", "")),
+        work_class=str(raw.get("work_class", "")),
+        budget_line=str(raw.get("budget_line", "")),
+        role_name=str(raw.get("role_name", "") or ""),
+        visibility=str(raw.get("visibility", "") or ""),
+        report_by_seconds=int(raw.get("report_by_seconds") or 0),
+        ttl_seconds=int(raw.get("ttl_seconds") or 0),
+        spawned_by_instance_id=str(raw.get("spawned_by_instance_id", "") or ""),
+        spawned_by_role=str(raw.get("spawned_by_role", "") or ""),
+        directed_by=directed_by,
+        **_spawn_dispatch_overrides_from_params(raw),
+    )
+
+
+def _apply_work_class_defaults(
+    req: SpawnSessionRequest, defaults: Mapping[str, Mapping[str, str]],
+) -> SpawnSessionRequest:
+    """§6 L3 rule 1 — fill an OMITTED ``model``/``effort`` from the
+    operator-configured per-``work_class`` default (``plugin.yaml``'s
+    ``work_class_defaults`` block). Never overrides a value the caller
+    explicitly passed; an unconfigured ``work_class`` (the shipped default —
+    empty block) leaves both fields exactly as ``spawn_session`` received
+    them, i.e. today's behavior."""
+    entry = defaults.get(req.work_class)
+    if not entry:
+        return req
+    model = req.model or str(entry.get("model", ""))
+    effort = req.effort or str(entry.get("effort", ""))
+    if model == req.model and effort == req.effort:
+        return req
+    return replace(req, model=model, effort=effort)
+
+
+def _apply_tool_allowlist(
+    req: SpawnSessionRequest, allowlists: Mapping[str, tuple[str, ...]],
+) -> SpawnSessionRequest:
+    """§6 permission-mode ruling (2026-08-03) — fill an OMITTED
+    ``allowed_tools`` from the operator-configured per-``work_class``
+    allowlist (``plugin.yaml``'s ``work_class_tool_allowlists`` block).
+    Never overrides an explicit caller value. An unconfigured ``work_class``
+    resolves to the shipped-empty default (``()``) — the spawn is STILL
+    gated (``headless_adapter.py`` always injects the PreToolUse hook),
+    just with nothing extra allowed, never an open default."""
+    if req.allowed_tools:
+        return req
+    configured = allowlists.get(req.work_class)
+    if not configured:
+        return req
+    return replace(req, allowed_tools=configured)
+
+
+def _resolve_permission_mode(req: SpawnSessionRequest, policy_mode: str) -> SpawnSessionRequest:
+    """§6 permission-mode design — fill an OMITTED ``permission_mode`` from
+    ``policy_mode`` (``plugin.yaml``'s ``headless_permission_mode``), never
+    overriding an explicit caller value. Per the 2026-08-03 operator ruling
+    ("we don't have any restrictions now"), no resolved value is rejected
+    here — ``headless_adapter.py.verify_config()`` still refuses a spawn if
+    this and the config both resolve to nothing at all, which is
+    operational sanity (the process needs SOME argv value), not a
+    restriction on which value."""
+    if req.permission_mode:
+        return req
+    return replace(req, permission_mode=policy_mode)
+
+
+def _resolve_transport(req: SpawnSessionRequest, policy_transport: str) -> SpawnSessionRequest:
+    """fleet-watch-transport-migration phase 2 slice 1 (2026-08-06) — fill
+    an OMITTED ``transport`` from ``policy_transport`` (``plugin.yaml``'s
+    ``default_fleet_transport``), never overriding an explicit caller
+    value. Mirrors :func:`_resolve_permission_mode` exactly: the same
+    fill-never-override shape, one field later."""
+    if req.transport:
+        return req
+    return replace(req, transport=policy_transport)
+
+
+def _apply_spawn_session_policy(
+    req: SpawnSessionRequest, policy: _SessionLifecyclePolicyConfig,
+) -> SpawnSessionRequest:
+    """The four spawn-config-resolution steps every ``spawn_session``
+    dispatch must run — model/effort defaults, tool allowlist, permission
+    mode, transport — factored out so ``spawn_session()`` (the API path)
+    and the ``restart_session`` choreography (the background-worker path)
+    share exactly ONE resolution path. Before this (2026-08-10), the
+    choreography built its own ``SpawnSessionRequest`` directly and skipped
+    all four steps; ``permission_mode``/``allowed_tools``/``transport`` are
+    not columns on ``managed_session``, so restarting a worker silently lost
+    them every time (measured live: ``host_cannot_spawn`` — no permission
+    mode configured — on the fresh spawn). A fifth policy step added here
+    now reaches both callers automatically instead of needing to be copied
+    into a second, easily-forgotten call site."""
+    if not req.model or not req.effort:
+        req = _apply_work_class_defaults(req, policy.work_class_defaults)
+    req = _apply_tool_allowlist(req, policy.work_class_tool_allowlists)
+    req = _resolve_permission_mode(req, policy.headless_permission_mode)
+    req = _resolve_transport(req, policy.default_fleet_transport)
+    return req
+
+
 def _success_result(
     *,
     data: dict[str, object],
@@ -4555,16 +6868,18 @@ def _build_peer_inbox_request(
         )
         raise ValueError(message) from exc
     role_after_raw = raw.get("role_after")
-    include_important = raw.get("include_important")
     return PeerInboxRequest(
         recipient_agent_id=binding.agent_id,
         recipient_agent_instance_id=binding.agent_instance_id,
         recipient_agent_session_id=binding.agent_session_id,
         after_created_at=after_created_at,
         limit=_clamp_peer_inbox_limit(raw.get("limit")),
-        include_important=(
-            True if include_important is None else bool(include_important)
-        ),
+        # A4 (2026-08-04): the silent/important split at send time is
+        # retired, so the catch-up view is the only meaningful one — never
+        # read from the caller. This closes the hatch the same way Amendment
+        # 3 closes send_peer_message's: the schema entry AND the
+        # read-and-branch code both go, not just one.
+        include_important=True,
         role_after=(
             str(role_after_raw) if role_after_raw not in (None, "") else None
         ),
@@ -4850,6 +7165,52 @@ def _as_str_tuple(
     return (str(value),)
 
 
+def _as_work_class_defaults(value: object) -> dict[str, dict[str, str]]:
+    """Coerce ``plugin.yaml``'s ``work_class_defaults`` block (§6 L3 rule 1)
+    into ``{work_class: {"model": ..., "effort": ...}}``. Tolerant of a
+    malformed entry (skips it, logs, keeps the rest) rather than failing the
+    whole config build over one operator typo — matches ``_as_bool``/
+    ``_as_int``'s "fall back rather than crash" posture. Absent/wrong-typed
+    input returns ``{}``, which is exactly today's behavior (no defaults
+    applied, spawn_session leaves model/effort as the caller passed them)."""
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, dict[str, str]] = {}
+    for work_class, entry in value.items():
+        if not isinstance(work_class, str) or not isinstance(entry, dict):
+            logger.warning(
+                "Skipping malformed work_class_defaults entry for %r: not a mapping",
+                work_class,
+            )
+            continue
+        result[work_class] = {
+            str(k): str(v) for k, v in entry.items() if k in {"model", "effort"}
+        }
+    return result
+
+
+def _as_work_class_tool_allowlists(value: object) -> dict[str, tuple[str, ...]]:
+    """Coerce ``plugin.yaml``'s ``work_class_tool_allowlists`` block (§6
+    permission-mode ruling, 2026-08-03) into ``{work_class: (tool_name, ...)}``.
+    Tolerant of a malformed entry (skips it, logs, keeps the rest) — same
+    posture as ``_as_work_class_defaults``. Absent/wrong-typed input returns
+    ``{}``: every headless spawn is STILL gated (the hook is always injected,
+    per ``headless_adapter.py``'s ``_spawn_env``), just with an empty
+    allowlist — never an open default."""
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, tuple[str, ...]] = {}
+    for work_class, entry in value.items():
+        if not isinstance(work_class, str) or not isinstance(entry, (list, tuple)):
+            logger.warning(
+                "Skipping malformed work_class_tool_allowlists entry for %r: not a list",
+                work_class,
+            )
+            continue
+        result[work_class] = tuple(str(t) for t in entry)
+    return result
+
+
 def _resolve_homunculus_name() -> str:
     """Return the homunculus identity from ``$HOMUNCULUS_NAME``.
 
@@ -4860,6 +7221,65 @@ def _resolve_homunculus_name() -> str:
     """
     import os  # noqa: PLC0415 — kept local so the import is greppable here
     return os.environ.get("HOMUNCULUS_NAME", "").strip()
+
+
+# R4 seed-packaging audit, Package B (2026-08-10): root_manifest.yaml's own
+# unwritten placeholder for `homunculus_name:` -- the midwife rewrites this
+# field ONLY at genesis, so a raw/pre-genesis checkout keeps this exact
+# literal, which rung 2 below must skip rather than treat as a real name.
+_ROOT_MANIFEST_PLACEHOLDER = "homunculus"
+
+
+def _resolve_homunculus_name_for_memory_tags() -> str:
+    """Three-rung origin-resolution ladder for memory-tag scoping ONLY.
+
+    SEPARATE from :func:`_resolve_homunculus_name` by deliberate ruling
+    (coordinator seat, arm-8491e1ba, 2026-08-10): ``_resolve_homunculus_name`` has
+    an unrelated third caller (the MCP streamable router's own identity
+    label) whose consumers were never traced, so it stays byte-identical
+    here -- containment over elegance on mint night. This function is
+    called ONLY from the two M2.2 memory-tag verbs
+    (``generate_curation_report``/``reinforce_by_slug``); unifying the two
+    resolvers, after tracing the router-identity string's actual
+    consumers, is a named post-mint backlog item, not this change.
+
+    The SAME ladder as the hooks' own ``_journal.homunculus_name()``
+    (``.claude/hooks/memory_passthrough/_journal.py`` and its vendored
+    plugin copy), a parity test asserts the two agree on OUTPUT across a
+    matrix of env/file/dirname combinations -- never on implementation
+    approach, since this side runs inside the venv (real ``yaml.safe_load``)
+    while the hooks' side runs outside it (a minimal regex line-scan,
+    since PyYAML is a venv-only dependency there, measured 2026-08-10).
+
+    1. ``HOMUNCULUS_NAME`` env var, if set.
+    2. ``root_manifest.yaml``'s own ``homunculus_name:`` field, placeholder-
+       skipped.
+    3. ``CLAUDE_PROJECT_DIR``-basename -- :func:`_resolve_homunculus_name`'s
+       existing sole behavior, preserved here as the final fallback.
+
+    Empty string only when every rung is exhausted (no env var AND no
+    resolvable ``CLAUDE_PROJECT_DIR``) -- callers apply their own
+    fail-loud contract on an empty result, same as the existing function.
+    """
+    import os  # noqa: PLC0415 — kept local, mirrors _resolve_homunculus_name's own style
+
+    import yaml  # noqa: PLC0415
+
+    env_name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    if env_name:
+        return env_name
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+    if not project_dir:
+        return ""
+    try:
+        with open(os.path.join(project_dir, "root_manifest.yaml"), encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+        candidate = str((data or {}).get("homunculus_name", "")).strip()
+        if candidate and candidate != _ROOT_MANIFEST_PLACEHOLDER:
+            return candidate
+    except (OSError, yaml.YAMLError):
+        pass  # unreadable, absent, or malformed -- fall through, never raise
+    return os.path.basename(os.path.normpath(os.path.abspath(project_dir)))
 
 
 __all__ = ["AgentMessagingPlugin"]

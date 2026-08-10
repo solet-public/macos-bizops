@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Watcher lifecycle smoke — W1 singleton, W2 SIGTERM unwind, --exit-with-parent.
 
-Dax §34.1/§34.3: two watchers under one ``$AGENT_SESSION_ID`` are byte-identical
+Two watchers under one ``$AGENT_SESSION_ID`` are byte-identical
 (same instance id, same spool, same wake hook), so nothing downstream can tell
 them apart and the second one silently re-points the registry binding. W1 makes
 the kernel the arbiter; W2 makes a terminated watcher evict its own row instead

@@ -26,9 +26,12 @@ the roleless lane + the 40+ zombie-row class). Cases:
   E  close-route convergence (TestClient): POST /close runs the SAME
      cleanup sequence — swept and closed are indistinguishable.
   F  INF-06 wiring guard: the composed _on_sweep_tick INVOKES both forwarded
-     riders (sweep_serve_timeouts + gc_terminal_rows), even when the INF-02
-     completion sweep raises — a silent un-wiring is the stall this slice
-     prevents, so it must be regression-guarded.
+     riders (sweep_serve_timeouts + gc_terminal_rows) AND the D1
+     session-lifecycle sweep, even when the INF-02 completion sweep raises —
+     a silent un-wiring is the stall this slice prevents, so it must be
+     regression-guarded. (A4, 2026-08-04: the REL-05 deaf-wake reconciler
+     rider retired from this tick; D1's session sweep is the surviving rider
+     this case now asserts survives a raising INF-02 sweep.)
 
 Run:
     HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
@@ -405,7 +408,7 @@ def _sweep_tick_forwarded_rider_cases() -> None:
     print("F — _on_sweep_tick invokes the INF-06 forwarded riders:")
 
     calls: list[str] = []
-    reconciled: list[str] = []
+    swept: list[str] = []
     autonomic = SimpleNamespace(
         completions=SimpleNamespace(
             sweep_serve_timeouts=lambda: calls.append("completions.sweep"),
@@ -414,9 +417,7 @@ def _sweep_tick_forwarded_rider_cases() -> None:
     )
     fake_self = SimpleNamespace(
         _autonomic_assignment=autonomic,
-        _direct_wake_reconciler=SimpleNamespace(
-            reconcile=lambda: reconciled.append("reconcile"),
-        ),
+        _run_session_lifecycle_sweep=lambda: swept.append("d1_sweep"),
     )
     AgentMessagingPlugin._on_sweep_tick(cast("Any", fake_self))  # noqa: SLF001
     _check(
@@ -424,30 +425,29 @@ def _sweep_tick_forwarded_rider_cases() -> None:
         and "forwarded.gc_terminal_rows" in calls,
         "F1 _on_sweep_tick INVOKES both INF-06 forwarded riders (sweep + GC)",
     )
+    _check(swept == ["d1_sweep"], "F1 _on_sweep_tick also invokes the D1 session sweep")
 
-    # A raising INF-02 completion sweep must NOT skip the forwarded riders or the
-    # REL-05 reconciler (per-rider fault-isolation).
+    # A raising INF-02 completion sweep must NOT skip the forwarded riders or
+    # the D1 session-lifecycle sweep (per-rider fault-isolation).
     def _boom() -> None:
         raise RuntimeError("INF-02 sweep fault")
 
     calls.clear()
-    reconciled.clear()
+    swept.clear()
     autonomic2 = SimpleNamespace(
         completions=SimpleNamespace(sweep_serve_timeouts=_boom),
         forwarded=_ForwardedRiderSpy(calls),
     )
     fake_self2 = SimpleNamespace(
         _autonomic_assignment=autonomic2,
-        _direct_wake_reconciler=SimpleNamespace(
-            reconcile=lambda: reconciled.append("reconcile"),
-        ),
+        _run_session_lifecycle_sweep=lambda: swept.append("d1_sweep"),
     )
     AgentMessagingPlugin._on_sweep_tick(cast("Any", fake_self2))  # noqa: SLF001
     _check(
         "forwarded.sweep_serve_timeouts" in calls
         and "forwarded.gc_terminal_rows" in calls
-        and reconciled == ["reconcile"],
-        "F2 a RAISING INF-02 sweep does not skip the forwarded riders / reconciler",
+        and swept == ["d1_sweep"],
+        "F2 a RAISING INF-02 sweep does not skip the forwarded riders / D1 sweep",
     )
 
 

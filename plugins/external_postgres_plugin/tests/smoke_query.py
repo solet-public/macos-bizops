@@ -2,27 +2,39 @@
 """Query-verb + classification smoke tests for external_postgres_plugin.
 
 Hermetic — a faked psycopg connection/cursor, no live Postgres (the live
-read-only proof is smoke_readonly.py). Red-first: every check asserts REAL
-behavior in query_actions / connection.classify_pg_error / the EDGE parity.
+read-only proof is smoke_readonly.py; the live write-capability proof is
+smoke_write.py). Red-first: every check asserts REAL behavior in
+query_actions / connection.classify_pg_error / the EDGE parity.
 
 Exercises:
   1. run_query — writes a TSV handle (path/columns/row_count/truncated), never
      rows/records inline (override-friction default/override behavior is
-     smoke_spill.py's job, not duplicated here)
+     smoke_data_export.py's job, not duplicated here)
   2. run_query — refuses a two-statement string and a write leader (guard)
-  3. list_schemas — system schemas excluded via a bound param
+  3. run_statement — no-result-set statement commits and returns rowcount
+     inline; a RETURNING statement routes through the same always-TSV path as
+     run_query and commits; a RETURNING statement WITHOUT output_tsv_path
+     rolls back (never silently discards the returned rows while committing);
+     single-statement SHAPE guard still applies; the read-leader
+     ACCESS-CONTROL guard never runs on this path (a write leader is not
+     refused) — see query_actions.run_statement's own docstring
+  4. list_schemas — system schemas excluded via a bound param
   5. list_tables — schema passed as a BOUND parameter (not interpolated)
   6. describe_table — column shape + nullable coercion
   7. test_connection — ok/read_only shape + resolved host echo (conn.info.host)
   8. TOPOLOGY-LEAK (SECURITY): connection/auth classes classify to a GENERIC
      message that NEVER contains the driver exception's host/user marker;
      syntax classes carry the server's primary message (caller's own query)
-  9. plugin-level: a driver auth fault surfaces a generic error, marker absent
-  10. statement_timeout bounds: a 0/negative/non-int config value fails LOUD
+  9. statement_timeout bounds: a 0/negative/non-int config value fails LOUD
       (external_pg.not_configured) — the DoS bound is non-disableable
-  11. platform_pg_port bounds: a non-int / 0 / out-of-range [1,65535] config value
+  10. platform_pg_port bounds: a non-int / 0 / out-of-range [1,65535] config value
       fails LOUD (external_pg.not_configured) — protects the §8.4 guard's port arm
-  12. EDGE parity: validate_edge_process_provider raises nothing
+  11. EDGE parity: validate_edge_process_provider raises nothing
+
+The plugin-level dispatch->driver-fault integration (a run_query/etc. call surfacing
+a topology-safe classified error) now runs entirely inside the D0.3 background
+worker, not the dispatch call — covered by smoke_async_jobs.py's worker tests,
+not duplicated here.
 
 Run:
     HOMUNCULUS_NAME=<name> .venv/bin/python3 \
@@ -44,7 +56,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "external_postgres_plugin" / "src"))
 
 from external_postgres_plugin import connection, query_actions  # noqa: E402
-from external_postgres_plugin.app_config import ExternalDsn, ExternalPgConfigError  # noqa: E402
+from external_postgres_plugin.app_config import ExternalPgConfigError  # noqa: E402
 from external_postgres_plugin.plugin import ExternalPostgresPlugin  # noqa: E402
 from external_postgres_plugin.statement_guard import StatementGuardError  # noqa: E402
 
@@ -88,7 +100,7 @@ class _FakeDriverError(Exception):
 
 
 def _passthrough_gate(path: str) -> str:
-    """A no-op containment gate — real containment is smoke_spill.py's job."""
+    """A no-op containment gate — real containment is smoke_data_export.py's job."""
     return path
 
 
@@ -144,6 +156,73 @@ def test_run_query_guard() -> None:
         except StatementGuardError:
             write = True
         _assert("write-leader run_query refused", write)
+
+
+def test_run_statement_no_result_set_commits_inline() -> None:
+    conn, cur = _fake_conn(None, [])
+    result = query_actions.run_statement(
+        conn, {"sql": "UPDATE t SET x = 1"}, _passthrough_gate,
+    )
+    _assert("no-result-set has_result_set False", result["has_result_set"] is False)
+    _assert("no-result-set carries rowcount", "rowcount" in result)
+    _assert("no path/columns/row_count keys when no result set", "path" not in result and "columns" not in result)
+    _assert("no-result-set commits", conn.commit.called)
+    _assert("no-result-set never rolls back", not conn.rollback.called)
+
+
+def test_run_statement_with_returning_writes_tsv() -> None:
+    conn, _ = _fake_conn(["id"], [(1,), (2,)])
+    with tempfile.TemporaryDirectory(prefix="epg_stmt_") as workspace:
+        out_path = str(Path(workspace) / "out.tsv")
+        result = query_actions.run_statement(
+            conn,
+            {"sql": "INSERT INTO t (v) VALUES (1), (2) RETURNING id", "output_tsv_path": out_path},
+            _passthrough_gate,
+        )
+        _assert("returning has_result_set True", result["has_result_set"] is True)
+        _assert("returning carries path", result["path"] == out_path)
+        _assert("returning carries row_count", result["row_count"] == 2)
+        _assert("returning commits", conn.commit.called)
+        lines = Path(out_path).read_text(encoding="utf-8").splitlines()
+        _assert("tsv actually written", lines[0] == "id" and "1" in lines and "2" in lines)
+
+
+def test_run_statement_returning_without_path_rolls_back() -> None:
+    conn, _ = _fake_conn(["id"], [(1,)])
+    raised = False
+    try:
+        query_actions.run_statement(
+            conn, {"sql": "INSERT INTO t (v) VALUES (1) RETURNING id"}, _passthrough_gate,
+        )
+    except ValueError:
+        raised = True
+    _assert("missing output_tsv_path for a RETURNING statement raises", raised)
+    _assert("rolls back rather than silently discarding rows", conn.rollback.called)
+    _assert("never commits when rows would be discarded", not conn.commit.called)
+
+
+def test_run_statement_single_statement_guard_only() -> None:
+    conn, _ = _fake_conn(None, [])
+    two = False
+    try:
+        query_actions.run_statement(
+            conn, {"sql": "UPDATE t SET x = 1; UPDATE t SET x = 2"}, _passthrough_gate,
+        )
+    except StatementGuardError:
+        two = True
+    _assert("two-statement run_statement refused (shape guard only)", two)
+
+
+def test_run_statement_no_read_leader_classification() -> None:
+    # The read/write ACCESS-CONTROL guard (assert_read_statement) must NEVER
+    # run on this path -- a write leader is not refused here, unlike run_query.
+    conn, _ = _fake_conn(None, [])
+    refused = False
+    try:
+        query_actions.run_statement(conn, {"sql": "DELETE FROM t"}, _passthrough_gate)
+    except StatementGuardError:
+        refused = True
+    _assert("run_statement never applies the read-leader access-control guard", not refused)
 
 
 def test_list_schemas() -> None:
@@ -204,32 +283,6 @@ def test_classify_topology_leak() -> None:
     _assert("syntax-class -> query_failed", code == "external_pg.query_failed")
     _assert("syntax carries the server's primary message", "syntax error" in message)
     _assert("syntax message uses message_primary, not raw str (no host)", _HOST_MARKER not in message, message)
-
-
-def test_plugin_level_generic_error() -> None:
-    plugin = ExternalPostgresPlugin()
-    plugin.initialize({})  # bind config_provider (defaults apply); unbound = config fault
-    plugin._app_config_loader = MagicMock()
-    plugin._app_config_loader.resolve.return_value = ExternalDsn(
-        name="x", host="h", port=5432, dbname="d", user="u", password="p", sslmode="disable"
-    )
-    original = connection.connect
-
-    def _boom(*args: Any, **kwargs: Any) -> Any:
-        raise _FakeDriverError("28P01", f"auth failed for {_USER_MARKER} at {_HOST_MARKER}")
-
-    connection.connect = _boom  # type: ignore[assignment]
-    try:
-        result = plugin.run_query(
-            {"connection_name": "x", "sql": "SELECT 1", "output_tsv_path": "/tmp/plugin_level_smoke.tsv"}, {},
-        )
-    finally:
-        connection.connect = original  # type: ignore[assignment]
-    _assert("plugin surfaces an error status", result["action_status"] == "error")
-    _assert("plugin error code is auth_failed", result["error"]["code"] == "external_pg.auth_failed")
-    _assert("plugin error message hides host+user markers",
-            _HOST_MARKER not in result["error"]["message"] and _USER_MARKER not in result["error"]["message"],
-            result["error"]["message"])
 
 
 def test_statement_timeout_bounds() -> None:
@@ -297,7 +350,7 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 7 verbs discovered", len(actions) == 7)
+    _assert("all 8 verbs discovered", len(actions) == 8)
 
 
 def main() -> int:
@@ -306,12 +359,16 @@ def main() -> int:
     test_run_query_writes_tsv()
     test_run_query_duplicate_columns()
     test_run_query_guard()
+    test_run_statement_no_result_set_commits_inline()
+    test_run_statement_with_returning_writes_tsv()
+    test_run_statement_returning_without_path_rolls_back()
+    test_run_statement_single_statement_guard_only()
+    test_run_statement_no_read_leader_classification()
     test_list_schemas()
     test_list_tables_bound_param()
     test_describe_table()
     test_test_connection()
     test_classify_topology_leak()
-    test_plugin_level_generic_error()
     test_statement_timeout_bounds()
     test_platform_pg_port_bounds()
     test_edge_parity()

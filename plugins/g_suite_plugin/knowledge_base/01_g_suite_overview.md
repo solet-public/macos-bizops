@@ -189,12 +189,12 @@ Errors are typed with the `gsuite.*` prefix: `gsuite.not_connected`,
 
 ## Business-data limits migration (2026-08-02) — g_suite is LIMITS-ONLY
 
-Unlike jira_plugin/marketo_plugin/zuora_plugin's full spill-floor treatment
+Unlike jira_plugin/marketo_plugin/zuora_plugin's full data-export treatment
 (`workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md`),
 g_suite's three previously-ungoverned list/read verbs
 (`gmail_list_messages`, `drive_list_files`, `sheets_get_values`) got a
 **resource guard only** — operator scope refinement, arm-4f6174762777dfe2fa66b8d409bb373b:
-the mass-exposure/PII concern the spill floor exists for does not apply to
+the mass-exposure/PII concern the data-export requirement exists for does not apply to
 g_suite. So there is **no containment gate, no caller-supplied-path
 requirement, and no inline-branch deletion** here — all three verbs still
 return inline, same as before; only the row bound changed.
@@ -227,7 +227,7 @@ connectors where an override exists (`drive_list_files`): both-or-neither
 fails loud, naming which half was missing; a `row_limit` above the hard cap
 is refused, never silently clamped.
 
-`drive_download_file` is the **worked blob-spill example**: it returns a
+`drive_download_file` is the **worked blob-export example**: it returns a
 `file_blob_key`, and its `get_edge_process_definitions()` entry declares
 `("file_blob_key", 0.3)`. Every export/download verb (`sheets_export`,
 `docs_export`, `slides_export`) replicates this: each declares

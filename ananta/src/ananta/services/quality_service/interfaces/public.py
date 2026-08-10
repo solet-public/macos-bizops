@@ -95,8 +95,20 @@ def _run_return_schema(target_field: str, target_desc: str) -> ReturnValueSchema
             "passed": ParameterMetadata(
                 type=ParameterType.BOOLEAN, description="True iff exit_code == 0."
             ),
+            "skipped": ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                description=(
+                    "True iff exit_code == 77 (the reserved SKIP convention: a "
+                    "disclosed, non-blocking dependency gap, distinct from a "
+                    "genuine failure). Always False for a static gate (run_gate) "
+                    "or the whole suite (run_test with no smoke), which never "
+                    "themselves exit 77 -- meaningful for run_test against a "
+                    "single named smoke."
+                ),
+            ),
             "exit_code": ParameterMetadata(
-                type=ParameterType.INTEGER, description="Process exit code (124 = timeout)."
+                type=ParameterType.INTEGER,
+                description="Process exit code (77 = disclosed skip, 124 = timeout).",
             ),
             "timed_out": ParameterMetadata(
                 type=ParameterType.BOOLEAN, description="True iff the hard timeout fired."

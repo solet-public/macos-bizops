@@ -285,6 +285,28 @@ exactly the broken-but-silent state this replaces.
 
 **If the existing file still carries this deployment's own pre-consolidation inline hooks** — a `HOMUNCULUS_STEP_ZERO_HOOK=<name>` command, a `HOMUNCULUS_ROLE_RECLAIM_HOOK=<name>` command, or a `HOMUNCULUS_WAKE_HOOK=<name>` `Stop` entry (the shape shipped before WS-5b-core moved these into the plugin) — back up `~/.claude/settings.json` first (same collision-probed backup naming as Step 3's zshrc backup), then remove them by hand before running the commands above. They are this deployment's own superseded configuration, not another tool's, and leaving them in place double-fires every reminder and races two wakers on one spool lock now that the plugin owns all three.
 
+**Correction, measured on a live deployment (fleet-watch-transport-migration phase 3,
+2026-08-06): the three literal marker strings above are not reliable search keys on every
+deployment.** On that machine's actual `~/.claude/settings.json`, only the `Stop`/wake entry
+carried its literal `HOMUNCULUS_WAKE_HOOK=` marker; the KB-first, check-messages, and
+role-reclaim hooks were present but rendered from an older or differently-templated form that
+did not carry the other two marker strings at all. **Identify the four hooks to remove by ROLE
+and CONTENT (a `Stop` entry running the wake command; `UserPromptSubmit`/`SessionStart` entries
+matching the KB-first / check-messages / role-reclaim reminder text), not by grepping for the
+marker strings alone** — a marker-only search can silently undercount on a deployment whose
+`settings.json` predates the exact template render this runbook assumes.
+
+**Second correction: `<clone>` in the two install commands above must be a clone that carries
+`.claude-plugin/marketplace.json` at its root.** A hydrated seed clone gets this file from seed
+assembly; an ORIGIN dev checkout (one that was never assembled from a seed — e.g. the homunculus's
+own primary development repo) does not, and `claude plugin marketplace add <clone>` fails
+against it with no `.claude-plugin/marketplace.json` present. If `<clone>` is such an origin
+checkout, render the file first: `deployment/scripts/setup_clone.sh` (run once per clone) now
+includes this render step, or render
+`hydration_templates/marketplace_json.template` by hand
+(`{{MARKETPLACE_NAME}}` → the marketplace name from D-5a.2's derivation) to
+`<clone>/.claude-plugin/marketplace.json` before running the two commands above.
+
 **Then verify, explicitly — the command's own success report is not the
 verification.** Confirm the marketplace appears in
 `~/.claude/plugins/known_marketplaces.json` and the plugin in
@@ -461,10 +483,23 @@ Let the operator pick names and count; do not invent roles they did not ask for.
 
 **Operational guidance: leave sessions running, use `/clear`.** Once a role's session is started, tell the operator to leave it running in its own iTerm2 (or other terminal) tab rather than closing it between conversations. Quitting a session loses its process and its role's live identity until it is manually relaunched; the `/clear` slash command instead resets the conversation while the process (and its stable `AGENT_SESSION_ID`) keeps running — the coordination-hooks plugin's `SessionStart` matcher already covers `clear` (`hooks/hooks.json`, `startup|resume|clear`), so the role-binding reminder fires automatically and the session is addressable again within moments. This is the operational rhythm this platform runs on: long-lived tabs, `/clear` between tasks, restart only when a session is genuinely stuck.
 
+## Step 4a-ii — programmatically spawned workers (new in `coordination-hooks` `0.5.0`)
+
+Everything above in Step 4a covers sessions an operator starts by hand. A coordinator role can also spawn worker sessions directly (`plugin::agent_messaging_plugin::spawn_session` — see the maintenance-verbs joseki cards referenced in the seed update runbook). This is a genuinely different delivery path from the plugin's own `hooks.json`, worth understanding before running any fleet where a session spawns others.
+
+**What ships where.** `coordination-hooks`'s static `hooks/hooks.json` is unchanged in shape by this release — the same nine hook entries across five events an interactively-launched fleet session gets via its own installed plugin copy (Step 2 above). A **programmatically spawned** worker gets none of that from `hooks.json` at all. Instead, the host adapter that spawns it (`agent_messaging_plugin`'s `headless_adapter.py` or `tmux_adapter.py`) builds a **generated Claude Code `--settings` blob for that one spawn**, scoped to that worker alone, wiring eight hook files across `PreToolUse`/`SessionStart`/`UserPromptSubmit`/`PostToolUse`/`Stop` — `headless_tool_allowlist_gate.py`, `capture_session_mapping.py`, `heartbeat_report_alive.py`, `rotation_due_watch.py`, `wake_waiter.py`, `check_messages_reminder.py`, `step_zero_reminder.py`, `role_binding_reminder.py` — plus a `permissions.deny: ["Agent", "Task"]` rule enforcing the Claude-Task-tool-forbidden invariant for the spawn itself. None of these eight are registered in `hooks.json` for this purpose; a spawned worker also runs with `--setting-sources project`, which deliberately excludes both user-scope and local-scope settings, so it does not inherit the operator's own permissive defaults or the seat's copy of these same hooks either — re-wiring them per spawn is what keeps a headless worker's wake, reminders, and heartbeat working without double-firing them for the launching seat.
+
+**How a spawned worker resolves those eight files — the two-rung ladder, and the bug it closes.** A born clone ships **no `.claude/hooks/` directory at all** (it is this dev checkout's own; it is not in the seed's copy allowlist). Before this release, both adapters built every worker-hook path as a bare `<cwd>/.claude/hooks/<file>` with no existence check — on a born clone this generated a `--settings` blob whose `PreToolUse` entry pointed at a file that did not exist, and Claude Code treats a `python3 <missing file>` `PreToolUse` failure as a blocking error: every one of that spawned worker's tool calls was refused from its first turn, with no local signal to the operator why. The fix is a two-rung resolution, run once per file at spawn time: **rung 1** — this checkout's own `.claude/hooks/<file>`, when present (every dev checkout, unaffected by this fix); **rung 2** — this plugin's own shipped `hooks/<file>`, the fallback every clone carries even with no `.claude/hooks/` at all, read from the checkout copy of the plugin tree directly rather than the version-keyed installed plugin cache (the same cache-staleness trap Step 6 below documents — a checkout copy can't go stale the way an installed cache copy can). **If neither rung resolves, the spawn itself is refused loudly** (`WorkerHookResolutionError`, surfaced to the caller as `HostCannotSpawnError`) rather than starting a worker that will silently fail its first tool call — a clear, attributable refusal instead of an unexplained hang.
+
+**Zero-risk setup + verify, for the session doing the deploying:**
+1. Run this plugin's own test suite green before trusting any of this (`tests/run_all.py` under the installed/checkout `coordination-hooks` path) — both new hooks and the resolution ladder ship with dedicated smokes; confirm they exist in your own install, not just the source tree.
+2. **The fail-closed/fail-open contracts, stated plainly.** `headless_tool_allowlist_gate.py` ships UNARMED — it only enforces when the spawning call supplied an explicit `allowed_tools` list (`FLEET_HEADLESS_TOOL_ALLOWLIST` set, even to an empty string); an ordinary spawn is unaffected. Once armed, it is the one hook in this stack that is FAIL-CLOSED — any parse or exception path also blocks (`exit 2`), because this is the actual safety boundary for an unattended worker with no human present to catch a hook bug. `capture_session_mapping.py` is non-fatal in every failure mode (missing env var, bad stdin, unwritable spool dir all warn and exit `0`) and writes only to the one spool directory its adapter declared — never anywhere else, never a credential.
+3. **Bounded post-update verification.** Reuse Step 6's cache-copy hooks diff below, scoped to `hooks/`, to confirm this plugin's shipped fallback copy (rung 2) actually reached the installed cache. Then spawn one worker with a minimal `allowed_tools` list and confirm a call outside that list is refused with the gate's clean stderr reason — not a hang, not a silent allow. "The worker started fine" is not evidence the resolution ladder or the allowlist gate are actually working — prove one real block, the same discipline the git-controller-gate paragraph above already uses for the fleet-wide git safety gate.
+
 ## Step 4b — configure the export/workspace root (required before any business-connector activation)
 
 **Do this before Step 4c.** Business-connector reads (Jira, Salesforce, Snowflake, Postgres,
-and similar) never return record-level data inline — results spill to a file the operator
+and similar) never return record-level data inline — results are exported to a file the operator
 supplies, and every business-connector verb refuses outright until a workspace root is
 configured (an empty allow-list is the secure default: no export destination, no read).
 Skipping this step does not mean "business connectors work with a smaller safety margin" —
@@ -575,7 +610,16 @@ It is a no-op success when the router is already healthy. `uninstall_router.py <
 
 A seed never ships `.git` — the "no contaminated history travels" invariant is exactly why `.git/` is `never_copy` in the seed manifest — so a freshly-hydrated seed clone arrives as a plain source tree, **not** a git worktree. Genesis fixes this as its final step: it `git init`s the born tree with a **fresh, empty history of its own** (never the minting homunculus's `.git`), writes a sensible `.gitignore`, sets a **local** git identity (repo config only — your global git config is never touched), and makes one initial commit. No operator action is needed.
 
-This is what lets `platform_dev_surface_plugin` come ready (its readiness probe runs `git rev-parse --is-inside-work-tree`, which a plain source tree fails) and makes any git-based workflow in the clone work from first boot. The step is **idempotent**: a tree that is already a worktree is left untouched, and an existing `.gitignore` is preserved, never clobbered — so if you cloned the seed from a GitHub repo (which arrives WITH a `.git`), genesis correctly leaves your existing history alone. The initial local identity (`<name>` / `<name>@localhost`) is a placeholder you are free to change with `git config`.
+This is what lets `platform_dev_surface_plugin` come ready (its readiness probe runs `git rev-parse --is-inside-work-tree`, which a plain source tree fails) and makes any git-based workflow in the clone work from first boot. The initial local identity (`<name>` / `<name>@localhost`) is a placeholder you are free to change with `git config`.
+
+The step is **idempotent, and the two halves are idempotent differently** — worth stating precisely, because the imprecise version of this paragraph hid a real defect for several releases:
+
+- **History is conditional.** A tree that is already a worktree keeps its history untouched; genesis reports `status="skipped"` and never runs `git init`, `git add`, or `git commit`. So if you cloned the seed from a GitHub repo (which arrives WITH a `.git`), your existing history is left strictly alone.
+- **The `.gitignore` is unconditional.** It is written whenever the file is ABSENT, in either shape of tree — including the already-a-worktree case. An existing `.gitignore` is still never clobbered, so your own edits survive.
+
+That second point is the correction. The `.gitignore` write used to sit behind the already-a-worktree check, which meant a clone from GitHub — the normal way to take a seed, and therefore every adopter — got **no `.gitignore` at all**. The visible symptom is a clone where `git status` is full of `__pycache__` and the whole `.venv`; the real risk is that runtime state and secrets the ignore list exists to exclude are one `git add -A` away from being committed. Reported by an external adopter and fixed 2026-08-08.
+
+One consequence to expect on a cloned seed: because genesis must not touch your history, a `.gitignore` written into an existing worktree is left **untracked** rather than committed. Commit it yourself when convenient.
 
 ## What this homunculus ingests and embeds
 
@@ -643,7 +687,7 @@ document.
 
 With a session's watcher armed (the rename skill does this at session start), peer and role-addressed messages stream into the watch task's output and surface when the session next looks at it — not as live interruptions. Without a watcher, messages queue durably and drain when one next arms. This is designed behavior, not a defect; the generated CLAUDE.md states the same expectation to the user directly.
 
-Senders see it named honestly: an IMPORTANT send to a watcher-held session returns `delivery="queued_watcher"` — delivered into the watch output; an idle recipient with the Step 2 wake hook installed picks it up as a fresh turn (the `<name> wake` Stop hook blocks on the watcher's delivery spool and wakes the session), a busy one at its next look. The watcher's own event-stream ack marks the message consumed platform-side, so armed watchers do not generate deaf-wake escalations; if a `deaf_wake_escalation` names a watcher-held role, that watcher is dead or its output is never being read — re-arm it (`/rename <Role>` or a fresh `<name> watch`) and resend. On a harness without hook support, a plain background `<name> watch` task still receives everything; deliveries then wait for the next look — that is the floor, and the wake hook is the shipped upgrade, MCP-free and provider-agnostic.
+Senders see it named honestly: every send to a watcher-held session is delivery-attempted unconditionally (A4, 2026-08-04 — there is no sender-declared marker to opt into a wake) and returns `delivery="queued_watcher"` — delivered into the watch output; an idle recipient with the Step 2 wake hook installed picks it up as a fresh turn (the `<name> wake` Stop hook blocks on the watcher's delivery spool and wakes the session), a busy one at its next look. The watcher's own event-stream ack marks the message consumed platform-side. There is no per-message escalation apparatus watching for a missed wake anymore; staleness is caught at the session level instead, through the recipient's own `report_by` promise (`sweep_overdue_sessions` / `_notify_steward_of_overdue`) — if you suspect a watcher is dead or its output is never being read, re-arm it (`/rename <Role>` or a fresh `<name> watch`) and resend rather than wait on an automatic re-queue. On a harness without hook support, a plain background `<name> watch` task still receives everything; deliveries then wait for the next look — that is the floor, and the wake hook is the shipped upgrade, MCP-free and provider-agnostic.
 
 ## Reference
 

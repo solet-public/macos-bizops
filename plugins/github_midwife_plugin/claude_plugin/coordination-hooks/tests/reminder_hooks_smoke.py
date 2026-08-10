@@ -3,7 +3,7 @@
 
 SECURITY.md asserts that the text these hooks inject is "a **fixed string
 literal** compiled into the script", with exactly one disclosed exception --
-`role_binding_reminder.js` interpolating `AGENT_SESSION_LABEL`, JSON-escaped.
+`role_binding_reminder.py` interpolating `AGENT_SESSION_LABEL`, JSON-escaped.
 That is a claim about behaviour, so it is proved here by behaviour: run the same
 hook twice under two different labels and compare the injected text byte for
 byte. A hook that ever learned to interpolate something else would produce two
@@ -29,19 +29,19 @@ from typing import Any  # noqa: E402
 
 from _harness import Results, preflight, run_hook  # noqa: E402
 
-REMINDERS = ("step_zero_reminder.js", "check_messages_reminder.js", "role_binding_reminder.js")
+REMINDERS = ("step_zero_reminder.py", "check_messages_reminder.py", "role_binding_reminder.py")
 
 # Hooks that read Claude Code's stdin payload to learn which event fired.
-STDIN_AWARE = ("check_messages_reminder.js", "role_binding_reminder.js")
+STDIN_AWARE = ("check_messages_reminder.py", "role_binding_reminder.py")
 
 # The single hook SECURITY.md discloses as interpolating a value.
-INTERPOLATING = ("role_binding_reminder.js",)
+INTERPOLATING = ("role_binding_reminder.py",)
 
 # Each hook's compiled-in default event name, used when stdin is absent or junk.
 DEFAULT_EVENT = {
-    "step_zero_reminder.js": "UserPromptSubmit",
-    "check_messages_reminder.js": "UserPromptSubmit",
-    "role_binding_reminder.js": "SessionStart",
+    "step_zero_reminder.py": "UserPromptSubmit",
+    "check_messages_reminder.py": "UserPromptSubmit",
+    "role_binding_reminder.py": "SessionStart",
 }
 
 LABEL_A = "Coordinator-Day"
@@ -102,8 +102,8 @@ def _context(res: Results, hook: str, label: str, stdin: str = "") -> str | None
 #: Reminders that still have an arm condition, and the variable that arms them.
 #: step_zero is deliberately ABSENT — it has no condition at all (§7).
 _CONDITIONAL_REMINDERS = {
-    "check_messages_reminder.js": "AGENT_SESSION_ID",
-    "role_binding_reminder.js": "AGENT_SESSION_LABEL",
+    "check_messages_reminder.py": "AGENT_SESSION_ID",
+    "role_binding_reminder.py": "AGENT_SESSION_LABEL",
 }
 
 
@@ -135,13 +135,13 @@ def check_step_zero_fires_everywhere(res: Results) -> None:
     awareness reminder is a session never learning the platform exists — the
     silent-absence class, now on the awareness side.
 
-    RED MUTATION for this leg: re-add ANY env condition to step_zero_reminder.js.
+    RED MUTATION for this leg: re-add ANY env condition to step_zero_reminder.py.
 
     Byte-identical labelled vs unlabelled is asserted rather than merely
     "non-empty", because a hook that emitted DIFFERENT text without fleet
     context would still be leaking a deployment assumption into the literal.
     """
-    hook = "step_zero_reminder.js"
+    hook = "step_zero_reminder.py"
     bare = run_hook(hook, env={})
     res.check(bare.returncode == 0, f"{hook} exits 0 with no env", f"exit {bare.returncode}")
     res.check(bare.stdout != "", f"{hook} FIRES with no env at all (awareness is unconditional)",
@@ -154,7 +154,7 @@ def check_step_zero_fires_everywhere(res: Results) -> None:
 
 
 def check_step_zero_text_verify(res: Results) -> None:
-    """§33.1 / WS3C §7 new text-verify leg (Dax's finding): step_zero's literal
+    """§33.1 / WS3C §7 new text-verify leg: step_zero's literal
     restores knowledge-first ORDERING primacy without becoming imperative,
     deployment-specific, or naming a process verb -- and separates "check
     before other work" (ordering) from "don't block on the async reply" (the
@@ -166,7 +166,7 @@ def check_step_zero_text_verify(res: Results) -> None:
     conflated phrasing), drop "before other work" (the primacy claim), or add
     a process-key/deployment-path literal.
     """
-    context = _context(res, "step_zero_reminder.js", LABEL_A)
+    context = _context(res, "step_zero_reminder.py", LABEL_A)
     if context is None:
         return
     res.check(

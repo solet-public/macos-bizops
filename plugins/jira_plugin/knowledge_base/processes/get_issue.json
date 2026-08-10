@@ -1,13 +1,13 @@
 {
   "process_key": "plugin::jira_plugin::get_issue",
   "display_name": "Jira: Get Issue",
-  "description": "Fetch one Jira issue by key: summary, plain-text description, status, assignee, reporter, labels, and attachment metadata (not the attachment bytes). Single-record reads like this stay inline (2026-08-02 operator ruling: validation-shaped single-item reads are not the mass-exposure risk the business-data limits migration targets). When the goal is only confirming an issue exists or checking its status, jql_search's trimmed rows (key/status) may already answer that without fetching the full description and people fields. Read action.",
-  "embedding_description": "Retrieve the full detail of one known Jira issue by its key, such as PROJ-123: the summary, description body, current workflow status, assignee and reporter, labels, and the metadata describing each attachment. The single-ticket read for when you already hold the issue key; attachment bytes are fetched separately.",
+  "description": "Fetch one Jira issue by key: summary, plain-text description, status, assignee, reporter, labels, and attachment metadata (not the attachment bytes). Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the fetch finishing; the issue detail is delivered when the job completes. Single-record reads like this stay inline (2026-08-02 operator ruling: validation-shaped single-item reads are not the mass-exposure risk the business-data limits migration targets). When the goal is only confirming an issue exists or checking its status, jql_search's trimmed rows (key/status) may already answer that without fetching the full description and people fields. Read action.",
+  "embedding_description": "Retrieve the full detail of one known Jira issue by its key, such as PROJ-123 -- summary, description body, status, assignee/reporter, labels, and attachment metadata. Returns a job_id right away and delivers that detail once the background fetch completes. The single-ticket lookup for when you already hold the issue key.",
   "result_processor_customizations": {
-    "action_label": "Jira issue fetched",
+    "action_label": "Jira issue fetch queued",
     "result_type": "jira_get_issue_result",
-    "result_description": "One issue's summary, description, status, people, labels, and attachment metadata.",
-    "presentation_guidance": "Summarize the issue's status and key fields. The description body is free-text corporate content (sensitivity 0.6) and assignee/reporter are names (0.3) — surface for the caller but not as public content."
+    "result_description": "Dispatch envelope: job_id (string) and status ('queued'). This is NOT the issue detail -- that arrives separately when the job completes and is delivered as its own message.",
+    "presentation_guidance": "This call only confirms the fetch was queued -- do not present job_id/status as the issue detail. Acknowledge the request is in flight; the issue detail lands in a follow-up message when the job completes. Once delivered, summarize the issue's status and key fields. The description body is free-text corporate content (sensitivity 0.6) and assignee/reporter are names (0.3) -- surface for the caller but not as public content."
   },
   "error_processor_customizations": {
     "action_context": "Fetch one Jira issue by key.",

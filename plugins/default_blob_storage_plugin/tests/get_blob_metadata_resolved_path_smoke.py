@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Smoke test for ``get_blob_metadata``'s ``resolved_path`` field (Dax 22.3/28.4).
+"""Smoke test for ``get_blob_metadata``'s ``resolved_path`` field.
 
-Regression under test: the blob-spill fix converts an oversized connector
+Regression under test: the blob-export fix converts an oversized connector
 result into a ``result_blob_key`` pointer with no registered way to reach the
 bytes — ``get_blob_metadata`` returned only ``{blob_id, metadata}``, so a
-caller holding a spill envelope's ``result_blob_key`` + ``namespace`` had no
+caller holding a export envelope's ``result_blob_key`` + ``namespace`` had no
 path to read the file from a script. The fix adds ``resolved_path`` (reusing
 ``resolve_blob_path``, per the design) and fails LOUD when metadata exists
 but the on-disk file is gone, rather than returning ``resolved_path: null``
@@ -140,7 +140,7 @@ def _require_str_field(data: dict[str, Any], key: str) -> str:
 
 
 def test_resolved_path_present_and_reads_back(tmp_dir: Path) -> None:
-    """The core Dax 22.3/28.4 fix: resolved_path resolves to the real file."""
+    """The core blob-export fix: resolved_path resolves to the real file."""
     provider = _make_provider(tmp_dir)
     content = b"x" * 4096
     store_result = provider.store_blob("marketo_plugin", content, {"filename": "get_leads_results.json", "mime_type": "application/json"})
@@ -177,20 +177,20 @@ def test_missing_file_errors_loud_not_null(tmp_dir: Path) -> None:
 def test_identical_filenames_do_not_collide(tmp_dir: Path) -> None:
     """3.1 refutation, pinned as a regression: same filename metadata, distinct
     blob_ids and distinct on-disk bytes -- storage is blob_id-keyed, never
-    filename-keyed, so there is nothing here for 'unique spill filenames' to fix."""
+    filename-keyed, so there is nothing here for 'unique export filenames' to fix."""
     provider = _make_provider(tmp_dir)
     metadata = {"filename": "get_leads_results.json", "mime_type": "application/json"}
     result_1 = provider.store_blob("marketo_plugin", b"first" * 10, dict(metadata))
     result_2 = provider.store_blob("marketo_plugin", b"second" * 10, dict(metadata))
     blob_id_1 = _require_str_field(_data_of(result_1), "blob_id")
     blob_id_2 = _require_str_field(_data_of(result_2), "blob_id")
-    _assert("two spills with the same filename get distinct blob_ids", blob_id_1 != blob_id_2, f"{blob_id_1} vs {blob_id_2}")
+    _assert("two exports with the same filename get distinct blob_ids", blob_id_1 != blob_id_2, f"{blob_id_1} vs {blob_id_2}")
 
     meta_1 = _data_of(provider.get_blob_metadata("marketo_plugin", blob_id_1))
     meta_2 = _data_of(provider.get_blob_metadata("marketo_plugin", blob_id_2))
     path_1 = _require_str_field(meta_1, "resolved_path")
     path_2 = _require_str_field(meta_2, "resolved_path")
-    _assert("resolved_path differs across the two spills", path_1 != path_2)
+    _assert("resolved_path differs across the two exports", path_1 != path_2)
     _assert("record #1 still readable and unclobbered", Path(path_1).read_bytes() == b"first" * 10)
     _assert("record #2 still readable and unclobbered", Path(path_2).read_bytes() == b"second" * 10)
     metadata_1 = meta_1.get("metadata") or {}

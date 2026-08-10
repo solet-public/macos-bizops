@@ -1,23 +1,48 @@
 #!/usr/bin/env python3
 """Query-verb + classification smoke tests for snowflake_plugin.
 
-Hermetic — a faked Snowflake connection/cursor, no live warehouse. Red-first:
-every check asserts REAL behavior in query_actions / connection.classify_
-snowflake_error / the EDGE parity.
+Hermetic — a faked Snowflake connection/cursor, no live warehouse (there is no
+LIVE write-capability smoke here — see this module's own run_statement tests'
+docstring below for why). Red-first: every check asserts REAL behavior in
+query_actions / connection.classify_snowflake_error / the EDGE parity.
 
 Exercises:
   1. run_query — writes a TSV handle (path/columns/row_count/truncated), never
      rows/records inline (override-friction default/override behavior is
-     smoke_spill.py's job, not duplicated here)
+     smoke_data_export.py's job, not duplicated here)
   2. run_query — refuses a write-leader statement (guard)
-  3. list_databases — name extraction from a SHOW DATABASES row
+  3. run_statement — no-result-set statement disables autocommit, commits, and
+     returns rowcount inline; a result-producing statement (e.g. RETURNING)
+     routes through the same always-TSV path as run_query and commits; a
+     result-producing statement WITHOUT output_tsv_path rolls back (never
+     silently discards the returned rows while committing); the read-leader
+     ACCESS-CONTROL guard never runs on this path (a DELETE is not refused) —
+     see query_actions.run_statement's own docstring. No single-statement
+     SHAPE guard test exists here (unlike external_postgres_plugin's
+     run_statement): Snowflake enforces single-statement natively at the
+     driver, not via a plugin-side parser, so there is nothing to exercise
+     against a fake connection — see connection.py's module docstring for the
+     live verification.
+  4. list_databases — name extraction from a SHOW DATABASES row
   5. list_schemas / list_tables / describe_table — shape + identifier escaping
   6. test_connection — account/user/role/warehouse/version shape
   7. TOPOLOGY-LEAK (SECURITY): auth/timeout/warehouse-suspended classes
      classify to a GENERIC message that NEVER contains the driver exception's
      account/user marker; object-not-found keeps driver detail
-  8. plugin-level: a driver auth fault surfaces a generic error, marker absent
-  9. EDGE parity: validate_edge_process_provider raises nothing
+  8. EDGE parity: validate_edge_process_provider raises nothing
+
+The plugin-level dispatch->driver-fault integration (a run_query/etc. call
+surfacing a topology-safe classified error) now runs entirely inside the D0.3
+background worker, not the dispatch call — covered by smoke_async_jobs.py's
+worker tests, not duplicated here.
+
+NO LIVE smoke exists for run_statement (unlike external_postgres_plugin's
+smoke_write.py against a local scratch database). The only reachable
+Snowflake target from this checkout is the operator's own live account,
+connected on an explicitly reader-scoped role — not a scratch/test target —
+so a live write-capability proof was deliberately NOT attempted here. This is
+a named, disclosed gap, not a silent omission: see this batch's commit
+message.
 
 Run:
     HOMUNCULUS_NAME=<name> .venv/bin/python3 \
@@ -38,7 +63,6 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "snowflake_plugin" / "src"))
 
 from snowflake_plugin import connection, query_actions  # noqa: E402
-from snowflake_plugin.app_config import SnowflakeAccountConfig  # noqa: E402
 from snowflake_plugin.plugin import SnowflakePlugin  # noqa: E402
 from snowflake_plugin.statement_guard import StatementGuardError  # noqa: E402
 
@@ -83,7 +107,7 @@ class _FakeDriverError(Exception):
 
 
 def _passthrough_gate(path: str) -> str:
-    """A no-op containment gate — real containment is smoke_spill.py's job."""
+    """A no-op containment gate — real containment is smoke_data_export.py's job."""
     return path
 
 
@@ -115,6 +139,63 @@ def test_run_query_guard() -> None:
         except StatementGuardError:
             write = True
         _assert("write-leader run_query refused", write)
+
+
+def test_run_statement_no_result_set_commits_inline() -> None:
+    conn, cur = _fake_conn(None, [])
+    cur.rowcount = 3
+    result = query_actions.run_statement(
+        conn, {"sql": "UPDATE t SET x = 1"}, _passthrough_gate,
+    )
+    _assert("no-result-set has_result_set False", result["has_result_set"] is False)
+    _assert("no-result-set carries rowcount", result.get("rowcount") == 3)
+    _assert("no path/columns/row_count keys when no result set", "path" not in result and "columns" not in result)
+    _assert("autocommit disabled before executing", conn.autocommit.call_args == ((False,),))
+    _assert("no-result-set commits", conn.commit.called)
+    _assert("no-result-set never rolls back", not conn.rollback.called)
+
+
+def test_run_statement_with_result_set_writes_tsv() -> None:
+    conn, _ = _fake_conn(["id"], [(1,), (2,)])
+    with tempfile.TemporaryDirectory(prefix="snw_stmt_") as workspace:
+        out_path = str(Path(workspace) / "out.tsv")
+        result = query_actions.run_statement(
+            conn,
+            {"sql": "INSERT INTO t (v) VALUES (1), (2) RETURNING id", "output_tsv_path": out_path},
+            _passthrough_gate,
+        )
+        _assert("result-set has_result_set True", result["has_result_set"] is True)
+        _assert("result-set carries path", result["path"] == out_path)
+        _assert("result-set carries row_count", result["row_count"] == 2)
+        _assert("result-set commits", conn.commit.called)
+        lines = Path(out_path).read_text(encoding="utf-8").splitlines()
+        _assert("tsv actually written", lines[0] == "id" and "1" in lines and "2" in lines)
+
+
+def test_run_statement_result_set_without_path_rolls_back() -> None:
+    conn, _ = _fake_conn(["id"], [(1,)])
+    raised = False
+    try:
+        query_actions.run_statement(
+            conn, {"sql": "INSERT INTO t (v) VALUES (1) RETURNING id"}, _passthrough_gate,
+        )
+    except ValueError:
+        raised = True
+    _assert("missing output_tsv_path for a result-producing statement raises", raised)
+    _assert("rolls back rather than silently discarding rows", conn.rollback.called)
+    _assert("never commits when rows would be discarded", not conn.commit.called)
+
+
+def test_run_statement_no_read_leader_classification() -> None:
+    # The read/write ACCESS-CONTROL guard (assert_read_statement) must NEVER
+    # run on this path -- a DELETE is not refused here, unlike run_query.
+    conn, _ = _fake_conn(None, [])
+    refused = False
+    try:
+        query_actions.run_statement(conn, {"sql": "DELETE FROM t"}, _passthrough_gate)
+    except StatementGuardError:
+        refused = True
+    _assert("run_statement never applies the read-leader access-control guard", not refused)
 
 
 def test_list_databases() -> None:
@@ -179,35 +260,6 @@ def test_classify_topology_leak() -> None:
     _assert("not-found carries driver detail", "FOO" in message, message)
 
 
-def test_plugin_level_generic_error() -> None:
-    plugin = SnowflakePlugin()
-    plugin.initialize({})  # bind config_provider (defaults apply); unbound = config fault
-    plugin._app_config_loader = MagicMock()
-    plugin._app_config_loader.resolve.return_value = SnowflakeAccountConfig(
-        account="a", user="u", warehouse="w", database="d", schema="s", role="r",
-        auth_method="key_pair", private_key_der=b"fake",
-    )
-    original = connection.connect
-
-    def _boom(*args: Any, **kwargs: Any) -> Any:
-        raise _FakeDriverError(390144, f"JWT rejected for {_USER_MARKER}@{_ACCOUNT_MARKER}")
-
-    connection.connect = _boom  # type: ignore[assignment]
-    try:
-        result = plugin.run_query(
-            {"sql": "SELECT 1", "output_tsv_path": "/tmp/plugin_level_smoke.tsv"}, {},
-        )
-    finally:
-        connection.connect = original  # type: ignore[assignment]
-    _assert("plugin surfaces an error status", result["action_status"] == "error")
-    _assert("plugin error code is auth_failed", result["error"]["code"] == "snowflake.auth_failed")
-    _assert(
-        "plugin error message hides account+user markers",
-        _ACCOUNT_MARKER not in result["error"]["message"] and _USER_MARKER not in result["error"]["message"],
-        result["error"]["message"],
-    )
-
-
 def test_edge_parity() -> None:
     from ananta.core.plugins.action_discovery import discover_actions
     from ananta.core.process_registry.plugin_registration_validator import (
@@ -224,7 +276,7 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 7 verbs discovered", len(actions) == 7)
+    _assert("all 8 verbs discovered", len(actions) == 8)
 
 
 def main() -> int:
@@ -232,13 +284,16 @@ def main() -> int:
     print("=" * 47)
     test_run_query_writes_tsv()
     test_run_query_guard()
+    test_run_statement_no_result_set_commits_inline()
+    test_run_statement_with_result_set_writes_tsv()
+    test_run_statement_result_set_without_path_rolls_back()
+    test_run_statement_no_read_leader_classification()
     test_list_databases()
     test_list_schemas()
     test_list_tables()
     test_describe_table()
     test_test_connection()
     test_classify_topology_leak()
-    test_plugin_level_generic_error()
     test_edge_parity()
     print()
     print(f"Results: {_passed} passed, {len(_failed)} failed")

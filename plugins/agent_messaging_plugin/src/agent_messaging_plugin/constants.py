@@ -4,9 +4,6 @@ from typing import Final
 
 PLUGIN_NAME: str = "agent_messaging_plugin"
 
-# The runner process the channel plugin submits per turn.
-RUN_TURN_NAME: str = "run_turn"
-
 # The sender identity the platform itself uses for role-handover notices.
 # Lives here rather than in ``plugin`` so ``role_claim`` — shared by the
 # ``peer_claim_role`` verb and the ``peer/claim_role`` bridge route — can reach

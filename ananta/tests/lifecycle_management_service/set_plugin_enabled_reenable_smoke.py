@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LIF-01 / Dax S31.4 ``set_plugin_enabled`` disable->enable smoke (C1b, no pytest).
+"""LIF-01 ``set_plugin_enabled`` disable->enable smoke (C1b, no pytest).
 
 Design: ``workbench/2026-07-31_architect_four_item_dispatch_designs.md`` S1
 ("LIF-01 -- set_plugin_enabled re-enable path").

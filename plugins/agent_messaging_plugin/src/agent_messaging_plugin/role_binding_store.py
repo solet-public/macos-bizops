@@ -46,6 +46,7 @@ from ananta.llm.agent_messaging.role_binding import (
     COL_ORIGIN,
     COL_PROPERTIES,
     COL_ROLE,
+    COL_ROLE_CLASS,
     COL_SESSION_LABEL,
     HOLDER_KIND_INFERENCE_PROVIDER,
     HOLDER_KIND_SESSION,
@@ -644,6 +645,115 @@ def upsert_role_entity(
     )
 
 
+class RoleClassConflictError(Exception):
+    """A governance act tried to legislate ``name`` with a role_class DIFFERENT
+    from the one already on record — never silently reassigned.
+
+    §3.1 Q1 corollary: class-assignment is a governance act, never an ambient
+    side-effect, so a conflicting re-run is a genuine policy refusal (the same
+    posture ``session_lifecycle_verbs._validate_spawn_role``'s
+    ``role_class_conflict`` already takes at spawn time), not idempotency.
+    """
+
+    def __init__(self, name: str, existing_class: str, requested_class: str) -> None:
+        self.name = name
+        self.existing_class = existing_class
+        self.requested_class = requested_class
+        super().__init__(
+            f"role_class_conflict: role {name!r} is already legislated "
+            f"role_class={existing_class!r}, not the requested {requested_class!r}.",
+        )
+
+
+def _read_role_entity_row(
+    state: StateManagementInterface, external_id: str,
+) -> dict[str, object] | None:
+    records = require_records(
+        state.query_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {"table": TABLE_ROLE, "filters": {_COL_EXTERNAL_ID: external_id}},
+        ),
+    )
+    return records[0] if records else None
+
+
+def legislate_role_class(
+    state: StateManagementInterface,
+    *,
+    name: str,
+    role_class: str,
+    directed_by: str,
+    brief_ref: str,
+) -> str:
+    """Governance-act creation of the ``role`` entity row with ``role_class``
+    stamped AT BIRTH — the ONE sanctioned path that assigns an authority-
+    carrying class (§3.1 Q1: claim-time is enforce-by-class, never
+    class-assignment; ``upsert_role_entity``'s record deliberately excludes
+    ``role_class`` so ordinary claim traffic structurally cannot touch it —
+    the only other writer is ``role_class_backfill.py``'s one-shot, same-shaped
+    targeted ``update_state``).
+
+    Race-safe first-write: an INSERT race primitive
+    (``on_conflict='do_nothing'``, the same device ``claim_role_binding_v4``
+    uses for its first-claim). A lost race re-reads the live row: the SAME
+    class already on record is an idempotent no-op re-run
+    (``'already_legislated'``); a DIFFERENT class raises
+    :class:`RoleClassConflictError` rather than silently reassigning it.
+
+    ``directed_by`` / ``brief_ref`` are best-effort provenance on the row's
+    ``description``/``properties`` (NOT the durable audit trail — those two
+    columns are overwritten by every subsequent ordinary claim's
+    ``upsert_role_entity(state, name=name)`` call, which is pre-existing D1
+    behavior, out of this act's scope to change); the loud log line below and
+    the platform's own action/session-ledger record of this call are the
+    actual audit trail (the settled ruling: "audit is the record").
+
+    Returns ``'legislated'`` (fresh) or ``'already_legislated'`` (idempotent
+    re-run).
+    """
+    external_id = role_binding_external_id(name)
+    record = {
+        _COL_EXTERNAL_ID: external_id,
+        COL_ROLE: name,
+        COL_ROLE_CLASS: role_class,
+        COL_ORIGIN: ROLE_ORIGIN_USER,
+        COL_DESCRIPTION: f"legislated role_class={role_class}",
+        COL_PROPERTIES: json.dumps(
+            {"directed_by": directed_by, "brief_ref": brief_ref, "legislated_at": _now_iso()},
+        ),
+    }
+    insert_result = require_completed(
+        state.upsert_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {
+                "table": TABLE_ROLE,
+                "record": record,
+                "conflict_columns": [_COL_EXTERNAL_ID],
+                "on_conflict": "do_nothing",
+            },
+        ),
+        "legislate role entity",
+    )
+    inner = insert_result.get("result")
+    inserted = bool(inner.get("inserted")) if isinstance(inner, dict) else False
+    if inserted:
+        logger.warning(
+            "GOVERNANCE ACT: role %r legislated role_class=%r directed_by=%r "
+            "brief_ref=%r", name, role_class, directed_by, brief_ref,
+        )
+        return "legislated"
+    existing = _read_role_entity_row(state, external_id)
+    existing_class = str((existing or {}).get(COL_ROLE_CLASS) or "")
+    if existing_class == role_class:
+        logger.info(
+            "GOVERNANCE ACT: role %r already legislated role_class=%r — "
+            "idempotent re-run, directed_by=%r brief_ref=%r",
+            name, role_class, directed_by, brief_ref,
+        )
+        return "already_legislated"
+    raise RoleClassConflictError(name, existing_class, role_class)
+
+
 def ingest_role_entity(
     memory_service: object | None,
     *,
@@ -1011,6 +1121,7 @@ __all__ = [
     "RoleBindingMalformedError",
     "RoleBindingVacantError",
     "RoleClaimContendedError",
+    "RoleClassConflictError",
     "claim_role_binding_v4",
     "holds_role",
     "ingest_role_entity",
@@ -1022,6 +1133,7 @@ __all__ = [
     "resolve_role_binding",
     "resolve_role_binding_v4",
     "run_cutover_migration_at_readiness",
+    "legislate_role_class",
     "session_claim_requires_session_id",
     "upsert_role_entity",
     "verify_migration_parity",

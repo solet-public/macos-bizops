@@ -335,7 +335,7 @@ def _unused_loader(blob_id: str) -> OutgoingAttachment:  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
-# Blob spill service resolution
+# Blob export service resolution
 # ---------------------------------------------------------------------------
 
 

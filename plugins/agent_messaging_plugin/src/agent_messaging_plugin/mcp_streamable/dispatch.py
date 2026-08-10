@@ -41,10 +41,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, Final
 
 from ananta.llm.agent_messaging.models import (
-    ListAgentMessagesRequest,
-    OpenAgentThreadRequest,
     PeerInboxRequest,
-    SendAgentMessageRequest,
     TextPart,
 )
 from ananta.llm.agent_messaging.service import AgentMessagingError
@@ -57,9 +54,6 @@ from ..peer_dispatch import (
     NativeWakeError,
     dispatch_peer_send,
     dispatch_role_send,
-)
-from ..peer_inbox_view import (
-    serialize_message as _serialize_message,
 )
 from ..peer_inbox_view import (
     serialize_peer_inbox_page as _serialize_peer_inbox_page,
@@ -695,6 +689,7 @@ def _tool_peer_send(
         bridge_manager=context.bridge_manager,
         peer_registry=context.peer_registry,
         agent_messaging_service=context.agent_messaging_service,
+        state_service=context.state_service,
         sender_bridge_id=session.bridge_id,
         sender_agent_id=session.agent_id,
         sender_agent_instance_id=session.agent_instance_id,
@@ -770,6 +765,7 @@ def _tool_peer_send_by_name(
         bridge_manager=context.bridge_manager,
         peer_registry=context.peer_registry,
         agent_messaging_service=context.agent_messaging_service,
+        state_service=state_service,
         role_name=role_name,
         role=role,
         sender_bridge_id=session.bridge_id,
@@ -805,7 +801,6 @@ def _tool_peer_inbox(
         raise JsonRpcError(
             _INVALID_PARAMS, "peer_inbox.limit must be a positive integer",
         )
-    include_important = bool(arguments.get("include_important", True))
     role_after_raw = arguments.get("role_after")
     if role_after_raw is not None and not isinstance(role_after_raw, str):
         raise JsonRpcError(
@@ -817,7 +812,11 @@ def _tool_peer_inbox(
             recipient_agent_instance_id=session.agent_instance_id,
             after_created_at=after_dt,
             limit=max(1, min(limit_raw, 100)),
-            include_important=include_important,
+            # A4 (2026-08-04): include_important retired from the tool schema
+            # -- the catch-up view is the only meaningful one now that
+            # delivery is unconditional. Always True; never read from the
+            # caller.
+            include_important=True,
             # Opaque role-section cursor; the service validates + fails closed
             # on a malformed token (→ AgentMessagingError → JsonRpcError).
             role_after=role_after_raw,
@@ -825,143 +824,6 @@ def _tool_peer_inbox(
     )
     context.peer_registry.touch_binding(session.agent_instance_id)
     return _serialize_peer_inbox_page(page, session.agent_instance_id)
-
-
-def _tool_agent_thread_open(
-    arguments: dict[str, Any],
-    *,
-    session: StreamableSession,
-    context: DispatchContext,
-) -> dict[str, Any]:
-    backend = arguments.get("backend")
-    if not isinstance(backend, str) or not backend:
-        raise JsonRpcError(
-            _INVALID_PARAMS, "agent_thread_open.backend must be a non-empty string",
-        )
-    request = OpenAgentThreadRequest(
-        bridge_id=session.bridge_id,
-        session_id=session.session_id,
-        backend=backend,
-        working_directory=_optional_str(arguments.get("working_directory")),
-        title=_optional_str(arguments.get("title")),
-        context=_parse_thread_context(arguments.get("context")),
-        initial_message=_parse_initial_message(arguments.get("initial_message")),
-    )
-    opened = context.agent_messaging_service.open_thread(request)
-    return {
-        "thread_id": opened.thread_id,
-        "message_id": opened.message_id,
-        "action_id": opened.action_id,
-        "flow_id": opened.flow_id,
-        "status": opened.status.value,
-    }
-
-
-def _tool_agent_send(
-    arguments: dict[str, Any],
-    *,
-    session: StreamableSession,
-    context: DispatchContext,
-) -> dict[str, Any]:
-    thread_id = arguments.get("thread_id")
-    if not isinstance(thread_id, str) or not thread_id:
-        raise JsonRpcError(
-            _INVALID_PARAMS, "agent_send.thread_id must be a non-empty string",
-        )
-    content_raw = arguments.get("content") or []
-    if not isinstance(content_raw, list) or not content_raw:
-        raise JsonRpcError(
-            _INVALID_PARAMS, "agent_send.content must be a non-empty list",
-        )
-    request = SendAgentMessageRequest(
-        bridge_id=session.bridge_id,
-        thread_id=thread_id,
-        content=_parse_text_parts(content_raw),
-        response_mode=str(arguments.get("response_mode") or "async"),
-        timeout_seconds=(
-            arguments.get("timeout_seconds")
-            if isinstance(arguments.get("timeout_seconds"), int)
-            else None
-        ),
-    )
-    queued = context.agent_messaging_service.send_message(request)
-    return {
-        "thread_id": queued.thread_id,
-        "message_id": queued.message_id,
-        "action_id": queued.action_id,
-        "flow_id": queued.flow_id,
-        "status": queued.status.value,
-    }
-
-
-def _tool_agent_messages(
-    arguments: dict[str, Any],
-    *,
-    session: StreamableSession,
-    context: DispatchContext,
-) -> dict[str, Any]:
-    thread_id = arguments.get("thread_id")
-    if not isinstance(thread_id, str) or not thread_id:
-        raise JsonRpcError(
-            _INVALID_PARAMS, "agent_messages.thread_id must be a non-empty string",
-        )
-    after_cursor_raw = arguments.get("after_cursor", 0)
-    if not isinstance(after_cursor_raw, int) or after_cursor_raw < 0:
-        raise JsonRpcError(
-            _INVALID_PARAMS,
-            "agent_messages.after_cursor must be a non-negative integer",
-        )
-    limit_raw = arguments.get("limit", 50)
-    if not isinstance(limit_raw, int) or limit_raw <= 0:
-        raise JsonRpcError(
-            _INVALID_PARAMS, "agent_messages.limit must be a positive integer",
-        )
-    page = context.agent_messaging_service.list_messages(
-        ListAgentMessagesRequest(
-            bridge_id=session.bridge_id,
-            thread_id=thread_id,
-            after_cursor=after_cursor_raw,
-            limit=limit_raw,
-        ),
-    )
-    return _serialize_messages_page(page)
-
-
-def _tool_agent_status(
-    arguments: dict[str, Any],
-    *,
-    session: StreamableSession,
-    context: DispatchContext,
-) -> dict[str, Any]:
-    thread_id = arguments.get("thread_id")
-    if not isinstance(thread_id, str) or not thread_id:
-        raise JsonRpcError(
-            _INVALID_PARAMS, "agent_status.thread_id must be a non-empty string",
-        )
-    status = context.agent_messaging_service.get_status(
-        thread_id=thread_id, bridge_id=session.bridge_id,
-    )
-    return _serialize_thread_status(status)
-
-
-def _tool_agent_close(
-    arguments: dict[str, Any],
-    *,
-    session: StreamableSession,
-    context: DispatchContext,
-) -> dict[str, Any]:
-    thread_id = arguments.get("thread_id")
-    if not isinstance(thread_id, str) or not thread_id:
-        raise JsonRpcError(
-            _INVALID_PARAMS, "agent_close.thread_id must be a non-empty string",
-        )
-    closed = context.agent_messaging_service.close_thread(
-        thread_id=thread_id, bridge_id=session.bridge_id,
-    )
-    return {
-        "thread_id": closed.thread_id,
-        "status": closed.status.value,
-    }
 
 
 _TOOL_HANDLERS: Final[dict[str, Any]] = {
@@ -976,11 +838,6 @@ _TOOL_HANDLERS: Final[dict[str, Any]] = {
     "peer_send": _tool_peer_send,
     "peer_send_by_name": _tool_peer_send_by_name,
     "peer_inbox": _tool_peer_inbox,
-    "agent_thread_open": _tool_agent_thread_open,
-    "agent_send": _tool_agent_send,
-    "agent_messages": _tool_agent_messages,
-    "agent_status": _tool_agent_status,
-    "agent_close": _tool_agent_close,
 }
 
 
@@ -1081,76 +938,6 @@ def _parse_text_parts(parts: list[Any]) -> list[TextPart]:
     if not out:
         raise JsonRpcError(_INVALID_PARAMS, "content must be a non-empty list")
     return out
-
-
-def _parse_thread_context(value: Any) -> Any | None:
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise JsonRpcError(_INVALID_PARAMS, "context must be an object")
-    from ananta.llm.agent_messaging.models import (  # noqa: PLC0415
-        AgentThreadContext,
-    )
-    summary = value.get("summary")
-    summary_str = summary if isinstance(summary, str) else None
-    tags_raw = value.get("tags") or ()
-    if not isinstance(tags_raw, list | tuple):
-        raise JsonRpcError(_INVALID_PARAMS, "context.tags must be a list")
-    tags = tuple(str(t) for t in tags_raw)
-    return AgentThreadContext(summary=summary_str, tags=tags)
-
-
-def _parse_initial_message(value: Any) -> Any | None:
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise JsonRpcError(
-            _INVALID_PARAMS, "initial_message must be an object",
-        )
-    from ananta.llm.agent_messaging.models import InitialMessage  # noqa: PLC0415
-    content_raw = value.get("content")
-    if not isinstance(content_raw, list):
-        raise JsonRpcError(
-            _INVALID_PARAMS, "initial_message.content must be a list",
-        )
-    content = _parse_text_parts(content_raw)
-    response_mode = str(value.get("response_mode") or "async")
-    timeout_raw = value.get("timeout_seconds")
-    timeout_seconds = timeout_raw if isinstance(timeout_raw, int) else None
-    return InitialMessage(
-        content=content,
-        response_mode=response_mode,
-        timeout_seconds=timeout_seconds,
-    )
-
-
-def _serialize_messages_page(page: Any) -> dict[str, Any]:
-    return {
-        "thread_id": page.thread_id,
-        "messages": [_serialize_message(m) for m in page.messages],
-        "next_cursor": page.next_cursor,
-        "status": page.status.value,
-    }
-
-
-def _serialize_thread_status(status: Any) -> dict[str, Any]:
-    return {
-        "thread_id": status.thread_id,
-        "status": status.status.value,
-        "backend": status.backend,
-        "last_message_cursor": status.last_message_cursor,
-        "updated_at": status.updated_at.isoformat(),
-        "active_action_id": status.active_action_id,
-        "active_flow_id": status.active_flow_id,
-        "backend_session_id": status.backend_session_id,
-    }
-
-
-def _optional_str(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    return text if text else None
 
 
 __all__ = [

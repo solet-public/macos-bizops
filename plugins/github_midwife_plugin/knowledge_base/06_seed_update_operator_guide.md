@@ -272,6 +272,66 @@ thing, sometimes wanting the whole set — narrow the request itself (ask for
 specific fields, or a bounded range) rather than forcing one shape as a
 blanket rule.
 
+## What changed in this release — you can now run a small fleet of sessions from this homunculus (2026-08-10 update)
+
+If you already start extra agent sessions from this homunculus (or want to
+start), this update is the one that makes that practical rather than
+manual. Two things matter for you specifically:
+
+**Don't skip Step 5 above this time.** A small companion tool (the
+`coordination-hooks` plugin) got a real update in this release, including
+a fix to a background helper that used to be able to wait forever without
+telling anyone. Step 5's refresh commands are what actually pick that up —
+if you skip it thinking "it probably updated with everything else," it
+did not; that's exactly the trap Step 5 exists to catch.
+
+**A new "operating manual" now ships with your homunculus** for anyone
+running more than one session of it at once — how to hand off work between
+sessions, pause one, bring back a stuck one, and check whether one is
+running low on its own working memory. If you (or a coding agent working
+on your behalf) manage multiple sessions, ask your agent to search your
+homunculus's knowledge base for "maintenance verbs joseki cards" — that's
+the manual. If you only ever talk to one session at a time, none of this
+changes anything for you.
+
+**One more thing, only if you use a connected Postgres or Snowflake
+database:** both can now write to your database, but only if the login
+you registered is itself allowed to — your homunculus does not add or
+remove any permission on its own; your database's own access rules
+decide. If you never want a particular connection to be able to write,
+register it under a read-only login, same as you would for any other
+tool. Snowflake's write path is brand-new this release and hasn't been
+tested against a live account yet — if you turn it on, you're among the
+first to actually use it live.
+
+## What changed in this release — mostly behind-the-scenes (2026-08-08 update)
+
+This update is almost entirely internal — you can follow Steps 1–6 above
+exactly as written, with nothing extra. There's no new dependency to
+install, and nothing new to configure.
+
+The one thing worth knowing: if you (or a coding agent working on your
+behalf) ever start OTHER agent sessions from this homunculus — not just the
+one you're talking to — this release gives those sessions more ways to
+coordinate with each other (starting, watching, and handing off work
+between them). If that's not something you do, you can ignore this
+entirely; it doesn't change how your homunculus behaves for ordinary use.
+
+**One thing to know about, not something this update fixes:** a plugin
+your homunculus ships and enables by default includes a few small reminder
+hooks that depend on a program called `node` being present on your
+machine. If it isn't, those specific reminders simply do not run. Most of
+the time you'll notice — you'll see an on-screen error naming the missing
+program, both at the start of a session and when you submit a prompt, and
+everything keeps working normally either way. One of the reminders (an
+idle-wake helper that's meant to run quietly in the background) is the
+exception: if it fails to start, there's no visible sign of it at all.
+Your git-safety protection is a separate hook, built differently, and
+keeps working either way. This isn't fixed yet.
+
+See the root `RELEASE_NOTES.md` file in your homunculus's folder for the
+full list of what changed, in more detail than this guide covers.
+
 ## Reference
 
 - `05_seed_update_runbook.md` — the same update procedure written to a
@@ -281,3 +341,5 @@ blanket rule.
   purpose.
 - `01_hydration_runbook.md` — the first-time setup steps Step 4 above
   re-runs selectively.
+- `RELEASE_NOTES.md` at the repo root — the full changelog for every
+  release, including the ones summarized above.

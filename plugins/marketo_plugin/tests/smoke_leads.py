@@ -5,21 +5,21 @@ Hermetic — a faked client returning canned decoded envelope dicts (the shape
 ``http_client.MarketoClient.get_json``/``post_json``/``delete_json`` already
 return), no live instance. describe_lead_fields/get_leads/list_activity_types/
 get_activities ALWAYS write to a caller-supplied output_tsv_path now
-(business-data limits + spill-floor migration, 2026-08-02) — these tests use a
+(business-data limits + data-export migration, 2026-08-02) — these tests use a
 throwaway tempfile + a real passthrough gate (unit tests of marketing_actions
 functions directly, not the plugin's containment gate; see
-smoke_spill_floor.py for that) and read the written TSV back to assert
+smoke_data_export.py for that) and read the written TSV back to assert
 content. get_api_usage is unaffected (out of the six migrated verbs, stays
 inline).
 
 Exercises:
   1. describe_lead_fields — TSV-handle shape plus the instance-specific
      searchable_fields catalog; an absent searchableFields key succeeds with
-     searchable_fields=None (Dax Part 32.1) while a present-but-malformed
+     searchable_fields=None while a present-but-malformed
      value still raises (negative control)
   2. get_leads — instance-specific filter_type forwarding, internal-loop
-     pagination across 2 vendor calls, truncated shape (Dax 29.2 hide-paging
-     build — no next_page_token/more_result field), over-cap filter_values
+     pagination across 2 vendor calls, truncated shape (2026-08-03 hide-paging
+     change — no next_page_token/more_result field), over-cap filter_values
      rejected
   3. create_or_update_leads — one describe preflight per batch, whole-batch
      refusal naming every REST read-only non-key field and its records,
@@ -41,7 +41,7 @@ Exercises:
   8. list_activity_types and get_api_usage — per-instance activity ids and
      current-day API consumption are exposed through pure reads
   9. get_activities — since_datetime mints the internal starting token
-     (no caller-visible next_page_token, Dax 29.2), the internal loop keeps
+     (no caller-visible next_page_token since the hide-paging change), the internal loop keeps
      paging through an empty moreResult=true page (Adobe: short/empty does
      not mean done), a tokenless moreResult=true contract violation stops
      rather than spins and reports truncated honestly, activity_type_ids/
@@ -103,7 +103,7 @@ def _fake_client(**method_returns: dict[str, Any]) -> Any:
 def _tmp_tsv_path() -> str:
     """A fresh throwaway .tsv path per call — these are unit tests of
     marketing_actions functions directly, not the plugin's real containment
-    gate (see smoke_spill_floor.py for that)."""
+    gate (see smoke_data_export.py for that)."""
     _path_counter["n"] += 1
     return str(Path(_TMP_DIR) / f"out_{_path_counter['n']}.tsv")
 
@@ -147,9 +147,9 @@ def test_describe_lead_fields_inline() -> None:
 
 
 def test_describe_lead_fields_missing_searchable_fields() -> None:
-    """Dax Part 32.1: the v1 describe endpoint's response never carries a top-level
-    searchableFields key on their live instance, so the call raised unconditionally
-    and describe_lead_fields could not succeed at all for them. Absence is not
+    """The v1 describe endpoint's response can omit the top-level
+    searchableFields key entirely, so the call raised unconditionally
+    and describe_lead_fields could not succeed at all on such an instance. Absence is not
     evidence the instance has no searchable fields (the same discipline
     _read_only_rest_field_names already applies to missing rest metadata), so the
     call must succeed with searchable_fields carried through as None instead of
@@ -222,8 +222,8 @@ def test_get_leads_filter_forwarding() -> None:
     rows = _read_tsv(result["path"])
     _assert("get_leads records carried", rows[0]["email"] == "a@b.com")
     _assert("get_leads absent token not truncated", result["truncated"] is False)
-    _assert("get_leads has no next_page_token field — hidden per Dax 29.2", "next_page_token" not in result)
-    _assert("get_leads has no more_result field — hidden per Dax 29.2", "more_result" not in result)
+    _assert("get_leads has no next_page_token field — hidden by design", "next_page_token" not in result)
+    _assert("get_leads has no more_result field — hidden by design", "more_result" not in result)
     _assert(
         "instance-specific filter_type forwarded",
         client.get_json.call_args.kwargs["params"]["filterType"]
@@ -653,7 +653,7 @@ def test_classify_marketo_envelope() -> None:
 def test_get_activities() -> None:
     """§20.2 — the read that verifies what a destructive write actually caused.
 
-    Dax 29.2 hide-paging build: no caller-visible next_page_token exists on
+    2026-08-03 hide-paging change: no caller-visible next_page_token exists on
     this verb any more — since_datetime mints the internal starting token,
     and the loop pages internally on moreResult, never exposing the token.
     """
@@ -680,8 +680,8 @@ def test_get_activities() -> None:
     rows = _read_tsv(result["path"])
     _assert("activities records carried", rows[0]["activityTypeId"] == "6")
     _assert("activities not truncated — moreResult went false", result["truncated"] is False)
-    _assert("activities has no next_page_token field — hidden per Dax 29.2", "next_page_token" not in result)
-    _assert("activities has no more_result field — hidden per Dax 29.2", "more_result" not in result)
+    _assert("activities has no next_page_token field — hidden by design", "next_page_token" not in result)
+    _assert("activities has no more_result field — hidden by design", "more_result" not in result)
     token_call, activities_call = client.get_json.call_args_list
     _assert("paging token minted from since_datetime", token_call.kwargs["params"]["sinceDatetime"] == "2026-07-28T00:00:00-07:00")
     _assert("minted token used for the activities read", activities_call.kwargs["params"]["nextPageToken"] == "tok-mint")
@@ -746,11 +746,12 @@ def test_get_activities() -> None:
         raised = True
     _assert("missing since_datetime rejected", raised)
 
-    # Marketo's own server-side caps enforced here, not left to a 1003. The
-    # lead_ids check runs AFTER the internal token mint (unlike
-    # activity_type_ids, checked before it), so the fake client must supply a
-    # valid mint response — otherwise a mint failure would raise first and
-    # this wouldn't actually exercise the lead_ids cap.
+    # Marketo's own server-side caps enforced here, not left to a 1003.
+    # D0.3 migration note: lead_ids (like every other param) is now validated
+    # entirely inside prepare_get_activities, before any vendor call — the
+    # mint no longer happens at all for a rejected request. The fake client's
+    # mint response is unused here (kept for realism); the cap is what's
+    # under test.
     over_cap_lead_ids_client = MagicMock()
     over_cap_lead_ids_client.get_json.return_value = {"success": True, "nextPageToken": "tok-mint"}
     raised = False
@@ -888,7 +889,7 @@ def test_list_activity_types_and_api_usage() -> None:
 
 
 def test_list_paging_fields_surfaced() -> None:
-    """§20.3 / Dax 29.2 — list_* verbs page internally and expose ``truncated``
+    """§20.3 — list_* verbs page internally and expose ``truncated``
     instead of a caller-visible token, and instead of silently slicing."""
     two_page_client = MagicMock()
     two_page_client.get_json.side_effect = [
@@ -899,8 +900,8 @@ def test_list_paging_fields_surfaced() -> None:
     _assert("list_campaigns internal loop followed the token across 2 vendor calls", two_page_client.get_json.call_count == 2)
     _assert("list_campaigns accumulated across both internal pages", result["row_count"] == 2)
     _assert("list_campaigns fully drained collection not truncated", result["truncated"] is False)
-    _assert("list_campaigns has no next_page_token field — hidden per Dax 29.2", "next_page_token" not in result)
-    _assert("list_campaigns has no more_result field — hidden per Dax 29.2", "more_result" not in result)
+    _assert("list_campaigns has no next_page_token field — hidden by design", "next_page_token" not in result)
+    _assert("list_campaigns has no more_result field — hidden by design", "more_result" not in result)
 
     lists_client = MagicMock()
     lists_client.get_json.side_effect = [
@@ -953,7 +954,7 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 15 verbs discovered", len(actions) == 15, str(len(actions)))
+    _assert("all 16 verbs discovered", len(actions) == 16, str(len(actions)))
     _assert("get_activities registered as a verb", "get_activities" in {a.name for a in actions})
     _assert(
         "list_activity_types registered as a verb",

@@ -30,12 +30,15 @@ plugins/github_midwife_plugin/tests/bootstrap_stdlib_only_smoke.py``.
 
 from __future__ import annotations
 
+import contextlib
 import getpass
 import importlib.util
+import io
 import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -286,6 +289,74 @@ def _make_fixture_tree(root: Path) -> tuple[Path, Path]:
     return target, fake_prefix
 
 
+
+# bootstrap reaches the host through exactly three probes, all `shutil.which` and
+# none of them routed through `ctx.run`: brew, psql, pg_isready. Enumerated from
+# the source rather than discovered one failure at a time — patching only the one
+# that happened to fail first is how this leaked twice.
+_HOST_PROBES = ("brew", "psql", "pg_isready")
+
+
+@contextlib.contextmanager
+def _isolated_host(module: ModuleType, *, brew_present: bool = True) -> Generator[None]:
+    """Present every host probe as healthy (optionally with brew absent)."""
+    real_which = module.shutil.which
+
+    def fake(name: str) -> str | None:
+        if name == "brew":
+            return f"/opt/fake/bin/{name}" if brew_present else None
+        if name in _HOST_PROBES:
+            return f"/opt/fake/bin/{name}"
+        return real_which(name)
+
+    module.shutil.which = fake
+    try:
+        yield
+    finally:
+        module.shutil.which = real_which
+
+
+
+def _quietly(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Call a bootstrap step with its command echo contained.
+
+    `bootstrap._print_command` echoes each command, and the psql commands carry
+    `getpass.getuser()` as the admin role. That is CORRECT in the product — the
+    identity is derived at runtime, never a literal, so the shipped file holds no
+    operator identity — but it put the running user's name into this smoke's
+    console output and therefore into gate logs. Contained here rather than masked
+    in `bootstrap.py`, which would degrade the adopter-facing transparency the echo
+    exists to provide.
+    """
+    with contextlib.redirect_stdout(io.StringIO()):
+        return fn(*args, **kwargs)
+
+
+
+def _run_steps_isolated(module: ModuleType, ctx: Any, *, brew_present: bool = True) -> list[dict[str, Any]]:
+    """Drive the step sequence with the HOST fully isolated, and its echo contained.
+
+    Two things this closes, both of which leaked the ambient machine into a smoke
+    that documents itself as running with "subprocess/network/confirm all mocked":
+
+    1. `probe_homebrew()` reaches `shutil.which('brew')` directly — not through
+       `ctx.run` — so no mock intercepted it and the happy path silently required
+       the MINTING MACHINE to have Homebrew. It failed on any machine without it,
+       while the product was behaving exactly as designed (absent Homebrew is a
+       `needs_user_action` stop-and-ask). The brew-ABSENT leg below already patched
+       this and said why in a comment; the patch was simply never applied to the
+       leg that needs brew PRESENT.
+    2. `bootstrap._print_command` echoes each command, and the role it prints is
+       `getpass.getuser()`. That is correct in the product — the identity is DERIVED
+       at runtime, never a literal, so the shipped file carries no operator identity
+       — but it means this smoke's CONSOLE OUTPUT carried the running user's name
+       into gate logs. Captured here rather than masked in `bootstrap.py`, which
+       would degrade the adopter-facing transparency that echo exists for.
+    """
+    with _isolated_host(module, brew_present=brew_present), contextlib.redirect_stdout(io.StringIO()):
+        return module.run_steps(ctx)
+
+
 def _check_happy_path_dry_run(root: Path) -> None:
     module = _load_bootstrap_module()
     target, fake_prefix = _make_fixture_tree(root)
@@ -296,7 +367,7 @@ def _check_happy_path_dry_run(root: Path) -> None:
         confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
-    steps = module.run_steps(ctx)
+    steps = _run_steps_isolated(module, ctx)
 
     _check(
         "happy-path dry run executes all 7 steps in order",
@@ -330,13 +401,10 @@ def _check_homebrew_absent_stops_immediately(root: Path) -> None:
         target=target, run=_fake_run_no_brew, confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
-    # probe_homebrew uses shutil.which, not ctx.run -- patch it directly.
-    original_which = module.shutil.which
-    module.shutil.which = lambda name: None if name == "brew" else original_which(name)
-    try:
-        steps = module.run_steps(ctx)
-    finally:
-        module.shutil.which = original_which
+    # Same isolation as the happy path, brew forced ABSENT. Previously this leg
+    # carried the only copy of the which() patch; the helper now shares it so the
+    # two legs cannot drift apart again.
+    steps = _run_steps_isolated(module, ctx, brew_present=False)
 
     _check(
         "Homebrew absence stops the sequence at step 1 -- no later step attempted",
@@ -362,7 +430,7 @@ def _check_hard_failure_is_caught_not_raised(root: Path) -> None:
         target=target, run=_fake_run_venv_creation_fails, confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
-    steps = module.run_steps(ctx)
+    steps = _run_steps_isolated(module, ctx)
 
     _check(
         "a hard subprocess failure is caught as a 'failed' step record, not an uncaught exception",
@@ -404,7 +472,7 @@ def _check_role_creation_failure_names_homebrew_convention(root: Path) -> None:
         http_get=_fake_http_get_correct_model,
     )
     try:
-        module.ensure_role_and_db(ctx)
+        _quietly(module.ensure_role_and_db, ctx)
     except module.BootstrapError as exc:
         _check(
             "role-creation failure names the Homebrew superuser convention",
@@ -473,7 +541,7 @@ def _record_venv_seed_commands(root: Path) -> list[list[str]]:
         target=target, run=_recording_run, confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
-    step = module.ensure_venv_and_seed(ctx)
+    step = _quietly(module.ensure_venv_and_seed, ctx)
     _check("venv_and_seed completes under the recording fake", step["status"] == "completed", f"{step!r}")
     return recorded
 
@@ -586,7 +654,7 @@ def _check_role_db_inconsistent_state_needs_user_action(root: Path) -> None:
         target=target, run=_fake_run_role_present_db_absent, confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
-    step = module.ensure_role_and_db(ctx)
+    step = _quietly(module.ensure_role_and_db, ctx)
     detail = str(step.get("detail", ""))
     _check(
         "inconsistent role/db state surfaces as needs_user_action",
@@ -631,7 +699,7 @@ def _check_reconciled_db_missing_revoke_applies_r4(root: Path) -> None:
             target=_target, run=_recording_run, confirm=lambda _msg: True,
             http_get=_fake_http_get_correct_model,
         )
-        step = module.ensure_role_and_db(ctx)
+        step = _quietly(module.ensure_role_and_db, ctx)
         _check(
             f"PRESENT_HEALTHY with PUBLIC-open datacl {datacl_text!r} completes (not skipped)",
             step.get("status") == "completed",
@@ -673,7 +741,7 @@ def _check_reconciled_db_missing_vector_extension_applies_d12(root: Path) -> Non
         target=target, run=_recording_run, confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
-    step = module.ensure_role_and_db(ctx)
+    step = _quietly(module.ensure_role_and_db, ctx)
     _check(
         "PRESENT_HEALTHY with vector extension missing completes (not skipped)",
         step.get("status") == "completed",
@@ -714,7 +782,7 @@ def _check_absent_role_db_create_path_activates_vector_extension(root: Path) -> 
         target=target, run=_recording_run, confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
-    step = module.ensure_role_and_db(ctx)
+    step = _quietly(module.ensure_role_and_db, ctx)
     _check(
         "ABSENT role/db create path completes",
         step.get("status") == "completed",
@@ -746,7 +814,7 @@ def _check_fully_healthy_role_db_skips_with_revoke_verified(root: Path) -> None:
         target=target, run=_make_all_healthy_fake_run(fake_prefix), confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
-    step = module.ensure_role_and_db(ctx)
+    step = _quietly(module.ensure_role_and_db, ctx)
     _check(
         "fully-healthy role_and_db (incl. verified revoke and vector extension) reports skipped",
         step.get("status") == "skipped"

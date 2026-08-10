@@ -60,8 +60,8 @@ ERR_DEPENDENCIES_NOT_READY: Final[str] = "bridge.dependencies_not_ready"
 ERR_ATTACHMENT_MISSING: Final[str] = "bridge.attachment_missing"
 
 # Process keys for the bridge-delivery EDGE_SINK pair.  Kept here (not in
-# constants.py) because the dispatcher contract is local to the bridge
-# surface — other entry points to the plugin (run_turn) do not use them.
+# constants.py) because the dispatcher contract (process_call's async
+# completion path) is local to the bridge surface.
 _DELIVER_RESULT_PROCESS_KEY: Final[str] = (
     f"plugin::{PLUGIN_NAME}::deliver_result"
 )

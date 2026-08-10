@@ -16,18 +16,19 @@ default-read echoes, before calling the write endpoint. Only a ``success:
 false`` envelope (structural fault — bad batch shape, auth, access) raises
 after a write is attempted.
 
-Business-data limits + spill-floor migration (2026-08-02 —
+Business-data limits + data-export migration (2026-08-02 —
 workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md,
 §7.1). ``describe_lead_fields``, ``get_leads``, ``list_activity_types``,
 ``get_activities``, ``list_campaigns``, and ``list_static_lists`` now ALWAYS
 write to the caller-supplied ``output_tsv_path`` and return a handle only —
-never records inline, at any size (the former blob-spill/``INLINE_BYTE_CAP``
+never records inline, at any size (the former blob-export/``INLINE_BYTE_CAP``
 branches are deleted, not lowered; blob storage retires from this plugin
 entirely).
 
-Dax 29.2 hide-paging build (2026-08-03, operator ruling: "we need to deliver
-the results - the paging is an implementation detail that should be hidden",
-design doc §5.4/§7.2 as amended, ruled doc-wide by Coordinator-Day). This
+Internal pagination is hidden by design (2026-08-03 hide-paging change,
+operator ruling: "we need to deliver the results - the paging is an
+implementation detail that should be hidden", design doc §5.4/§7.2 as
+amended, ruled doc-wide). This
 SUPERSEDES the original Tier-2 build's Pattern B (caller-driven external
 loop) for ``get_leads``, ``get_activities``, ``list_campaigns``, and
 ``list_static_lists`` — the four verbs whose vendor per-call ceiling
@@ -52,7 +53,7 @@ Beyond the row_limit hard cap (5,000): no resumption exists, by design
 (§5.4) — a caller who needs more re-invokes the verb with a narrower
 filter/date-range (e.g. ``get_leads`` with a tighter ``filter_values`` slice,
 ``get_activities`` with a later ``since_datetime``), never by carrying a
-token forward. This is why Dax's originally-measured 45,325-lead job no
+token forward. This is why a lead count well past the 5,000 hard cap no
 longer fits in one ``get_leads`` call even at the cap (~17 internal vendor
 calls gets to 5,000) — its route is now several separate ``get_leads`` calls
 against non-overlapping filters, not a single call plus caller-side paging.
@@ -64,6 +65,24 @@ signal of any kind — nothing to hide.
 No bulk-extract verb exists (v1 scope): Marketo's async Bulk Extract job API
 (create -> enqueue -> poll status -> download file) is a materially different
 control-flow shape from every other verb here and is explicitly deferred.
+
+D0.3 sync-verb migration (2026-08-09 —
+workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md).
+Batch 1: ``get_leads``, ``get_activities``, ``list_campaigns``, and
+``list_static_lists`` each split into a ``prepare_<verb>`` (param validation +
+path resolution, no vendor call — runs on the plugin's ms-scale dispatch
+path) and an ``execute_<verb>`` (the actual paginated vendor fetch + TSV
+write — runs in the plugin's background worker, off the dispatch path
+entirely, per the platform's deferred-completion shape). Batch 2:
+``describe_lead_fields``, ``list_activity_types``, and ``get_api_usage`` — the
+single-vendor-call reads — split the same way, minus the pagination (their
+``prepare_<verb>`` does only param validation / path resolution; their
+``execute_<verb>`` is the one vendor call). Every migrated verb's original
+combined ``<verb>`` function survives unchanged as a synchronous
+``execute_<verb>(client, prepare_<verb>(...))`` convenience wrapper —
+``check_setup``'s read probes and any other direct in-process caller still
+call it exactly as before; only the plugin's own dispatch handlers for these
+seven verbs call prepare/execute separately.
 """
 
 from __future__ import annotations
@@ -156,28 +175,53 @@ def _resolve_effective_limit(params: dict[str, Any], *, verb: str) -> int:
     return row_limit
 
 
-def describe_lead_fields(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
-    """Fetch the full lead field metadata list; write it to output_tsv_path, return a handle.
+def prepare_describe_lead_fields(params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Validate describe_lead_fields params and resolve the export path — no vendor call."""
+    output_tsv_path = _require_str(params, "output_tsv_path")
+    return {"resolved_path": _gate_and_check_parent(path_gate, output_tsv_path)}
 
-    ``searchableFields`` is absent on some instances (Dax Part 32.1: the v1
-    describe endpoint never carries a top-level ``searchableFields`` key on
-    their live instance). Absence is not evidence the instance has no
+
+def execute_describe_lead_fields(client: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Fetch the full lead field metadata list; write it to the prepared path, return a handle.
+
+    ``searchableFields`` is absent on some instances (the v1
+    describe endpoint can omit the top-level ``searchableFields`` key
+    entirely). Absence is not evidence the instance has no
     searchable fields, so it is carried through as ``None`` rather than
     failing the whole call, matching ``_read_only_rest_field_names``'s
     missing-metadata discipline below. A present-but-malformed value still
     fails loudly, since that signals real response corruption rather than a
     field the response simply does not carry.
     """
-    output_tsv_path = _require_str(params, "output_tsv_path")
-    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
     payload = client.get_json(LEADS_DESCRIBE_PATH)
     fields = payload.get("result") or []
     searchable_fields = payload.get("searchableFields")
     if searchable_fields is not None and not isinstance(searchable_fields, list):
         raise ValueError("Marketo describe response returned a malformed searchableFields")
-    result = _write_records_tsv(fields if isinstance(fields, list) else [], resolved_path)
+    result = _write_records_tsv(fields if isinstance(fields, list) else [], request["resolved_path"])
     result["searchable_fields"] = searchable_fields
     return result
+
+
+def describe_lead_fields(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Synchronous prepare+execute convenience wrapper.
+
+    Used by check_setup's read probe and any direct in-process caller.
+    """
+    return execute_describe_lead_fields(client, prepare_describe_lead_fields(params, path_gate))
+
+
+def prepare_list_activity_types(params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Validate list_activity_types params and resolve the export path — no vendor call."""
+    output_tsv_path = _require_str(params, "output_tsv_path")
+    return {"resolved_path": _gate_and_check_parent(path_gate, output_tsv_path)}
+
+
+def execute_list_activity_types(client: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Fetch the instance's authoritative activity type catalog; write it to the prepared path."""
+    payload = client.get_json(ACTIVITY_TYPES_PATH)
+    records = payload.get("result") or []
+    return _write_records_tsv(records if isinstance(records, list) else [], request["resolved_path"])
 
 
 def list_activity_types(
@@ -185,15 +229,19 @@ def list_activity_types(
     params: dict[str, Any],
     path_gate: PathGate,
 ) -> dict[str, Any]:
-    """Return the configured instance's authoritative activity type catalog as a workspace TSV."""
-    output_tsv_path = _require_str(params, "output_tsv_path")
-    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
-    payload = client.get_json(ACTIVITY_TYPES_PATH)
-    records = payload.get("result") or []
-    return _write_records_tsv(records if isinstance(records, list) else [], resolved_path)
+    """Synchronous prepare+execute convenience wrapper.
+
+    Used by check_setup's read probe and any direct in-process caller.
+    """
+    return execute_list_activity_types(client, prepare_list_activity_types(params, path_gate))
 
 
-def get_api_usage(client: Any, _params: dict[str, Any]) -> dict[str, Any]:
+def prepare_get_api_usage(_params: dict[str, Any]) -> dict[str, Any]:
+    """No params to validate and no export path to resolve — no vendor call either way."""
+    return {}
+
+
+def execute_get_api_usage(client: Any, _request: dict[str, Any]) -> dict[str, Any]:
     """Return current-day REST API call totals and per-user usage."""
     payload = client.get_json(API_USAGE_PATH)
     records = payload.get("result") or []
@@ -228,36 +276,103 @@ def get_api_usage(client: Any, _params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_leads(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
-    """Query leads by filterType/filterValues; write the results to output_tsv_path, return a handle.
+def get_api_usage(client: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Synchronous prepare+execute convenience wrapper.
 
-    Pages internally across Marketo's MARKETO_LIST_PAGE_ROW_CAP (300)
-    per-call ceiling up to the effective row limit (§5: 500 default,
-    acknowledge_default_limit_override + row_limit raises it to
-    MARKETO_LIST_ROW_LIMIT_CAP). No pagination token or continuation
-    parameter exists on this verb — Dax 29.2's hide-paging ruling. Beyond the
-    hard cap: no resumption; re-invoke with a narrower filter_values slice.
+    Used by check_setup's read probe and any direct in-process caller.
+    """
+    return execute_get_api_usage(client, prepare_get_api_usage(params))
+
+
+def prepare_get_leads(params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Validate get_leads params and resolve the export path — no vendor call.
+
+    D0.3 dispatch/worker split: this is the ms-scale piece that runs on the
+    dispatch path; :func:`execute_get_leads` does the actual paginated fetch
+    in the background worker.
     """
     output_tsv_path = _require_str(params, "output_tsv_path")
     resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
     filter_type = _require_str(params, "filter_type")
     filter_values = _require_list(params, "filter_values", max_len=MAX_FILTER_VALUES)
     effective_limit = _resolve_effective_limit(params, verb="get_leads")
-    query: dict[str, Any] = {
-        "filterType": filter_type,
-        "filterValues": ",".join(str(v) for v in filter_values),
-    }
     fields = params.get("fields")
-    if isinstance(fields, list) and fields:
-        query["fields"] = ",".join(str(f) for f in fields)
-    leads, truncated = _paginate_token_authoritative(client, "/rest/v1/leads.json", query, effective_limit)
-    result = _write_records_tsv(leads, resolved_path)
+    fields_out = [str(f) for f in fields] if isinstance(fields, list) and fields else None
+    return {
+        "resolved_path": resolved_path,
+        "filter_type": filter_type,
+        "filter_values": [str(v) for v in filter_values],
+        "fields": fields_out,
+        "effective_limit": effective_limit,
+    }
+
+
+def execute_get_leads(client: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Run the paginated leads.json fetch + TSV write from a prepared request.
+
+    Pages internally across Marketo's MARKETO_LIST_PAGE_ROW_CAP (300)
+    per-call ceiling up to the effective row limit (§5: 500 default,
+    acknowledge_default_limit_override + row_limit raises it to
+    MARKETO_LIST_ROW_LIMIT_CAP). No pagination token or continuation
+    parameter exists on this verb — hidden by the 2026-08-03 hide-paging change. Beyond the
+    hard cap: no resumption; re-invoke with a narrower filter_values slice.
+    """
+    query: dict[str, Any] = {
+        "filterType": request["filter_type"],
+        "filterValues": ",".join(request["filter_values"]),
+    }
+    fields = request.get("fields")
+    if fields:
+        query["fields"] = ",".join(fields)
+    leads, truncated = _paginate_token_authoritative(client, "/rest/v1/leads.json", query, request["effective_limit"])
+    result = _write_records_tsv(leads, request["resolved_path"])
     result["truncated"] = truncated
     return result
 
 
-def get_activities(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
-    """Read the Marketo activity log; write the results to output_tsv_path, return a handle.
+def get_leads(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Synchronous prepare+execute convenience wrapper.
+
+    Used by check_setup's read probe and any direct in-process caller. The
+    plugin's dispatch handler calls :func:`prepare_get_leads` /
+    :func:`execute_get_leads` separately, split across the D0.3 dispatch
+    (ms-scale) / background-worker (real vendor I/O) boundary.
+    """
+    return execute_get_leads(client, prepare_get_leads(params, path_gate))
+
+
+def prepare_get_activities(params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Validate get_activities params and resolve the export path — no vendor call.
+
+    D0.3 dispatch/worker split: this is the ms-scale piece that runs on the
+    dispatch path. Unlike :func:`prepare_get_leads`, the ORIGINAL synchronous
+    flow minted the activity paging token (a vendor round-trip) as part of
+    query-building — that token mint moves entirely into
+    :func:`execute_get_activities` here, since dispatch-time validation must
+    do zero vendor I/O, not just avoid the pagination loop.
+    """
+    output_tsv_path = _require_str(params, "output_tsv_path")
+    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
+    since_datetime = params.get("since_datetime")
+    if not (isinstance(since_datetime, str) and since_datetime.strip()):
+        raise ValueError("'get_activities' requires 'since_datetime' (ISO-8601)")
+    type_ids = _require_list(params, "activity_type_ids", max_len=MAX_ACTIVITY_TYPE_IDS)
+    lead_ids_out: list[str] | None = None
+    if params.get("lead_ids") is not None:
+        lead_ids = _require_list(params, "lead_ids", max_len=MAX_ACTIVITY_LEAD_IDS)
+        lead_ids_out = [str(lead_id) for lead_id in lead_ids]
+    effective_limit = _resolve_effective_limit(params, verb="get_activities")
+    return {
+        "resolved_path": resolved_path,
+        "since_datetime": since_datetime.strip(),
+        "activity_type_ids": [str(type_id) for type_id in type_ids],
+        "lead_ids": lead_ids_out,
+        "effective_limit": effective_limit,
+    }
+
+
+def execute_get_activities(client: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Mint the paging token and run the paginated activity-log fetch + TSV write.
 
     This is the read that lets a caller verify what a destructive write caused
     (e.g. whether a ``merge_leads`` call resulted in a Send Email / Send Alert
@@ -265,7 +380,7 @@ def get_activities(client: Any, params: dict[str, Any], path_gate: PathGate) -> 
     internally from that instant up to the effective row limit (§5: 500
     default, acknowledge_default_limit_override + row_limit raises it to
     MARKETO_LIST_ROW_LIMIT_CAP) — no pagination token or continuation
-    parameter exists on this verb, Dax 29.2's hide-paging ruling. Beyond the
+    parameter exists on this verb, hidden by the 2026-08-03 hide-paging change. Beyond the
     hard cap: no resumption; re-invoke with a later since_datetime.
 
     HONEST SCOPE — this verb is an AFTER-THE-FACT audit, not a pre-flight
@@ -300,44 +415,27 @@ def get_activities(client: Any, params: dict[str, Any], path_gate: PathGate) -> 
     this code implements the documented rule; they cannot and do not show
     that Marketo honours it.
     """
-    output_tsv_path = _require_str(params, "output_tsv_path")
-    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
-    effective_limit = _resolve_effective_limit(params, verb="get_activities")
-    query = _activity_query(client, params)
-    activities, _last_token, truncated = _paginate_activities(client, query, effective_limit)
-    result = _write_records_tsv(activities, resolved_path)
+    query: dict[str, Any] = {
+        "nextPageToken": _mint_activity_paging_token(client, request["since_datetime"]),
+        "activityTypeIds": ",".join(request["activity_type_ids"]),
+    }
+    if request.get("lead_ids"):
+        query["leadIds"] = ",".join(request["lead_ids"])
+    activities, _last_token, truncated = _paginate_activities(client, query, request["effective_limit"])
+    result = _write_records_tsv(activities, request["resolved_path"])
     result["truncated"] = truncated
     return result
 
 
-def _activity_query(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Build activities.json's starting query with both server-required arguments."""
-    type_ids = _require_list(
-        params,
-        "activity_type_ids",
-        max_len=MAX_ACTIVITY_TYPE_IDS,
-    )
-    query: dict[str, Any] = {
-        "nextPageToken": _activity_start_token(client, params),
-        "activityTypeIds": ",".join(str(type_id) for type_id in type_ids),
-    }
-    if params.get("lead_ids") is not None:
-        lead_ids = _require_list(params, "lead_ids", max_len=MAX_ACTIVITY_LEAD_IDS)
-        query["leadIds"] = ",".join(str(lead_id) for lead_id in lead_ids)
-    return query
+def get_activities(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Synchronous prepare+execute convenience wrapper.
 
-
-def _activity_start_token(client: Any, params: dict[str, Any]) -> str:
-    """Mint the internal loop's starting paging token from since_datetime.
-
-    No caller-supplied next_page_token path exists — Dax 29.2's hide-paging
-    ruling removed resumption from this verb's surface entirely; a caller
-    wanting more after the hard cap re-invokes with a later since_datetime.
+    Used by any direct in-process caller. The plugin's dispatch handler calls
+    :func:`prepare_get_activities` / :func:`execute_get_activities`
+    separately, split across the D0.3 dispatch (ms-scale) / background-worker
+    (real vendor I/O, including the paging-token mint) boundary.
     """
-    since_datetime = params.get("since_datetime")
-    if not (isinstance(since_datetime, str) and since_datetime.strip()):
-        raise ValueError("'get_activities' requires 'since_datetime' (ISO-8601)")
-    return _mint_activity_paging_token(client, since_datetime.strip())
+    return execute_get_activities(client, prepare_get_activities(params, path_gate))
 
 
 def _mint_activity_paging_token(client: Any, since_datetime: str) -> str:
@@ -409,8 +507,28 @@ def merge_leads(client: Any, params: dict[str, Any]) -> dict[str, Any]:
     return {"success": bool(payload.get("success", True)), "request_id": payload.get("requestId")}
 
 
-def list_campaigns(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
-    """List campaigns; write the results to output_tsv_path, return a handle.
+def prepare_list_campaigns(params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Validate list_campaigns params and resolve the export path — no vendor call.
+
+    D0.3 dispatch/worker split: this is the ms-scale piece that runs on the
+    dispatch path; :func:`execute_list_campaigns` does the actual paginated
+    fetch in the background worker.
+    """
+    output_tsv_path = _require_str(params, "output_tsv_path")
+    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
+    effective_limit = _resolve_effective_limit(params, verb="list_campaigns")
+    names = params.get("names")
+    program_names = params.get("program_names")
+    return {
+        "resolved_path": resolved_path,
+        "names": [str(n) for n in names] if isinstance(names, list) and names else None,
+        "program_names": [str(n) for n in program_names] if isinstance(program_names, list) and program_names else None,
+        "effective_limit": effective_limit,
+    }
+
+
+def execute_list_campaigns(client: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Run the paginated campaigns.json fetch + TSV write from a prepared request.
 
     Marketo caps a single page at 300 campaigns; this verb previously
     DISCARDED the response's own paging fields, so an instance with more than
@@ -419,24 +537,30 @@ def list_campaigns(client: Any, params: dict[str, Any], path_gate: PathGate) -> 
     than as truncation. Now pages internally up to the effective row limit
     (§5: 500 default, acknowledge_default_limit_override + row_limit raises
     it to MARKETO_LIST_ROW_LIMIT_CAP) — no pagination token or continuation
-    parameter exists on this verb, Dax 29.2's hide-paging ruling. Beyond the
+    parameter exists on this verb, hidden by the 2026-08-03 hide-paging change. Beyond the
     hard cap: no resumption; re-invoke with a narrower names/program_names
     filter.
     """
-    output_tsv_path = _require_str(params, "output_tsv_path")
-    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
-    effective_limit = _resolve_effective_limit(params, verb="list_campaigns")
     query: dict[str, Any] = {}
-    names = params.get("names")
-    if isinstance(names, list) and names:
-        query["name"] = [str(n) for n in names]
-    program_names = params.get("program_names")
-    if isinstance(program_names, list) and program_names:
-        query["programName"] = [str(n) for n in program_names]
-    campaigns, truncated = _paginate_token_authoritative(client, "/rest/v1/campaigns.json", query, effective_limit)
-    result = _write_records_tsv(campaigns, resolved_path)
+    if request.get("names"):
+        query["name"] = request["names"]
+    if request.get("program_names"):
+        query["programName"] = request["program_names"]
+    campaigns, truncated = _paginate_token_authoritative(client, "/rest/v1/campaigns.json", query, request["effective_limit"])
+    result = _write_records_tsv(campaigns, request["resolved_path"])
     result["truncated"] = truncated
     return result
+
+
+def list_campaigns(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Synchronous prepare+execute convenience wrapper.
+
+    Used by check_setup's read probe and any direct in-process caller. The
+    plugin's dispatch handler calls :func:`prepare_list_campaigns` /
+    :func:`execute_list_campaigns` separately, split across the D0.3 dispatch
+    (ms-scale) / background-worker (real vendor I/O) boundary.
+    """
+    return execute_list_campaigns(client, prepare_list_campaigns(params, path_gate))
 
 
 def trigger_campaign(client: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -454,27 +578,52 @@ def trigger_campaign(client: Any, params: dict[str, Any]) -> dict[str, Any]:
     return {"success": bool(payload.get("success", True)), "request_id": payload.get("requestId")}
 
 
-def list_static_lists(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
-    """List static lists; write the results to output_tsv_path, return a handle.
+def prepare_list_static_lists(params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Validate list_static_lists params and resolve the export path — no vendor call.
+
+    D0.3 dispatch/worker split: this is the ms-scale piece that runs on the
+    dispatch path; :func:`execute_list_static_lists` does the actual
+    paginated fetch in the background worker.
+    """
+    output_tsv_path = _require_str(params, "output_tsv_path")
+    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
+    effective_limit = _resolve_effective_limit(params, verb="list_static_lists")
+    names = params.get("names")
+    return {
+        "resolved_path": resolved_path,
+        "names": [str(n) for n in names] if isinstance(names, list) and names else None,
+        "effective_limit": effective_limit,
+    }
+
+
+def execute_list_static_lists(client: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Run the paginated lists.json fetch + TSV write from a prepared request.
 
     Same page-cap exposure as :func:`list_campaigns` — it is a class of
     defect, not one verb. Pages internally up to the effective row limit (§5:
     500 default, acknowledge_default_limit_override + row_limit raises it to
     MARKETO_LIST_ROW_LIMIT_CAP) — no pagination token or continuation
-    parameter exists on this verb, Dax 29.2's hide-paging ruling. Beyond the
+    parameter exists on this verb, hidden by the 2026-08-03 hide-paging change. Beyond the
     hard cap: no resumption; re-invoke with a narrower names filter.
     """
-    output_tsv_path = _require_str(params, "output_tsv_path")
-    resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
-    effective_limit = _resolve_effective_limit(params, verb="list_static_lists")
     query: dict[str, Any] = {}
-    names = params.get("names")
-    if isinstance(names, list) and names:
-        query["name"] = [str(n) for n in names]
-    lists_, truncated = _paginate_token_authoritative(client, "/rest/v1/lists.json", query, effective_limit)
-    result = _write_records_tsv(lists_, resolved_path)
+    if request.get("names"):
+        query["name"] = request["names"]
+    lists_, truncated = _paginate_token_authoritative(client, "/rest/v1/lists.json", query, request["effective_limit"])
+    result = _write_records_tsv(lists_, request["resolved_path"])
     result["truncated"] = truncated
     return result
+
+
+def list_static_lists(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
+    """Synchronous prepare+execute convenience wrapper.
+
+    Used by check_setup's read probe and any direct in-process caller. The
+    plugin's dispatch handler calls :func:`prepare_list_static_lists` /
+    :func:`execute_list_static_lists` separately, split across the D0.3
+    dispatch (ms-scale) / background-worker (real vendor I/O) boundary.
+    """
+    return execute_list_static_lists(client, prepare_list_static_lists(params, path_gate))
 
 
 def add_leads_to_list(client: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -506,7 +655,7 @@ def check_setup(client: Any) -> dict[str, Any]:
     from_list, trigger_campaign) — there is no way to test those permissions
     without performing the action itself, so ``reads_verified`` is a PARTIAL
     guarantee: it names ``writes_unverified`` explicitly rather than implying
-    the whole setup is confirmed ready. The five spill-floor-migrated probes
+    the whole setup is confirmed ready. The five data-export-migrated probes
     write to a throwaway tempfile via a passthrough gate, never the operator's
     real workspace — this is a permission probe, not an export, and must not
     depend on export_allowed_roots being configured.
@@ -549,8 +698,8 @@ def _run_read_probe(client: Any, verb: str) -> None:
     get_leads/list_campaigns/list_static_lists explicitly force
     row_limit=1 via the §5 override — a cheap probe should stay a single
     minimal vendor call, never the now-internal-looping default of
-    DEFAULT_ROW_LIMIT (a quota-safety fix riding the Dax 29.2 hide-paging
-    build: before internal paging existed these three were already
+    DEFAULT_ROW_LIMIT (a quota-safety fix riding the 2026-08-03 hide-paging
+    change: before internal paging existed these three were already
     single-call by construction; now they are not unless bounded here).
     """
     if verb == "get_api_usage":
@@ -739,11 +888,30 @@ def _gate_and_check_parent(path_gate: PathGate, output_tsv_path: str) -> str:
 
 
 def _write_records_tsv(records: list[Any], resolved_path: str) -> dict[str, Any]:
+    """Write records to resolved_path via tempfile + atomic rename.
+
+    D0.3 section 7 named constraint: a direct ``open(resolved_path, "wb")``
+    was safe only under the plugin's prior full seriality — a reader hitting
+    an overlapping path mid-write, or two concurrent background-worker jobs
+    targeting the same path, becomes possible once the migration's worker
+    thread runs jobs off the dispatch path. ``os.replace`` is atomic on the
+    same filesystem, so a reader always sees either the old file or the
+    complete new one, never a partial write.
+    """
     dict_records = [r for r in records if isinstance(r, dict)]
     columns = _ordered_columns(dict_records)
     row_lists = [[_cell_value(record.get(column)) for column in columns] for record in dict_records]
-    with open(resolved_path, "wb") as handle:
-        handle.write(_to_tsv(columns, row_lists))
+    payload = _to_tsv(columns, row_lists)
+    parent_dir = os.path.dirname(resolved_path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=parent_dir, prefix=".marketo_tsv_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.replace(tmp_path, resolved_path)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
     return {"path": resolved_path, "columns": columns, "row_count": len(row_lists)}
 
 

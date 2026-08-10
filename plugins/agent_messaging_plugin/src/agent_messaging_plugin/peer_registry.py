@@ -285,6 +285,11 @@ class PeerRegistry:
                 "session_label": effective_label,
                 "parent_pid": binding.parent_pid,
                 "agent_session_id": effective_agent_session_id,
+                # codex-watch-migration wake_capable design (2026-08-06):
+                # re-declared on EVERY register() call, no preserve-on-empty —
+                # a bool has no "empty" state, so (unlike session_label above)
+                # the incoming value always wins outright.
+                "wake_capable": binding.wake_capable,
             },
         )
         logger.info(
@@ -443,6 +448,27 @@ class PeerRegistry:
                 soft_delete=False,
             )
 
+    def resolve_by_agent_instance_id(
+        self, agent_instance_id: str,
+    ) -> BridgeBinding | None:
+        """Reverse-lookup the live binding for a durable ``agent_instance_id``
+        alone, with no ``agent_id`` required up front.
+
+        ``agent_instance_id`` is ``unique=True`` on this table (schema.py), so
+        this is a direct single-row lookup, not a scan — unlike
+        :meth:`resolve`, which requires the caller to already know the
+        ``agent_id`` to disambiguate. Used by callers that only have a
+        recorded instance id (e.g. a ``managed_session`` row's
+        ``spawned_by_instance_id``) and no reliable ``agent_id`` source for
+        it — a session spawned by an operator-launched seat with no
+        ``managed_session`` row of its own has exactly this shape. Returns
+        ``None`` for an empty id or no match (best-effort: nothing to notify).
+        """
+        if not agent_instance_id:
+            return None
+        row = self._bindings.read_one({"agent_instance_id": agent_instance_id})
+        return _binding_from_row(row) if row is not None else None
+
     def resolve_by_agent_session_id(
         self, agent_session_id: str,
     ) -> BridgeBinding | None:
@@ -526,6 +552,7 @@ def _binding_from_row(row: dict[str, object]) -> BridgeBinding:
         created_at=str(row.get("created_at") or ""),
         updated_at=str(row.get("updated_at") or ""),
         agent_session_id=str(row.get("agent_session_id") or ""),
+        wake_capable=bool(row.get("wake_capable", True)),
     )
 
 

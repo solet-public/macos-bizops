@@ -333,8 +333,7 @@ def _compose_wake_packet(target: WakeTarget, lines: list[str]) -> str:
         "delivered and consumed server-side. Durable copies: "
         f"`{target.homunculus_name} call "
         "plugin::agent_messaging_plugin::peer_inbox "
-        '\'{"agent_session_id": "\'"$AGENT_SESSION_ID"\'", '
-        '"include_important": true}\'`. '
+        '\'{"agent_session_id": "\'"$AGENT_SESSION_ID"\'"}\'`. '
         "Do not reply with bare acknowledgements."
     )
     return "\n".join([header, *body, footer])

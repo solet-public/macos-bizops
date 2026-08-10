@@ -113,7 +113,7 @@ creates a turn, or whenever a reminder says to check messages, read this
 session's own durable inbox through the local CLI:
 
 ```bash
-{{HOMUNCULUS_NAME}} call plugin::agent_messaging_plugin::peer_inbox '{"agent_session_id":"'"$AGENT_SESSION_ID"'","include_important":true,"limit":5}'
+{{HOMUNCULUS_NAME}} call plugin::agent_messaging_plugin::peer_inbox '{"agent_session_id":"'"$AGENT_SESSION_ID"'","limit":5}'
 ```
 
 The response has two independent sections and two independent cursors:
@@ -125,8 +125,8 @@ The response has two independent sections and two independent cursors:
   it is null; `role_section_status: "ok"` means the section was computed, not
   that its backlog is drained.
 
-Never mix the two cursors. Treat a repeated IMPORTANT message already handled
-as a duplicate delivery, not a new instruction. A queue or watcher receipt is
+Never mix the two cursors. Treat a repeated message already handled as a
+duplicate delivery, not a new instruction. A queue or watcher receipt is
 not proof that a model turn read the inbox; completion evidence names the
 message ID and the action actually taken.
 

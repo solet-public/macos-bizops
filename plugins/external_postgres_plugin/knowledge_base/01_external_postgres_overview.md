@@ -1,21 +1,32 @@
 # External Postgres Plugin (`external_postgres_plugin`)
 
-A read-only **"super Datagrip"** over **foreign** Postgres databases the
-operator registers — cloud RDS or local dev Postgres. It is deliberately NOT
+A **"super Datagrip"** over **foreign** Postgres databases the operator
+registers — cloud RDS or local dev Postgres. It is deliberately NOT
 `postgres_state_management_plugin` (the platform's own state-DB owner): the words
 "external" vs "state_management" keep the roles disjoint in registry listings, KB
 retrieval, and gate reports. This plugin never touches the platform's own
-database; the containment guard refuses it role-independently.
+database; the containment guard refuses it role-independently, for every verb
+including the write verb.
 
 Every verb takes a connection **NAME** (never a DSN). Adding a database is a
 one-time operator **registration** — no code change.
 
-## Read/write posture — READ-ONLY, HARD (operator-ratified, RATIFY-2)
+## Read/write posture — READ-only-hard reads, one write verb (RATIFY-2, reversed 2026-08-09)
 
-The operator's dividing line: *"if someone deleted a database that would be a big
-deal."* Because this is a developer tool used by multiple people, a stray
-`DELETE FROM orders` / `DROP TABLE` must be structurally impossible. So there is
-**no write verb**, and the read-only guarantee is enforced at three layers:
+**History, for context, not current policy:** the plugin originally shipped
+READ-ONLY, HARD (RATIFY-2) — the operator's dividing line at the time was *"if
+someone deleted a database that would be a big deal,"* so no write verb existed
+at all. **The operator reversed that standing ban on 2026-08-09** ("users have
+been complaining" about connectors that cannot manage what they integrate),
+with **Amendment 1** the same day settling HOW: *"these systems all have RBAC
+and we do not [need] to try to re-implement controls in our plugins."* So the
+write verb (`run_statement`) exists, and the control plane for what it can
+actually do is the registered credential's own server-side Postgres **GRANTs**
+— never a plugin-side permission check, consent gate, or refusal default (that
+whole class was explicitly withdrawn by Amendment 1).
+
+**Every READ verb stays exactly as read-only-hard as before** — nothing about
+the reversal touches them:
 
 1. **LOAD-BEARING — the psycopg3 connection read-only characteristic.**
    `conn.read_only = True` is set BEFORE the first `execute()`, so psycopg3 emits
@@ -30,20 +41,39 @@ deal."* Because this is a developer tool used by multiple people, a stray
 2. **BELT — the read-leader guard.** Admits only the Datagrip read family
    `{SELECT, WITH, EXPLAIN, SHOW, VALUES, TABLE}`; everything else fails fast with
    `external_pg.read_only_violation`. Defense-in-depth + UX, NOT the boundary.
+   **This guard is READ-VERB-ONLY** — `run_statement` never calls it.
 3. **BELT — single-statement per call** via a real SQL parser (`sqlparse`, BSD).
    The parser is **result-shape hygiene** (bounds `SET`-injection + multi-result),
    NOT write containment: a second statement that slips `sqlparse` still cannot
-   write, because the read-only connection refuses it (25006). `sqlparse` was
-   ratified over `pglast` (GPL-3.0) because the repo is publicly distributed and
-   the parser is not the destruction boundary.
+   write on a READ verb, because the read-only connection refuses it (25006).
+   `sqlparse` was ratified over `pglast` (GPL-3.0) because the repo is publicly
+   distributed and the parser is not the destruction boundary. `run_statement`
+   reuses this SAME shape-only check (exactly one statement — an engineering
+   convention for predictable commit semantics, not a permission gate) but never
+   the read-leader guard above.
 
-**v1 limitation:** `CREATE TEMP TABLE` / scratch writes are refused (they are
-writes). CTEs are the covered path for scratch computation. A temp-schema-write
-mode is a deliberate operator-gated **v2** decision, not a config flip.
+**v1 limitation (read verbs):** `CREATE TEMP TABLE` / scratch writes are refused
+on a READ verb (they are writes). CTEs are the covered path for scratch
+computation on a read connection. Use `run_statement` if an actual write is
+needed.
 
-Registration should still recommend a **read-only DB user** (defense-in-depth);
-`test_connection` surfaces the connecting role so a misconfigured write-capable
-credential is visible.
+**The write verb (`run_statement`):** opens with `read_only=False` instead of
+the characteristic above. It performs NO plugin-side classification of what the
+statement does — a DELETE is not refused, a syntactically-write-shaped
+statement is not inspected — because that decision belongs entirely to the
+server. A statement with no result set (the common INSERT/UPDATE/DELETE/DDL
+case) commits and returns `rowcount` inline; a statement WITH a result set (a
+`RETURNING` clause) routes through the same always-TSV export path as
+`run_query` — rows are never inline, at any size — and its absence when the
+statement DOES return rows rolls the whole write back rather than silently
+discarding them while still committing.
+
+Registration should still recommend the **least-privileged DB user the task
+needs** (a read-only role for read-only registrations; a scoped write role
+only where write access is actually intended) — this is the operator's own
+registration-time decision in Postgres's own terms, not a plugin gate.
+`test_connection` surfaces the connecting role so a misconfigured credential
+is visible either way.
 
 ## Containment — never the platform's own database (§8.4)
 
@@ -134,12 +164,21 @@ process_call service_interface::address_book_service::register {
   `read_only` so the operator can confirm a connection points where they expect
   before trusting it.
 
-## Verb map (all EDGE, all reads)
+## Verb map (all EDGE)
 
-| Verb | Args | Returns |
+Every verb below except `list_connections` is **born-async** (D0.3
+deferred-completion shape, 2026-08-09/10): the dispatch call returns
+`{job_id, status: "queued"}` in milliseconds, and the "Returns" column below
+describes what the JOB delivers when it completes — NOT this call's own
+immediate return value. Conflating "the dispatch returned" with "the job
+finished" is the doctrine's named trap; see
+`workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md`.
+
+| Verb | Args | Job-completion result |
 |---|---|---|
 | `run_query` | `connection_name, sql, output_tsv_path, acknowledge_default_limit_override=false, row_limit` | `{path, columns, row_count, truncated}` — written as ONE `.tsv` file at the caller's ABSOLUTE path, never rows inline; defaults to 500 rows, up to 1000 with an acknowledged override |
-| `list_connections` | — | `{connections: [name]}` (names only, never secrets) |
+| `run_statement` **(WRITE)** | `connection_name, sql, output_tsv_path (only if the statement has a RETURNING clause), acknowledge_default_limit_override=false, row_limit` | No RETURNING: `{rowcount, has_result_set: false}`. RETURNING: `{rowcount, has_result_set: true, path, columns, row_count, truncated}` — same always-TSV shape as run_query for the returned rows |
+| `list_connections` | — | `{connections: [name]}` (names only, never secrets) — still SYNCHRONOUS, not async: a single address-book scan, not a foreign-DB round trip |
 | `list_schemas` | `connection_name` | `{schemas: [name]}` |
 | `list_tables` | `connection_name, schema` | `{tables: [{name, kind}]}` |
 | `describe_table` | `connection_name, schema, table` | `{columns: [{name, type, nullable, default}]}` |
@@ -157,7 +196,7 @@ the caller supplies the path, the config supplies the containment.
 
 Both `run_query` and `export_query` ALWAYS write their result to the caller's
 `output_tsv_path` — never rows inline, at any size (business-data limits +
-spill-floor migration, 2026-08-02; the former inline-return/byte-cap branch
+data-export migration, 2026-08-02; the former inline-return/byte-cap branch
 is deleted, not lowered). Each defaults to 500 rows absent an acknowledged
 override; `run_query`'s override ceiling is 1000, `export_query`'s is 50000
 (the N>>500 route). `acknowledge_default_limit_override=true` together with
@@ -177,7 +216,10 @@ UUIDs) are coerced to their string form before writing.
 the operator runs `pip install -e plugins/external_postgres_plugin` into the shared
 `.venv`. Until installed the plugin is dormant tree-ware.
 
-The hermetic smokes run without a database. The two LIVE smokes
-(`smoke_readonly.py`, `smoke_multistatement.py`) prove the read-only boundary
-against a local **scratch** Postgres database (`epg_smoke_scratch` on the Homebrew
-cluster — NEVER the platform database) and skip cleanly when that fixture is unreachable.
+The hermetic smokes run without a database. The three LIVE smokes
+(`smoke_readonly.py`, `smoke_multistatement.py`, `smoke_write.py`) prove the
+read-only boundary — and, for `smoke_write.py`, the write reversal actually
+working end-to-end, including a commit visible from a SEPARATE connection —
+against a local **scratch** Postgres database (`epg_smoke_scratch` on the
+Homebrew cluster — NEVER the platform database), and skip cleanly when that
+fixture is unreachable.

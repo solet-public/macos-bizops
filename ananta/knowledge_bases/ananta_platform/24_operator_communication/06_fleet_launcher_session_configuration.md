@@ -1,6 +1,6 @@
-# Fleet Launcher Session Configuration: Model, Effort, and Advisor Per Role
+# Fleet Launcher Session Configuration: Model, Effort, Advisor, and Transport Per Role
 
-Tags: knowledge:tag:fleet_launcher, knowledge:tag:operator_communication, knowledge:tag:cli_configuration, knowledge:tag:advisor_tool
+Tags: knowledge:tag:fleet_launcher, knowledge:tag:operator_communication, knowledge:tag:cli_configuration, knowledge:tag:advisor_tool, knowledge:tag:fleet_transport
 
 Article Layer: 2
 
@@ -8,9 +8,9 @@ Article Role: operations_reference
 
 Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-reference, domain:local-homunculus, domain:client-deployment, consumer_profile:both
 
-Embedding Description: How to change the base model, effort level, and advisor model for one named role in an operator's multi-session fleet launcher — where that launcher actually lives, the CLI flags and environment variables involved, and the one verified-correct way to fully disable the advisor tool for a single session, with a link to Anthropic's own advisor documentation.
+Embedding Description: How to change the base model, effort level, advisor model, and declared transport (MCP vs watch) for one named role in an operator's multi-session fleet launcher — where that launcher actually lives, the CLI flags and environment variables involved, the one verified-correct way to fully disable the advisor tool for a single session, and where the fleet-wide default transport is declared and how a per-role launcher export overrides it.
 
-**When you need this**: an operator asks to change the model, effort level, or advisor configuration for a named session role (a coordinator, a reviewer, an implementation lane, any role launched by a wrapper function); a session needs to know where that configuration actually lives before searching for it in the wrong place; a session needs to turn the advisor tool off for one role without touching the operator's global default.
+**When you need this**: an operator asks to change the model, effort level, advisor configuration, or transport for a named session role (a coordinator, a reviewer, an implementation lane, any role launched by a wrapper function); a session needs to know where that configuration actually lives before searching for it in the wrong place; a session needs to turn the advisor tool off for one role without touching the operator's global default; a session needs to know why one role talks over MCP while another talks over the watch transport, or wants to change which one a role uses.
 
 ---
 
@@ -38,6 +38,24 @@ A seed-hydration plugin may ship a *template* for producing this launcher for a 
 ## Model and effort
 
 Both are ordinary per-session CLI flags on the `claude` invocation: `--model <alias>` and `--effort <level>` (`low`, `medium`, `high`, `xhigh`, `max`). Passing neither flag inherits the operator's `~/.claude/settings.json` defaults (`model` and `effortLevel` keys). A launcher function typically builds these as optional flags — an empty argument expands to zero flags rather than an empty-string flag value — so existing callers that don't pass a model/effort stay byte-identical after adding the parameters.
+
+## Transport per role
+
+Each session talks to the platform over one of two transports: **MCP** (a live bridge connection; requires `claude mcp add` and, on some tiers, Anthropic-direct auth — unusable on a machine whose policy blocks MCP) or **watch** (a per-session `homunculus watch` watcher plus a zero-token `Stop`-hook wake; no MCP registration needed). The fleet's charter (2026-08-06, operator, verbatim in the fleet-watch-transport-migration lane brief): corporate deployments disallow MCP, so **watch must be the fleet's primary transport**, MCP retained only as a backup and for chat-class sessions.
+
+The fleet-wide default is declared in exactly ONE place: `default_fleet_transport` in `agent_messaging_plugin`'s `plugin.yaml` (shipped `"watch"`, the charter's own value — same declared-config posture as `headless_permission_mode`, changeable with a config edit and a routine blue-green swap, no launcher edit required to move the fleet-wide default).
+
+That config value is the *source of truth for the default*; it is **not** what an individual session reads at launch. Each session reads its own `FLEET_TRANSPORT` environment variable directly (the rename skill, the spawned-worker hook guards, and the watch-arm's `wake_waiter.js` Stop hook all read it independently — declared, never probed, never silently crossed; see the rename skill for the full rule). The goal state is that **every role's launcher wrapper exports `FLEET_TRANSPORT` explicitly**, per role, rather than relying on any consumer's own unset-fallback literal:
+
+```sh
+claude-<role>() { _claude_for_<homunculus> <Role-Label> <model> <effort> watch }
+# a role that still needs MCP (chat-class, or not yet migrated):
+claude-<role>() { _claude_for_<homunculus> <Role-Label> <model> <effort> mcp }
+```
+
+Declared beats fallback: once every role's launcher line names its transport explicitly, the various `${FLEET_TRANSPORT:-...}` fallback literals scattered across consumers become near-dead code — they only matter for a session launched outside any wrapper. Don't rely on them as the mechanism; treat an explicit per-role export as the actual configuration surface, the same way model and effort are.
+
+**Mixed fleet during a migration — explicit exports are what make a fallback flip safe.** A consumer's own unset-fallback literal (e.g. the Stop hook that decides whether to run `homunculus wake`) should only be flipped to match a new fleet-wide default AFTER every role whose launcher doesn't yet pass an explicit transport has been given one. Flipping a shared fallback first, while some standing roles still rely on it silently, risks a role that has no watcher armed exec'ing a wake command against a spool nothing feeds — a wedged turn-end, not a clean failure. Sequence it: pin explicit per-role exports first, flip shared fallbacks last, never the reverse.
 
 ## The advisor tool
 

@@ -161,18 +161,16 @@ otherwise claimed (see Explicit exclusions below) — plus one further entry,
 below, that was checked, found equivalent, and is kept rather than silently
 dropped because it was previously listed here as an open provisional entry.
 
-Backend agent-thread dispatch is confirmed as an MCP-only mechanism. Opening
-and driving a backend agent thread (the coordination service's
+Backend agent-thread dispatch (the coordination service's
 `agent_thread_open` / `agent_send` / `agent_messages` / `agent_status` /
-`agent_close` operations) is a capability of the MCP transport only — it is
-bridge-bound by design and has no equivalent on a declared non-MCP
-transport. A session running on a non-MCP transport cannot open or drive
-one at all. Fleet coordination in this deployment operates through full
-peer sessions exchanging messages, not through backend-driven agent
-threads, so this capability's absence off the MCP transport does not
-remove anything the operating model depends on. Whether this scope is
-permanent is an open engineering question, not a decided one — no operator
-ruling on this point exists on record.
+`agent_close` operations) was retired in the D3 dormant-head retirement —
+the dormant `GuardedAgentInterface` backend had zero implementing plugins,
+so the entire dispatch surface (both the MCP tools and their HTTP/service
+implementation) was removed, not just its non-MCP transport reach. This
+entry is kept for record: while live, it was an MCP-only mechanism with no
+non-MCP-transport equivalent. Fleet coordination in this deployment
+operates through full peer sessions exchanging messages, which this
+retirement does not touch.
 
 Peer enumeration is confirmed as an MCP-only capability. Discovering which
 peer sessions are currently registered works only over the MCP transport. A

@@ -27,6 +27,16 @@ from code_vetting_plugin.toolrun import tool_available
 _ZERO_WIDTH_SPACE = chr(0x200B)
 _DUP_BLOCK = "\n".join(f"    value_{i} = compute_step({i}, base, offset, scale)" for i in range(12))
 
+# The automake/Meson/CTest SKIP_RETURN_CODE convention, matching
+# run_smokes.py's own _SKIP_EXIT_CODE -- exits 0 if every check ran (the
+# common case, rg present), 77 if the battery ran but the two rg-dependent
+# end-to-end halves below skipped their live half (structural half still
+# ran and is asserted either way -- see each test's own comment), never
+# silently 0 with the gap invisible to run_smokes.py's aggregate. Undeclared-
+# dependency audit: workbench/2026-08-08_undeclared_system_dependencies_findings_d3-impl.md.
+_SKIP_EXIT_CODE = 77
+_rg_dependent_half_skipped = False
+
 
 def _make_tree(root: Path) -> TargetTree:
     tracked: list[str] = []
@@ -161,14 +171,16 @@ def test_underivable_operator_identity_records_a_gap_not_an_empty_pattern() -> N
     # "" would produce an empty alternation branch that matches every file.
     #
     # The composition half is HERMETIC and always runs. The scan()-wiring half needs `rg` on
-    # PATH, and ripgrep is one of the tools a born seed does not declare or install (Dax
-    # Part 31) — so it is guarded rather than allowed to red for a missing tool. Guarding is
+    # PATH, and ripgrep is one of the tools a born seed does not declare or install —
+    # so it is guarded rather than allowed to red for a missing tool. Guarding is
     # safe here because the assertion that actually carries the fix (no empty pattern is ever
     # composed) is the unguarded one above it.
+    global _rg_dependent_half_skipped
     with patch.object(patterns, "_git_global_config", return_value=""):
         assert patterns._operator_pii_pattern() is None  # noqa: SLF001
         if not tool_available("rg"):
             print("SKIP scan()-wiring half: rg not on PATH (composition half still asserted)")
+            _rg_dependent_half_skipped = True
             return
         with tempfile.TemporaryDirectory() as tmp:
             result = patterns.scan(_make_tree(Path(tmp)), "rid")
@@ -198,8 +210,10 @@ def test_operator_pii_finding_redacts_the_matched_value() -> None:
 
     # End-to-end half: prove the redaction actually reaches `evidence`. Guarded on `rg` for the
     # same reason as the gap test above — a born seed does not declare ripgrep.
+    global _rg_dependent_half_skipped
     if not tool_available("rg"):
         print("SKIP evidence half: rg not on PATH (redact flag still asserted structurally)")
+        _rg_dependent_half_skipped = True
         return
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -232,6 +246,12 @@ def main() -> int:
         test()
         print(f"PASS {test.__name__}")
     print(f"OK: {len(tests)} L1 scanner smoke checks passed.")
+    if _rg_dependent_half_skipped:
+        print(
+            "SKIP: rg not on PATH -- the two end-to-end scan()-wiring halves above "
+            "disclosed a gap rather than running; every other check ran and passed."
+        )
+        return _SKIP_EXIT_CODE
     return 0
 
 

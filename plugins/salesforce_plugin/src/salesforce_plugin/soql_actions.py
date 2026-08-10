@@ -23,7 +23,7 @@ defense-in-depth.
 
 Both ``soql_query`` and ``export_soql`` ALWAYS write their result to the
 caller-supplied ``output_tsv_path`` and return a handle only — never records
-inline, at any size (business-data limits + spill-floor migration,
+inline, at any size (business-data limits + data-export migration,
 2026-08-02; the former inline-return/``INLINE_BYTE_CAP`` branch is deleted,
 not lowered). The effective record ceiling is DEFAULT_ROW_LIMIT unless the
 caller supplies BOTH ``acknowledge_default_limit_override=true`` and an

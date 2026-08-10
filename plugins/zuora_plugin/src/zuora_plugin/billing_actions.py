@@ -9,11 +9,11 @@ No delete verb exists (v1 scope, matching the 2026-06-20 design + the
 umbrella wave's read/write posture register): billing records are
 voided/cancelled through Zuora's own workflow, not deleted through this tool.
 
-Business-data limits + spill-floor migration (2026-08-02 —
+Business-data limits + data-export migration (2026-08-02 —
 workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md).
 ``data_query``, ``bulk_export``, ``list_subscriptions``, and ``list_invoices``
 now ALWAYS write to the caller-supplied ``output_tsv_path`` and return a
-handle only — never records inline, at any size (the former blob-spill /
+handle only — never records inline, at any size (the former blob-export /
 ``INLINE_BYTE_CAP`` branches are deleted, not lowered). Effective record
 ceiling is ``DEFAULT_ROW_LIMIT`` unless the caller supplies BOTH
 ``acknowledge_default_limit_override=true`` and an explicit ``row_limit``

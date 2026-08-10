@@ -5,10 +5,11 @@ This is the single entry point a reviewer needs:
 
     python3 tests/run_all.py
 
-It requires only the `node` and `python3` the plugin already depends on. It
-needs no repository, no network, no configuration, and no environment
-variables -- and it writes nothing outside a temporary directory that is
-removed when it finishes.
+It requires only `python3`, the plugin's sole runtime dependency (no `node`
+needed since 2026-08-08 -- see `wake_waiter.py`'s docstring). It needs no
+repository, no network, no configuration, and no environment variables --
+and it writes nothing outside a temporary directory that is removed when it
+finishes.
 
 Exit 0 when every smoke passes, non-zero otherwise.
 """

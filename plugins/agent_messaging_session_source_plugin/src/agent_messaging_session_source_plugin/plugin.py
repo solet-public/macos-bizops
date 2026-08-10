@@ -338,10 +338,10 @@ class AgentMessagingSessionSourcePlugin(
         """The agent_messaging plugin, via structural typing.
 
         agent_messaging is deliberately NOT a bound service (see
-        ``AgentMessagingServiceInterface`` — binding it would hide ``run_turn``),
-        so it is consumed through ``orchestrator.plugin_manager.plugins[...]``,
-        not ``get_service``. Fails fast if the orchestrator or the plugin is
-        unavailable.
+        ``AgentMessagingServiceInterface`` — binding it would hide its
+        ``plugin::*::*`` EDGE processes), so it is consumed through
+        ``orchestrator.plugin_manager.plugins[...]``, not ``get_service``.
+        Fails fast if the orchestrator or the plugin is unavailable.
         """
         if self.orchestrator_ref is None:
             raise RuntimeError(

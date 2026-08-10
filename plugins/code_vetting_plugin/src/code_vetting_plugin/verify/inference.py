@@ -1,20 +1,20 @@
 """Wave-2 inference substrate for the L3 refute-harness (design brief §3.3, §5c).
 
 The intended L3 adversary is *inference*: N independent reviewer sessions, each
-seeded with one lens's rulebook refute prompt, dispatched over the platform
-bridge (``agent_thread_open`` backend=claude_code|codex — subscription-covered,
+seeded with one lens's rulebook refute prompt, dispatched over the platform's
+peer-messaging bridge (``peer_send`` / ``peer_inbox`` — subscription-covered,
 no metered key). This module is the inference side of the pluggable
 :class:`~.dispatch.SkepticDispatcher` seam; it slots in with zero change to
 :mod:`.verifier`.
 
-**Why a transport seam.** The ``agent_*`` bridge tools are MCP tools the
+**Why a transport seam.** The peer-messaging bridge tools are MCP tools the
 orchestrating *agent* invokes; a standalone Python process cannot call them, and
-a dispatched turn is asynchronous (its reply arrives on the ``bridge_delivery_
-result`` channel). So the dispatcher does not embed the bridge call — it depends
-on a :class:`SkepticTransport` (`prompt → raw reply text`). The orchestrator
-drives the actual bridge inference and supplies the replies through the
-transport; :class:`RecordedTransport` replays gathered replies so a live run is
-reproducible and the parse→aggregate path is exercised deterministically. A
+a dispatched peer message is asynchronous (its reply arrives via a peer_inbox
+notification, not a return value). So the dispatcher does not embed the bridge
+call — it depends on a :class:`SkepticTransport` (`prompt → raw reply text`). The
+orchestrator drives the actual bridge inference and supplies the replies through
+the transport; :class:`RecordedTransport` replays gathered replies so a live run
+is reproducible and the parse→aggregate path is exercised deterministically. A
 future in-process ``BridgeTransport`` (once a Python bridge client exists) is a
 drop-in for the same Protocol.
 
@@ -146,8 +146,8 @@ class SubprocessSkepticTransport:
     """Automated live transport: one read-only ``claude -p`` subprocess per skeptic.
 
     The design's cost model (design brief §5c) — orchestrate the already-paid-for
-    Claude Code subscription, $0 marginal — for when the bridge ``agent_thread_open``
-    backend is unavailable. Reuses the vetting suite's shared ``toolrun`` runner
+    Claude Code subscription, $0 marginal — for when the peer-messaging bridge
+    is unavailable. Reuses the vetting suite's shared ``toolrun`` runner
     (no reinvented subprocess handling). ``--allowedTools Read,Grep,Glob`` grants NO
     Bash/Edit/Write, so a skeptic structurally cannot run git or mutate the
     worktree — the Git-Controller policy is honored by construction. A skeptic that

@@ -69,7 +69,25 @@ _SHIPPED_POLICY_COPIES: tuple[Path, ...] = (
 # asserted. Only the clause SECTION must match.
 _ORIGIN_GATE_COPY = _REPO_ROOT / ".claude" / "hooks" / "git_controller_gate.py"
 
-_ALL_CLAUSE_SITES: tuple[Path, ...] = (*_SHIPPED_POLICY_COPIES, _ORIGIN_GATE_COPY)
+def clause_sites(origin_copy: Path = _ORIGIN_GATE_COPY) -> tuple[Path, ...]:
+    """The clause sites to assert over — the shipped three, plus the origin copy
+    IF THIS TREE HAS ONE.
+
+    The fourth copy lives under `.claude/`, which ``root_manifest.yaml`` declares
+    is never shipped, so it is absent from every born clone BY CONSTRUCTION — out
+    of scope there, not missing. Requiring it unconditionally made this smoke
+    unpassable on any born clone while the three copies that DO ship were
+    perfectly consistent; an external adopter reported it failing on a clean
+    install for exactly that reason.
+
+    This WIDENS the site set at origin and never narrows the invariant: the three
+    shipped copies are required everywhere (see
+    :func:`case_the_shipped_three_are_always_required`), so a born clone still
+    proves byte-identity across every copy it actually carries. A tree that lost a
+    shipped copy still reds.
+    """
+    extra = (origin_copy,) if origin_copy.is_file() else ()
+    return (*_SHIPPED_POLICY_COPIES, *extra)
 
 # Wording the clause must NOT contain. The ruling is explicit that the clause
 # names no mechanism the gate has — the gate detects nothing new — because a
@@ -109,14 +127,35 @@ def _load(path: Path) -> ModuleType:
 
 
 def case_every_copy_exists() -> None:
-    for path in _ALL_CLAUSE_SITES:
-        _check(path.is_file(), f"copy present: {path.relative_to(_REPO_ROOT)}")
+    for path in _SHIPPED_POLICY_COPIES:
+        _check(path.is_file(), f"shipped copy present: {path.relative_to(_REPO_ROOT)}")
+    sites = clause_sites()
+    mode = "origin (4 sites)" if len(sites) == 4 else "bundle (3 shipped sites)"
+    print(f"  clause-site mode: {mode}")
+
+
+def case_the_shipped_three_are_always_required() -> None:
+    """The bundle path is under test, not merely tolerated.
+
+    Drives the resolver with an origin copy that cannot exist, and asserts it
+    still yields exactly the three shipped sites. Without this leg, a resolver
+    that quietly returned fewer sites would look identical to a healthy bundle
+    run — which is the failure shape this whole change exists to avoid.
+    """
+    bundle_sites = clause_sites(_REPO_ROOT / ".claude" / "does-not-exist.py")
+    _check(len(bundle_sites) == 3, f"bundle mode resolves exactly the 3 shipped copies (got {len(bundle_sites)})")
+    _check(
+        tuple(bundle_sites) == _SHIPPED_POLICY_COPIES,
+        "bundle mode resolves the shipped copies themselves, not some other set",
+    )
 
 
 def case_clause_section_byte_equal_across_four_copies() -> None:
-    """Binding (1)+(2): the clause SECTION is byte-equal in all four copies."""
+    """Binding (1)+(2): the clause SECTION is byte-equal across every copy THIS
+    TREE carries — four at origin, the shipped three in a bundle."""
+    sites = clause_sites()
     clauses: dict[Path, str] = {}
-    for path in _ALL_CLAUSE_SITES:
+    for path in sites:
         if not path.is_file():
             continue
         module = _load(path)
@@ -129,13 +168,13 @@ def case_clause_section_byte_equal_across_four_copies() -> None:
             clauses[path] = clause
 
     _check(
-        len(clauses) == len(_ALL_CLAUSE_SITES),
-        f"all {len(_ALL_CLAUSE_SITES)} copies exposed a clause (got {len(clauses)})",
+        len(clauses) == len(sites),
+        f"all {len(sites)} copies present in this tree exposed a clause (got {len(clauses)})",
     )
     distinct = set(clauses.values())
     _check(
         len(distinct) <= 1,
-        "clause section is byte-equal across all four copies "
+        "clause section is byte-equal across every copy in this tree "
         f"(got {len(distinct)} distinct variants: "
         f"{sorted(hashlib.sha256(c.encode()).hexdigest()[:12] for c in distinct)})",
     )
@@ -143,7 +182,7 @@ def case_clause_section_byte_equal_across_four_copies() -> None:
 
 def case_clause_is_actually_carried_by_the_shipped_message() -> None:
     """A clause defined but never concatenated in would pass a naive equality leg."""
-    for path in _ALL_CLAUSE_SITES:
+    for path in clause_sites():
         if not path.is_file():
             continue
         module = _load(path)
@@ -196,12 +235,17 @@ def case_env_var_divergence_is_preserved_not_unified() -> None:
     shipped-copy failure, and the gate is fail-OPEN when its var is unset, so a
     copy silently reading the wrong name arms nothing while believed armed.
     """
-    origin = _load(_ORIGIN_GATE_COPY) if _ORIGIN_GATE_COPY.is_file() else None
-    _check(
-        origin is not None
-        and getattr(origin, "GIT_CONTROLLER_ENV", None) == "HOMUNCULUS_GIT_CONTROLLER_NAME",
-        "origin .claude/ copy still reads HOMUNCULUS_GIT_CONTROLLER_NAME",
-    )
+    # The origin half of the divergence can only be asserted where the origin copy
+    # exists. In a bundle it is absent by construction, so asserting it there was
+    # not a weaker check — it was an impossible one. The SHIPPED half below is
+    # required unconditionally, which is what keeps the divergence pinned from
+    # both ends wherever both ends are present.
+    if _ORIGIN_GATE_COPY.is_file():
+        origin = _load(_ORIGIN_GATE_COPY)
+        _check(
+            getattr(origin, "GIT_CONTROLLER_ENV", None) == "HOMUNCULUS_GIT_CONTROLLER_NAME",
+            "origin .claude/ copy still reads HOMUNCULUS_GIT_CONTROLLER_NAME",
+        )
     shipped_gate = (
         _PLUGIN_ROOT / "claude_plugin" / "coordination-hooks" / "hooks" / "git_controller_gate.py"
     )
@@ -238,6 +282,7 @@ def case_policy_module_adds_no_platform_call_or_network() -> None:
 
 _CASES = (
     case_every_copy_exists,
+    case_the_shipped_three_are_always_required,
     case_clause_section_byte_equal_across_four_copies,
     case_clause_is_actually_carried_by_the_shipped_message,
     case_clause_names_no_mechanism_the_gate_lacks,
@@ -248,7 +293,7 @@ _CASES = (
 
 
 def main() -> int:
-    print("A5 / D-5a.3 four-copy policy-text consistency smoke")
+    print("A5 / D-5a.3 policy-text consistency smoke (origin: 4 sites; bundle: the shipped 3)")
     print("=" * 60)
     for case in _CASES:
         case()
@@ -256,7 +301,7 @@ def main() -> int:
     if _failed:
         print(f"FAIL: {_passed} passed, {len(_failed)} failed")
         return 1
-    print(f"PASS: {_passed} four-copy policy-text checks")
+    print(f"PASS: {_passed} policy-text checks")
     return 0
 
 

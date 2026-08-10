@@ -31,6 +31,7 @@ Run:
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,8 @@ from ananta.llm.agent_messaging.models import (  # noqa: E402
 
 # Stands in for the persisted ROW's created_at (see role_dispatch_smoke).
 _ROW_CREATED_AT = "2026-08-01T00:00:00.000001+00:00"
+
+from _real_state_fake import RealShapeState  # noqa: E402
 
 from agent_messaging_plugin import plugin as plugin_module  # noqa: E402
 from agent_messaging_plugin.bridge_sessions import (  # noqa: E402
@@ -355,6 +358,14 @@ class _FakePeerRegistry:
         return self._adapter
 
 
+class _LiveBridge:
+    """A4 Amendment 5: binding_is_live now reads ``closed``/``last_seen_at``
+    off the bridge for EVERY recipient kind (was watcher-only)."""
+
+    closed = False
+    last_seen_at = datetime.now(UTC).isoformat()
+
+
 class _FakeBridgeManager:
 
     # WS-2a W3: the dispatch liveness gate reads this off its bridge_manager
@@ -366,6 +377,10 @@ class _FakeBridgeManager:
         return DEFAULT_BINDING_LIVENESS_WINDOW_S
     def __init__(self) -> None:
         self.events: list[tuple[str, str, str, dict[str, object]]] = []
+
+    def get(self, bridge_id: str) -> _LiveBridge:
+        del bridge_id
+        return _LiveBridge()
 
     def append_event(
         self, bridge_id: str, event: str, prose: str, meta: dict[str, object],
@@ -386,6 +401,7 @@ def test_forward_leg_carries_role_reply_to() -> None:
         bridge_manager=_FakeBridgeManager(),  # type: ignore[arg-type]
         peer_registry=_FakePeerRegistry(online=True, adapter=adapter),  # type: ignore[arg-type]
         agent_messaging_service=_FakeService(),
+        state_service=RealShapeState(),  # type: ignore[arg-type]
         role_name="R_B",
         role=_role("R_B"),
         sender_bridge_id="system:scheduler",
@@ -413,6 +429,7 @@ def test_no_adapter_role_send_prose_names_role() -> None:
         bridge_manager=manager,  # type: ignore[arg-type]
         peer_registry=_FakePeerRegistry(online=True, adapter=None),  # type: ignore[arg-type]
         agent_messaging_service=_FakeService(),
+        state_service=RealShapeState(),  # type: ignore[arg-type]
         role_name="R_B",
         role=_role("R_B"),
         sender_bridge_id="system:scheduler",
@@ -443,6 +460,7 @@ def test_return_leg_survives_reconnect() -> None:
         bridge_manager=_FakeBridgeManager(),  # type: ignore[arg-type]
         peer_registry=_FakePeerRegistry(online=False, adapter=None),  # type: ignore[arg-type]
         agent_messaging_service=service,
+        state_service=RealShapeState(),  # type: ignore[arg-type]
         role_name=_ARBITRARY_ROLE,
         role=_role(_ARBITRARY_ROLE),
         sender_bridge_id="system:scheduler",
@@ -471,6 +489,7 @@ def test_forward_leg_delivers_woke_native() -> None:
         bridge_manager=_FakeBridgeManager(),  # type: ignore[arg-type]
         peer_registry=_FakePeerRegistry(online=True, adapter=_WakeAdapter()),  # type: ignore[arg-type]
         agent_messaging_service=_FakeService(),
+        state_service=RealShapeState(),  # type: ignore[arg-type]
         role_name="R_B",
         role=_role("R_B"),
         sender_bridge_id="system:scheduler",

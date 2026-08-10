@@ -17,6 +17,7 @@ from ananta.core.actions.action_metadata import (
     ReturnValueSchema,
     platform_process,
 )
+from ananta.core.config.config_manager import get_config
 from ananta.core.config.config_provider import ConfigProvider
 from ananta.core.domain.types import ActionResult
 from ananta.core.plugins.decorators import service_lifecycle
@@ -110,14 +111,33 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         self._operator_config: dict[str, object] = {}
 
     def initialize(self, config: dict[str, object]) -> None:
-        """Capture the merged operator config so prepare_for_readiness can bind it.
+        """Re-capture the merged operator config, defensively.
 
-        The platform calls this with get_plugin_config(name) (yaml defaults +
-        profile overrides). The base implementation is a no-op; the actr plugin
-        needs the config to bind export_allowed_roots onto the backend, so it
-        stores it here (initialize runs before prepare_for_readiness).
+        CORRECTED 2026-08-06 (root cause, config-binding-order incident:
+        workbench/2026-08-05_canonical_memory_and_ledger_verification_findings.md-
+        adjacent finding, root-caused in the platform's own startup registry).
+        The old docstring here claimed "initialize runs before
+        prepare_for_readiness" — the OPPOSITE of the platform's actual order:
+        ``_start_service_plugins`` (which calls every plugin's
+        ``prepare_for_readiness``) runs BEFORE ``_initialize_plugin_configs``
+        (which calls this method) — see
+        ``ananta/src/ananta/core/orchestration/startup_sequence.py``'s
+        ``STARTUP_SEQUENCE`` dependency graph. Binding on this method's
+        capture therefore bound ``{}`` on every boot; ``export_allowed_roots``
+        and the cron-override keys never took effect.
+        ``prepare_for_readiness`` now pulls the merged config directly
+        (``get_config().get_plugin_config(...)``, the same pattern
+        ``postgres_state_management_plugin`` already uses) rather than
+        depending on this method having already run. This method is kept as
+        a defensive re-bind — re-applies the config and, if
+        ``config_provider`` already exists, rebuilds it — in case the
+        platform's config genuinely changes between the two steps, or a
+        future startup-order change reintroduces reliance on this path.
+        Never the primary source of truth anymore.
         """
         self._operator_config = config or {}
+        if self.config_provider is not None:
+            self.config_provider = ConfigProvider(self.name, self._operator_config)
 
     def get_default_config(self) -> dict[str, Any]:
         """Return default configuration."""
@@ -161,9 +181,17 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
                 f"{self.name}: Application directory not configured - plugin cannot initialize"
             )
 
-        # Initialize configuration and logging. Bind the operator config captured
-        # in initialize() (previously bound `{}`, so profile overrides were
-        # dropped) so export_allowed_roots — and the cron overrides — take effect.
+        # Initialize configuration and logging. Pull the merged operator config
+        # DIRECTLY here (get_config().get_plugin_config) rather than depending
+        # on initialize() having already run — the platform's real startup
+        # order runs prepare_for_readiness (via start_service_plugins) BEFORE
+        # initialize_plugin_configs (which calls initialize()), so waiting on
+        # self._operator_config here always bound `{}` (2026-08-06 finding);
+        # export_allowed_roots and the cron overrides never took effect on any
+        # boot. Matches the postgres_state_management_plugin precedent.
+        self._operator_config = get_config().get_plugin_config(
+            self.name, default_config=self.get_default_config(),
+        )
         self.config_provider = ConfigProvider(self.name, self._operator_config)
         self.logger = configure_plugin_logging(APP_HOME, self.name, self.config_provider)
         self.logger.debug(f"Initializing {self.name}")

@@ -1,14 +1,14 @@
 {
-  "description": "Coordination hooks: KB-first reminder, check-your-messages reminder, role-binding reminder, an opt-in idle-wake waiter, and an opt-in git-mutation guard.",
+  "description": "Coordination hooks: KB-first reminder, check-your-messages reminder, role-binding reminder, an opt-in idle-wake waiter, an opt-in git-mutation guard, a heartbeat report-alive hook, a rotation-due watch hook, the memory-passthrough capture/session-context pair, and two spawn-injected worker hooks (a headless tool-allowlist gate and a session-mapping capture) shipped here as a spawned worker's fallback copy, never wired into this manifest.",
   "hooks": {
     "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "node",
+            "command": "python3",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/step_zero_reminder.js"
+              "${CLAUDE_PLUGIN_ROOT}/hooks/step_zero_reminder.py"
             ]
           }
         ]
@@ -17,9 +17,20 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
+            "command": "python3",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/check_messages_reminder.js"
+              "${CLAUDE_PLUGIN_ROOT}/hooks/check_messages_reminder.py"
+            ]
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/session_context.py"
             ]
           }
         ]
@@ -31,16 +42,27 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
+            "command": "python3",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/check_messages_reminder.js"
+              "${CLAUDE_PLUGIN_ROOT}/hooks/check_messages_reminder.py"
             ]
           },
           {
             "type": "command",
-            "command": "node",
+            "command": "python3",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/role_binding_reminder.js"
+              "${CLAUDE_PLUGIN_ROOT}/hooks/role_binding_reminder.py"
+            ]
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/session_context.py"
             ]
           }
         ]
@@ -51,9 +73,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
+            "command": "python3",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/wake_waiter.js"
+              "${CLAUDE_PLUGIN_ROOT}/hooks/wake_waiter.py"
             ],
             "asyncRewake": true,
             "timeout": 86400
@@ -70,6 +92,42 @@
             "command": "python3",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/git_controller_gate.py"
+            ]
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/rotation_due_watch.py"
+            ]
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/heartbeat_report_alive.py"
+            ]
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/capture.py"
             ]
           }
         ]

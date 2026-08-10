@@ -35,10 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from ananta.llm.agent_messaging.models import (
-    ListAgentMessagesRequest,
-    OpenAgentThreadRequest,
     PeerInboxRequest,
-    SendAgentMessageRequest,
     TextPart,
 )
 from ananta.llm.agent_messaging.schema import (
@@ -71,9 +68,6 @@ from .peer_dispatch import (
     dispatch_role_send,
 )
 from .peer_inbox_view import (
-    serialize_message as _serialize_message,
-)
-from .peer_inbox_view import (
     serialize_peer_inbox_page,
 )
 from .peer_list_view import (
@@ -101,6 +95,7 @@ from .role_claim import (
     RoleClaimOrigin,
     claim_role_for_session,
 )
+from .session_lifecycle_store import backfill_registration
 
 if TYPE_CHECKING:
     from .models import BridgeBinding, QueuedEvent
@@ -191,6 +186,14 @@ class PeerRegisterBody(BaseModel):
     # Defaults to False so non-coding-agent peers (older Codex sessions,
     # MCP-only consumers) remain unaffected.
     provides_inference: bool = False
+    # codex-watch-migration wake_capable design (2026-08-06): declared by the
+    # bridge subprocess itself (mcp_bridge/__main__.py's _run(), computed the
+    # same way as provides_inference). Defaults True — the opposite polarity
+    # from provides_inference above — because an omitting/older client must
+    # read as "has native wake" (today's universal reality) not "does not",
+    # matching BridgeBinding.wake_capable's own default. See models.py for
+    # the full field rationale.
+    wake_capable: bool = True
     # The session's CONFIGURED standing role, sent so the response can answer
     # "do I still hold it?" (``session_role_held``) on the INFRA register route.
     # Without that answer the forwarder's steady-state re-assert has to issue a
@@ -254,28 +257,6 @@ class PeerDeliveredBody(BaseModel):
     # currently hold that role).
     external_id: str
     recipient_key: str
-
-
-class PeerDeliveredDirectBody(BaseModel):
-    # REL-05: the repair loop POSTs this after a successful re-emit of a
-    # direct-wake row to record the emission (emit_count += 1, last_emitted_at).
-    # ``message_id`` is echoed from the drain row and recipient-fenced
-    # server-side (the caller must be the row's fixed recipient instance).
-    message_id: str
-
-
-class ThreadOpenBody(BaseModel):
-    backend: str
-    working_directory: str | None = None
-    title: str | None = None
-    context: dict[str, Any] | None = None
-    initial_message: dict[str, Any] | None = None
-
-
-class ThreadSendBody(BaseModel):
-    content: list[dict[str, Any]]
-    response_mode: str = "async"
-    timeout_seconds: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -351,12 +332,6 @@ def register_routes(
         re_emit_window_s=re_emit_window_s,
         re_emit_cap=re_emit_cap,
     )
-    _register_agent_thread_routes(
-        app,
-        bridge_manager=bridge_manager,
-        agent_messaging_service=agent_messaging_service,
-    )
-
     @app.get(f"{API_PREFIX}/health")
     async def health() -> JSONResponse:
         if readiness_probe is not None and not readiness_probe():
@@ -447,16 +422,13 @@ def _register_bridge_lifecycle_routes(
         binding = _lookup_binding_for_bridge(peer_registry, bridge_id)
         if binding is not None:
             peer_registry.touch_binding(binding.agent_instance_id)
-            # A watcher's cursor ack proves the acked events
-            # streamed into its watch output — the pull equivalent of entering
-            # a turn. Retire the acked deliveries' re-emit/escalation insurance
-            # so an armed watcher never escalates recipient_gone. MCP-transport
-            # bridges confirm via /peer/drain instead — never here (their
-            # forwarder drains events without the model having read them).
+            # A watcher's cursor ack proves the acked events streamed into its
+            # watch output — the pull equivalent of entering a turn. Stamps
+            # role rows consumed. MCP-transport bridges confirm via
+            # /peer/drain instead — never here (their forwarder drains events
+            # without the model having read them).
             if binding.is_watcher and acked:
-                _consume_watcher_acked_events(
-                    agent_messaging_service, binding, acked,
-                )
+                _consume_watcher_acked_events(agent_messaging_service, acked)
         next_cursor = events[-1].cursor if events else after
         return JSONResponse(
             content={
@@ -564,6 +536,42 @@ def _register_platform_surface_routes(
 # ---------------------------------------------------------------------------
 # Peer routes: register / list / send / inbox
 # ---------------------------------------------------------------------------
+
+
+def _managed_session_registration_backfill(
+    state_service: Any | None,
+    *,
+    agent_instance_id: str,
+    agent_id: str,
+    agent_session_id: str,
+) -> None:
+    """Fleet session-management D1 (§3.2/§5) registration-hook fix: fires the
+    ``spawning -> live`` edge and backfills ``agent_session_id``/``agent_id``
+    on the ``managed_session`` row this ``agent_instance_id`` was spawned
+    into (a no-op when there is none — most registrations are ordinary
+    operator-launched sessions, not spawn_session lineage). NEVER raises: a
+    fault here is loud but registration MUST still succeed, mirroring
+    :func:`_state_table_self_refresh`'s posture.
+    """
+    if state_service is None:
+        logger.warning(
+            "peer/register: state_service unbound — managed_session "
+            "registration backfill skipped (agi=%s)", agent_instance_id,
+        )
+        return
+    try:
+        backfill_registration(
+            state_service,
+            agent_instance_id=agent_instance_id,
+            agent_id=agent_id,
+            agent_session_id=agent_session_id,
+        )
+    except Exception:  # noqa: BLE001 — best-effort; registration MUST still succeed
+        logger.exception(
+            "peer/register: managed_session registration backfill FAULTED "
+            "(agi=%s) — registration kept 200, but the session's ledger row "
+            "(if any) was NOT updated", agent_instance_id,
+        )
 
 
 def _state_table_self_refresh(
@@ -681,101 +689,12 @@ def _session_role_held_token(
     return "held" if held else "not_held"
 
 
-def _direct_wake_self_refresh(
-    agent_messaging_service: Any | None,
-    *,
-    agent_session_id: str,
-    new_agent_instance_id: str,
-) -> str:
-    """Reconnect self-refresh for the DIRECT-WAKE outbox (Fork-1a).
-
-    The direct-send sibling of :func:`_state_table_self_refresh`: on reconnect a
-    recipient's ``agent_instance_id`` rotates, so re-home every owed direct-wake
-    row this session is the RECIPIENT of onto the just-registered successor
-    (``rehome_owed_direct_wakes``, keyed on the stable ``agent_session_id``) —
-    curing the REL-01 ``recipient_gone`` orphan class the RCA proved bites, and
-    re-entering the ``recipient_gone`` rows whose terminality WAS the orphan bug.
-    Same one-shot-at-register, loud-but-non-fatal posture as the role
-    self-refresh: a fault brings the bridge up 200 with rows NOT re-homed (they
-    strand until the next reconnect); NO retry queue (Architect ruling 2).
-
-    Tokens: ``rehomed:<n>`` / ``no_owed`` / ``no_session_key`` / ``no_service`` /
-    ``error``.
-    """
-    if not agent_session_id or agent_session_id == UNCLAIMED_SESSION_ID:
-        return "no_session_key"
-    if agent_messaging_service is None:
-        return "no_service"
-    try:
-        rehomed = agent_messaging_service.rehome_owed_direct_wakes(
-            agent_session_id=agent_session_id,
-            new_agent_instance_id=new_agent_instance_id,
-        )
-    except Exception:  # noqa: BLE001 — loud-but-non-fatal; the bridge MUST still register
-        logger.exception(
-            "peer/register: direct-wake re-home FAULTED (session %r, new agi=%s); "
-            "registration kept 200 but owed direct rows were NOT re-homed and will "
-            "strand until the next reconnect",
-            agent_session_id, new_agent_instance_id,
-        )
-        return "error"
-    if rehomed >= 1:
-        logger.info(
-            "peer/register: re-homed %d owed direct-wake row(s) to "
-            "agent_instance_id=%s on reconnect (session %r)",
-            rehomed, new_agent_instance_id, agent_session_id,
-        )
-        return f"rehomed:{rehomed}"
-    return "no_owed"
-
-
-def _role_wake_self_refresh(
-    agent_messaging_service: Any | None,
-    *,
-    agent_session_id: str,
-    new_agent_instance_id: str,
-) -> str:
-    """Reconnect self-refresh for owed ROLE rows (H1-role).
-
-    The role sibling of :func:`_direct_wake_self_refresh`. ``_state_table_self_refresh``
-    above re-points the role BINDING on reconnect, but the owed ROLE ROWS kept the
-    dead ``emitted_to_agent_instance_id``, so the consumption reconcile joined a
-    corpse while the live session acted under its successor — measured as an
-    emission burned per drain until the cap escalated. Keyed on the stable
-    ``agent_session_id`` stamped at emission.
-
-    Same loud-but-non-fatal posture as its siblings: a fault brings the bridge up
-    200 with rows NOT re-homed (they strand until the next reconnect); no retry
-    queue.
-
-    Tokens: ``rehomed:<n>`` / ``no_owed`` / ``no_session_key`` / ``no_service`` /
-    ``error``.
-    """
-    if not agent_session_id or agent_session_id == UNCLAIMED_SESSION_ID:
-        return "no_session_key"
-    if agent_messaging_service is None:
-        return "no_service"
-    try:
-        rehomed = agent_messaging_service.rehome_owed_role_wakes(
-            agent_session_id=agent_session_id,
-            new_agent_instance_id=new_agent_instance_id,
-        )
-    except Exception:  # noqa: BLE001 — loud-but-non-fatal; the bridge MUST still register
-        logger.exception(
-            "peer/register: role-wake re-home FAULTED (session %r, new agi=%s); "
-            "registration kept 200 but owed role rows were NOT re-homed and will "
-            "strand until the next reconnect",
-            agent_session_id, new_agent_instance_id,
-        )
-        return "error"
-    if rehomed >= 1:
-        logger.info(
-            "peer/register: re-homed %d owed role-wake row(s) to "
-            "agent_instance_id=%s on reconnect (session %r)",
-            rehomed, new_agent_instance_id, agent_session_id,
-        )
-        return f"rehomed:{rehomed}"
-    return "no_owed"
+# A4 (2026-08-04): _direct_wake_self_refresh + _role_wake_self_refresh
+# (the REL-05/H1-role owed-row reconnect re-home helpers) retired here — their
+# sole purpose was keeping the retiring escalation/consumption-reconcile join
+# keys (rehome_owed_direct_wakes / rehome_owed_role_wakes) correct across a
+# reconnect. _state_table_self_refresh (role BINDING re-point) is unrelated
+# and stays untouched.
 
 
 def _effective_registration_agent_session_id(
@@ -861,6 +780,7 @@ def _register_peer_routes(
             session_label=body.session_label,
             parent_pid=body.parent_pid,
             agent_session_id=effective_agent_session_id,
+            wake_capable=body.wake_capable,
         )
         # ``register`` returns the EFFECTIVE label — the preserve-on-empty
         # path (2026-06-01 §4.2) restores a stored label when the incoming
@@ -881,6 +801,17 @@ def _register_peer_routes(
             ),
         )
         bridge.session_label = effective_label
+        # D1 registration hook (§3.2/§5, Dawn ruling arm-11511b07) — fires
+        # spawning->live and backfills agent_session_id/agent_id on this
+        # agent_instance_id's managed_session row, if one exists. Runs AFTER
+        # peer_registry.register succeeds, same ordering rationale as the
+        # D-IF7 sidecar populate below.
+        _managed_session_registration_backfill(
+            state_service,
+            agent_instance_id=agent_instance_id,
+            agent_id=agent_id,
+            agent_session_id=effective_agent_session_id,
+        )
         # D-IF7 sidecar populate (v4 §4) — bind the per-bridge inference
         # vertex AFTER peer_registry.register succeeds so the wrapper can
         # resolve a provider for this agent_instance_id on its next
@@ -917,23 +848,6 @@ def _register_peer_routes(
             agent_session_id=effective_agent_session_id,
             self_refresh=self_refresh_action,
         )
-        # Fork-1a: re-home this session's owed DIRECT-wake rows off the rotated
-        # instance onto the successor (the direct-send sibling of the role
-        # self-refresh above; same loud-but-non-fatal one-shot posture).
-        direct_rehome_action = _direct_wake_self_refresh(
-            agent_messaging_service,
-            agent_session_id=effective_agent_session_id,
-            new_agent_instance_id=agent_instance_id,
-        )
-        # H1-role: the same move for owed ROLE rows. The role BINDING was
-        # re-pointed by the state-table self-refresh above, but the owed rows'
-        # emitted_to join key was not — so the consumption reconcile joined a
-        # dead instance while the live session acted under its successor.
-        role_rehome_action = _role_wake_self_refresh(
-            agent_messaging_service,
-            agent_session_id=effective_agent_session_id,
-            new_agent_instance_id=agent_instance_id,
-        )
         # INF-01 Trigger-1 (§D.9): fill a vacant / dead-holder sys:autonomic
         # slot with the just-registered session. Runs AFTER the sidecar
         # populate (a provider must exist for the claim to serve) and AFTER
@@ -967,8 +881,6 @@ def _register_peer_routes(
                 "bridge_id": bridge_id,
                 "status": "registered",
                 "self_refresh": self_refresh_action,
-                "direct_rehome": direct_rehome_action,
-                "role_rehome": role_rehome_action,
                 "autonomic": autonomic_action,
                 "session_role_held": session_role_held,
             },
@@ -1097,15 +1009,12 @@ def _register_peer_routes(
         # The bridge calling peer_inbox is alive — bump its binding so
         # peer_list shows recent activity even if no peer_send has run.
         peer_registry.touch_binding(sender_binding.agent_instance_id)
-        # The watch client's arm-time catch-up drain prints every
-        # returned entry into the watch output — those exact rows are surfaced,
-        # so their re-emit/escalation insurance retires here. Watcher-only:
-        # an MCP session's consumption authority stays the /peer/drain
-        # reconcile.
+        # The watch client's arm-time catch-up drain prints every returned
+        # entry into the watch output — stamp the surfaced role rows
+        # consumed. Watcher-only: an MCP session's consumption authority
+        # stays the /peer/drain reconcile.
         if sender_binding.is_watcher and include_important:
-            _consume_watcher_inbox_page(
-                agent_messaging_service, sender_binding, page,
-            )
+            _consume_watcher_inbox_page(agent_messaging_service, page)
         return JSONResponse(
             content=_serialize_peer_inbox(page, sender_binding),
             status_code=200,
@@ -1115,14 +1024,18 @@ def _register_peer_routes(
     async def peer_drain_route(
         bridge_id: str, body: PeerDrainBody,
     ) -> JSONResponse:
-        # v10 Control #5 + REL-05: return the oldest page of un-CONSUMED IMPORTANT
-        # ROLE messages owed to the roles this bridge holds, PLUS the owed DIRECT
-        # rows for this instance. The binding is derived server-side from
-        # ``bridge_id`` (NOT caller-supplied). Before listing, RECONCILE
-        # consumption: this bridge's in-memory ``last_model_activity_at`` marks
-        # consumed any owed row emitted before that turn (so the active session's
-        # rows drop out of the owed set). A deaf session has a stale/empty stamp →
-        # nothing consumed → its owed rows re-emit (the Vector-B insurance).
+        # v10 Control #5: return the oldest page of un-CONSUMED IMPORTANT ROLE
+        # messages owed to the roles this bridge holds. The binding is derived
+        # server-side from ``bridge_id`` (NOT caller-supplied).
+        #
+        # A4 (2026-08-04): the REL-05 Guard-1 consumption reconcile (this
+        # bridge's live last_model_activity_at marking owed rows consumed) and
+        # the DIRECT-wake half of this route retired here — Guard 1 ("no
+        # model-initiated call since emission") was blind to local-only work;
+        # sweep_overdue_sessions + _notify_steward_of_overdue is the sole
+        # successor, keyed on the recipient's own report_by promise. Role
+        # consumption stays authoritative via /peer/delivered (the forwarder's
+        # explicit confirm) and the watcher events-ack path — both untouched.
         bridge = bridge_manager.get(bridge_id)
         if bridge is None or bridge.closed:
             return _bridge_not_found(bridge_id)
@@ -1135,31 +1048,8 @@ def _register_peer_routes(
             )
         agent_instance_id = sender_binding.agent_instance_id
         limit = max(1, min(body.limit, 100))
-        activity_at = _parse_iso_after(bridge.last_model_activity_at or None)
-        # QUIET-GAP: the reconcilers need the emission's own quiet-gap datum too,
-        # but they read it FROM THE ROW (``activity_at_emission``, captured at
-        # emission time) rather than from this bridge's live stamp pair. The live
-        # ``prev_model_activity_at`` slides forward on every model call, so an
-        # emission was consumable only in the one drain window between the first
-        # and second post-emission call — miss it and a recipient who provably
-        # acted was recorded deaf. Only the LIVE stamp is needed here (guard 1).
         try:
-            if activity_at is not None:
-                agent_messaging_service.reconcile_role_consumption(
-                    agent_instance_id=agent_instance_id,
-                    activity_at=activity_at,
-                )
-                agent_messaging_service.reconcile_direct_consumption(
-                    agent_instance_id=agent_instance_id,
-                    activity_at=activity_at,
-                )
             rows = agent_messaging_service.list_undelivered_for_instance(
-                agent_instance_id=agent_instance_id,
-                limit=limit,
-                re_emit_window_s=re_emit_window_s,
-                cap=re_emit_cap,
-            )
-            direct_rows = agent_messaging_service.list_owed_direct_for_instance(
                 agent_instance_id=agent_instance_id,
                 limit=limit,
                 re_emit_window_s=re_emit_window_s,
@@ -1171,9 +1061,6 @@ def _register_peer_routes(
         return JSONResponse(
             content={
                 "undelivered": [_serialize_role_drain_row(r) for r in rows],
-                "undelivered_direct": [
-                    _serialize_direct_wake_row(r) for r in direct_rows
-                ],
                 # N3: the forwarder marks a re-emit [re-emit n/cap ...] — cap
                 # rides the envelope so the client never hard-codes it.
                 "re_emit_cap": re_emit_cap,
@@ -1219,173 +1106,6 @@ def _register_peer_routes(
             return _agent_messaging_error_response(exc)
         return JSONResponse(content={"flagged": flagged}, status_code=200)
 
-    @app.post(f"{API_PREFIX}/{{bridge_id}}/peer/delivered_direct")
-    async def peer_delivered_direct_route(
-        bridge_id: str, body: PeerDeliveredDirectBody,
-    ) -> JSONResponse:
-        # REL-05: record a re-emission of a direct-wake row after a successful
-        # emit. Recipient-fenced (only the row's fixed recipient instance can
-        # bump it) — ``flagged=false`` if the caller is not that recipient.
-        bridge = bridge_manager.get(bridge_id)
-        if bridge is None or bridge.closed:
-            return _bridge_not_found(bridge_id)
-        sender_binding = _lookup_binding_for_bridge(peer_registry, bridge_id)
-        if sender_binding is None:
-            return _validation_error(
-                "identity_not_registered",
-                "this bridge has not registered an agent_id; "
-                "POST /peer/register first",
-            )
-        try:
-            flagged = agent_messaging_service.mark_direct_emitted_for_instance(
-                message_id=body.message_id,
-                agent_instance_id=sender_binding.agent_instance_id,
-                # QUIET-GAP capture — the direct sibling; see the role confirm.
-                activity_at_emission=bridge.last_model_activity_at or None,
-            )
-        except AgentMessagingError as exc:
-            return _agent_messaging_error_response(exc)
-        return JSONResponse(content={"flagged": flagged}, status_code=200)
-
-
-# ---------------------------------------------------------------------------
-# Agent thread routes: open / send / messages / status / close
-# ---------------------------------------------------------------------------
-
-
-def _register_agent_thread_routes(
-    app: FastAPI,
-    *,
-    bridge_manager: BridgeSessionManager,
-    agent_messaging_service: Any,
-) -> None:
-    @app.post(f"{API_PREFIX}/{{bridge_id}}/agent/thread/open")
-    async def agent_thread_open_route(
-        bridge_id: str, body: ThreadOpenBody,
-    ) -> JSONResponse:
-        bridge = bridge_manager.get(bridge_id)
-        if bridge is None or bridge.closed:
-            return _bridge_not_found(bridge_id)
-        try:
-            request = OpenAgentThreadRequest(
-                bridge_id=bridge_id,
-                session_id=bridge.session_id,
-                backend=body.backend,
-                working_directory=body.working_directory,
-                title=body.title,
-                context=_parse_context(body.context),
-                initial_message=_parse_initial_message(body.initial_message),
-            )
-            opened = agent_messaging_service.open_thread(request)
-        except AgentMessagingError as exc:
-            return _agent_messaging_error_response(exc)
-        return JSONResponse(
-            content={
-                "thread_id": opened.thread_id,
-                "message_id": opened.message_id,
-                "action_id": opened.action_id,
-                "flow_id": opened.flow_id,
-                "status": opened.status.value,
-            },
-            status_code=200,
-        )
-
-    @app.post(f"{API_PREFIX}/{{bridge_id}}/agent/{{thread_id}}/send")
-    async def agent_send_route(
-        bridge_id: str, thread_id: str, body: ThreadSendBody,
-    ) -> JSONResponse:
-        bridge = bridge_manager.get(bridge_id)
-        if bridge is None or bridge.closed:
-            return _bridge_not_found(bridge_id)
-        try:
-            request = SendAgentMessageRequest(
-                bridge_id=bridge_id,
-                thread_id=thread_id,
-                content=_parse_text_parts(body.content),
-                response_mode=body.response_mode,
-                timeout_seconds=body.timeout_seconds,
-            )
-            queued = agent_messaging_service.send_message(request)
-        except AgentMessagingError as exc:
-            return _agent_messaging_error_response(exc)
-        return JSONResponse(
-            content={
-                "thread_id": queued.thread_id,
-                "message_id": queued.message_id,
-                "action_id": queued.action_id,
-                "flow_id": queued.flow_id,
-                "status": queued.status.value,
-            },
-            status_code=200,
-        )
-
-    @app.get(f"{API_PREFIX}/{{bridge_id}}/agent/{{thread_id}}/messages")
-    async def agent_messages_route(
-        bridge_id: str,
-        thread_id: str,
-        after_cursor: int = 0,
-        limit: int = 50,
-    ) -> JSONResponse:
-        bridge = bridge_manager.get(bridge_id)
-        if bridge is None or bridge.closed:
-            return _bridge_not_found(bridge_id)
-        try:
-            page = agent_messaging_service.list_messages(
-                ListAgentMessagesRequest(
-                    bridge_id=bridge_id,
-                    thread_id=thread_id,
-                    after_cursor=after_cursor,
-                    limit=limit,
-                ),
-            )
-        except AgentMessagingError as exc:
-            return _agent_messaging_error_response(exc)
-        return JSONResponse(
-            content=_serialize_messages_page(page),
-            status_code=200,
-        )
-
-    @app.get(f"{API_PREFIX}/{{bridge_id}}/agent/{{thread_id}}/status")
-    async def agent_status_route(
-        bridge_id: str, thread_id: str,
-    ) -> JSONResponse:
-        bridge = bridge_manager.get(bridge_id)
-        if bridge is None or bridge.closed:
-            return _bridge_not_found(bridge_id)
-        try:
-            status = agent_messaging_service.get_status(
-                thread_id=thread_id, bridge_id=bridge_id,
-            )
-        except AgentMessagingError as exc:
-            return _agent_messaging_error_response(exc)
-        return JSONResponse(
-            content=_serialize_thread_status(status),
-            status_code=200,
-        )
-
-    @app.post(f"{API_PREFIX}/{{bridge_id}}/agent/{{thread_id}}/close")
-    async def agent_close_route(
-        bridge_id: str,
-        thread_id: str,
-        body: dict[str, Any] = Body(default_factory=dict),  # noqa: B008,ARG001
-    ) -> JSONResponse:
-        bridge = bridge_manager.get(bridge_id)
-        if bridge is None or bridge.closed:
-            return _bridge_not_found(bridge_id)
-        try:
-            closed = agent_messaging_service.close_thread(
-                thread_id=thread_id, bridge_id=bridge_id,
-            )
-        except AgentMessagingError as exc:
-            return _agent_messaging_error_response(exc)
-        return JSONResponse(
-            content={
-                "thread_id": closed.thread_id,
-                "status": closed.status.value,
-            },
-            status_code=200,
-        )
-
 
 # ---------------------------------------------------------------------------
 # peer/send dispatch — the IMPORTANT-marker semantics live here so the
@@ -1430,6 +1150,7 @@ def _peer_send_impl(
             bridge_manager=bridge_manager,
             peer_registry=peer_registry,
             agent_messaging_service=agent_messaging_service,
+            state_service=state_service,
             sender_bridge_id=bridge_id,
             sender_agent_id=sender_binding.agent_id,
             sender_agent_instance_id=sender_binding.agent_instance_id,
@@ -1666,6 +1387,7 @@ def _peer_send_by_name_impl(
             bridge_manager=bridge_manager,
             peer_registry=peer_registry,
             agent_messaging_service=agent_messaging_service,
+            state_service=state_service,
             role_name=role_name,
             role=role,
             sender_bridge_id=bridge_id,
@@ -1711,48 +1433,6 @@ def _parse_text_parts(value: list[dict[str, Any]]) -> list[TextPart]:
     return parts
 
 
-def _parse_context(value: dict[str, Any] | None) -> Any | None:
-    if value is None:
-        return None
-    from ananta.llm.agent_messaging.models import (  # noqa: PLC0415
-        AgentThreadContext,
-    )
-    summary = _optional_str(value.get("summary"))
-    tags_raw = value.get("tags")
-    if tags_raw is None:
-        tags: tuple[str, ...] = ()
-    elif isinstance(tags_raw, list | tuple):
-        tags = tuple(str(t) for t in tags_raw)
-    else:
-        raise AgentMessagingError("context.tags must be a list")
-    return AgentThreadContext(summary=summary, tags=tags)
-
-
-def _parse_initial_message(value: dict[str, Any] | None) -> Any | None:
-    if value is None:
-        return None
-    from ananta.llm.agent_messaging.models import (  # noqa: PLC0415
-        InitialMessage,
-    )
-    content = _parse_text_parts(_coerce_content_list(value.get("content")))
-    response_mode = str(value.get("response_mode") or "async")
-    timeout_raw = value.get("timeout_seconds")
-    timeout_seconds = timeout_raw if isinstance(timeout_raw, int) else None
-    return InitialMessage(
-        content=content,
-        response_mode=response_mode,
-        timeout_seconds=timeout_seconds,
-    )
-
-
-def _coerce_content_list(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        raise AgentMessagingError(
-            "initial_message.content must be a list of text parts",
-        )
-    return [v for v in value if isinstance(v, dict)]
-
-
 def _parse_iso_after(value: str | None) -> _dt | None:
     if not value:
         return None
@@ -1767,28 +1447,6 @@ def _parse_iso_after(value: str | None) -> _dt | None:
 # ---------------------------------------------------------------------------
 # Helpers — serialization
 # ---------------------------------------------------------------------------
-
-
-def _serialize_messages_page(page: Any) -> dict[str, Any]:
-    return {
-        "thread_id": page.thread_id,
-        "messages": [_serialize_message(m) for m in page.messages],
-        "next_cursor": page.next_cursor,
-        "status": page.status.value,
-    }
-
-
-def _serialize_thread_status(status: Any) -> dict[str, Any]:
-    return {
-        "thread_id": status.thread_id,
-        "status": status.status.value,
-        "backend": status.backend,
-        "last_message_cursor": status.last_message_cursor,
-        "updated_at": status.updated_at.isoformat(),
-        "active_action_id": status.active_action_id,
-        "active_flow_id": status.active_flow_id,
-        "backend_session_id": status.backend_session_id,
-    }
 
 
 def _serialize_peer_inbox(page: Any, sender_binding: BridgeBinding) -> dict[str, Any]:
@@ -1840,27 +1498,6 @@ def _serialize_role_drain_row(row: dict[str, Any]) -> dict[str, Any]:
         "sender_session_label": row.get("sender_session_label"),
         "thread_id": row.get("thread_id"),
         "important": bool(row.get("important", False)),
-        "emit_count": int(row.get("emit_count") or 0),
-        "created_at": _iso_or_empty(row.get("created_at")),
-        "content": _role_drain_prose(row.get("content")),
-    }
-
-
-def _serialize_direct_wake_row(row: dict[str, Any]) -> dict[str, Any]:
-    """Project an owed direct-wake row to the drain wire shape (REL-05).
-
-    Mirrors :func:`_serialize_role_drain_row` for direct sends: the
-    ``message_id`` (echoed back to ``POST /peer/delivered_direct``,
-    recipient-fenced), the sender provenance for the targeted-reply meta, the
-    thread handle, the marker-stripped content, and ``emit_count`` +
-    ``created_at`` for the N3 re-emit marker.
-    """
-    return {
-        "message_id": row.get("message_id"),
-        "thread_id": row.get("thread_id"),
-        "sender_agent_id": row.get("sender_agent_id"),
-        "sender_agent_instance_id": row.get("sender_agent_instance_id"),
-        "sender_session_label": row.get("sender_session_label"),
         "emit_count": int(row.get("emit_count") or 0),
         "created_at": _iso_or_empty(row.get("created_at")),
         "content": _role_drain_prose(row.get("content")),
@@ -2015,16 +1652,18 @@ def _lookup_binding_for_bridge(
 
 def _consume_watcher_acked_events(
     agent_messaging_service: Any,
-    binding: BridgeBinding,
     acked: list[QueuedEvent],
 ) -> None:
-    """Stamp watcher-acked IMPORTANT deliveries consumed.
+    """Stamp watcher-acked IMPORTANT role deliveries consumed.
 
     Role deliveries are recognised by the Control #5 ``delivery_external_id``
-    meta key (stamped on both the native-wake and channel-event transports);
-    direct wakes by their ``message_id`` meta. Both marks are predicated
-    (``consumed=false``) and the direct mark is fenced to the acking binding's
-    own instance, so a re-ack or a non-delivery event is a no-op.
+    meta key (stamped on both the native-wake and channel-event transports).
+    Predicated (``consumed=false``), so a re-ack or a non-delivery event is a
+    no-op.
+
+    A4 (2026-08-04): the direct-wake branch (``message_id``-only meta,
+    ``mark_direct_consumed_on_ack``) retired here with the direct-wake outbox
+    table it stamped.
     """
     for event in acked:
         if event.event_type not in _WATCHER_DELIVERY_EVENT_TYPES:
@@ -2034,33 +1673,23 @@ def _consume_watcher_acked_events(
             agent_messaging_service.mark_role_consumed_on_ack(
                 external_id=external_id,
             )
-            continue
-        message_id = str(event.meta.get("message_id") or "")
-        if message_id:
-            agent_messaging_service.mark_direct_consumed_on_ack(
-                message_id=message_id,
-                recipient_agent_instance_id=binding.agent_instance_id,
-            )
 
 
 def _consume_watcher_inbox_page(
     agent_messaging_service: Any,
-    binding: BridgeBinding,
     page: Any,
 ) -> None:
-    """Stamp watcher catch-up-drained IMPORTANT rows consumed.
+    """Stamp watcher catch-up-drained IMPORTANT role rows consumed.
 
-    The instance section's entries map to direct-wake rows by ``message_id``
-    (silent messages have no outbox row — the fenced mark is a no-op). Role
-    entries recover their role name from the synthetic ``role:`` thread handle
-    and re-derive the deterministic delivery external_id; the predicated mark
-    skips silent and already-consumed rows.
+    Role entries recover their role name from the synthetic ``role:`` thread
+    handle and re-derive the deterministic delivery external_id; the
+    predicated mark skips silent and already-consumed rows.
+
+    A4 (2026-08-04): the instance-section (direct-wake) loop retired here —
+    it stamped the direct-wake outbox table, which no longer exists;
+    ``page.entries`` is still valid message history, just no longer paired
+    with an outbox row to mark.
     """
-    for entry in page.entries:
-        agent_messaging_service.mark_direct_consumed_on_ack(
-            message_id=str(entry.message.id),
-            recipient_agent_instance_id=binding.agent_instance_id,
-        )
     for entry in page.role_entries:
         role_name = str(entry.thread_id).removeprefix(ROLE_THREAD_PREFIX)
         agent_messaging_service.mark_role_consumed_on_ack(
@@ -2080,13 +1709,6 @@ def _config_int(config: Any, key: str, default: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return default
     return int(value)
-
-
-def _optional_str(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    return text if text else None
 
 
 __all__ = [

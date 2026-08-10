@@ -139,8 +139,9 @@ Exercises seven cases:
 ```
 
 End-to-end transport smoke: initializes two sessions, exercises the full
-tool surface, peer-sends an IMPORTANT cross-session message, and verifies
-the SSE channel delivers the wake notification.
+tool surface, peer-sends a cross-session message (delivery is unconditional
+since A4, 2026-08-04), and verifies the SSE channel delivers the wake
+notification.
 
 ## What's NOT in this article
 

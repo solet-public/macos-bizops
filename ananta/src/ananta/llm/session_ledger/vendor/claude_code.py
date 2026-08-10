@@ -340,16 +340,22 @@ def _parse_conversation_line(
     role = message.get("role")
     if not isinstance(role, str) or not role:
         raise ValueError("claude_code: message.role missing or empty")
+    # T1 usage-capture lane (2026-08-05 ruling): only assistant lines carry
+    # a 'usage' dict in practice (MEASURED shape, scratch probe 2026-08-05);
+    # read generically here so a future vendor change that adds it
+    # elsewhere is picked up for free rather than requiring a role check.
+    usage = message.get("usage")
+    usage_json = usage if isinstance(usage, dict) else None
     content = message.get("content")
     if isinstance(content, str):
         # Legacy single-string content (early Claude Code versions).
-        yield _build_message_event(ctx, role=role, text=content)
+        yield _build_message_event(ctx, role=role, text=content, usage=usage_json)
         return
     if not isinstance(content, list):
         raise ValueError(
             "claude_code: message.content must be string or list of content blocks"
         )
-    yield from _parse_message_blocks(content, ctx=ctx, role=role)
+    yield from _parse_message_blocks(content, ctx=ctx, role=role, usage=usage_json)
 
 
 def _parse_message_blocks(
@@ -357,6 +363,7 @@ def _parse_message_blocks(
     *,
     ctx: _LineContext,
     role: str,
+    usage: dict[str, Any] | None = None,
 ) -> Iterator[RawSessionEvent]:
     """Walk content blocks and emit events in source-line order.
 
@@ -364,6 +371,12 @@ def _parse_message_blocks(
     in source order. All events share the line timestamp; the importer's
     sequence allocator preserves emit order, so persisted order mirrors
     the assistant's "intro text → tool call" temporal narrative.
+
+    ``usage`` (T1 usage-capture lane) rides only the accumulated-text
+    MESSAGE event this function emits, never the tool_use/tool_result
+    events — usage is a per-LINE (per-API-turn) figure the line's message
+    carries once, not a per-block figure; attributing it to a tool event
+    would double-count or misattribute it.
     """
     text_parts: list[str] = []
     tool_events: list[RawSessionEvent] = []
@@ -371,8 +384,15 @@ def _parse_message_blocks(
         event = _classify_block(block, ctx=ctx, role=role, text_parts=text_parts)
         if event is not None:
             tool_events.append(event)
-    if text_parts:
-        yield _build_message_event(ctx, role=role, text="\n".join(text_parts))
+    # ``or usage``: a tool-only assistant turn (no text blocks at all --
+    # common for a pure tool-call turn) must still emit a carrier for the
+    # line's usage figure; without this, usage would be silently dropped
+    # for every tool-only turn, undercounting real spend (this wave's
+    # whole purpose). An empty content_text is a valid MESSAGE event
+    # (_validate_message_event only requires content_text OR content_json
+    # non-None, and "" is not None).
+    if text_parts or usage:
+        yield _build_message_event(ctx, role=role, text="\n".join(text_parts), usage=usage)
     yield from tool_events
 
 
@@ -471,6 +491,7 @@ def _build_message_event(
     *,
     role: str,
     text: str,
+    usage: dict[str, Any] | None = None,
 ) -> RawSessionEvent:
     return RawSessionEvent(
         external_session_id=ctx.session_id,
@@ -480,6 +501,7 @@ def _build_message_event(
             "text": text,
             "project_path": ctx.project_path,
             "git_branch": ctx.git_branch,
+            "usage": usage,
         },
         event_at=ctx.event_at,
         vendor_event_id=ctx.line_uuid,

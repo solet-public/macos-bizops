@@ -53,10 +53,10 @@ DEFAULT_API_VERSION: Final[str] = "62.0"
 CONFIG_KEY_API_VERSION: Final[str] = "api_version"
 
 # ---------------------------------------------------------------------------
-# Caps + export (business-data limits + spill-floor migration, 2026-08-02 —
+# Caps + export (business-data limits + data-export migration, 2026-08-02 —
 # workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md).
 # Both soql_query and export_soql now ALWAYS write to a caller-supplied path
-# (07-29 spill floor, unconditional — the former INLINE_BYTE_CAP/inline-return
+# (07-29 data-export requirement, unconditional — the former INLINE_BYTE_CAP/inline-return
 # branch is deleted, not lowered: no record-read verb returns record values
 # inline at any size). DEFAULT_ROW_LIMIT is the fetch ceiling absent an
 # explicit, acknowledged override; SOQL_MAX_RECORDS_CAP is soql_query's

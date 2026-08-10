@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke coverage for the ``peer_inbox`` platform process (Dax Part 24).
+"""Smoke coverage for the ``peer_inbox`` platform process.
 
 Covers the layer the process itself owns — caller-identity resolution, the two
 independent cursors, the page bound, the loud-failure set, and the serialized
@@ -509,12 +509,20 @@ def test_limit_defaults_and_clamps() -> None:
     )
 
 
-def test_include_important_defaults_true() -> None:
+def test_include_important_is_always_true_now() -> None:
+    """A4 (2026-08-04): the silent/important split at send time is retired,
+    so the catch-up view is the only meaningful one. include_important is no
+    longer read from the caller — a caller-supplied False is silently
+    ignored (extra key, no effect), never honoured."""
     registry = _registry()
     registry.register(_binding())
-    for args, expected, label in (
-        ({}, True, "omitted include_important defaults to the catch-up view"),
-        ({"include_important": False}, False, "include_important=False is honoured"),
+    for args, label in (
+        ({}, "omitted include_important -> the catch-up view (unchanged)"),
+        (
+            {"include_important": False},
+            "A4: a caller-supplied include_important=False is now IGNORED "
+            "(never read) — the request still carries True",
+        ),
     ):
         service = _RecordingService(_page())
         _call(
@@ -524,7 +532,7 @@ def test_include_important_defaults_true() -> None:
         )
         seen = service.seen
         assert seen is not None
-        _check(seen.include_important is expected, label)
+        _check(seen.include_important is True, label)
 
 
 # ---------------------------------------------------------------------------
@@ -809,14 +817,19 @@ def test_handover_notice_is_the_pinned_backlog_dependency() -> None:
     Once the watcher's arm-time drain seeds to newest and spools nothing, a
     brand-new role holder is never woken about the backlog waiting for its
     role. The only thing standing between that and silence is this notice:
-    live-delivered at claim time, IMPORTANT-marked so it wakes, and naming a
-    call the holder can actually run. "If either regresses it goes dark
-    silently" is the sentence that means a guard is owed — this is the guard.
+    live-delivered at claim time, and naming a call the holder can actually
+    run. "If either regresses it goes dark silently" is the sentence that
+    means a guard is owed — this is the guard.
 
     Three legs, because there are three ways to lose it:
 
     (a) it FIRES     — the claim path dispatches it at all
-    (b) it WAKES     — the IMPORTANT marker is present, or it persists silently
+    (b) it is COSMETICALLY MARKED — the notice still leads with IMPORTANT
+        for a human reader's benefit; A4 (2026-08-04) retired the marker as a
+        wake gate, so this is no longer load-bearing for delivery (dispatch
+        is now unconditional — leg (a) alone guarantees the wake attempt),
+        but a regression here would still be a readability loss worth
+        catching.
     (c) it is RUNNABLE — the key it names is the verb's OWN registered name and
         every REQUIRED parameter is mentioned
 
@@ -852,6 +865,7 @@ def test_handover_notice_is_the_pinned_backlog_dependency() -> None:
             bridge_manager=cast("Any", object()),
             peer_registry=cast("Any", object()),
             agent_messaging_service=cast("Any", object()),
+            state_service=cast("Any", object()),
             name=_ROLE,
             agent_id=_AGENT_ID,
             agent_instance_id=_INSTANCE_ID,
@@ -881,6 +895,7 @@ def test_handover_notice_is_the_pinned_backlog_dependency() -> None:
             bridge_manager=cast("Any", object()),
             peer_registry=cast("Any", object()),
             agent_messaging_service=cast("Any", object()),
+            state_service=cast("Any", object()),
             name=_ROLE,
             agent_id=_AGENT_ID,
             agent_instance_id=_INSTANCE_ID,
@@ -892,11 +907,13 @@ def test_handover_notice_is_the_pinned_backlog_dependency() -> None:
         "an idempotent self-re-claim fires NO notice (the refresh contract)",
     )
 
-    # (b) it WAKES — without the marker the notice persists silently and the
-    # holder is never woken, which is the same darkness by another route.
+    # (b) it is COSMETICALLY MARKED — A4 retired the marker as a wake gate
+    # (dispatch is unconditional; leg (a) alone now guarantees delivery is
+    # attempted), so this no longer guards a silent-delivery failure mode.
+    # Kept as a readability regression guard only.
     _check(
         IMPORTANT_MARKER_RE.match(prose) is not None,
-        "the notice is IMPORTANT-marked, so it wakes rather than persisting silently",
+        "the notice still leads with IMPORTANT (cosmetic; not wake-gating since A4)",
     )
 
     # (c) it is RUNNABLE — against the live decorator, not a copied literal.
@@ -960,8 +977,9 @@ def test_wake_footer_advertises_a_runnable_command() -> None:
         f"id (got {parsed.get('agent_session_id')!r})",
     )
     _check(
-        parsed.get("include_important") is True,
-        "the advertised argument asks for the durable catch-up view",
+        "include_important" not in parsed,
+        "A4: the footer no longer advertises the retired include_important "
+        "argument — the catch-up view is the only one peer_inbox serves now",
     )
     # And the process accepts exactly that payload.
     registry = _registry()
@@ -1004,7 +1022,7 @@ def main() -> int:
         test_a_service_level_rejection_surfaces_as_an_error,
         test_a_failed_role_section_still_serves_instance_mail,
         test_limit_defaults_and_clamps,
-        test_include_important_defaults_true,
+        test_include_important_is_always_true_now,
         test_serialized_page_matches_the_declared_schema,
         test_role_section_status_serializes_to_its_lowercase_value,
         test_entries_carry_sender_identity_and_isoformat_timestamps,

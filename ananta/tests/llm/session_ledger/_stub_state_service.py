@@ -325,6 +325,45 @@ class StubStateService:
     # null-external_id precondition guard + count_rows_per_table). Default 0 =
     # no null-external_id events, so the reset guard passes.
     _count_result: int = 0
+    # Matcher-keyed FAILURE injection for ``upsert_state`` (2026-08-06,
+    # session-ledger duplicate-external_id fix): distinct from
+    # ``_upsert_inserted_result``, which only models the CLEAN "conflict fired,
+    # DO NOTHING" outcome (still ``action_status: completed``). This models a
+    # genuine provider-level failure envelope (``action_status: failed``) for
+    # ONE matched record — e.g. a unique-constraint violation on a DIFFERENT,
+    # untargeted index the caller's ``ON CONFLICT`` clause doesn't cover — so a
+    # smoke can prove the repository's specific-error handling without a real
+    # Postgres connection. ``(table, when, error_message)``; first match wins.
+    upsert_failures: list[tuple[str, Any, str]] = field(default_factory=list)
+
+    def add_upsert_failure(
+        self, table: str, when: Any, error_message: str,
+    ) -> None:
+        """Queue a FAILED ``upsert_state`` envelope for the first record
+        matching ``when(record) -> bool`` on ``table``. Never fires for a
+        non-matching record — those still hit the normal
+        ``_upsert_inserted_result`` path."""
+        self.upsert_failures.append((table, when, error_message))
+
+    def _match_upsert_failure(
+        self, table_name: str, record: dict[str, object],
+    ) -> dict[str, Any] | None:
+        """Split out of ``upsert_state`` to keep it under the radon-cc
+        threshold — the first queued ``upsert_failures`` entry matching
+        ``table_name`` + ``when(record)``, rendered as a FAILED envelope, or
+        ``None`` if nothing matches."""
+        for fail_table, when, error_message in self.upsert_failures:
+            if fail_table != table_name:
+                continue
+            if when is None or when(record):
+                return {
+                    "action_status": "failed",
+                    "data": {},
+                    "actions": [],
+                    "error": error_message,
+                    "timestamp": "",
+                }
+        return None
 
     def add_select_response(
         self, sql_fragment: str, rows: list[dict[str, object]]
@@ -405,6 +444,9 @@ class StubStateService:
                 ),
             )
         )
+        failure = self._match_upsert_failure(str(data.get("table", "")), record)
+        if failure is not None:
+            return failure
         if on_conflict == "do_nothing":
             # DO-NOTHING mode returns {inserted, id} (the repository's
             # _upsert_do_nothing seam reads data.result.inserted). The recorder

@@ -10,7 +10,7 @@ Verbs (all EDGE):
   - data_query                                              — read
   - get_object / list_subscriptions / get_invoice / list_invoices — read
   - create_object / update_object                           — write
-  - bulk_export                                              — read (spill)
+  - bulk_export                                              — read (exports to file)
   - test_connection                                          — diagnostic
 
 Security posture (umbrella design §2, applied to this pre-wave-2 design;

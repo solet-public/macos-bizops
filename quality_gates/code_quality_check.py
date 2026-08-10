@@ -10,7 +10,10 @@ Exit codes:
   1 - Type errors found (pyright)
   2 - Lint errors found (ruff)
   3 - Type + lint errors
-  4 - Syntax errors (critical, supersedes all)
+  4 - Syntax errors (critical, supersedes all); also covers a missing venv
+      and a required gate tool that never ran at all (pyright/ruff module
+      unresolved -- see ToolUnavailableError) -- all "cannot proceed as
+      configured," not a findings result
   5 - Blocking-gate violations (non-allowlisted findings from any
       blocking structural gate: god_class_check / radon_cc_check /
       radon_mi_check / whole_tree_integration_gate /
@@ -72,10 +75,78 @@ _WRAPPER_USAGE_ERROR = 64
 
 # Per-file gate scope: the platform's quality surface, mirroring the
 # SKILL Step 6 SCOPE regex and the radon_cc/mi allowlists' coverage.
-# Operator-tooling (research/tools/migrations/parity_tests, workbench,
-# deployment) lives outside this scope per that KB contract.
-_PER_FILE_GATE_TOP_LEVEL = (Path("ananta/src"), Path("ananta/tests"), Path("quality_gates"))
-_PER_FILE_GATE_PLUGIN_GLOBS = ("plugins/*/src", "plugins/*/tests")
+# Narrowing operator ruling, 2026-08-08 ("quality gates apply to
+# everything, boy scout rules"): `research/` and `disabled_plugins/` stay
+# out (see pyproject.toml's ruff/pyright exclude comments for the
+# conditions that let something back in); `tools/`, `parity_tests/`,
+# `.claude/hooks`, and plugin `policies/` are being brought in-scope,
+# fix-first, one class per landing — see
+# workbench/2026-08-08_gate_scope_widening_measurement_d3-impl.md.
+# `.claude/hooks` is deferred: rotation-impl has live untracked/dirty
+# work there as of 2026-08-08, and this scope walk is filesystem-based
+# (rglob), not git-tracked-only, so widening now would sweep its WIP into
+# this gate. workbench/ remains out per the (assumption, not
+# operator-ruled) ephemeral-scratch carve-out in that same findings
+# file. `deployment/` is only partly out: `deployment/scripts` (one
+# file) is in-scope, fix-first, as part of ruling 1's "tail" class —
+# the rest of `deployment/` was never part of that class and stays
+# unaddressed pending its own measurement.
+#
+# Entries below that are individual FILES, not directories, rely on
+# `_per_file_gate_paths()`'s `root.is_file()` branch — a bare-file
+# `_PER_FILE_GATE_TOP_LEVEL` or `_PER_FILE_GATE_PLUGIN_GLOBS` entry is
+# appended directly rather than rglob'd (rglob on a file path would
+# error). `ananta/setup.py` and `bootstrap.py` are scoped to themselves
+# specifically, not the directories they sit in, since those directories
+# hold unrelated already-scoped or not-yet-ruled content.
+# COUPLED SURFACE: .claude/skills/git-controller-commit/SKILL.md Step 1's
+# SCOPE regex must name every non-plugins/ path class added here, in the
+# same commit — the skill's per-file Steps 2-6 derive their scope from that
+# regex, not from this table, and an entry missing there is silently
+# un-gated per-file (caught live 2026-08-09 on initialization/tests/).
+_PER_FILE_GATE_TOP_LEVEL = (
+    Path("ananta/src"), Path("ananta/tests"), Path("quality_gates"),
+    Path("ananta/setup.py"), Path("bootstrap.py"), Path("deployment/scripts"),
+    Path("initialization/__init__.py"), Path("initialization/profile_loader.py"),
+    Path("initialization/tests"), Path("initialization/src"),
+    Path("plugins/github_midwife_plugin/coordination_hooks_common"),
+)
+# `initialization/tests` re-added 2026-08-09 alongside the
+# `profile_loader_smoke.py::main` CC(18) fix (radon_cc B(10) or better
+# throughout the file) — see
+# workbench/2026-08-08_gate_scope_widening_measurement_d3-impl.md.
+# `initialization/src` added 2026-08-10 (ruling arm-07c73c73), landed
+# CC-clean same commit as the code fixes. COUPLED SURFACE, all four
+# landed together: this table entry, the `ruff check` command string in
+# `_check_ruff` (both occurrences — the invocation and the `--fix` hint),
+# `[tool.pyright] include` in pyproject.toml, and the git-controller-commit
+# SKILL.md Step 1 SCOPE regex. `initialization/` ships its own
+# `pyproject.toml` (own [tool.ruff]/[tool.mypy], package `homunculi`,
+# never installed into this repo's shared `.venv`) — the root config
+# governs this gate regardless (ruling arm-07c73c73 §3); its local config
+# stays untouched as that package's own dev surface, not ours to silence.
+# The last two patterns are two segments deep, not one: a single-segment
+# `plugins/*/hooks`/`plugins/*/tests` glob is blind to a bundle directory
+# (`claude_plugin`/`codex_plugin`) sitting between the plugin root and its
+# code. Kept as an explicit two-segment pattern rather than a recursive
+# `plugins/*/**/tests` glob, which would also match `plugins/*/research/tests`
+# (out of scope per the research exemption) and `plugins/*/src/**/tests`
+# (already covered by the `plugins/*/src` rglob).
+_PER_FILE_GATE_PLUGIN_GLOBS = (
+    "plugins/*/src",
+    "plugins/*/tests",
+    "plugins/*/*/coordination-hooks/hooks",
+    "plugins/*/*/coordination-hooks/tests",
+    "plugins/*/policies",
+    "plugins/*/scripts",
+    "plugins/*/setup.py",
+    "plugins/*/parity_tests",
+    # `tools/` (8 plugins, 26 files): all 8 landed CC-clean 2026-08-09 (16
+    # violations in default_knowledge_plugin, four D-rank, were the last
+    # holdout) — see
+    # workbench/2026-08-08_gate_scope_widening_measurement_d3-impl.md.
+    "plugins/*/tools",
+)
 
 # Path-segment prefix that flags a directory as a bundled venv (e.g.
 # `.venv`, `.venv_cosyvoice`). Bundled venvs ship vendored library code
@@ -401,6 +472,9 @@ def _per_file_gate_paths(project_root: Path) -> list[Path]:
 
     py_files: list[Path] = []
     for root in roots:
+        if root.is_file():
+            py_files.append(root)
+            continue
         for path in root.rglob("*.py"):
             if any(part.startswith(_BUNDLED_VENV_PREFIX) for part in path.parts):
                 continue
@@ -807,6 +881,49 @@ def _find_venv_python(project_root: Path) -> Path | None:
     return None
 
 
+def _check_gate_toolchain(project_root: Path) -> bool:
+    """True if ruff/pyright/radon are all present; prints the shared preflight's own message if not.
+
+    Runs BEFORE `_check_pyright`/`_check_ruff` deliberately: a `python3 -m
+    pyright`/`-m ruff` invocation against a venv where the module is simply
+    not installed does not raise a normal per-tool error — `_check_pyright`
+    in particular has no way to distinguish "0 type errors" from "pyright
+    isn't here to report any," since its error count comes from counting
+    pyright's own `" - error:"` diagnostic lines, which a bare
+    `ModuleNotFoundError` traceback never contains. Undeclared-dependency
+    audit: workbench/2026-08-08_undeclared_system_dependencies_findings_d3-impl.md.
+    """
+    script = project_root / "deployment" / "scripts" / "check_gate_toolchain.sh"
+    result = subprocess.run([str(script), "gate"], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(result.stderr, end="")
+        return False
+    return True
+
+
+class ToolUnavailableError(RuntimeError):
+    """A required checker never executed at all -- distinct from running and
+    finding zero issues, and distinct from running and producing genuinely
+    unparseable output. Fatal, always: a checker that did not run is not a
+    passing checker, regardless of what upstream preflight ran or didn't run
+    before this call -- reachability is a property of the current call
+    graph, not of the defect this guards against. Undeclared-dependency
+    audit: workbench/2026-08-08_undeclared_system_dependencies_findings_d3-impl.md.
+    """
+
+
+def _module_unavailable(output: str, module: str) -> bool:
+    """True iff `output` is Python's OWN ``-m`` failure for a genuinely
+    unresolvable module -- ``<interpreter>: No module named <module>``,
+    printed by the interpreter itself before the module ever loads. This is
+    categorically different from a diagnostic the module emits once it HAS
+    loaded (which requires the module to already be importable), so this
+    string is never something a working checker would itself print as a
+    finding -- it can only mean "this never ran."
+    """
+    return f"No module named {module}" in output
+
+
 def _report_pyright_errors(output: str, error_count: int) -> None:
     print(f"❌ BLOCKING: {error_count} type errors found")
     print("\nFirst 5 errors:")
@@ -818,8 +935,75 @@ def _report_pyright_errors(output: str, error_count: int) -> None:
     print("\n💡 Run: pyright")
 
 
+def _run_blocking_gates(
+    project_root: Path, venv_python: Path, results: _CheckResults,
+) -> None:
+    """Run the four whole-tree blocking gates + the two warn-only gates into
+    `results`. Split out of `main()` purely to keep its own branch count
+    (and cyclomatic complexity) down -- no behavior change, same calls in
+    the same order."""
+    if _check_whole_tree_integration_gate(project_root, venv_python):
+        results.failed_blocking_gates.append(_W_INT_GATE.name)
+    if _check_service_interface_ast_gate(project_root, venv_python):
+        results.failed_blocking_gates.append(_SI_AST_GATE.name)
+    if _check_return_shape_gate(project_root, venv_python):
+        results.failed_blocking_gates.append(_RETURN_SHAPE_GATE.name)
+    if _check_embedding_bound_gate(project_root, venv_python):
+        results.failed_blocking_gates.append(_EMBEDDING_BOUND_GATE.name)
+    # W-INT Cycle 2 driver-import gate runs in WARN mode per master plan
+    # §1.7 — emits findings but never blocks. Mode flip at W-WINT2-FINAL.
+    _check_wint2_driver_import_gate(project_root, venv_python)
+    # W-INT Cycle 2 vault-key-declaration gate (W-PLUGIN-LAUNCH-KEYS sub-1)
+    # runs in WARN mode per brief §5.3 — emits findings but never blocks.
+    # Mode flip at sub-2 W-VAULT-CALLER-ENFORCE in lockstep with the
+    # runtime readiness gate.
+    _check_wint2_warn_only_gate(
+        project_root, venv_python, _W_WINT2_VAULT_KEY_GATE,
+    )
+
+
+def _run_pyright_checked(
+    project_root: Path, venv_python: Path, results: _CheckResults,
+) -> int | None:
+    """Run pyright into `results`; return an exit code to bail `main()` with,
+    or None to continue. Split out of `main()` to keep the fatal-vs-continue
+    branch from adding to `main()`'s own cyclomatic complexity."""
+    try:
+        results.has_type_errors = _check_pyright(project_root, venv_python)
+    except ToolUnavailableError as exc:
+        # Same exit code as the venv-missing precondition failure -- a
+        # checker that never ran is the same class of "cannot proceed as
+        # configured," not a type-errors-found result.
+        print(f"❌ FATAL: {exc}")
+        return 4
+    return None
+
+
+def _run_ruff_checked(
+    project_root: Path, venv_python: Path, results: _CheckResults,
+) -> int | None:
+    """Run ruff into `results`; same shape and reasoning as
+    `_run_pyright_checked` -- kept as a separate, parallel function rather
+    than a shared generic wrapper, matching this module's existing
+    one-function-per-tool style."""
+    try:
+        results.has_lint_errors = _check_ruff(project_root, venv_python)
+    except ToolUnavailableError as exc:
+        print(f"❌ FATAL: {exc}")
+        return 4
+    return None
+
+
 def _check_pyright(project_root: Path, venv_python: Path) -> bool:
-    """Run pyright; return True if blocking type errors were found."""
+    """Run pyright; return True if blocking type errors were found.
+
+    Raises ToolUnavailableError if pyright's own module never resolved (the
+    interpreter's own "No module named" failure) -- distinct from the
+    remaining, genuinely ambiguous "ran but produced output this function
+    can't parse" case, which stays the pre-existing non-blocking "status
+    unclear" outcome. Do not collapse the two: one means the checker ran and
+    said something odd, the other means it never checked anything.
+    """
     venv_activate = venv_python.parent / "activate"
     print("\n📊 Type Checking with pyright (strict)...")
     pyright_cmd = f"cd {project_root} && source {venv_activate} && python3 -m pyright 2>&1"
@@ -834,20 +1018,35 @@ def _check_pyright(project_root: Path, venv_python: Path) -> bool:
         return True
     if success:
         print("✅ ZERO type errors - strict enforcement passed!")
-    else:
-        print("⚠️ pyright check completed but status unclear")
+        return False
+    if _module_unavailable(output, "pyright"):
+        raise ToolUnavailableError(
+            f"pyright never ran -- its module could not be resolved: {output.strip()!r}"
+        )
+    print("⚠️ pyright check completed but status unclear")
     return False
 
 
 def _check_ruff(project_root: Path, venv_python: Path) -> bool:
-    """Run ruff; return True if lint errors were found."""
+    """Run ruff; return True if lint errors were found.
+
+    Raises ToolUnavailableError if ruff's own module never resolved — same
+    shape and same reasoning as `_check_pyright`: a genuinely absent ruff
+    must not read as "lint errors found" (the wrong noun attached to a true
+    signal) any more than it should read as a silent pass.
+    """
     print("\n📊 Linting with ruff...")
-    ruff_cmd = f"cd {project_root} && {venv_python} -m ruff check ananta/src ananta/tests plugins --config pyproject.toml 2>&1"
+    ruff_cmd = f"cd {project_root} && {venv_python} -m ruff check ananta/src ananta/tests plugins initialization/src --config pyproject.toml 2>&1"
     success, output = run_command(ruff_cmd, "Running ruff linter")
 
     if success:
         print("✅ No lint errors found")
         return False
+
+    if _module_unavailable(output, "ruff"):
+        raise ToolUnavailableError(
+            f"ruff never ran -- its module could not be resolved: {output.strip()!r}"
+        )
 
     lint_lines = [line for line in output.split("\n") if line.strip()]
     if not lint_lines:
@@ -857,7 +1056,7 @@ def _check_ruff(project_root: Path, venv_python: Path) -> bool:
         print(f"   {line}")
     if len(lint_lines) > 10:
         print(f"   ... and {len(lint_lines) - 10} more")
-    print("\n💡 Run: ruff check ananta/src ananta/tests plugins --config pyproject.toml --fix")
+    print("\n💡 Run: ruff check ananta/src ananta/tests plugins initialization/src --config pyproject.toml --fix")
     return True
 
 
@@ -944,30 +1143,20 @@ def main() -> int:
         print("   Then: source .venv/bin/activate && pip install ruff pyright radon")
         return 4
 
+    if not _check_gate_toolchain(project_root):
+        return 4
+
     results = _CheckResults()
-    results.has_type_errors = _check_pyright(project_root, venv_python)
-    results.has_lint_errors = _check_ruff(project_root, venv_python)
+    pyright_bail = _run_pyright_checked(project_root, venv_python, results)
+    if pyright_bail is not None:
+        return pyright_bail
+    ruff_bail = _run_ruff_checked(project_root, venv_python, results)
+    if ruff_bail is not None:
+        return ruff_bail
     results.failed_blocking_gates.extend(
         _check_coherence_gates(project_root, venv_python)
     )
-    if _check_whole_tree_integration_gate(project_root, venv_python):
-        results.failed_blocking_gates.append(_W_INT_GATE.name)
-    if _check_service_interface_ast_gate(project_root, venv_python):
-        results.failed_blocking_gates.append(_SI_AST_GATE.name)
-    if _check_return_shape_gate(project_root, venv_python):
-        results.failed_blocking_gates.append(_RETURN_SHAPE_GATE.name)
-    if _check_embedding_bound_gate(project_root, venv_python):
-        results.failed_blocking_gates.append(_EMBEDDING_BOUND_GATE.name)
-    # W-INT Cycle 2 driver-import gate runs in WARN mode per master plan
-    # §1.7 — emits findings but never blocks. Mode flip at W-WINT2-FINAL.
-    _check_wint2_driver_import_gate(project_root, venv_python)
-    # W-INT Cycle 2 vault-key-declaration gate (W-PLUGIN-LAUNCH-KEYS sub-1)
-    # runs in WARN mode per brief §5.3 — emits findings but never blocks.
-    # Mode flip at sub-2 W-VAULT-CALLER-ENFORCE in lockstep with the
-    # runtime readiness gate.
-    _check_wint2_warn_only_gate(
-        project_root, venv_python, _W_WINT2_VAULT_KEY_GATE,
-    )
+    _run_blocking_gates(project_root, venv_python, results)
 
     if _check_syntax(project_root):
         return 4

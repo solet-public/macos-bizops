@@ -56,6 +56,23 @@ class _FakeStore:
         return "patch-fake"
 
 
+def _git_init(root: Path) -> None:
+    """Make the fixture a git worktree — the shape this service actually runs in.
+
+    `platform_dev_surface_plugin` operates on a worktree by construction (genesis
+    git-inits every born tree), and since 2026-08-08 `search` falls back to the
+    git-native grep when ripgrep is absent. A non-worktree fixture therefore tested
+    the service outside its own contract and could not exercise the fallback path
+    at all — it failed with "not a git repository" on exactly the node/rg-less
+    machines the fallback exists for.
+    """
+    run = __import__("subprocess").run
+    for args in (["-c", "init.defaultBranch=main", "init", "-q"],
+                 ["config", "user.email", "t@localhost"], ["config", "user.name", "t"],
+                 ["add", "-A"], ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture"]):
+        run(["git", *args], cwd=root, capture_output=True, text=True, timeout=60, check=True)
+
+
 def _build_fixture() -> Path:
     root = Path(tempfile.mkdtemp(prefix="secret_fixture_"))
     (root / "normal.py").write_text("x = 1  # clean file\n", encoding="utf-8")
@@ -78,6 +95,7 @@ def _build_fixture() -> Path:
     (root / "has_secret.py").write_text(
         f"CANARY_MARKER = 1\nAPI_KEY = {_CANARY}\n", encoding="utf-8"
     )
+    _git_init(root)
     return root
 
 

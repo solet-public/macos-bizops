@@ -57,18 +57,43 @@ instance-specific contract.
 
 ## Paging contracts differ by verb — internal now, but still not one signal
 
-**Dax 29.2 hide-paging build (2026-08-03, operator ruling "the paging is an
-implementation detail that should be hidden," design doc §5.4/§7.2 as
-amended).** `get_leads`, `list_campaigns`, `list_static_lists`, and
-`get_activities` all page INTERNALLY now — no `next_page_token` or
-`more_result` field exists on any of the four, input or output. A caller
-gets one call, one complete file up to the effective row limit (§5:
+**Internal pagination is hidden by design (2026-08-03 hide-paging change,
+operator ruling "the paging is an implementation detail that should be
+hidden," design doc §5.4/§7.2 as amended).** `get_leads`, `list_campaigns`, `list_static_lists`, and
+`get_activities` all page INTERNALLY — no `next_page_token` or
+`more_result` field exists on any of the four, input or output. The internal
+loop runs to completion up to the effective row limit (§5:
 `acknowledge_default_limit_override`/`row_limit`, default 500, hard cap
-5,000), and a `truncated` boolean. This section documents the internal
-mechanism (`marketing_actions._paginate_token_authoritative` /
-`_paginate_activities`) for anyone maintaining it — it is no longer a
-caller-facing contract, but the underlying vendor quirks it papers over are
-unchanged and still worth knowing.
+5,000) and produces one complete file with a `truncated` boolean — the
+vendor's own per-call ceiling is never a caller-facing continuation. This
+section documents the internal mechanism
+(`marketing_actions._paginate_token_authoritative` / `_paginate_activities`)
+for anyone maintaining it — it is no longer a caller-facing contract, but the
+underlying vendor quirks it papers over are unchanged and still worth
+knowing.
+
+**D0.3 sync-verb migration (2026-08-09) layers a SECOND change on top of the
+above, at the dispatch level, not the pagination level.** All four verbs now
+dispatch an async job and return `{job_id, status}` in milliseconds; the
+internal pagination described in this section runs in a background worker,
+off the dispatch path, and a direct `process_call` caller retrieves the
+finished file (or a `truncated`/error outcome) with a second call,
+`check_marketo_job_status(job_id)` — never in the same round-trip as the
+dispatch. A caller inside a flow gets the finished result routed back
+automatically via `completion_handlers` instead. Do not read "one call, one
+complete file" anywhere below as describing the CALLER's round-trip count —
+it describes the vendor-facing internal loop only.
+
+**Batch 2 (same 2026-08-09 migration) extends this to the plugin's three
+single-vendor-call reads: `describe_lead_fields`, `list_activity_types`, and
+`get_api_usage`.** None of the three ever looped internally (unaffected by
+the pagination discussion above), but each still made its one vendor call
+inline on the dispatch path before this batch — same fix, no pagination
+loop to move, just the single call. `describe_lead_fields`' "returns...
+searchable_fields" and `get_api_usage`'s "returns `calls_today`..." above
+describe what the FINISHED job's result carries, retrieved via
+`check_marketo_job_status(job_id)` — not what the dispatch call itself
+returns, which is `{job_id, status}` only, same as the four above.
 
 The four internally-paged reads do not share one safe raw continuation
 signal:
@@ -111,7 +136,7 @@ anybody?" — it reads the Marketo activity log (emails sent/delivered, alerts,
 sales emails, interesting moments, campaign requests, data value changes)
 from an ISO-8601 instant (`since_datetime`, which mints the internal loop's
 starting token — required on every call, there is no caller-supplied
-continuation-token path since Dax 29.2). `activity_type_ids` is mandatory
+continuation-token path since the hide-paging change). `activity_type_ids` is mandatory
 and accepts 1-10 ids; `lead_ids` is optional with a maximum of 30. Both caps
 are Marketo's own and are enforced in-plugin rather than left to a
 server-side error.
@@ -131,7 +156,7 @@ Three traps worth knowing:
   and its unreliability now has a sharper consequence than before.**
   `moreResult: true` means the internal loop KEEPS PAGING, even when a page's
   `result` is empty. Marketo streams activities in ~300-item pages and an
-  empty page mid-stream is normal. Before Dax 29.2, an under-reporting flag
+  empty page mid-stream is normal. Before the hide-paging change, an under-reporting flag
   was survivable: the caller still held `next_page_token` and could keep
   going manually. Now that the token is hidden, an under-reporting flag means
   `get_activities` returns `truncated: false` on an incomplete read, with
@@ -230,13 +255,13 @@ consumer verifies before depending on it, never as an assurance from us** — if
 an asset verb is ever added, the gap surfaces as a 403 at first real use rather
 than at setup, which is the failure mode `check_setup` exists to prevent.
 
-## Business-data limits + spill-floor migration (2026-08-02)
+## Business-data limits + data-export migration (2026-08-02)
 
 `describe_lead_fields`, `get_leads`, `list_activity_types`, `get_activities`,
 `list_campaigns`, and `list_static_lists` ALWAYS write their result to the
 caller's `output_tsv_path` — never records inline, at any size
 (`workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md`,
-§7.1; the former blob-spill/`INLINE_BYTE_CAP` branch is deleted, not
+§7.1; the former blob-export/`INLINE_BYTE_CAP` branch is deleted, not
 lowered). Blob storage has retired from this plugin entirely — `get_api_usage`
 is the only read verb untouched by this migration (small, bounded, no PII,
 outside the six §7.1 names). Neither destination is platform blob storage —
@@ -245,7 +270,7 @@ operator-configured `export_allowed_roots` entry in this plugin's config
 (`export_containment.py`, realpath + `commonpath` containment mirroring
 `ledger_allowed_roots`; the default `[]` REFUSES every write).
 
-**Superseded by Dax 29.2 (2026-08-03) for four of the six — see below.** At
+**Superseded by the hide-paging change (2026-08-03) for four of the six — see below.** At
 Tier-2 landing, none of the six carried an `acknowledge_default_limit_override`/
 `row_limit` pair, because Marketo fixes every one of these verbs' per-call
 reads at (or below) 300 records server-side with no query-side size
@@ -272,8 +297,8 @@ on any of the four, input or output; a `truncated` boolean replaces them.
 Beyond the hard cap: **no resumption, by design** — a caller re-invokes the
 verb with a narrower `filter_values` slice (`get_leads`), a narrower
 `names`/`program_names` filter (`list_campaigns`/`list_static_lists`), or a
-later `since_datetime` (`get_activities`). For Dax's measured 45,325-lead
-case this means several separate `get_leads` calls against non-overlapping
+later `since_datetime` (`get_activities`). For a caller working a lead count
+well past the 5,000 hard cap, this means several separate `get_leads` calls against non-overlapping
 filters (~17 internal vendor calls each to reach the 5,000 cap), not one
 call plus caller-side paging — real latency and API-quota cost, disclosed in
 the process description with a `get_api_usage` check suggested first. The
@@ -291,7 +316,7 @@ probed verb's result to a throwaway tempfile via a passthrough gate, never
 the plugin's real `_export_path_gate`, and deletes the tempfile
 unconditionally afterward. `get_leads`/`list_campaigns`/`list_static_lists`'
 probes additionally pass `acknowledge_default_limit_override=true` +
-`row_limit=1`, a Dax 29.2 quota-safety fix — without it, a cheap permission
+`row_limit=1`, a quota-safety fix from the hide-paging change — without it, a cheap permission
 probe on an instance with more than 300 campaigns/lists would now make a
 second internal vendor call to reach the new default, which a setup check
 has no business doing.
@@ -470,7 +495,7 @@ Marketo's Bulk Extract API (create job → enqueue → poll status → download
 file) is a materially different, multi-call control-flow shape from every
 other verb in this connector and is explicitly deferred out of v1.
 `get_leads`'s internal pagination up to its row_limit hard cap (see
-"Business-data limits + spill-floor migration" above) covers the common
+"Business-data limits + data-export migration" above) covers the common
 ad-hoc case without the async job machinery.
 
 ## SQL-lockdown gate note
@@ -489,6 +514,6 @@ silent for this plugin — no allowlist entry needed anywhere in `src/` or
 | `src/marketo_plugin/app_config.py` | Resolves `marketo_instance` from the address book; the client_secret is chain-consumed. |
 | `src/marketo_plugin/http_client.py` | `MarketoClient` — synchronous httpx client with cached, envelope-triggered re-mintable bearer auth (client-credentials grant, GET-based token mint). |
 | `src/marketo_plugin/errors.py` | Envelope-first error classification (`classify_marketo_envelope`) from the response body's `errors[]` list. |
-| `src/marketo_plugin/export_containment.py` | Own-copy workspace-root containment gate (`assert_export_path_allowed`) binding `export_allowed_roots` — admits `output_tsv_path` for the six spill-floor-migrated read verbs. |
-| `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `get_api_usage`, `list_activity_types`, `get_activities`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup` — the six-verb spill-floor set write to `output_tsv_path` under the §7.1 migration (see above). |
+| `src/marketo_plugin/export_containment.py` | Own-copy workspace-root containment gate (`assert_export_path_allowed`) binding `export_allowed_roots` — admits `output_tsv_path` for the six data-export-migrated read verbs. |
+| `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `get_api_usage`, `list_activity_types`, `get_activities`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup` — the six-verb data-export set write to `output_tsv_path` under the §7.1 migration (see above). |
 | `src/marketo_plugin/plugin.py` | The `MarketoPlugin` EDGE provider — client lifecycle, error mapping, EDGE registration, `_export_path_gate`. |

@@ -159,14 +159,48 @@ class RealShapeState:
     def _table(self, namespace: str, table: str) -> list[dict[str, Any]]:
         return self._rows.setdefault((namespace, table), [])
 
-    def _stamp_insert(self, record: dict[str, Any]) -> None:
-        """Standardizer parity: fill created_at/updated_at on insert (only)."""
+    def _stamp_insert(self, record: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+        """Standardizer parity: fill created_at/updated_at/id on insert (only).
+        The real provider's standardizer assigns every row a generated ``id``
+        (a standardizer column, per ``_STANDARDIZER_COLUMNS``) — a fake that
+        omits it hides any reader that keys a later write on the row's own
+        ``id`` (e.g. a guarded ``fired_at IS NULL`` update keyed on the id a
+        prior ``query_state`` read back), which the real provider always
+        supports."""
         record.setdefault("created_at", self.now_iso())
         record.setdefault("updated_at", record["created_at"])
+        record.setdefault("id", f"gen-{len(rows) + 1}")
 
     @staticmethod
-    def _match(row: dict[str, Any], filters: dict[str, Any]) -> bool:
-        return all(row.get(k) == v for k, v in filters.items())
+    def _match_one(cell: Any, want: Any) -> bool:
+        """One filter column's predicate, mirroring the REAL postgres
+        provider's ``_build_filter_clauses`` grammar (provider.py) —
+        fixed 2026-08-04 after acceptance Test C caught the divergence live:
+        a bare ``None`` filter value used to equality-match a bare ``None``
+        cell here, but the real provider compiles a bare ``None`` to SQL
+        ``col = NULL`` — always UNKNOWN/false, matching ZERO rows, never a
+        NULL cell. The provider's documented NULL form is
+        ``{"op": "is_null"}`` / ``{"op": "is_not_null"}``; this fake must
+        require the same op to match a NULL cell, or it hides exactly the
+        bug class that shipped live and matched nothing for months."""
+        if isinstance(want, dict):
+            op = want.get("op")
+            if op == "is_null":
+                return cell is None
+            if op == "is_not_null":
+                return cell is not None
+            raise ValueError(f"RealShapeState._match_one: unsupported dict-op filter {want!r}")
+        if want is None:
+            # A bare None NEVER matches, not even a None cell — the real
+            # provider's `col = NULL` is always false. There is no
+            # equality-with-NULL in this grammar; is_null is a different
+            # value shape entirely.
+            return False
+        return cell == want
+
+    @classmethod
+    def _match(cls, row: dict[str, Any], filters: dict[str, Any]) -> bool:
+        return all(cls._match_one(row.get(k), v) for k, v in filters.items())
 
     # -- query --------------------------------------------------------
     def query_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
@@ -234,7 +268,7 @@ class RealShapeState:
                 existing.update(record)
                 return _ok({"result": {"upserted": 1}})
         record.setdefault("is_deleted", 0)
-        self._stamp_insert(record)
+        self._stamp_insert(record, rows)
         rows.append(record)
         if on_conflict == "do_nothing":
             return _ok({"result": {"inserted": True, "id": record.get("id")}})
@@ -258,9 +292,9 @@ class RealShapeState:
         if external_id is not None and any(r.get("external_id") == external_id for r in rows):
             return _err(f"duplicate external_id={external_id!r}")
         record.setdefault("is_deleted", 0)
-        self._stamp_insert(record)
+        self._stamp_insert(record, rows)
         rows.append(record)
-        return _ok({"result": {"generated_id": f"gen-{len(rows)}", "inserted": 1}})
+        return _ok({"result": {"generated_id": record["id"], "inserted": 1}})
 
     def update_state(
         self, namespace: str, query: dict[str, Any], updates: dict[str, Any],

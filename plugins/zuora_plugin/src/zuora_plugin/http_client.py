@@ -1,12 +1,15 @@
-"""Zuora REST client — OAuth 2.0 client-credentials, synchronous.
+"""Zuora REST client — OAuth 2.0 client-credentials.
 
-Synchronous (not the 2026-06-20 design appendix's ``httpx.AsyncClient``
-sketch) to match the house verb shape: every wave-2 connector's
-``@platform_process`` methods are plain ``(self, params, state)`` calls, the
-shape the g_suite build proved out and the umbrella design's cover-note
-explicitly says supersedes the recipe's async sketches (umbrella design,
-"Prior art" note). A sync ``httpx.Client`` avoids running an event loop
-inside a sync verb call.
+DEPRECATED-PENDING-REMEDIATION (2026-08-09): this client's calls run
+inline on the action-dispatch path. The prior framing here — that sync
+"matches the house verb shape" and that the 2026-06-20 async sketch was
+correctly superseded — is retracted by operator ruling; see the 2026-08-05
+action-pipeline sync-verb remediation ruling.
+The umbrella design's "Prior art" note (workbench/2026-07-09_enterprise_connectors_design.md)
+is superseded on this point only — its other content (auth, error
+taxonomy, SQL-access lockdown) is unaffected. Zuora migration to the
+deferred-completion shape is Phase 1 (bizops) scope, not yet scheduled.
+See workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md.
 
 The bearer token is cached in-memory and re-fetched ~30s before its recorded
 expiry (clock-skew margin) or on a fresh 401 (force re-fetch once). It is

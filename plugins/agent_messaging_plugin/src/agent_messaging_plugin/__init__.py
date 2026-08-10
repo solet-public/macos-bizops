@@ -1,4 +1,4 @@
-"""Agent messaging plugin — schema + run_turn + service-binding host.
+"""Agent messaging plugin — schema + peer messaging + service-binding host.
 
 The server plugin is re-exported LAZILY (PEP 562): importing the bare package
 must not pull in `.plugin`, which resolves a scoped vault name (and so requires

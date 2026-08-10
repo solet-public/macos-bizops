@@ -67,6 +67,20 @@ def require_updated(result: object) -> int:
     return updated if isinstance(updated, int) else 0
 
 
+def require_deleted(result: object) -> int:
+    """Rows-affected from a COMPLETED ``delete_records`` (``data.result.deleted``).
+
+    NESTED under ``result``, same shape family as :func:`require_updated`. The
+    predicated-delete callers (a displacer pruning the loser's session-key row)
+    need the count to distinguish "matched and removed" from "predicate no
+    longer held" (0 — a benign lost race, not a fault).
+    """
+    data = _completed_data(result, "delete")
+    inner = data.get("result")
+    deleted = inner.get("deleted") if isinstance(inner, dict) else None
+    return deleted if isinstance(deleted, int) else 0
+
+
 def is_completed(result: object) -> bool:
     """True iff ``result`` is a COMPLETED ActionResult envelope (non-raising).
 

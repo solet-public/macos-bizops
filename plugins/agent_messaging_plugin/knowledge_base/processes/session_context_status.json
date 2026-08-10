@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::session_context_status",
+  "display_name": "Read a session's cached context-window occupancy",
+  "description": "maintenance-verbs M1 (shape (a)). Reads back the cached snapshot report_context_status last wrote for one agent_instance_id: model, current_tokens, ceiling, the derived fraction of ceiling, a per-prompt carriage-cost estimate (~10% of current_tokens, the operator's own cached-context-cost arithmetic), whether rotation is due (fraction >= rotation_thresholds.ROTATION_THRESHOLD_FRACTION), and when it was measured. resolved=false (never a raised error) is the expected, stable shape when no report has landed yet for that session — a fresh session pre-first-tick, or (until its own seat-wiring design note is acted on) a host=operator seat. This handler is a trivial state read; it never resolves a transcript path or touches a file itself.",
+  "embedding_description": "Read a session's current context-window usage as a fraction of its model's ceiling, plus a rotation-due flag and a per-prompt carriage-cost estimate — the rotation-economics gauge, distinct from budget_report (lifetime spend per budget_line, excludes host=operator, wrong instrument for this) and from session_status (the lifecycle ledger row, unrelated to context occupancy).",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Context status read",
+    "result_type": "session_context_status_result",
+    "result_description": "resolved, resolution_error, agent_instance_id, claude_session_id, model, current_tokens, ceiling, fraction, per_prompt_carriage_estimate_tokens, rotation_due, measured_at.",
+    "presentation_guidance": "Lead with resolved — if false, report resolution_error verbatim and stop; never estimate a number in its place. If resolved and rotation_due is true, say so plainly; the operator's checkpoint-and-stop tripwire (~60% of ceiling) is stricter than this verb's own rotation_due flag (0.5), so a caller applying the tripwire should compare fraction directly, not rely on rotation_due alone."
+  },
+  "error_processor_customizations": {
+    "action_context": "A single filtered read on agent_instance_id against the session_context_status cache table.",
+    "error_interpretation": "missing_argument: agent_instance_id was empty. state_service_unavailable: the state service is not bound. Absence of a cached row is NOT an error — it returns resolved=false in a normal successful result, never a raised failure.",
+    "recovery_guidance": "For missing_argument, supply the target session's own agent_instance_id (ledger id for a worker, from list_sessions/session_status; a worker/seat's own env-native AGENT_INSTANCE_ID for itself)."
+  }
+}

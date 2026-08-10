@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lif01_reenable_smoke_plugin"
 version = "1.0.0"
-description = "Test fixture for the LIF-01 set_plugin_enabled disable->enable smoke. LifecycleManaged plugin whose prepare_for_readiness raises unless orchestrator_ref is injected -- the exact Dax S31.4 failure mode."
+description = "Test fixture for the LIF-01 set_plugin_enabled disable->enable smoke. LifecycleManaged plugin whose prepare_for_readiness raises unless orchestrator_ref is injected -- the exact re-enable failure mode."
 requires-python = "==3.13.*"
 dependencies = []
 

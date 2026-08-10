@@ -126,6 +126,7 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
                 attachment_blob_upload=None,
                 attachment_mime_type=None,
                 attachment_filename=None,
+                usage_json=_optional_dict(payload.get("usage")),
             )
         if kind == PAYLOAD_KIND_TOOL_CALL:
             tool_name = _require_str(payload, "tool_name")
@@ -506,6 +507,13 @@ def _optional_str(value: object) -> str | None:
     if isinstance(value, str):
         return value
     return None
+
+
+def _optional_dict(value: object) -> dict[str, Any] | None:
+    """T1 usage-capture lane (2026-08-05 ruling): the vendor parser's
+    'usage' payload key, verbatim -- None for any non-dict value (never
+    coerced, matches _optional_str's own tolerant-but-honest contract)."""
+    return value if isinstance(value, dict) else None
 
 
 def _parse_cursor_dt(

@@ -89,19 +89,28 @@ CONFIG_KEY_REQUEST_TIMEOUT_SECONDS: Final[str] = "request_timeout_seconds"
 TOKEN_REFRESH_MARGIN_SECONDS: Final[float] = 30.0
 DEFAULT_TOKEN_TTL_SECONDS: Final[float] = 3600.0
 
+# Client-side throttle (D0.3 sync-verb migration, 2026-08-09 — the plugin's
+# prior full seriality accidentally kept concurrency at 1; the background
+# worker removes that, so these are now real limits, not inherited ones).
+# Margin under Marketo's 615 "10 concurrent in-flight" cap.
+MARKETO_MAX_CONCURRENT_CALLS: Final[int] = 8
+# Margin under Marketo's 606 "100 calls/20s" cap.
+MARKETO_RATE_WINDOW_SECONDS: Final[float] = 20.0
+MARKETO_RATE_WINDOW_MAX_CALLS: Final[int] = 90
+
 # ---------------------------------------------------------------------------
-# Business-data limits + spill-floor migration (2026-08-02 —
+# Business-data limits + data-export migration (2026-08-02 —
 # workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md,
 # §7.1). describe_lead_fields, get_leads, list_activity_types, get_activities,
 # list_campaigns, and list_static_lists now ALWAYS write to a caller-supplied
-# output_tsv_path — never records inline, at any size (the former blob-spill/
+# output_tsv_path — never records inline, at any size (the former blob-export/
 # INLINE_BYTE_CAP branch is deleted, not lowered; blob storage retires from
 # this plugin entirely). get_api_usage is UNCHANGED — small, bounded, no PII,
 # not part of the six verbs §7.1 touches.
 #
-# Dax 29.2 hide-paging build (2026-08-03, operator ruling "the paging is an
-# implementation detail that should be hidden", design doc §5.4/§7.2 as
-# amended, ruled doc-wide by Coordinator-Day). get_leads, get_activities,
+# Internal pagination is hidden by design (2026-08-03 hide-paging change,
+# operator ruling "the paging is an implementation detail that should be
+# hidden", design doc §5.4/§7.2 as amended, ruled doc-wide). get_leads, get_activities,
 # list_campaigns, and list_static_lists now carry the standard §5
 # acknowledge_default_limit_override/row_limit pair for the first time —
 # reversing the original Tier-2 build's "nothing to bind on" reasoning, which
@@ -204,6 +213,10 @@ ERROR_RATE_LIMITED: Final[str] = "marketo.rate_limited"
 ERROR_QUOTA_EXCEEDED: Final[str] = "marketo.daily_quota_exceeded"
 ERROR_QUERY_FAILED: Final[str] = "marketo.query_failed"
 ERROR_API_ERROR: Final[str] = "marketo.api_error"
+# D0.3 sync-verb migration (2026-08-09): the four internally-paginating
+# list/search verbs now dispatch as async jobs; this is check_marketo_job_status'
+# not-found case, distinct from ERROR_OBJECT_NOT_FOUND (a Marketo-side 702).
+ERROR_JOB_NOT_FOUND: Final[str] = "marketo.job_not_found"
 
 # ---------------------------------------------------------------------------
 # Marketo REST error-code map: numeric code (string) -> (our error code, retryable)
@@ -301,3 +314,16 @@ RESULT_TYPE_MERGE_LEADS: Final[str] = "marketo_merge_leads_result"
 RESULT_TYPE_GET_ACTIVITIES: Final[str] = "marketo_get_activities_result"
 RESULT_TYPE_LIST_ACTIVITY_TYPES: Final[str] = "marketo_list_activity_types_result"
 RESULT_TYPE_GET_API_USAGE: Final[str] = "marketo_get_api_usage_result"
+RESULT_TYPE_CHECK_MARKETO_JOB_STATUS: Final[str] = "marketo_check_job_status_result"
+
+# ---------------------------------------------------------------------------
+# D0.3 sync-verb migration (2026-08-09) — async job dispatch for the four
+# internally-paginating list/search verbs whose vendor round-trips are the
+# worst loop-hold shape in the corpus (get_leads, get_activities,
+# list_campaigns, list_static_lists). See marketing_actions.py's module
+# docstring for the prepare/execute split this enables.
+# ---------------------------------------------------------------------------
+MARKETO_ASYNC_ACTION_NAMES: Final[frozenset[str]] = frozenset(
+    {"get_leads", "get_activities", "list_campaigns", "list_static_lists"}
+)
+PARAM_JOB_ID: Final[str] = "job_id"

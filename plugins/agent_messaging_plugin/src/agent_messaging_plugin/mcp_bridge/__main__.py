@@ -98,40 +98,19 @@ SERVER_INSTRUCTIONS: Final[str] = "\n".join(
         "invoke registered homunculus processes without going through inference. Use",
         "them when you already know which process you want.",
         "",
-        "== Backend dispatch (agent_thread_open / agent_send) ==",
-        "",
-        "Open a thread with agent_thread_open(backend, ...). Send messages",
-        "with agent_send(thread_id, content). Each send dispatches one",
-        "backend turn asynchronously. Listen for bridge_delivery_result",
-        "channel notifications carrying a structured run_turn payload —",
-        "payload.status in {idle, interrupted, error} discriminates;",
-        "payload.error.code is a stable token on the error path. Read",
-        "history with agent_messages; check live state with agent_status;",
-        "close with agent_close. Bridge-bound: only this MCP session can",
-        "address threads opened through it.",
-        "",
         "== Peer messaging (peer_send / peer_inbox) ==",
         "",
         "Talk to other LIVE MCP-connected agents (humans, Codex, Claude,",
-        "whatever is registered in peer_list). Two delivery modes, gated",
-        "by an explicit marker in the prose:",
+        "whatever is registered in peer_list). Wake is a transport property,",
+        "not a sender-declared one: every peer_send is delivery-attempted",
+        "against the resolved recipient's live binding, waking it when a",
+        "native adapter is registered, unconditionally -- there is no",
+        "silent-vs-notifying mode to choose. A leading 'IMPORTANT:' in prose",
+        "is stripped as input hygiene only; it no longer changes delivery.",
         "",
-        '  - peer_send with prose starting "IMPORTANT" (followed by ":"',
-        "    or whitespace) -> notification fires on the receiver. The",
-        "    marker is stripped before delivery. Use ONLY when you",
-        "    genuinely need the receiver to act: questions, requests,",
-        "    corrections, things that move work forward.",
-        "",
-        "  - peer_send WITHOUT the IMPORTANT marker -> message is",
-        "    persisted in the thread but no notification fires. The",
-        '    receiver only sees it via peer_inbox. Use for FYI updates,',
-        '    acknowledgements, "got it" / "thanks" / wrap-ups, and any',
-        "    message where a reply would not add value.",
-        "",
-        "When you receive a peer_message notification, the sender used",
-        "IMPORTANT. Reply with substance, or stay silent if a reply adds",
-        "no value (silence is allowed even on IMPORTANT messages). Do",
-        'NOT reply with acknowledgements, thanks, or "got it" -- those',
+        "When you receive a peer_message notification, reply with substance,",
+        "or stay silent if a reply adds no value (silence is always allowed).",
+        'Do NOT reply with acknowledgements, thanks, or "got it" -- those',
         "create loops.",
         "",
         "Current limits: text-only channel, no attachments on direct calls,",
@@ -258,155 +237,6 @@ TOOLS: Final[list[Tool]] = [
         },
     ),
     Tool(
-        name="agent_thread_open",
-        description=(
-            "Open a durable inter-agent thread targeting a backend "
-            "(codex|claude_code). Optionally include initial_message to "
-            "dispatch a first turn immediately. Returns thread_id + (if "
-            "initial_message) message_id/action_id/flow_id. Async -- turn "
-            "results arrive as bridge_delivery_result channel notifications."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "backend": {
-                    "type": "string",
-                    "enum": ["codex", "claude_code"],
-                    "description": "Backend that owns the thread.",
-                },
-                "working_directory": {
-                    "type": "string",
-                    "description": (
-                        "Filesystem root for the backend; must be inside "
-                        "allowed_working_directory_roots if configured."
-                    ),
-                },
-                "title": {"type": "string", "description": "Optional short label."},
-                "context": {
-                    "type": "object",
-                    "description": "Optional context passed to the backend.",
-                    "properties": {
-                        "summary": {"type": "string"},
-                        "tags": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "additionalProperties": False,
-                },
-                "initial_message": {
-                    "type": "object",
-                    "description": (
-                        "Optional first message; if present the thread is "
-                        "dispatched immediately."
-                    ),
-                    "properties": {
-                        "content": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "type": {"type": "string", "enum": ["text"]},
-                                    "text": {"type": "string"},
-                                },
-                                "required": ["type", "text"],
-                                "additionalProperties": False,
-                            },
-                            "minItems": 1,
-                        },
-                        "response_mode": {"type": "string", "enum": ["async"]},
-                        "timeout_seconds": {"type": "integer", "minimum": 1},
-                    },
-                    "required": ["content"],
-                    "additionalProperties": False,
-                },
-            },
-            "required": ["backend"],
-            "additionalProperties": False,
-        },
-    ),
-    Tool(
-        name="agent_send",
-        description=(
-            "Append a follow-up message to an existing thread and dispatch "
-            "the next turn. Async -- completion arrives as a "
-            "bridge_delivery_result notification with the structured "
-            "payload (payload.status discriminates idle/interrupted/error)."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "thread_id": {"type": "string"},
-                "content": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "type": {"type": "string", "enum": ["text"]},
-                            "text": {"type": "string"},
-                        },
-                        "required": ["type", "text"],
-                        "additionalProperties": False,
-                    },
-                    "minItems": 1,
-                },
-                "response_mode": {"type": "string", "enum": ["async"]},
-                "timeout_seconds": {"type": "integer", "minimum": 1},
-            },
-            "required": ["thread_id", "content"],
-            "additionalProperties": False,
-        },
-    ),
-    Tool(
-        name="agent_messages",
-        description=(
-            "Read messages from a thread using cursor pagination. Returns "
-            "messages with cursor strictly greater than after_cursor, "
-            "ordered ascending."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "thread_id": {"type": "string"},
-                "after_cursor": {"type": "integer", "minimum": 0, "default": 0},
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100,
-                    "default": 50,
-                },
-            },
-            "required": ["thread_id"],
-            "additionalProperties": False,
-        },
-    ),
-    Tool(
-        name="agent_status",
-        description=(
-            "Snapshot read of a thread: status "
-            "(open|queued|running|idle|interrupted|error|closed), backend, "
-            "last cursor, active_action_id/active_flow_id if a turn is in "
-            "flight."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {"thread_id": {"type": "string"}},
-            "required": ["thread_id"],
-            "additionalProperties": False,
-        },
-    ),
-    Tool(
-        name="agent_close",
-        description=(
-            "Close a thread terminally. Refuses (HTTP 409 "
-            "agent_thread_running) if the thread has an active turn -- "
-            "wait for it to land or for agent_interrupt support to ship."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {"thread_id": {"type": "string"}},
-            "required": ["thread_id"],
-            "additionalProperties": False,
-        },
-    ),
-    Tool(
         name="peer_register",
         description="\n".join(
             [
@@ -503,23 +333,15 @@ TOOLS: Final[list[Tool]] = [
                 "  only after that instance is peer_unreachable. A live instance",
                 "  always wins, even if the session key points elsewhere.",
                 "",
-                "Loop-prevention contract:",
+                "Delivery contract:",
                 "  Messages are ALWAYS persisted in the (sender_bridge, peer_instance)",
-                "  agent_thread. They only fire a notification on the receiver if the",
-                '  prose begins with the marker "IMPORTANT" (case-sensitive, followed',
-                '  by ":" or whitespace). The marker is stripped before delivery.',
-                "",
-                "  - With IMPORTANT marker -> notification fires. Claude Code wakes",
-                "    through its registered native adapter; locally patched Codex",
-                "    wakes through notifications/homunculus/peer_message. Use ONLY when",
-                "    you genuinely need a response.",
-                "  - Without marker -> silent persistence. The receiver only sees the",
-                "    message if they explicitly call peer_inbox. Use for acks, status",
-                "    updates, FYI notes -- anything that does not require a response.",
-                "",
-                "Forgetting the marker on a real question means the receiver never sees",
-                "it -- you will need to resend with the marker. That is by design: it",
-                'forces conscious "I want a response" choices and breaks ack loops.',
+                "  agent_thread, and ALWAYS delivery-attempted against the resolved",
+                "  recipient's live binding -- wake is a transport property, not",
+                "  something the sender opts into. Claude Code wakes through its",
+                "  registered native adapter; locally patched Codex wakes through",
+                "  notifications/homunculus/peer_message. A leading 'IMPORTANT:' in",
+                "  the prose is stripped as input hygiene only; it no longer gates",
+                "  delivery.",
                 "",
                 "Fails (HTTP 400) if the peer is not currently registered, the",
                 "peer_id is ambiguous without an instance hint (peer_ambiguous),",
@@ -582,10 +404,12 @@ TOOLS: Final[list[Tool]] = [
                 "Git-Controller, and Codex-Reviewer, depending on which roles are",
                 "currently claimed in the homunculus.",
                 "",
-                "Loop-prevention contract:",
-                "  Prefix content with \"IMPORTANT: \" only when the role holder should",
-                "  wake and act now. Without IMPORTANT the message is persisted for the",
-                "  holder's role inbox but does not wake a live session.",
+                "Delivery contract:",
+                "  Every send is persisted to the role's durable inbox AND",
+                "  delivery-attempted against the current holder's live binding --",
+                "  wake is a transport property, not something the sender opts into.",
+                "  A leading 'IMPORTANT:' in the content is stripped as input",
+                "  hygiene only; it no longer gates delivery.",
                 "",
                 "This is the preferred task-assignment tool. Use peer_send only for",
                 "direct replies or an operator-requested exact live instance.",
@@ -604,8 +428,9 @@ TOOLS: Final[list[Tool]] = [
                 "content": {
                     "type": "string",
                     "description": (
-                        "Message text. Prefix with 'IMPORTANT: ' to wake the "
-                        "current role holder."
+                        "Message text. Delivery is a transport property, not a "
+                        "sender-declared one: every send is delivery-attempted "
+                        "against the resolved recipient's live binding."
                     ),
                 },
             },
@@ -619,14 +444,11 @@ TOOLS: Final[list[Tool]] = [
             [
                 "Pull peer messages addressed to your agent_id.",
                 "",
-                "Default behavior: return silent and IMPORTANT-marked messages",
-                "as a durable catch-up view. Use an `after` timestamp when polling",
-                "during an active incident so old IMPORTANT history does not flood",
-                "the context window.",
-                "",
-                "Set include_important=false only for intentional silent-only",
-                "status checks where previously-notified IMPORTANT messages would",
-                "be noise.",
+                "Returns the durable catch-up view of every message addressed to",
+                "you -- delivery is a transport property now, not a sender-declared",
+                "one, so there is no silent-vs-notified split to filter on here.",
+                "Use an `after` timestamp when polling during an active incident so",
+                "old history does not flood the context window.",
                 "",
                 "Spans every peer thread targeting you, regardless of which bridge owns",
                 "the thread. Pagination uses after (ISO-8601 timestamp); pass the previous",
@@ -647,16 +469,6 @@ TOOLS: Final[list[Tool]] = [
                     "minimum": 1,
                     "maximum": 100,
                     "default": 50,
-                },
-                "include_important": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": (
-                        "When true, return the durable catch-up view including "
-                        "messages whose sender used the IMPORTANT marker. "
-                        "Default true. Set false only for intentional "
-                        "silent-only status checks."
-                    ),
                 },
                 "role_after": {
                     "type": "string",
@@ -814,32 +626,6 @@ async def _tool_process_result(fw: Forwarder, a: dict[str, Any]) -> dict[str, An
     return await fw.process_result(action_id=str(a["action_id"]))
 
 
-async def _tool_agent_thread_open(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
-    return await fw.agent_thread_open(args=a)
-
-
-async def _tool_agent_send(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
-    thread_id = str(a["thread_id"])
-    body = {k: v for k, v in a.items() if k != "thread_id"}
-    return await fw.agent_send(thread_id=thread_id, args=body)
-
-
-async def _tool_agent_messages(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
-    return await fw.agent_messages(
-        thread_id=str(a["thread_id"]),
-        after_cursor=int(a.get("after_cursor", 0)),
-        limit=int(a.get("limit", 50)),
-    )
-
-
-async def _tool_agent_status(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
-    return await fw.agent_status(thread_id=str(a["thread_id"]))
-
-
-async def _tool_agent_close(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
-    return await fw.agent_close(thread_id=str(a["thread_id"]))
-
-
 async def _tool_peer_register(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
     return await fw.peer_register(
         agent_id=str(a["agent_id"]),
@@ -870,10 +656,13 @@ async def _tool_peer_send_by_name(
 
 
 async def _tool_peer_inbox(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
+    # A4 (2026-08-04): include_important retired from the tool schema -- the
+    # catch-up view is the only meaningful one now that delivery is
+    # unconditional. Always True; never read from the caller.
     return await fw.peer_inbox(
         after=a.get("after"),
         limit=a.get("limit"),
-        include_important=bool(a.get("include_important", True)),
+        include_important=True,
         role_after=a.get("role_after"),
     )
 
@@ -889,11 +678,6 @@ _TOOL_DISPATCH: Final[
     "process_schema": _tool_process_schema,
     "process_call": _tool_process_call,
     "process_result": _tool_process_result,
-    "agent_thread_open": _tool_agent_thread_open,
-    "agent_send": _tool_agent_send,
-    "agent_messages": _tool_agent_messages,
-    "agent_status": _tool_agent_status,
-    "agent_close": _tool_agent_close,
     "peer_register": _tool_peer_register,
     "peer_list": _tool_peer_list,
     "peer_send": _tool_peer_send,
@@ -964,6 +748,14 @@ async def _run() -> None:
     # (forwarder._notification_method_for), so a codex holder would be
     # deaf — organism turns would park until the serve-timeout sweep.
     provides_inference = agent_id == DEFAULT_AGENT_ID
+    # codex-watch-migration wake_capable design (2026-08-06): declared here,
+    # never probed — true only for the agent kind with a registered native
+    # wake adapter (Claude Code). Codex's bridge has no turn-injection
+    # surface once the patched build retires, so it declares false and the
+    # dispatch path tees its deliveries into the spool wake_waiter.js reads
+    # instead. See models.py's BridgeBinding.wake_capable for the full
+    # rationale.
+    wake_capable = agent_id == DEFAULT_AGENT_ID
     forwarder = Forwarder(
         base_url=base_url,
         homunculus_name=homunculus_name,
@@ -973,6 +765,7 @@ async def _run() -> None:
         session_label=session_label,
         parent_pid=parent_pid,
         provides_inference=provides_inference,
+        wake_capable=wake_capable,
         session_role=session_role,
     )
     server = _build_server(forwarder)

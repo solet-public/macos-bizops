@@ -20,6 +20,15 @@ Coverage:
 * ``compound_refused`` — unique + another field (not_null) both differ still
   raises NotImplementedError (single-axis discipline preserved).
 * ``diff_schema_e2e`` — the drop lands through the top-level diff_schema.
+* ``event_table_real_shape_exactly_one_op`` — schema-debt-external-id lane,
+  2a leg (2), 2026-08-06: diffing the REAL, full ``session_ledger__event``
+  table (7 indexes, ~15 columns) between its pre-fix shape
+  (``external_id.unique=True``, simulating the live recorded snapshot) and
+  its post-fix declared shape (``unique=False``, the 2a code) yields
+  EXACTLY ONE op — the standalone DROP CONSTRAINT — and touches no other
+  column or index. Guards against a wider-than-intended diff: the other 6
+  indexes and the composite ``idx_event_session_external_unique`` must be
+  byte-identical on both sides and must not appear in the emitted ops.
 
 Per [[sandbox-mutating-smokes]] all fixtures are in-memory; schema_diff is
 pure-functional (no DB / filesystem side effects).
@@ -30,6 +39,7 @@ Run:
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 from pathlib import Path
 
@@ -40,7 +50,12 @@ sys.path.insert(
     str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
+from ananta.llm.session_ledger.schema import (  # noqa: E402
+    TABLE_EVENT,
+    get_session_ledger_schema,
+)
 from ananta.types.column_types import ColumnType  # noqa: E402
+from ananta.types.schema_standardizer import SchemaStandardizer  # noqa: E402
 from ananta.types.schema_types import (  # noqa: E402
     ColumnDefinition,
     SchemaDefinition,
@@ -176,11 +191,76 @@ def diff_schema_e2e() -> None:
     )
 
 
+def event_table_real_shape_exactly_one_op() -> None:
+    """2a leg (2): the diff engine touches ONLY the standalone constraint.
+
+    ``declared`` is the real, standardized ``session_ledger__event`` table as
+    2a's code now declares it (``external_id.unique=False``). ``current``
+    simulates the pre-fix recorded snapshot: identical in every other
+    respect, but with ``external_id.unique`` flipped back to True (what was
+    live before 2a's code shipped). If 2a's fix accidentally touched any
+    other column or index, this diff would emit more than one op.
+    """
+    print("event_table_real_shape_exactly_one_op:")
+    real_schema = get_session_ledger_schema()
+    namespace = real_schema.namespace
+    declared_event = SchemaStandardizer().standardize_schema(real_schema).tables[TABLE_EVENT]
+
+    pre_fix_external_id = dataclasses.replace(
+        declared_event.columns["external_id"], unique=True,
+    )
+    current_event = dataclasses.replace(
+        declared_event,
+        columns={**declared_event.columns, "external_id": pre_fix_external_id},
+    )
+
+    _check(
+        _is_unique_only_change(
+            current_event.columns["external_id"], declared_event.columns["external_id"],
+        ),
+        "the ONLY column-level difference is external_id.unique",
+    )
+    _check(
+        current_event.indexes == declared_event.indexes,
+        "every index (including the composite idx_event_session_external_unique) "
+        "is byte-identical on both sides",
+    )
+
+    ops = _diff_or_refuse_column_changes(
+        namespace=namespace, table_name=TABLE_EVENT,
+        current_table=current_event, declared_table=declared_event,
+        schema_name="example",
+    )
+    _check(len(ops) == 1, f"exactly 1 op emitted for the real event table; got {len(ops)}")
+    if len(ops) == 1:
+        s = ops[0].as_string()
+        expected_constraint = f"{namespace}__{TABLE_EVENT}_external_id_key"
+        _check(
+            "DROP CONSTRAINT" in s and expected_constraint in s,
+            f"op is DROP CONSTRAINT on {expected_constraint!r} (got {s!r})",
+        )
+
+    full_ops = diff_schema(
+        namespace=namespace,
+        current=SchemaDefinition(namespace=namespace, tables={TABLE_EVENT: current_event}),
+        declared=SchemaDefinition(namespace=namespace, tables={TABLE_EVENT: declared_event}),
+        mode="update",
+        schema_name="example",
+        current_index_physical_names={},
+    )
+    _check(
+        len(full_ops) == 1,
+        f"top-level diff_schema also emits exactly 1 op for the whole table "
+        f"(no drop-index/create-index churn from unrelated indexes); got {len(full_ops)}",
+    )
+
+
 def main() -> int:
     unique_drop()
     unique_add()
     compound_refused()
     diff_schema_e2e()
+    event_table_real_shape_exactly_one_op()
     print()
     print(f"  passed: {_passed}")
     print(f"  failed: {len(_failed)}")

@@ -5,7 +5,7 @@ a ``params`` dict, return plain result dicts. Blob I/O is injected —
 ``download_file`` receives a ``blob_writer`` callable so the plugin owns the
 blob-storage coupling while this module owns Drive + media transfer.
 
-This module is the worked example of the blob-spill pattern the remaining
+This module is the worked example of the blob-export pattern the remaining
 export/download verbs (sheets_export, docs_export, slides_export) replicate:
 the verb returns a ``*_blob_key``; the verb must be declared in
 ``get_edge_process_definitions`` (decorated<->declared parity — a FATAL
@@ -44,7 +44,7 @@ _GOOGLE_NATIVE_PREFIX = "application/vnd.google-apps"
 def list_files(drive: Any, params: dict[str, Any]) -> dict[str, Any]:
     """List Drive files matching a Drive query (newest first).
 
-    Business-data limits (2026-08-02, resource guard, not the spill floor —
+    Business-data limits (2026-08-02, resource guard, not the data-export requirement —
     g_suite is limits-only): the CEILING defaults to DRIVE_DEFAULT_PAGE_SIZE
     (500); ``acknowledge_default_limit_override=true`` + an explicit
     ``row_limit`` (up to DRIVE_PAGE_SIZE_CAP, Drive's own real single-call

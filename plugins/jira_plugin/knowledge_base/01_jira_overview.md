@@ -118,7 +118,7 @@ mystery 401.
 
 ## Business-data limits migration (2026-08-02, revised 2026-08-03)
 
-**Jira EXITED the spill floor entirely** — operator veto, 2026-08-03
+**Jira EXITED the data-export requirement entirely** — operator veto, 2026-08-03
 verbatim: *"We have no PII in Jira - just company internal accounts. Don't
 worry at all about PII in Jira."* An earlier revision of this section (still
 visible in git history) had `jql_search`/`list_comments` always writing to a

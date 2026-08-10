@@ -66,6 +66,8 @@ from ananta.llm.session_ledger.schema import (  # noqa: E402
 from ananta.llm.session_ledger.summarization import VECTOR_NAMESPACE  # noqa: E402
 from ananta.services.session_ledger_service.service import (  # noqa: E402
     SessionLedgerService,
+)
+from ananta.services.session_ledger_service.summarize import (  # noqa: E402
     _assemble_transcript,
 )
 from ananta.services.session_ledger_service.summary_executor import (  # noqa: E402

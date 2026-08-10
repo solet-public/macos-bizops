@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent_messaging_plugin"
 version = "0.1.0"
-description = "Durable agent-thread/message persistence + run_turn EDGE process for inter-agent calls"
+description = "Durable agent-thread/message persistence + peer messaging for inter-agent calls"
 license = "Apache-2.0"
 requires-python = "==3.13.*"
 dependencies = [

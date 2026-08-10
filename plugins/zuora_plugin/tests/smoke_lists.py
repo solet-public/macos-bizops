@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""list_subscriptions / list_invoices spill-floor smoke tests for zuora_plugin.
+"""list_subscriptions / list_invoices data-export smoke tests for zuora_plugin.
 
-Business-data limits + spill-floor migration, 2026-08-02
+Business-data limits + data-export migration, 2026-08-02
 (workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md,
-§7.3 "full spill-floor" build class). Both verbs now ALWAYS write to the
+§7.3 "full data-export" build class). Both verbs now ALWAYS write to the
 caller-supplied output_tsv_path — the previous implementation returned an
 inline ``subscriptions``/``invoices`` list with no bound of any kind.
 
@@ -271,7 +271,7 @@ def test_export_path_outside_allowed_root_refused() -> None:
 
 
 def main() -> int:
-    print("\nzuora_plugin list_subscriptions / list_invoices spill-floor smoke tests")
+    print("\nzuora_plugin list_subscriptions / list_invoices data-export smoke tests")
     print("=" * 47)
     test_list_subscriptions_writes_tsv()
     test_list_subscriptions_pages_past_single_vendor_page()
@@ -288,7 +288,7 @@ def main() -> int:
     if _failed:
         print("FAILED:", _failed)
         return 1
-    print("All list_subscriptions / list_invoices spill-floor smoke tests passed.")
+    print("All list_subscriptions / list_invoices data-export smoke tests passed.")
     return 0
 
 

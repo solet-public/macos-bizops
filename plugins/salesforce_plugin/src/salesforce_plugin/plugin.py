@@ -8,8 +8,15 @@ platform stores no Salesforce secret of its own, nor does any access token
 ever enter this process. Full read/write including delete_record (record
 deletion is an acceptable-loss class, RATIFY-2).
 
-Verbs (all EDGE):
-  - soql_query                                      — read (inline; fails loud over the caps)
+Verbs (all EDGE, all on the D0.3 deferred-completion shape —
+workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md):
+every dispatch handler below returns ``{"job_id", "status": "queued"}`` in
+milliseconds; ``async_jobs.py``'s single background worker thread does the
+real `sf` CLI subprocess spawn off the action-dispatch path and completes the
+job. The dispatch handlers never touch ``SalesforceCliExecutor`` directly —
+only the worker thread does, preserving the plugin's original effective
+concurrency of one.
+  - soql_query                                      — read (always writes output_tsv_path)
   - export_soql                                     — read (full result as a workspace TSV,
     absolute output_tsv_path contained under export_allowed_roots; refuse-all when unset)
   - get_record / describe_sobject / list_sobjects   — read
@@ -31,6 +38,7 @@ session for this process to detect and re-mint.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -51,7 +59,7 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import export_containment, record_actions, soql_actions
+from . import async_jobs, export_containment
 from .app_config import AppConfigError, AppConfigLoader
 from .client import SalesforceCliExecutor
 from .constants import (
@@ -98,6 +106,14 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         self._address_book_service: Any | None = None
         self._app_config_loader: AppConfigLoader | None = None
         self._cli_executor: SalesforceCliExecutor | None = None
+        # D0.3 deferred-completion machinery (async_jobs.py) — lazily acquired /
+        # started on first async-shaped dispatch, mirroring
+        # comfyui_image_generation_plugin's _try_acquire_job_manager (boot order
+        # does not guarantee orchestrator_ref.async_job_manager is set yet at
+        # prepare_for_readiness time, but it always is by first dispatch).
+        self._async_job_manager: Any | None = None
+        self._worker_thread: threading.Thread | None = None
+        self._worker_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # VaultKeysProvider — no plugin-owned vault keys
@@ -247,6 +263,24 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             self.logger.warning("%s: unexpected fault (%s)", endpoint_name, type(exc).__name__)
         return self._error(code, message)
 
+    def _dispatch_async(
+        self, action_name: str, params: dict[str, Any], state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """D0.3 ms-scale dispatch: create the job, return immediately — no `sf` CLI call here."""
+        try:
+            create_result = async_jobs.create_job(
+                self, action_name=action_name, params=params, state=state,
+            )
+        except ValueError as exc:
+            return self._error(ERROR_INVALID_PARAMS, str(exc))
+        except RuntimeError as exc:
+            return self._error(ERROR_NOT_CONFIGURED, str(exc))
+        if create_result.get("action_status") != "completed":
+            error = create_result.get("error", {})
+            message = str(error.get("message", "failed to create async job"))
+            return self._error(ERROR_API_ERROR, message)
+        return self._success(create_result["data"])
+
     # ------------------------------------------------------------------
     # EdgeProcessProvider
     # ------------------------------------------------------------------
@@ -301,12 +335,14 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         display_name="Salesforce: SOQL Query",
         description=(
             "Run a SOQL query (e.g. \"SELECT Id, Name FROM Account WHERE …\") against the "
-            "configured Salesforce org. The result is ALWAYS written to the caller-supplied "
-            "output_tsv_path, never returned inline — this plugin never executes Apex, so the "
-            "50,000-record Apex governor limit does not apply to it; the actual Salesforce fact "
-            "for this call path (sf CLI -> jsforce REST client) is a 2,000-record REST query "
-            "batch size with no vendor total ceiling, and jsforce's autoFetch already pages past "
-            f"that internally. The limit below is entirely our own policy. Defaults to "
+            "configured Salesforce org. Returns immediately with a job_id and status 'queued' "
+            "(D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the job "
+            "finishing. When the job completes, the result is ALWAYS written to the "
+            "caller-supplied output_tsv_path, never returned inline — this plugin never executes "
+            "Apex, so the 50,000-record Apex governor limit does not apply to it; the actual "
+            "Salesforce fact for this call path (sf CLI -> jsforce REST client) is a 2,000-record "
+            "REST query batch size with no vendor total ceiling, and jsforce's autoFetch already "
+            f"pages past that internally. The limit below is entirely our own policy. Defaults to "
             f"{DEFAULT_ROW_LIMIT} records to avoid exhausting API request limits and disk, and to "
             "discourage pulling all records for client-side filtering that a SOQL WHERE clause "
             "should do instead. To fetch more, pass acknowledge_default_limit_override=true "
@@ -353,45 +389,26 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV — never records inline, at any size.",
+            description="Dispatch envelope — job_id + status: queued. Not the TSV handle itself.",
             properties={
-                "path": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Absolute path of the written TSV file.",
-                ),
-                "row_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of records written.",
-                ),
-                "total_size": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Salesforce's own total matching-record count for the query.",
-                ),
-                "columns": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Field names, in SOQL SELECT order.",
-                ),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when row_count hit the effective limit — more records may exist.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def soql_query(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda executor: soql_actions.soql_query(executor, params, self._export_path_gate),
-            "soql_query",
-        )
+        return self._dispatch_async("soql_query", params, state)
 
     @platform_process(
         name="export_soql",
         display_name="Salesforce: Export SOQL",
         description=(
             "The N>>500 route: run a SOQL query and write the result as ONE tab-separated .tsv "
-            "file at an ABSOLUTE output_tsv_path in the operator's workspace. The path must lie "
+            "file at an ABSOLUTE output_tsv_path in the operator's workspace. Returns immediately "
+            "with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch "
+            "returning is NOT the same as the job finishing. The path must lie "
             "under an operator-configured export_allowed_roots entry (empty config refuses every "
             "export). Nested relationship objects are serialized as JSON text in their cells. Same "
             "read rules and override mechanism as soql_query, with a higher hard cap: this plugin "
@@ -443,43 +460,27 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV: path, columns, row_count, total_size, and truncated.",
+            description="Dispatch envelope — job_id + status: queued. Not the TSV handle itself.",
             properties={
-                "path": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Absolute path of the written TSV file.",
-                ),
-                "row_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of records written.",
-                ),
-                "total_size": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Salesforce's own total matching-record count for the query.",
-                ),
-                "columns": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Field names, in SOQL SELECT order.",
-                ),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when row_count hit the effective limit — more records may exist.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def export_soql(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda executor: soql_actions.export_soql(executor, params, self._export_path_gate),
-            "export_soql",
-        )
+        return self._dispatch_async("export_soql", params, state)
 
     @platform_process(
         name="get_record",
         display_name="Salesforce: Get Record",
-        description="Fetch one record by sobject + id, optionally trimmed to specific fields.",
+        description=(
+            "Fetch one record by sobject + id, optionally trimmed to specific fields. Returns "
+            "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the "
+            "dispatch returning is NOT the same as the job finishing; the record's fields are "
+            "delivered when the job completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "sobject": ParameterMetadata(
@@ -493,18 +494,28 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             ),
         },
         return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT, description="The record's fields."
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the record itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def get_record(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda executor: record_actions.get_record(executor, params), "get_record")
+        return self._dispatch_async("get_record", params, state)
 
     @platform_process(
         name="describe_sobject",
         display_name="Salesforce: Describe SObject",
-        description="Describe an sobject's fields (name/type/label/nillable/updateable, trimmed).",
+        description=(
+            "Describe an sobject's fields (name/type/label/nillable/updateable, trimmed). Returns "
+            "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the "
+            "dispatch returning is NOT the same as the job finishing; the field metadata is "
+            "delivered when the job completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "sobject": ParameterMetadata(
@@ -512,33 +523,52 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             ),
         },
         return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT, description="Trimmed field metadata."
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the field metadata itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def describe_sobject(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda executor: record_actions.describe_sobject(executor, params), "describe_sobject"
-        )
+        return self._dispatch_async("describe_sobject", params, state)
 
     @platform_process(
         name="list_sobjects",
         display_name="Salesforce: List SObjects",
-        description="List the org's sobjects (API name + label).",
+        description=(
+            "List the org's sobjects (API name + label). Returns immediately with a job_id and "
+            "status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the "
+            "same as the job finishing; the sobject list is delivered when the job completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="sobjects: [{name, label}]."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the sobject list itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_sobjects(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda executor: record_actions.list_sobjects(executor, params), "list_sobjects")
+        return self._dispatch_async("list_sobjects", params, state)
 
     @platform_process(
         name="create_record",
         display_name="Salesforce: Create Record",
-        description="Create a record of the given sobject type with the given fields. Write action.",
+        description=(
+            "Create a record of the given sobject type with the given fields. Write action. "
+            "Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion "
+            "shape) — the dispatch returning is NOT the same as the record being created; the "
+            "confirmation (new record id) is delivered when the job completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "sobject": ParameterMetadata(
@@ -548,17 +578,29 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
                 type=ParameterType.OBJECT, required=True, description="Non-empty object of field values."
             ),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="New record id and success."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the new record id itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def create_record(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda executor: record_actions.create_record(executor, params), "create_record")
+        return self._dispatch_async("create_record", params, state)
 
     @platform_process(
         name="update_record",
         display_name="Salesforce: Update Record",
-        description="Apply a non-empty fields object to an existing record by sobject + id. Write action.",
+        description=(
+            "Apply a non-empty fields object to an existing record by sobject + id. Write action. "
+            "Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion "
+            "shape) — the dispatch returning is NOT the same as the update being applied; the "
+            "confirmation is delivered when the job completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "sobject": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sobject API name."),
@@ -567,58 +609,73 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
                 type=ParameterType.OBJECT, required=True, description="Non-empty object of field values to set."
             ),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Confirmation the update was applied."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the update confirmation itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def update_record(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda executor: record_actions.update_record(executor, params), "update_record")
+        return self._dispatch_async("update_record", params, state)
 
     @platform_process(
         name="delete_record",
         display_name="Salesforce: Delete Record",
         description=(
             "Permanently delete a record by sobject + id. This is a destructive write action "
-            "taking an EXPLICIT target — sobject and id are required, no bulk form."
+            "taking an EXPLICIT target — sobject and id are required, no bulk form. Returns "
+            "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — "
+            "the dispatch returning is NOT the same as the record being deleted; the confirmation "
+            "is delivered when the job completes."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "sobject": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sobject API name."),
             "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The record id to delete."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Confirmation the record was deleted."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the delete confirmation itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def delete_record(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda executor: record_actions.delete_record(executor, params), "delete_record")
+        return self._dispatch_async("delete_record", params, state)
 
     @platform_process(
         name="test_connection",
         display_name="Salesforce: Test Connection",
         description=(
-            "Verify the org binding by querying the org record through the sf CLI. Returns ok, "
-            "org_id, the verified username, and the pinned api_version."
+            "Verify the org binding by querying the org record through the sf CLI. Returns "
+            "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — "
+            "the dispatch returning is NOT the same as the job finishing; ok, org_id, the "
+            "verified username, and the pinned api_version are delivered when the job completes."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
         return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT, description="ok, org_id, username, api_version."
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the connection check itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def test_connection(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        def _do(executor: SalesforceCliExecutor) -> dict[str, Any]:
-            org_id = soql_actions.fetch_org_id(executor)
-            return {
-                "ok": True,
-                "org_id": org_id,
-                "username": executor.username,
-                "api_version": executor.api_version,
-            }
-
-        return self._run(_do, "test_connection")
+        return self._dispatch_async("test_connection", params, state)
 
 
 def _edge(

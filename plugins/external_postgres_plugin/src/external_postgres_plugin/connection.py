@@ -8,10 +8,18 @@ entries; it is structurally incapable of reaching the platform DB, enforced by
 Read-only is the psycopg3 CONNECTION CHARACTERISTIC (``conn.read_only = True``),
 set BEFORE the first execute so it applies at the BEGIN of EVERY transaction
 including the first implicit one — there is NO write-capable window. This is the
-LOAD-BEARING write-stopper (§8.5): every write fails at the server with SQLSTATE
-25006 regardless of statement leader/count/smuggling, even for an over-privileged
-registered credential. NOT a post-connect ``SET default_transaction_read_only``
-(which leaves the first implicit transaction write-capable — Codex BLOCKER).
+LOAD-BEARING write-stopper (§8.5) for every READ verb: a write fails at the
+server with SQLSTATE 25006 regardless of statement leader/count/smuggling, even
+for an over-privileged registered credential. NOT a post-connect
+``SET default_transaction_read_only`` (which leaves the first implicit
+transaction write-capable — Codex BLOCKER).
+
+Write verbs (operator ruling, 2026-08-09 — the connector read-only posture
+reversal + Amendment 1, "vendor RBAC is the control plane") open a connection
+with ``read_only=False`` instead — a deliberate, verb-scoped choice, never a
+default. Whether such a connection can ACTUALLY write is then decided entirely
+by the registered credential's own server-side Postgres GRANTs; this module
+performs no plugin-side permission check either way.
 """
 
 from __future__ import annotations
@@ -90,12 +98,18 @@ def connect(
     *,
     statement_timeout_ms: int,
     platform_pg_port: int,
+    read_only: bool = True,
 ) -> psycopg.Connection[Any]:
-    """Open a hardened, READ-ONLY connection to a foreign Postgres DB.
+    """Open a hardened connection to a foreign Postgres DB.
 
     Enforces the containment guard first (never connects without it), sets the
     statement_timeout windowlessly via libpq startup options, and applies the
-    read-only connection characteristic BEFORE any execute.
+    ``read_only`` connection characteristic BEFORE any execute.
+
+    ``read_only`` defaults to ``True`` — every existing (read-verb) call site is
+    unaffected. A write verb passes ``read_only=False`` explicitly; whether that
+    connection's credential can actually write is then entirely the server's own
+    GRANT decision, never a plugin-side check.
     """
     assert_foreign_target(dsn, platform_pg_port)
     conn: psycopg.Connection[Any] = psycopg.connect(
@@ -109,9 +123,9 @@ def connect(
         options=f"-c statement_timeout={statement_timeout_ms}",
     )
     # BEFORE any execute (connection is not yet in a transaction): psycopg3 emits
-    # the read-only characteristic at every transaction BEGIN incl. the first, so
-    # there is no write-capable window.
-    conn.read_only = True
+    # the read_only characteristic at every transaction BEGIN incl. the first, so
+    # there is no write-capable window for a read-only connection to slip through.
+    conn.read_only = read_only
     return conn
 
 

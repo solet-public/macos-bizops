@@ -93,79 +93,6 @@ class ArtifactRef:
 
 
 @dataclass(frozen=True, slots=True)
-class AgentThreadContext:
-    """Optional context payload supplied at thread open."""
-
-    summary: str | None = None
-    tags: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class InitialMessage:
-    """Optional initial message bundled with ``agent_thread_open``."""
-
-    content: MessageContent
-    response_mode: str = "async"
-    timeout_seconds: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class OpenAgentThreadRequest:
-    """Inputs to ``AgentMessagingService.open_thread``."""
-
-    bridge_id: str
-    session_id: str
-    backend: str
-    working_directory: str | None = None
-    title: str | None = None
-    context: AgentThreadContext | None = None
-    initial_message: InitialMessage | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AgentThreadOpened:
-    """Response from ``open_thread``."""
-
-    thread_id: str
-    status: ThreadStatus
-    message_id: str | None = None
-    action_id: str | None = None
-    flow_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SendAgentMessageRequest:
-    """Inputs to ``AgentMessagingService.send_message``."""
-
-    bridge_id: str
-    thread_id: str
-    content: MessageContent
-    response_mode: str = "async"
-    timeout_seconds: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AgentMessageQueued:
-    """Response from ``send_message``."""
-
-    thread_id: str
-    message_id: str
-    action_id: str
-    flow_id: str
-    status: ThreadStatus
-
-
-@dataclass(frozen=True, slots=True)
-class ListAgentMessagesRequest:
-    """Inputs to ``AgentMessagingService.list_messages``."""
-
-    bridge_id: str
-    thread_id: str
-    after_cursor: int = 0
-    limit: int = 50
-
-
-@dataclass(frozen=True, slots=True)
 class AgentMessageRow:
     """One row of ``core__agent_message`` rendered as a public payload."""
 
@@ -181,16 +108,6 @@ class AgentMessageRow:
     error: dict[str, object] | None = None
     artifacts: tuple[ArtifactRef, ...] = ()
     metadata: dict[str, object] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class AgentMessagesPage:
-    """Response from ``list_messages``."""
-
-    thread_id: str
-    messages: tuple[AgentMessageRow, ...]
-    next_cursor: int
-    status: ThreadStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,28 +182,6 @@ class AgentThreadMessagesPage:
     thread_id: str
     messages: tuple[AgentMessageRow, ...]
     next_cursor: int
-
-
-@dataclass(frozen=True, slots=True)
-class AgentThreadStatus:
-    """Response from ``get_status``."""
-
-    thread_id: str
-    status: ThreadStatus
-    backend: str
-    last_message_cursor: int
-    updated_at: datetime
-    active_action_id: str | None = None
-    active_flow_id: str | None = None
-    backend_session_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AgentThreadClosed:
-    """Response from ``close_thread``."""
-
-    thread_id: str
-    status: ThreadStatus
 
 
 # ---------------------------------------------------------------------------
@@ -528,29 +423,19 @@ class AgentThreadRow:
 __all__ = [
     "ID_PREFIX_MESSAGE",
     "ID_PREFIX_THREAD",
-    "AgentMessageQueued",
     "AgentMessageRow",
-    "AgentMessagesPage",
-    "AgentThreadClosed",
-    "AgentThreadContext",
     "AgentThreadMessagesPage",
-    "AgentThreadOpened",
     "AgentThreadRow",
-    "AgentThreadStatus",
     "AgentThreadsPage",
     "ArtifactRef",
-    "InitialMessage",
-    "ListAgentMessagesRequest",
     "ListAgentThreadsRequest",
     "MessageContent",
     "MessageKind",
     "MessageRole",
-    "OpenAgentThreadRequest",
     "ReadThreadMessagesRequest",
     "OriginatorType",
     "PeerSendRequest",
     "PeerSendResult",
-    "SendAgentMessageRequest",
     "TextPart",
     "ThreadStatus",
 ]

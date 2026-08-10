@@ -46,12 +46,12 @@ prod/sandbox flag:
 | EU Production | `https://rest.eu.zuora.com` |
 | Sandbox | `https://rest.apisandbox.zuora.com` |
 
-## Business-data limits + spill-floor migration (2026-08-02)
+## Business-data limits + data-export migration (2026-08-02)
 
 `data_query`, `bulk_export`, `list_subscriptions`, and `list_invoices` ALWAYS
 write their result to the caller's `output_tsv_path` — never records inline,
 at any size (`workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md`;
-the former blob-spill/`INLINE_BYTE_CAP` branch on `data_query`/`bulk_export`
+the former blob-export/`INLINE_BYTE_CAP` branch on `data_query`/`bulk_export`
 is deleted, not lowered). Neither destination is platform blob storage — the
 path must be absolute, end in `.tsv`, and lie under an operator-configured
 `export_allowed_roots` entry in this plugin's config (`export_containment.py`,

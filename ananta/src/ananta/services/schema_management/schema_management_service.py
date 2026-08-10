@@ -245,6 +245,24 @@ class SchemaManagementService:
             )
 
         # Validate external_id override preserves UNIQUE constraint
+        #
+        # DELIBERATE ASYMMETRY (schema-debt-external-id lane, 2a, 2026-08-06):
+        # the ColumnDefinition-based path (SchemaStandardizer._validate_
+        # constrainable_field, ananta/types/schema_standardizer.py) now lets
+        # a table opt OUT of this via an explicit unique=False override —
+        # this path (the raw-dict/bootstrap dialect, reached from
+        # StateService.create_schema for the framework/generic-plugin/
+        # discovery_service namespaces, never session_ledger) still hard-
+        # rejects it. No caller on THIS path has hit the composite-identity
+        # need yet, so relaxing it here would be speculative capability with
+        # no red-first leg to prove it against. Path-2 parity + unifying
+        # both validators into one implementation so they can't drift again
+        # is a tracked follow-on, not done in 2a — see the "P2 2a follow-on"
+        # section of
+        # workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md
+        # before relaxing this. A pin-leg
+        # (ananta/tests/services/state_service/schema_management_service_external_id_pin_smoke.py)
+        # reds if this rule changes out from under that record.
         if "external_id" in table_columns:
             col_def = table_columns["external_id"]
             # Column definitions here are SQL strings like "TEXT UNIQUE NOT NULL"

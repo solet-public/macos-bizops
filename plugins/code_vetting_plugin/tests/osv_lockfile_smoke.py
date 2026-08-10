@@ -38,6 +38,12 @@ from code_vetting_plugin.toolrun import tool_available
 
 _CHECKS_RUN: list[str] = []
 
+# The automake/Meson/CTest SKIP_RETURN_CODE convention, matching
+# run_smokes.py's own _SKIP_EXIT_CODE. Undeclared-dependency audit:
+# workbench/2026-08-08_undeclared_system_dependencies_findings_d3-impl.md.
+_SKIP_EXIT_CODE = 77
+_osv_check_skipped = False
+
 
 class SmokeFailureError(AssertionError):
     """Raised on any check failure; message is the failure detail."""
@@ -104,12 +110,16 @@ def _check_no_lockfile_gap() -> None:
     # A python-source tree with no lockfile: osv records an honest not_applicable, before any subprocess.
     cov = scan_osv(_tree(("src/a.py", "pyproject.toml")), "vr-r73").coverage
     _check("osv on a no-lockfile tree: ran=False", cov.ran is False, str(cov))
+    global _osv_check_skipped
     if tool_available(_OSV):
         _check(
             "osv no-lockfile gap is a distinct not_applicable (hermetic — no subprocess)",
             (cov.gap_reason or "").startswith("not_applicable:") and "no lockfiles" in (cov.gap_reason or ""),
             str(cov.gap_reason),
         )
+    else:
+        print("  SKIP  osv-scanner no-lockfile gap-reason assertion: osv-scanner not on PATH")
+        _osv_check_skipped = True
 
 
 def main() -> int:
@@ -123,6 +133,13 @@ def main() -> int:
         print(f"  ({len(_CHECKS_RUN)} checks attempted before failure)", file=sys.stderr)
         return 1
     print(f"osv_lockfile_smoke OK: {len(_CHECKS_RUN)} checks passed")
+    if _osv_check_skipped:
+        print(
+            "SKIP: osv-scanner not on PATH -- the osv-specific gap-reason "
+            "assertion disclosed a gap rather than running; every other "
+            "check ran and passed."
+        )
+        return _SKIP_EXIT_CODE
     return 0
 
 

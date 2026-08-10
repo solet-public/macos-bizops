@@ -294,6 +294,68 @@ def test_attribution_resolved_from_registry() -> None:
     )
 
 
+_WATCH_AGENT_ID = "claude_code"
+_WATCH_INSTANCE = "agi-watch-livecaller00000000000000000001"
+_WATCH_LABEL = "Watch-Registered-Caller"
+_WATCH_SESSION_ID = "ases-watch-1785431900"
+_WATCH_ROLE = "Watch-Registered-Caller"
+
+
+def _registry_with_live_watch_session() -> PeerRegistry:
+    """Same shape as :func:`_registry_with_live_session`, but for a session
+    registered over the WATCH transport (an ``agi-watch-``-prefixed
+    instance id, matching the rename skill's watcher-path claim result --
+    see e.g. ``agi-watch-92a6ae0e3e134e5e11774007`` observed live,
+    fleet-watch-transport-migration phase 1). ``BridgeBinding`` carries no
+    transport field at all -- this fixture exists to make that fact an
+    explicit, pinned assertion rather than something inferred from the
+    generic MCP-shaped fixture never mentioning transport."""
+    store: Store = open_store(
+        get_peer_binding_schema(),
+        namespace=PEER_BINDING_NAMESPACE,
+        backend="in_memory",
+    )
+    registry = PeerRegistry(bindings_store=store)
+    registry.register(
+        BridgeBinding(
+            bridge_id="agc-watch-bridge",
+            agent_id=_WATCH_AGENT_ID,
+            agent_instance_id=_WATCH_INSTANCE,
+            session_label=_WATCH_LABEL,
+            parent_pid=5252,
+            agent_session_id=_WATCH_SESSION_ID,
+        ),
+    )
+    return registry
+
+
+def test_attribution_resolved_from_registry_for_watch_registered_caller() -> None:
+    """fleet-watch-transport-migration phase 2 slice 1 (2026-08-06): the
+    CLI-send identity path -- verified, not assumed -- for a WATCH-
+    registered caller. resolve_by_agent_session_id keys purely on
+    agent_session_id; a watch-registered session's binding resolves
+    exactly like an MCP-registered one, because the identity-drop this
+    mechanism guards against applies only to a genuinely UNREGISTERED
+    caller (the bare one-shot CLI bridge), never to a caller registered
+    over a different transport."""
+    surface = _surface(
+        _registry_with_live_watch_session(),
+        _RoleStateService({_WATCH_INSTANCE: [_WATCH_ROLE]}),
+    )
+    attribution = surface._resolve_caller_attribution(_cli_bridge(_WATCH_SESSION_ID))
+    _check(
+        attribution.agent_id == _WATCH_AGENT_ID
+        and attribution.agent_instance_id == _WATCH_INSTANCE
+        and attribution.session_label == _WATCH_LABEL,
+        "attribution: a watch-registered caller's identity resolves out of the "
+        "registered binding exactly like an MCP-registered caller's does",
+    )
+    _check(
+        attribution.role == _WATCH_ROLE,
+        "attribution: the watch-registered caller's durable role resolves too",
+    )
+
+
 def test_attribution_degrades_to_empty() -> None:
     surface = _surface(_registry_with_live_session())
     unknown = surface._resolve_caller_attribution(_cli_bridge("ases-never-registered"))
@@ -423,7 +485,18 @@ _ATTRIBUTED_STATE: dict[str, Any] = {
 
 
 class _NoRoleStateService:
-    """State service whose role resolution finds nothing (instance-rung path)."""
+    """State service whose role resolution finds nothing (instance-rung path).
+
+    ``query_state`` is the minimal real-provider shape (no records) — the
+    drive-on-delivery seam (2026-08-04) now reads ``managed_session`` off
+    whatever ``state_service`` the sender resolves, and this double must
+    answer "no managed_session row" honestly rather than crash with an
+    AttributeError (widened-interface trap: a fake standing in for a
+    narrower old contract must widen alongside it, same-commit)."""
+
+    def query_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+        del namespace, query
+        return {"action_status": "completed", "data": {"records": [], "count": 0}}
 
 
 def test_ladder_prefers_attributed_role() -> None:
@@ -492,9 +565,21 @@ _UNSET = object()
 def _send_peer_message(state: dict[str, Any], state_service: object = _UNSET) -> Any:
     """Drive the REAL ``send_peer_message`` body against a captured service."""
     registry = _registry_with_live_session()
+    bridge_manager = BridgeSessionManager(
+        session_id_factory=lambda _n: "ags-x",
+        idle_timeout_s=3600,
+        max_pending_events=50,
+        long_poll_timeout_s=1,
+    )
+    # A4 Amendment 5: binding_is_live is now checked for every recipient, so
+    # the recipient needs a REAL opened bridge (last_seen_at fresh at open),
+    # not just a registered binding pointing at an id nothing ever opened.
+    recipient_bridge_id = bridge_manager.open(
+        homunculus_name="test", parent_pid=None,
+    ).bridge_id
     registry.register(
         BridgeBinding(
-            bridge_id="agc-recipient",
+            bridge_id=recipient_bridge_id,
             agent_id="codex",
             agent_instance_id="agi-recipient",
             session_label="Recipient",
@@ -505,12 +590,7 @@ def _send_peer_message(state: dict[str, Any], state_service: object = _UNSET) ->
     service = _CapturingService()
     plugin = object.__new__(AgentMessagingPlugin)
     plugin._peer_registry = registry
-    plugin._bridge_manager = BridgeSessionManager(
-        session_id_factory=lambda _n: "ags-x",
-        idle_timeout_s=3600,
-        max_pending_events=50,
-        long_poll_timeout_s=1,
-    )
+    plugin._bridge_manager = bridge_manager
     plugin._require_service = lambda: service
     resolved = _NoRoleStateService() if state_service is _UNSET else state_service
     plugin._get_state_service = lambda: resolved

@@ -4,7 +4,7 @@
 Hermetic — a faked JIRA client, synthetic JIRAError objects. Red-first: each
 check asserts real parsing / internal-pagination / override / classification /
 topology-hygiene behavior against the 2026-08-03 reopened design (jira EXITED
-the spill floor entirely, operator veto "no PII in Jira"; paging is hidden
+the data-export requirement entirely, operator veto "no PII in Jira"; paging is hidden
 inside the effective row limit, operator ruling "the paging is an
 implementation detail that should be hidden" — design doc §0.1/§5.4). There
 is no output_tsv_path, no containment gate, and no caller-visible pagination
@@ -49,7 +49,7 @@ Exercises:
   13. _run — ValueError/AppConfigError/JIRAError/JiraServiceError/broad
       routing (ExportPathRefusedError no longer exists as a class — its
       import alone would fail red on the retired module)
-  14. blob spill service resolution (add_attachment's upload path — the only
+  14. blob export service resolution (add_attachment's upload path — the only
       surviving blob-write path on this connector)
 
 Run:
@@ -506,14 +506,14 @@ def test_run_success_shape() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Blob spill service resolution (attachments — the sole surviving blob-write path)
+# Blob export service resolution (attachments — the sole surviving blob-write path)
 # ---------------------------------------------------------------------------
 
 
 def test_store_blob_resolves_service_at_point_of_use() -> None:
     """§20.1 regression: blob_storage_service is constructed AFTER plugin
     readiness, so readiness-time resolution cached None forever and every
-    spill hard-failed; the fix resolves lazily at first use."""
+    export hard-failed; the fix resolves lazily at first use."""
     plugin = JiraPlugin()
     blob_service = MagicMock()
     blob_service.store_blob.return_value = {

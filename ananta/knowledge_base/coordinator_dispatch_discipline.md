@@ -17,7 +17,7 @@ Failure F1 in the v2 coordinator workflow strategy: **the coordinator dispatches
 
 The empirical pattern:
 
-- Coordinator sends a `peer_send` IMPORTANT to a peer with a work brief.
+- Coordinator sends a `peer_send` dispatch to a peer with a work brief.
 - The peer wakes, starts working.
 - Something happens — peer is mid-task, takes longer than expected, hits a blocker but waits to ask, the dispatched session uses a worktree that vanishes, MCP bridge drops.
 - The coordinator has no scheduled prompt to re-check. The operator notices the gap before the coordinator does.
@@ -45,7 +45,7 @@ ledger_search_required: <list of plain-English queries the peer MUST run via
 
 `expected_path` is mechanical — the coordinator can check `os.path.exists()` (or `git status`) at watchdog wake-up time and know whether the work landed without parsing any messages.
 
-`expected_completion_signal` is the peer-side commitment. For peer-to-peer dispatches it is almost always: `peer_send IMPORTANT to Coordinator (agi-<id>) with verdict + before/after counts`. For dispatches that produce a file, the file path serves the same role (existence-check at wake-up).
+`expected_completion_signal` is the peer-side commitment. For peer-to-peer dispatches it is almost always: `peer_send to Coordinator (agi-<id>) with verdict + before/after counts`. For dispatches that produce a file, the file path serves the same role (existence-check at wake-up).
 
 `kb_search_required` is the **non-negotiable Step Zero gate in the paired
 AGENTS.md / CLAUDE.md bootstrap contract**. The dispatch enumerates the searches
@@ -75,7 +75,7 @@ Immediately after sending the dispatch, the coordinator schedules a watchdog via
   "arguments": {
     "seconds": 1800,
     "memory_tag": "dispatch:watchdog:<task_id>",
-    "content": "Watchdog for dispatch <task_id>: peer=<peer_id>, expected_path=<path>, expected_completion_signal=<signal>. On wake: (a) check path exists; (b) check peer_inbox(include_important=True) for completion since <T>; (c) if neither, send IMPORTANT status-check ping and reschedule."
+    "content": "Watchdog for dispatch <task_id>: peer=<peer_id>, expected_path=<path>, expected_completion_signal=<signal>. On wake: (a) check path exists; (b) check peer_inbox() for completion since <T>; (c) if neither, send a status-check peer_send and reschedule."
   }
 }
 ```
@@ -88,17 +88,17 @@ The `memory_tag` is the unique identifier of this watchdog. Convention: `dispatc
 
 ## 4. The wake-up routine
 
-**Important limitation:** the wake-driven path described below depends on the coordinator session being in a VERTEX turn at fire time. EDGE-scheduled-action wakes don't surface as channel notifications to the originator session. In practice this means the mechanical state-check (steps 1–2 below) IS the load-bearing mechanism; the wake-driven trigger (step 3 "send IMPORTANT ping") only fires when the coordinator happens to be in a VERTEX turn (typically because the operator just interacted). The discipline degrades gracefully: the coordinator runs the state-check at the start of any turn with in-flight work, wake-driven or operator-driven.
+**Important limitation:** the wake-driven path described below depends on the coordinator session being in a VERTEX turn at fire time. EDGE-scheduled-action wakes don't surface as channel notifications to the originator session. In practice this means the mechanical state-check (steps 1–2 below) IS the load-bearing mechanism; the wake-driven trigger (step 3 "send a status-check ping") only fires when the coordinator happens to be in a VERTEX turn (typically because the operator just interacted). The discipline degrades gracefully: the coordinator runs the state-check at the start of any turn with in-flight work, wake-driven or operator-driven.
 
 When the schedule fires AND the coordinator is in a VERTEX turn, the coordinator wakes with the watchdog memory presented as an observation. The mechanical check is:
 
 1. **`expected_path` exists on disk?** → if yes: dispatch completed. Mark the in-flight memory completed (`memory_service::remember` with a `dispatch:completed:<task_id>` tag, or delete the in-flight entry). STOP.
-2. **`peer_inbox(include_important=true)` contains a completion `peer_send` from the dispatched peer since dispatch time?** → if yes: same as (1).
-3. **Neither?** → Send `peer_send` IMPORTANT to the dispatched peer:
+2. **`peer_inbox()` contains a completion `peer_send` from the dispatched peer since dispatch time?** → if yes: same as (1).
+3. **Neither?** → Send a `peer_send` to the dispatched peer:
 
    ```
    Status check on dispatch <id> sent at <T>. Expected path: <path>.
-   Expected signal: <signal>. Neither has landed. Reply IMPORTANT
+   Expected signal: <signal>. Neither has landed. Reply
    with status (done/in-progress/blocked) + ETA or blocker.
    ```
 
@@ -144,7 +144,7 @@ The **20-minute active-management cron** closes that gap. While the coordinator 
   "process_key": "service_interface::memory_service::upsert_memory_by_tag",
   "arguments": {
     "tag": "coordinator:active_sweep",
-    "content": "Active-management sweep: (1) read mcp__<server-name>__peer_inbox(include_important=True) for IMPORTANT-back milestones, completions, questions, blockers; (2) sweep memory_service::get_memories_by_tag(tag='dispatch:in_flight') for any dispatch past its expected_completion_signal window; (3) for any peer who ACK'd but hasn't surfaced a milestone or completion within 2× their stated ETA, send IMPORTANT status check; (4) update your coordinator plan doc if state changed; (5) if everything is quiet AND no in-flight dispatches remain, decide whether to clear this cron via clear_scheduled_actions_by_tag(tag='coordinator:active_sweep')."
+    "content": "Active-management sweep: (1) read mcp__<server-name>__peer_inbox() for milestones, completions, questions, blockers; (2) sweep memory_service::get_memories_by_tag(tag='dispatch:in_flight') for any dispatch past its expected_completion_signal window; (3) for any peer who ACK'd but hasn't surfaced a milestone or completion within 2× their stated ETA, send a status check; (4) update your coordinator plan doc if state changed; (5) if everything is quiet AND no in-flight dispatches remain, decide whether to clear this cron via clear_scheduled_actions_by_tag(tag='coordinator:active_sweep')."
   }
 }
 
@@ -181,80 +181,76 @@ Clear the cron when standing down or when work quiesces:
 
 ---
 
-## 8. The IMPORTANT triad — dispatch / ACK / milestone protocol
+## 8. The dispatch / ACK / milestone protocol
 
-The platform's `peer_send` IMPORTANT marker is the loop-prevention mechanism documented at `knowledge_bases/agent_messaging_plugin/03_inter_agent_messaging.md`. This section codifies the **coordinator-side discipline** for using it.
+**A4 (2026-08-04): delivery is unconditional now.** Every `peer_send` is delivery-attempted against the resolved recipient's live binding, whether or not the prose starts with `IMPORTANT` — the platform mechanism is documented at `knowledge_bases/agent_messaging_plugin/03_inter_agent_messaging.md`. A leading `IMPORTANT:` is still recognized and stripped before delivery, but it is now purely cosmetic emphasis for the reader; it does not gate whether a wake fires. This section codifies the **coordinator-side discipline** for using `peer_send` well under that contract — what used to be enforced by a marker choice is now enforced entirely by whether you send a message at all.
 
-Coordinator-to-peer dispatch has three asymmetric IMPORTANT touchpoints on the same lifecycle:
+Coordinator-to-peer dispatch has three asymmetric touchpoints on the same lifecycle:
 
-### A. Coordinator → Peer: dispatch USES IMPORTANT
+### A. Coordinator → Peer: dispatch is a `peer_send`
 
-Every coordinator-issued dispatch starts the prose with `IMPORTANT` so the receiver wakes immediately. Silent `peer_send` for a dispatch is a structural error: heads-down peers do not poll their inbox; without the wake, the dispatch sits unsurfaced until the peer next interacts with their operator or runs `peer_inbox` opportunistically. The dispatch envelope (§2) plus IMPORTANT is the minimum viable dispatch.
+Every coordinator-issued dispatch is sent as soon as the brief is ready — delivery is attempted unconditionally, so there is no separate step to "arm" the wake. The dispatch envelope (§2) is the minimum viable dispatch.
 
-### B. Coordinator → Peer: dispatch DEMANDS IMPORTANT-ACK before work starts
+### B. Coordinator → Peer: dispatch DEMANDS an ACK before work starts
 
-The dispatch brief includes an explicit demand: "ACK with IMPORTANT before starting work." Two purposes:
+The dispatch brief includes an explicit demand: "ACK before starting work." Two purposes:
 
-1. **Engagement confirmation.** Silent ACK fails this — the coordinator cannot distinguish "engaged and working" from "silently stuck." An IMPORTANT-marked ACK guarantees the peer is at inference and surfaced the brief.
+1. **Engagement confirmation.** No ACK within a reasonable window means the coordinator cannot distinguish "engaged and working" from "the wake didn't land." An ACK confirms the peer is at inference and surfaced the brief.
 2. **Pre-work clarification.** ACK is the structural moment for the peer to surface scope questions, interpretation ambiguity, or blockers BEFORE editing. The cost of an ACK-and-question cycle is bounded; the cost of an in-flight scope misunderstanding caught at completion is unbounded.
 
-Acceptable ACK content: "ACK. Will run KB searches per kb_search_required, then start. Expect IMPORTANT-back at completion." Or: "ACK. One scope question before I start: <Q>." Both are IMPORTANT-marked.
+Acceptable ACK content: "ACK. Will run KB searches per kb_search_required, then start. Expect a reply at completion." Or: "ACK. One scope question before I start: <Q>."
 
-### C. Peer → Coordinator: REQUEST IMPORTANT-back at milestones / blockers / completion
+### C. Peer → Coordinator: REQUEST a reply at milestones / blockers / completion
 
-The dispatch brief explicitly asks for IMPORTANT-marked replies at meaningful milestones, blockers, and completion. Silent `peer_send` for completion is a structural error: the coordinator does not poll inbox between operator turns; silent completions are caught only via the §7 20-minute cron (delayed) or the next operator interaction (operator-driven coordination tax).
+The dispatch brief explicitly asks for a reply at meaningful milestones, blockers, and completion. Silence at completion is a structural error: the coordinator does not poll inbox between operator turns; silent completions are caught only via the §7 20-minute cron (delayed) or the next operator interaction (operator-driven coordination tax).
 
-What counts as "meaningful":
-- **Completion.** Always IMPORTANT.
-- **Blocker.** Always IMPORTANT. The coordinator may be holding gating dispatches on the peer's verdict.
-- **Milestone in a long-running task.** IMPORTANT when downstream dispatches depend on the milestone landing.
-- **Routine FYI status during a long stretch.** Silent IS acceptable here — but the threshold is narrow.
+What counts as "meaningful" enough to report at all (see the two forms below for the mechanics):
+- **Completion.** Always report.
+- **Blocker.** Always report. The coordinator may be holding gating dispatches on the peer's verdict.
+- **Milestone in a long-running task.** Report when downstream dispatches depend on the milestone landing.
+- **Routine FYI status during a long stretch.** Sending nothing at all IS acceptable here — but the threshold is narrow.
 
-### Three communication forms, not two
+### Two communication forms, not three
 
-The discipline does NOT mean "everything is IMPORTANT." It also does NOT mean "send nothing at all." There are three forms with distinct semantics — getting them confused leaves peers inferring from absence OR sitting on substantive content they never get woken about:
+Before A4, a sender chose between an IMPORTANT-marked wake and a silent-persist that stayed in the thread without waking anyone — and silent-persist doubled as the ack-loop escape valve. That middle form no longer exists: **every `peer_send` now wakes the recipient unconditionally**, regardless of what the prose starts with. There are only two forms left, and conflating them is the mistake this section exists to prevent:
 
 | Form | Mechanism | When to use |
 |---|---|---|
-| **IMPORTANT `peer_send`** | Wakes the receiver via notification | **DEFAULT for all substantive content.** The receiver must act, decide, respond, or factor the content into their plan. Includes "concur, proceed" confirmations on a peer's stated default, FYI-with-substance, queued follow-on briefs, corrections, position flips. If it has substance, it goes IMPORTANT. |
-| **Silent-persist `peer_send`** (no IMPORTANT marker) | Message persisted in the thread; visible on `peer_inbox()`; no wake | **ONLY** for messages that would otherwise create an "OK got it / you're welcome / thanks / no problem" wake-loop. A pure ACK with no further information for the receiver. The receiver does NOT need to act on it; the persistence is for audit-trail closure only. |
-| **No `peer_send` at all** | Nothing in the thread | The receiver's correct default IS "proceed without my input" and there is genuinely nothing to add. E.g., peer announced completion and the next substantive action is a fresh dispatch to a DIFFERENT peer; internal coordinator state updates (TaskUpdate, plan-doc edits) that don't change any peer's plan; a peer explicitly said "proceeding unless you flag otherwise" and you have no flag. |
+| **`peer_send`** | Wakes the receiver via notification, unconditionally | **DEFAULT for all substantive content.** The receiver must act, decide, respond, or factor the content into their plan. Includes "concur, proceed" confirmations on a peer's stated default, FYI-with-substance, queued follow-on briefs, corrections, position flips. If it has substance, send it. |
+| **No `peer_send` at all** | Nothing in the thread | The receiver's correct default IS "proceed without my input" and there is genuinely nothing to add — OR the content is a pure ack/thanks/"got it" with no further information for the receiver. E.g., peer announced completion and the next substantive action is a fresh dispatch to a DIFFERENT peer; internal coordinator state updates (TaskUpdate, plan-doc edits) that don't change any peer's plan; a peer explicitly said "proceeding unless you flag otherwise" and you have no flag; closing an ack-loop ("received, no further action needed") that would otherwise just wake the peer to acknowledge your acknowledgement. |
 
-**The ONLY purpose of silent-persist is to break ack-loops.** A peer IMPORTANTs the coordinator with a completion report. The coordinator wants to close the loop ("received; no further action from you needed") for audit-trail closure. If the coordinator IMPORTANTs back, the peer wakes on it, may feel obliged to acknowledge ("you're welcome"), the coordinator wakes on THAT, and you've got a useless wake cycle. Silent-persist breaks this: the closure message is in the thread for audit, but no wake fires.
+**Ack-loops are now avoided by not sending, not by choosing a marker.** A peer sends the coordinator a completion report. The coordinator wants to close the loop for audit-trail closure — but there is no low-wake-cost channel to do that in anymore: a reply, marked IMPORTANT or not, wakes the peer the same way. If the reply carries no substance the peer needs to act on, don't send it; the persisted thread already carries the completion report for audit. If you genuinely need to say something (a correction, a new instruction), send it — the wake is the cost of using the channel at all now.
 
-**Silent-persist is NOT a low-cost channel for substantive content.** If you find yourself reaching for silent-persist because "I don't want to interrupt the peer's focus" or "I want to queue a follow-on without scope-stacking," that's the wrong frame. Either the content is substantive (use IMPORTANT — with explicit "complete current task first" framing if it's a queued follow-on) or it isn't (send no `peer_send` at all). The middle ground that silent-persist appears to offer for substantive content does not exist — heads-down peers don't poll their inbox, so a substantive silent-persist message is functionally invisible until the peer happens to next call `peer_inbox()`.
+**There is no low-cost channel for content that "feels low-stakes."** If you find yourself wanting to send something because "I don't want to interrupt the peer's focus" or "I want to queue a follow-on without scope-stacking," the old middle ground (silent-persist) is gone. Either the content is substantive (send it — with explicit "complete current task first" framing if it's a queued follow-on) or it isn't (send nothing).
 
-**"Concur, proceed" confirmations specifically.** When a peer ACKs your dispatch with N pre-draft scope questions and stated defaults ("proceeding with these unless you flag otherwise"), your concur-with-defaults reply IS substantive — it removes their uncertainty about whether you've actually engaged with their plan. It goes IMPORTANT. The wake is justified by the substance.
+**"Concur, proceed" confirmations specifically.** When a peer ACKs your dispatch with N pre-draft scope questions and stated defaults ("proceeding with these unless you flag otherwise"), your concur-with-defaults reply IS substantive — it removes their uncertainty about whether you've actually engaged with their plan. Send it. The wake is justified by the substance.
 
 No `peer_send` at all is correct for:
 
 - **Receiving a peer's completion report when the next substantive action is a fresh dispatch to a DIFFERENT peer.** The completion is in your inbox; the new dispatch is the substantive response, not an ack of the prior peer.
 - **Internal coordinator state updates** (TaskUpdate, plan-doc edits) that don't change any peer's plan.
 - **A peer's "proceeding unless you flag otherwise" interpretation where you have no flag.** Absence IS the correct semantic; the peer explicitly told you that.
+- **A pure ack, thanks, or "got it"** that adds nothing the receiver needs to act on — sending it just wakes them to acknowledge your acknowledgement.
 
-**Two failure modes this codifies against:**
+**The failure mode this codifies against:** a coordinator stays silent when a peer asks for confirmation on a stated default. That ABSENCE is the bug — the peer cannot distinguish "approved, proceed" from "not yet read"; the substantive concur should have been sent.
 
-- **Sending nothing when a concur is substantive.** A coordinator stays silent when a peer asks for confirmation on a stated default. That ABSENCE is the bug — the peer cannot distinguish "approved, proceed" from "not yet read"; the substantive concur should have been IMPORTANT-marked.
-- **Silent-persisting substantive content to avoid over-interrupting.** A coordinator silent-persists a "concur, proceed" reply plus a queued follow-on brief, framed as "avoiding scope-stacking interruption." Same root cause as the first: silent-persist is NOT a low-cost substantive channel — a heads-down peer never sees it until it happens to next call `peer_inbox()`. Silent-persist exists ONLY to break ack-loops; substantive content goes IMPORTANT regardless of how "low-stakes" it feels.
+The protocol is asymmetric **because the cost of a missed reply is asymmetric**. Missed dispatch = peer never starts (rare now — delivery is unconditional, so this narrows to a genuinely unreachable recipient, which the platform now surfaces loudly rather than silently). Missed ACK = coordinator builds downstream on assumed-engaged peer. Missed completion = coordinator builds downstream on stale state. Missed substantive concur = peer sits on stated-default uncertainty. The wake cost of a substantive message is bounded; the cost of leaving substance unsurfaced is unbounded — so when in doubt, send it, and reserve silence for content that is genuinely pure acknowledgement.
 
-The triad is asymmetric **because the cost of missed wake is asymmetric**. Missed dispatch wake = peer never starts. Missed ACK = coordinator builds downstream on assumed-engaged peer. Missed completion wake = coordinator builds downstream on stale state. Missed substantive concur = peer sits on stated-default uncertainty. The wake cost of an IMPORTANT-marked substantive message is bounded; the cost of leaving substance unsurfaced is unbounded.
-
-### Failure modes the triad addresses
+### Failure modes the protocol addresses
 
 | Failure | What happens | Discipline that closes it |
 |---|---|---|
-| No IMPORTANT on dispatch | Receiver never wakes; dispatch sits silent for hours | A. dispatch uses IMPORTANT |
-| No demand-IMPORTANT-ACK | Can't tell engaged-but-working from silently-stuck | B. demand IMPORTANT-ACK |
-| No request-IMPORTANT-back on completion | Coordinator catches completion only on next operator turn or 20-min cron; downstream dispatches block | C. request IMPORTANT-back |
-| Silent ACK to a coordinator gating other dispatches | Coordinator + all gated peers all idle | B. demand IMPORTANT-ACK, even on "still working" status |
-| Silent flip of a prior asserted position | Coordinator builds downstream on the old position | C. request IMPORTANT-back on corrections |
+| No demand-ACK | Can't tell engaged-but-working from silently-stuck | B. demand ACK |
+| No request-reply on completion | Coordinator catches completion only on next operator turn or 20-min cron; downstream dispatches block | C. request a reply |
+| Silent ACK to a coordinator gating other dispatches | Coordinator + all gated peers all idle | B. demand ACK, even on "still working" status |
+| Silent flip of a prior asserted position | Coordinator builds downstream on the old position | C. request a reply on corrections |
 
 ### Cross-references
 
-- `knowledge_bases/agent_messaging_plugin/03_inter_agent_messaging.md` — the platform mechanism (notification fires, marker stripping, loop prevention).
+- `knowledge_bases/agent_messaging_plugin/03_inter_agent_messaging.md` — the platform mechanism (unconditional delivery, delivery-outcome vocabulary, optional marker stripping).
 - This article — the coordinator-side discipline that uses the mechanism.
 
-The triad has held throughout long autonomous multi-peer campaigns — many parallel peers, repeated design iterations, bug investigations, and blue-green cutovers running unattended for hours — with no silent-stuck cases requiring operator rescue.
+The dispatch/ACK/milestone discipline has held throughout long autonomous multi-peer campaigns — many parallel peers, repeated design iterations, bug investigations, and blue-green cutovers running unattended for hours — with no silent-stuck cases requiring operator rescue.
 
 ---
 
@@ -266,7 +262,7 @@ The triad has held throughout long autonomous multi-peer campaigns — many para
 
 ```
 expected_path: <repo-relative path the peer will produce>
-expected_completion_signal: peer_send IMPORTANT with section count + advisor call result
+expected_completion_signal: peer_send with section count + advisor call result
 ```
 
 …followed by `execute_in_seconds(seconds=1800, memory_tag="dispatch:watchdog:<task_id>", content=<wake-up brief>)`.
@@ -274,8 +270,8 @@ expected_completion_signal: peer_send IMPORTANT with section count + advisor cal
 At T+1800s the coordinator wakes on the memory tag:
 
 - existence-check the declared `expected_path` on disk → file absent.
-- `peer_inbox(include_important=True)` since dispatch time → no completion message.
-- IMPORTANT status-check `peer_send` to the peer: "status?"
+- `peer_inbox()` since dispatch time → no completion message.
+- status-check `peer_send` to the peer: "status?"
 
 The 2-hour unmonitored gap becomes a 30-minute monitored gap. The coordinator regains control of the in-flight workstream within one operator-attention-window.
 
@@ -285,8 +281,8 @@ The 2-hour unmonitored gap becomes a 30-minute monitored gap. The coordinator re
 
 Watchdogs are for **dispatches that the coordinator is on the hook to complete**. Some dispatches don't qualify:
 
-- **Silent ack of a peer's completion report.** The dispatch is one-way; nothing to track.
-- **FYI peer_send (no IMPORTANT marker).** No completion is expected.
+- **Ack of a peer's completion report.** The dispatch is one-way; nothing to track.
+- **FYI peer_send.** No completion is expected.
 - **Operator-driven cycles** (e.g., a homunculus re-birth). The operator paces; the coordinator responds. Schedule a watchdog only if the coordinator is the one driving a sub-step inside the cycle.
 - **Long-running operator-paused dispatches.** If the operator says "wait on me before continuing," don't schedule a watchdog that will ping the operator (the operator isn't in `peer_list`).
 
@@ -301,13 +297,13 @@ The discipline scopes to **coordinator-issued, peer-bound dispatches with a deli
 - `service_interface::scheduling_service::ensure_global_heartbeat` — the always-on liveness case (different pattern; not for in-flight dispatch tracking).
 - `service_interface::memory_service::get_memories_by_tag` — retrieve in-flight dispatches for the K=3 sweep (§6) and the cron sweep (§7).
 - `service_interface::scheduling_service::clear_scheduled_actions_by_tag` — cancel a watchdog when the dispatch completes before the timer fires; cancel the active-management cron on handoff or quiescence (§7).
-- `mcp__<server-name>__peer_inbox(include_important=True)` — read completion messages, including IMPORTANT-marked ones (which already woke the coordinator at delivery, but show up here for backfill).
-- `mcp__<server-name>__peer_send` with prose starting `IMPORTANT` — the dispatch / ACK / milestone wake mechanism (§8).
+- `mcp__<server-name>__peer_inbox()` — read completion messages (delivery already woke the coordinator once; this is the backfill/catch-up view).
+- `mcp__<server-name>__peer_send` — the dispatch / ACK / milestone mechanism (§8); delivery is unconditional, so this is the wake mechanism regardless of prose.
 
 See also:
 
-- `knowledge_bases/agent_messaging_plugin/03_inter_agent_messaging.md` — the IMPORTANT-marker platform mechanism (notification fires, marker stripping, loop prevention) that §8's coordinator discipline relies on.
+- `knowledge_bases/agent_messaging_plugin/03_inter_agent_messaging.md` — the delivery-contract platform mechanism (unconditional delivery, delivery-outcome vocabulary, optional marker stripping) that §8's coordinator discipline relies on.
 - `responsiveness_and_checkins.md` — the same wake-up pattern applied to user-facing latency and check-ins.
 - `scheduling_memory_driven.md` — the underlying scheduling philosophy (wake-ups, not payloads).
 
-The discipline depends on four coordinator habits: (1) **never dispatch without declaring `expected_path` + `expected_completion_signal` + `kb_search_required` + `ledger_search_required`** (§2); (2) **never dispatch without scheduling a per-dispatch watchdog** (§3); (3) **while actively managing in-flight work, run the 20-minute active-management cron** (§7); (4) **dispatch USES IMPORTANT, DEMANDS IMPORTANT-ACK, and REQUESTS IMPORTANT-back at milestones / blockers / completion** (§8). Together they convert the dispatch chain from fire-and-forget into structurally-tracked.
+The discipline depends on four coordinator habits: (1) **never dispatch without declaring `expected_path` + `expected_completion_signal` + `kb_search_required` + `ledger_search_required`** (§2); (2) **never dispatch without scheduling a per-dispatch watchdog** (§3); (3) **while actively managing in-flight work, run the 20-minute active-management cron** (§7); (4) **dispatch, DEMAND an ACK before work starts, and REQUEST a reply at milestones / blockers / completion** (§8) — delivery is unconditional, so use the channel deliberately rather than for acks. Together they convert the dispatch chain from fire-and-forget into structurally-tracked.

@@ -10,20 +10,41 @@ audit trail the way Zuora's billing records are; see the knowledge-base
 overview for the explicit read/write posture note.
 
 Verbs (all EDGE):
-  - describe_lead_fields                                    — read
-  - get_leads                                                — read
-  - get_api_usage                                            — read (current-day API consumption)
-  - list_activity_types                                      — read (per-instance activity metadata)
-  - get_activities                                           — read (activity log; verifies what a write CAUSED, after the fact)
+  - describe_lead_fields                                    — read, ASYNC (D0.3 job dispatch — see below)
+  - get_leads                                                — read, ASYNC
+  - get_api_usage                                            — read, ASYNC (current-day API consumption)
+  - list_activity_types                                      — read, ASYNC (per-instance activity metadata)
+  - get_activities                                           — read, ASYNC (activity log; verifies what a write CAUSED, after the fact)
   - create_or_update_leads                                   — write
   - delete_leads                                             — write (destructive)
   - merge_leads                                              — write (destructive, irreversible)
-  - list_campaigns                                           — read
+  - list_campaigns                                           — read, ASYNC
   - trigger_campaign                                         — write (side-effecting; the flow it runs is NOT readable first — see the KB's campaign flow inspection article)
-  - list_static_lists                                        — read
+  - list_static_lists                                        — read, ASYNC
   - add_leads_to_list / remove_leads_from_list               — write
   - test_connection                                          — diagnostic (credentials reachable)
   - check_setup                                              — diagnostic (which READ capabilities the Role grants; PARTIAL, see docstring)
+  - check_marketo_job_status                                 — diagnostic (poll an ASYNC verb's dispatched job)
+
+D0.3 sync-verb migration (2026-08-09): the seven ASYNC verbs above dispatch an
+AsyncJobManager job and return {job_id, status} in milliseconds instead of
+running their vendor fetch inline on the dispatch path — batch 1 (get_leads,
+get_activities, list_campaigns, list_static_lists) migrated the internally-
+paginating, multi-vendor-round-trip verbs first (the worst loop-hold shape in
+the D0.2 blocking-verb corpus); batch 2 (describe_lead_fields, get_api_usage,
+list_activity_types) migrated the single-vendor-call reads the same way, minus
+the pagination. A background worker thread (ServicePlugin.start_services) does
+the real vendor I/O off the dispatch path for all seven; completion routes
+through AsyncJobManager's completion_handlers exactly as
+comfyui_image_generation_plugin's generate_image does (the production exemplar
+this migration follows), and check_marketo_job_status is the caller-polling
+fallback for direct process_call callers, mirroring comfyui's
+check_generation_status. Every other verb below is still unmigrated and still
+runs its vendor call inline on the dispatch await via self._run — that
+includes create_or_update_leads/delete_leads/merge_leads/add_leads_to_list/
+remove_leads_from_list/trigger_campaign/test_connection/check_setup, all named
+BLOCKING-SUSPECTED or cannot-determine rows in the D0.2 inventory and slated
+for a later batch of this same migration, not this one.
 
 Security posture: every verb is directly process_call-able like any other
 process (matches the 2026-07-15 operator ruling retiring the RATIFY-3
@@ -38,9 +59,10 @@ allowlist entry needed.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ananta.core.actions.action_metadata import (
     ContextHandling,
@@ -53,13 +75,15 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.config.config_provider import ConfigProvider
 from ananta.core.domain.enums import ActionStatus, ProcessorPolicyCategory
-from ananta.core.plugins.plugin_base import PluginBase
+from ananta.core.domain.types import ActionResult
+from ananta.core.plugins.decorators import service_lifecycle
+from ananta.core.plugins.plugin_base import ServicePlugin
 from ananta.interfaces.edge_process_provider import (
     EdgeProcessDefinition,
     EdgeProcessProvider,
 )
 
-from . import export_containment, marketing_actions
+from . import completion_templates, export_containment, marketing_actions
 from .app_config import AppConfigError, AppConfigLoader
 from .constants import (
     CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
@@ -69,13 +93,16 @@ from .constants import (
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
     ERROR_API_ERROR,
     ERROR_INVALID_PARAMS,
+    ERROR_JOB_NOT_FOUND,
     ERROR_NOT_CONFIGURED,
     MARKETO_LIST_PAGE_ROW_CAP,
     MARKETO_LIST_ROW_LIMIT_CAP,
     PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_JOB_ID,
     PARAM_ROW_LIMIT,
     PLUGIN_NAME,
     RESULT_TYPE_ADD_LEADS_TO_LIST,
+    RESULT_TYPE_CHECK_MARKETO_JOB_STATUS,
     RESULT_TYPE_CHECK_SETUP,
     RESULT_TYPE_CREATE_OR_UPDATE_LEADS,
     RESULT_TYPE_DELETE_LEADS,
@@ -99,11 +126,65 @@ from .errors import (
 )
 from .http_client import MarketoAuthError, MarketoClient
 
+if TYPE_CHECKING:
+    from ananta.core.state.async_job_manager import AsyncJobManager
 
-class MarketoPlugin(PluginBase, EdgeProcessProvider):
-    """Marketo Engage connector (lead CRUD/query, campaigns, list membership) plugin."""
+# Background worker's handler per async-dispatched action name — the actual
+# vendor I/O, run off the dispatch path (D0.3 deferred-completion shape).
+_JOB_EXECUTORS: dict[str, Callable[[MarketoClient, dict[str, Any]], dict[str, Any]]] = {
+    "get_leads": marketing_actions.execute_get_leads,
+    "get_activities": marketing_actions.execute_get_activities,
+    "list_campaigns": marketing_actions.execute_list_campaigns,
+    "list_static_lists": marketing_actions.execute_list_static_lists,
+    "describe_lead_fields": marketing_actions.execute_describe_lead_fields,
+    "list_activity_types": marketing_actions.execute_list_activity_types,
+    "get_api_usage": marketing_actions.execute_get_api_usage,
+}
+
+_JOB_PROVIDER_PREFIX = f"{PLUGIN_NAME}."
+
+
+def _eligible_marketo_job(
+    job: Any,
+) -> tuple[str, str, Callable[[MarketoClient, dict[str, Any]], dict[str, Any]]] | None:
+    """Filter one raw queued-job record down to (job_id, action_name, executor).
+
+    Returns None for anything not a marketo_plugin async-dispatched job this
+    worker knows how to execute — a different plugin's job, an unmigrated
+    marketo_plugin verb, or a malformed record.
+    """
+    if not isinstance(job, dict):
+        return None
+    provider_name = job.get("provider_name")
+    if not isinstance(provider_name, str) or not provider_name.startswith(_JOB_PROVIDER_PREFIX):
+        return None
+    action_name = provider_name[len(_JOB_PROVIDER_PREFIX):]
+    executor = _JOB_EXECUTORS.get(action_name)
+    job_id = job.get("id")
+    if executor is None or not isinstance(job_id, str):
+        return None
+    return job_id, action_name, executor
+
+
+class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
+    """Marketo Engage connector (lead CRUD/query, campaigns, list membership) plugin.
+
+    D0.3 sync-verb migration (2026-08-09): a ``ServicePlugin`` with a
+    persistent background worker thread, modeled directly on
+    comfyui_image_generation_plugin's (the one production D0.3 exemplar) —
+    single worker thread, one job processed at a time, which is what keeps
+    the platform's ``FlowManager._sequence_cache`` concurrency caveat from
+    applying here (see D0.3 doctrine §2). The worker processes
+    ``get_leads``/``get_activities``/``list_campaigns``/``list_static_lists``
+    jobs queued by their dispatch handlers below; every other verb is still
+    unmigrated and still runs inline on the dispatch path via ``self._run``.
+    """
 
     name: str = PLUGIN_NAME
+
+    # Worker configuration — bursty connector, not a continuously-busy one;
+    # matches comfyui_image_generation_plugin's poll interval.
+    WORKER_POLL_INTERVAL: float = 2.0
 
     def __init__(self) -> None:
         super().__init__()
@@ -111,6 +192,14 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         self._address_book_service: Any | None = None
         self._app_config_loader: AppConfigLoader | None = None
         self._client: MarketoClient | None = None
+        # D0.3 section 7 named constraint: lazily building self._client is
+        # itself a check-then-set that the migration's background worker now
+        # races against the (still-synchronous) main dispatch thread for.
+        self._client_lock = threading.Lock()
+
+        # Worker thread management (ServicePlugin pattern, comfyui-modeled).
+        self._stop_event: threading.Event = threading.Event()
+        self._worker_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
     # VaultKeysProvider — no plugin-owned vault keys
@@ -171,9 +260,43 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         if self._app_config_loader is None:
             raise RuntimeError(ERROR_ADDRESS_BOOK_NOT_AVAILABLE)
         if self._client is None:
-            config = self._app_config_loader.load()
-            self._client = MarketoClient(config, timeout_seconds=self._request_timeout_seconds())
+            with self._client_lock:
+                if self._client is None:
+                    config = self._app_config_loader.load()
+                    self._client = MarketoClient(config, timeout_seconds=self._request_timeout_seconds())
         return self._client
+
+    def _require_async_job_manager(self) -> AsyncJobManager:
+        """Fetch the platform's AsyncJobManager off the orchestrator reference.
+
+        Not a setter-injected field — ``OrchestratorProtocol.async_job_manager``
+        is a property every plugin can read directly once ``orchestrator_ref``
+        is set (D0.3 doctrine §2: constructed once as a platform-wide
+        singleton at boot, same object graph every plugin shares).
+        """
+        if self.orchestrator_ref is None:
+            raise RuntimeError(f"{self.name}: orchestrator_ref not injected")
+        manager = self.orchestrator_ref.async_job_manager
+        if manager is None:
+            raise RuntimeError(f"{self.name}: AsyncJobManager not yet available")
+        return manager  # type: ignore[return-value]
+
+    def _require_state_context(self, state: dict[str, Any]) -> tuple[str, str]:
+        """Validate session_id/flow_id are present and usable BEFORE create_job.
+
+        D0.3 doctrine §1 required step, not a convention — AsyncJobManager.create_job
+        itself validates only ``notes``; this dispatch-time check is what
+        prevents a job whose completion can never route (comfyui's
+        ``param_validation.validate_state_context`` is the production instance
+        of this same step).
+        """
+        session_id = state.get("session_id")
+        flow_id = state.get("flow_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("session_id missing from state context")
+        if not isinstance(flow_id, str) or not flow_id:
+            raise ValueError("flow_id missing from state context")
+        return session_id, flow_id
 
     def _success(self, data: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -190,6 +313,23 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             "data": {},
             "actions": [],
             "error": {"code": code, "message": message},
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+
+    def _service_action_result(self, data: dict[str, object]) -> ActionResult:
+        """A typed-as-ActionResult twin of _success, for start_services/stop_services only.
+
+        ServicePlugin declares those two ``-> ActionResult`` (a TypedDict);
+        every other verb here declares ``-> dict[str, Any]`` and uses
+        ``_success``/``_error`` instead — both are correct for their own
+        caller's declared return type, this one exists only because the two
+        typed shapes are not interchangeable under pyright strict.
+        """
+        return {
+            "action_status": ActionStatus.COMPLETED.value,
+            "data": data,
+            "actions": [],
+            "error": None,
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
@@ -247,6 +387,185 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             self.logger.debug("%s: success", endpoint_name)
         return self._success(data)
 
+    def _dispatch_async_job(
+        self,
+        *,
+        action_name: str,
+        verb_label: str,
+        notes: str,
+        prepare: Callable[[], dict[str, Any]],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Ms-scale D0.3 dispatch: validate, create a job, return {job_id, status}.
+
+        No vendor call happens here — ``prepare`` does param validation +
+        export-path resolution only (see marketing_actions.py's
+        ``prepare_<verb>`` functions); the background worker calls the
+        matching ``execute_<verb>`` with the resolved request later.
+        """
+        try:
+            session_id, flow_id = self._require_state_context(state)
+            request_data = prepare()
+            manager = self._require_async_job_manager()
+        except (ValueError, AppConfigError, MarketoServiceError, export_containment.ExportPathRefusedError, RuntimeError) as exc:
+            code, message = self._classify_exception(exc, action_name)
+            return self._error(code, message)
+        request_data["notes"] = notes
+        job_metadata = completion_templates.build_job_metadata(session_id, flow_id, verb_label)
+        result = manager.create_job(
+            plugin_name=PLUGIN_NAME,
+            action_name=action_name,
+            request_data=request_data,
+            description=notes,
+            job_metadata=job_metadata,
+        )
+        return self._job_creation_response(result, action_name)
+
+    def _job_creation_response(self, result: dict[str, Any], action_name: str) -> dict[str, Any]:
+        """Interpret AsyncJobManager.create_job's result into a dispatch response."""
+        if result.get("action_status") != "completed":
+            error_info = result.get("error", {})
+            message = error_info.get("message", "unknown") if isinstance(error_info, dict) else str(error_info)
+            return self._error(ERROR_API_ERROR, f"Failed to create Marketo async job: {message}")
+        data = result.get("data", {})
+        job_id = data.get("job_id") if isinstance(data, dict) else None
+        if not isinstance(job_id, str) or not job_id:
+            return self._error(ERROR_API_ERROR, "Marketo async job creation returned no job_id")
+        if self.logger:
+            self.logger.debug("%s: dispatched job %s", action_name, job_id)
+        return self._success({"job_id": job_id, "status": "queued"})
+
+    def _classify_exception(self, exc: Exception, endpoint_name: str) -> tuple[str, str]:
+        """Shared exception -> (code, message) classification for _run and the worker."""
+        if isinstance(exc, ValueError):
+            return ERROR_INVALID_PARAMS, str(exc)
+        if isinstance(exc, AppConfigError):
+            return ERROR_NOT_CONFIGURED, str(exc)
+        if isinstance(exc, (MarketoServiceError, export_containment.ExportPathRefusedError)):
+            return exc.code, str(exc)
+        if isinstance(exc, MarketoAuthError):
+            return "marketo.auth_failed", "Marketo OAuth token request failed."
+        if isinstance(exc, MarketoEnvelopeError):
+            return classify_marketo_envelope(exc)
+        if isinstance(exc, MarketoTransportError):
+            return ERROR_API_ERROR, "Marketo API call failed (transport fault)."
+        # A bare RuntimeError (e.g. _require_client/_require_async_job_manager's
+        # "not yet available" faults) preserves its own message rather than
+        # falling through to the generic catch-all below — must be checked
+        # AFTER MarketoAuthError, which is itself a RuntimeError subclass.
+        if isinstance(exc, RuntimeError):
+            return ERROR_API_ERROR, str(exc)
+        if self.logger:
+            self.logger.warning("%s: unexpected fault (%s)", endpoint_name, type(exc).__name__)
+        return ERROR_API_ERROR, "Marketo API call failed."
+
+    # ------------------------------------------------------------------
+    # Background worker (D0.3 deferred-completion machinery)
+    # ------------------------------------------------------------------
+
+    @service_lifecycle(operation="start")
+    async def start_services(self) -> ActionResult:
+        """Start the background worker that processes queued Marketo jobs."""
+        if self._services_started:
+            return self._service_action_result({"message": "marketo_plugin worker already running"})
+        self._stop_event.clear()
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop,
+            name=f"{PLUGIN_NAME}-worker",
+            daemon=False,
+        )
+        self._worker_thread.start()
+        self._services_started = True
+        self._service_started_at = datetime.now(UTC).isoformat()
+        if self.logger:
+            self.logger.debug("marketo_plugin worker started")
+        return self._service_action_result(
+            {"message": "marketo_plugin worker started", "started_at": self._service_started_at}
+        )
+
+    @service_lifecycle(operation="stop")
+    async def stop_services(self) -> ActionResult:
+        """Stop the background worker gracefully."""
+        if not self._services_started:
+            return self._service_action_result({"message": "marketo_plugin worker already stopped"})
+        self._stop_event.set()
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=30.0)
+            if self._worker_thread.is_alive() and self.logger:
+                self.logger.error("marketo_plugin worker thread did not stop within timeout")
+        self._worker_thread = None
+        self._services_started = False
+        self._service_started_at = None
+        if self.logger:
+            self.logger.debug("marketo_plugin worker stopped")
+        return self._service_action_result({"message": "marketo_plugin worker stopped"})
+
+    def _worker_loop(self) -> None:
+        """Poll for queued marketo_plugin jobs and process them one at a time.
+
+        Single worker thread, one job at a time — the property D0.3 doctrine
+        §2 names as what keeps this migration safe against
+        ``FlowManager._sequence_cache``'s lack of internal locking.
+        """
+        while not self._stop_event.is_set():
+            try:
+                self._process_pending_jobs()
+            except Exception:  # noqa: BLE001 — never let the loop die on one bad cycle
+                if self.logger:
+                    self.logger.exception("marketo_plugin worker: unexpected fault in poll cycle")
+            self._stop_event.wait(self.WORKER_POLL_INTERVAL)
+
+    def _process_pending_jobs(self) -> None:
+        if self.orchestrator_ref is None:
+            return
+        raw_manager = self.orchestrator_ref.async_job_manager
+        if raw_manager is None:
+            return
+        manager = cast("AsyncJobManager", raw_manager)
+        result = manager.list_jobs(status="queued", limit=10, order_by="created_at ASC")
+        if result.get("action_status") != "completed":
+            return
+        data = result.get("data", {})
+        jobs = data.get("jobs", []) if isinstance(data, dict) else []
+        for job in jobs:
+            if self._stop_event.is_set():
+                return
+            eligible = _eligible_marketo_job(job)
+            if eligible is None:
+                continue
+            job_id, action_name, executor = eligible
+            self._process_job(manager, job_id, action_name, executor)
+
+    def _process_job(
+        self,
+        manager: AsyncJobManager,
+        job_id: str,
+        action_name: str,
+        executor: Callable[[MarketoClient, dict[str, Any]], dict[str, Any]],
+    ) -> None:
+        manager.update_job(job_id, {"status": "processing"})
+        payload_result = manager.get_job_payload(job_id, "request")
+        payload_data = payload_result.get("data", {})
+        request_data = payload_data.get("payload", {}) if isinstance(payload_data, dict) else {}
+        if not isinstance(request_data, dict) or not request_data:
+            manager.update_job(
+                job_id,
+                {"status": "error", "error": {"code": ERROR_API_ERROR, "message": "job request payload missing"}},
+            )
+            return
+        try:
+            client = self._require_client()
+            job_result = executor(client, request_data)
+        except Exception as exc:  # noqa: BLE001 — classified below, never left unhandled
+            code, message = self._classify_exception(exc, action_name)
+            manager.update_job(job_id, {"status": "error", "error": {"code": code, "message": message}})
+            if self.logger:
+                self.logger.warning("%s: job %s failed (%s)", action_name, job_id, code)
+            return
+        manager.update_job(job_id, {"status": "completed", "result": job_result})
+        if self.logger:
+            self.logger.debug("%s: job %s completed", action_name, job_id)
+
     # ------------------------------------------------------------------
     # EdgeProcessProvider
     # ------------------------------------------------------------------
@@ -268,6 +587,9 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
             "remove_leads_from_list": _edge("remove_leads_from_list", RESULT_TYPE_REMOVE_LEADS_FROM_LIST, retryable=False),
             "test_connection": _edge("test_connection", RESULT_TYPE_TEST_CONNECTION, retryable=True),
             "check_setup": _edge("check_setup", RESULT_TYPE_CHECK_SETUP, retryable=True),
+            "check_marketo_job_status": _edge(
+                "check_marketo_job_status", RESULT_TYPE_CHECK_MARKETO_JOB_STATUS, retryable=False,
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -278,11 +600,12 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         name="describe_lead_fields",
         display_name="Marketo: Describe Lead Fields",
         description=(
-            "Fetch the full lead field metadata list and the instance-specific searchable_fields "
-            "accepted by get_leads.filter_type, when the instance's describe response carries that "
-            "field. ALWAYS writes the field descriptors to the caller-supplied output_tsv_path, "
-            "never inline — this is a business-connector record-read verb under the 07-29 spill "
-            "floor even though its content is schema metadata, not customer PII."
+            "Dispatch an async job that fetches the full lead field metadata list and the "
+            "instance-specific searchable_fields accepted by get_leads.filter_type, and returns "
+            "{job_id, status} in milliseconds; poll check_marketo_job_status(job_id) for the "
+            "finished result. The finished job ALWAYS carries the field descriptors written to "
+            "output_tsv_path, never inline — this is a business-connector record-read verb under "
+            "the 07-29 data-export floor even though its content is schema metadata, not customer PII."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -294,42 +617,43 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV, plus searchable_fields.",
+            description="A job handle — poll check_marketo_job_status(job_id) for the finished TSV.",
             properties={
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
-                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of field descriptors written."),
-                "columns": ParameterMetadata(type=ParameterType.LIST, description="Field-descriptor column names, in first-appearance order."),
-                "searchable_fields": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Field names valid for get_leads.filter_type; null on an instance whose describe response omits it.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Pass to check_marketo_job_status to retrieve the result."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued' — the dispatch never waits for the vendor call."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def describe_lead_fields(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda client: marketing_actions.describe_lead_fields(client, params, self._export_path_gate),
-            "describe_lead_fields",
+        return self._dispatch_async_job(
+            action_name="describe_lead_fields",
+            verb_label="lead field metadata export",
+            notes="Marketo describe_lead_fields",
+            prepare=lambda: marketing_actions.prepare_describe_lead_fields(params, self._export_path_gate),
+            state=state,
         )
 
     @platform_process(
         name="get_api_usage",
         display_name="Marketo: Get Current API Usage",
         description=(
-            "Read the configured Marketo subscription's current-day REST API "
-            "call total and per-user breakdown. Use calls_today when checking "
-            "whether a planned batch fits the operator's known daily quota."
+            "Dispatch an async job that reads the configured Marketo subscription's current-day "
+            "REST API call total and per-user breakdown, and returns {job_id, status} in "
+            "milliseconds; poll check_marketo_job_status(job_id) for the finished result. Use the "
+            "finished job's calls_today when checking whether a planned batch fits the operator's "
+            "known daily quota."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description=(
-                "date, calls_today, users, records, and row_count for the "
-                "current subscription day."
-            ),
+            description="A job handle — poll check_marketo_job_status(job_id) for the finished usage data.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Pass to check_marketo_job_status to retrieve the result."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued' — the dispatch never waits for the vendor call."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
@@ -339,23 +663,29 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        return self._run(
-            lambda client: marketing_actions.get_api_usage(client, params),
-            "get_api_usage",
+        return self._dispatch_async_job(
+            action_name="get_api_usage",
+            verb_label="API usage read",
+            notes="Marketo get_api_usage",
+            prepare=lambda: marketing_actions.prepare_get_api_usage(params),
+            state=state,
         )
 
     @platform_process(
         name="get_leads",
         display_name="Marketo: Get Leads",
         description=(
-            "Query leads by an instance-supported filter_type and up to 300 filter_values. Read "
-            "describe_lead_fields.searchable_fields to discover valid standard and custom filter "
-            "types first. ALWAYS writes the matching leads to output_tsv_path, never inline. Pages "
-            f"internally across Marketo's own {MARKETO_LIST_PAGE_ROW_CAP}-per-call ceiling (fixed "
-            "server-side, no query-side parameter to raise) up to the effective row limit — this "
-            f"verb never returns a partial page for you to continue; defaults to {DEFAULT_ROW_LIMIT} "
-            "to avoid exhausting vendor rate limits and disk, and to discourage pulling all records "
-            "for client-side filtering a vendor query should do instead. To fetch more, pass "
+            "Dispatch an async job that queries leads by an instance-supported filter_type and up "
+            "to 300 filter_values, and returns {job_id, status} in milliseconds — the query itself "
+            "runs in the background; poll check_marketo_job_status(job_id) for the finished TSV "
+            "handle. Read describe_lead_fields.searchable_fields to discover valid standard and "
+            "custom filter types first. The finished job ALWAYS carries the matching leads written "
+            f"to output_tsv_path, never inline. Pages internally across Marketo's own "
+            f"{MARKETO_LIST_PAGE_ROW_CAP}-per-call ceiling (fixed server-side, no query-side "
+            "parameter to raise) up to the effective row limit — this verb never returns a partial "
+            f"page for you to continue; defaults to {DEFAULT_ROW_LIMIT} to avoid exhausting vendor "
+            "rate limits and disk, and to discourage pulling all records for client-side filtering "
+            "a vendor query should do instead. To fetch more, pass "
             f"acknowledge_default_limit_override=true together with an explicit row_limit (up to "
             f"{MARKETO_LIST_ROW_LIMIT_CAP}) — both required together, refused rather than clamped "
             f"above {MARKETO_LIST_ROW_LIMIT_CAP}. Beyond the hard cap there is no resumption: "
@@ -403,32 +733,34 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV — never records inline, at any size.",
+            description="A job handle — poll check_marketo_job_status(job_id) for the finished TSV.",
             properties={
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
-                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of leads written."),
-                "columns": ParameterMetadata(type=ParameterType.LIST, description="Lead field names, in first-appearance order."),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="True when row_count hit the effective limit — more leads may exist.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Pass to check_marketo_job_status to retrieve the result."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued' — the dispatch never waits for the fetch."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def get_leads(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda client: marketing_actions.get_leads(client, params, self._export_path_gate), "get_leads",
+        return self._dispatch_async_job(
+            action_name="get_leads",
+            verb_label="lead query export",
+            notes=f"Marketo get_leads: filter_type={params.get('filter_type')!r}",
+            prepare=lambda: marketing_actions.prepare_get_leads(params, self._export_path_gate),
+            state=state,
         )
 
     @platform_process(
         name="list_activity_types",
         display_name="Marketo: List Activity Types",
         description=(
-            "List the configured Marketo instance's activity type ids and metadata. Use these "
-            "per-instance ids as the mandatory activity_type_ids for get_activities. ALWAYS writes "
-            "the catalog to output_tsv_path, never inline — this is a business-connector "
-            "record-read verb under the 07-29 spill floor even though its content is instance "
+            "Dispatch an async job that lists the configured Marketo instance's activity type ids "
+            "and metadata, and returns {job_id, status} in milliseconds; poll "
+            "check_marketo_job_status(job_id) for the finished result. Use the finished job's ids as "
+            "the mandatory activity_type_ids for get_activities. The finished job ALWAYS carries the "
+            "catalog written to output_tsv_path, never inline — this is a business-connector "
+            "record-read verb under the 07-29 data-export requirement even though its content is instance "
             "metadata, not customer PII."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
@@ -441,11 +773,10 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV.",
+            description="A job handle — poll check_marketo_job_status(job_id) for the finished TSV.",
             properties={
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
-                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of activity type descriptors written."),
-                "columns": ParameterMetadata(type=ParameterType.LIST, description="Descriptor column names, in first-appearance order."),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Pass to check_marketo_job_status to retrieve the result."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued' — the dispatch never waits for the vendor call."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
@@ -456,40 +787,42 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        return self._run(
-            lambda client: marketing_actions.list_activity_types(
-                client,
-                params,
-                self._export_path_gate,
-            ),
-            "list_activity_types",
+        return self._dispatch_async_job(
+            action_name="list_activity_types",
+            verb_label="activity type catalog export",
+            notes="Marketo list_activity_types",
+            prepare=lambda: marketing_actions.prepare_list_activity_types(params, self._export_path_gate),
+            state=state,
         )
 
     @platform_process(
         name="get_activities",
         display_name="Marketo: Get Lead Activities",
         description=(
-            "Read the Marketo activity log — what leads actually DID, or had done to them "
-            "(emails sent/delivered, alerts, campaign requests, data value changes). Pass "
-            "since_datetime (ISO-8601, second-granularity — a fractional-seconds component is "
-            "floor-truncated before the paging-token request because Marketo otherwise rewinds "
-            "that window to midnight UTC). activity_type_ids is mandatory (max 10); discover "
-            "valid ids with list_activity_types. Optional lead_ids (max 30) filter server-side. "
-            "AFTER-THE-FACT audit: it reports what a write already caused; it cannot promise "
-            "that a future merge/update will stay silent. ALWAYS writes to output_tsv_path, "
-            f"never inline. Pages internally across Marketo's own {MARKETO_LIST_PAGE_ROW_CAP}-"
-            "per-call ceiling up to the effective row limit — no pagination token appears on "
-            f"this verb; defaults to {DEFAULT_ROW_LIMIT}. To fetch more, pass "
-            "acknowledge_default_limit_override=true together with an explicit row_limit (up to "
-            f"{MARKETO_LIST_ROW_LIMIT_CAP}) — both required together, refused rather than clamped "
-            f"above {MARKETO_LIST_ROW_LIMIT_CAP}. Beyond the hard cap: no resumption, re-invoke "
-            "with a later since_datetime. moreResult is the ONLY usable vendor continuation "
-            "signal internally (Adobe documents this endpoint always returns a token, so token "
-            "presence can't terminate the loop, unlike get_leads/list_campaigns/list_static_lists) "
-            "and its reliability on this endpoint is documented but UNMEASURED — the one live "
-            "measurement of moreResult anywhere found it violated on list_campaigns, so "
-            "truncated=false here is only as honest as Marketo's own flag. Prefer requesting "
-            "stable ID and status fields for validation over email or other PII-bearing fields."
+            "Dispatch an async job that reads the Marketo activity log — what leads actually DID, "
+            "or had done to them (emails sent/delivered, alerts, campaign requests, data value "
+            "changes) — and returns {job_id, status} in milliseconds; poll "
+            "check_marketo_job_status(job_id) for the finished TSV handle. Pass since_datetime "
+            "(ISO-8601, second-granularity — a fractional-seconds component is floor-truncated "
+            "before the paging-token request because Marketo otherwise rewinds that window to "
+            "midnight UTC). activity_type_ids is mandatory (max 10); discover valid ids with "
+            "list_activity_types. Optional lead_ids (max 30) filter server-side. AFTER-THE-FACT "
+            "audit: it reports what a write already caused; it cannot promise that a future "
+            "merge/update will stay silent. The finished job ALWAYS carries the records written to "
+            f"output_tsv_path, never inline. Pages internally across Marketo's own "
+            f"{MARKETO_LIST_PAGE_ROW_CAP}-per-call ceiling up to the effective row limit — no "
+            f"pagination token appears on this verb; defaults to {DEFAULT_ROW_LIMIT}. To fetch "
+            "more, pass acknowledge_default_limit_override=true together with an explicit "
+            f"row_limit (up to {MARKETO_LIST_ROW_LIMIT_CAP}) — both required together, refused "
+            f"rather than clamped above {MARKETO_LIST_ROW_LIMIT_CAP}. Beyond the hard cap: no "
+            "resumption, re-invoke with a later since_datetime. moreResult is the ONLY usable "
+            "vendor continuation signal internally (Adobe documents this endpoint always returns a "
+            "token, so token presence can't terminate the loop, unlike "
+            "get_leads/list_campaigns/list_static_lists) and its reliability on this endpoint is "
+            "documented but UNMEASURED — the one live measurement of moreResult anywhere found it "
+            "violated on list_campaigns, so truncated=false on the finished job is only as honest "
+            "as Marketo's own flag. Prefer requesting stable ID and status fields for validation "
+            "over email or other PII-bearing fields."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -539,26 +872,22 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV — never records inline, at any size.",
+            description="A job handle — poll check_marketo_job_status(job_id) for the finished TSV.",
             properties={
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
-                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of activity items written."),
-                "columns": ParameterMetadata(type=ParameterType.LIST, description="Activity-item field names, in first-appearance order."),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description=(
-                        "True when row_count hit the effective limit or the vendor's own "
-                        "moreResult flag never went false — more activity items may exist."
-                    ),
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Pass to check_marketo_job_status to retrieve the result."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued' — the dispatch never waits for the fetch."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def get_activities(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda client: marketing_actions.get_activities(client, params, self._export_path_gate), "get_activities",
+        return self._dispatch_async_job(
+            action_name="get_activities",
+            verb_label="activity log export",
+            notes=f"Marketo get_activities: since={params.get('since_datetime')!r}",
+            prepare=lambda: marketing_actions.prepare_get_activities(params, self._export_path_gate),
+            state=state,
         )
 
     @platform_process(
@@ -627,11 +956,13 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         name="list_campaigns",
         display_name="Marketo: List Campaigns",
         description=(
-            "List campaigns, optionally filtered by names and/or program_names. ALWAYS writes to "
-            f"output_tsv_path, never inline. Pages internally across Marketo's own "
-            f"{MARKETO_LIST_PAGE_ROW_CAP}-per-call ceiling up to the effective row limit — no "
-            f"pagination token appears on this verb; defaults to {DEFAULT_ROW_LIMIT} to avoid "
-            "exhausting vendor rate limits and disk. To fetch more, pass "
+            "Dispatch an async job that lists campaigns, optionally filtered by names and/or "
+            "program_names, and returns {job_id, status} in milliseconds; poll "
+            "check_marketo_job_status(job_id) for the finished TSV handle. The finished job ALWAYS "
+            f"carries the campaigns written to output_tsv_path, never inline. Pages internally "
+            f"across Marketo's own {MARKETO_LIST_PAGE_ROW_CAP}-per-call ceiling up to the effective "
+            f"row limit — no pagination token appears on this verb; defaults to {DEFAULT_ROW_LIMIT} "
+            "to avoid exhausting vendor rate limits and disk. To fetch more, pass "
             "acknowledge_default_limit_override=true together with an explicit row_limit (up to "
             f"{MARKETO_LIST_ROW_LIMIT_CAP}) — both required together, refused rather than clamped "
             f"above {MARKETO_LIST_ROW_LIMIT_CAP}. Beyond the hard cap: no resumption, re-invoke "
@@ -667,22 +998,22 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV — never records inline, at any size.",
+            description="A job handle — poll check_marketo_job_status(job_id) for the finished TSV.",
             properties={
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
-                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of campaigns written."),
-                "columns": ParameterMetadata(type=ParameterType.LIST, description="Campaign field names, in first-appearance order."),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="True when row_count hit the effective limit — more campaigns may exist.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Pass to check_marketo_job_status to retrieve the result."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued' — the dispatch never waits for the fetch."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_campaigns(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda client: marketing_actions.list_campaigns(client, params, self._export_path_gate), "list_campaigns",
+        return self._dispatch_async_job(
+            action_name="list_campaigns",
+            verb_label="campaign listing export",
+            notes=f"Marketo list_campaigns: names={params.get('names')!r}",
+            prepare=lambda: marketing_actions.prepare_list_campaigns(params, self._export_path_gate),
+            state=state,
         )
 
     @platform_process(
@@ -716,8 +1047,10 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         name="list_static_lists",
         display_name="Marketo: List Static Lists",
         description=(
-            "List static lists, optionally filtered by names. Same page-cap shape as "
-            "list_campaigns. ALWAYS writes to output_tsv_path, never inline. Pages internally "
+            "Dispatch an async job that lists static lists, optionally filtered by names, and "
+            "returns {job_id, status} in milliseconds; poll check_marketo_job_status(job_id) for "
+            "the finished TSV handle. Same page-cap shape as list_campaigns. The finished job "
+            f"ALWAYS carries the lists written to output_tsv_path, never inline. Pages internally "
             f"across Marketo's own {MARKETO_LIST_PAGE_ROW_CAP}-per-call ceiling up to the "
             f"effective row limit — no pagination token appears on this verb; defaults to "
             f"{DEFAULT_ROW_LIMIT} to avoid exhausting vendor rate limits and disk. To fetch more, "
@@ -755,23 +1088,22 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV — never records inline, at any size.",
+            description="A job handle — poll check_marketo_job_status(job_id) for the finished TSV.",
             properties={
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
-                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of static lists written."),
-                "columns": ParameterMetadata(type=ParameterType.LIST, description="Static-list field names, in first-appearance order."),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="True when row_count hit the effective limit — more static lists may exist.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Pass to check_marketo_job_status to retrieve the result."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued' — the dispatch never waits for the fetch."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_static_lists(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda client: marketing_actions.list_static_lists(client, params, self._export_path_gate),
-            "list_static_lists",
+        return self._dispatch_async_job(
+            action_name="list_static_lists",
+            verb_label="static list listing export",
+            notes=f"Marketo list_static_lists: names={params.get('names')!r}",
+            prepare=lambda: marketing_actions.prepare_list_static_lists(params, self._export_path_gate),
+            state=state,
         )
 
     @platform_process(
@@ -858,6 +1190,100 @@ class MarketoPlugin(PluginBase, EdgeProcessProvider):
         return self._run(
             lambda client: marketing_actions.check_setup(client), "check_setup"
         )
+
+    @platform_process(
+        name="check_marketo_job_status",
+        display_name="Marketo: Check Async Job Status",
+        description=(
+            "Poll the status of an async job dispatched by get_leads, get_activities, "
+            "list_campaigns, or list_static_lists. status is one of queued, processing, "
+            "completed, error, or cancelled. result carries the finished job's TSV handle "
+            "(path, row_count, columns, truncated) once status is completed, and is null "
+            "in every other state. error carries the classified marketo.* code + message "
+            "once status is error, and is null in every other state — poll again after "
+            "check_after_seconds while status is queued or processing."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            PARAM_JOB_ID: ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="The job_id returned by get_leads/get_activities/list_campaigns/list_static_lists.",
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="The job's current status, plus its result or error once terminal.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Echoes the requested job_id."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="queued, processing, completed, error, or cancelled."),
+                "result": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="The finished TSV handle (path, row_count, columns, truncated) once status is completed; null otherwise.",
+                ),
+                "error": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="The classified marketo.* {code, message} once status is error; null otherwise.",
+                ),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def check_marketo_job_status(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        job_id = params.get(PARAM_JOB_ID)
+        if not isinstance(job_id, str) or not job_id:
+            return self._error(ERROR_INVALID_PARAMS, f"'{PARAM_JOB_ID}' is required and must be a non-empty string")
+        try:
+            manager = self._require_async_job_manager()
+        except RuntimeError as exc:
+            return self._error(ERROR_API_ERROR, str(exc))
+        job = self._extract_job_record(manager.get_job(job_id))
+        if job is None:
+            return self._error(ERROR_JOB_NOT_FOUND, f"Marketo job not found: {job_id}")
+        status = job.get("status")
+        status = status if isinstance(status, str) and status else "unknown"
+        result_payload, error_payload = self._terminal_job_payloads(manager, job_id, status)
+        return self._success(
+            {
+                "job_id": job_id,
+                "status": status,
+                "result": result_payload,
+                "error": error_payload,
+            }
+        )
+
+    def _extract_job_record(self, job_result: dict[str, Any]) -> dict[str, Any] | None:
+        """Pull the job dict out of AsyncJobManager.get_job's envelope, or None."""
+        if job_result.get("action_status") != "completed":
+            return None
+        data = job_result.get("data", {})
+        candidate = data.get("job") if isinstance(data, dict) else None
+        return candidate if isinstance(candidate, dict) else None
+
+    def _terminal_job_payloads(
+        self, manager: AsyncJobManager, job_id: str, status: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """(result, error) for a terminal status; (None, None) otherwise.
+
+        Coordinator-seat advisory (2026-08-09): both keys must stay present on the
+        caller's response regardless — only the VALUE is conditional here.
+        """
+        if status == "completed":
+            return self._fetch_job_result_payload(manager, job_id, "result"), None
+        if status == "error":
+            return None, self._fetch_job_result_payload(manager, job_id, "error")
+        return None, None
+
+    def _fetch_job_result_payload(
+        self, manager: AsyncJobManager, job_id: str, payload_type: str,
+    ) -> dict[str, Any]:
+        payload_result = manager.get_job_payload(job_id, payload_type)
+        if payload_result.get("action_status") != "completed":
+            return {}
+        data = payload_result.get("data", {})
+        payload = data.get("payload") if isinstance(data, dict) else None
+        return payload if isinstance(payload, dict) else {}
 
 
 def _edge(

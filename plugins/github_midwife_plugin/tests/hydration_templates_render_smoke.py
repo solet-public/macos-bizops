@@ -340,7 +340,44 @@ def _missing_and_forbidden(
 # Only the EXCEPTION is named by hand, because it is a documented design decision
 # rather than an observation — and naming it is what stops "five" from silently
 # becoming "four label-gated plus one nobody checked".
-_LABEL_INDEPENDENT_HOOKS = frozenset({"git_controller_gate.py"})
+#
+# check_messages_reminder.py and wake_waiter.py were ALREADY armed on
+# AGENT_SESSION_ID, never AGENT_SESSION_LABEL, in their pre-2026-08-08 JS form
+# too -- this check only ever passed for them by accident, matching an
+# unrelated historical comment ("re-keyed from AGENT_SESSION_LABEL on
+# 2026-08-01") rather than real arming logic. The coordination-hooks
+# Python promotion (2026-08-08) surfaced this: the new files' docstrings
+# don't happen to repeat that same incidental phrase, so the vacuous match
+# stopped occurring and this check went red for the first time -- correctly,
+# since it was never actually verifying these two hooks' real contract.
+#
+# heartbeat_report_alive.py (R4 vendoring, 2026-08-10) is armed on
+# AGENT_INSTANCE_ID, and its source never references AGENT_SESSION_LABEL at
+# all -- a clean fit for this bucket, same shape as the three above.
+# rotation_due_watch.py is NOT added here despite ALSO arming on
+# AGENT_INSTANCE_ID: its source legitimately contains the string
+# "AGENT_SESSION_LABEL" (it reads the label to enrich its notification TEXT,
+# never to arm), so it happens to satisfy the opposite branch's plain
+# substring check today -- correctly, by coincidence of what that branch
+# actually tests (string presence), not because it is truly label-gated.
+# Disclosed here so a future reader does not "fix" it into this set and
+# break that branch's real, if narrower, guarantee.
+#
+# capture.py and session_context.py (R4 vendoring Package B, 2026-08-10)
+# arm on neither AGENT_SESSION_LABEL nor any other env var at all -- their
+# precondition is a filesystem-presence check (this agent's own memory
+# directory existing), and neither file's source references
+# AGENT_SESSION_LABEL. drain.py/hydrate_render.py/index_render.py/sync.py
+# never appear in this smoke's roster at all (it derives the roster from
+# hooks.json's actual registrations, and those four are deliberately never
+# wired there -- see manifest_consistency_smoke.py's
+# AGENT_INVOKED_CLI_UTILITIES design note), so they need no entry here.
+_LABEL_INDEPENDENT_HOOKS = frozenset(
+    {
+        "git_controller_gate.py", "check_messages_reminder.py", "wake_waiter.py",
+        "heartbeat_report_alive.py", "capture.py", "session_context.py",
+    },
+)
 _PLUGIN_HOOKS_DIR = (
     _TEMPLATES_DIR.parents[1] / "claude_plugin" / "coordination-hooks" / "hooks"
 )
