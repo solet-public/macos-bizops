@@ -2,23 +2,14 @@
 
 <!-- BEGIN HOMUNCULUS HYDRATION -->
 
-> **🛑 FIRST ACTION, EVERY SESSION — NON-NEGOTIABLE.** Before your first
-> substantive reply and before any other tool call in this directory, run one
-> `dax call service_interface::knowledge_service::search` (the
-> **Step Zero** command below). This is the literal first step of every task —
-> including tasks that look like plain code, shell, or config work, and
-> including tasks where you feel you already know the answer. Answering from
-> source files, prior assumptions, web search, or MCP *before* you have searched
-> dax is a defect, not a shortcut. If you have not yet searched
-> dax this session, you are not ready to act.
-
 This directory is the home of **dax**, a homunculus on the Ananta
 platform: a named, persistent agentic instance with its own PostgreSQL schema,
-memories, knowledge bases, and plugins. You — the Claude Code session reading
-this — are its driving agent. This managed block governs dax
-access for sessions opened in this directory. Existing project instructions
-still apply; if they conflict with how to reach dax, follow
-this block for access and ask the operator about the conflict.
+memories, knowledge bases, and plugins. You — the AGENTS.md-convention
+session reading this — are its driving agent. This managed block governs
+dax access for sessions opened in this directory. Existing
+project instructions still apply; if they conflict with how to reach
+dax, follow this block for access and ask the operator about
+the conflict.
 
 ## Access mode — no-MCP CLI is the default
 
@@ -37,13 +28,14 @@ ingestion is enabled it is also the path for session-ledger recall:
 dax call service_interface::session_ledger_service::search_event_content '{"query": "<topic>", "limit": 8}'
 ```
 
-It needs no MCP server, no `claude mcp add`, and no
-`mcp__dax__*` tools.
+It needs no MCP server and no `mcp__dax__*` tools.
 
 MCP is optional and exists only for the operator who explicitly asks for it
 and whose machine policy permits it. Do not register, debug, or search for MCP
 tools unprompted, and do not treat their absence as a problem to solve — the
-CLI path above is not a fallback, it is the default.
+CLI path above is not a fallback, it is the default. Runner-specific
+peer-to-peer wake is a separate concern from knowledge/process access; retrieve
+the current messaging contract before assuming its transport.
 
 If `dax call` itself fails (the homunculus process is not
 running — check with `dax health`), the fallback is
@@ -103,11 +95,40 @@ embedding rebuild and causes inference timeouts.
   on `~/Library/LaunchAgents/local.homunculus.dax.plist`.
 - Foreground (debugging): `/Users/david.westgate/Workspace/dax/client/bin/launch-dax`
   (stop the LaunchAgent first — never run two instances).
-- Named Claude Code session:
-  `/Users/david.westgate/Workspace/dax/client/bin/claude-dax` (on PATH if you
-  accepted the shell setup). It never bypasses your tool-permission prompts,
-  and it registers this session with dax so it is addressable
-  by role name — see the messaging contract below.
+- The `dax` CLI is on PATH via genesis's
+  `~/.local/bin/dax` symlink; no venv activation needed for
+  `dax call` / `dax health`.
+- Start stock Codex through
+  `/Users/david.westgate/Workspace/dax/client/bin/codex-dax [role] [codex arguments ...]`.
+  The launcher exports one stable session ID, registers `agent_id=codex`, claims
+  the supplied durable role, and arms the parent-bound no-MCP watcher when the
+  selected fleet transport is `watch`. Do not substitute a locally patched
+  receive binary for the launcher's stock `codex` executable.
+
+## Stock Codex durable inbox
+
+The Stop hook carries only a fixed fact — that coordination deliveries are
+pending. It never places peer-message content into hook output. When that nudge
+creates a turn, or whenever a reminder says to check messages, read this
+session's own durable inbox through the local CLI:
+
+```bash
+dax call plugin::agent_messaging_plugin::peer_inbox '{"agent_session_id":"'"$AGENT_SESSION_ID"'","limit":5}'
+```
+
+The response has two independent sections and two independent cursors:
+
+- `entries` is oldest-first. If `next_after_created_at` is non-null, call again
+  with that exact timestamp as `"after":"<next_after_created_at>"`.
+- `role_entries` is newest-first. If `next_role_cursor` is non-null, call again
+  with that opaque token as `"role_after":"<next_role_cursor>"`. Continue until
+  it is null; `role_section_status: "ok"` means the section was computed, not
+  that its backlog is drained.
+
+Never mix the two cursors. Treat a repeated message already handled as a
+duplicate delivery, not a new instruction. A queue or watcher receipt is
+not proof that a model turn read the inbox; completion evidence names the
+message ID and the action actually taken.
 
 ## Messaging, connectivity, and governance — found via Step Zero
 
@@ -119,8 +140,7 @@ here — search for the terms below rather than assuming the mechanism:
   channels; several distinct layers get loosely called "the bridge."
 - `peer registry role binding durable claim` — why an entry in a raw peer
   list is presence, not a claim, and how `peer_send_by_name` actually
-  resolves; the `<name> watch` / `<name> wake` no-MCP messaging path this
-  session's launcher arms via the rename skill.
+  resolves.
 - `first days owner onboarding` / `homunculus charter template` / `operator
   decision brief` / `operator collaboration craft` — the governance set for
   working with your operator.
@@ -138,8 +158,8 @@ better than you found it. Database access goes through the
 ## Reference
 
 The genesis ladder that created this homunculus, and the hydration runbook
-that generated this file and the `client/` tooling, live in the knowledge
-base — search "genesis bootstrap ladder" or "hydration operator environment
-setup" via Step Zero above.
+that generated this file, live in the knowledge base — search "genesis
+bootstrap ladder" or "hydration operator environment setup" via Step Zero
+above.
 
 <!-- END HOMUNCULUS HYDRATION -->

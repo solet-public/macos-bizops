@@ -102,6 +102,7 @@ Do not register or troubleshoot MCP unless the user says policy permits it."
   # NOTE: this comment MUST stay above the assignment chain — a comment between
   # a `\`-continued assignment and `exec` breaks the chain, so the vars never
   # export to the child (they become a standalone assignment-only statement).
+  HOMUNCULUS_NAME="dax" \
   AGENT_SESSION_LABEL="$role" \
   AGENT_SESSION_ID="$session_id" \
   GIT_CONTROLLER_NAME="$_FLEET_GIT_CONTROLLER_NAME" \
