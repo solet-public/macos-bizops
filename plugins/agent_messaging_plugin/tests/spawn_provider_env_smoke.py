@@ -333,6 +333,46 @@ def test_headless_spawn_no_provider_inherits() -> None:
         _restore_env_family(prior)
 
 
+def test_tmux_omits_dev_channels_flag_on_bedrock() -> None:
+    """The tmux driver must NOT pass --dangerously-load-development-channels
+    when the provider will ignore it (Bedrock): the flag is inert there, and
+    passing it makes the PTY-confirm expect loop wait for a prompt that never
+    comes, then kill a fully-booted worker. Omitting it keeps
+    _needs_dev_channels_confirmation false so the loop is skipped. An
+    Anthropic / no-provider spawn is unchanged: flag present, loop runs."""
+    from agent_messaging_plugin.tmux_adapter import (  # noqa: PLC0415
+        _DEV_CHANNELS_FLAG,
+        TmuxHostDriver,
+        _needs_dev_channels_confirmation,
+    )
+
+    driver = TmuxHostDriver(
+        tmux_bin="tmux", homunculus_name="dax", permission_mode="bypassPermissions",
+    )
+    cmd_bedrock = driver._spawn_command(
+        {"provider": "bedrock", "provider_env": {"CLAUDE_CODE_USE_BEDROCK": "1"}},
+        transport="watch",
+    )
+    _check(
+        _DEV_CHANNELS_FLAG not in cmd_bedrock,
+        "tmux + bedrock: --dangerously-load-development-channels is OMITTED "
+        "(inert on a third-party provider; passing it would hang the confirm loop)",
+    )
+    _check(
+        _needs_dev_channels_confirmation(cmd_bedrock) is False,
+        "tmux + bedrock: confirm expect loop is skipped (no flag = no prompt to wait for)",
+    )
+    cmd_default = driver._spawn_command({}, transport="watch")
+    _check(
+        _DEV_CHANNELS_FLAG in cmd_default,
+        "tmux + no provider: dev-channels flag still present (Anthropic path unchanged)",
+    )
+    _check(
+        _needs_dev_channels_confirmation(cmd_default) is True,
+        "tmux + no provider: confirm expect loop still runs (unchanged)",
+    )
+
+
 def main() -> int:
     test_coerce_provider_env()
     test_apply_provider_env_noop()
@@ -346,6 +386,7 @@ def main() -> int:
     test_resolve_provider_env_bedrock_no_vault()
     test_headless_spawn_applies_bedrock_overlay()
     test_headless_spawn_no_provider_inherits()
+    test_tmux_omits_dev_channels_flag_on_bedrock()
 
     print()
     print(f"PASSED: {_passed}")

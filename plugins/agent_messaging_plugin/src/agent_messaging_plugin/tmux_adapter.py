@@ -125,6 +125,30 @@ def _needs_dev_channels_confirmation(claude_cmd: list[str]) -> bool:
     return _DEV_CHANNELS_FLAG in claude_cmd
 
 
+def _provider_ignores_dev_channels(provider_env: Mapping[str, str] | None) -> bool:
+    """True when the resolved inference provider will SILENTLY IGNORE
+    ``--dangerously-load-development-channels`` — i.e. any third-party
+    provider (measured 2026-08-10 on Bedrock: the pane prints
+    "Channels are not available on third-party providers" and boots straight
+    to a ready prompt, never raising the interactive confirmation the expect
+    loop in :meth:`TmuxHostDriver._confirm_dev_channels_prompt` waits for).
+
+    Passing an inert flag is not free here: the driver's confirm loop would
+    then wait the full timeout for a prompt that can never appear and KILL a
+    fully-booted worker as "half-alive." So :meth:`_spawn_command` omits the
+    flag entirely when this returns true — the flag does nothing on the
+    provider anyway, and omitting it keeps :func:`_needs_dev_channels_
+    confirmation` correctly false so the loop is skipped.
+
+    Detection is by the provider env overlay the spawning session directs
+    (``provider="bedrock"`` sets ``CLAUDE_CODE_USE_BEDROCK``). ``None``/empty
+    (inherit the daemon env, or an Anthropic spawn) returns false — the
+    Anthropic path is unchanged, prompt-and-confirm as before."""
+    if not provider_env:
+        return False
+    return str(provider_env.get("CLAUDE_CODE_USE_BEDROCK", "")).strip() == "1"
+
+
 def _pane_shows_dev_channels_prompt(pane_text: str) -> bool:
     return any(marker in pane_text for marker in _DEV_CHANNELS_PROMPT_MARKERS)
 
@@ -650,7 +674,15 @@ class TmuxHostDriver:
             cmd += ["--mcp-config", str(self._mcp_config_path), "--strict-mcp-config"]
         else:
             cmd += ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
-        cmd += ["--dangerously-load-development-channels", f"server:{self._homunculus_name}"]
+        # Dev-channel loading is orthogonal to MCP-vs-watch, BUT it is a no-op
+        # on a third-party provider (Bedrock) — the flag is silently ignored
+        # there. Passing it anyway is actively harmful: the PTY-confirm expect
+        # loop below would wait the full timeout for a confirmation prompt that
+        # can never appear and then kill a fully-booted worker. So omit it when
+        # the resolved provider will ignore it; _needs_dev_channels_confirmation
+        # then stays false and the loop is correctly skipped. (2026-08-10)
+        if not _provider_ignores_dev_channels(_coerce_provider_env(spec)):
+            cmd += ["--dangerously-load-development-channels", f"server:{self._homunculus_name}"]
         model = str(spec.get("model") or "")
         if model:
             cmd += ["--model", model]
