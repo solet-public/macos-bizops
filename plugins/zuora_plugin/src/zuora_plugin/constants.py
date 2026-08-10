@@ -79,11 +79,11 @@ CONFIG_KEY_REQUEST_TIMEOUT_SECONDS: Final[str] = "request_timeout_seconds"
 TOKEN_REFRESH_MARGIN_SECONDS: Final[float] = 30.0
 
 # ---------------------------------------------------------------------------
-# Caps + spill (business-data limits + spill-floor migration, 2026-08-02 —
+# Caps + export (business-data limits + data-export migration, 2026-08-02 —
 # workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md).
 # data_query, bulk_export, list_subscriptions, and list_invoices now ALWAYS
 # write to a caller-supplied output_tsv_path — never records inline, at any
-# size (07-29 spill floor, unconditional; the former INLINE_BYTE_CAP/blob-spill
+# size (07-29 data-export requirement, unconditional; the former INLINE_BYTE_CAP/blob-export
 # branch is deleted, not lowered). DEFAULT_ROW_LIMIT is the fetch ceiling
 # absent an explicit, acknowledged override, matching salesforce/postgres's
 # reconciled default — zuora has no vendor-imposed ceiling below 500 for any

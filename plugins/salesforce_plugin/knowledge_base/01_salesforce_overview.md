@@ -178,7 +178,7 @@ that user's permissions, and its audit trail shows that user.
 
 Both `soql_query` and `export_soql` ALWAYS write their result to the
 caller's `output_tsv_path` — never records inline, at any size
-(business-data limits + spill-floor migration, 2026-08-02; the former
+(business-data limits + data-export migration, 2026-08-02; the former
 inline-return/byte-cap branch is deleted, not lowered). Neither destination
 is platform blob storage (operator ruling 2026-07-15); the path must be
 absolute, end in `.tsv`, and lie under an operator-configured

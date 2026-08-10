@@ -26,6 +26,7 @@ site (no site/base_url param on any verb).
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -48,7 +49,7 @@ from ananta.interfaces.edge_process_provider import (
 )
 from jira import JIRA, JIRAError
 
-from . import comment_actions, issue_actions
+from . import async_jobs
 from .app_config import AppConfigError, AppConfigLoader
 from .attachment_actions import OutgoingAttachment, add_attachment, download_attachment
 from .client import JiraClientFactory
@@ -83,7 +84,7 @@ from .constants import (
 from .errors import JiraServiceError, classify_jira_error
 
 # Field sensitivities (RATIFY-8: SaaS records/rows 0.3; free-text
-# description/body/comments 0.6; attachment/spill blob keys 0.3; ids/keys/counts
+# description/body/comments 0.6; attachment/export blob keys 0.3; ids/keys/counts
 # /flags 0.0; metadata lists 0.1). Every returned *_blob_key MUST appear in its
 # verb's tuple (the edge_process_mismatch FATAL, Authoring Traps §3).
 # WORKED BLOB EXAMPLE: download_attachment returns attachment_blob_key (0.3 SaaS).
@@ -101,6 +102,14 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         self._blob_storage_service: Any | None = None
         self._app_config_loader: AppConfigLoader | None = None
         self._client_factory: JiraClientFactory | None = None
+        # D0.3 deferred-completion machinery (async_jobs.py) — lazily acquired /
+        # lazily started, same reasoning as external_postgres_plugin's sibling
+        # attrs: orchestrator_ref.async_job_manager is not guaranteed set at
+        # prepare_for_readiness, and the ONE worker thread starts on first
+        # dispatch, not at boot.
+        self._async_job_manager: Any | None = None
+        self._worker_thread: threading.Thread | None = None
+        self._worker_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # VaultKeysProvider — no plugin-owned vault keys
@@ -148,11 +157,11 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
                 f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires "
                 "address_book_service to resolve the jira_site credentials"
             )
-        # blob_storage is needed only for attachment + JQL-spill verbs and is
+        # blob_storage is needed only for attachment + JQL-export verbs and is
         # resolved lazily at first use (_blob_service): the platform constructs
         # blob_storage_service in the init_service_manager startup step, AFTER
         # every plugin's prepare_for_readiness — resolving it here caches None
-        # forever and every spill hard-fails (field-verified on a live
+        # forever and every export hard-fails (field-verified on a live
         # deployment).
         self._app_config_loader = AppConfigLoader(self._address_book_service)
         config = self.config_provider or {}
@@ -227,7 +236,7 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         """Store an outgoing attachment's bytes as a blob; return the blob id (the *_blob_key).
 
         Attachments only — jql_search/list_comments return inline (§5.4, jira
-        exited the spill floor); this is the plugin's only blob-write path.
+        exited the data-export requirement); this is the plugin's only blob-write path.
         """
         blob_service = self._blob_service()
         if blob_service is None:
@@ -277,6 +286,24 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         if self.logger:
             self.logger.debug("%s: success", endpoint_name)
         return self._success(data)
+
+    def _dispatch_async(
+        self, action_name: str, params: dict[str, Any], state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """D0.3 ms-scale dispatch: create the job, return immediately — no I/O here."""
+        try:
+            create_result = async_jobs.create_job(
+                self, action_name=action_name, params=params, state=state,
+            )
+        except ValueError as exc:
+            return self._error(ERROR_INVALID_PARAMS, str(exc))
+        except RuntimeError as exc:
+            return self._error(ERROR_NOT_CONFIGURED, str(exc))
+        if create_result.get("action_status") != "completed":
+            error = create_result.get("error", {})
+            message = str(error.get("message", "failed to create async job"))
+            return self._error(ERROR_API_ERROR, message)
+        return self._success(create_result["data"])
 
     # ------------------------------------------------------------------
     # EdgeProcessProvider
@@ -351,26 +378,32 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         display_name="Jira: JQL Search",
         description=(
             "Search issues with a JQL query (e.g. \"project = PROJ AND status = 'In Progress' "
-            "ORDER BY updated DESC\"). Returns trimmed rows (key/summary/status/assignee/updated) "
-            f"INLINE, one complete result — up to {DEFAULT_ROW_LIMIT} issues by default. Jira "
-            "carries no PII risk (operator ruling: company-internal accounts only), so this verb "
-            "never spills to a file. Atlassian's /search/jql endpoint caps a single HTTP call at "
-            "100 issues; within the effective row limit this verb pages internally across that "
-            "ceiling and hands back one result — there is no caller-visible continuation token. "
+            "ORDER BY updated DESC\"). Returns immediately with a job_id and status 'queued' "
+            "(D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the "
+            "search finishing. When the job completes, trimmed rows "
+            "(key/summary/status/assignee/updated) are delivered INLINE via the completion "
+            f"continuation, one complete result — up to {DEFAULT_ROW_LIMIT} issues by default. "
+            "Jira carries no PII risk (operator ruling: company-internal accounts only), so this "
+            "verb never exports to a file — the completed job's own result payload IS the data, "
+            "not a blob key. Atlassian's /search/jql endpoint caps a single HTTP call at "
+            "100 issues; within the effective row limit the background job pages internally "
+            "across that ceiling and hands back one result — there is no caller-visible "
+            "continuation token. "
             f"At the default {DEFAULT_ROW_LIMIT}-row limit that is up to 5 sequential internal "
             f"HTTP calls; at the {ROW_LIMIT_CAP}-row override cap it is up to 50 — each call is a "
-            "real round-trip, so a large row_limit has real latency cost. To raise the limit past "
+            "real round-trip, so a large row_limit has real latency cost, paid by the background "
+            "job rather than the dispatch call. To raise the limit past "
             f"{DEFAULT_ROW_LIMIT}, pass acknowledge_default_limit_override=true together with "
             f"row_limit (up to {ROW_LIMIT_CAP}; above that is refused, never silently clamped). "
             f"A defense-in-depth circuit breaker bounds the internal loop at "
             f"{MAX_INTERNAL_CALLS} calls regardless of row_limit, well above the 50 calls today's "
-            "cap requires. Optional max_results narrows how many rows THIS call returns, at or below the "
-            "effective limit — it never widens it. If the vendor genuinely has more matches than "
-            "the effective limit, truncated is true and total is an approximate count (narrow the "
-            "JQL to see the rest — there is no resume token). Optional fields restricts which "
-            "ADDITIONAL columns are fetched beyond the fixed render set — prefer requesting stable "
-            "ID/status fields over free-text fields when the goal is validation rather than "
-            "content inspection."
+            "cap requires. Optional max_results narrows how many rows the completed job returns, "
+            "at or below the effective limit — it never widens it. If the vendor genuinely has "
+            "more matches than the effective limit, truncated is true and total is an "
+            "approximate count (narrow the JQL to see the rest — there is no resume token). "
+            "Optional fields restricts which ADDITIONAL columns are fetched beyond the fixed "
+            "render set — prefer requesting stable ID/status fields over free-text fields when "
+            "the goal is validation rather than content inspection."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -420,40 +453,17 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Trimmed issue rows, inline, one complete result within the effective limit.",
+            description="Dispatch envelope — job_id + status: queued. Not the issue rows themselves.",
             properties={
-                "issues": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Trimmed issue rows (key/summary/status/assignee/updated/...).",
-                ),
-                "row_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of issue rows returned.",
-                ),
-                "total": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=(
-                        "Exact match count when not truncated; an approximate count from a "
-                        "separate query when truncated is true."
-                    ),
-                ),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description=(
-                        "True when more matches exist beyond the effective row limit — narrow "
-                        "the JQL to see the rest; there is no resume token."
-                    ),
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def jql_search(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: issue_actions.jql_search(self._require_client(), params),
-            "jql_search",
-        )
+        return self._dispatch_async("jql_search", params, state)
 
     @platform_process(
         name="get_issue",
@@ -461,12 +471,14 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Fetch one issue by key: summary, description (plain text), status, assignee, "
             "reporter, labels, and attachment metadata (id/filename/mime/size — not the bytes; "
-            "use download_attachment for those). Single-record reads like this stay inline "
-            "(2026-08-02 operator ruling: validation-shaped single-item reads are not the "
-            "mass-exposure risk the business-data limits migration targets). When the goal is "
-            "only confirming an issue exists or checking its status, jql_search's trimmed rows "
-            "(key/status) may already answer that without fetching the full description and "
-            "people fields."
+            "use download_attachment for those). Returns immediately with a job_id and status "
+            "'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same "
+            "as the fetch finishing; the issue detail is delivered when the job completes. "
+            "Single-record reads like this stay inline (2026-08-02 operator ruling: "
+            "validation-shaped single-item reads are not the mass-exposure risk the business-data "
+            "limits migration targets). When the goal is only confirming an issue exists or "
+            "checking its status, jql_search's trimmed rows (key/status) may already answer that "
+            "without fetching the full description and people fields."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -478,16 +490,17 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Issue summary, description, people, labels, and attachment metadata.",
+            description="Dispatch envelope — job_id + status: queued. Not the issue detail itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def get_issue(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: issue_actions.get_issue(self._require_client(), params),
-            "get_issue",
-        )
+        return self._dispatch_async("get_issue", params, state)
 
     @platform_process(
         name="create_issue",
@@ -495,7 +508,10 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Create an issue in a project of a given type with a summary and optional plain-text "
             "description. Optional 'fields' is an object of additional Jira fields (priority, "
-            "labels, custom fields, ...). Returns the new issue's key and id. This is a write action."
+            "labels, custom fields, ...). Returns immediately with a job_id and status 'queued' "
+            "(D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the "
+            "issue being created; the new issue's key and id are delivered when the job "
+            "completes. This is a write action."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -527,23 +543,27 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="New issue key and id.",
+            description="Dispatch envelope — job_id + status: queued. Not the new issue's key/id.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def create_issue(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: issue_actions.create_issue(self._require_client(), params),
-            "create_issue",
-        )
+        return self._dispatch_async("create_issue", params, state)
 
     @platform_process(
         name="update_issue",
         display_name="Jira: Update Issue",
         description=(
             "Apply a non-empty 'fields' object (summary, description, assignee, labels, custom "
-            "fields, ...) to an existing issue by key. This is a write action."
+            "fields, ...) to an existing issue by key. Returns immediately with a job_id and "
+            "status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT "
+            "the same as the update being applied; the confirmation is delivered when the job "
+            "completes. This is a write action."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -560,23 +580,27 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Confirmation the update was applied.",
+            description="Dispatch envelope — job_id + status: queued. Not the update confirmation itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def update_issue(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: issue_actions.update_issue(self._require_client(), params),
-            "update_issue",
-        )
+        return self._dispatch_async("update_issue", params, state)
 
     @platform_process(
         name="delete_issue",
         display_name="Jira: Delete Issue",
         description=(
             "Permanently delete an issue by key. This is a destructive write action taking an "
-            "EXPLICIT target — the issue key is required and there is no bulk form."
+            "EXPLICIT target — the issue key is required and there is no bulk form. Returns "
+            "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — "
+            "the dispatch returning is NOT the same as the delete being applied; the "
+            "confirmation is delivered when the job completes."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -588,16 +612,17 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Confirmation the issue was deleted.",
+            description="Dispatch envelope — job_id + status: queued. Not the delete confirmation itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def delete_issue(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: issue_actions.delete_issue(self._require_client(), params),
-            "delete_issue",
-        )
+        return self._dispatch_async("delete_issue", params, state)
 
     # ------------------------------------------------------------------
     # @platform_process implementations — comments + transitions
@@ -606,7 +631,12 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="add_comment",
         display_name="Jira: Add Comment",
-        description="Add a plain-text comment to an issue. Returns the new comment id. Write action.",
+        description=(
+            "Add a plain-text comment to an issue. Returns immediately with a job_id and status "
+            "'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same "
+            "as the comment being posted; the new comment id is delivered when the job "
+            "completes. Write action."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "key": ParameterMetadata(
@@ -622,38 +652,43 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="New comment id.",
+            description="Dispatch envelope — job_id + status: queued. Not the new comment id itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def add_comment(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: comment_actions.add_comment(self._require_client(), params),
-            "add_comment",
-        )
+        return self._dispatch_async("add_comment", params, state)
 
     @platform_process(
         name="list_comments",
         display_name="Jira: List Comments",
         description=(
-            "List an issue's comments (id/author/body/created), most recent last, INLINE, one "
-            f"complete result — up to {DEFAULT_ROW_LIMIT} comments by default. Jira carries no "
-            "PII risk (operator ruling: company-internal accounts only), so this verb never "
-            "spills to a file. Atlassian caps a single HTTP call at 100 comments; within the "
-            "effective row limit this verb pages internally by offset across that ceiling and "
-            "hands back one result — there is no caller-visible offset or continuation token. "
+            "List an issue's comments (id/author/body/created), most recent last. Returns "
+            "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — "
+            "the dispatch returning is NOT the same as the list finishing. When the job "
+            "completes, comment rows are delivered INLINE, one complete result — up to "
+            f"{DEFAULT_ROW_LIMIT} comments by default. Jira carries no PII risk (operator "
+            "ruling: company-internal accounts only), so this verb never exports to a file. "
+            "Atlassian caps a single HTTP call at 100 comments; within the effective row limit "
+            "the background job pages internally by offset across that ceiling and hands back "
+            "one result — there is no caller-visible offset or continuation token. "
             f"At the default {DEFAULT_ROW_LIMIT}-row limit that is up to 5 sequential internal "
             f"HTTP calls; at the {ROW_LIMIT_CAP}-row override cap it is up to 50 — each call is a "
-            "real round-trip, so a large row_limit has real latency cost. A defense-in-depth "
+            "real round-trip, so a large row_limit has real latency cost, paid by the background "
+            "job rather than the dispatch call. A defense-in-depth "
             f"circuit breaker bounds the internal loop at {MAX_INTERNAL_CALLS} calls regardless "
             "of row_limit, well above the 50 calls today's cap requires. To raise the limit past "
             f"{DEFAULT_ROW_LIMIT}, pass acknowledge_default_limit_override=true together with "
             f"row_limit (up to {ROW_LIMIT_CAP}; above that is refused, never silently clamped). "
-            "Optional max narrows how many comments THIS call returns, at or below the effective "
-            "limit — it never widens it. If the issue genuinely has more comments than the "
-            "effective limit, truncated is true (narrow the pull or raise the limit to see the "
-            "rest — there is no resume token)."
+            "Optional max narrows how many comments the completed job returns, at or below the "
+            "effective limit — it never widens it. If the issue genuinely has more comments than "
+            "the effective limit, truncated is true (narrow the pull or raise the limit to see "
+            "the rest — there is no resume token)."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -692,40 +727,27 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Comment rows, inline, one complete result within the effective limit.",
+            description="Dispatch envelope — job_id + status: queued. Not the comment rows themselves.",
             properties={
-                "comments": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Comment rows (id/author/body/created), most recent last.",
-                ),
-                "row_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of comment rows returned.",
-                ),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description=(
-                        "True when more comments exist beyond the effective row limit or a "
-                        "call count was not confirmed complete — there is no resume token."
-                    ),
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_comments(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: comment_actions.list_comments(self._require_client(), params),
-            "list_comments",
-        )
+        return self._dispatch_async("list_comments", params, state)
 
     @platform_process(
         name="list_transitions",
         display_name="Jira: List Transitions",
         description=(
             "List the workflow transitions available from an issue's current status "
-            "(id/name/to_status). Use transition_issue with a chosen id to move the issue."
+            "(id/name/to_status). Use transition_issue with a chosen id to move the issue. "
+            "Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion "
+            "shape) — the dispatch returning is NOT the same as the list finishing; the "
+            "available transitions are delivered when the job completes."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -737,23 +759,27 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Available transitions (id/name/to_status).",
+            description="Dispatch envelope — job_id + status: queued. Not the transitions list itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_transitions(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: comment_actions.list_transitions(self._require_client(), params),
-            "list_transitions",
-        )
+        return self._dispatch_async("list_transitions", params, state)
 
     @platform_process(
         name="transition_issue",
         display_name="Jira: Transition Issue",
         description=(
             "Move an issue through a workflow transition (by transition id from list_transitions), "
-            "optionally adding a comment. Returns the new status. This is a write action."
+            "optionally adding a comment. Returns immediately with a job_id and status 'queued' "
+            "(D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the "
+            "transition being applied; the new status is delivered when the job completes. This "
+            "is a write action."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -775,16 +801,17 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Confirmation and the issue's new status.",
+            description="Dispatch envelope — job_id + status: queued. Not the new status itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def transition_issue(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: comment_actions.transition_issue(self._require_client(), params),
-            "transition_issue",
-        )
+        return self._dispatch_async("transition_issue", params, state)
 
     # ------------------------------------------------------------------
     # @platform_process implementations — attachments (blob-bridged)
@@ -866,32 +893,26 @@ class JiraPlugin(PluginBase, EdgeProcessProvider):
         display_name="Jira: Test Connection",
         description=(
             "Verify the configured Jira credentials by fetching the authenticated account. "
-            "Returns ok, the site base_url, and the service account's id + display name."
+            "Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion "
+            "shape) — the dispatch returning is NOT the same as the check finishing; ok, the "
+            "site base_url, and the service account's id + display name are delivered when the "
+            "job completes."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="ok, base_url, account_id, display_name.",
+            description="Dispatch envelope — job_id + status: queued. Not the connection check result itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def test_connection(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda: _test_connection(self._require_client()), "test_connection")
-
-
-def _test_connection(client: JIRA) -> dict[str, Any]:
-    """Fetch the authenticated account to confirm connectivity + credentials."""
-    myself = client.myself()
-    account_id = myself.get("accountId")
-    display_name = myself.get("displayName")
-    return {
-        "ok": True,
-        "base_url": client.server_url,
-        "account_id": account_id if isinstance(account_id, str) else "",
-        "display_name": display_name if isinstance(display_name, str) else "",
-    }
+        return self._dispatch_async("test_connection", params, state)
 
 
 def _edge(

@@ -166,8 +166,6 @@ def check_disarm_and_loop_guard(res: Results, work: Path) -> None:
     cases = (
         ("missing session id", _env(work / "d1", cli, session_id=None)),
         ("missing wake CLI", _env(work / "d2", None)),
-        ("missing transport", _env(work / "d3", cli, transport=None)),
-        ("empty transport", _env(work / "d4", cli, transport="")),
         ("MCP transport", _env(work / "d5", cli, transport="mcp")),
         ("unknown transport", _env(work / "d6", cli, transport="http")),
     )
@@ -185,6 +183,30 @@ def check_disarm_and_loop_guard(res: Results, work: Path) -> None:
     )
     _check_noop(res, looped, "stop_hook_active loop guard")
     res.check(not loop_marker.exists(), "loop guard never spawns the CLI", "stub ran")
+
+
+def check_arm_matrix(res: Results, work: Path) -> None:
+    """RULED 2026-07-31 (Architect, claude_plugin's own arm-matrix comment): an
+    unset or empty FLEET_TRANSPORT is EQUIVALENT TO UNSET -- empty is not a
+    declaration -- so it ARMS. codex_plugin's wake_waiter.js originally diverged
+    on purpose (comment: "prevents accidental double-wake while the patched MCP
+    path is active") -- that rationale is retired BY THIS LANE'S OWN GOAL
+    (patch-the-application is going away), so the divergence has no remaining
+    justification and codex_plugin now follows the same ruling claude_plugin
+    already pins."""
+    cli = _stub(work, "arm_stub", exit_code=WAKE_SIGNAL)
+    cases = (
+        ("transport unset", None),
+        ("transport watch", "watch"),
+        ("transport empty string", ""),
+    )
+    for label, transport in cases:
+        marker = work / f"arm_{label.replace(' ', '_')}"
+        marker.unlink(missing_ok=True)
+        env = _env(marker, cli, transport=transport)
+        proc = run_hook(HOOK, env=env, stdin=_payload())
+        res.check(marker.exists(), f"armed ({label}) spawns the CLI", "the stub never ran")
+        res.check(proc.returncode == 0, f"armed ({label}) passes through exit 0", f"exit {proc.returncode}")
 
 
 def check_malformed_input(res: Results, work: Path) -> None:
@@ -312,6 +334,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="codex-coordination-wake-") as raw:
         work = Path(raw)
         check_disarm_and_loop_guard(res, work)
+        check_arm_matrix(res, work)
         check_malformed_input(res, work)
         check_wake_is_one_bit(res, work)
         check_nonwake_outcomes(res, work)

@@ -5,8 +5,8 @@ adversarial refute-harness over it with the deterministic heuristic dispatcher,
 and writes two artifacts: the verified register (F1 JSON, every finding stamped
 confirmed/refuted, ``layer=L3_verified``) and a human-readable run report.
 
-Wave-2 swaps the dispatcher for the inference substrate
-(``agent_thread_open`` backend); nothing else here changes.
+Wave-2 swaps the dispatcher for the inference substrate (the platform's
+peer-messaging bridge); nothing else here changes.
 
     python -m code_vetting_plugin.verify.cli \\
         --candidates workbench/<candidates>.json \\

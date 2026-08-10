@@ -1,7 +1,7 @@
 """LifecycleManaged fixture plugin for the LIF-01 re-enable smoke.
 
 ``prepare_for_readiness`` raises unless ``orchestrator_ref`` was injected
-first -- this is the exact Dax S31.4 repro: the legacy
+first -- this is the exact LIF-01 re-enable repro: the legacy
 ``_rediscover_plugins`` -> ``discover_plugins`` clear-and-rebuild path
 re-instantiates plugins via ``PluginInitializer.create_plugin_instance``,
 which sets only ``name`` + the validation registry, never

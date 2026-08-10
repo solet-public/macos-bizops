@@ -39,6 +39,12 @@ from code_vetting_plugin.toolrun import tool_available
 
 _CHECKS_RUN: list[str] = []
 
+# The automake/Meson/CTest SKIP_RETURN_CODE convention, matching
+# run_smokes.py's own _SKIP_EXIT_CODE. Undeclared-dependency audit:
+# workbench/2026-08-08_undeclared_system_dependencies_findings_d3-impl.md.
+_SKIP_EXIT_CODE = 77
+_semgrep_check_skipped = False
+
 
 class SmokeFailureError(AssertionError):
     """Raised on any check failure; message is the failure detail."""
@@ -99,12 +105,16 @@ def _check_no_pack_gap(tmp: Path) -> None:
     # ran is False whether semgrep is installed (no-pack gap, returns before any subprocess) or
     # absent (not-installed gap) — never a clean run over an unmapped stack.
     _check("semgrep on a no-mapped-stack tree: ran=False", cov.ran is False, str(cov))
+    global _semgrep_check_skipped
     if tool_available("semgrep"):
         _check(
             "semgrep no-pack gap names the unmapped stacks (hermetic — no subprocess)",
             (cov.gap_reason or "").startswith("not_applicable:") and "no semgrep ruleset mapped" in (cov.gap_reason or ""),
             str(cov.gap_reason),
         )
+    else:
+        print("  SKIP  semgrep no-pack gap-reason assertion: semgrep not on PATH")
+        _semgrep_check_skipped = True
 
 
 def _check_findings_parse() -> None:
@@ -139,6 +149,13 @@ def main() -> int:
         print(f"  ({len(_CHECKS_RUN)} checks attempted before failure)", file=sys.stderr)
         return 1
     print(f"semgrep_multistack_smoke OK: {len(_CHECKS_RUN)} checks passed")
+    if _semgrep_check_skipped:
+        print(
+            "SKIP: semgrep not on PATH -- the semgrep-specific gap-reason "
+            "assertion disclosed a gap rather than running; every other "
+            "check ran and passed."
+        )
+        return _SKIP_EXIT_CODE
     return 0
 
 

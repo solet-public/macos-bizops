@@ -19,7 +19,11 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   cannot tell whether a binding is actually stale, and deliberately does not
   try. It echoes the session's own `AGENT_SESSION_LABEL` and leaves both
   verification and re-assertion to the session's own tools.
-- **Idle-wake waiter** (`Stop`) — opt-in, nudge-only. When a session with
+- **Idle-wake waiter** (`Stop`) — opt-in per session (armed by environment
+  variables, see Configuration), but the fleet this plugin ships with runs
+  on it as the PRIMARY idle-wake mechanism as of 2026-08-06, not a
+  fallback — see `SECURITY.md`'s "Operational status" note. Nudge-only.
+  When a session with
   an `AGENT_SESSION_ID` goes idle, invokes exactly `$AGENT_WAKE_CLI wake` (fixed argv, no
   shell) — the operator-configured coordination CLI's blocking wait verb —
   and **discards its output entirely**. On the wake signal (exit 2) it
@@ -44,15 +48,95 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   *fleet*, where a session relying on it must have a checkable basis and must
   cite that basis in band. An operator instruction to proceed always
   overrides.
+- **Heartbeat report-alive** (`PostToolUse`, unconditional) — opt-in per
+  session via `AGENT_INSTANCE_ID`. After a tool call completes, throttled to
+  at most once per ~180s via a local marker file, it shells out to the
+  fleet's `report_alive` CLI verb so a fleet-managed session's liveness stays
+  current without a standalone background loop — the loop shape this hook
+  replaced could survive a session `/clear` and keep reporting a dead
+  session as live for hours, since it had no coupling to whether the process
+  it vouched for was still doing anything. This hook has no persistent
+  process of its own; it dies with the tool-call lifecycle it fires inside.
+  Conveys no dynamic information back to the session — it never prints a
+  `hookSpecificOutput` block, only an occasional stderr diagnostic on
+  failure. See `SECURITY.md` for the full contract.
+- **Rotation-due watch** (`PostToolUse`, unconditional) — opt-in per session
+  via `AGENT_INSTANCE_ID`. The host-independent sibling of the heartbeat:
+  reads the session's own transcript usage, compares it against a declared
+  context ceiling, and on a threshold crossing sends ONE notification (via
+  `peer_send_by_name` to the session's steward, or a local marker file when
+  no steward is resolvable) — at most once per session generation. It never
+  acts on the signal itself (never clears or rotates the session); rotation
+  timing stays a steward/operator decision. Also opportunistically caches a
+  lightweight context-status reading on every un-throttled tick, independent
+  of the threshold check. Like the heartbeat, it prints nothing to stdout;
+  diagnostics are stderr-only. See `SECURITY.md` for the full contract.
+- **Memory-passthrough capture** (`PostToolUse`, `Write|Edit|MultiEdit`) —
+  when the touched file is under this agent's own memory directory,
+  appends one journal record (path, hash, timestamp) locally. No content
+  is emitted or transmitted; this is a local append-only log entry, never
+  a network call.
+- **Memory-passthrough session context** (`SessionStart` + `UserPromptSubmit`)
+  — when the agent's memory directory exists, prints a fixed instruction
+  template telling the agent exactly what to run to hydrate its local
+  memory projection from canonical storage, or to drain locally-captured
+  edits back to it. A hook subprocess has no platform bridge of its own,
+  so this is how the loop reaches the agent at all — the agent then runs
+  the commands itself via Bash.
+- **Memory-passthrough CLI utilities** (`drain.py`, `hydrate_render.py`,
+  `index_render.py`, `sync.py`) — NOT Claude Code hooks; none fire
+  automatically. Agent-invoked directly via Bash, on the agent's own
+  judgment, following the session-context hook's own printed
+  instructions. `drain.py` reads the pending local journal and prints the
+  exact upsert arguments for each entry; `hydrate_render.py` regenerates
+  the local memory projection from an already-exported snapshot;
+  `index_render.py` renders the budget-fitted `MEMORY.md` index (shared
+  library for `hydrate_render.py`, plus its own standalone entry point);
+  `sync.py` wraps hydrate/drain into one Bash call per direction and is
+  the one CLI utility in this group that shells out, via the same
+  PATH-resolved `homunculus` convention as the heartbeat/rotation-due
+  watch hooks. See `SECURITY.md` for the full per-file contract.
+- **Spawn-injected worker hooks** (`headless_tool_allowlist_gate.py`,
+  `capture_session_mapping.py`) — NOT wired into this plugin's own
+  `hooks/hooks.json` at all; a spawned headless/tmux worker's own host
+  adapter (`agent_messaging_plugin`) references these files by path in a
+  generated Claude Code `--settings` blob at spawn time, and they ship
+  here purely as the fallback copy a born clone (no `.claude/hooks/` of
+  its own) still carries. `headless_tool_allowlist_gate.py`
+  (`PreToolUse`) enforces a spawned worker's spawn-time tool allowlist —
+  unarmed by default, and FAIL-CLOSED (blocks on any parse error) when a
+  caller does supply one, since this is the actual safety boundary for an
+  unattended worker with no human to catch a hook bug.
+  `capture_session_mapping.py` (`SessionStart`) writes one file-per-firing
+  spool record mapping this worker's `AGENT_INSTANCE_ID` to its Claude
+  Code `session_id`, for the platform's own session-ledger reconciliation
+  — non-fatal by design, like the memory-passthrough capture hook. See
+  `SECURITY.md` for the full contract of each.
 
 ## Configuration
 
-Four of the five hooks are guarded on an environment variable and are
-silent no-ops when it is unset, so unrelated Claude Code sessions on the
-same machine are unaffected by them. The knowledge-base-first reminder is
-the one exception: it is unconditionally armed. `check_messages_reminder.js`
-and the idle-wake waiter key on `AGENT_SESSION_ID`; the role-binding
-reminder keys on `AGENT_SESSION_LABEL`.
+Fourteen of the fifteen hooks are default-off, each guarded on either an
+environment variable or a filesystem-presence check, and are silent
+no-ops when their guard is absent — so unrelated Claude Code sessions on
+the same machine, or a session in a project with no memory directory, are
+unaffected by them. The knowledge-base-first reminder is the one
+exception: it is unconditionally armed. `check_messages_reminder.py` and
+the idle-wake waiter key on `AGENT_SESSION_ID`; the role-binding reminder
+keys on `AGENT_SESSION_LABEL`; the heartbeat and rotation-due watch hooks
+key on `AGENT_INSTANCE_ID` (throttling additionally uses
+`AGENT_HEARTBEAT_MARKER_DIR` when set — see `SECURITY.md` for the fail-open
+behavior when it is absent but the instance id is present); the
+memory-passthrough capture and session-context hooks key on whether this
+agent's own memory directory exists at all — no environment variable
+arms or disarms either (a bare session in a project with no memory
+directory sees zero output/effect from both). The two spawn-injected
+worker hooks key on their own adapter-supplied variables:
+`headless_tool_allowlist_gate.py` enforces only when
+`FLEET_HEADLESS_TOOL_ALLOWLIST` is set (even to an empty string);
+`capture_session_mapping.py` writes only when both
+`ANANTA_SESSION_MAPPING_SPOOL_DIR` and `AGENT_INSTANCE_ID` are set —
+neither is meaningful outside a spawned worker's own generated settings,
+so an ordinary interactive session never arms either.
 
 The git-mutation guard is separately opt-in via `GIT_CONTROLLER_NAME`: unset,
 the guard is fully OFF (every session may run git and spawn subagents).
@@ -74,23 +158,58 @@ empty value must not silently kill wakes on a watch deployment.
 
 - Every hook uses exec-form invocation (`command` + a separate `args` array)
   — no shell string interpolation, no injection surface.
-- The three reminder hooks are plain Node scripts with no dependency beyond
-  Node itself, which Claude Code already requires to run — no interpreter
-  discovery, no vendored binary, no runtime install step.
-- The git-mutation guard is Python, stdlib-only, and never executes
-  target-controlled code — it only inspects the tool-call payload Claude
-  Code already passes on stdin.
-- No hook calls out to any external service or database. The reminders and
-  the gate execute nothing at all; the wake waiter executes exactly one
-  operator-configured local command (`$AGENT_WAKE_CLI wake`, fixed argv, no
-  shell), discards its output, and emits only its own compiled-in text.
-  Every string this plugin can ever inject into a session is a fixed
-  literal visible in its source, with one disclosed exception: the
-  role-binding reminder interpolates the session's own
-  `AGENT_SESSION_LABEL` into its text (JSON-escaped, read from the process
-  environment — never from stdin or message content). They are guardrails
-  and plumbing, not a security boundary — see the hooks' own docstrings for
-  the precise scope of each one.
+- Every hook in this plugin is stdlib-only Python (`python3`) — no
+  interpreter discovery, no vendored binary, no runtime install step,
+  except one disclosed, narrow exception: `rotation_due_watch.py` imports
+  `agent_messaging_plugin.rotation_thresholds`, a zero-third-party-
+  dependency SAME-PLATFORM module (not a PyPI package) that ships alongside
+  this plugin in every capability bundle, resolved via `CLAUDE_PROJECT_DIR`
+  and imported inside a `try`/`except` that degrades gracefully (skips the
+  threshold computation, never crashes) if it is ever absent. The
+  memory-passthrough CLI utilities import each other directly
+  (`hydrate_render.py` imports `index_render`; `sync.py` imports `drain`
+  and `hydrate_render`) to avoid an extra process layer — local modules
+  within this same plugin, not a new external dependency, same reasoning
+  as any hook importing its own underscore-prefixed sibling. `python3`
+  itself is a guaranteed platform prerequisite, unlike this plugin's prior
+  Node implementation of four of these hooks, which depended on a runtime
+  nothing guaranteed and could silently fail to launch with no signal
+  Claude Code surfaces to the user (measured 2026-08-08; retired the same
+  day).
+- The git-mutation guard never executes target-controlled code — it only
+  inspects the tool-call payload Claude Code already passes on stdin.
+- No hook calls out to any external service or database directly. The
+  three reminders and the gate execute nothing at all. Four hooks/
+  utilities are disclosed exceptions with a bounded, fixed-shape
+  contract: the wake waiter executes exactly one operator-configured
+  local command (`$AGENT_WAKE_CLI wake --max-wait <seconds>`, fixed
+  argv, no shell), discards its output, and emits only its own
+  compiled-in text; the heartbeat and rotation-due watch hooks each
+  invoke the local `homunculus` CLI with a fixed `["homunculus", "call",
+  "<fixed process_key>", <JSON payload>]` argv (no shell) and write only
+  a small, secret-free timestamp marker file for throttling; `sync.py`
+  (memory-passthrough, agent-invoked, never auto-fired) invokes the same
+  `homunculus` CLI convention once per export and once per pending
+  journal entry on drain. Four memory-passthrough files write more than
+  a marker by design — `capture.py` appends one journal record,
+  `hydrate_render.py`/`index_render.py` write this agent's own per-fact
+  files and `MEMORY.md`, `_journal.py` is the shared library both use —
+  but every write target is this agent's own already-resolved memory
+  path, sourced from an already-exported snapshot or this agent's own
+  journal, never a path or content built from raw tool-call/message
+  data. Every string this plugin can ever inject into a session is a
+  fixed literal visible in its source, with two disclosed exceptions:
+  the role-binding reminder interpolates the session's own
+  `AGENT_SESSION_LABEL` into its text (JSON-escaped, read from the
+  process environment — never from stdin or message content), and the
+  memory-passthrough session-context hook interpolates this session's
+  own already-resolved paths and a pending-count integer into its fixed
+  instruction template. The heartbeat, rotation-due watch, and
+  memory-passthrough capture hooks inject nothing at all, ever — none
+  has a `hookSpecificOutput` stdout path, only occasional stderr
+  diagnostics. They are guardrails and plumbing, not a security
+  boundary — see the hooks' own docstrings for the precise scope
+  of each one.
 - Reminder text is phrased as factual statements about project state
   ("unread messages may be pending"), never as imperative commands
   ("check your messages now"). The Claude Code hooks documentation

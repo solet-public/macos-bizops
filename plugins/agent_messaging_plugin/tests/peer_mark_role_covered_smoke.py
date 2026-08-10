@@ -180,11 +180,6 @@ def _plugin(state: StateManagementInterface, registry: PeerRegistry) -> AgentMes
         AgentMessagingService(
             repository=cast(Any, None),
             state_service=state,
-            backend_router=cast(Any, None),
-            flow_manager=cast(Any, None),
-            action_factory=cast(Any, None),
-            compilation_context_builder=cast(Any, None),
-            bridge_delivery=cast(Any, None),
             config=AgentMessagingConfig(),
         ),
     )

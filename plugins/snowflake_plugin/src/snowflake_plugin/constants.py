@@ -4,13 +4,17 @@ Single source of truth for every magic value: the address-book credential
 shape, session hardening knobs, the read-only statement-leader set (belt),
 result caps, error codes, and result types.
 
-Posture (operator-ratified RATIFY-2/§5.6): READ-ONLY, HARD. There is NO write
-verb. Unlike external_postgres_plugin, Snowflake has NO session-level
-read-only flag — the connector-side statement-leader guard is FAST-FAIL ONLY
-(defense-in-depth + UX). The TRUE developer-proof boundary is the read-only
-ROLE the connection is pinned to (GRANT SELECT/USAGE only, no
-INSERT/UPDATE/DELETE/MERGE/DDL). See knowledge_base/01_snowflake_overview.md
-for the full posture + the asymmetry with the Postgres connector.
+Posture (operator-ratified RATIFY-2/§5.6 for the READ verbs; reversed for
+write by operator ruling 2026-08-09 + Amendment 1 — "vendor RBAC is the
+control plane"): every read verb stays READ-ONLY via the connector-side
+statement-leader guard, FAST-FAIL ONLY (defense-in-depth + UX) since Snowflake
+has no session-level read-only connection characteristic — the TRUE
+developer-proof boundary for those verbs is the read-only ROLE the connection
+is pinned to (GRANT SELECT/USAGE only, no INSERT/UPDATE/DELETE/MERGE/DDL). The
+write verb (``run_statement``) performs NO plugin-side access control at all —
+what it can do is decided entirely by the registered credential's own
+server-side role grants. See knowledge_base/01_snowflake_overview.md for the
+full posture + the asymmetry with the Postgres connector.
 
 This plugin reaches ONLY the Snowflake account resolved from the
 "snowflake_account" address-book entry — never any other external system.
@@ -97,10 +101,10 @@ READ_LEADERS: Final[frozenset[str]] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
-# Result caps (business-data limits + spill-floor migration, 2026-08-02 —
+# Result caps (business-data limits + data-export migration, 2026-08-02 —
 # workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md).
 # Both run_query and export_query now ALWAYS write to a caller-supplied path
-# (07-29 spill floor, unconditional — the former INLINE_BYTE_CAP/inline-return
+# (07-29 data-export requirement, unconditional — the former INLINE_BYTE_CAP/inline-return
 # branch is deleted, not lowered: no record-read verb returns record values
 # inline at any size). DEFAULT_ROW_LIMIT is the fetch ceiling absent an
 # explicit, acknowledged override; MAX_ROWS_HARD_CAP is run_query's override
@@ -181,6 +185,7 @@ GENERIC_MESSAGE_READ_ONLY: Final[str] = (
 # Result types
 # ---------------------------------------------------------------------------
 RESULT_TYPE_RUN_QUERY: Final[str] = "snowflake_run_query_result"
+RESULT_TYPE_RUN_STATEMENT: Final[str] = "snowflake_run_statement_result"
 RESULT_TYPE_LIST_DATABASES: Final[str] = "snowflake_list_databases_result"
 RESULT_TYPE_LIST_SCHEMAS: Final[str] = "snowflake_list_schemas_result"
 RESULT_TYPE_LIST_TABLES: Final[str] = "snowflake_list_tables_result"

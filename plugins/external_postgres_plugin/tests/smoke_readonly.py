@@ -15,13 +15,19 @@ read-only characteristic binds regardless of role). Setup/teardown of the
 probe table go through ``psql`` (a read-WRITE path) so this smoke never needs a
 raw driver import.
 
-LOUD-ON-UNREACHABLE (Coordinator-Day Q2 ruling, GTE-09): if Postgres/the local
-trust role/``psql`` are unavailable the smoke FAILS LOUD (exit 1) with an unmissable
-SKIPPED-LIVE-DB-UNREACHABLE banner — NOT a silent exit-0 skip. run_smokes only
-surfaces a smoke's output on FAIL, so a silent skip would be invisible in the
-suite (the GTE-09 rot); failing loud makes "the 25006 proof did not run"
-unmissable. The scratch cluster is the same 24/7 instance the platform needs, so
-this path is pathological. It runs FOR REAL wherever the scratch DB is reachable.
+VISIBLE-SKIP-ON-UNREACHABLE (Coordinator-Day Q2 ruling, GTE-09; UPDATED
+2026-08-08 — undeclared-dependency audit): if Postgres/the local trust
+role/``psql`` are unavailable at SETUP time, the smoke exits the dedicated
+SKIP code (77 — the automake/Meson/CTest convention) with an unmissable
+SKIPPED-LIVE-DB-UNREACHABLE banner, and ``run_smokes.py`` now reports that
+distinctly from both a pass and a fail (it used to only surface a smoke's
+output on FAIL, so the original GTE-09 ruling made this fail loud instead
+of a silent exit-0 skip — that gap is closed, so the workaround is too). A
+failure once checks are already RUNNING (fixture broke mid-run, not just
+absent) still fails loud (exit 1) rather than folding into the skip path,
+since that could be a real bug. The scratch cluster is the same 24/7
+instance the platform needs, so this path is pathological. It runs FOR
+REAL wherever the scratch DB is reachable.
 
 Proves:
   1. conn.read_only is True
@@ -196,17 +202,40 @@ def _run_live_checks() -> None:
         fresh.close()
 
 
-def _unreachable_fail(detail: str) -> int:
-    # LOUD, non-zero exit (Coordinator-Day Q2 ruling): run_smokes ONLY surfaces a
-    # smoke's output on FAIL, so a silent exit-0 skip is invisible in the suite —
-    # exactly the GTE-09 rot. Failing loud makes "the live 25006 proof did NOT run"
-    # unmissable in run_smokes output. The scratch cluster is the same 24/7 Homebrew
-    # instance the platform needs, so this path is pathological, not routine.
+_SKIP_EXIT_CODE = 77
+
+
+def _unreachable_skip(detail: str) -> int:
+    # UPDATED 2026-08-08 (undeclared-dependency audit): the Coordinator-Day Q2 /
+    # GTE-09 ruling made this FAIL LOUD (exit 1) rather than a silent exit-0
+    # skip, because run_smokes.py only surfaced a smoke's output on FAIL --
+    # a genuine skip would have been invisible in the suite. That gap is now
+    # closed: run_smokes.py reports passed/skipped/failed distinctly via the
+    # automake/Meson/CTest SKIP_RETURN_CODE convention (77), so a setup-time
+    # unreachable fixture can now be a VISIBLE skip instead of an over-broad
+    # fail that blocked every commit on a machine without a local scratch
+    # Postgres. workbench/2026-08-08_undeclared_system_dependencies_findings_d3-impl.md.
+    # This function covers ONLY setup-time unreachability (the fixture never
+    # came up) -- a failure mid-run, once checks are already executing, stays
+    # a genuine FAIL via _mid_run_fail below, since that could be a real bug,
+    # not just an absent dependency.
     print("=" * 70)
-    print("SKIPPED-LIVE-DB-UNREACHABLE — FAILING LOUD (not a silent pass)")
+    print("SKIPPED-LIVE-DB-UNREACHABLE")
     print(f"  {detail}")
     print("  The LIVE read-only 25006 proof DID NOT RUN. Bring up local Postgres")
     print("  (the local trust-auth user @ localhost:5432 + createdb/psql) and re-run.")
+    print("=" * 70)
+    return _SKIP_EXIT_CODE
+
+
+def _mid_run_fail(detail: str) -> int:
+    # Genuine FAIL (exit 1), distinct from _unreachable_skip above: the
+    # fixture came up but something broke WHILE checks were running -- that
+    # could be a real bug in the checks themselves, not just an absent
+    # dependency, so this stays loud rather than folding into the skip path.
+    print("=" * 70)
+    print("LIVE-DB FIXTURE FAILED MID-RUN")
+    print(f"  {detail}")
     print("=" * 70)
     return 1
 
@@ -289,14 +318,14 @@ def main() -> int:
         print("FAILED:", _failed)
         return 1
     if not _setup():
-        return _unreachable_fail(
+        return _unreachable_skip(
             "scratch Postgres fixture unreachable (createdb/psql/local-trust-user/localhost:5432)."
         )
     try:
         _run_live_checks()
     except Exception as exc:  # fixture failed mid-run -> loud FAIL, not a silent skip
         _teardown()
-        return _unreachable_fail(f"live fixture failed mid-run: {exc}")
+        return _mid_run_fail(f"live fixture failed mid-run: {exc}")
     _teardown()
     print()
     print(f"Results: {_passed} passed, {len(_failed)} failed")

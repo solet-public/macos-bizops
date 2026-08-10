@@ -125,12 +125,55 @@ def _check_idempotent(root: Path) -> None:
     )
 
 
+def _check_cloned_seed_gets_a_gitignore(root: Path) -> None:
+    """The ADOPTER case: ``.git`` PRESENT, ``.gitignore`` ABSENT.
+
+    The seed is distributed as a GitHub repo, so every adopter's clone arrives
+    already a worktree. ``_check_idempotent`` cannot see this: it writes a
+    ``.gitignore`` before its re-run, so it only ever exercises the clobber-guard
+    and the one path an adopter actually takes goes untested. Without a
+    ``.gitignore`` a born clone shows every ``__pycache__`` and its whole ``.venv``
+    as untracked, and an operator can commit runtime state and secrets that the
+    ignore list exists to keep out.
+    """
+    clone = _make_born_tree(root)
+    subprocess.run(["git", "-C", str(clone), "init", "-q"], check=True, timeout=60)
+    _check("fixture: the clone is already a worktree", (clone / ".git").exists())
+    _check("fixture: the clone has no .gitignore", not (clone / ".gitignore").exists())
+
+    record = git_init_worktree(clone, "testhum")
+
+    _check(
+        "a cloned seed still reports skipped (history is never touched)",
+        record["status"] == "skipped",
+        str(record),
+    )
+    _check(
+        "a cloned seed with no .gitignore GETS one",
+        (clone / ".gitignore").is_file(),
+        f"no .gitignore written; record={record}",
+    )
+    _check(
+        "the skipped record reports the write it performed",
+        record.get("gitignore_written") is True,
+        str(record),
+    )
+    body = (clone / ".gitignore").read_text(encoding="utf-8")
+    _check(
+        "the written .gitignore covers runtime state and secrets",
+        "profile/data/" in body and "profile/config/vault/" in body,
+        body[:200],
+    )
+
+
 def main() -> int:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             _check_fresh_init(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_idempotent(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_cloned_seed_gets_a_gitignore(Path(tmp))
     except SmokeFailureError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         print(f"  ({len(_CHECKS_RUN)} checks attempted before failure)", file=sys.stderr)

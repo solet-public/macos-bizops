@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """W3 — dispatch refuses to claim `queued_watcher` against a silent bridge.
 
-Dax §34.1: `append_event` succeeds against ANY non-closed bridge session, and a
+`append_event` succeeds against ANY non-closed bridge session, and a
 SIGKILLed watcher leaves its server-side session standing. So the send is
 labelled `queued_watcher` — "a queue accepted it" — while nothing will ever poll
 that queue, for up to the full 3_600s idle sweep. The label is not merely

@@ -48,10 +48,10 @@ Launcher-run fleet sessions can have direct and role-addressed messages waiting 
 In a launcher-run fleet session, with `AGENT_SESSION_ID` set in the environment, the catch-up read, on the same deployment command line, is:
 
 ```sh
-<the deployment's CLI> call plugin::agent_messaging_plugin::peer_inbox "{\"agent_session_id\": \"$AGENT_SESSION_ID\", \"include_important\": true}"
+<the deployment's CLI> call plugin::agent_messaging_plugin::peer_inbox "{\"agent_session_id\": \"$AGENT_SESSION_ID\"}"
 ```
 
-The `agent_session_id` argument is the launcher-exported value, also echoed by `peer_register` and the watcher's armed line — the agent whose mail is read is resolved from that session id server-side, never named directly by the caller. The result carries two independently-paged sections, an instance section and a role section, each with its own cursor; the same command line's `schema` action for `plugin::agent_messaging_plugin::peer_inbox` documents both. A message already read is not necessarily retired — re-emit insurance can resurface it — so a returned entry is evidence a message was addressed to this session, not proof it is unread.
+The `agent_session_id` argument is the launcher-exported value, also echoed by `peer_register` and the watcher's armed line — the agent whose mail is read is resolved from that session id server-side, never named directly by the caller. The result carries two independently-paged sections, an instance section and a role section, each with its own cursor; the same command line's `schema` action for `plugin::agent_messaging_plugin::peer_inbox` documents both. A role message already read is not necessarily consumed for replay purposes — the surviving role-replay durability guarantee can still resurface it until its holder acks it directly — so a returned role entry is evidence a message was addressed to this session, not proof it is retired.
 
 For a session that has claimed a durable role, the read-only ownership check, on the same command line, is:
 

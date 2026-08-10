@@ -18,6 +18,22 @@ setup(
         "python-dotenv>=1.0.0",
         "click>=8.0.0",
     ],
+    extras_require={
+        # The platform commit gate's own toolchain (git-controller-commit
+        # skill, Steps 2/3/4-5), undeclared until this audit:
+        # workbench/2026-08-08_undeclared_system_dependencies_findings_d3-impl.md.
+        # Deliberately NOT absence-tolerant, unlike code_vetting_plugin's
+        # `typecheck`/`coverage` extras (correctly optional: a missing
+        # foreign-target scanner is a disclosed coverage gap, never a gate
+        # failure). These three back the commit gate itself: an
+        # absence-tolerant commit gate would silently skip static analysis
+        # on every commit. Do not "harmonise" this group with `typecheck`.
+        "gate": [
+            "ruff>=0.15",
+            "pyright>=1.1",
+            "radon>=6.0",
+        ],
+    },
     entry_points={
         "console_scripts": [
             "ananta=ananta.cli:sync_main",

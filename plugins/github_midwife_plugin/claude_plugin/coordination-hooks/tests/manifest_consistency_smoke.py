@@ -40,7 +40,6 @@ from _harness import (  # noqa: E402
     TESTS_DIR,
     Results,
     is_stdlib_module,
-    node_builtin_modules,
     preflight,
 )
 
@@ -48,12 +47,49 @@ from _harness import (  # noqa: E402
 # hook must be added here, and then every document below must mention it -- that
 # coupling is the whole point of this file.
 HOOK_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "step_zero_reminder.js": ("knowledge-base-first", "kb-first", "knowledge base"),
-    "check_messages_reminder.js": ("check-your-messages", "check your messages"),
-    "role_binding_reminder.js": ("role-binding", "role binding"),
-    "wake_waiter.js": ("wake waiter", "idle-wake", "wake_waiter"),
+    "step_zero_reminder.py": ("knowledge-base-first", "kb-first", "knowledge base"),
+    "check_messages_reminder.py": ("check-your-messages", "check your messages"),
+    "role_binding_reminder.py": ("role-binding", "role binding"),
+    "wake_waiter.py": ("wake waiter", "idle-wake", "wake_waiter"),
     "git_controller_gate.py": ("git-mutation", "git-controller", "git controller"),
+    "heartbeat_report_alive.py": ("heartbeat", "report_alive", "report-alive"),
+    "rotation_due_watch.py": ("rotation-due", "rotation due"),
+    "capture.py": ("memory-passthrough", "memory passthrough"),
+    "session_context.py": ("memory-passthrough", "memory passthrough"),
+    "drain.py": ("memory-passthrough", "memory passthrough"),
+    "hydrate_render.py": ("memory-passthrough", "memory passthrough"),
+    "index_render.py": ("memory-passthrough", "memory passthrough"),
+    "sync.py": ("memory-passthrough", "memory passthrough"),
+    "headless_tool_allowlist_gate.py": ("spawn-injected",),
+    "capture_session_mapping.py": ("spawn-injected",),
 }
+
+# R4 seed-packaging audit, Package B (2026-08-10): files that are
+# entry-point-SHAPED (no underscore prefix, so _entry_point_hooks() picks
+# them up) but are NOT Claude Code hooks at all -- they never fire
+# automatically on any event; the agent invokes them directly via Bash, on
+# its own judgment, following session_context.py's own printed
+# instructions. Exempted ONLY from "must be wired in hooks.json" --
+# every OTHER check (documentation, stdlib-only, no-network-unless-
+# disclosed, subprocess/file-write shape) still applies in full.
+AGENT_INVOKED_CLI_UTILITIES = frozenset(
+    {"drain.py", "hydrate_render.py", "index_render.py", "sync.py"},
+)
+
+# R4 Package C (2026-08-10): files that are entry-point-SHAPED but are
+# invoked by a DIFFERENT plugin's spawn mechanism, never by this plugin's
+# own hooks.json at all -- a spawned headless/tmux worker's host adapter
+# (agent_messaging_plugin) references these by path in a generated Claude
+# Code `--settings` blob at spawn time. They ship here purely as the
+# fallback copy a born clone carries (rung 2 of the adapters' own
+# resolution ladder); the origin checkout's `.claude/hooks/<file>` is rung
+# 1 and the primary copy. Exempted ONLY from "must be wired in hooks.json"
+# -- every OTHER check (documentation, stdlib-only, no-network-unless-
+# disclosed, subprocess/file-write shape) still applies in full, same
+# contract as AGENT_INVOKED_CLI_UTILITIES above.
+SPAWN_INJECTED_HOOKS = frozenset(
+    {"headless_tool_allowlist_gate.py", "capture_session_mapping.py"},
+)
 
 # Documents that must name every hook. hooks.json and plugin.json carry a
 # one-line description; README.md and SECURITY.md carry the prose.
@@ -65,42 +101,95 @@ NETWORK_MODULES = frozenset(
         "http", "https", "http2", "net", "dgram", "tls", "dns", "socket",
         "urllib", "urllib2", "urllib3", "httplib", "http.client", "ftplib",
         "telnetlib", "smtplib", "requests", "httpx", "aiohttp", "websocket",
-        "websockets", "node:http", "node:https", "node:net", "node:dgram",
-        "node:tls", "node:dns", "node:http2",
+        "websockets",
     }
 )
 
-# Global network entry points that need no import at all.
-NETWORK_GLOBALS = ("fetch(", "XMLHttpRequest", "navigator.sendBeacon", "new WebSocket")
-
 # Source-level names that would falsify "No hook writes a file as an action of
-# its own." Reads are fine and expected (the gate reads the session file).
+# its own" for a hook NOT in FILE_WRITE_CAPABLE_HOOKS. Reads are fine and
+# expected (the gate reads the session file). heartbeat_report_alive.py and
+# rotation_due_watch.py are the two DISCLOSED exceptions: both write small,
+# secret-free throttle/latch marker files (a timestamp, nothing else) under
+# AGENT_HEARTBEAT_MARKER_DIR (or a temp-dir fallback for the latter) -- see
+# SECURITY.md's "heartbeat and rotation-due" section for the full contract.
 WRITE_PRIMITIVES = (
-    "writeFileSync", "writeFile(", "appendFile", "createWriteStream", "mkdirSync",
-    "unlinkSync", "rmSync", "renameSync", "copyFileSync",
     "write_text", "write_bytes", "os.remove", "os.unlink", "os.mkdir", "os.makedirs",
     "shutil.", "tempfile.NamedTemporary", "os.rename",
+    # R4 seed-packaging audit, Package B (2026-08-10): the memory-passthrough
+    # files' own write idiom is `open(path, "w"/"a", encoding=...)`, which
+    # none of the tokens above catch -- without these two, hydrate_render.py
+    # and capture.py would pass this check vacuously (no primitive NAMED)
+    # despite genuinely writing files directly in their own source, not via
+    # delegation. Narrow on purpose: matches this codebase's own consistent
+    # `open(x, "w"/"a", encoding=...)` style, not every possible open() call.
+    '"w", encoding', '"a", encoding',
 )
+# Two distinct write shapes: MARKER_ONLY writes a bare timestamp and
+# nothing else (Package A's two hooks, checked below); CONTENT_BEARING
+# writes real fact content sourced from an already-authenticated export
+# snapshot or the agent's own append-only journal, never held to
+# MARKER_ONLY's narrower bare-timestamp claim (membership here only feeds
+# the write-primitive/subprocess-shape checks above, not a content-source
+# claim -- narrowing that claim precisely enough to check accurately was
+# tried and dropped this pass, see the commit message's disclosed gaps).
+MARKER_ONLY_WRITE_HOOKS = frozenset({"heartbeat_report_alive.py", "rotation_due_watch.py"})
+CONTENT_BEARING_WRITE_HOOKS = frozenset(
+    {
+        "capture.py", "hydrate_render.py", "index_render.py", "_journal.py",
+        # R4 Package C (2026-08-10): writes a real content record (agent_instance_id,
+        # claude_session_id, captured_at, capture_source) to a file-per-firing spool,
+        # not a bare timestamp -- same CONTENT_BEARING class as capture.py's journal
+        # entry, never MARKER_ONLY's narrower bare-timestamp claim.
+        "capture_session_mapping.py",
+    },
+)
+FILE_WRITE_CAPABLE_HOOKS = MARKER_ONLY_WRITE_HOOKS | CONTENT_BEARING_WRITE_HOOKS
 
-# Source-level names that would falsify "Exactly one subprocess execution exists
-# in the plugin." Checked across every hook; only the wake waiter may match.
+# Source-level names that would falsify "no hook outside SUBPROCESS_CAPABLE_HOOKS
+# executes a subprocess." wake_waiter.py, heartbeat_report_alive.py, and
+# rotation_due_watch.py are the three DISCLOSED exceptions -- each is checked
+# against its OWN fixed-shape contract below (no shell=True, subprocess.run
+# only, a fixed/bounded argv), not just membership in the set.
+# "subprocess." (WITH the trailing dot), never the bare word "subprocess" --
+# several of this plugin's own docstrings use the plain English phrase "a
+# hook subprocess has no MCP bridge" (memory-passthrough files), which a
+# bare-substring match would misclassify as a real subprocess.run/Popen call.
+# Actual usage always appears as `subprocess.<method>(` somewhere in the same
+# file even when `import subprocess` itself has no trailing dot, so this
+# stays a true-positive-preserving, false-positive-eliminating narrowing --
+# same class of fix as the wake-waiter argv-shape regex above.
 SUBPROCESS_PRIMITIVES = (
-    "child_process", "spawnSync", "spawn(", "execSync", "execFile", "execFileSync",
-    "subprocess", "os.system", "os.popen", "os.execv", "os.execl", "os.spawn", "os.fork",
+    "subprocess.", "os.system", "os.popen", "os.execv", "os.execl", "os.spawn", "os.fork",
     "pty.spawn", "commands.getoutput",
 )
-SUBPROCESS_OWNER = "wake_waiter.js"
+SUBPROCESS_OWNER = "wake_waiter.py"
+SUBPROCESS_CAPABLE_HOOKS = frozenset(
+    {"wake_waiter.py", "heartbeat_report_alive.py", "rotation_due_watch.py", "sync.py"},
+)
+# The fixed process_key each hook's subprocess.run call must carry verbatim --
+# same shape-fixity property as the wake waiter's argv check below, applied to
+# the homunculus-CLI callers. sync.py legitimately calls more than one
+# process_key (export once, upsert per pending entry); its own named
+# constant EXPORT_PROCESS_KEY is checked as the representative fixed value --
+# proving the fixed-shape/no-shell/subprocess.run-only properties hold, the
+# same bar every other homunculus-calling hook here is held to.
+HOMUNCULUS_CALLER_PROCESS_KEYS = {
+    "heartbeat_report_alive.py": "plugin::agent_messaging_plugin::report_alive",
+    "rotation_due_watch.py": "plugin::agent_messaging_plugin::session_status",
+    "sync.py": "service_interface::memory_service::export_memories",
+}
 
 _NUMBER_WORDS = {
     1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
     6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+    11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen",
 }
 
 # Shell metacharacters that must never appear in an exec-form argv. `${VAR}` is
 # Claude Code's own manifest substitution and is expressly allowed; `$(` is not.
 SHELL_METACHARACTERS = ("$(", "`", ";", "|", "&", ">", "<", "\n")
 
-ALLOWED_COMMANDS = frozenset({"node", "python3"})
+ALLOWED_COMMANDS = frozenset({"python3"})
 PLUGIN_ROOT_TOKEN = "${CLAUDE_PLUGIN_ROOT}/hooks/"
 
 
@@ -149,10 +238,6 @@ def _manifest_entries(manifest: dict[str, object]) -> list[dict[str, object]]:
                 if isinstance(entry, dict):
                     entries.append(entry)
     return entries
-
-
-def _js_requires(source: str) -> set[str]:
-    return set(re.findall(r"require\(\s*['\"]([^'\"]+)['\"]\s*\)", source))
 
 
 def _py_imports(source: str, filename: str) -> set[str]:
@@ -209,6 +294,25 @@ def check_tree_matches_manifest(res: Results, entries: list[dict[str, object]], 
         res.check((HOOKS_DIR / name).is_file(), f"hooks.json path exists on disk: {name}")
 
     for name in hooks:
+        if name in AGENT_INVOKED_CLI_UTILITIES:
+            res.check(
+                name not in referenced,
+                f"agent-invoked CLI utility is NOT wired in hooks.json: {name}",
+                "this file is documented as never auto-firing -- a hooks.json "
+                "entry for it would be a real behavior change, not just a "
+                "classification error",
+            )
+            continue
+        if name in SPAWN_INJECTED_HOOKS:
+            res.check(
+                name not in referenced,
+                f"spawn-injected worker hook is NOT wired in hooks.json: {name}",
+                "this file is documented as invoked only via a spawned worker's "
+                "adapter-generated --settings, never via this plugin's own "
+                "hooks.json -- a hooks.json entry for it would double-fire it "
+                "for every session that loads this plugin, not just spawned workers",
+            )
+            continue
         res.check(name in referenced, f"hook is wired in hooks.json: {name}", "present on disk but never invoked")
 
     orphans = referenced - set(hooks)
@@ -251,7 +355,7 @@ def check_every_hook_is_documented(res: Results, hooks: list[str]) -> None:
 def check_security_md_counts(res: Results, hooks: list[str]) -> None:
     text = _read_prose("SECURITY.md")
     total = len(hooks)
-    reminders = len([name for name in hooks if name.endswith("_reminder.js")])
+    reminders = len([name for name in hooks if name.endswith("_reminder.py")])
 
     res.check(
         f"is {_NUMBER_WORDS[total]} Claude Code hooks" in text,
@@ -261,63 +365,119 @@ def check_security_md_counts(res: Results, hooks: list[str]) -> None:
     res.check(
         f"{_NUMBER_WORDS[reminders]} context reminders" in text,
         "SECURITY.md reminder count matches the tree",
-        f"tree has {reminders} *_reminder.js",
+        f"tree has {reminders} *_reminder.py",
     )
+    inert = total - len(SUBPROCESS_CAPABLE_HOOKS)
     res.check(
-        f"other {_NUMBER_WORDS[total - 1]} hooks execute nothing" in text,
+        f"other {_NUMBER_WORDS[inert]} hooks execute nothing" in text,
         "SECURITY.md 'execute nothing' count matches the tree",
-        f"expected 'other {_NUMBER_WORDS[total - 1]} hooks execute nothing'",
+        f"expected 'other {_NUMBER_WORDS[inert]} hooks execute nothing' "
+        f"({total} total minus the {len(SUBPROCESS_CAPABLE_HOOKS)} disclosed subprocess-capable hooks)",
+    )
+    default_off = total - 1  # every hook except the unconditionally-armed step_zero_reminder.py
+    # .lower() here (unlike the two checks above): this phrase is expected to
+    # open its own sentence in prose ("Six of the seven..."), so a literal
+    # lowercase match would wrongly fail on ordinary sentence-initial
+    # capitalization.
+    res.check(
+        f"{_NUMBER_WORDS[default_off]} of the {_NUMBER_WORDS[total]} hooks are default-off" in text.lower(),
+        "SECURITY.md default-off count matches the tree",
+        f"expected '{_NUMBER_WORDS[default_off]} of the {_NUMBER_WORDS[total]} hooks are default-off'",
     )
 
 
 def check_no_network(res: Results, hooks: list[str], siblings: list[str]) -> None:
     for name in hooks + siblings:
         source = (HOOKS_DIR / name).read_text(encoding="utf-8")
-        modules = _js_requires(source) if name.endswith(".js") else _py_imports(source, name)
+        modules = _py_imports(source, name)
         offending = sorted(modules & NETWORK_MODULES)
         res.check(not offending, f"no network module in {name}", f"imports {offending}")
-        if name.endswith(".js"):
-            hits = [token for token in NETWORK_GLOBALS if token in source]
-            res.check(not hits, f"no global network call in {name}", f"found {hits}")
 
 
 def check_no_file_writes(res: Results, hooks: list[str], siblings: list[str]) -> None:
     for name in hooks + siblings:
+        if name in FILE_WRITE_CAPABLE_HOOKS:
+            continue
         source = (HOOKS_DIR / name).read_text(encoding="utf-8")
         hits = [token for token in WRITE_PRIMITIVES if token in source]
         res.check(not hits, f"no file-write primitive in {name}", f"found {hits}")
 
 
-def check_exactly_one_subprocess(res: Results, hooks: list[str], siblings: list[str]) -> None:
+def check_file_write_hooks_write_only_markers(res: Results) -> None:
+    """The MARKER_ONLY file-writers may only write a throttle/latch marker
+    -- a timestamp string -- never anything content-bearing. Source-level:
+    proves no OTHER write target exists, e.g. no writing to a path built from
+    stdin/tool-input data, which would be a materially different claim than
+    'writes its own fixed marker file'."""
+    for name in sorted(MARKER_ONLY_WRITE_HOOKS):
+        source = (HOOKS_DIR / name).read_text(encoding="utf-8")
+        res.check(
+            "write_text(str(time.time()))" in source,
+            f"{name}'s only write is a bare timestamp marker",
+            "expected the fixed 'write_text(str(time.time()))' shape",
+        )
+
+
+def check_subprocess_capable_hooks(res: Results, hooks: list[str], siblings: list[str]) -> None:
     owners: list[str] = []
     for name in hooks + siblings:
         source = (HOOKS_DIR / name).read_text(encoding="utf-8")
         if any(token in source for token in SUBPROCESS_PRIMITIVES):
             owners.append(name)
     res.check(
-        owners == [SUBPROCESS_OWNER],
-        "exactly one hook can execute a subprocess",
-        f"expected only {SUBPROCESS_OWNER}, found {owners}",
+        set(owners) == SUBPROCESS_CAPABLE_HOOKS,
+        "exactly the disclosed hooks can execute a subprocess",
+        f"expected {sorted(SUBPROCESS_CAPABLE_HOOKS)}, found {sorted(owners)}",
     )
 
+    for name, process_key in HOMUNCULUS_CALLER_PROCESS_KEYS.items():
+        source = (HOOKS_DIR / name).read_text(encoding="utf-8")
+        res.check(
+            re.search(r"\bshell\s*=\s*True", source) is None,
+            f"{name} never passes a shell option",
+            "a `shell=True` option appears in the source",
+        )
+        res.check(
+            source.count("subprocess.run") >= 1
+            and not re.search(r"\bsubprocess\.(Popen|call|check_call|check_output)\s*\(|\bos\.system\s*\(", source),
+            f"{name} uses subprocess.run only",
+            "a different subprocess-family call is present",
+        )
+        res.check(
+            process_key in source,
+            f"{name}'s homunculus-call argv carries its fixed process_key",
+            f"expected {process_key!r} to appear in the source as a named constant",
+        )
+        res.check(
+            re.search(r'\["homunculus",\s*"call",', source) is not None,
+            f"{name} invokes homunculus via a fixed argv prefix",
+            'expected the literal ["homunculus", "call", ...] argument vector',
+        )
+
     waiter = (HOOKS_DIR / SUBPROCESS_OWNER).read_text(encoding="utf-8")
-    # `shell: true` is the option that would turn a fixed argv into a shell
+    # `shell=True` is the option that would turn a fixed argv into a shell
     # string. Match the option form, not the word -- the source says "no shell"
     # in prose, and a comment must not be able to fail this check.
     res.check(
-        re.search(r"\bshell\s*:", waiter) is None,
+        re.search(r"\bshell\s*=\s*True", waiter) is None,
         f"{SUBPROCESS_OWNER} never passes a shell option",
-        "a `shell:` option appears in the source",
+        "a `shell=True` option appears in the source",
     )
     res.check(
-        waiter.count("spawnSync") >= 1 and not re.search(r"\bexec(Sync|File|FileSync)?\s*\(", waiter),
-        f"{SUBPROCESS_OWNER} uses spawnSync only",
-        "an exec-family call is present",
+        waiter.count("subprocess.run") >= 1
+        and not re.search(r"\bsubprocess\.(Popen|call|check_call|check_output)\s*\(|\bos\.system\s*\(", waiter),
+        f"{SUBPROCESS_OWNER} uses subprocess.run only",
+        "a different subprocess-family call is present",
     )
+    # The argv is fixed in SHAPE: literal subcommand, literal flag, and one
+    # numeric element that can only come out of resolve_max_wait_s() — a
+    # validated positive integer, never raw environment text. The behavioural
+    # half (malformed overrides fall back loudly to the default) is pinned by
+    # wake_waiter_smoke.py's bounded-wait cases.
     res.check(
-        'spawnSync(cli, ["wake"]' in waiter,
+        '[cli, "wake", "--max-wait", str(resolve_max_wait_s())]' in waiter,
         f"{SUBPROCESS_OWNER} argv is fixed",
-        "expected a literal [\"wake\"] argument vector",
+        'expected the literal ["wake", "--max-wait", str(resolve_max_wait_s())] argument vector',
     )
 
 
@@ -325,42 +485,61 @@ def check_child_output_is_unread(res: Results) -> None:
     """SECURITY.md: the child's stdout/stderr are 'dropped unread'.
 
     This has to be a SOURCE check, not a behavioural one. Switching the spawn to
-    `stdio: "pipe"` reads the child's streams into the parent -- falsifying
-    "unread" -- while still emitting nothing, so no black-box test can see it.
-    Mutation testing found exactly this hole.
+    `stdout=subprocess.PIPE` reads the child's streams into the parent --
+    falsifying "unread" -- while still emitting nothing, so no black-box test
+    can see it. Mutation testing found exactly this hole (against the prior
+    Node implementation's equivalent `stdio: "pipe"` shape; the risk carries
+    over unchanged to this hook's Python `subprocess.run` call).
     """
     waiter = (HOOKS_DIR / SUBPROCESS_OWNER).read_text(encoding="utf-8")
-    res.check(
-        re.search(r'stdio\s*:\s*\[\s*"ignore"\s*,\s*"ignore"\s*,\s*"ignore"\s*\]', waiter) is not None,
-        f"{SUBPROCESS_OWNER} spawns with all three streams ignored",
-        "the child's streams are not all set to 'ignore'",
-    )
-    for stream in ("result.stdout", "result.stderr", "result.output"):
+    for stream in ("stdin", "stdout", "stderr"):
         res.check(
-            stream not in waiter,
-            f"{SUBPROCESS_OWNER} never reads {stream}",
+            re.search(rf"\b{stream}\s*=\s*subprocess\.DEVNULL", waiter) is not None,
+            f"{SUBPROCESS_OWNER} spawns with {stream} set to DEVNULL",
+            f"{stream}=subprocess.DEVNULL not found in the source",
+        )
+    for attr in ("result.stdout", "result.stderr", "result.output"):
+        res.check(
+            attr not in waiter,
+            f"{SUBPROCESS_OWNER} never reads {attr}",
             "the child's output is referenced in the source",
         )
 
 
-def check_stdlib_only(res: Results, hooks: list[str], siblings: list[str], builtins: frozenset[str]) -> None:
+# The one disclosed, narrow exception to "stdlib-only": rotation_due_watch.py
+# imports agent_messaging_plugin.rotation_thresholds -- a zero-third-party-
+# dependency SAME-PLATFORM module (not a PyPI package; ships alongside this
+# plugin in every capability bundle), resolved via CLAUDE_PROJECT_DIR and
+# imported inside a try/except that degrades gracefully (warns + skips the
+# notify-threshold computation) if it is ever absent. Never silently widen
+# this set -- a real third-party or unbounded dependency belongs in
+# SECURITY.md's Supply chain section, not just here.
+ALLOWED_CROSS_PLATFORM_IMPORTS: dict[str, frozenset[str]] = {
+    "rotation_due_watch.py": frozenset({"agent_messaging_plugin"}),
+}
+
+
+def check_stdlib_only(res: Results, hooks: list[str], siblings: list[str]) -> None:
     sibling_modules = {Path(name).stem for name in siblings}
+    # AGENT_INVOKED_CLI_UTILITIES are legitimate import targets for each
+    # other within this plugin (hydrate_render.py imports index_render;
+    # sync.py imports drain and hydrate_render directly to avoid an extra
+    # subprocess layer) -- same "local module, not a third-party package"
+    # reasoning as sibling_modules above, just for the non-underscore set.
+    utility_modules = {Path(name).stem for name in AGENT_INVOKED_CLI_UTILITIES}
     for name in hooks + siblings:
         source = (HOOKS_DIR / name).read_text(encoding="utf-8")
-        if name.endswith(".js"):
-            for module in sorted(_js_requires(source)):
-                res.check(
-                    module in builtins or module.removeprefix("node:") in builtins,
-                    f"{name} requires only Node built-ins",
-                    f"{module!r} is not a built-in module",
-                )
-        else:
-            for module in sorted(_py_imports(source, name)):
-                res.check(
-                    is_stdlib_module(module) or module in sibling_modules,
-                    f"{name} imports only the Python stdlib",
-                    f"{module!r} is neither stdlib nor a sibling module",
-                )
+        allowed_cross_platform = ALLOWED_CROSS_PLATFORM_IMPORTS.get(name, frozenset())
+        for module in sorted(_py_imports(source, name)):
+            res.check(
+                is_stdlib_module(module)
+                or module in sibling_modules
+                or module in utility_modules
+                or module in allowed_cross_platform,
+                f"{name} imports only the Python stdlib (plus its disclosed exceptions)",
+                f"{module!r} is neither stdlib, a sibling module, a local "
+                "utility module, nor a disclosed exception",
+            )
 
 
 def check_verification_section(res: Results) -> None:
@@ -466,7 +645,6 @@ def main() -> int:
     siblings = _sibling_modules()
     manifest = json.loads(_read("hooks/hooks.json"))
     entries = _manifest_entries(manifest)
-    builtins = node_builtin_modules()
 
     print(f"Entry-point hooks: {len(hooks)} — {', '.join(hooks)}")
     print(f"Sibling modules:   {len(siblings)} — {', '.join(siblings) or 'none'}")
@@ -483,9 +661,10 @@ def main() -> int:
     check_security_md_counts(res, hooks)
     check_no_network(res, hooks, siblings)
     check_no_file_writes(res, hooks, siblings)
-    check_exactly_one_subprocess(res, hooks, siblings)
+    check_file_write_hooks_write_only_markers(res)
+    check_subprocess_capable_hooks(res, hooks, siblings)
     check_child_output_is_unread(res)
-    check_stdlib_only(res, hooks, siblings, builtins)
+    check_stdlib_only(res, hooks, siblings)
     check_verification_section(res)
     check_artifact_is_self_contained(res)
     check_plugin_manifest_loads(res)

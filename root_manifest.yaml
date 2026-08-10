@@ -25,6 +25,7 @@ homunculus_name: homunculus
 universal:
   files:
     - README.md
+    - RELEASE_NOTES.md
     - LICENSE
     - NOTICE
     - CONTRIBUTING.md
@@ -92,6 +93,15 @@ sanctioned:
   - path: .agents
     reason: "Claude Code plugin-marketplace surface; written by local agent tooling (.agents/plugins/marketplace.json), origin-only and never shipped in a seed"
     operator_approved: "2026-08-01"
+
+  # Operator ruling 2026-08-06 (wording approved in-seat, coordinator-seat session).
+  # Landing this entry is what un-parks the directory: restore
+  # workbench/2026-08-06_claude_plugin_parked/marketplace.json to
+  # .claude-plugin/marketplace.json after it lands (fresh clones get it
+  # from setup_clone.sh instead).
+  - path: .claude-plugin
+    reason: "Claude Code plugin-marketplace surface; holds the reviewed marketplace.json that registers the in-repo coordination-hooks plugin as an in-place directory marketplace (used where it sits, never cloned, so the installed catalog cannot drift from the reviewed one); written by clone setup/hydration after birth, so it may be absent at a newborn's first cutover gate"
+    operator_approved: "2026-08-06"
 
   - path: pyproject.toml
     reason: "development-checkout surface; a seed-born homunculus installs from the shipped plugin trees, not from a root project definition"

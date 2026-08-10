@@ -95,27 +95,14 @@ def _bridge_manager() -> BridgeSessionManager:
 
 
 class _NoOwedDirectWakeService:
-    """Minimal route stub; these smokes assert claiming, not direct wakes."""
+    """Minimal route stub; these smokes assert claiming, not delivery.
 
-    def rehome_owed_direct_wakes(
-        self, *, agent_session_id: str, new_agent_instance_id: str,
-    ) -> int:
-        del agent_session_id, new_agent_instance_id
-        return 0
-
-    def rehome_owed_role_wakes(
-        self, *, agent_session_id: str, new_agent_instance_id: str,
-    ) -> int:
-        """H1-role sibling. Present because the ROUTE calls it on every register.
-
-        Absent, every register in this smoke AttributeErrors into the product's
-        deliberate loud-but-non-fatal guard and the suite GREENS over a degraded
-        route — 19 swallowed faults across two files before this was measured. A
-        fake standing in for a service must track that service's interface, or it
-        silently stops exercising the thing the smoke claims to cover.
-        """
-        del agent_session_id, new_agent_instance_id
-        return 0
+    A4 (2026-08-04): used to carry rehome_owed_direct_wakes/rehome_owed_role_wakes
+    because the /peer/register route called both on every register; both calls
+    retired with the escalation/consumption-reconcile apparatus they served, so
+    this fake is now a pure placeholder for the ``agent_messaging_service``
+    param the route still requires.
+    """
 
 
 class _Harness:

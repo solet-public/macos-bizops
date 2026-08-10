@@ -9,9 +9,20 @@ funnel through the **same** dispatch logic:
 * persist the message via ``agent_messaging_service.peer_send``,
 * touch the sender bridge + both bindings so ``updated_at`` reflects
   the dispatch,
-* detect the IMPORTANT marker and, when present, route through the
-  recipient's native wake adapter if registered, else append a
-  ``peer_message`` channel event on the recipient's bridge.
+* route through the recipient's native wake adapter if registered,
+  else append a ``peer_message`` channel event on the recipient's
+  bridge,
+* drive-on-delivery (2026-08-04): ALONGSIDE the step above, a best-effort
+  extra nudge through the recipient's ``managed_session`` driver channel
+  when one is live and eligible — see
+  :func:`agent_messaging_plugin.session_lifecycle_verbs.drive_on_delivery`.
+
+Wake is a TRANSPORT property, not a sender-declared one (A4, 2026-08-04):
+every send takes this path, unconditionally — the IMPORTANT marker is
+matched and stripped as input hygiene for old-habit prose, but no longer
+gates anything (this was ruled NONE; see
+``workbench/2026-08-04_marker_retirement_architect_memo_architect.md``
+before proposing a wake toggle here).
 
 The shape of this logic is protocol semantics, not HTTP / JSON-RPC
 plumbing — both call sites used to duplicate it.  This module is the
@@ -21,7 +32,9 @@ and the raised exceptions into their own response types.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -39,9 +52,12 @@ from ananta.llm.agent_messaging.schema import (
 from ananta.llm.agent_messaging.service import role_message_external_id
 
 from .bridge_sessions import BridgeNotFoundError, BridgeQueueFullError
+from .local_cli.spool import default_spool_path, spool_append, watch_instance_digest
 from .peer_registry import PeerAmbiguousError, PeerUnreachableError
+from .session_lifecycle_verbs import drive_on_delivery
 
 if TYPE_CHECKING:
+    from ananta.interfaces.state_management_interface import StateManagementInterface
     from ananta.llm.agent_messaging.models import TextPart
 
     from .bridge_sessions import BridgeSessionManager
@@ -63,9 +79,10 @@ EVENT_PEER_MESSAGE: Final[str] = "peer_message"
 EVENT_POST_MESSAGE: Final[str] = "post_message"
 
 
-# Matches the leading "IMPORTANT" marker (with ":" or whitespace tail)
-# that gates the wake-vs-silent dispatch path.  Stripped from the
-# delivered prose before forwarding — the marker is protocol metadata.
+# Matches the leading "IMPORTANT" marker (with ":" or whitespace tail).
+# A4 (2026-08-04): retired as a delivery-gating signal — kept as a
+# permanent cosmetic strip so literal "IMPORTANT:" text from old-habit
+# senders never leaks into delivered prose. Stripped, never branched on.
 IMPORTANT_MARKER_RE: Final[re.Pattern[str]] = re.compile(
     r"^\s*IMPORTANT[:\s]\s*", re.MULTILINE,
 )
@@ -90,7 +107,6 @@ IMPORTANT_MARKER_RE: Final[re.Pattern[str]] = re.compile(
 # so senders never read a watcher delivery as a live wake. Consumption for
 # these rides the watcher's
 # events-ack (the /events route), not model activity.
-DELIVERY_PERSISTED_SILENT: Final[str] = "persisted_silent"
 DELIVERY_QUEUED_NOTIFICATION: Final[str] = "queued_notification"
 DELIVERY_QUEUED_WAKE: Final[str] = "queued_wake"
 DELIVERY_QUEUED_WATCHER: Final[str] = "queued_watcher"
@@ -149,22 +165,57 @@ class NativeWakeError(Exception):
         self.peer_agent_id: str = peer_agent_id
 
 
-def _recipient_activity_stamp(
-    bridge_manager: BridgeSessionManager, recipient: BridgeBinding,
-) -> str | None:
-    """The RECIPIENT's ``last_model_activity_at`` right now, or ``None``.
+def _tee_spool_if_wake_incapable(
+    recipient: BridgeBinding, delivered_prose: str,
+) -> None:
+    """Best-effort spool tee for a recipient with no native wake path
+    (codex-watch-migration wake_capable design, 2026-08-06). Called
+    ALONGSIDE :func:`drive_on_delivery` — a SIBLING, not a shared branch:
+    the two conditions (``wake_capable`` and managed-session-ness) are
+    orthogonal, a recipient can be both or neither, and unifying them would
+    hide two independent capabilities under one name.
 
-    The QUIET-GAP capture (H2) must describe the RECIPIENT's activity state as of
-    the emission, so it is read from the recipient's own live bridge — reading the
-    sender's would record the wrong session entirely. ``None`` when the recipient
-    has no live bridge (a ``queued_for_replay`` send) or has never made a
-    model-initiated call; both mean "no recorded activity at emission", which the
-    guard's None-rule already treats as an unbounded quiet gap.
+    A ``wake_capable=False`` binding (declared by its own bridge at
+    registration — see ``models.py``'s ``BridgeBinding.wake_capable``) has no
+    live turn-injection surface, so the platform feeds the SAME spool file
+    ``local_cli/wake.py``'s Stop-hook waiter already knows how to block on and
+    read — ``local_cli/wake.py`` itself needs no change: its own
+    ``read_watch_pairing`` fallback already documents "no watcher has
+    published a choice ... correct when no watcher ever armed," which is
+    exactly this recipient's steady state. Uses the SAME writer
+    (``local_cli.spool.spool_append``) a real ``watch`` process already uses,
+    not a second implementation.
+
+    Silently no-ops (never raises, never touches the caller's already-
+    computed delivery outcome) when: the recipient IS wake-capable (the
+    overwhelmingly common case — a single boolean check, the cheapest
+    possible no-op); the recipient has no ``agent_session_id`` (nothing to
+    derive a spool path from — an unregistered or legacy caller, the same
+    class ``drive_on_delivery`` already tolerates via its own optional-
+    collaborator convention); or the spool write itself raises (disk full,
+    permissions) — degrades to "no local nudge," same containment class as
+    ``drive_on_delivery``'s own driver-channel send.
     """
-    bridge = bridge_manager.get(recipient.bridge_id)
-    if bridge is None:
-        return None
-    return bridge.last_model_activity_at or None
+    if recipient.wake_capable:
+        return
+    if not recipient.agent_session_id:
+        return
+    homunculus_name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    if not homunculus_name:
+        return
+    instance_id = f"agi-watch-{watch_instance_digest(recipient.agent_session_id)}"
+    spool = default_spool_path(homunculus_name, instance_id)
+    line = json.dumps(
+        {"watch": "event", "event": {"content": delivered_prose}}, sort_keys=True,
+    )
+    try:
+        spool_append(spool, line)
+    except Exception:  # noqa: BLE001 — best-effort tee, same containment as
+        # drive_on_delivery's own driver-channel send.
+        logger.warning(
+            "_tee_spool_if_wake_incapable: spool write failed for %s",
+            recipient.agent_instance_id, exc_info=True,
+        )
 
 
 def dispatch_peer_send(
@@ -172,6 +223,7 @@ def dispatch_peer_send(
     bridge_manager: BridgeSessionManager,
     peer_registry: PeerRegistry,
     agent_messaging_service: Any,
+    state_service: StateManagementInterface | None,
     sender_bridge_id: str,
     sender_agent_id: str,
     sender_agent_instance_id: str,
@@ -220,7 +272,10 @@ def dispatch_peer_send(
     )
     prose = "\n".join(part.text for part in content)
     marker_match = IMPORTANT_MARKER_RE.match(prose)
-    important = marker_match is not None
+    # A4: the marker is stripped as input hygiene, never branched on for
+    # anything else — every send takes this path (ruled NONE on a wake
+    # toggle; see the module docstring).
+    delivered_prose = prose[marker_match.end():] if marker_match else prose
     result = agent_messaging_service.peer_send(
         PeerSendRequest(
             sender_bridge_id=sender_bridge_id,
@@ -235,7 +290,7 @@ def dispatch_peer_send(
             peer_agent_session_id=recipient.agent_session_id,
             sender_agent_session_id=sender_agent_session_id,
             content=content,
-            important=important,
+            important=True,
         ),
     )
     # Bump activity timestamps for the sender bridge + both endpoint
@@ -247,37 +302,21 @@ def dispatch_peer_send(
         sender_bridge.touch()
     peer_registry.touch_binding(sender_agent_instance_id)
     peer_registry.touch_binding(recipient.agent_instance_id)
-    if not important:
-        return PeerSendOutcome(
-            thread_id=str(result.thread_id),
-            message_id=str(result.message_id),
-            cursor=int(result.cursor),
-            delivered_to_agent_id=peer_id,
-            delivered_to_agent_instance_id=recipient.agent_instance_id,
-            from_agent_id=sender_agent_id,
-            from_agent_instance_id=sender_agent_instance_id,
-            delivery=DELIVERY_PERSISTED_SILENT,
-            delivered_to_bridge_id=recipient.bridge_id,
-        )
-    # ``marker_match`` is narrowed by ``important`` (truthy iff
-    # match was found); the explicit assertion keeps the type
-    # checker happy without a runtime cost.
-    assert marker_match is not None
-    delivered_prose = prose[marker_match.end():]
-    # WS-2a W3, direct-send half. The message row is ALREADY persisted at this
+    # A4 Amendment 5: binding_is_live generalized to EVERY recipient kind
+    # (was watcher-only). The message row is ALREADY persisted at this
     # point, so raising here loses nothing — it tells the sender immediately
-    # that nobody is polling, instead of returning `queued_watcher` and letting
-    # them discover it with a stopwatch (Dax's repro waited 20s and then had to
-    # infer it). The prose says where the message still is, because "unreachable"
-    # without that reads as "lost".
-    if _watcher_is_silent(
+    # that nobody is polling (a resolved-but-stale binding: bridge present,
+    # last_seen_at past the liveness window — e.g. a SIGKILLed process with
+    # no client-initiated /close) instead of reporting a successful
+    # ``queued_wake``/``queued_notification`` that will never be drained.
+    if not binding_is_live(
         bridge_manager=bridge_manager,
-        recipient=recipient,
+        binding=recipient,
         window_seconds=bridge_manager.binding_liveness_window_s,
     ):
         raise PeerUnreachableError(
-            f"{peer_id} instance {recipient.agent_instance_id} is a watcher whose "
-            f"bridge {recipient.bridge_id} has not polled within "
+            f"{peer_id} instance {recipient.agent_instance_id}'s bridge "
+            f"{recipient.bridge_id} has not polled within "
             f"{bridge_manager.binding_liveness_window_s}s — nothing is draining it. The "
             f"message IS persisted (message_id {result.message_id}) and readable "
             f"from that identity's inbox; it was not delivered to a live session.",
@@ -340,36 +379,22 @@ def dispatch_peer_send(
             else DELIVERY_QUEUED_NOTIFICATION
         )
         delivered_bridge = recipient.bridge_id
-    # REL-05: insure this IMPORTANT direct send. The outbox row records the
-    # ORIGINAL emission just performed (emit_count=1, last_emitted_at=now); if the
-    # recipient session never enters a turn (Vector B), the recipient's repair
-    # drain re-emits it (capped) until it provably enters context, then escalates
-    # to this sender. Written AFTER a successful emission so a hard-failed wake
-    # (NativeWakeError above) does not leave an insured-but-never-emitted row.
-    # Silent sends never reach here (returned above) — the re-emit machinery is
-    # IMPORTANT-only by contract.
-    agent_messaging_service.persist_direct_wake(
-        message_id=str(result.message_id),
-        thread_id=str(result.thread_id),
-        recipient_agent_id=recipient.agent_id,
+    # A4 (2026-08-04): the REL-05 direct-wake insurance outbox retired here —
+    # sweep_overdue_sessions + _notify_steward_of_overdue is its successor,
+    # keyed on the recipient's own report_by promise rather than a per-message
+    # consumption heuristic. See the architect memo, Amendment 4.
+    # Drive-on-delivery (2026-08-04): a managed recipient's driver channel
+    # gets an extra best-effort nudge ALONGSIDE the notify above (never
+    # instead of it — this call cannot raise and cannot change delivery_kind).
+    drive_on_delivery(
+        state_service,
         recipient_agent_instance_id=recipient.agent_instance_id,
-        # Fork-1a: stamp the recipient's STABLE session key (from the resolved
-        # live binding, never caller args) so a reconnect re-homes owed rows.
-        recipient_agent_session_id=recipient.agent_session_id,
-        sender_agent_id=sender_agent_id,
-        sender_agent_instance_id=sender_agent_instance_id,
-        sender_session_label=sender_session_label,
-        sender_bridge_id=sender_bridge_id,
-        content=content,
-        # QUIET-GAP capture (H2): the RECIPIENT's activity stamp as of THIS
-        # emission — read from the recipient's own live bridge, never the
-        # sender's. Frozen on the row so guard 2 tests the gap this emission
-        # actually landed in, instead of a pair that slides forward afterwards.
-        # None when the recipient has no live bridge (queued_for_replay) or has
-        # never made a model-initiated call: the whole preceding session is then
-        # the quiet gap, which is the documented None-rule.
-        activity_at_emission=_recipient_activity_stamp(bridge_manager, recipient),
+        sender_label=sender_session_label,
     )
+    # codex-watch-migration wake_capable design (2026-08-06): SIBLING to
+    # drive_on_delivery above, not unified — see _tee_spool_if_wake_incapable's
+    # own docstring for why the two conditions are orthogonal.
+    _tee_spool_if_wake_incapable(recipient, delivered_prose)
     return PeerSendOutcome(
         thread_id=str(result.thread_id),
         message_id=str(result.message_id),
@@ -418,14 +443,15 @@ class RoleSendOutcome:
     """Typed result of a role-addressed (``peer_send_by_name``) dispatch.
 
     ``thread_id`` is the synthetic ``"role:{name}"`` handle (display only).
-    ``delivery`` is one of ``persisted_silent`` (silent role message — inbox
-    only), ``queued_wake`` / ``queued_notification`` (the role event was QUEUED
-    on the live holder's bridge; ``delivered`` is flipped by the holder's forwarder
-    on confirmed emission, NOT at send — v10 Q3-revised), ``queued_watcher``
-    (the holder is a no-MCP watcher: the event streams into its watch output
-    and surfaces when the session next looks — no turn starts; consumption is
-    the watcher's events-ack), or ``queued_for_replay`` (persisted but the
-    holder was unreachable; the repair loop re-delivers).
+    ``delivery`` is one of ``queued_wake`` / ``queued_notification`` (the role
+    event was QUEUED on the live holder's bridge; ``delivered`` is flipped by
+    the holder's forwarder on confirmed emission, NOT at send — v10
+    Q3-revised), ``queued_watcher`` (the holder is a no-MCP watcher: the
+    event streams into its watch output and surfaces when the session next
+    looks — no turn starts; consumption is the watcher's events-ack), or
+    ``queued_for_replay`` (persisted but the holder was unreachable; the
+    repair loop re-delivers). Every role send is delivery-attempted (A4,
+    2026-08-04) — there is no longer a silent/inbox-only outcome.
     """
 
     thread_id: str
@@ -477,29 +503,6 @@ def binding_is_live(
     ).total_seconds() <= window_seconds
 
 
-def _watcher_is_silent(
-    *,
-    bridge_manager: BridgeSessionManager,
-    recipient: BridgeBinding,
-    window_seconds: int,
-) -> bool:
-    """True when a WATCHER binding resolves to a bridge nobody is polling.
-
-    Scoped to watcher bindings on purpose. ``append_event`` succeeds against
-    any non-closed bridge session, and a SIGKILLed watcher leaves its
-    server-side session standing — so the send is labelled ``queued_watcher``
-    ("a queue accepted it") while nothing will ever poll that queue, for up to
-    the full 3_600s idle sweep. Detecting it here lets the EXISTING
-    unreachable path produce ``queued_for_replay``, which is both honest and
-    already re-delivered by the owed-delivery machinery.
-    """
-    return recipient.is_watcher and not binding_is_live(
-        bridge_manager=bridge_manager,
-        binding=recipient,
-        window_seconds=window_seconds,
-    )
-
-
 def _deliver_important_to_binding(
     *,
     bridge_manager: BridgeSessionManager,
@@ -542,17 +545,18 @@ def _deliver_important_to_binding(
     ``/peer/delivered`` is the SOLE delivered-authority for both (v10 Q3-revised,
     Codex BLOCKER-3).
     """
-    # WS-2a W3 (Dax §34.1): refuse to report `queued_watcher` against a bridge
-    # nobody is polling. Raising here routes into dispatch_role_send's EXISTING
-    # PeerUnreachableError branch, which already returns `queued_for_replay` —
-    # honest, durable, and re-delivered. No new label, no schema change.
-    if _watcher_is_silent(
+    # A4 Amendment 5: binding_is_live generalized to EVERY recipient kind
+    # (was watcher-only). Raising here routes into dispatch_role_send's
+    # EXISTING PeerUnreachableError branch, which already returns
+    # `queued_for_replay` — honest, durable, and re-delivered. No new label,
+    # no schema change.
+    if not binding_is_live(
         bridge_manager=bridge_manager,
-        recipient=recipient,
+        binding=recipient,
         window_seconds=bridge_manager.binding_liveness_window_s,
     ):
         raise PeerUnreachableError(
-            f"watcher binding {recipient.agent_instance_id} resolves to bridge "
+            f"binding {recipient.agent_instance_id} resolves to bridge "
             f"{recipient.bridge_id}, which has not polled within "
             f"{bridge_manager.binding_liveness_window_s}s — treating as unreachable",
         )
@@ -634,6 +638,7 @@ def dispatch_role_send(
     bridge_manager: BridgeSessionManager,
     peer_registry: PeerRegistry,
     agent_messaging_service: Any,
+    state_service: StateManagementInterface | None,
     role_name: str,
     role: ResolvedRole,
     sender_bridge_id: str,
@@ -654,10 +659,7 @@ def dispatch_role_send(
     1. **Persist-first (#4.1/#1.1):** ONE authoritative ``upsert_state`` of the
        complete envelope (``delivered=false``), BEFORE resolving the live
        holder binding — so a role send never requires a live binding.
-    2. **Silent → inbox-only:** a non-IMPORTANT role message is never
-       auto-emitted (loop prevention); it is durable + re-readable via the
-       role-inbox section.
-    3. **Best-effort deliver (#4.2):** resolve the current holder's live
+    2. **Best-effort deliver (#4.2):** resolve the current holder's live
        binding and emit; on no-binding / wake failure / queue full →
        ``queued_for_replay`` (success — the row persists, Control #5 re-delivers).
        On success, NEITHER path flips ``delivered`` here at send (v10 Q3-revised,
@@ -668,10 +670,15 @@ def dispatch_role_send(
        flip authority for both (POST /peer/delivered after confirmed emission),
        so an unconfirmed queued event stays ``delivered=false`` for the repair
        drain to re-deliver.
+
+    A4 (2026-08-04): every role send takes step 2 — the former "non-IMPORTANT
+    -> inbox-only, never emitted" branch is retired (ruled NONE on a wake
+    toggle). The IMPORTANT marker is still matched and stripped from the
+    delivered prose as input hygiene, never branched on.
     """
     prose = "\n".join(part.text for part in content)
     marker_match = IMPORTANT_MARKER_RE.match(prose)
-    important = marker_match is not None
+    delivered_prose = prose[marker_match.end():] if marker_match else prose
     persisted = agent_messaging_service.persist_role_message(
         recipient_kind=RECIPIENT_KIND_ROLE,
         recipient_key=role_name,
@@ -679,20 +686,10 @@ def dispatch_role_send(
         sender_agent_id=sender_agent_id,
         sender_agent_instance_id=sender_agent_instance_id,
         sender_session_label=sender_session_label,
-        important=important,
+        important=True,
         content=content,
     )
     thread_id = f"{ROLE_THREAD_PREFIX}{role_name}"
-    if not important:
-        return RoleSendOutcome(
-            thread_id=thread_id,
-            message_id=message_id,
-            role=role,
-            delivery=DELIVERY_PERSISTED_SILENT,
-            delivered_to_bridge_id="",
-        )
-    assert marker_match is not None  # narrowed by ``important``
-    delivered_prose = prose[marker_match.end():]
     delivery_external_id = role_message_external_id(
         RECIPIENT_KIND_ROLE, role_name, message_id,
     )
@@ -747,6 +744,17 @@ def dispatch_role_send(
     # paths. This is STRONGER than the old optimistic send-flip (forwarder-
     # CONFIRMED at-least-once) and removes the takeover-between-wake-and-flip
     # suppression — the flip is always whoever currently holds + drains.
+    # Drive-on-delivery (2026-08-04): ALONGSIDE the notify above, never
+    # instead of it — best-effort, cannot raise, cannot change delivery_kind.
+    drive_on_delivery(
+        state_service,
+        recipient_agent_instance_id=recipient.agent_instance_id,
+        sender_label=sender_session_label,
+    )
+    # codex-watch-migration wake_capable design (2026-08-06): SIBLING to
+    # drive_on_delivery above, not unified — role-addressed sends (the primary
+    # way a Codex office is reached) get the same tee as direct sends.
+    _tee_spool_if_wake_incapable(recipient, delivered_prose)
     return RoleSendOutcome(
         thread_id=thread_id,
         message_id=message_id,
@@ -837,7 +845,6 @@ def build_peer_message_meta(
 
 __all__ = [
     "DELIVERY_QUEUED_NOTIFICATION",
-    "DELIVERY_PERSISTED_SILENT",
     "DELIVERY_QUEUED_FOR_REPLAY",
     "DELIVERY_QUEUED_WAKE",
     "DELIVERY_QUEUED_WATCHER",

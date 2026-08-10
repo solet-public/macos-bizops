@@ -48,18 +48,22 @@ S2::plugins/salesforce_plugin/src/salesforce_plugin/soql_actions.py::*  # sancti
 # connection.py / statement_guard.py / app_config.py / constants.py stay fully gated).
 S2::plugins/external_postgres_plugin/tests/smoke_guard.py::*  # false-positive: read-only guard test fixtures (foreign-SQL leader/statement strings)
 S2::plugins/external_postgres_plugin/tests/smoke_query.py::*  # false-positive: query-verb test fixtures (foreign-SQL strings)
-S2::plugins/external_postgres_plugin/tests/smoke_spill.py::*  # false-positive: spill/export test fixtures (foreign-SQL strings)
+S2::plugins/external_postgres_plugin/tests/smoke_data_export.py::*  # false-positive: export test fixtures (foreign-SQL strings)
 S2::plugins/external_postgres_plugin/tests/smoke_multistatement.py::*  # false-positive: single-statement/defense-in-depth test fixtures (foreign-SQL strings)
 S2::plugins/external_postgres_plugin/tests/smoke_readonly.py::*  # false-positive: LIVE read-only test fixtures (foreign-SQL write-attempt strings + assert labels)
+S2::plugins/external_postgres_plugin/tests/smoke_async_jobs.py::*  # false-positive: D0.3 worker-dispatch test fixtures (foreign-SQL strings fed to a fully monkeypatched fake connection, zero real DB access — same shape as smoke_query.py/smoke_data_export.py above)
+S2::plugins/external_postgres_plugin/tests/smoke_write.py::*  # false-positive: LIVE write-capability test fixtures (foreign-SQL INSERT/UPDATE/DELETE/RETURNING/SELECT-count strings against the scratch DB, epg_smoke_scratch — same shape as smoke_readonly.py above)
 # snowflake_plugin TEST fixtures (2026-07-13, wave-2): same shape as external_postgres_plugin's
 # test allowlisting above — every S2/S3 hit is a warehouse-SQL guard/query fixture (read-leader
-# refusal strings, spill/export sql params), none is platform-DB SQL. query_actions.py itself
+# refusal strings, export sql params), none is platform-DB SQL. query_actions.py itself
 # needs NO S2 entry: its introspection strings are SHOW/DESCRIBE (not S2 verbs) and the caller's
 # free-text sql/run_query text is a runtime variable, never a literal SELECT/INSERT/… string.
 S2::plugins/snowflake_plugin/tests/smoke_guard.py::*  # false-positive: read-only guard test fixtures (warehouse-SQL leader/statement strings)
 S2::plugins/snowflake_plugin/tests/smoke_query.py::*  # false-positive: query-verb test fixtures (warehouse-SQL strings)
-S2::plugins/snowflake_plugin/tests/smoke_spill.py::*  # false-positive: spill/export test fixtures (warehouse-SQL strings)
+S2::plugins/snowflake_plugin/tests/smoke_data_export.py::*  # false-positive: export test fixtures (warehouse-SQL strings)
+S2::plugins/snowflake_plugin/tests/smoke_async_jobs.py::*  # false-positive: D0.3 worker-dispatch test fixtures (warehouse-SQL strings fed to a fully monkeypatched fake connection, zero real warehouse access — same shape as smoke_query.py/smoke_data_export.py above)
 S2::plugins/salesforce_plugin/tests/smoke_soql.py::*  # false-positive: SOQL query-verb test fixtures (foreign-org SOQL strings)
+S2::plugins/salesforce_plugin/tests/smoke_async_jobs.py::*  # false-positive: D0.3 worker-dispatch test fixtures (foreign-org SOQL strings)
 S2::plugins/zuora_plugin/tests/smoke_data_query.py::*  # false-positive: ZOQL query-verb test fixtures (foreign-tenant ZOQL strings, never platform SQL)
 S2::ananta/src/ananta/llm/session_ledger/ingest.py::sql:upsert_session canonical race: Phase 1 ON CONFLICT fired but…  # false-positive: log/comment literal containing 'ON CONFLICT' (hand-reviewed, not SQL); CONTENT-ANCHORED 2026-07-02 (FIX-2a — first consumer of the sql:<snippet> form): line-agnostic, immune to the line drift that forced the sibling plugin.py 'Create the…' entry to be re-pinned 2752→2763→2764→2786 (4× in one day)
 # REMOVED 2026-07-02: the default_thinking_plugin plugin.py 'Create the Work Breakdown
@@ -133,6 +137,7 @@ S2::plugins/postgres_state_management_plugin/tests/filter_grammar_smoke.py::sql:
 S3::plugins/external_postgres_plugin/tests/smoke_guard.py::*  # false-positive: read-only-guard DDL write-refusal fixtures
 S3::plugins/external_postgres_plugin/tests/smoke_multistatement.py::*  # false-positive: LIVE scratch-DB seed DDL (epg_smoke_scratch)
 S3::plugins/external_postgres_plugin/tests/smoke_readonly.py::*  # false-positive: LIVE scratch-DB seed/probe DDL (epg_smoke_scratch)
+S3::plugins/external_postgres_plugin/tests/smoke_write.py::*  # false-positive: LIVE scratch-DB seed/probe DDL (epg_smoke_scratch)
 S3::plugins/snowflake_plugin/tests/smoke_guard.py::*  # false-positive: read-only-guard DDL write-refusal fixtures (warehouse-SQL)
 S3::plugins/actr_memory_plugin/tests/actr_memory_clear_session_migration_live_smoke.py::sql:CREATE TABLE " "." " ( )  # false-positive: test fixture DDL
 S3::plugins/actr_memory_plugin/tests/actr_memory_hard_delete_migration_live_smoke.py::sql:CREATE TABLE " "." __ " ( )  # false-positive: test fixture DDL

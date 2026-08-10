@@ -40,7 +40,7 @@ ERROR_EXPORT_ROOT_REJECTED: Final[str] = "github_midwife.export_root_rejected"
 CONFIG_KEY_EXPORT_ALLOWED_ROOTS: Final[str] = "export_allowed_roots"
 
 # The full connector roster this migration touches (07-29 ruling + the
-# 2026-08-02 limits/spill-floor design doc §7, Tier 1 + Tier 2). Not every
+# 2026-08-02 limits/data-export design doc §7, Tier 1 + Tier 2). Not every
 # plugin in this tuple is present in every clone — `configure_export_root`
 # only writes config for the ones actually installed under `<clone>/plugins/`,
 # so an uninstalled connector's config is never touched (inert-by-absence,

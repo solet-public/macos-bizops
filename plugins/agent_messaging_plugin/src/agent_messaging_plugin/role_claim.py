@@ -48,9 +48,15 @@ from typing import TYPE_CHECKING, Any
 
 from ananta.llm.agent_messaging.models import TextPart
 from ananta.llm.agent_messaging.role_binding import (
+    AGENT_ROLE_BINDING_NAMESPACE,
     HOLDER_KIND_INFERENCE_PROVIDER,
     HOLDER_KIND_SESSION,
+    TABLE_ROLE,
+    is_reserved_primary_name,
+    is_system_role,
+    role_binding_external_id,
 )
+from ananta.llm.agent_messaging.state_results import require_records
 
 from .bridge_sessions import BridgeNotFoundError, BridgeQueueFullError
 from .constants import (
@@ -77,9 +83,18 @@ from .role_binding_store import (
     session_claim_requires_session_id,
     upsert_role_entity,
 )
+from .session_role_claim_store import (
+    CardinalityConflictError,
+    CardinalityGatedClaim,
+    SessionRoleClaimContendedError,
+    delete_session_role_claim_if_still_holds,
+    win_cardinality_gate,
+)
 from .system_slots import SystemSlotClaimDecision, evaluate_system_slot_claim
 
 if TYPE_CHECKING:  # pragma: no cover — type-only references
+    from ananta.interfaces.state_management_interface import StateManagementInterface
+
     from .bridge_sessions import BridgeSessionManager
     from .peer_registry import PeerRegistry
     from .role_binding_store import ResolvedRole
@@ -159,17 +174,50 @@ def new_holder_prose(name: str) -> str:
     no-MCP session read "drain your backlog with peer_inbox" and had no
     peer_inbox to call. The key is copy-runnable on both transports, so the
     instruction is now executable by whoever receives it.
+
+    **Attestation closing step (rotation-systematization fix loop, 2026-08-08
+    — ``workbench/2026-08-07_rotation_systematization_findings_rotation-impl.md``,
+    "the seam and the correctness condition"):** added because the covered-mark
+    floor (``peer_mark_role_covered``) was found to be permanently inert for
+    every role in practice — nothing anywhere ever called it, BY DESIGN (the
+    verb is registered-route-only), so a role's mark never advances unless the
+    holder itself attests. This is the ONE place that instruction can live and
+    reach every deployment (the platform's own handover text, not a
+    checkout-local convention). The correctness condition is stated IN the
+    prose itself, not merely documented elsewhere, because a safety rule that
+    lives outside the instruction a reader actually receives gets followed
+    unsafely. The transport caveat is equally explicit and load-bearing: a
+    ``watch``-transport session's own outbound calls are a bare
+    ``homunculus call`` subprocess, which the platform stamps with
+    ``caller_attribution_*`` rather than ``inference_vertex_session_id`` — the
+    field ``peer_mark_role_covered`` requires. Such a session CANNOT attest,
+    ever, no matter how it tries; the prose says so plainly rather than
+    implying a capability the reader may not have. This function adds NO code
+    path that attests on any session's behalf — the platform still only ever
+    accepts an attestation from the holder's own live, registered-route turn.
     """
     return (
         f"IMPORTANT: You now hold role {name!r}. Drain your role backlog with "
-        f"plugin::agent_messaging_plugin::peer_inbox (include_important=true, "
-        f"passing your own agent_session_id) — role-addressed messages sent to "
-        f"{name!r} while it was held by another session (or unclaimed) are "
-        f"waiting. Page the role section with role_after until next_role_cursor "
-        f"is null; role_section_status 'ok' does not mean drained. If the page "
-        f"reports role_floor_applied=true, the default drain stopped at this "
-        f"role's covered mark — echo the returned role_history_cursor back as "
-        f"role_after for a deliberate read of anything before it."
+        f"plugin::agent_messaging_plugin::peer_inbox (passing your own "
+        f"agent_session_id) — role-addressed messages sent to {name!r} while "
+        f"it was held by another session (or unclaimed) are waiting. Page the "
+        f"role section with role_after until next_role_cursor is null; "
+        f"role_section_status 'ok' does not mean drained. If the page reports "
+        f"role_floor_applied=true, the default drain stopped at this role's "
+        f"covered mark — echo the returned role_history_cursor back as "
+        f"role_after for a deliberate read of anything before it. "
+        f"Once you have read and acted on this backlog, attest your own "
+        f"progress: call plugin::agent_messaging_plugin::peer_mark_role_covered "
+        f"with the newest message_id from the LAST peer_inbox response's "
+        f"role_entries you actually read — never a computed or assumed "
+        f"boundary, and never the newest message in the whole backlog if your "
+        f"last read did not return it. This requires a call dispatched through "
+        f"your own registered bridge (a live MCP tool call) — a bare "
+        f"homunculus call subprocess cannot attest and is refused loud. If "
+        f"your session has no registered bridge (e.g. watch transport with no "
+        f"MCP route), you cannot perform this step; that is expected, not an "
+        f"error — this role's covered mark will simply stay behind your reads, "
+        f"and nothing else will attest on your behalf."
     )
 
 
@@ -178,6 +226,7 @@ def send_handover_notice(
     bridge_manager: BridgeSessionManager | None,
     peer_registry: PeerRegistry | None,
     agent_messaging_service: Any | None,
+    state_service: StateManagementInterface | None,
     peer_id: str,
     peer_agent_instance_id: str,
     prose: str,
@@ -201,6 +250,7 @@ def send_handover_notice(
             bridge_manager=bridge_manager,
             peer_registry=peer_registry,
             agent_messaging_service=agent_messaging_service,
+            state_service=state_service,
             sender_bridge_id=SYSTEM_ROLE_HANDOVER_ID,
             sender_agent_id=SYSTEM_AGENT_ID,
             sender_agent_instance_id=SYSTEM_ROLE_HANDOVER_ID,
@@ -277,6 +327,7 @@ def notify_role_handover(
     bridge_manager: BridgeSessionManager | None,
     peer_registry: PeerRegistry | None,
     agent_messaging_service: Any | None,
+    state_service: StateManagementInterface | None,
     name: str,
     new_agent_id: str,
     new_agent_instance_id: str,
@@ -314,6 +365,7 @@ def notify_role_handover(
             bridge_manager=bridge_manager,
             peer_registry=peer_registry,
             agent_messaging_service=agent_messaging_service,
+            state_service=state_service,
             peer_id=target_agent_id or new_agent_id,
             peer_agent_instance_id=target_instance_id,
             prose=displaced_prose(name, new_agent_instance_id),
@@ -323,6 +375,7 @@ def notify_role_handover(
         bridge_manager=bridge_manager,
         peer_registry=peer_registry,
         agent_messaging_service=agent_messaging_service,
+        state_service=state_service,
         peer_id=new_agent_id,
         peer_agent_instance_id=new_agent_instance_id,
         prose=new_holder_prose(name),
@@ -335,6 +388,7 @@ def settle_role_handover(
     bridge_manager: BridgeSessionManager | None,
     peer_registry: PeerRegistry | None,
     agent_messaging_service: Any | None,
+    state_service: StateManagementInterface | None,
     name: str,
     agent_id: str,
     agent_instance_id: str,
@@ -377,6 +431,7 @@ def settle_role_handover(
         bridge_manager=bridge_manager,
         peer_registry=peer_registry,
         agent_messaging_service=agent_messaging_service,
+        state_service=state_service,
         name=name,
         new_agent_id=agent_id,
         new_agent_instance_id=agent_instance_id,
@@ -536,6 +591,109 @@ def _claim_preflight_refusal(
     return None
 
 
+def _role_entity_exists(state_service: Any, name: str) -> bool:
+    """Does the first-class ``role`` entity row for ``name`` already exist?
+
+    Distinguishes a FRESH MINT (no row yet) from a claim against an
+    already-legislated name — the reserved-mint guard below only fires on the
+    former (§3.1 / Dawn ruling Q1: peer_claim_role is enforce-by-class, never
+    class-assignment; only a fresh mint of a reserved-pattern name is refused).
+    """
+    result = state_service.query_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": TABLE_ROLE, "filters": {"external_id": role_binding_external_id(name)}},
+    )
+    return bool(require_records(result))
+
+
+def _reserved_mint_refusal(state_service: Any, name: str) -> RoleClaimFailure | None:
+    """Refuse a FRESH MINT of a reserved primary-seat name (``<homunculus>-Main``
+    shape) — the ONE D1-scoped claim-path guard from §3.1 (Dawn ruling Q1).
+    ``sys:*`` names are already keyspace-rejected upstream by
+    ``evaluate_system_slot_claim``; this guards the DIFFERENT ``-Main`` pattern,
+    and only when no role row exists yet. A name already legislated (via this
+    plugin's ``legislate_role`` governance-act verb, outside D1) claims
+    normally regardless of this check.
+    """
+    if not is_reserved_primary_name(name) or is_system_role(name):
+        return None
+    if _role_entity_exists(state_service, name):
+        return None
+    return RoleClaimFailure(
+        code="reserved_role_name",
+        message=(
+            f"role {name!r} matches the reserved primary-seat pattern "
+            "(<homunculus>-Main) and has no legislated role row yet — minting "
+            "it via an ordinary claim is refused. Primary-seat legislation is "
+            "a governance act (this plugin's legislate_role verb), not a "
+            "session claim."
+        ),
+    )
+
+
+def _mint_and_cardinality_gate_refusal(
+    state_service: Any, *, name: str, agent_session_id: str, agent_instance_id: str,
+) -> RoleClaimFailure | None:
+    """Fleet session-management Phase B, D1 (§3.1 reserved-mint guard + §2
+    AMEND-4b cardinality gate, Dawn ruling gap 2). Evaluated BEFORE the
+    binding CAS so a refusal mutates nothing beyond a harmless role-entity
+    upsert (§5.5 — a lost CAS then leaves at most an orphan entity, never
+    read on resolve). ``sys:*`` slots are slot machinery, exempt from the
+    cardinality count (§2) — they keep the existing §6.1 gate untouched, no
+    ``session_role_claim`` row.
+
+    TRUST MODEL (``session_role_claim_store`` module docstring, Q2): keyed on
+    ``agent_session_id`` at the SAME trust level the existing binding CAS
+    already operates at — genuine against an honestly-identified session,
+    NOT hardened against a forged identity pair (tracked debt,
+    ``reference_peer_claim_role_trusts_caller_asserted_instance_id``).
+
+    Returns the refusal, or ``None`` to let the claim proceed (a system role
+    always returns ``None`` here — its gate is untouched).
+    """
+    reserved = _reserved_mint_refusal(state_service, name)
+    if reserved is not None:
+        return reserved
+    # §5.5 entity-first: upsert the role entity BEFORE the binding CAS.
+    upsert_role_entity(state_service, name=name)
+    if is_system_role(name):
+        return None
+    try:
+        win_cardinality_gate(
+            state_service,
+            CardinalityGatedClaim(
+                agent_session_id=agent_session_id,
+                requested_role=name,
+                agent_instance_id=agent_instance_id,
+            ),
+        )
+    except CardinalityConflictError as exc:
+        return RoleClaimFailure(code="cardinality_conflict", message=str(exc))
+    except SessionRoleClaimContendedError as exc:
+        return RoleClaimFailure(code="session_role_claim_contended", message=str(exc))
+    return None
+
+
+def _prune_displaced_session_role_claim(
+    state_service: Any, *, name: str, outcome: dict[str, Any],
+) -> None:
+    """Displacer cleanup (Dawn ruling gap 1): prune the LOSER's own
+    ``session_role_claim`` row so it does not linger as a stale orphan
+    (harmless either way — the loser's own next claim self-repairs via
+    branch (iii) — but pruning now keeps the common case clean). No-op for
+    ``sys:*`` names (they never win a ``session_role_claim`` row) or a
+    non-displacing outcome.
+    """
+    if is_system_role(name) or str(outcome.get("action") or "") != "displaced":
+        return
+    prior = outcome.get("prior")
+    prior_session_id = str(getattr(prior, "agent_session_id", "") or "")
+    if prior_session_id:
+        delete_session_role_claim_if_still_holds(
+            state_service, agent_session_id=prior_session_id, expected_held_role=name,
+        )
+
+
 def _log_operator_takeover(
     *,
     takeover: bool,
@@ -647,9 +805,12 @@ def claim_role_for_session(
     )
     if held is not None:
         return held
-    # §5.5 entity-first: upsert the role entity BEFORE the binding CAS (a lost CAS
-    # then leaves at most a harmless orphan entity; resolve never reads it).
-    upsert_role_entity(state_service, name=name)
+    gate_refusal = _mint_and_cardinality_gate_refusal(
+        state_service, name=name, agent_session_id=agent_session_id,
+        agent_instance_id=agent_instance_id,
+    )
+    if gate_refusal is not None:
+        return gate_refusal
     # §9 CUTOVER: the v4 predicated-CAS claim (claim / displace / self-reclaim in
     # one) returns action + the PRE-CAS displaced prior for the §5.4 notify.
     outcome = claim_role_binding_v4(
@@ -663,6 +824,7 @@ def claim_role_for_session(
             session_label=session_label,
         ),
     )
+    _prune_displaced_session_role_claim(state_service, name=name, outcome=outcome)
     _log_operator_takeover(
         takeover=takeover,
         name=name,
@@ -675,6 +837,7 @@ def claim_role_for_session(
         bridge_manager=bridge_manager,
         peer_registry=peer_registry,
         agent_messaging_service=agent_messaging_service,
+        state_service=state_service,
         name=name,
         agent_id=agent_id,
         agent_instance_id=agent_instance_id,

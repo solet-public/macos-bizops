@@ -44,15 +44,18 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
 # The per-session error-isolation + persistent-skip cases deliberately trigger a
 # caught exception log + a STALL warning. Silence them so the smoke output is
-# clean — the assertions, not the logs, prove the behavior.
-logging.getLogger("ananta.services.session_ledger_service.service").setLevel(
+# clean — the assertions, not the logs, prove the behavior. Both live in
+# summarize.py post schema-debt service.py decomposition (2026-08-07).
+logging.getLogger("ananta.services.session_ledger_service.summarize").setLevel(
     logging.CRITICAL,
 )
 
-from ananta.services.session_ledger_service import service as svc_mod  # noqa: E402
+from ananta.services.session_ledger_service import summarize as svc_mod  # noqa: E402
 from ananta.services.session_ledger_service.service import (  # noqa: E402
-    _AUTO_SUMMARIZE_TRIVIAL_SENTINEL,
     SessionLedgerService,
+)
+from ananta.services.session_ledger_service.summarize import (  # noqa: E402
+    _AUTO_SUMMARIZE_TRIVIAL_SENTINEL,
 )
 from ananta.services.session_ledger_service.summary_executor import (  # noqa: E402
     BoundedSummaryExecutor,
@@ -527,7 +530,7 @@ def test_wi0_static_entry_submits_without_inline_summarization() -> None:
 
     entry = bodies.get("summarize_quiescent_sessions", "")
     one = bodies.get("_summarize_one_session", "")
-    _check(entry and one, "both methods located in service.py")
+    _check(entry and one, "both methods located in summarize.py")
     _check(
         "_summary_executor.submit" in entry,
         "entry dispatches the drain via _summary_executor.submit",

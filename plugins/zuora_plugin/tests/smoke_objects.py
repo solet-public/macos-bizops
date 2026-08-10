@@ -5,7 +5,7 @@ Hermetic — a faked client returning canned ``httpx.Response`` objects, no
 live tenant.
 
 list_subscriptions / list_invoices moved to smoke_lists.py (business-data
-limits + spill-floor migration, 2026-08-02 — they now write to a
+limits + data-export migration, 2026-08-02 — they now write to a
 caller-supplied output_tsv_path under the §5 override mechanism, not an
 inline shape). get_invoice is unaffected (single-record fetch-by-id, §1.2
 exemption) and stays here.

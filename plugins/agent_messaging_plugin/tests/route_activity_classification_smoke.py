@@ -170,7 +170,7 @@ def test_claim_role_route_is_infra() -> None:
 
 
 def test_forwarder_infra_routes_never_stamp() -> None:
-    for suffix in ("events", "peer/drain", "peer/delivered", "peer/delivered_direct"):
+    for suffix in ("events", "peer/drain", "peer/delivered"):
         path = f"/api/v1/bridge/agc-x/{suffix}"
         _check(
             not is_model_initiated_path(path),

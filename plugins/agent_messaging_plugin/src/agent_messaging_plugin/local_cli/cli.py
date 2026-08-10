@@ -412,9 +412,9 @@ def _acquire_watch_singleton(lock_path: Path) -> None:
     A process holding this flock is by definition a live watcher for this
     session, so the incumbent is the correct one. That is the opposite of the
     registry's replace-on-register semantics, which exist for RECONNECT, where
-    the incumbent is dead. Refusing here is what stops the two producers Dax
-    named: a `nohup`-armed watcher reparented to launchd, and a pre-swap
-    watcher left alive across a blue-green swap.
+    the incumbent is dead. Refusing here is what stops the two known false-
+    liveness producers: a `nohup`-armed watcher reparented to launchd, and a
+    pre-swap watcher left alive across a blue-green swap.
     """
     global _watch_singleton_handle
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -680,8 +680,10 @@ def _drain_inbox(client: BridgeClient, spool: Path | None, marks_path: Path) -> 
     ``role_high_water``.
 
     The notice dependency IS pinned: ``role_claim_handover_smoke.py`` asserts
-    the dispatched notice text names ``peer_inbox``, `include_important=true`,
-    and paging ``role_after`` until ``next_role_cursor`` is null. This
+    the dispatched notice text names ``peer_inbox``, the holder's own
+    ``agent_session_id``, and paging ``role_after`` until ``next_role_cursor``
+    is null — and, since A4 (2026-08-04), that it no longer mentions the
+    retired ``include_important`` parameter. This
     docstring previously named ``handover_notice_runnable_smoke`` as the
     guard; that file never existed in the tree or the gate register (a
     design-doc name that leaked into shipped source).

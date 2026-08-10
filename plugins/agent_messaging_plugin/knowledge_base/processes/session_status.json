@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::session_status",
+  "display_name": "Read one managed session's ledger row",
+  "description": "Fleet session-management Phase B, D1 (§4). Returns the full managed_session ledger row for one agent_instance_id — identity, lineage (spawned_by_instance_id, spawned_by_role, lane_id, brief_ref), dispatch config (model, effort, work_class, budget_line, visibility), host (host, host_ref, capability_report), contract (report_by, expires_at), and the current lifecycle_state + last_transition_at + directed_by. Host-liveness enrichment (probing the driver for whether the process is actually alive right now, beyond what the ledger says) is deferred to whichever caller has the host driver registry — this verb is the ledger's own truth, always available regardless of host.",
+  "embedding_description": "Read the full lifecycle ledger row for one specific managed session by its agent_instance_id — identity, lineage, dispatch config, host, and current lifecycle state. Distinct from list_sessions (the whole roster, filtered) and report_alive (a session reporting its OWN status, a write not a read).",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Session status read",
+    "result_type": "session_status_result",
+    "result_description": "The managed_session row's fields: agent_instance_id, agent_session_id, agent_id, spawned_by_instance_id, spawned_by_role, lane_id, brief_ref, model, effort, work_class, budget_line, visibility, host, host_ref, capability_report, report_by, expires_at, lifecycle_state, last_transition_at, directed_by.",
+    "presentation_guidance": "Lead with lifecycle_state and lane_id/brief_ref for orientation. Note report_by only if it is close to now or in the past — that is the report-or-die margin, not a generic timestamp to recite."
+  },
+  "error_processor_customizations": {
+    "action_context": "A single filtered read on agent_instance_id against the managed_session table.",
+    "error_interpretation": "session_not_found: no managed_session row exists for the given agent_instance_id (never claimed, or hard-deleted). state_service_unavailable: the state service is not bound.",
+    "recovery_guidance": "For session_not_found, confirm the agent_instance_id via list_sessions or the caller's own spawn_session result rather than retrying the same id."
+  }
+}

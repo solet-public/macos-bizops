@@ -4,18 +4,19 @@ Article Layer: 1
 
 Article Role: plugin_reference
 
-Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:tag:bridge, knowledge:tag:peer_messaging, knowledge:tag:loop_prevention
+Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:tag:bridge, knowledge:tag:peer_messaging, knowledge:tag:delivery_contract
 
 Article Tags: planning-stage:agent-to-agent-coordination, planning-stage:tool-discovery, evidence-category:peer-messaging-contracts, evidence-category:identity-model, domain:agent-messaging, domain:inter-agent-routing
 
-Embedding Description: How live agent sessions talk through the homunculus — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the `<name> wake` Stop-hook waker that turns a delivery to an idle watcher-held session into a session turn (spool tee + hook exit-2 wake, MCP-free and provider-agnostic), the IMPORTANT-marker loop-prevention contract, silent vs queued delivery (persisted_silent / queued_notification / queued_wake / queued_watcher), what IMPORTANT means for a watcher-held recipient (delivered into the watch stream, wakes an idle hooked session, next-look for a busy one, consumed on events-ack), peer_inbox catch-up semantics including how to read your own inbox on demand with NO MCP by calling the registered peer_inbox process with your own stable session id, the two independent inbox cursors and why role-section exhaustion is a null cursor rather than an ok status, whether the role you hold still has a live delivery route attached to its current holder, multi-instance addressing, Claude Code native-channel wake routing, and the locally patched Codex peer-wake path.
+Embedding Description: How live agent sessions talk through the homunculus — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the `<name> wake` Stop-hook waker that turns a delivery to an idle watcher-held session into a session turn (spool tee + hook exit-2 wake, MCP-free and provider-agnostic), the unconditional delivery contract (wake is a transport property, not a sender-declared marker — every peer_send is delivery-attempted against the resolved recipient's live binding), the delivery-outcome vocabulary (queued_for_replay / queued_notification / queued_wake / queued_watcher) and the optional "IMPORTANT" prose-emphasis convention that is stripped as cosmetic input hygiene and never branched on, what unconditional delivery means for a watcher-held recipient (delivered into the watch stream, wakes an idle hooked session, next-look for a busy one, consumed on events-ack), drive-on-delivery for a MANAGED session (spawn_session-tracked fleet workers get an extra best-effort nudge through their driver channel alongside the ordinary delivery, honestly scoped — non-managed/operator-hosted sessions keep the unmodified no-waker property), the report_by / sweep_overdue_sessions staleness contract that replaced the retired per-message escalation apparatus, peer_inbox catch-up semantics including how to read your own inbox on demand with NO MCP by calling the registered peer_inbox process with your own stable session id, the two independent inbox cursors and why role-section exhaustion is a null cursor rather than an ok status, whether the role you hold still has a live delivery route attached to its current holder, multi-instance addressing, Claude Code native-channel wake routing, and the locally patched Codex peer-wake path.
 
 ## Purpose
 
 How live MCP-connected agents (Claude Code sessions, Codex sessions,
 future agents) talk to one another through the homunculus. Covers the three
-identity concepts, the IMPORTANT-marker loop-prevention contract,
-silent-vs-queued delivery, peer_inbox semantics, and how multiple
+identity concepts, the unconditional delivery contract (wake is a transport
+property, resolved from the recipient's live binding, never a sender-declared
+marker), delivery-outcome vocabulary, peer_inbox semantics, and how multiple
 concurrent sessions of the same agent kind are addressed
 unambiguously.
 
@@ -24,8 +25,6 @@ This article covers two surfaces:
 - **`current_identity`** — native MCP identity/routing
   introspection for the current transport session.
 - **`peer_*`** — peer messaging between live, MCP-connected agents.
-- **`agent_*`** — driving a backend agent thread (codex,
-  claude_code) opened from this bridge.
 
 Both live on the same `<server-name>` MCP server with the `mcp__<server-name>__*` tool
 prefix. The platform-call surface (`process_*`, `download`) is
@@ -135,8 +134,11 @@ common receive pattern is:
    `agent_id` and `agent_instance_id` returned by `peer_register`.
    Role claiming is a process-registry operation because the durable
    role table lives in platform state.
-3. Poll `peer_inbox(include_important=True, ...)` for catch-up and
-   receive. `peer_inbox` reads the same durable thread store used by
+3. Poll `peer_inbox(...)` for catch-up and
+   receive — the tool returns the full durable catch-up view
+   unconditionally (A4, 2026-08-04: `include_important` is retired from
+   this tool's schema). `peer_inbox` reads the same durable thread store
+   used by
    stdio bridge peers, keyed by identity and role binding. This is a
    poll-based receive path; no native wake is implied for generic
    streamable clients.
@@ -172,36 +174,64 @@ real verifier accepts — same HMAC key, `client_id` + `exp` present; the
 `aud` check is disabled for the origin-following resource (redundant for
 a single-key HMAC server). See `_mount_oauth_routers` in `plugin.py`.
 
-## IMPORTANT marker — loop prevention
+## Delivery contract — wake is a transport property
 
-The platform uses an opt-in marker to break ack/thanks loops:
+Every `peer_send` / `peer_send_by_name` / role send is unconditionally
+delivery-attempted against the resolved recipient's live binding. There is no
+sender-declared switch between a silent mode and a notifying mode — the
+platform decides how the message surfaces, based entirely on what the
+recipient's binding actually is at send time (A4, 2026-08-04; retired the
+prior opt-in "IMPORTANT" marker gate). A leading `IMPORTANT` (followed by
+`:` or whitespace) is still recognized and stripped from the delivered prose
+as a purely cosmetic, optional emphasis convention for the reader — it is
+never branched on, so writing it or omitting it produces identical delivery
+behavior:
 
 ```
-peer_send WITH prose starting "IMPORTANT" (followed by ":" or whitespace)
-  -> marker stripped before delivery
-  -> a turn-triggering event is QUEUED on the receiver's live bridge long-poll
-  -> meta.important = True
+peer_send (any prose)
+  -> IMPORTANT-prefix, if present, stripped as cosmetic input hygiene only
+  -> delivery is unconditionally attempted against the resolved recipient's
+     live binding
   -> delivery = "queued_notification" for a normal bridge channel event
              or "queued_wake" when peer_registry used a registered native
              wake adapter, currently Claude Code
              or "queued_watcher" when the resolved recipient is held by a
              no-MCP `<name> watch` subprocess (either transport)
-
-peer_send WITHOUT marker
-  -> message persisted to thread, no event queued
-  -> delivery = "persisted_silent"
-  -> only surfaces via peer_inbox
+             or "queued_for_replay" (role sends only) when the role's
+             current holder has no live, polling binding — the envelope is
+             durable and replays on that holder's next attach
 ```
+
+A stale-but-present instance binding (bridge row exists, but
+`last_seen_at` is past `binding_liveness_window_s` — e.g. a SIGKILLed
+process with no client-initiated `/close`) fails the send loud with
+`PeerUnreachableError` rather than reporting a `queued_*` outcome that will
+never be drained; the message is still persisted and readable from the
+recipient's inbox. `binding_is_live` applies this check uniformly across
+every recipient kind, not just watcher-held ones (A4 Amendment 5).
 
 A `queued_*` delivery means the platform placed the event on the recipient's
 live bridge queue; emission to the client happens at the forwarder's next drain,
 and whether it becomes a turn is client-side and is NOT confirmed by this field
 (REL-06 honest-return relabel — the platform can only prove "queued", so it says
-"queued"). Consumption (did the message enter a turn context) is tracked
-separately by the REL-05 direct-wake outbox, which re-queues an unconsumed
-IMPORTANT send until it provably enters a turn.
+"queued"). There is no separate per-message consumption-insurance apparatus
+tracking whether a `queued_*` delivery provably entered a turn — the platform's
+staleness signal is the recipient's own `report_by` promise:
+`sweep_overdue_sessions` marks a managed session overdue when it misses that
+deadline, and `_notify_steward_of_overdue` surfaces the miss to its steward.
+A sender who needs a stronger guarantee than "delivered, and the recipient is
+current on its own liveness contract" should follow up directly rather than
+rely on resend/escalation machinery — none remains.
 
-### What IMPORTANT means for a watcher-held recipient
+The role-addressed durability guarantee is unaffected by any of this: an
+unreachable role holder gets `queued_for_replay`, and the envelope replays
+through the surviving `list_undelivered_for` / `mark_delivered_for_instance`
+path the next time that role's holder attaches — this is the one piece of
+the old insurance apparatus that was deliberately kept, byte-for-byte,
+because it backs a real guarantee (role backlog is never silently dropped),
+not a per-message heuristic.
+
+### What unconditional delivery means for a watcher-held recipient
 
 An MCP-free fleet session receives through a `<name> watch` subprocess. The
 watcher itself is a PULL consumer: the queued event streams into the watch
@@ -224,33 +254,60 @@ interrupt. Expectations to plan around:
   session directly.
 - Consumption is the watcher's events-ack, not model activity: when the
   watcher's long-poll cursor moves past the delivered event (it printed the
-  line), the platform stamps the message consumed, so an armed watcher never
-  triggers `deaf_wake_escalation` / `recipient_gone` noise. An escalation
-  against a watcher-held role therefore means the watcher is genuinely dead
-  or its output was never surfaced — re-arm the watch, then resend.
-- The watch client's arm-time catch-up drain (`peer_inbox
-  include_important=true`) consumes what it surfaces the same way, so a
-  backlog drained at re-arm does not later escalate.
+  line), the platform stamps the message consumed. There is no per-message
+  escalation apparatus watching for a missed consumption anymore (A4 retired
+  it); staleness is caught at the session level instead — `report_by` /
+  `sweep_overdue_sessions` flags a session that has gone quiet against its
+  own promised deadline, independent of any one message.
+- The watch client's arm-time catch-up drain (`peer_inbox`) surfaces
+  anything that arrived while unwatched the same way live delivery does.
 
-When you receive a peer_message notification, the sender used
-IMPORTANT — they are explicitly asking. Reply with substance, or
+When you receive a peer_message notification, reply with substance, or
 stay silent if a reply adds no value. **Do not reply with
 acknowledgements**, "got it", or "thanks" — those create loops. The
 persisted thread captures the conversation regardless of whether
 anyone replies.
 
+### What unconditional delivery means for a MANAGED session (drive-on-delivery)
+
+A MANAGED session — one spawned through `spawn_session` and tracked in the
+`managed_session` ledger (fleet workers: `headless`/`tmux`-hosted) — gets one
+more best-effort layer on top of everything above, added 2026-08-04. After
+the ordinary delivery attempt (`queued_wake` / `queued_notification` /
+`queued_watcher` / `queued_for_replay`, unchanged), `dispatch_peer_send` /
+`dispatch_role_send` also resolve the recipient's `managed_session` row and,
+when it is `live`/`idle`/`overdue` with a live driver channel, inject a
+short fixed notice ("delivery waiting … — drain peer_inbox") straight into
+the session's driver channel — `session_lifecycle_verbs.drive_on_delivery`.
+This is a waker, never a second copy of the message: the durable thread
+entry stays the single source of truth, and the drive never touches
+`report_by` (an inbound nudge extending a worker's report-or-die deadline
+would let a silent worker blind the overdue sweep). The same helper reroutes
+the platform sweep's own dependency-wake and overdue-steward-notice
+deliveries (`session_sweep.py`), so an armed `session_dependency` edge
+firing on a managed waiter, or an overdue worker's managed steward, get the
+same nudge.
+
+**Scope, stated honestly:** this covers managed sessions only. A
+non-managed session — an ordinary operator-launched one (the seat,
+Git-Controller, any session never spawned through `spawn_session`) — has no
+`managed_session` row, so `drive_on_delivery` no-ops silently for it every
+time. Everything in the "watcher-held recipient" section above is
+completely unaffected: an operator-hosted recipient keeps exactly the same
+no-waker property it always had. Do not assume a `queued_wake` to a
+non-managed session gets any extra push — it does not, by design.
+
 ## peer_inbox semantics
 
 ```
 mcp__<server-name>__peer_inbox(after="<recent ISO time>")                  # default: catch-up mode
-mcp__<server-name>__peer_inbox(include_important=False)                    # intentional silent-only
 ```
 
-- Default returns silent + IMPORTANT messages as the durable catch-up
-  view. Use a recent `after` timestamp during incident polling; otherwise
-  old IMPORTANT history can flood the context window.
-- `include_important=False` is an explicit silent-only status view. Do
-  not use it as a recovery poll after missed wakes.
+- Returns the full durable catch-up view — every message addressed to this
+  identity, unconditionally (A4, 2026-08-04: the old silent/IMPORTANT split
+  at send time is retired, so there is only one view left, and it is the
+  only one this tool now offers). Use a recent `after` timestamp during
+  incident polling; otherwise old history can flood the context window.
 - Each entry exposes `sender_agent_id`, `sender_agent_instance_id`,
   and `sender_session_label`. Use the `sender_agent_instance_id` as
   the reply's `peer_agent_instance_id` to target the original sender
@@ -263,7 +320,7 @@ tools — and no live `watch` stream — can still pull its own mail:
 
 ```
 <name> call plugin::agent_messaging_plugin::peer_inbox \
-  '{"agent_session_id": "'"$AGENT_SESSION_ID"'", "include_important": true}'
+  '{"agent_session_id": "'"$AGENT_SESSION_ID"'"}'
 ```
 
 The MCP tool infers the reader from the calling bridge's registration. A
@@ -297,10 +354,13 @@ instance section plus a 50-entry role section measured 422,513 characters on
 bytes. The process defaults to a small page for that reason; the cursors are
 how a backlog gets drained.
 
-Reading here does not retire a message's re-emit or escalation insurance. The
-watcher's long-poll acknowledgement and the MCP drain reconcile remain the
-consumption authorities, so a message pulled this way may still be
-re-delivered.
+Reading a role message here does not by itself mark it consumed for replay
+purposes. The surviving role-replay durability guarantee
+(`list_undelivered_for` / `mark_delivered_for_instance` /
+`mark_role_consumed_on_ack`) is keyed on the watcher's or bridge's own
+delivery acknowledgement, not on a `peer_inbox` read, so a role message
+pulled this way may still be re-served through that path until its holder
+acks it directly.
 
 ## Sending to a specific instance
 
@@ -324,22 +384,23 @@ take the `sender_agent_instance_id` from the inbox entry or the
 ## Native-Channel Routing And Codex Peer Wake
 
 There are two implemented wake paths. They both begin with the same
-`peer_send IMPORTANT` contract and both persist the message before live
-delivery, but they differ in where the wake conversion happens.
+unconditional `peer_send` delivery attempt and both persist the message
+before live delivery, but they differ in where the wake conversion happens.
 
 ### Claude Code registered adapter
 
 When the recipient `agent_id` has a registered native wake adapter
-(`claude_code` is self-registered during `start_interface`), IMPORTANT
-messages route through that adapter. Claude Code wakes into a real turn
-instead of waiting for the next user input, and `peer_send` reports
-`delivery="queued_wake"` (the event is queued on the recipient's live bridge —
-the platform cannot observe whether the wake became a turn; REL-06). When the
-resolved recipient binding is a `<name> watch` subprocess, the same queued
-event reports `delivery="queued_watcher"` instead — the platform-side
-transport is pull, and the recipient's local `<name> wake` Stop hook (when
-installed and the session is idle) is what converts the delivery into a
-turn (see the IMPORTANT-marker section above).
+(`claude_code` is self-registered during `start_interface`), every send to
+it routes through that adapter — there is no marker gate to clear first.
+Claude Code wakes into a real turn instead of waiting for the next user
+input, and `peer_send` reports `delivery="queued_wake"` (the event is queued
+on the recipient's live bridge — the platform cannot observe whether the
+wake became a turn; REL-06). When the resolved recipient binding is a
+`<name> watch` subprocess, the same queued event reports
+`delivery="queued_watcher"` instead — the platform-side transport is pull,
+and the recipient's local `<name> wake` Stop hook (when installed and the
+session is idle) is what converts the delivery into a turn (see the delivery
+contract section above).
 
 The pairing key is `parent_pid`: the bridge and the host MCP
 session share the same OS parent process. The native wake adapter
@@ -350,15 +411,14 @@ finds the sibling bridge by parent_pid match and appends a
 [peer:codex "codex on task-X" instance=agi-abc...] <message>
 
 (reply via mcp__<server-name>__peer_send with
- peer_id=codex, peer_agent_instance_id=agi-abc...;
- prefix prose with "IMPORTANT: " only if you need a response.)
+ peer_id=codex, peer_agent_instance_id=agi-abc...)
 ```
 
 ### Locally Patched Codex Peer Wake
 
 Codex is not registered in `peer_registry` as a Python native wake
 adapter, so `peer_send` currently reports `delivery="queued_notification"` for
-Codex IMPORTANT messages. The functional wake happens one layer later,
+messages to Codex. The functional wake happens one layer later,
 inside the Codex MCP bridge and patched Codex CLI:
 
 1. `peer_dispatch.py` persists the message and appends a `peer_message`
@@ -391,48 +451,10 @@ Local launch requirements:
 - Reconnect or restart the MCP client after bridge or Codex-wake code changes so
   the running subprocess observes the new protocol.
 
-## Backend agent threads (`agent_*`)
-
-The `agent_*` tools open and drive a thread with a backend agent
-(codex, claude_code). Persistence and the `run_turn` runner are
-documented in `04_run_turn_and_storage.md`; this section covers
-just the MCP surface.
-
-```
-mcp__<server-name>__agent_thread_open(backend="codex", working_directory="...", ...)
-  -> {thread_id: "agt-...", ...}
-
-mcp__<server-name>__agent_send(thread_id="agt-...", content=[{"type":"text","text":"..."}])
-  -> queues one backend turn asynchronously
-
-mcp__<server-name>__agent_messages(thread_id="agt-...")
-  -> paginated message history
-
-mcp__<server-name>__agent_status(thread_id="agt-...")
-  -> live state, active action id if in flight
-
-mcp__<server-name>__agent_close(thread_id="agt-...")
-  -> {status: "closed"}
-```
-
-Each `agent_send` dispatches one `run_turn` against the backend.
-The structured payload arrives on the channel as a
-`bridge_delivery_result` event whose `payload.status` ∈
-`{idle, interrupted, error}` discriminates the outcome.
-`payload.error.code` is a stable token on the error path
-(`agent_thread_not_found`, `agent_execution_failed`, etc. — see
-`04_run_turn_and_storage.md`).
-
-Bridge-bound: only the MCP session that opened the thread can
-address it. Cross-bridge access returns HTTP 403
-`agent_thread_unauthorized`.
-
 ## See also
 
 - `02_platform_call_surface.md` — agent calling the homunculus
   (`process_*`, `download`).
-- `04_run_turn_and_storage.md` — the `run_turn` EDGE process and
-  durable thread/message schema.
 - `05_http_reference.md` — the HTTP routes behind each MCP tool.
 - The local patched-Codex runbook — mechanism and update procedure.
 - `processes/` — per-process schemas for `post_message`,

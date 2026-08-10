@@ -6,7 +6,7 @@ Nested Jira objects (comment author, transition target status) are flattened
 None-safely.
 
 Business-data limits, 2026-08-03 operator revision (design doc §0.1/§5.4):
-jira EXITED the spill floor (operator veto — "no PII in Jira, just company
+jira EXITED the data-export requirement (operator veto — "no PII in Jira, just company
 internal accounts") and its "paging must be hidden" ruling retired the
 disclosure-only shape ``list_comments`` briefly had. ``list_comments`` is now
 LIMITS-ONLY, g_suite-class: results return INLINE, never to a file, no

@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::clear_session",
+  "display_name": "Clear a managed session's context",
+  "description": "Fleet session-management Phase B, D1 (AMEND 5b). Sends '/clear' over the resolved host driver's driver channel (stream-json stdin) to the running Claude Code process behind agent_instance_id -- fire-and-forget, this call does not read or await the resulting turn. Optional park=true additionally drives the ledger row from live/idle/overdue to parked (L3 rule 2, steward direction) -- the ONLY writer of that lifecycle edge. Only available on hosts whose driver provides a driver channel (currently 'headless' and 'tmux'); the degenerate 'operator' driver, and a headless/tmux process this build's memory no longer tracks (e.g. after a restart), both refuse with unsupported_on_host rather than silently doing nothing.",
+  "embedding_description": "Nuke a fleet session's memory back to zero via '/clear' -- every prior turn is gone, unrecoverable, with an optional park flag to retire the ledger row too. The panic-button verb: context is corrupted, or the operator wants a hard reset. Nothing here reduces size gently -- that's compact_session's job. terminate_session ends the process itself, not just its memory.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Session context cleared",
+    "result_type": "clear_session_result",
+    "result_description": "lifecycle_state (the row's state after this call) and parked (true only when park=true was passed and the live/idle/overdue -> parked transition actually landed).",
+    "presentation_guidance": "This call is fire-and-forget: a clean result confirms the command was sent over the driver channel, not that the target session has finished processing it."
+  },
+  "error_processor_customizations": {
+    "action_context": "Reads the managed_session ledger row, refuses on a terminal lifecycle_state, resolves the row's host driver, and sends '/clear' over its driver_channel() -- a fixed sequence, no retry loop.",
+    "error_interpretation": "session_not_found: no managed_session row exists for the given agent_instance_id. lifecycle_state_conflict: the row is already terminated/retired -- terminal rows never receive driver-channel commands. unsupported_on_host: the row's host has no driver in this build, or its driver has no live driver channel for this host_ref (the degenerate 'operator' driver, or a headless process spawned before a restart wiped this build's in-memory tracking).",
+    "recovery_guidance": "For unsupported_on_host, use the manual equivalent for that session (e.g. typing /clear directly if it is an operator-attended session) -- this verb has no fallback path, by design, to avoid a silent no-op."
+  }
+}

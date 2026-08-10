@@ -15,16 +15,21 @@ BOTH, and that the belt is not load-bearing for safety:
      safety)
 
 Same local ``epg_smoke_scratch`` fixture as smoke_readonly.py, and the same
-LOUD-ON-UNREACHABLE contract (Coordinator-Day Q2): an unreachable fixture FAILS
-LOUD (exit 1, unmissable banner), never a silent exit-0 skip — because run_smokes
-only surfaces a smoke's output on FAIL.
+VISIBLE-SKIP-ON-UNREACHABLE contract (Coordinator-Day Q2, GTE-09; UPDATED
+2026-08-08 — undeclared-dependency audit): a fixture unreachable at SETUP
+time exits the dedicated SKIP code (77 — automake/Meson/CTest convention),
+which ``run_smokes.py`` now reports distinctly from pass/fail (it used to
+only surface a smoke's output on FAIL, which is why the original ruling
+made this fail loud instead — that gap is closed, so the workaround is
+too). A failure once checks are already RUNNING stays a genuine FAIL.
 
 Run:
     HOMUNCULUS_NAME=<name> .venv/bin/python3 \
         plugins/external_postgres_plugin/tests/smoke_multistatement.py
 
-Exits 0 only when the live proof ran and passed; exits 1 on a real failure OR an
-unreachable fixture.
+Exits 0 when the live proof ran and passed; 77 when the fixture was
+unreachable at setup (disclosed skip); 1 on a real failure (belt, or a
+break once the live proof was already running).
 """
 
 from __future__ import annotations
@@ -140,15 +145,27 @@ def _run_live_checks() -> None:
         conn.close()
 
 
-def _unreachable_fail(detail: str) -> int:
-    # LOUD, non-zero exit (Coordinator-Day Q2 ruling): run_smokes only surfaces a
-    # smoke's output on FAIL, so a silent exit-0 skip is invisible (GTE-09 rot).
-    # Failing loud makes "the live defense-in-depth proof did NOT run" unmissable.
+_SKIP_EXIT_CODE = 77
+
+
+def _unreachable_skip(detail: str) -> int:
+    # See the module docstring's VISIBLE-SKIP-ON-UNREACHABLE note. Setup-time
+    # unreachability only -- a mid-run break stays a genuine FAIL via
+    # _mid_run_fail below, since that could be a real bug, not just an
+    # absent dependency.
     print("=" * 70)
-    print("SKIPPED-LIVE-DB-UNREACHABLE — FAILING LOUD (not a silent pass)")
+    print("SKIPPED-LIVE-DB-UNREACHABLE")
     print(f"  {detail}")
     print("  The LIVE parser-bypass 25006 defense-in-depth proof DID NOT RUN.")
     print("  Bring up local Postgres (the local trust-auth user @ localhost:5432 + createdb/psql) and re-run.")
+    print("=" * 70)
+    return _SKIP_EXIT_CODE
+
+
+def _mid_run_fail(detail: str) -> int:
+    print("=" * 70)
+    print("LIVE-DB FIXTURE FAILED MID-RUN")
+    print(f"  {detail}")
     print("=" * 70)
     return 1
 
@@ -228,12 +245,12 @@ def main() -> int:
         print("FAILED (belt):", _failed)
         return 1
     if not _setup():
-        return _unreachable_fail("scratch Postgres fixture unreachable.")
+        return _unreachable_skip("scratch Postgres fixture unreachable.")
     try:
         _run_live_checks()
     except Exception as exc:
         _teardown()
-        return _unreachable_fail(f"live fixture failed mid-run: {exc}")
+        return _mid_run_fail(f"live fixture failed mid-run: {exc}")
     _teardown()
     print()
     print(f"Results: {_passed} passed, {len(_failed)} failed")

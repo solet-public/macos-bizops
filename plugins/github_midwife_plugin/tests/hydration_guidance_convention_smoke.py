@@ -228,6 +228,13 @@ def _check_embedding_descriptions_distinct(found: list[Path]) -> None:
 
 
 def _check_hydration_runbook_seed_neutral_and_no_mcp_primary() -> None:
+    # DELIBERATE EXEMPTION (2026-08-08): these literals are the banned-
+    # instance-name guard's own check target, not a leak of it -- a marker
+    # that forbids a token must contain that token to function. A whole-repo
+    # sweep for this same token found the guard was real but scoped to only
+    # this one file; do not "clean" these literals away, and do not let a
+    # future sweep do it either. Widening this guard to cover shipping
+    # surfaces generally (not just this runbook) is tracked separately.
     content = _HYDRATION_RUNBOOK.read_text(encoding="utf-8")
     for marker in ("Dax", "dax", "claude-dax"):
         _check(

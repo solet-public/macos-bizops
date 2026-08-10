@@ -59,7 +59,6 @@ class _FakeTransport:
         self._drain_pages = list(drain_pages or [])
         self.emitted: list[dict[str, Any]] = []
         self.flipped: list[tuple[str, str]] = []
-        self.direct_confirmed: list[str] = []
         self.drain_calls = 0
         self.fail_emits = 0  # number of upcoming emit_event calls to raise on
         self._running = True
@@ -81,17 +80,12 @@ class _FakeTransport:
         self.emitted.append(event)
 
     async def drain_page(self, limit: int) -> dict[str, Any]:
-        # REL-05: the transport now returns the full /peer/drain payload; the
-        # seeded pages are role rows, so wrap them (no direct rows in this smoke).
         self.drain_calls += 1
         page = self._drain_pages.pop(0) if self._drain_pages else []
-        return {"undelivered": page, "undelivered_direct": [], "re_emit_cap": 3}
+        return {"undelivered": page, "re_emit_cap": 3}
 
     async def flip_delivered(self, *, external_id: str, recipient_key: str) -> None:
         self.flipped.append((external_id, recipient_key))
-
-    async def confirm_direct(self, *, message_id: str) -> None:
-        self.direct_confirmed.append(message_id)
 
 
 class _GatedTransport:
@@ -127,12 +121,9 @@ class _GatedTransport:
             raise RuntimeError(msg)
 
     async def drain_page(self, limit: int) -> dict[str, Any]:
-        return {"undelivered": [], "undelivered_direct": [], "re_emit_cap": 3}
+        return {"undelivered": [], "re_emit_cap": 3}
 
     async def flip_delivered(self, *, external_id: str, recipient_key: str) -> None:
-        self.flips += 1
-
-    async def confirm_direct(self, *, message_id: str) -> None:
         self.flips += 1
 
 

@@ -205,8 +205,10 @@ def get_agent_messaging_schema() -> SchemaDefinition:
                 description=(
                     "Snapshot of the originator's session_label at "
                     "thread-creation time (e.g. 'Coordinator', "
-                    "'Architect'). NULL for non-peer threads (backend "
-                    "threads driven by agent_thread_open). Per "
+                    "'Architect'). NULL for non-peer threads (historical "
+                    "backend-dispatch threads, opened via the now-retired "
+                    "agent_thread_open — see the D3 dormant-head "
+                    "retirement). Per "
                     "2026-05-31 Architect ruling §2: snapshot "
                     "semantics by design — live /rename on a session "
                     "with open peer threads does NOT update historical "
@@ -360,7 +362,11 @@ def get_agent_messaging_schema() -> SchemaDefinition:
             ),
             "action_id": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description="The run_turn action_id this message was produced by, if any.",
+                description=(
+                    "The action_id this message was produced by, if any "
+                    "(historically the now-retired run_turn EDGE process's "
+                    "action id on backend-dispatch threads)."
+                ),
             ),
             "backend_session_id": ColumnDefinition(
                 type=ColumnType.TEXT,

@@ -6,9 +6,9 @@ the Tier-0 dispatch (root-contains-app_home rejected, root-inside-app_home
 rejected, valid-root accepted-and-persisted); the fourth
 (empty-allow-list-refusal) is the connectors' own pre-existing invariant,
 already covered where the gate itself lives —
-`plugins/external_postgres_plugin/tests/smoke_spill.py` (mirrored in
+`plugins/external_postgres_plugin/tests/smoke_data_export.py` (mirrored in
 `salesforce_plugin/tests/smoke_soql.py` and
-`snowflake_plugin/tests/smoke_spill.py`) — and is not reimplemented here;
+`snowflake_plugin/tests/smoke_data_export.py`) — and is not reimplemented here;
 this module never produces an empty-list state, it only ever appends.
 
 Offline: no real Postgres, no network, no real `~/.claude`. All paths are

@@ -3,7 +3,7 @@
 
 Hermetic — a faked client returning canned decoded envelope dicts, no live
 instance. list_campaigns/list_static_lists ALWAYS write to a caller-supplied
-output_tsv_path now (business-data limits + spill-floor migration,
+output_tsv_path now (business-data limits + data-export migration,
 2026-08-02) — these tests use a throwaway tempfile + a real passthrough gate
 and read the written TSV back to assert content.
 

@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""Shared journal library for the memory-passthrough loop (Slice 2).
+
+Unified-memory-passthrough (workbench/2026-07-16_unified_memory_passthrough_design_v2.md
+§4.4-4.6). The local memory dir is a DISPOSABLE PROJECTION of the homunculus's memory_service:
+the agent keeps writing per-fact `.md` files natively, a PostToolUse capture hook
+journals each write, an agent-mediated drain flushes the journal to
+`upsert_memory_by_tag`, and a SessionStart hydrate regenerates the dir from an
+origin-filtered export.
+
+This library is the local-filesystem half only — it NEVER touches the homunculus (a hook
+subprocess has no MCP bridge; that is exactly why drain/hydrate are agent-mediated,
+design §4.4 item 5). Pure stdlib: capture fires outside the venv.
+
+State (all under ~/.claude/memory_passthrough/):
+  * journal.jsonl        — append-only capture log; {path, sha256, mtime, origin, captured_at}
+  * journal.watermark    — byte offset of the last drained position (advanced after a drain)
+  * hydrated_hashes.json — {abs_path: sha256} last rendered by hydrate; the echo-break oracle
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+from datetime import UTC, datetime
+from pathlib import Path
+
+# --- Locations -------------------------------------------------------------
+
+# A test/override seam: point the whole loop at a scratch tree without touching
+# the real dirs. When unset, the real per-agent locations are used.
+_ENV_STATE_DIR = "MEMORY_PASSTHROUGH_STATE_DIR"
+_ENV_MEMORY_DIR = "MEMORY_PASSTHROUGH_MEMORY_DIR"
+_ENV_PROJECT_DIR = "CLAUDE_PROJECT_DIR"
+
+
+def state_dir() -> Path:
+    """Directory holding the journal + watermark + hydrated-hash oracle."""
+    override = os.environ.get(_ENV_STATE_DIR)
+    if override:
+        return Path(override)
+    return Path.home() / ".claude" / "memory_passthrough"
+
+
+def journal_path() -> Path:
+    return state_dir() / "journal.jsonl"
+
+
+def watermark_path() -> Path:
+    return state_dir() / "journal.watermark"
+
+
+def hydrated_hashes_path() -> Path:
+    return state_dir() / "hydrated_hashes.json"
+
+
+def project_dir() -> Path:
+    """The repo/project root (Claude Code sets CLAUDE_PROJECT_DIR in hook env).
+
+    Fails fast when unset: the origin tag derives from this path's basename, and
+    a cwd fallback once minted records under a wrong origin (claude_code.scratchpad,
+    2026-08-05) that hydrate's origin-filtered export could never pull back.
+    """
+    value = os.environ.get(_ENV_PROJECT_DIR)
+    if not value:
+        raise RuntimeError(
+            f"{_ENV_PROJECT_DIR} is not set; refusing to derive the memory origin "
+            f"from cwd. Invoke as: {_ENV_PROJECT_DIR}=<repo-root> python3 <script>"
+        )
+    return Path(value)
+
+
+def memory_dir() -> Path:
+    """The per-agent memory dir the projection lives in.
+
+    Claude Code stores per-project memory under
+    ``~/.claude/projects/<encoded-cwd>/memory/`` where <encoded-cwd> is the abs
+    project path with '/' replaced by '-'. Overridable for tests.
+    """
+    override = os.environ.get(_ENV_MEMORY_DIR)
+    if override:
+        return Path(override)
+    encoded = str(project_dir().resolve()).replace("/", "-")
+    return Path.home() / ".claude" / "projects" / encoded / "memory"
+
+
+# R4 seed-packaging audit, Package B (2026-08-10) -- the origin-resolution
+# ladder, so this checkout's own memory tags and an adopter's stay portable
+# across a rename, never coupled to the accident of what a clone directory
+# happens to be named. The midwife rewrites root_manifest.yaml's own
+# `homunculus_name:` field ONLY at genesis -- a raw/pre-genesis checkout
+# keeps its unwritten placeholder, so rung 2 must skip that exact literal
+# rather than treat it as a real name.
+_ROOT_MANIFEST_PLACEHOLDER = "homunculus"
+_ROOT_MANIFEST_NAME_RE = re.compile(r"^homunculus_name:\s*(\S+)\s*$", re.MULTILINE)
+
+
+def homunculus_name() -> str:
+    """Three-rung resolution ladder for this checkout's own homunculus name.
+
+    1. ``HOMUNCULUS_NAME`` env var, if set -- the platform's own single
+       source of truth when the launching environment carries it.
+    2. ``root_manifest.yaml``'s own ``homunculus_name:`` field, read via a
+       minimal regex line-scan -- never a real YAML parse: PyYAML is a
+       venv-only dependency on this platform (measured 2026-08-10) and
+       every file in this module runs outside the venv, so a YAML parse
+       here would silently violate this loop's own stdlib-only claim.
+       Skipped when the field still carries the unwritten placeholder
+       (rung 2 is only trustworthy post-genesis).
+    3. ``CLAUDE_PROJECT_DIR``-basename -- this function's prior sole
+       behavior, the final fallback, preserving continuity for any
+       checkout where neither rung above resolves.
+
+    Fails fast (same contract :func:`project_dir` already has) only when
+    ``CLAUDE_PROJECT_DIR`` itself is unset AND ``HOMUNCULUS_NAME`` is
+    unset -- there is nothing left to derive a name from at all. On THIS
+    checkout, at the time this ladder was added, every rung already
+    yields the same value, so adding it here changes no existing tag.
+    """
+    env_name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    if env_name:
+        return env_name
+    root = project_dir()  # raises RuntimeError if CLAUDE_PROJECT_DIR unset
+    try:
+        text = (root / "root_manifest.yaml").read_text(encoding="utf-8")
+        match = _ROOT_MANIFEST_NAME_RE.search(text)
+        candidate = match.group(1).strip("\"'") if match else ""
+        if candidate and candidate != _ROOT_MANIFEST_PLACEHOLDER:
+            return candidate
+    except OSError:
+        pass  # unreadable or absent -- fall through to rung 3, never raise
+    return root.resolve().name
+
+
+def origin() -> str:
+    """Stable origin tag value for THIS agent's projection records.
+
+    ``claude_code.<homunculus_name>`` (see :func:`homunculus_name` for the
+    resolution ladder) — stable across sessions of the same repo, so
+    hydrate pulls exactly this agent's records and never another origin's.
+    """
+    return f"claude_code.{homunculus_name()}"
+
+
+# --- Tag scheme (design §4.2) ----------------------------------------------
+# One record per fact file. The SLOT tag is the upsert replace key; the umbrella
+# + origin + scope + hash tags are unioned onto it (Slice 1(c)). Tag matching is
+# exact membership, so every record literally carries the ``agent_memory``
+# umbrella (that is what earns it the consolidation/purge protection) and the
+# origin tag (so a per-origin export cannot leak another agent's projection).
+UMBRELLA_TAG = "agent_memory"
+SCOPE_SHARED_TAG = "agent_memory:scope:shared"
+
+
+def origin_tag() -> str:
+    return f"agent_memory:origin:{origin()}"
+
+
+def slot_tag_for(path: str | os.PathLike[str]) -> str:
+    """The replace-key slot tag for a memory file: one slot per file-slug."""
+    slug = Path(path).stem
+    return f"agent_memory:slot:{origin()}:{slug}"
+
+
+def hash_tag(sha256: str) -> str:
+    return f"agent_memory:hash:{sha256[:16]}"
+
+
+def provenance_tags(sha256: str | None) -> list[str]:
+    """Umbrella + origin + scope (+ hash when known) tags unioned onto the slot."""
+    tags = [UMBRELLA_TAG, origin_tag(), SCOPE_SHARED_TAG]
+    if sha256:
+        tags.append(hash_tag(sha256))
+    return tags
+
+
+def slot_tag_of(tags: object) -> str | None:
+    """Extract the slot tag from a record's tag list (None if absent)."""
+    if not isinstance(tags, list):
+        return None
+    for tag in tags:
+        if isinstance(tag, str) and tag.startswith("agent_memory:slot:"):
+            return tag
+    return None
+
+
+def path_for_slot_tag(slot_tag: str) -> Path | None:
+    """Reconstruct the memory-file path a slot tag names (inverse of slot_tag_for).
+
+    ``agent_memory:slot:<origin>:<slug>`` -> ``<memory_dir>/<slug>.md``. The slug
+    is the final colon-delimited segment; a malformed slot tag returns None.
+    """
+    parts = slot_tag.split(":")
+    if len(parts) < 4 or parts[0] != "agent_memory" or parts[1] != "slot":
+        return None
+    slug = parts[-1]
+    if not slug:
+        return None
+    return memory_dir() / f"{slug}.md"
+
+
+# --- Memory-file predicate --------------------------------------------------
+
+def is_memory_file(path: str | os.PathLike[str]) -> bool:
+    """True when ``path`` is a per-fact memory markdown file under the memory dir.
+
+    Resolves symlinks before the containment check (an edit through a link that
+    escapes the memory dir is not a memory write). MEMORY.md (the rendered index)
+    is deliberately EXCLUDED — it is a projection of the record set, never a
+    canonical fact, so it must not round-trip back into the store.
+    """
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, RuntimeError):
+        return False
+    mem = memory_dir().resolve()
+    if resolved.suffix != ".md" or resolved.name == "MEMORY.md":
+        return False
+    try:
+        return os.path.commonpath([str(mem), str(resolved)]) == str(mem)
+    except ValueError:
+        return False
+
+
+# --- Hashing ----------------------------------------------------------------
+
+def sha256_file(path: str | os.PathLike[str]) -> str | None:
+    """SHA-256 of a file's bytes, or None if it cannot be read (e.g. deleted)."""
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+# --- Hydrated-hash oracle (echo-break) --------------------------------------
+
+def _load_hydrated_hashes() -> dict[str, str]:
+    try:
+        with open(hydrated_hashes_path(), encoding="utf-8") as handle:
+            data = json.load(handle)
+        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def last_hydrated_hash(path: str | os.PathLike[str]) -> str | None:
+    """The sha256 hydrate last rendered for ``path`` (the echo-break oracle)."""
+    return _load_hydrated_hashes().get(str(Path(path).resolve()))
+
+
+def stamp_hydrated_hashes(path_to_sha: dict[str, str]) -> None:
+    """Record the hashes hydrate just rendered, BEFORE any capture can fire.
+
+    Merges into the existing oracle so a partial re-hydrate never forgets other
+    files' hashes. Atomic write (tmp + replace) so a crash mid-write cannot
+    corrupt the oracle.
+    """
+    merged = _load_hydrated_hashes()
+    merged.update({str(Path(k).resolve()): str(v) for k, v in path_to_sha.items()})
+    _atomic_write_json(hydrated_hashes_path(), merged)
+
+
+# --- Journal ----------------------------------------------------------------
+
+def append_capture(path: str | os.PathLike[str]) -> str:
+    """Append one capture record for ``path``; return the disposition.
+
+    Echo-break: a write whose sha256 equals the last-hydrated hash for that path
+    is the hydrate renderer's own write bouncing back — skipped, so it never
+    re-drains as a fresh edit. A deleted file (no readable bytes) is journaled
+    with sha256=null so the drain can treat it as a local-cache clear.
+
+    Returns 'captured', 'echo_skipped', or 'not_memory'.
+    """
+    if not is_memory_file(path):
+        return "not_memory"
+    resolved = str(Path(path).resolve())
+    sha = sha256_file(resolved)
+    if sha is not None and sha == last_hydrated_hash(resolved):
+        return "echo_skipped"
+    try:
+        mtime = os.path.getmtime(resolved)
+    except OSError:
+        mtime = None
+    record = {
+        "path": resolved,
+        "sha256": sha,
+        "mtime": mtime,
+        "origin": origin(),
+        "captured_at": datetime.now(UTC).isoformat(),
+    }
+    _append_line(journal_path(), json.dumps(record, ensure_ascii=False))
+    return "captured"
+
+
+def _read_watermark() -> int:
+    try:
+        with open(watermark_path(), encoding="utf-8") as handle:
+            return int(handle.read().strip() or "0")
+    except (OSError, ValueError):
+        return 0
+
+
+def pending_lines() -> list[dict[str, object]]:
+    """Parsed journal records appended since the last drain watermark."""
+    path = journal_path()
+    if not path.exists():
+        return []
+    records: list[dict[str, object]] = []
+    with open(path, encoding="utf-8") as handle:
+        handle.seek(_read_watermark())
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                records.append(obj)
+    return records
+
+
+def pending_entries() -> list[dict[str, object]]:
+    """Deduped drain work: latest record per path (newest wins), order-stable."""
+    latest: dict[str, dict[str, object]] = {}
+    for rec in pending_lines():
+        p = rec.get("path")
+        if isinstance(p, str):
+            latest[p] = rec
+    return list(latest.values())
+
+
+def pending_count() -> int:
+    """Number of distinct paths awaiting drain."""
+    return len(pending_entries())
+
+
+def advance_watermark() -> None:
+    """Mark everything currently in the journal as drained.
+
+    Set the watermark to the journal's current size. Captures that land AFTER
+    this call append past the offset and are picked up by the next drain, so the
+    read-then-advance window loses nothing (bounded staleness <= one session,
+    accepted by design §4.4).
+    """
+    try:
+        size = journal_path().stat().st_size
+    except OSError:
+        size = 0
+    _atomic_write_text(watermark_path(), str(size))
+
+
+# --- Low-level IO -----------------------------------------------------------
+
+def _append_line(path: Path, line: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    os.replace(tmp, path)
+
+
+def _atomic_write_json(path: Path, obj: object) -> None:
+    _atomic_write_text(path, json.dumps(obj, ensure_ascii=False, indent=2))

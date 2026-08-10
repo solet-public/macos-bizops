@@ -158,11 +158,6 @@ def _make_service(state: _FakeState) -> AgentMessagingService:
     return AgentMessagingService(
         repository=cast(Any, None),
         state_service=cast(StateManagementInterface, state),
-        backend_router=cast(Any, None),
-        flow_manager=cast(Any, None),
-        action_factory=cast(Any, None),
-        compilation_context_builder=cast(Any, None),
-        bridge_delivery=cast(Any, None),
         config=AgentMessagingConfig(),
     )
 

@@ -139,6 +139,21 @@ class BridgeBinding:
     # surfaces via current_identity. Empty for sessions launched without
     # AGENT_SESSION_ID exported (streamable / older clients) -> no self-refresh.
     agent_session_id: str = ""
+    # codex-watch-migration wake_capable design (2026-08-06): DECLARED, never
+    # probed, at registration time by the bridge subprocess itself
+    # (mcp_bridge/__main__.py's _run(), same shape as provides_inference) —
+    # true when this binding's transport has a native turn-injection wake
+    # path (Claude Code's registered wake adapter), false when it does not
+    # (stock Codex's bridge, which has no equivalent surface once the patched
+    # build retires). Default true: every existing/non-declaring registration
+    # path — Claude Code, GC, seat, every watcher binding above all — reads
+    # as no-tee, which is both operationally correct (a watcher is already
+    # its own spool feeder; tee-ing it too would double-write) and
+    # semantically honest (a watcher-fed session IS wakeable). Read at
+    # dispatch time by peer_dispatch.py's spool-tee sibling to
+    # drive_on_delivery, never at registration time — this is a persisted
+    # capability, not a one-shot side-effect trigger like provides_inference.
+    wake_capable: bool = True
 
     @property
     def is_watcher(self) -> bool:

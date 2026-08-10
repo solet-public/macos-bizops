@@ -6,20 +6,26 @@ Drives ``dispatch_role_send`` with stubs to prove the branching contract:
   * **persist-first** — the authoritative envelope upsert happens BEFORE any
     holder resolution, for EVERY branch (durability does not depend on a live
     holder);
-  * **silent** role message → ``persisted_silent``, never auto-emitted, no
-    resolve / wake / flag;
-  * IMPORTANT + **offline holder** (resolve raises / wake fails / queue full)
-    → ``queued_for_replay`` (success), ``delivered`` left false (NOT flipped);
-  * IMPORTANT + **live holder, no native adapter** → ``queued_notification``
-    (channel event carrying the Control #5 role-delivery meta keys);
-    ``delivered`` is NOT flipped at send (v10 Q3 split — the holder's forwarder
-    is the sole flip authority for the queued ``queued_notification`` path, via
-    POST /peer/delivered);
-  * IMPORTANT + **live holder, native adapter** → ``queued_wake``;
-    ``delivered`` is NOT flipped at send (v10 Q3 REVISED — Codex B3: native wake
-    is the SAME append_event bridge queue, not a direct push, so the forwarder
-    is the sole flip authority for native too) — and the wake carries the role
-    keys via ``delivery_meta``.
+  * A4 (2026-08-04): every role send is delivery-attempted, marker or not —
+    the former "non-IMPORTANT -> persisted_silent, never auto-emitted" branch
+    is retired (ruled NONE on a wake toggle); a markerless send now takes
+    exactly the same path a marked one always took;
+  * **offline holder** (resolve raises / wake fails / queue full) →
+    ``queued_for_replay`` (success), ``delivered`` left false (NOT flipped);
+  * A4 Amendment 5: a resolved-but-STALE binding (bridge present,
+    ``last_seen_at`` past the liveness window) degrades to
+    ``queued_for_replay`` too — ``binding_is_live`` is now checked for every
+    recipient kind, not just watchers;
+  * **live holder, no native adapter** → ``queued_notification`` (channel
+    event carrying the Control #5 role-delivery meta keys); ``delivered`` is
+    NOT flipped at send (v10 Q3 split — the holder's forwarder is the sole
+    flip authority for the queued ``queued_notification`` path, via POST
+    /peer/delivered);
+  * **live holder, native adapter** → ``queued_wake``; ``delivered`` is NOT
+    flipped at send (v10 Q3 REVISED — Codex B3: native wake is the SAME
+    append_event bridge queue, not a direct push, so the forwarder is the
+    sole flip authority for native too) — and the wake carries the role keys
+    via ``delivery_meta``.
 
 Run:
     .venv/bin/python3 plugins/agent_messaging_plugin/tests/role_dispatch_smoke.py
@@ -28,6 +34,7 @@ Run:
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +42,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
+from _real_state_fake import RealShapeState  # noqa: E402
 from ananta.llm.agent_messaging.models import (  # noqa: E402
     RoleMessagePersisted,
     TextPart,
@@ -45,7 +53,6 @@ from agent_messaging_plugin.bridge_sessions import (  # noqa: E402
 )
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.peer_dispatch import (  # noqa: E402
-    DELIVERY_PERSISTED_SILENT,
     DELIVERY_QUEUED_FOR_REPLAY,
     DELIVERY_QUEUED_NOTIFICATION,
     DELIVERY_QUEUED_WAKE,
@@ -89,11 +96,11 @@ class _FakeService:
         self.delivered.append(external_id)
 
 
-def _binding() -> BridgeBinding:
+def _binding(*, stale: bool = False) -> BridgeBinding:
     # The REAL binding type, not a hand-rolled stub — dispatch reads binding
     # surface beyond raw fields (``is_watcher``), and a stub silently drifts.
     return BridgeBinding(
-        bridge_id="agc-live",
+        bridge_id="agc-stale" if stale else "agc-live",
         agent_id="claude_code",
         agent_instance_id="agi-holder",
         session_label="Architect",
@@ -111,19 +118,36 @@ class _WakeAdapter:
 
 
 class _FakePeerRegistry:
-    def __init__(self, *, online: bool, adapter: _WakeAdapter | None) -> None:
+    def __init__(
+        self, *, online: bool, adapter: _WakeAdapter | None, stale: bool = False,
+    ) -> None:
         self._online = online
         self._adapter = adapter
+        self._stale = stale
 
     def resolve(self, agent_id: str, agent_instance_id: str | None) -> BridgeBinding:
         if not self._online:
             raise PeerUnreachableError(
                 f"no live binding for {agent_id}/{agent_instance_id}",
             )
-        return _binding()
+        return _binding(stale=self._stale)
 
     def wake_adapter_for(self, agent_id: str) -> _WakeAdapter | None:
         return self._adapter
+
+
+class _LiveBridge:
+    closed = False
+    last_seen_at = datetime.now(UTC).isoformat()
+
+
+class _StaleBridge:
+    """A4 Amendment 5 fixture: present bridge, ``last_seen_at`` far outside
+    the liveness window — a SIGKILLed process with no client-initiated
+    ``/close``, e.g. a blue-green swap."""
+
+    closed = False
+    last_seen_at = "2020-01-01T00:00:00+00:00"
 
 
 class _FakeBridgeManager:
@@ -137,6 +161,9 @@ class _FakeBridgeManager:
         return DEFAULT_BINDING_LIVENESS_WINDOW_S
     def __init__(self) -> None:
         self.events: list[tuple[str, str, str, dict[str, object]]] = []
+
+    def get(self, bridge_id: str) -> _LiveBridge | _StaleBridge:
+        return _StaleBridge() if bridge_id == "agc-stale" else _LiveBridge()
 
     def append_event(
         self, bridge_id: str, event: str, prose: str, meta: dict[str, object],
@@ -157,15 +184,16 @@ def _content(text: str) -> list[TextPart]:
 
 
 def _dispatch(
-    *, text: str, online: bool, adapter: _WakeAdapter | None,
+    *, text: str, online: bool, adapter: _WakeAdapter | None, stale: bool = False,
 ) -> tuple[Any, _FakeService, _FakeBridgeManager]:
     service = _FakeService()
     manager = _FakeBridgeManager()
-    registry = _FakePeerRegistry(online=online, adapter=adapter)
+    registry = _FakePeerRegistry(online=online, adapter=adapter, stale=stale)
     outcome = dispatch_role_send(
         bridge_manager=manager,  # type: ignore[arg-type]
         peer_registry=registry,  # type: ignore[arg-type]
         agent_messaging_service=service,
+        state_service=RealShapeState(),  # type: ignore[arg-type]
         role_name="Architect",
         role=_ROLE,
         sender_bridge_id="agc-sender",
@@ -179,16 +207,46 @@ def _dispatch(
     return outcome, service, manager
 
 
-def test_silent_inbox_only() -> None:
+def test_markerless_send_is_delivered_not_silent() -> None:
+    """A4 red-first: a role send with NO marker text must be delivery-attempted
+    exactly like a marked one used to be — reverting the gate deletion in
+    dispatch_role_send regresses this to the retired persisted_silent outcome
+    (an identifier that no longer exists on peer_dispatch)."""
     outcome, service, manager = _dispatch(text="fyi", online=True, adapter=None)
-    _check(outcome.delivery == DELIVERY_PERSISTED_SILENT, "silent → persisted_silent")
     _check(
-        len(service.persisted) == 1 and service.persisted[0]["important"] is False,
-        "silent → persisted once (important=False)",
+        outcome.delivery == DELIVERY_QUEUED_NOTIFICATION,
+        "A4: markerless send → queued_notification, not persisted_silent",
+    )
+    _check(
+        len(service.persisted) == 1 and service.persisted[0]["important"] is True,
+        "A4: persisted row always stamps important=True now (no sender-side gate)",
+    )
+    _check(
+        len(manager.events) == 1,
+        "A4: markerless send still reaches the holder's bridge queue",
+    )
+
+
+def test_stale_binding_degrades_to_replay() -> None:
+    """A4 red-first (Amendment 5): a resolved-but-STALE binding (bridge
+    present, last_seen_at past the liveness window) must degrade to
+    queued_for_replay, exactly like an offline holder — reverting the
+    binding_is_live generalization would instead report a false-positive
+    queued_notification/queued_wake against a queue nobody will ever drain."""
+    outcome, service, manager = _dispatch(
+        text="IMPORTANT: ping", online=True, adapter=None, stale=True,
+    )
+    _check(
+        outcome.delivery == DELIVERY_QUEUED_FOR_REPLAY,
+        "A4 Amendment 5: stale binding → queued_for_replay, not a false-positive delivery",
+    )
+    _check(
+        len(service.persisted) == 1,
+        "persist-first: envelope persisted BEFORE the liveness check",
     )
     _check(
         not service.delivered and not manager.events,
-        "silent → never auto-emitted, no delivered-flag",
+        "stale → delivered NOT flipped, nothing emitted to the dead bridge",
     )
 
 
@@ -286,7 +344,8 @@ def test_important_native_wake() -> None:
 
 def main() -> int:
     print("=== v10 Control #4 persist-first role dispatch smoke ===")
-    test_silent_inbox_only()
+    test_markerless_send_is_delivered_not_silent()
+    test_stale_binding_degrades_to_replay()
     test_important_offline_queues()
     test_important_live_channel_event()
     test_important_native_wake()

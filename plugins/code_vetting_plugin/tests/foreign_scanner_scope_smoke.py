@@ -32,6 +32,15 @@ from code_vetting_plugin.toolrun import tool_available
 
 _CHECKS_RUN: list[str] = []
 
+# The automake/Meson/CTest SKIP_RETURN_CODE convention, matching
+# run_smokes.py's own _SKIP_EXIT_CODE -- set when bandit is absent and the
+# two bandit-specific assertions below are skipped (the bandit-independent
+# structural assertions in the same functions always run regardless).
+# Undeclared-dependency audit:
+# workbench/2026-08-08_undeclared_system_dependencies_findings_d3-impl.md.
+_SKIP_EXIT_CODE = 77
+_bandit_checks_skipped = False
+
 
 class SmokeFailureError(AssertionError):
     """Raised on any check failure; message is the failure detail."""
@@ -112,6 +121,7 @@ def _check_sast_defect2(ts_root: Path, py_root: Path) -> None:
     # (semgrep's FT-1.1 no-python gap is SUPERSEDED by R7-2's stack-pack selection — a foreign
     # TS tree now selects p/typescript, so semgrep's behavior is pinned hermetically in
     # semgrep_multistack_smoke.py, not here where a live registry hit would be non-deterministic.)
+    global _bandit_checks_skipped
     bandit_cov = scan_bandit(ts_tree, "vr-ft11").coverage
     _check("bandit on foreign TS: ran=False (never 'ran clean' over 0 files)", bandit_cov.ran is False, str(bandit_cov))
     if tool_available("bandit"):
@@ -120,6 +130,9 @@ def _check_sast_defect2(ts_root: Path, py_root: Path) -> None:
             (bandit_cov.gap_reason or "").startswith("not_applicable:") and "bandit examined 0 files" in (bandit_cov.gap_reason or ""),
             str(bandit_cov.gap_reason),
         )
+    else:
+        print("  SKIP  bandit-specific gap-reason assertion: bandit not on PATH")
+        _bandit_checks_skipped = True
 
     # Self-vet safety: a python-carrying quality-surface makes the empty-surface gate FALSE,
     # so the fix cannot misfire on a self-vet (which always carries python).
@@ -140,6 +153,9 @@ def _check_sast_defect2(ts_root: Path, py_root: Path) -> None:
     if tool_available("bandit"):
         widen_cov = scan_bandit(widen_tree, "vr-rider").coverage
         _check("RIDER-1: bandit foreign WIDENS to all *.py (root-level examined, no longer gapped)", widen_cov.ran is True and widen_cov.files_examined >= 1, str(widen_cov))
+    else:
+        print("  SKIP  RIDER-1 bandit-widen live assertion: bandit not on PATH")
+        _bandit_checks_skipped = True
 
 
 def main() -> int:
@@ -155,6 +171,13 @@ def main() -> int:
         print(f"  ({len(_CHECKS_RUN)} checks attempted before failure)", file=sys.stderr)
         return 1
     print(f"foreign_scanner_scope_smoke OK: {len(_CHECKS_RUN)} checks passed")
+    if _bandit_checks_skipped:
+        print(
+            "SKIP: bandit not on PATH -- bandit-specific live assertions "
+            "disclosed a gap rather than running; the structural assertions "
+            "ran and passed."
+        )
+        return _SKIP_EXIT_CODE
     return 0
 
 

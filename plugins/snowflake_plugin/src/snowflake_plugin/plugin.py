@@ -1,12 +1,21 @@
-"""Snowflake plugin entry point — a read-only warehouse query connector.
+"""Snowflake plugin entry point — a warehouse query (and write) connector.
 
-Query the operator-registered Snowflake account ("snowflake_account" address
-book entry). READ-ONLY, HARD: no write verb exists. Unlike
-external_postgres_plugin, Snowflake has NO session-level read-only flag, so
-the statement-leader guard here is FAST-FAIL ONLY — the TRUE developer-proof
-boundary is the read-only ROLE the connection is pinned to.
+Query — and, per the operator's 2026-08-09 posture reversal + Amendment 1,
+write to — the operator-registered Snowflake account ("snowflake_account"
+address book entry). Every read verb stays READ-ONLY via the statement-leader
+guard; Snowflake has NO session-level read-only flag, so that guard is
+FAST-FAIL ONLY — the TRUE developer-proof boundary for those verbs is the
+read-only ROLE the connection is pinned to. The one write verb,
+``run_statement``, performs no plugin-side access control of its own; the
+registered credential's server-side role grants are the entire control plane
+for what it can actually do (vendor RBAC, not a plugin re-implementation —
+see run_statement's own docstring).
 
-Verbs (all EDGE, all reads):
+Verbs (all EDGE), all on the D0.3 deferred-completion shape
+(workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md):
+the dispatch handler returns ``{"job_id", "status": "queued"}`` in
+milliseconds; ``async_jobs.py``'s single background worker thread does the
+real connect + query I/O and completes the job.
   - run_query       — one read-only statement; result written as a TSV file
     at the caller's output_tsv_path (default 500 rows, up to 1000 with an
     acknowledged override) — never rows inline, at any size
@@ -17,6 +26,8 @@ Verbs (all EDGE, all reads):
     export_allowed_roots config; refuse-all when unset), same override
     mechanism as run_query with a higher hard cap (50,000)
   - test_connection — account, user, role, warehouse, version
+  - run_statement   — the write verb: single-statement contract, explicit
+    per-call commit semantics, no statement-leader classification of any kind
 
 No plugin-owned vault keys (the private key is chain-consumed through the
 address book's ``resolve_with_secrets``), so this plugin needs NO vault
@@ -28,6 +39,7 @@ overflows fail loud).
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -49,7 +61,7 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import connection, export_containment, query_actions
+from . import async_jobs, connection, export_containment
 from .app_config import AppConfigLoader, SnowflakeConfigError
 from .constants import (
     CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
@@ -57,6 +69,7 @@ from .constants import (
     CONFIG_KEY_STATEMENT_TIMEOUT_SECONDS,
     DEFAULT_ROW_LIMIT,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
+    ERROR_API_ERROR,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
     EXPORT_ROW_CAP,
@@ -71,6 +84,7 @@ from .constants import (
     RESULT_TYPE_LIST_SCHEMAS,
     RESULT_TYPE_LIST_TABLES,
     RESULT_TYPE_RUN_QUERY,
+    RESULT_TYPE_RUN_STATEMENT,
     RESULT_TYPE_TEST_CONNECTION,
     STATEMENT_TIMEOUT_SECONDS_DEFAULT,
 )
@@ -87,6 +101,14 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         self.logger: logging.Logger | None = None
         self._address_book_service: Any | None = None
         self._app_config_loader: AppConfigLoader | None = None
+        # D0.3 deferred-completion machinery (async_jobs.py) — lazily acquired /
+        # started on first async-shaped dispatch, mirroring
+        # comfyui_image_generation_plugin's _try_acquire_job_manager (boot order
+        # does not guarantee orchestrator_ref.async_job_manager is set yet at
+        # prepare_for_readiness time, but it always is by first dispatch).
+        self._async_job_manager: Any | None = None
+        self._worker_thread: threading.Thread | None = None
+        self._worker_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # VaultKeysProvider — no plugin-owned keys (private key chain-consumed)
@@ -276,6 +298,24 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
             self.logger.warning("%s failed: %s", verb, code)
         return code, message
 
+    def _dispatch_async(
+        self, action_name: str, params: dict[str, Any], state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """D0.3 ms-scale dispatch: create the job, return immediately — no I/O here."""
+        try:
+            create_result = async_jobs.create_job(
+                self, action_name=action_name, params=params, state=state,
+            )
+        except ValueError as exc:
+            return self._error(ERROR_INVALID_PARAMS, str(exc))
+        except RuntimeError as exc:
+            return self._error(ERROR_NOT_CONFIGURED, str(exc))
+        if create_result.get("action_status") != "completed":
+            error = create_result.get("error", {})
+            message = str(error.get("message", "failed to create async job"))
+            return self._error(ERROR_API_ERROR, message)
+        return self._success(create_result["data"])
+
     # ------------------------------------------------------------------
     # EdgeProcessProvider
     # ------------------------------------------------------------------
@@ -295,6 +335,8 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
                 "export_query", RESULT_TYPE_EXPORT_QUERY),
             "test_connection": _edge(
                 "test_connection", RESULT_TYPE_TEST_CONNECTION),
+            "run_statement": _edge(
+                "run_statement", RESULT_TYPE_RUN_STATEMENT),
         }
 
     # ------------------------------------------------------------------
@@ -307,9 +349,11 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Run ONE read-only SQL statement against the configured Snowflake account. Read "
             "leaders only (SELECT/SHOW/DESCRIBE/EXPLAIN/WITH); the operator-granted role is "
-            "expected to be read-only. The result is ALWAYS written to the caller-supplied "
-            "output_tsv_path, never returned inline — Snowflake's own Python connector "
-            "documentation imposes no vendor row ceiling on a query result (arraysize/"
+            "expected to be read-only. Returns immediately with a job_id and status 'queued' "
+            "(D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the "
+            "job finishing. When the job completes, the result is ALWAYS written to the "
+            "caller-supplied output_tsv_path, never returned inline — Snowflake's own Python "
+            "connector documentation imposes no vendor row ceiling on a query result (arraysize/"
             f"client_prefetch_threads are client-side performance knobs, not caps); the limit "
             f"below is entirely our own policy. Defaults to {DEFAULT_ROW_LIMIT} rows to avoid "
             "exhausting warehouse compute and disk, and to discourage pulling all rows for "
@@ -357,100 +401,118 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
                 ),
             ),
         },
+        output_type="object",
+        output_description="Job ID and status for async query tracking.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV — never rows inline, at any size.",
+            description="Dispatch envelope — job_id + status: queued. Not the TSV handle itself.",
             properties={
-                "path": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Absolute path of the written TSV file.",
-                ),
-                "row_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of rows written.",
-                ),
-                "columns": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Column names, in query order.",
-                ),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when row_count hit the effective limit — more rows may exist.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def run_query(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            lambda conn: query_actions.run_query(conn, params, self._export_path_gate), "run_query"
-        )
+        return self._dispatch_async("run_query", params, state)
 
     @platform_process(
         name="list_databases",
         display_name="Snowflake: List Databases",
-        description="List databases visible to the configured role.",
+        description=(
+            "List databases visible to the configured role. Returns immediately with a job_id "
+            "and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is "
+            "NOT the same as the job finishing; the database list itself is delivered when the "
+            "job completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
+        output_type="object",
+        output_description="Job ID and status for async listing tracking.",
         return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT, description="The visible database names."
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the database list itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_databases(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            lambda conn: query_actions.list_databases(conn, params), "list_databases"
-        )
+        return self._dispatch_async("list_databases", params, state)
 
     @platform_process(
         name="list_schemas",
         display_name="Snowflake: List Schemas",
-        description="List schemas in a database. Requires database.",
+        description=(
+            "List schemas in a database. Requires database. Returns immediately with a job_id "
+            "and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is "
+            "NOT the same as the job finishing; the schema list itself is delivered when the job "
+            "completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "database": ParameterMetadata(
                 type=ParameterType.STRING, required=True, description="The database to list schemas from."
             ),
         },
+        output_type="object",
+        output_description="Job ID and status for async listing tracking.",
         return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT, description="The schema names."
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the schema list itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_schemas(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            lambda conn: query_actions.list_schemas(conn, params), "list_schemas"
-        )
+        return self._dispatch_async("list_schemas", params, state)
 
     @platform_process(
         name="list_tables",
         display_name="Snowflake: List Tables",
-        description="List tables in a database.schema. Requires database and schema.",
+        description=(
+            "List tables in a database.schema. Requires database and schema. Returns immediately "
+            "with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch "
+            "returning is NOT the same as the job finishing; the table list itself is delivered "
+            "when the job completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "database": ParameterMetadata(type=ParameterType.STRING, required=True, description="The database."),
             "schema": ParameterMetadata(type=ParameterType.STRING, required=True, description="The schema."),
         },
+        output_type="object",
+        output_description="Job ID and status for async listing tracking.",
         return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT, description="Tables with name and kind."
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the table list itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_tables(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            lambda conn: query_actions.list_tables(conn, params), "list_tables"
-        )
+        return self._dispatch_async("list_tables", params, state)
 
     @platform_process(
         name="describe_table",
         display_name="Snowflake: Describe Table",
         description=(
             "Describe a table's columns (name, type, nullability, default). Requires database, "
-            "schema, and table."
+            "schema, and table. Returns immediately with a job_id and status 'queued' (D0.3 "
+            "deferred-completion shape) — the dispatch returning is NOT the same as the job "
+            "finishing; the column list itself is delivered when the job completes."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -458,25 +520,32 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
             "schema": ParameterMetadata(type=ParameterType.STRING, required=True, description="The table's schema."),
             "table": ParameterMetadata(type=ParameterType.STRING, required=True, description="The table name."),
         },
+        output_type="object",
+        output_description="Job ID and status for async introspection tracking.",
         return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT, description="Columns with name, type, nullable, and default."
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the column list itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def describe_table(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            lambda conn: query_actions.describe_table(conn, params), "describe_table"
-        )
+        return self._dispatch_async("describe_table", params, state)
 
     @platform_process(
         name="export_query",
         display_name="Snowflake: Export Query",
         description=(
             "The N>>500 route: run a read-only query and write the result as ONE tab-separated "
-            ".tsv file at an ABSOLUTE output_tsv_path in the operator's workspace. The path must lie under an "
-            "operator-configured export_allowed_roots entry (empty config refuses every export). "
-            "Same read-only rules and override mechanism as run_query, with a higher hard cap: "
+            ".tsv file at an ABSOLUTE output_tsv_path in the operator's workspace. Returns "
+            "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — "
+            "the dispatch returning is NOT the same as the job finishing. The path must lie "
+            "under an operator-configured export_allowed_roots entry (empty config refuses every "
+            "export). Same read-only rules and override mechanism as run_query, with a higher hard cap: "
             "Snowflake's own Python connector documentation imposes no vendor row ceiling, only "
             f"our own policy. Defaults to {DEFAULT_ROW_LIMIT} rows absent an acknowledged override "
             "— for that common small/default case, run_query has an identical interface with a "
@@ -520,36 +589,21 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
                 ),
             ),
         },
+        output_type="object",
+        output_description="Job ID and status for async export tracking.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV: path, columns, row_count, and truncated.",
+            description="Dispatch envelope — job_id + status: queued. Not the TSV handle itself.",
             properties={
-                "path": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Absolute path of the written TSV file.",
-                ),
-                "row_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of rows written.",
-                ),
-                "columns": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Column names, in query order.",
-                ),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when row_count hit the effective limit — more rows may exist.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def export_query(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            lambda conn: query_actions.export_query(conn, params, self._export_path_gate),
-            "export_query",
-        )
+        return self._dispatch_async("export_query", params, state)
 
     @platform_process(
         name="test_connection",
@@ -557,20 +611,103 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Open the configured Snowflake account and confirm it: account, user, role, warehouse, "
             "and server version. Use this to verify the connector is reachable and the granted role "
-            "is what you expect."
+            "is what you expect. Returns immediately with a job_id and status 'queued' (D0.3 "
+            "deferred-completion shape) — the dispatch returning is NOT the same as the job "
+            "finishing; the connection details are delivered when the job completes."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
+        output_type="object",
+        output_description="Job ID and status for async connection-test tracking.",
         return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT, description="ok, account, user, role, warehouse, version."
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the connection details themselves.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def test_connection(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            lambda conn: query_actions.test_connection(conn, params), "test_connection"
-        )
+        return self._dispatch_async("test_connection", params, state)
+
+    @platform_process(
+        name="run_statement",
+        display_name="Snowflake: Run Statement",
+        description=(
+            "Run ONE SQL statement against the configured Snowflake account — INSERT/UPDATE/"
+            "DELETE/MERGE/DDL/anything, not just reads. What the statement is actually allowed "
+            "to do is decided entirely by the registered role's own server-side grants — this "
+            "verb performs no read/write classification or permission check of its own (vendor "
+            "RBAC is the control plane, operator ruling 2026-08-09 + Amendment 1). "
+            "Single-statement is enforced natively by the Snowflake driver, not by this plugin "
+            "(unlike external_postgres_plugin's run_statement, which reuses a shape guard) — "
+            "no multi-statement scripts. A statement with no result set (the common INSERT/"
+            "UPDATE/DELETE/DDL case) commits and returns rowcount inline. A statement that DOES "
+            "produce a result set (e.g. a RETURNING clause, where the target object supports "
+            "one) routes through the SAME always-TSV export path as run_query: rows are never "
+            "returned inline, at any size, so output_tsv_path is then required — its absence "
+            "rolls the whole statement back rather than silently discarding the returned rows "
+            "while still committing the write. Returns immediately with a job_id and status "
+            "'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same "
+            "as the job finishing."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "sql": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description=(
+                    "A single SQL statement — any statement the registered role's own "
+                    "server-side grants permit, not just reads."
+                ),
+            ),
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description=(
+                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots "
+                    "entry. Required ONLY if the statement produces a result set (e.g. a "
+                    "RETURNING clause) — omit it for a plain INSERT/UPDATE/DELETE/DDL with no "
+                    "result set, which returns rowcount inline instead."
+                ),
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Only relevant when the statement produces a result set: must be exactly "
+                    f"true, together with row_limit, to fetch more than the default "
+                    f"{DEFAULT_ROW_LIMIT} returned rows."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Only relevant when the statement produces a result set: explicit row "
+                    f"ceiling, up to {MAX_ROWS_HARD_CAP}. Only honored together with "
+                    "acknowledge_default_limit_override=true."
+                ),
+            ),
+        },
+        output_type="object",
+        output_description="Job ID and status for async statement-execution tracking.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the statement's own result.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def run_statement(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("run_statement", params, state)
 
 
 def _edge(

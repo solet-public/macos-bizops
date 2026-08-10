@@ -453,6 +453,24 @@ def _event_table() -> TableSchema:
                 not_null=True,
                 description="repository_fk: session_ledger__session.id.",
             ),
+            # Opt out of the platform-wide standalone UNIQUE(external_id):
+            # this table's true identity is the COMPOSITE (session_id,
+            # external_id) pair enforced by idx_event_session_external_unique
+            # below — the same column, standalone, is not this table's key.
+            # Schema-debt-external-id lane, 2a (2026-08-06); full rationale +
+            # DB-verified evidence in
+            # workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md.
+            "external_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                unique=False,
+                data_sensitivity=0.5,
+                description=(
+                    "Vendor-supplied event id verbatim when present, else a "
+                    "derv:-prefixed hash (derive_event_external_id). NOT "
+                    "globally unique on its own — see idx_event_session_"
+                    "external_unique below for the real identity."
+                ),
+            ),
             "sequence": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=True,
@@ -564,6 +582,18 @@ def _event_table() -> TableSchema:
                     "and a session's ``source_id`` never changes."
                 ),
             ),
+            "usage_json": ColumnDefinition(
+                type=ColumnType.JSON,
+                description=(
+                    "T1 usage-capture lane (2026-08-05 ruling): per-message "
+                    "token usage, persisted verbatim from the vendor's own "
+                    "raw shape (no re-derivation/renaming). NULL for every "
+                    "event the source vendor doesn't populate usage for -- "
+                    "additive widening, re-installed via the metadata-driven "
+                    "DDL lifecycle (ALTER TABLE ADD COLUMN, existing rows "
+                    "preserved), never a required field."
+                ),
+            ),
         },
         indexes=[
             IndexDefinition(
@@ -609,16 +639,28 @@ def _event_table() -> TableSchema:
                 name="idx_event_event_at",
                 columns=["event_at"],
             ),
-            # GAP-5 idempotent ingest: the FULL unique on the built-in
-            # ``external_id`` is the conflict target for ``append_event``'s
-            # ``ON CONFLICT (session_id, external_id) DO NOTHING`` upsert.
-            # ``external_id`` = ``vendor_event_id`` ?? a deterministic ``derv:``
-            # hash, so re-ingest of the same source event dedups at the DB level
+            # GAP-5 idempotent ingest: this COMPOSITE unique is the conflict
+            # target for ``append_event``'s ``ON CONFLICT (session_id,
+            # external_id) DO NOTHING`` upsert. ``external_id`` =
+            # ``vendor_event_id`` ?? a deterministic ``derv:`` hash, so
+            # re-ingest of the same source event dedups at the DB level
             # (replaces the unenforced ``vendor_event_id`` idempotency claim).
             # The index goes live in slice 1 — Postgres treats NULLs as DISTINCT,
             # so the legacy null-``external_id`` rows don't violate it; the
             # NOT-NULL constraint follows in slice 2 after the backfill. Non-
             # partial: post-backfill ``external_id`` is never NULL.
+            #
+            # This is now the SOLE DB-level enforcement of event identity
+            # (schema-debt-external-id lane, 2a, 2026-08-06): the
+            # platform-wide standalone ``UNIQUE(external_id)`` that used to
+            # collide with this composite (a cross-session vendor-event-id
+            # match tripped ``session_ledger__event_external_id_key``,
+            # degraded to a dedup by the importer's narrow catch in
+            # ``ingest.py`` on 2026-08-06) is opted out of above — see the
+            # ``external_id`` column's own comment. Root cause fixed at the
+            # schema layer; the importer's catch remains as defence for
+            # pre-migration databases per
+            # workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md.
             IndexDefinition(
                 name="idx_event_session_external_unique",
                 columns=["session_id", "external_id"],

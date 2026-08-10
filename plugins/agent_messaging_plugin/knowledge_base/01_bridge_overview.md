@@ -8,7 +8,7 @@ Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:t
 
 Article Tags: planning-stage:orientation, evidence-category:plugin-architecture, domain:agent-messaging, domain:bridge
 
-Embedding Description: One-page map of agent_messaging_plugin and the three responsibilities it owns after the 2026-05 bridge consolidation — IO interface (post_message, start/stop_interface), bridge service (FastAPI surface, peer registry, bridge-delivery EDGE_SINKs, Python MCP stdio bridge, Claude-shaped notifications, and patched Codex peer wake), and durable agent-messaging core (core__agent_thread/core__agent_message schema, run_turn EDGE).
+Embedding Description: One-page map of agent_messaging_plugin and the three responsibilities it owns after the 2026-05 bridge consolidation — IO interface (post_message, start/stop_interface), bridge service (FastAPI surface, peer registry, bridge-delivery EDGE_SINKs, Python MCP stdio bridge, Claude-shaped notifications, and patched Codex peer wake), and durable agent-messaging core (core__agent_thread/core__agent_message schema, peer messaging, session-ledger substrate reads).
 
 ## Purpose
 
@@ -64,19 +64,21 @@ See `05_http_reference.md` for the full route table and
 
 ### Hat 3 — Agent messaging core
 
-The lowest layer is unchanged from the original `agent_messaging_plugin`:
+The lowest layer hosts the durable schema and the live peer-messaging
+surface:
 
 - durable schema `core__agent_thread` (per-thread state) and
   `core__agent_message` (append-only cursor-addressable messages),
-- the `plugin::agent_messaging_plugin::run_turn` EDGE process —
-  internal runner submitted by `AgentMessagingService._dispatch_turn`
-  after a successful `agent_thread_open` or `agent_send`. Never
-  authored by the model.
+- `peer_send`/`peer_inbox` — live agent-to-agent talk between MCP
+  sessions, documented in `03_inter_agent_messaging.md`,
+- `list_threads`/`read_thread_messages` — the unscoped GAP-5/D1
+  substrate reads the session-ledger projection consumes.
 
-`run_turn` is how the homunculus drives backend agents (codex, claude_code) opened
-from an inter-agent thread. Live agent-to-agent talk between MCP
-sessions is the peer-messaging surface — different code path,
-documented in `03_inter_agent_messaging.md`.
+The dormant backend-dispatch surface that used to live here
+(`open_thread`/`send_message`/`list_messages`/`get_status`/
+`close_thread`, the `run_turn` EDGE process, the `GuardedAgentInterface`
+backend) was retired in the D3 dormant-head retirement — it had zero
+implementing plugins.
 
 ## Single FastAPI surface, single MCP server
 
@@ -112,10 +114,7 @@ patched-Codex runbook covers stale `agc-*` bridge ids and update procedure.
 
 - Agent calling the homunculus (`process_*`, `download`) →
   `02_platform_call_surface.md`.
-- Agent calling another live agent (`peer_*`) or backend agent
-  (`agent_*`) → `03_inter_agent_messaging.md`.
-- Driving a backend agent thread (`run_turn` internals, durable
-  schema, lifecycle) → `04_run_turn_and_storage.md`.
+- Agent calling another live agent (`peer_*`) → `03_inter_agent_messaging.md`.
 - HTTP route table behind every MCP tool → `05_http_reference.md`.
 - Per-process schemas, error tokens, recovery guidance →
   `processes/*.json`.

@@ -14,8 +14,8 @@ other than the calling case asking for it.
 
 Hooks are exercised as PROCESSES, never imported. That is the contract Claude
 Code actually uses -- environment and stdin in, stdout/stderr and an exit code
-out -- and for the four Node hooks it is the only contract there is: they export
-nothing, they are top-level scripts.
+out -- and it is the only contract there is: every hook is a top-level script
+that exports nothing.
 
 Self-contained by construction: nothing here resolves a path outside this
 plugin directory, so the suite runs from the plugin as an isolated artifact.
@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import shutil
 import subprocess
 import sys
 import sysconfig
@@ -88,8 +87,6 @@ def preflight() -> None:
         have = ".".join(str(part) for part in sys.version_info[:3])
         want = ".".join(str(part) for part in MIN_PYTHON)
         problems.append(f"python {want}+ required to run this suite, found {have}")
-    if shutil.which("node") is None:
-        problems.append("node not found on PATH (required: every reminder hook is a Node script)")
     if not HOOKS_DIR.is_dir():
         problems.append(f"hooks directory not found: {HOOKS_DIR}")
     # GUARD_VARS and _PASSTHROUGH being disjoint is proved statically by the type
@@ -120,10 +117,7 @@ def run_hook(
     if leaked:
         raise SystemExit(f"harness: guard variable(s) leaked into the child environment: {leaked}")
 
-    if path.suffix == ".js":
-        argv = ["node", str(path)]
-    else:
-        argv = [sys.executable, "-B", str(path)]
+    argv = [sys.executable, "-B", str(path)]
 
     return subprocess.run(
         argv,
@@ -160,20 +154,6 @@ def is_stdlib_module(module: str) -> bool:
         return True
     stdlib_path = sysconfig.get_paths().get("stdlib", "")
     return bool(stdlib_path) and origin.startswith(stdlib_path) and "site-packages" not in origin
-
-
-def node_builtin_modules() -> frozenset[str]:
-    """Ask the running Node for its built-in module list (no hardcoded allowlist)."""
-    proc = subprocess.run(
-        ["node", "-p", "require('module').builtinModules.join('\\n')"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise SystemExit(f"harness: could not query Node built-ins: {proc.stderr.strip()}")
-    return frozenset(line.strip() for line in proc.stdout.splitlines() if line.strip())
 
 
 class Results:

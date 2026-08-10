@@ -38,6 +38,13 @@ _HOMUNCULUS = _homunculus_or_fail()
 PLUGIN_NAME: Final[str] = "g_suite_plugin"
 PLUGIN_VERSION: Final[str] = "1.0.0"
 
+# D0.3 deferred-completion shape: every migrated verb enqueues under this ONE
+# action_name (the specific verb travels in the job's request_data["verb"]
+# instead) so a single serial worker thread's list_jobs(provider_name=...)
+# filter covers all of them — modeled on cosyvoice2_tts_plugin's
+# _JOB_ACTION_NAME convention.
+JOB_ACTION_NAME: Final[str] = "workspace_job"
+
 # ---------------------------------------------------------------------------
 # Blob storage namespace (downloads/exports/attachments)
 # ---------------------------------------------------------------------------
@@ -111,7 +118,7 @@ ADDRESS_BOOK_FIELD_REDIRECT_URI: Final[str] = "redirect_uri"
 # workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md,
 # operator scope refinement arm-4f6174762777dfe2fa66b8d409bb373b: g_suite is
 # LIMITS-ONLY, a resource guard against exhausting vendor rate limits / an
-# unbounded response size — NOT the spill floor (no containment gate, no
+# unbounded response size — NOT the data-export requirement (no containment gate, no
 # caller-supplied-path requirement, no inline-branch deletion; the operator's
 # mass-exposure concern does not apply to g_suite). Gmail keeps a 500 default
 # explicitly per the operator, matching Gmail's own real single-call vendor

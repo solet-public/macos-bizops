@@ -16,6 +16,14 @@ whose SECURITY.md claims are hardest to confirm by reading alone:
    every non-wake exit path -- clean exit, arbitrary nonzero, death by signal,
    missing executable, non-executable file -- and asserting exit 0 each time.
 
+It also pins one load-bearing coordination claim: **the wait is bounded.** An
+unbounded waiter holds the harness status file at "shell" for its whole life,
+so "idle" is never stamped and the seat idle watcher is structurally blind
+(2026-08-08 overnight stall). Proved by recording the argv the hook passes to
+the CLI: `--max-wait` is always present, defaulting to the compiled-in cap,
+honouring a valid `AGENT_WAKE_MAX_WAIT_S` override, and falling back LOUDLY
+(one fixed-format stderr note) on a malformed or non-positive override.
+
 The arming matrix is verified with a CONTROLLED environment: a stub that records
 whether it ran, so a "disarmed" case proves the CLI was never invoked rather
 than merely producing no output.
@@ -30,12 +38,13 @@ import sys
 # Must precede the _harness import — see manifest_consistency_smoke.py for why.
 sys.dont_write_bytecode = True
 
+import json  # noqa: E402
 import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from _harness import Results, preflight, run_hook  # noqa: E402
 
-HOOK = "wake_waiter.js"
+HOOK = "wake_waiter.py"
 WAKE_SIGNAL = 2
 LABEL = "Coordinator-Day"
 MARKER_ENV = "STUB_MARKER"
@@ -50,8 +59,10 @@ SECRET_STDERR = "SENSITIVE-STDERR-9a72cc-message-body-should-never-appear"
 def _stub(directory: Path, name: str, *, exit_code: int | None, chatty: bool = False) -> Path:
     """Write an executable stand-in for the operator's coordination CLI.
 
-    exit_code None means "die from a signal", which makes Node's spawnSync
-    report status null -- the path most likely to be mishandled.
+    exit_code None means "die from a signal", which makes Python's
+    subprocess.run report a NEGATIVE returncode (the signal number, negated)
+    rather than a small positive status -- the path most likely to be
+    mishandled.
     """
     lines = [
         "#!/usr/bin/env python3",
@@ -131,10 +142,13 @@ def check_arm_matrix(res: Results, work: Path) -> None:
         # The hook already behaves this way (`transport && transport !== "watch"`
         # is falsy on ""); this case pins it so a "tidying" change to that
         # condition surfaces as a red rather than a silent loss of wakes.
-        # NOTE the asymmetry with the rename skill, which reads
-        # ${FLEET_TRANSPORT:-mcp} and resolves empty to "mcp": that is a
-        # different question (which transport to USE) from this one (was a
-        # transport DECLARED at all), and the two may legitimately differ.
+        # NOTE this is a different question from the rename skill's own
+        # ${FLEET_TRANSPORT:-watch} fallback (which transport to USE) vs.
+        # this hook's own question (was a transport DECLARED at all) — the
+        # two consumers apply their own independent defaults and may
+        # legitimately differ in value even though, since the fleet-watch-
+        # transport-migration charter (2026-08-06), both currently resolve
+        # empty to "watch".
         ("transport empty string", ""),
     )
     for label, transport in cases:
@@ -143,6 +157,62 @@ def check_arm_matrix(res: Results, work: Path) -> None:
         proc = run_hook(HOOK, env=_env(marker, cli, transport=transport))
         res.check(marker.exists(), f"armed ({label}) spawns the CLI", "the stub never ran")
         res.check(proc.returncode == 0, f"armed ({label}) passes through exit 0", f"exit {proc.returncode}")
+
+
+def _argv_stub(directory: Path, name: str) -> Path:
+    """A stand-in CLI that records the argv it was invoked with (sans argv[0])."""
+    lines = [
+        "#!/usr/bin/env python3",
+        "import json, os, sys",
+        f"marker = os.environ.get({MARKER_ENV!r})",
+        "if marker:",
+        "    open(marker, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))",
+        "sys.exit(0)",
+    ]
+    path = directory / name
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def check_bounded_wait_argv(res: Results, work: Path) -> None:
+    """The wait must be bounded: `--max-wait` always reaches the CLI.
+
+    The default is pinned by value on purpose -- it is a coordination constant
+    that must stay under the prompt-cache TTL (see the hook's docstring), so a
+    change to it should surface here as a deliberate red, not slip through.
+    """
+    cli = _argv_stub(work, "argv_stub")
+    default = "2400"
+    cases: tuple[tuple[str, str | None, str, bool], ...] = (
+        ("no override", None, default, False),
+        ("valid override", "90", "90", False),
+        ("malformed override", "soon", default, True),
+        ("zero override", "0", default, True),
+        ("negative override", "-5", default, True),
+    )
+    for label, override, expected, expect_note in cases:
+        marker = work / f"argv_{label.replace(' ', '_')}"
+        marker.unlink(missing_ok=True)
+        env = _env(marker, cli)
+        if override is not None:
+            env["AGENT_WAKE_MAX_WAIT_S"] = override
+        proc = run_hook(HOOK, env=env)
+        argv = json.loads(marker.read_text(encoding="utf-8")) if marker.exists() else None
+        res.check(
+            argv == ["wake", "--max-wait", expected],
+            f"bounded wait ({label}): CLI argv is ['wake', '--max-wait', {expected!r}]",
+            f"got {argv!r}",
+        )
+        res.check(proc.returncode == 0, f"bounded wait ({label}) exits 0", f"exit {proc.returncode}")
+        if expect_note:
+            res.check(
+                proc.stderr.startswith(NOTE_PREFIX) and proc.stderr.strip().count("\n") == 0,
+                f"bounded wait ({label}) falls back LOUDLY with a one-line note",
+                f"got {proc.stderr[:120]!r}",
+            )
+        else:
+            res.check(proc.stderr == "", f"bounded wait ({label}) is silent on stderr", f"got {proc.stderr[:80]!r}")
 
 
 def check_one_bit_claim(res: Results, work: Path) -> None:
@@ -246,6 +316,7 @@ def main() -> int:
         work = Path(raw)
         check_disarm_matrix(res, work)
         check_arm_matrix(res, work)
+        check_bounded_wait_argv(res, work)
         check_one_bit_claim(res, work)
         check_nudge_is_compiled_in(res, work)
         check_never_traps_the_session(res, work)

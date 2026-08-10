@@ -2,6 +2,16 @@
 
 <!-- BEGIN HOMUNCULUS HYDRATION -->
 
+> **🛑 FIRST ACTION, EVERY SESSION — NON-NEGOTIABLE.** Before your first
+> substantive reply and before any other tool call in this directory, run one
+> `{{HOMUNCULUS_NAME}} call service_interface::knowledge_service::search` (the
+> **Step Zero** command below). This is the literal first step of every task —
+> including tasks that look like plain code, shell, or config work, and
+> including tasks where you feel you already know the answer. Answering from
+> source files, prior assumptions, web search, or MCP *before* you have searched
+> {{HOMUNCULUS_NAME}} is a defect, not a shortcut. If you have not yet searched
+> {{HOMUNCULUS_NAME}} this session, you are not ready to act.
+
 This directory is the home of **{{HOMUNCULUS_NAME}}**, a homunculus on the Ananta
 platform: a named, persistent agentic instance with its own PostgreSQL schema,
 memories, knowledge bases, and plugins. You — the Claude Code session reading

@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Deaf-wake owed-delivery: store-naive vs runtime-aware datetime tz-mismatch fix.
+"""Owed-delivery: store-naive vs runtime-aware datetime tz-mismatch fix.
 
 The state store's ``DATETIME`` columns are ``timestamp without time zone``, so
 every timestamp read back (``created_at``, ``last_emitted_at``) is offset-NAIVE
 UTC — while ``_clock()`` (= ``datetime.now(UTC)``) and the bridge activity stamp
-are offset-AWARE UTC. The REL-05/RIDER owed-delivery code compared the two
-directly, so LIVE it raised ``TypeError: can't compare/subtract offset-naive and
-offset-aware datetimes`` on EVERY sweep tick (``_escalatable``) and EVERY
-IMPORTANT drain (``_stamp_consumed_rows``, ``_within_reemit_window``) — the
-deaf-wake insurance faulted before it could escalate or reconcile.
+are offset-AWARE UTC. Code that compared the two directly raised
+``TypeError: can't compare/subtract offset-naive and offset-aware datetimes``.
 
 The fix: ``_parse_iso`` coerces a naive stored cell → aware UTC (honoring its own
 docstring), the single boundary, so every comparison in the module is
@@ -18,9 +15,19 @@ RED-FIRST FIDELITY (the reason this shipped): the existing deaf-wake smokes seed
 timestamps via ``datetime(..., tzinfo=UTC).isoformat()`` — AWARE strings — so
 their fake never reproduced the naive-on-read the real ``timestamp without time
 zone`` column produces. These tests seed timestamps as NAIVE strings exactly as
-the column returns them (no offset) and pass an AWARE ``now``/``activity_at``.
-Revert the ``_parse_iso`` coercion and each of the three site tests raises
-``TypeError`` (verified by hand).
+the column returns them (no offset) and pass an AWARE ``now``. Revert the
+``_parse_iso`` coercion and each site test raises ``TypeError`` (verified by
+hand).
+
+A4 (2026-08-04): pruned from three sites to the two that survive marker
+retirement. ``_escalatable`` (the sweep-tick escalation site) and
+``_stamp_consumed_rows``/``reconcile_role_consumption`` (the Guard-1
+consumption-reconcile site) retired with the apparatus they served — see
+``workbench/2026-08-04_marker_retirement_architect_memo_architect.md``
+Amendment 4. ``_parse_iso`` itself and ``_within_reemit_window`` (shared by
+the surviving role-replay drain, ``list_undelivered_for_instance``) are
+untouched by that retirement and still need this exact naive-vs-aware
+coverage.
 
 Run:
     HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \\
@@ -32,24 +39,13 @@ from __future__ import annotations
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _real_state_fake import RealShapeState  # noqa: E402
-from ananta.interfaces.state_management_interface import (  # noqa: E402
-    StateManagementInterface,
-)
-from ananta.llm.agent_messaging.schema import (  # noqa: E402
-    NAMESPACE,
-    TABLE_AGENT_ROLE_MESSAGE,
-)
 from ananta.llm.agent_messaging.service import (  # noqa: E402
-    AgentMessagingService,
-    _escalatable,
     _parse_iso,
     _within_reemit_window,
 )
@@ -59,7 +55,7 @@ from ananta.llm.agent_messaging.service import (  # noqa: E402
 # ``2026-07-07 12:00:00.000000``). ``datetime.fromisoformat`` parses it naive.
 NAIVE_T0 = "2026-07-07 12:00:00.000000"
 NAIVE_T0_T = "2026-07-07T12:00:00.000000"  # 'T' separator variant, also naive
-# The live datetimes the sweep/drain compare against are AWARE UTC.
+# The live datetimes the drain compares against are AWARE UTC.
 NOW_AWARE = datetime(2026, 7, 7, 13, 0, 0, tzinfo=UTC)  # T0 + 1h
 
 _passed = 0
@@ -74,25 +70,6 @@ def _check(condition: object, label: str) -> None:
         return
     _failed.append(label)
     print(f"  FAIL  {label}")
-
-
-class _EnabledConfig:
-    enabled = True
-    allowed_backends: tuple[str, ...] = ()
-
-
-def _service(state: RealShapeState) -> AgentMessagingService:
-    return AgentMessagingService(
-        repository=cast(Any, object()),
-        state_service=cast(StateManagementInterface, state),
-        backend_router=cast(Any, object()),
-        flow_manager=cast(Any, object()),
-        action_factory=cast(Any, object()),
-        compilation_context_builder=cast(Any, object()),
-        bridge_delivery=cast(Any, object()),
-        config=cast(Any, _EnabledConfig()),
-        clock=lambda: NOW_AWARE,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -125,33 +102,8 @@ def test_parse_iso_coerces_naive_stored_cell_to_aware_utc() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Site 1 — the SWEEP tick: _escalatable(now_aware - created_naive)  [service.py:353]
-# reproduces "REL-05 deaf-wake escalation FAULTED; sweeper continues"
-# ---------------------------------------------------------------------------
-
-
-def test_escalatable_no_fault_on_naive_created_at() -> None:
-    # emit_count 0 so the row can only escalate via the TIME branch (the naive
-    # subtraction). deadline = cap*window = 3*300 = 900s; now-created = 3600s > 900.
-    rows = [{"created_at": NAIVE_T0, "emit_count": 0, "external_id": "adw-old"}]
-    try:
-        out = _escalatable(
-            cast(Any, rows), now=NOW_AWARE, cap=3, re_emit_window_s=300.0,
-        )
-        raised = False
-    except TypeError:
-        out = []
-        raised = True
-    _check(
-        not raised and [r["external_id"] for r in out] == ["adw-old"],
-        "SWEEP: _escalatable escalates a time-owed row with a NAIVE created_at "
-        "(no offset-naive/aware TypeError) — the faulting sweep-tick site",
-    )
-
-
-# ---------------------------------------------------------------------------
-# Site 2 — the DRAIN re-emit window: _within_reemit_window(now_aware - emitted_naive)
-# [service.py:305] — in list_undelivered_for_instance
+# Site — the DRAIN re-emit window: _within_reemit_window(now_aware - emitted_naive)
+# — in list_undelivered_for_instance (the surviving role-replay drain)
 # ---------------------------------------------------------------------------
 
 
@@ -176,66 +128,10 @@ def test_within_reemit_window_no_fault_on_naive_last_emitted() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Site 3 — consumption stamping: _stamp_consumed_rows(emitted_naive >= activity_aware)
-# [service.py:1296] via reconcile_role_consumption — reproduces the 813x drain fault
-# ---------------------------------------------------------------------------
-
-
-def test_reconcile_consumption_no_fault_on_naive_last_emitted() -> None:
-    state = RealShapeState()
-    svc = _service(state)
-    # A role row EMITTED-TO agi-holder, un-consumed, whose last_emitted_at is a
-    # NAIVE stored string BEFORE the (aware) model-activity stamp.
-    emitted_naive = "2026-07-07 12:30:00.000000"
-    state.rows(NAMESPACE, TABLE_AGENT_ROLE_MESSAGE).append(
-        {
-            "id": "arm-consume",
-            "external_id": "role:R:agm-consume",
-            "recipient_kind": "role",
-            "recipient_key": "R",
-            "message_id": "agm-consume",
-            "sender_agent_id": "claude_code",
-            "sender_agent_instance_id": "agi-S",
-            "sender_session_label": "Sender",
-            "important": True,
-            "delivered": True,
-            "consumed": False,
-            "escalated": False,
-            "emit_count": 1,
-            "emitted_to_agent_instance_id": "agi-holder",
-            "last_emitted_at": emitted_naive,
-            "content": [{"type": "text", "text": "IMPORTANT: hi"}],
-            "created_at": emitted_naive,
-            "is_deleted": 0,
-        },
-    )
-    try:
-        stamped = svc.reconcile_role_consumption(
-            agent_instance_id="agi-holder", activity_at=NOW_AWARE,
-        )
-        raised = False
-    except TypeError:
-        stamped = []
-        raised = True
-    row = next(
-        r for r in state.rows(NAMESPACE, TABLE_AGENT_ROLE_MESSAGE)
-        if r["message_id"] == "agm-consume"
-    )
-    _check(
-        not raised and stamped == ["role:R:agm-consume"] and row["consumed"] is True,
-        "CONSUME: reconcile_role_consumption stamps a row with a NAIVE "
-        "last_emitted_at against an AWARE activity_at (no TypeError) — the 813x "
-        "faulting _stamp_consumed_rows site",
-    )
-
-
 def main() -> None:
-    print("=== deaf-wake naive-vs-aware datetime tz-mismatch smoke ===")
+    print("=== owed-delivery naive-vs-aware datetime tz-mismatch smoke ===")
     test_parse_iso_coerces_naive_stored_cell_to_aware_utc()
-    test_escalatable_no_fault_on_naive_created_at()
     test_within_reemit_window_no_fault_on_naive_last_emitted()
-    test_reconcile_consumption_no_fault_on_naive_last_emitted()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

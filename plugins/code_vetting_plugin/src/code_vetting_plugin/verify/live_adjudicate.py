@@ -3,8 +3,8 @@
 Runs the refute-harness with the **inference** dispatcher against a real L2
 candidate, seeding each lens with an evidence pack (the actual source under
 review + precedent + the upstream critic's both-sides framing). The skeptic
-replies are gathered out-of-band over the bridge (``agent_thread_open``) by the
-orchestrating agent and supplied here as a recorded-replies file, so the run is
+replies are gathered out-of-band over the platform's peer-messaging bridge by
+the orchestrating agent and supplied here as a recorded-replies file, so the run is
 reproducible and the parse→aggregate→stamp path is exercised end-to-end.
 
     python -m code_vetting_plugin.verify.live_adjudicate \\

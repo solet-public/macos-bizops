@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::list_sessions",
+  "display_name": "List managed fleet sessions",
+  "description": "Fleet session-management Phase B, D1 (§4). Returns every live managed_session ledger row, optionally filtered by lane_id, work_class, host, or lifecycle_state (equality filters only, combined with AND). This is the ONE fleet list — operator-launched sessions carry a row too (written at normal registration, not through spawn_session), so this verb never needs a separate 'manual sessions' query.",
+  "embedding_description": "Browse or search the current fleet roster — which sessions exist right now, grouped or filtered by lane, work class, host, or lifecycle state. A read-only survey query, never a spawn and never a single-row lookup.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Fleet session roster listed",
+    "result_type": "list_sessions_result",
+    "result_description": "sessions: an array of managed_session ledger rows matching the supplied filters (empty array if none match; never an error for a legitimate zero-result query).",
+    "presentation_guidance": "Summarize the count and group by lifecycle_state or lane when useful. Do not claim host liveness beyond what the row's lifecycle_state says — this verb reads the ledger, not a live host probe."
+  },
+  "error_processor_customizations": {
+    "action_context": "A pure filtered read over the managed_session table via StateManagementInterface; no state mutation, no host interaction.",
+    "error_interpretation": "state_service_unavailable: the state service is not bound on this homunculus.",
+    "recovery_guidance": "state_service_unavailable indicates a platform binding problem, not a caller error — report it rather than retrying with different filters."
+  }
+}

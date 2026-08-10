@@ -1,22 +1,33 @@
-"""External Postgres plugin entry point — the read-only "super Datagrip".
+"""External Postgres plugin entry point — the "super Datagrip" over foreign DBs.
 
-Query FOREIGN Postgres databases the operator registers as ``external_pg::<name>``
-address-book entries. READ-ONLY, HARD: no write verb exists, and the psycopg3
-connection read-only characteristic (connection.py) is the developer-proof
-write-stopper. Every verb takes a connection NAME (never a DSN); the platform's
-own DB instance is refused role-independently (connection.assert_foreign_target).
+Query (and, per the operator's 2026-08-09 posture reversal + Amendment 1, write
+to) FOREIGN Postgres databases the operator registers as ``external_pg::<name>``
+address-book entries. Every read verb stays READ-ONLY, HARD via the psycopg3
+connection read-only characteristic (connection.py) — the developer-proof
+write-stopper. The one write verb opens a NON-read_only connection instead and
+performs no plugin-side access control of its own; the registered credential's
+server-side Postgres GRANTs are the entire control plane for what it can
+actually do (vendor RBAC, not a plugin re-implementation — see run_statement's
+own docstring). Every verb takes a connection NAME (never a DSN); the
+platform's own DB instance is refused role-independently, for every verb
+(connection.assert_foreign_target).
 
-Verbs (all EDGE, all reads):
-  - run_query        — one read-only statement; result written as a TSV file
-    at the caller's output_tsv_path (default 500 rows, up to 1000 with an
-    acknowledged override) — never rows inline, at any size
-  - list_connections — the registered external_pg::* connection names
-  - list_schemas / list_tables / describe_table — first-class introspection
-  - export_query     — the N>>500 route: full result written as a TSV file in
-    the operator's workspace (absolute output_tsv_path, contained under the
-    export_allowed_roots config; refuse-all when unset), same override
-    mechanism as run_query with a higher hard cap (50,000)
-  - test_connection  — server version, current role, read-only flag
+Verbs (all EDGE):
+  - list_schemas / list_tables / describe_table / test_connection / run_query /
+    export_query / run_statement — all on the D0.3 deferred-completion shape
+    (workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md):
+    the dispatch handler returns ``{"job_id", "status": "queued"}`` in
+    milliseconds; ``async_jobs.py``'s single background worker thread does the
+    real connect + query I/O and completes the job. run_query/export_query's
+    result — and run_statement's, when its statement produces one (e.g. a
+    RETURNING clause) — is always written to the caller-supplied
+    output_tsv_path when the job completes, never returned inline (default
+    500 rows, up to 1000/50,000 with an acknowledged override — see
+    query_actions.py for the full contract). run_statement is the write verb:
+    single-statement contract, explicit per-call commit semantics, no
+    statement-leader classification of any kind.
+  - list_connections — the registered external_pg::* connection names (still
+    synchronous — a single address-book scan, not a foreign-DB round trip).
 
 No plugin-owned vault keys (the per-connection password is chain-consumed through
 the address book's ``resolve_with_secrets``), so this plugin needs NO vault
@@ -28,6 +39,7 @@ overflows fail loud).
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -49,7 +61,7 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import connection, export_containment, query_actions
+from . import async_jobs, connection, export_containment
 from .app_config import AppConfigLoader, ExternalPgConfigError
 from .connection import ExternalPgGuardError
 from .constants import (
@@ -73,6 +85,7 @@ from .constants import (
     RESULT_TYPE_LIST_SCHEMAS,
     RESULT_TYPE_LIST_TABLES,
     RESULT_TYPE_RUN_QUERY,
+    RESULT_TYPE_RUN_STATEMENT,
     RESULT_TYPE_TEST_CONNECTION,
     STATEMENT_TIMEOUT_MS_DEFAULT,
 )
@@ -89,6 +102,14 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         self.logger: logging.Logger | None = None
         self._address_book_service: Any | None = None
         self._app_config_loader: AppConfigLoader | None = None
+        # D0.3 deferred-completion machinery (async_jobs.py) — lazily acquired /
+        # started on first async-shaped dispatch, mirroring
+        # comfyui_image_generation_plugin's _try_acquire_job_manager (boot order
+        # does not guarantee orchestrator_ref.async_job_manager is set yet at
+        # prepare_for_readiness time, but it always is by first dispatch).
+        self._async_job_manager: Any | None = None
+        self._worker_thread: threading.Thread | None = None
+        self._worker_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # VaultKeysProvider — no plugin-owned keys (password chain-consumed)
@@ -257,8 +278,15 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         params: dict[str, Any],
         action: Callable[[Any], dict[str, Any]],
         verb: str,
+        *,
+        read_only: bool = True,
     ) -> dict[str, Any]:
-        """Resolve a connection NAME, open a hardened read-only connection, run the action.
+        """Resolve a connection NAME, open a hardened connection, run the action.
+
+        ``read_only`` defaults to ``True`` (every read verb); a write verb passes
+        ``read_only=False`` explicitly — the server's own GRANTs on the registered
+        credential then decide what the connection can actually do, never a
+        plugin-side check.
 
         Error classification is TOPOLOGY-SAFE: connection/auth/permission classes
         return a generic fixed message; only the caller's-own-query classes carry
@@ -275,6 +303,7 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
             dsn = self._app_config_loader.resolve(raw_name)
             conn = connection.connect(
                 dsn,
+                read_only=read_only,
                 statement_timeout_ms=self._statement_timeout_ms(),
                 platform_pg_port=self._platform_pg_port(),
             )
@@ -310,6 +339,24 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
             self.logger.warning("%s failed: %s", verb, code)
         return code, message
 
+    def _dispatch_async(
+        self, action_name: str, params: dict[str, Any], state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """D0.3 ms-scale dispatch: create the job, return immediately — no I/O here."""
+        try:
+            create_result = async_jobs.create_job(
+                self, action_name=action_name, params=params, state=state,
+            )
+        except ValueError as exc:
+            return self._error(ERROR_INVALID_PARAMS, str(exc))
+        except RuntimeError as exc:
+            return self._error(ERROR_NOT_CONFIGURED, str(exc))
+        if create_result.get("action_status") != "completed":
+            error = create_result.get("error", {})
+            message = str(error.get("message", "failed to create async job"))
+            return self._error(ERROR_API_ERROR, message)
+        return self._success(create_result["data"])
+
     # ------------------------------------------------------------------
     # EdgeProcessProvider
     # ------------------------------------------------------------------
@@ -329,6 +376,8 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
                 "export_query", RESULT_TYPE_EXPORT_QUERY),
             "test_connection": _edge(
                 "test_connection", RESULT_TYPE_TEST_CONNECTION),
+            "run_statement": _edge(
+                "run_statement", RESULT_TYPE_RUN_STATEMENT),
         }
 
     # ------------------------------------------------------------------
@@ -341,7 +390,9 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Run ONE read-only SQL statement against a registered foreign Postgres connection "
             "(by connection_name). Read leaders only (SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE); the "
-            "connection is read-only at the server, so writes/DDL are refused. The result is "
+            "connection is read-only at the server, so writes/DDL are refused. Returns immediately "
+            "with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch "
+            "returning is NOT the same as the job finishing. When the job completes, the result is "
             "ALWAYS written to the caller-supplied output_tsv_path, never returned inline — this "
             "connection is an arbitrary customer database, so there is no vendor-imposed row "
             f"ceiling to defer to; the limit below is entirely our own policy. Defaults to "
@@ -396,37 +447,21 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
                 ),
             ),
         },
+        output_type="object",
+        output_description="Job ID and status for async query tracking.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV — never rows inline, at any size.",
+            description="Dispatch envelope — job_id + status: queued. Not the TSV handle itself.",
             properties={
-                "path": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Absolute path of the written TSV file.",
-                ),
-                "row_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of rows written.",
-                ),
-                "columns": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Column names, in query order.",
-                ),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when row_count hit the effective limit — more rows may exist.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def run_query(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            params,
-            lambda conn: query_actions.run_query(conn, params, self._export_path_gate),
-            "run_query",
-        )
+        return self._dispatch_async("run_query", params, state)
 
     @platform_process(
         name="list_connections",
@@ -460,7 +495,9 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         display_name="External Postgres: List Schemas",
         description=(
             "List the non-system schemas in a registered foreign Postgres connection. Requires "
-            "connection_name."
+            "connection_name. Returns immediately with a job_id and status 'queued' — the actual "
+            "schema list is delivered when the job completes (D0.3 deferred-completion shape); the "
+            "dispatch returning is NOT the same as the job finishing."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -470,24 +507,30 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
                 description="The registered connection name.",
             ),
         },
+        output_type="object",
+        output_description="Job ID and status for async schema-list tracking.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="The non-system schema names.",
+            description="Dispatch envelope — job_id + status: queued. Not the schema list itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_schemas(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            params, lambda conn: query_actions.list_schemas(conn, params), "list_schemas"
-        )
+        return self._dispatch_async("list_schemas", params, state)
 
     @platform_process(
         name="list_tables",
         display_name="External Postgres: List Tables",
         description=(
             "List tables and views in a schema of a registered foreign Postgres connection. "
-            "Requires connection_name and schema."
+            "Requires connection_name and schema. Returns immediately with a job_id and status "
+            "'queued' — the actual table list is delivered when the job completes (D0.3 "
+            "deferred-completion shape); the dispatch returning is NOT the same as the job finishing."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -502,24 +545,31 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
                 description="The schema to list tables from.",
             ),
         },
+        output_type="object",
+        output_description="Job ID and status for async table-list tracking.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Tables with name and kind.",
+            description="Dispatch envelope — job_id + status: queued. Not the table list itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_tables(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            params, lambda conn: query_actions.list_tables(conn, params), "list_tables"
-        )
+        return self._dispatch_async("list_tables", params, state)
 
     @platform_process(
         name="describe_table",
         display_name="External Postgres: Describe Table",
         description=(
             "Describe a table's columns (name, type, nullability, default) in a registered foreign "
-            "Postgres connection. Requires connection_name, schema, and table."
+            "Postgres connection. Requires connection_name, schema, and table. Returns immediately "
+            "with a job_id and status 'queued' — the column description is delivered when the job "
+            "completes (D0.3 deferred-completion shape); the dispatch returning is NOT the same as "
+            "the job finishing."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -539,17 +589,21 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
                 description="The table name.",
             ),
         },
+        output_type="object",
+        output_description="Job ID and status for async table-describe tracking.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Columns with name, type, nullable, and default.",
+            description="Dispatch envelope — job_id + status: queued. Not the column list itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def describe_table(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            params, lambda conn: query_actions.describe_table(conn, params), "describe_table"
-        )
+        return self._dispatch_async("describe_table", params, state)
 
     @platform_process(
         name="export_query",
@@ -557,19 +611,21 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         description=(
             "The N>>500 route: run a read-only query against a registered foreign Postgres "
             "connection and write the result as ONE tab-separated .tsv file at an ABSOLUTE "
-            "output_tsv_path in the operator's workspace. The path must lie under an "
-            "operator-configured export_allowed_roots entry (empty config refuses every export). "
-            "Same read-only rules and override mechanism as run_query, with a higher hard cap: "
-            "this connection is an arbitrary customer database, so there is no vendor-imposed row "
-            f"ceiling, only our own policy. Defaults to {DEFAULT_ROW_LIMIT} rows absent an "
-            "acknowledged override — for that common small/default case, run_query has an "
-            "identical interface with a lower ceiling. To fetch more, pass "
-            "acknowledge_default_limit_override=true together with an explicit row_limit (up to "
-            f"{EXPORT_ROW_CAP}) — both are required together, and a row_limit above "
-            f"{EXPORT_ROW_CAP} is refused rather than silently clamped. Requires connection_name, "
-            "sql, and output_tsv_path. When the goal is validating that records exist rather than "
-            "inspecting their content, prefer selecting stable ID columns over email addresses or "
-            "other PII-bearing fields — the query decides what columns land in the file."
+            "output_tsv_path in the operator's workspace. Returns immediately with a job_id and "
+            "status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the "
+            "same as the job finishing. The path must lie under an operator-configured "
+            "export_allowed_roots entry (empty config refuses every export). Same read-only rules "
+            "and override mechanism as run_query, with a higher hard cap: this connection is an "
+            "arbitrary customer database, so there is no vendor-imposed row ceiling, only our own "
+            f"policy. Defaults to {DEFAULT_ROW_LIMIT} rows absent an acknowledged override — for "
+            "that common small/default case, run_query has an identical interface with a lower "
+            "ceiling. To fetch more, pass acknowledge_default_limit_override=true together with an "
+            f"explicit row_limit (up to {EXPORT_ROW_CAP}) — both are required together, and a "
+            f"row_limit above {EXPORT_ROW_CAP} is refused rather than silently clamped. Requires "
+            "connection_name, sql, and output_tsv_path. When the goal is validating that records "
+            "exist rather than inspecting their content, prefer selecting stable ID columns over "
+            "email addresses or other PII-bearing fields — the query decides what columns land in "
+            "the file."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -610,46 +666,33 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
                 ),
             ),
         },
+        output_type="object",
+        output_description="Job ID and status for async export tracking.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV: path, columns, row_count, and truncated.",
+            description="Dispatch envelope — job_id + status: queued. Not the TSV handle itself.",
             properties={
-                "path": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Absolute path of the written TSV file.",
-                ),
-                "row_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of rows written.",
-                ),
-                "columns": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Column names, in query order.",
-                ),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when row_count hit the effective limit — more rows may exist.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def export_query(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            params,
-            lambda conn: query_actions.export_query(conn, params, self._export_path_gate),
-            "export_query",
-        )
+        return self._dispatch_async("export_query", params, state)
 
     @platform_process(
         name="test_connection",
         display_name="External Postgres: Test Connection",
         description=(
-            "Open a registered foreign Postgres connection and confirm it: returns the resolved "
-            "host it connected to, the server version, the current role, and the read-only flag "
-            "(always true). Use this to verify a connection points where you expect (the host you "
-            "registered) before trusting it. Requires connection_name."
+            "Open a registered foreign Postgres connection and confirm it: the resolved host it "
+            "connected to, the server version, the current role, and the read-only flag (always "
+            "true). Use this to verify a connection points where you expect (the host you "
+            "registered) before trusting it. Requires connection_name. Returns immediately with a "
+            "job_id and status 'queued' — the confirmation is delivered when the job completes "
+            "(D0.3 deferred-completion shape); the dispatch returning is NOT the same as the job "
+            "finishing."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -659,17 +702,102 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
                 description="The registered connection name.",
             ),
         },
+        output_type="object",
+        output_description="Job ID and status for async connection-test tracking.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="ok, host, server_version, current_user, read_only.",
+            description="Dispatch envelope — job_id + status: queued. Not the confirmation itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def test_connection(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run_on_connection(
-            params, lambda conn: query_actions.test_connection(conn, params), "test_connection"
-        )
+        return self._dispatch_async("test_connection", params, state)
+
+    @platform_process(
+        name="run_statement",
+        display_name="External Postgres: Run Statement",
+        description=(
+            "Run ONE SQL statement against a registered foreign Postgres connection (by "
+            "connection_name) on a WRITE-CAPABLE (non-read-only) connection — INSERT/UPDATE/"
+            "DELETE/DDL/anything, not just reads. What the statement is actually allowed to do "
+            "is decided entirely by the registered credential's own server-side Postgres GRANTs "
+            "— this verb performs no read/write classification or permission check of its own "
+            "(vendor RBAC is the control plane, operator ruling 2026-08-09 + Amendment 1). "
+            "Single-statement contract for v1 (an engineering convention for predictable commit "
+            "semantics, not a permission gate) — no multi-statement scripts. A statement with no "
+            "result set (the common INSERT/UPDATE/DELETE/DDL case, no RETURNING) commits and "
+            "returns rowcount inline. A statement that DOES produce a result set (a RETURNING "
+            "clause) routes through the SAME always-TSV export path as run_query: rows are never "
+            "returned inline, at any size, so output_tsv_path is then required — its absence "
+            "rolls the whole statement back rather than silently discarding the returned rows "
+            "while still committing the write. Returns immediately with a job_id and status "
+            "'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same "
+            "as the job finishing. Use list_connections to see registered names."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "connection_name": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="The registered connection name (from list_connections).",
+            ),
+            "sql": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description=(
+                    "A single SQL statement — any statement the registered credential's own "
+                    "server-side GRANTs permit, not just reads."
+                ),
+            ),
+            "output_tsv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description=(
+                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots "
+                    "entry. Required ONLY if the statement produces a result set (e.g. a "
+                    "RETURNING clause) — omit it for a plain INSERT/UPDATE/DELETE/DDL with no "
+                    "RETURNING, which returns rowcount inline instead."
+                ),
+            ),
+            PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Only relevant when the statement has a RETURNING clause: must be exactly "
+                    f"true, together with row_limit, to fetch more than the default "
+                    f"{DEFAULT_ROW_LIMIT} returned rows."
+                ),
+            ),
+            PARAM_ROW_LIMIT: ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description=(
+                    f"Only relevant when the statement has a RETURNING clause: explicit row "
+                    f"ceiling on the RETURNING rows, up to {MAX_ROWS_HARD_CAP}. Only honored "
+                    "together with acknowledge_default_limit_override=true."
+                ),
+            ),
+        },
+        output_type="object",
+        output_description="Job ID and status for async statement-execution tracking.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the statement's own result.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def run_statement(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("run_statement", params, state)
 
 
 def _edge(

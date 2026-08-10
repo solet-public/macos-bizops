@@ -799,6 +799,99 @@ class SessionLedgerIngestAPI(ABC):
     ) -> dict[str, Any]:
         """Converge export blobs onto content-digest identity (A3; operator-only)."""
 
+    @service_interface_process(
+        name="set_source_enabled",
+        is_discoverable=False,  # operator-only; not model-discoverable
+        provider=_PROVIDER,
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "source_id": ParameterMetadata(
+                type=ParameterType.STRING,
+                description="Source row id (``src_...``) to toggle.",
+                required=True,
+            ),
+            "enabled": ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                description=(
+                    "The desired ``enabled`` state. ``False`` blocks both "
+                    "the periodic poller (``list_sources(enabled_only=True)``) "
+                    "and a targeted ``poll_source`` call (which raises "
+                    "immediately on a disabled source) — the load-bearing "
+                    "half of the duplicate-source quiesce protocol."
+                ),
+                required=True,
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            description="Source enabled-flag toggle outcome.",
+            type=ParameterType.OBJECT,
+            properties={
+                "source_id": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Echo of the supplied source id.",
+                ),
+                "prior_enabled": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="The row's ``enabled`` value before this call.",
+                ),
+                "new_enabled": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="The row's ``enabled`` value after this call.",
+                ),
+                "changed": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description=(
+                        "``False`` when the requested state already matched "
+                        "the current state — an idempotent no-op, zero "
+                        "writes fired, not an error."
+                    ),
+                ),
+            },
+        ),
+        result_processor_customizations=MergeResultProcessorCustomizations(
+            action_label="Set Source Enabled",
+            result_type="ledger_source_enabled_toggled",
+            result_description=(
+                "One session_ledger__source row's enabled flag toggled "
+                "(or confirmed idempotently unchanged)."
+            ),
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+    )
+    @abstractmethod
+    def set_source_enabled(
+        self,
+        source_id: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        """Toggle one ``source`` row's ``enabled`` flag; operator-only.
+
+        Schema-debt-external-id lane, 2b-S1 quiesce-protocol prerequisite
+        (2026-08-07) — the duplicate-source-repair protocol's own "disable
+        BOTH pair members" step had no executable verb until this one; full
+        rationale in
+        ``workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md``
+        ("Canary attempt (2026-08-07)").
+
+        Homed here (not alongside :meth:`retire_duplicate_source` on
+        ``SessionLedgerInvertedBoundsRepairAPI``, which was the first
+        semantic instinct) because that class was already at 566
+        non-process LOC (>500, god-class violation) — measured, not
+        assumed, per the seat's own warning. ``SessionLedgerIngestAPI`` is
+        the next-best semantic fit (this toggles the same ``enabled``
+        column :meth:`register_source` writes at creation time) and had
+        240 lines of headroom.
+
+        Idempotent: a call whose ``enabled`` already matches the row's
+        current value fires zero writes and reports ``changed=False`` rather
+        than erroring. Writes via ``StateManagementInterface`` primitives
+        only, matching :meth:`retire_duplicate_source`'s discipline.
+
+        Raises ``ValueError`` naming the id when ``source_id`` does not
+        resolve to a live (non-soft-deleted) source row — fails loud rather
+        than silently no-op-ing on a typo'd id.
+        """
+
 
 # ───────────────────────────────────────────────────────────────────────────
 # M5.C — polling orchestration surface (split out from SessionLedgerServiceAPI)
@@ -1738,6 +1831,139 @@ class SessionLedgerInvertedBoundsRepairAPI(ABC):
         Use ``confirm=True`` to actually run. Default ``confirm=False``
         returns a structured dry-run with the orphan counts so the
         operator can size the repair before committing.
+        """
+
+    @service_interface_process(
+        name="retire_duplicate_source",
+        is_discoverable=False,  # operator-only; not model-discoverable
+        provider=_PROVIDER,
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "winner_source_id": ParameterMetadata(
+                type=ParameterType.STRING,
+                description=(
+                    "Source row id (``src_...``) to KEEP — every child row "
+                    "currently pointing at ``loser_source_id`` is re-pointed "
+                    "here."
+                ),
+                required=True,
+            ),
+            "loser_source_id": ParameterMetadata(
+                type=ParameterType.STRING,
+                description=(
+                    "Source row id (``src_...``) to RETIRE — soft-deleted "
+                    "once every child row has been re-pointed to "
+                    "``winner_source_id`` and it is confirmed orphaned. "
+                    "Must be ``enabled=false`` (quiesce protocol) and carry "
+                    "no active polling lease before ``confirm=True`` — the "
+                    "verb refuses otherwise."
+                ),
+                required=True,
+            ),
+            "confirm": ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                description=(
+                    "MUST be ``True`` for the verb to actually re-point "
+                    "child rows and soft-delete the loser. Default "
+                    "``False`` returns a dry-run with the per-table child "
+                    "counts that would move plus the loser's ``enabled`` "
+                    "flag, so the operator can size and quiesce-check the "
+                    "repair before committing."
+                ),
+                required=False,
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            description="Duplicate-source retirement outcome.",
+            type=ParameterType.OBJECT,
+            properties={
+                "confirmed": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="True when the re-point + soft-delete actually ran.",
+                ),
+                "winner_source_id": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Echo of the supplied winner id.",
+                ),
+                "loser_source_id": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Echo of the supplied loser id.",
+                ),
+                "children_to_move": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description=(
+                        "Dry-run path only — per-table live row count "
+                        "currently referencing the loser "
+                        "(session/import_batch/source_cursor/active_lease)."
+                    ),
+                ),
+                "loser_enabled": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description=(
+                        "Dry-run path only — the loser's current ``enabled`` "
+                        "flag. Must be ``false`` before ``confirm=True`` will "
+                        "proceed."
+                    ),
+                ),
+                "children_moved": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description=(
+                        "Confirmed path only — per-table rows-affected by "
+                        "the re-point."
+                    ),
+                ),
+                "loser_retired": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description=(
+                        "Confirmed path only — True iff the loser source row "
+                        "was soft-deleted (False only on an already-deleted "
+                        "row, which is otherwise unreachable given the "
+                        "verb's own not-found check)."
+                    ),
+                ),
+            },
+        ),
+        result_processor_customizations=MergeResultProcessorCustomizations(
+            action_label="Retire Duplicate Source",
+            result_type="ledger_duplicate_source_retired",
+            result_description=(
+                "One duplicate source row's children re-pointed to its "
+                "canonical winner; the loser row soft-deleted."
+            ),
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+    )
+    @abstractmethod
+    def retire_duplicate_source(
+        self,
+        winner_source_id: str,
+        loser_source_id: str,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Retire a duplicate ``source`` row into its canonical winner.
+
+        Schema-debt-external-id lane, 2b-S1 (2026-08-06). Operator-only
+        repair for the duplicate-source-registration defect measured live
+        (8 duplicated ``source_kind``s at diagnosis time) — full rationale,
+        winner-selection rules, and the required per-pair quiesce sequence
+        (disable both rows, wait out any active polling lease, repair,
+        re-enable the winner) are in
+        ``workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md``.
+
+        Use ``confirm=True`` to actually write. Default ``confirm=False``
+        returns a structured dry-run.
+
+        Soft-delete only, never hard — the retired row's rollback lever.
+
+        Refuses (raises ``ValueError``) on ``confirm=True`` when: the two
+        ids are identical; either source row is missing/deleted; the two
+        rows have different ``source_kind``s; OR the loser is still
+        ``enabled`` OR still shows an active polling lease — both are
+        quiesce-protocol preconditions enforced HERE, not merely trusted to
+        an external caller, so a repair cannot race the live poller even if
+        the quiesce steps were skipped upstream. Refuses (raises
+        ``LedgerRepositoryError``) if any child row still references the
+        loser after the re-point.
         """
 
 

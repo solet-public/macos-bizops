@@ -84,7 +84,6 @@ INFRA_ROUTES: frozenset[str] = frozenset(
         f"{_P}/{{bridge_id}}/peer/claim_role",
         f"{_P}/{{bridge_id}}/peer/drain",
         f"{_P}/{{bridge_id}}/peer/delivered",
-        f"{_P}/{{bridge_id}}/peer/delivered_direct",
         f"{_P}/health",
     },
 )

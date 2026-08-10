@@ -43,7 +43,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # HOMUNCULUS_NAME and therefore fails closed when unset.
 
 from _real_state_fake import RealShapeState  # noqa: E402
-from ananta.llm.agent_messaging.role_binding import HOLDER_KIND_SESSION  # noqa: E402
+from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
+    HOLDER_KIND_SESSION,
+    SYS_AUTONOMIC_SLOT,
+)
 
 from agent_messaging_plugin.role_binding_store import (  # noqa: E402
     HolderClaim,
@@ -416,6 +419,47 @@ def test_bridge_open_gate_defers_on_swept_bridge() -> None:
     )
 
 
+def test_autonomic_vertex_lane_defers_while_peer_session_holds() -> None:
+    """D2-window ruling 2026-08-04 (pulled forward on measured runaway): a
+    peer-session holder cannot serve raw vertex turns, so
+    ``get_autonomic_provider`` answers ``None`` for a HELD slot too — the
+    resolver's ``None`` → DEFER flip parks the turn in the durable queue.
+
+    Named failing mutation: reverting the method's tail to the pre-ruling
+    ``return self.get_inference_provider(resolved.agent_instance_id)`` reds
+    the held-slot leg below — the live stub provider planted on the harness
+    would be returned instead of ``None``.
+    """
+    harness = _make_harness()
+    autonomic = _bind_method(harness, "get_autonomic_provider")
+
+    _check(
+        autonomic() is None,
+        "autonomic vertex lane: VACANT slot -> None (vacancy DEFER flip, unchanged)",
+    )
+
+    claim_role_binding_v4(
+        cast("Any", harness._state),  # noqa: SLF001
+        name=SYS_AUTONOMIC_SLOT,
+        claim=HolderClaim(
+            holder_kind=HOLDER_KIND_SESSION,
+            holder_identity={"agent_id": "claude_code", "session_label": "Seat"},
+            agent_instance_id="agi-HELD",
+            agent_session_id="ases-HELD",
+            session_label="Seat",
+        ),
+    )
+    # A live provider IS present for the holder — under the pre-ruling body
+    # get_inference_provider would return it; the ruled body must not consult
+    # it for the vertex lane at all.
+    harness.get_inference_provider = lambda _agi: object()  # type: ignore[attr-defined]
+    _check(
+        autonomic() is None,
+        "autonomic vertex lane: HELD-by-peer-session slot with a live "
+        "provider -> None (vertex turns DEFER; D2-window ruling 2026-08-04)",
+    )
+
+
 # ─── Test 7: trigger-data carries inference_vertex_session_id ────────────
 
 
@@ -712,6 +756,7 @@ def main() -> int:
     test_bridge_open_gate_returns_provider_for_open_bridge()
     test_bridge_open_gate_defers_on_closed_bridge()
     test_bridge_open_gate_defers_on_swept_bridge()
+    test_autonomic_vertex_lane_defers_while_peer_session_holds()
     test_trigger_data_tags_inference_vertex_session_id()
     test_resolve_originating_role_reverse_lookup()
     test_resolve_role_to_instance()

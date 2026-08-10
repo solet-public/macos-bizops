@@ -15,19 +15,22 @@ senders got ``queued_wake`` (reads as a live wake). This smoke pins the fix:
   * **L2 labelling (role)** — same split for ``dispatch_role_send``.
   * **A1 events-ack consumption (route-level)** — GET /events returning a
     wake event does NOT consume (in-flight, not yet surfaced); the NEXT poll
-    whose cursor acks it DOES stamp the direct row consumed and the role row
-    consumed+delivered. RED anchor: an un-acked sibling row stays owed and the
-    reconciler still escalates it (a dead watcher must keep escalating).
+    whose cursor acks it DOES stamp the role row consumed+delivered.
   * **A2 watcher-only fence** — the same two-poll cycle on a NON-watcher
     binding consumes nothing (an MCP forwarder drains events without the model
     reading them; its consumption authority stays /peer/drain).
   * **A3 inbox catch-up consumption** — a watcher's arm-time
     ``peer_inbox`` default catch-up read stamps the returned role rows
-    consumed via the real route; the helper also consumes instance-section
-    (direct) entries; a non-watcher inbox read consumes nothing.
+    consumed via the real route; a non-watcher inbox read consumes nothing.
   * **A4 stdio role-send parity** — the bridge HTTP route behind stdio
     ``peer_send_by_name`` resolves the role and stamps the sender bridge
     identity onto the durable role row.
+
+A4 marker-retirement (2026-08-04): the direct-wake outbox this smoke used to
+also exercise (A1's direct-row consumption + escalation reconciler check, A2's
+direct-row fixture, A3's instance-section consumption helper) retired with
+the REL-05 apparatus it insured. Pruned to the surviving role-only paths;
+see the architect memo, Amendment 4.
 
 Run:
     HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
@@ -64,7 +67,6 @@ from ananta.llm.agent_messaging.schema import (  # noqa: E402
     NAMESPACE,
     RECIPIENT_KIND_ROLE,
     ROLE_THREAD_PREFIX,
-    TABLE_AGENT_DIRECT_WAKE,
     TABLE_AGENT_MESSAGE,
     TABLE_AGENT_ROLE_MESSAGE,
     TABLE_AGENT_THREAD,
@@ -81,9 +83,6 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from agent_messaging_plugin.bridge_sessions import BridgeSessionManager  # noqa: E402
-from agent_messaging_plugin.direct_wake_reconcile import (  # noqa: E402
-    DirectWakeReconciler,
-)
 from agent_messaging_plugin.http_routes import (  # noqa: E402
     _consume_watcher_inbox_page,
     register_routes,
@@ -152,11 +151,6 @@ def _service(state: RealShapeState, clock: _Clock) -> AgentMessagingService:
             cast(StateManagementInterface, state),
         ),
         state_service=cast(StateManagementInterface, state),
-        backend_router=cast(Any, object()),
-        flow_manager=cast(Any, object()),
-        action_factory=cast(Any, object()),
-        compilation_context_builder=cast(Any, object()),
-        bridge_delivery=cast(Any, object()),
         config=cast(Any, _EnabledConfig()),
         clock=clock,
     )
@@ -217,9 +211,6 @@ class _FakeDispatchService:
 
         return _R()
 
-    def persist_direct_wake(self, **_kwargs: Any) -> None:
-        return None
-
     def persist_role_message(self, **kwargs: Any) -> RoleMessagePersisted:
         # Mirrors the real facade's widened return: the dispatcher reads
         # ``.created_at`` off this to stamp the role-delivery wire meta.
@@ -254,11 +245,13 @@ def _dispatch_direct(
     reg: PeerRegistry,
     *,
     recipient_agi: str,
+    state: RealShapeState,
 ) -> str:
     outcome = dispatch_peer_send(
         bridge_manager=mgr,
         peer_registry=reg,
         agent_messaging_service=cast(Any, _FakeDispatchService()),
+        state_service=cast(StateManagementInterface, state),
         sender_bridge_id="agc-sender",
         sender_agent_id="claude_code",
         sender_agent_instance_id="agi-sender",
@@ -276,11 +269,13 @@ def _dispatch_role(
     reg: PeerRegistry,
     *,
     recipient_agi: str,
+    state: RealShapeState,
 ) -> str:
     outcome = dispatch_role_send(
         bridge_manager=mgr,
         peer_registry=reg,
         agent_messaging_service=cast(Any, _FakeDispatchService()),
+        state_service=cast(StateManagementInterface, state),
         role_name="R",
         role=ResolvedRole(
             name="R",
@@ -336,12 +331,12 @@ def test_labelling() -> None:
                 "claude_code", _FakeWakeAdapter(mgr, watcher_bridge),
             )
         _check(
-            _dispatch_direct(mgr, reg, recipient_agi=WATCHER_AGI)
+            _dispatch_direct(mgr, reg, recipient_agi=WATCHER_AGI, state=RealShapeState())
             == watcher_expect,
             f"L1: direct IMPORTANT to a watcher ({transport}) → {watcher_expect}",
         )
         _check(
-            _dispatch_role(mgr, reg, recipient_agi=WATCHER_AGI)
+            _dispatch_role(mgr, reg, recipient_agi=WATCHER_AGI, state=RealShapeState())
             == watcher_expect,
             f"L2: role IMPORTANT to a watcher holder ({transport}) → {watcher_expect}",
         )
@@ -350,11 +345,13 @@ def test_labelling() -> None:
                 "claude_code", _FakeWakeAdapter(mgr, live_bridge),
             )
         _check(
-            _dispatch_direct(mgr, reg, recipient_agi=LIVE_AGI) == live_expect,
+            _dispatch_direct(mgr, reg, recipient_agi=LIVE_AGI, state=RealShapeState())
+            == live_expect,
             f"L1: direct IMPORTANT to a non-watcher ({transport}) → {live_expect}",
         )
         _check(
-            _dispatch_role(mgr, reg, recipient_agi=LIVE_AGI) == live_expect,
+            _dispatch_role(mgr, reg, recipient_agi=LIVE_AGI, state=RealShapeState())
+            == live_expect,
             f"L2: role IMPORTANT to a non-watcher holder ({transport}) → {live_expect}",
         )
 
@@ -383,22 +380,6 @@ def _routes_client(
     return TestClient(app)
 
 
-def _persist_direct_row(svc: AgentMessagingService, *, message_id: str) -> None:
-    svc.persist_direct_wake(
-        message_id=message_id,
-        thread_id="agt-1",
-        recipient_agent_id="claude_code",
-        recipient_agent_instance_id=WATCHER_AGI,
-        recipient_agent_session_id=f"ases-{WATCHER_AGI}",
-        sender_agent_id="claude_code",
-        sender_agent_instance_id="agi-sender",
-        sender_session_label="Sender",
-        sender_bridge_id="agc-sender",
-        content=[TextPart(type="text", text="IMPORTANT: ping")],
-        activity_at_emission=None,
-    )
-
-
 def _row(state: RealShapeState, table: str, message_id: str) -> dict[str, Any]:
     return next(
         r
@@ -421,9 +402,8 @@ def test_events_ack_consumption() -> None:
         session_label="GC",
         parent_pid=77,
     )
-    # An owed direct row + an owed role row, each with its wake event queued on
-    # the watcher's bridge exactly as the dispatch transports append them.
-    _persist_direct_row(svc, message_id="agm-d1")
+    # An owed role row, with its wake event queued on the watcher's bridge
+    # exactly as the dispatch transport appends it.
     persisted_role = svc.persist_role_message(
         recipient_kind=RECIPIENT_KIND_ROLE,
         recipient_key="R",
@@ -449,52 +429,22 @@ def test_events_ack_consumption() -> None:
     )
     role_external = role_message_external_id(RECIPIENT_KIND_ROLE, "R", "agm-r1")
     mgr.append_event(
-        watcher_bridge, EVENT_POST_MESSAGE, "ping",
-        {"message_id": "agm-d1", "thread_id": "agt-1"},
-    )
-    mgr.append_event(
         watcher_bridge, EVENT_POST_MESSAGE, "role ping",
         {"message_id": "agm-r1", META_KEY_DELIVERY_EXTERNAL_ID: role_external},
     )
     client = _routes_client(mgr, reg, svc, state)
     first = client.get(f"/api/v1/bridge/{watcher_bridge}/events?after=-1").json()
     _check(
-        len(first["events"]) == 2
-        and _row(state, TABLE_AGENT_DIRECT_WAKE, "agm-d1")["consumed"] is False
+        len(first["events"]) == 1
         and _row(state, TABLE_AGENT_ROLE_MESSAGE, "agm-r1")["consumed"] is False,
         "A1: returning events does NOT consume (in-flight, not yet surfaced)",
     )
     ack_cursor = first["next_cursor"]
     client.get(f"/api/v1/bridge/{watcher_bridge}/events?after={ack_cursor}")
-    direct_row = _row(state, TABLE_AGENT_DIRECT_WAKE, "agm-d1")
     role_row = _row(state, TABLE_AGENT_ROLE_MESSAGE, "agm-r1")
-    _check(
-        direct_row["consumed"] is True and bool(direct_row["consumed_at"]),
-        "A1: the cursor ack stamps the direct row consumed",
-    )
     _check(
         role_row["consumed"] is True and role_row["delivered"] is True,
         "A1: the cursor ack stamps the role row consumed + delivered",
-    )
-    # Green: nothing escalatable far past the cap-equivalent time — an ARMED
-    # watcher never produces recipient_gone spam. Red anchor: a NEW un-acked
-    # row (dead/unread watcher) still escalates.
-    reconciler = DirectWakeReconciler(
-        service=svc,
-        bridge_manager=mgr,
-        peer_registry=reg,
-        cap=3,
-        re_emit_window_s=300,
-        clock=lambda: T0 + timedelta(seconds=100_000),
-    )
-    _check(
-        reconciler.reconcile() == 0,
-        "A1: acked deliveries never escalate (recipient_gone spam is gone)",
-    )
-    _persist_direct_row(svc, message_id="agm-d2")
-    _check(
-        reconciler.reconcile() == 1,
-        "A1 red anchor: an UN-acked owed row still escalates (dead watcher stays loud)",
     )
 
 
@@ -509,25 +459,24 @@ def test_events_ack_is_watcher_only() -> None:
         reg,
         bridge_id=live_bridge,
         agent_instance_id=LIVE_AGI,
-        session_label="Live",
+        session_label="R",
         parent_pid=88,
     )
-    svc.persist_direct_wake(
-        message_id="agm-d3",
-        thread_id="agt-1",
-        recipient_agent_id="claude_code",
-        recipient_agent_instance_id=LIVE_AGI,
-        recipient_agent_session_id=f"ases-{LIVE_AGI}",
+    _seed_role_binding(state, role="R", agi=LIVE_AGI)
+    svc.persist_role_message(
+        recipient_kind=RECIPIENT_KIND_ROLE,
+        recipient_key="R",
+        message_id="agm-r-nonwatcher",
         sender_agent_id="claude_code",
         sender_agent_instance_id="agi-sender",
         sender_session_label="Sender",
-        sender_bridge_id="agc-sender",
+        important=True,
         content=[TextPart(type="text", text="IMPORTANT: ping")],
-        activity_at_emission=None,
     )
+    role_external = role_message_external_id(RECIPIENT_KIND_ROLE, "R", "agm-r-nonwatcher")
     mgr.append_event(
-        live_bridge, EVENT_POST_MESSAGE, "ping",
-        {"message_id": "agm-d3", "thread_id": "agt-1"},
+        live_bridge, EVENT_POST_MESSAGE, "role ping",
+        {"message_id": "agm-r-nonwatcher", META_KEY_DELIVERY_EXTERNAL_ID: role_external},
     )
     client = _routes_client(mgr, reg, svc, state)
     first = client.get(f"/api/v1/bridge/{live_bridge}/events?after=-1").json()
@@ -535,7 +484,7 @@ def test_events_ack_is_watcher_only() -> None:
         f"/api/v1/bridge/{live_bridge}/events?after={first['next_cursor']}",
     )
     _check(
-        _row(state, TABLE_AGENT_DIRECT_WAKE, "agm-d3")["consumed"] is False,
+        _row(state, TABLE_AGENT_ROLE_MESSAGE, "agm-r-nonwatcher")["consumed"] is False,
         "A2: a NON-watcher bridge's events ack consumes nothing (forwarder"
         " drains are not reads)",
     )
@@ -713,46 +662,51 @@ def test_inbox_default_catchup_returns_direct_important() -> None:
     )
 
 
-def test_inbox_helper_consumes_direct_entries() -> None:
+def test_inbox_helper_consumes_role_entries() -> None:
+    """A4 (2026-08-04): the instance-section (direct) half of this helper
+    retired with the direct-wake outbox it stamped — page.entries is still
+    valid message history, just no longer paired with an outbox row to mark.
+    This proves the surviving role_entries half still consumes correctly."""
     state = RealShapeState()
     clock = _Clock(T0)
     svc = _service(state, clock)
-    _persist_direct_row(svc, message_id="agm-d4")
-    entry = PeerInboxEntry(
-        thread_id="agt-1",
+    svc.persist_role_message(
+        recipient_kind=RECIPIENT_KIND_ROLE,
+        recipient_key="R",
+        message_id="agm-r4",
+        sender_agent_id="claude_code",
+        sender_agent_instance_id="agi-sender",
+        sender_session_label="Sender",
+        important=True,
+        content=[TextPart(type="text", text="IMPORTANT: ping")],
+    )
+    role_external = role_message_external_id(RECIPIENT_KIND_ROLE, "R", "agm-r4")
+    role_entry = PeerInboxEntry(
+        thread_id=f"{ROLE_THREAD_PREFIX}R",
         sender_agent_id="claude_code",
         sender_agent_instance_id="agi-sender",
         sender_session_label="Sender",
         message=AgentMessageRow(
-            id="agm-d4",
-            thread_id="agt-1",
+            id="agm-r4",
+            thread_id=f"{ROLE_THREAD_PREFIX}R",
             cursor=0,
             role=MessageRole.ORIGINATOR,
             kind=MessageKind.MESSAGE,
-            content=[TextPart(type="text", text="ping")],
+            content=[TextPart(type="text", text="role ping")],
             created_at=T0,
         ),
     )
 
     class _Page:
-        entries = (entry,)
-        role_entries: tuple[PeerInboxEntry, ...] = ()
+        entries: tuple[PeerInboxEntry, ...] = ()
+        role_entries = (role_entry,)
 
-    binding = BridgeBinding(
-        bridge_id="agc-w",
-        agent_id="claude_code",
-        agent_instance_id=WATCHER_AGI,
-        session_label="GC",
-        parent_pid=77,
-    )
-    _consume_watcher_inbox_page(svc, binding, _Page())
+    del role_external  # derivation is exercised inside the helper itself
+    _consume_watcher_inbox_page(svc, _Page())
     _check(
-        _row(state, TABLE_AGENT_DIRECT_WAKE, "agm-d4")["consumed"] is True,
-        "A3: the inbox helper consumes instance-section (direct) entries",
-    )
-    _check(
-        ROLE_THREAD_PREFIX == "role:",
-        "A3: role thread prefix matches the persisted synthetic handle",
+        _row(state, TABLE_AGENT_ROLE_MESSAGE, "agm-r4")["consumed"] is True,
+        "A3: the inbox helper consumes role_entries (proves the external_id "
+        "re-derivation from the thread_id/message_id also worked)",
     )
 
 
@@ -844,7 +798,7 @@ def main() -> None:
     test_events_ack_is_watcher_only()
     test_inbox_catchup_consumption()
     test_inbox_default_catchup_returns_direct_important()
-    test_inbox_helper_consumes_direct_entries()
+    test_inbox_helper_consumes_role_entries()
     test_inbox_is_watcher_only()
     test_peer_send_by_name_route_dispatches_from_bridge_identity()
     print(f"\n{_passed} passed, {len(_failed)} failed")

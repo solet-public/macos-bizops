@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dax 29.2 hide-paging smoke tests for marketo_plugin.
+"""Hide-paging (2026-08-03 change) smoke tests for marketo_plugin.
 
 Operator ruling (2026-08-03, verbatim: "we need to deliver the results - the
 paging is an implementation detail that should be hidden"), design doc
@@ -16,7 +16,7 @@ request 500 -> 2 internal pages -> one complete file.
 Hermetic — a MagicMock standing in for MarketoClient (get_json mocked
 directly, side_effect list of decoded envelope dicts), no live instance. A
 real passthrough gate (unit tests of marketing_actions functions directly,
-not the plugin's containment gate; see smoke_spill_floor.py for that).
+not the plugin's containment gate; see smoke_data_export.py for that).
 
 Exercises, per verb (get_leads, get_activities, list_campaigns,
 list_static_lists):
@@ -291,7 +291,7 @@ def _override_friction_cases(call: Any, label_prefix: str, *, activity_shaped: b
 
 
 def main() -> int:
-    print("\nmarketo_plugin Dax 29.2 hide-paging (internal pagination) smoke tests")
+    print("\nmarketo_plugin hide-paging (internal pagination) smoke tests")
     print("=" * 71)
     test_get_leads_named_acceptance_scenario()
     test_get_leads_override_friction()
@@ -306,7 +306,7 @@ def main() -> int:
     if _failed:
         print("FAILED:", _failed)
         return 1
-    print("All Dax 29.2 hide-paging smoke tests passed.")
+    print("All hide-paging smoke tests passed.")
     return 0
 
 

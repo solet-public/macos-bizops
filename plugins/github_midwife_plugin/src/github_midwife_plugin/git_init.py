@@ -113,24 +113,41 @@ def _git(clone_root: Path, args: list[str], timeout: int, run: Runner) -> subpro
 
 
 def git_init_worktree(clone_root: Path, name: str, *, run: Runner = subprocess.run) -> dict[str, Any]:
-    """Give the born tree at ``clone_root`` a fresh, empty git worktree if it does
-    not already have one. Returns a phase record dict.
+    """Give the born tree at ``clone_root`` a ``.gitignore``, and a fresh, empty
+    git worktree if it does not already have one. Returns a phase record dict.
 
-    Idempotent: if ``clone_root/.git`` already exists the tree is already a
-    worktree and this is a no-op (``status="skipped"``). Writes ``.gitignore``
-    only if absent (never clobbers operator edits). On a fresh init: ``git init``
-    (empty history, branch ``main``), a LOCAL git identity (never ``--global`` —
-    the operator's own git config is untouched), ``git add -A``, and one initial
-    commit. Raises :class:`GitInitError` on any git failure (fail loud).
+    The ``.gitignore`` write comes FIRST and runs for BOTH shapes of tree, which
+    is load-bearing rather than tidy. The seed is distributed as a GitHub repo, so
+    an adopter's clone arrives ALREADY a worktree; while this write sat below the
+    ``.git`` early-return, every cloned seed — which is every adopter — silently
+    got no ``.gitignore`` at all, leaving runtime state and secrets a stray
+    ``git add -A`` away from being committed (reported by an external adopter).
+    Only the HISTORY half is conditional.
+
+    So ``status="skipped"`` means "history untouched", NOT "did nothing": that
+    branch can still have written a ``.gitignore``, and reports which via
+    ``gitignore_written``, present on both statuses so a caller never has to infer
+    it from ``status``. Written only if absent — an operator's existing file is
+    never clobbered, in either shape.
+
+    On a fresh init: ``git init`` (empty history, branch ``main``), a LOCAL git
+    identity (never ``--global`` — the operator's own git config is untouched),
+    ``git add -A``, and one initial commit. Raises :class:`GitInitError` on any
+    git failure (fail loud).
     """
-    if (clone_root / ".git").exists():
-        return {"step_name": "git_init", "status": "skipped", "reason": "already a git worktree"}
-
     gitignore = clone_root / ".gitignore"
     gitignore_written = False
     if not gitignore.exists():
         gitignore.write_text(_GITIGNORE, encoding="utf-8")
         gitignore_written = True
+
+    if (clone_root / ".git").exists():
+        return {
+            "step_name": "git_init",
+            "status": "skipped",
+            "reason": "already a git worktree",
+            "gitignore_written": gitignore_written,
+        }
 
     _git(clone_root, ["-c", "init.defaultBranch=main", "init", "-q"], GIT_COMMIT_TIMEOUT_S, run)
     # LOCAL identity only (repo config, NEVER --global): the newborn owns its

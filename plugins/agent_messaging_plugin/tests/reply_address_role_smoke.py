@@ -32,6 +32,7 @@ at cutover.
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -168,6 +169,10 @@ class _OpenBridge:
     # H2 quiet-gap capture reads this off the RECIPIENT's live bridge. The fake
     # carries it rather than letting a getattr default hide the contract.
     last_model_activity_at = ""
+    # A4 Amendment 5: binding_is_live (now checked for EVERY recipient kind,
+    # not just watchers) reads this off the bridge -- a fresh timestamp keeps
+    # this fixture's "live" bridge genuinely live under the generalized check.
+    last_seen_at = datetime.now(UTC).isoformat()
 
     def touch(self) -> None:
         return
@@ -176,7 +181,6 @@ class _OpenBridge:
 class _Service:
     def __init__(self) -> None:
         self.persisted: list[dict[str, Any]] = []
-        self.direct_wakes: list[dict[str, Any]] = []
 
     def persist_role_message(self, **kwargs: Any) -> RoleMessagePersisted:
         self.persisted.append(kwargs)
@@ -192,13 +196,6 @@ class _Service:
 
     def mark_delivered(self, *, external_id: str) -> None:
         del external_id
-
-    def persist_direct_wake(self, **kwargs: Any) -> None:
-        # REL-05 outbox insurance on the direct path. Captured rather than
-        # stubbed away: dispatch calls it AFTER a successful emission, so a fake
-        # that omitted it would let the send appear to succeed on a path the
-        # real dispatch would have raised through.
-        self.direct_wakes.append(kwargs)
 
 
 class _SendResult:

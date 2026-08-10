@@ -22,7 +22,9 @@ Verbs:
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -37,14 +39,16 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.config.config_provider import ConfigProvider
 from ananta.core.domain.enums import ActionStatus, ProcessorPolicyCategory
-from ananta.core.plugins.plugin_base import PluginBase
+from ananta.core.domain.types import ActionResult
+from ananta.core.plugins.decorators import service_lifecycle
+from ananta.core.plugins.plugin_base import ServicePlugin
 from ananta.interfaces.edge_process_provider import (
     EdgeProcessDefinition,
     EdgeProcessProvider,
 )
 from googleapiclient.errors import HttpError
 
-from . import docs_actions, drive_actions, gmail_actions, sheets_actions, slides_actions
+from . import completion_templates, docs_actions, drive_actions, gmail_actions, sheets_actions, slides_actions
 from .constants import (
     BLOB_NAMESPACE,
     DRIVE_DEFAULT_PAGE_SIZE,
@@ -61,6 +65,7 @@ from .constants import (
     ERROR_VAULT_NOT_AVAILABLE,
     GMAIL_DEFAULT_MAX_RESULTS,
     GMAIL_MAX_RESULTS_CAP,
+    JOB_ACTION_NAME,
     PARAM_ACKNOWLEDGE_OVERRIDE,
     PARAM_ROW_LIMIT,
     PLUGIN_NAME,
@@ -103,7 +108,22 @@ from .oauth.service_factory import GoogleServiceFactory
 from .oauth.token_store import TokenStore, TokenStoreError
 
 
-class GSuitePlugin(PluginBase, EdgeProcessProvider):
+@dataclass
+class _DeferredJobRuntime:
+    """D0.3 deferred-completion state, bundled into one attribute (god-class budget).
+
+    A single serial worker thread — matches comfyui_image_generation_plugin and
+    cosyvoice2_tts_plugin's one-worker-thread precedent, which is what keeps
+    FlowManager._sequence_cache's unlocked check-then-increment safe per the
+    doctrine's mechanic-1 caveat.
+    """
+
+    manager: Any | None = None
+    thread: threading.Thread | None = None
+    stop_event: threading.Event = field(default_factory=threading.Event)
+
+
+class GSuitePlugin(ServicePlugin, EdgeProcessProvider):
     """Google Workspace (Gmail / Drive / Sheets / Docs / Slides) plugin."""
 
     name: str = PLUGIN_NAME
@@ -120,6 +140,7 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         self._oauth_server: OAuthServer = OAuthServer()
         # In-memory PKCE store: state_nonce -> code_verifier. Short-lived.
         self._pending_states: dict[str, str] = {}
+        self._deferred: _DeferredJobRuntime = _DeferredJobRuntime()
 
     def set_vault_service(self, vault_service: object) -> None:
         """Receive the caller-bound VaultServiceProxy from lifecycle injection."""
@@ -183,6 +204,270 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         self._token_store = TokenStore(self._vault_service, self._app_config_loader)
         self._service_factory = GoogleServiceFactory(self._token_store)
         self.set_ready()
+
+    @service_lifecycle(operation="start")
+    async def start_services(self) -> ActionResult:
+        """Start the single serial background job-processing thread (D0.3 shape)."""
+        if self._services_started:
+            return {
+                "action_status": ActionStatus.COMPLETED.value,
+                "data": {"message": "Service already running"},
+                "actions": [],
+                "error": None,
+            }
+        self._deferred.stop_event.clear()
+        self._deferred.thread = threading.Thread(
+            target=self._job_processing_loop,
+            name="gsuite-async-jobs",
+            daemon=False,
+        )
+        self._deferred.thread.start()
+        self._services_started = True
+        self._service_started_at = datetime.now(UTC).isoformat()
+        self._service_error = None
+        return {
+            "action_status": ActionStatus.COMPLETED.value,
+            "data": {"message": "Service started successfully"},
+            "actions": [],
+            "error": None,
+        }
+
+    @service_lifecycle(operation="stop")
+    async def stop_services(self) -> ActionResult:
+        """Stop the background job-processing thread."""
+        if not self._services_started:
+            return {
+                "action_status": ActionStatus.COMPLETED.value,
+                "data": {"message": "Service already stopped"},
+                "actions": [],
+                "error": None,
+            }
+        self._deferred.stop_event.set()
+        if self._deferred.thread is not None:
+            self._deferred.thread.join(timeout=30.0)
+            self._deferred.thread = None
+        self._services_started = False
+        self._service_started_at = None
+        return {
+            "action_status": ActionStatus.COMPLETED.value,
+            "data": {"message": "Service stopped successfully"},
+            "actions": [],
+            "error": None,
+        }
+
+    # ------------------------------------------------------------------
+    # D0.3 deferred-completion machinery
+    # ------------------------------------------------------------------
+
+    def _try_acquire_job_manager(self) -> None:
+        """Deferred DI: AsyncJobManager becomes available on orchestrator_ref only
+        after platform startup completes — acquire it lazily, cache permanently."""
+        if self._deferred.manager is not None:
+            return
+        if self.orchestrator_ref is None:
+            return
+        job_manager = getattr(self.orchestrator_ref, "async_job_manager", None)
+        if job_manager is not None:
+            self._deferred.manager = job_manager
+
+    def _job_processing_loop(self) -> None:
+        """Poll for queued Workspace jobs and process them one at a time."""
+        stop_event = self._deferred.stop_event
+        while not stop_event.is_set():
+            try:
+                self._poll_and_process_once(stop_event)
+            except Exception:
+                if self.logger:
+                    self.logger.exception("g_suite job processing loop error")
+                stop_event.wait(5.0)
+
+    def _poll_and_process_once(self, stop_event: threading.Event) -> None:
+        """One poll cycle: acquire the manager, fetch at most one queued job, run it."""
+        self._try_acquire_job_manager()
+        manager = self._deferred.manager
+        if manager is None:
+            stop_event.wait(2.0)
+            return
+        result = manager.list_jobs(
+            status="queued",
+            provider_name=f"{PLUGIN_NAME}.{JOB_ACTION_NAME}",
+            limit=1,
+            order_by="created_at ASC",
+        )
+        jobs = (result.get("data") or {}).get("jobs", [])
+        if not jobs:
+            stop_event.wait(2.0)
+            return
+        for job in jobs:
+            if stop_event.is_set():
+                break
+            self._process_job(job)
+
+    def _process_job(self, job: dict[str, Any]) -> None:
+        """Look up the queued job's verb + params and run the real Google API call."""
+        job_id = str(job.get("id", job.get("job_id", "")))
+        manager = self._deferred.manager
+        assert manager is not None
+        manager.update_job(job_id, {"status": "processing"})
+        verb = ""
+        try:
+            payload_result = manager.get_job_payload(job_id)
+            request_data: dict[str, Any] = (payload_result.get("data") or {}).get("payload") or {}
+            verb = str(request_data.get("verb", ""))
+            params: dict[str, Any] = request_data.get("params") or {}
+            produce = self._deferred_producers().get(verb)
+            if produce is None:
+                raise ValueError(f"no deferred producer registered for verb '{verb}'")
+            data = produce(params)
+        except Exception as exc:  # noqa: BLE001 — classified below, never re-raised
+            code, message = _classify_deferred_exception(exc)
+            self._fail_job(job_id, code, message)
+            return
+        if self.logger:
+            self.logger.debug("%s: deferred success (job_id=%s)", verb, job_id)
+        manager.update_job(job_id, {"status": "completed", "result": data})
+
+    def _fail_job(self, job_id: str, code: str, message: str) -> None:
+        manager = self._deferred.manager
+        assert manager is not None
+        manager.update_job(
+            job_id, {"status": "error", "error": {"code": code, "message": message}}
+        )
+
+    def _deferred_producers(self) -> dict[str, Callable[[dict[str, Any]], dict[str, Any]]]:
+        """verb name -> zero-state callable performing the real Google API I/O.
+
+        Built lazily (not a class-level dict) because each thunk closes over
+        ``self`` for ``_require_factory()`` / ``_store_blob`` / ``_load_attachment``.
+        """
+        return {
+            "gmail_list_messages": lambda params: gmail_actions.list_messages(
+                self._require_factory().gmail(), params
+            ),
+            "gmail_get_message": lambda params: gmail_actions.get_message(
+                self._require_factory().gmail(), params
+            ),
+            "gmail_send": lambda params: gmail_actions.send_message(
+                self._require_factory().gmail(), params, self._load_attachment
+            ),
+            "drive_download_file": lambda params: drive_actions.download_file(
+                self._require_factory().drive(), params, self._store_blob
+            ),
+            "drive_upload_file": lambda params: drive_actions.upload_file(
+                self._require_factory().drive(), params, self._load_attachment
+            ),
+            "drive_list_files": lambda params: drive_actions.list_files(
+                self._require_factory().drive(), params
+            ),
+            "drive_create_folder": lambda params: drive_actions.create_folder(
+                self._require_factory().drive(), params
+            ),
+            "drive_share": lambda params: drive_actions.share_file(
+                self._require_factory().drive(), params
+            ),
+            "sheets_create_from_files": lambda params: sheets_actions.create_spreadsheet_from_files(
+                self._require_factory().sheets(), params
+            ),
+            "sheets_create": lambda params: sheets_actions.create_spreadsheet(
+                self._require_factory().sheets(), params
+            ),
+            "sheets_get_values": lambda params: sheets_actions.get_values(
+                self._require_factory().sheets(), params
+            ),
+            "sheets_update_values": lambda params: sheets_actions.update_values(
+                self._require_factory().sheets(), params
+            ),
+            "sheets_append_values": lambda params: sheets_actions.append_values(
+                self._require_factory().sheets(), params
+            ),
+            "sheets_batch_update": lambda params: sheets_actions.batch_update(
+                self._require_factory().sheets(), params
+            ),
+            "slides_create": lambda params: slides_actions.create_presentation(
+                self._require_factory().slides(), params
+            ),
+            "slides_get": lambda params: slides_actions.get_presentation(
+                self._require_factory().slides(), params
+            ),
+            "slides_batch_update": lambda params: slides_actions.batch_update(
+                self._require_factory().slides(), params
+            ),
+            "docs_create": lambda params: docs_actions.create_document(
+                self._require_factory().docs(), params
+            ),
+            "docs_get": lambda params: docs_actions.get_document(
+                self._require_factory().docs(), params
+            ),
+            "docs_batch_update": lambda params: docs_actions.batch_update(
+                self._require_factory().docs(), params
+            ),
+        }
+
+    @staticmethod
+    def _validate_deferred_context(state: dict[str, Any]) -> tuple[str, str] | None:
+        """Extract (session_id, flow_id) from state, or None if either is unusable."""
+        session_id = state.get("session_id")
+        flow_id = state.get("flow_id")
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        if not isinstance(flow_id, str) or not flow_id:
+            return None
+        return session_id, flow_id
+
+    def _create_deferred_job(
+        self, verb: str, session_id: str, flow_id: str, params: dict[str, Any]
+    ) -> tuple[str, None] | tuple[None, str]:
+        """Create the job row; returns (job_id, None) or (None, error_message)."""
+        manager = self._deferred.manager
+        assert manager is not None
+        process_key = f"plugin::{PLUGIN_NAME}::{verb}"
+        job_metadata = completion_templates.build_job_metadata(session_id, flow_id, verb, process_key)
+        create_result = manager.create_job(
+            plugin_name=PLUGIN_NAME,
+            action_name=JOB_ACTION_NAME,
+            request_data={"notes": f"{verb} ({session_id})", "verb": verb, "params": params},
+            job_metadata=job_metadata,
+        )
+        if create_result.get("action_status") != ActionStatus.COMPLETED.value:
+            message = (create_result.get("error") or {}).get("message", "job creation failed")
+            return None, str(message)
+        job_id = (create_result.get("data") or {}).get("job_id")
+        if not isinstance(job_id, str) or not job_id:
+            return None, "job creation returned no job_id"
+        return job_id, None
+
+    def _run_deferred(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+        verb: str,
+    ) -> dict[str, Any]:
+        """Ms-scale dispatch (D0.3 shape): validate, enqueue, return a job handle.
+
+        The real Google API call happens later, off this dispatch path, in
+        ``_process_job`` on the single background worker thread.
+        """
+        if not self._require_token_store().is_connected():
+            return self._error(
+                ERROR_NOT_CONNECTED,
+                "No Google account connected. Run connect_account first.",
+            )
+        context = self._validate_deferred_context(state)
+        if context is None:
+            return self._error(
+                ERROR_INVALID_PARAMS, "session_id/flow_id missing from state context"
+            )
+        self._try_acquire_job_manager()
+        if self._deferred.manager is None:
+            return self._error(
+                ERROR_API_ERROR,
+                "AsyncJobManager not available — platform startup may not be complete",
+            )
+        session_id, flow_id = context
+        job_id, error_message = self._create_deferred_job(verb, session_id, flow_id, params)
+        if job_id is None:
+            return self._error(ERROR_API_ERROR, error_message or "job creation failed")
+        return self._success({"job_id": job_id, "status": "queued"})
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -563,10 +848,14 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
             "already sits at the vendor's per-call ceiling (nothing for an override to raise to "
             "without building pageToken pagination across multiple calls, which this verb does not "
             "do). Returns message + thread ids only, never message content; use gmail_get_message "
-            "for one message's content once you have its id. Requires a connected account (run "
-            "connect_account first)."
+            "for one message's content once you have its id. Runs as a background job: this "
+            "dispatches the search and returns a job_id immediately; the matching ids arrive via a "
+            "follow-up message once it completes. Requires a connected account (run connect_account "
+            "first)."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "query": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -585,26 +874,27 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Matching message + thread ids — never message content.",
+            description="job_id for the queued search plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def gmail_list_messages(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: gmail_actions.list_messages(self._require_factory().gmail(), params),
-            "gmail_list_messages",
-        )
+        return self._run_deferred(params, state, "gmail_list_messages")
 
     @platform_process(
         name="gmail_get_message",
         display_name="Gmail: Get Message",
         description=(
             "Fetch one Gmail message by id: key headers (from/to/cc/subject/date), the plain-text "
-            "body, and attachment metadata (id/name/mime/size — not the attachment bytes). Requires "
-            "a connected account."
+            "body, and attachment metadata (id/name/mime/size — not the attachment bytes). Runs as "
+            "a background job: this dispatches the fetch and returns a job_id immediately; the "
+            "message content arrives via a follow-up message once it completes. Requires a "
+            "connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -614,26 +904,27 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Message headers, body_text, and attachment metadata.",
+            description="job_id for the queued fetch plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def gmail_get_message(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: gmail_actions.get_message(self._require_factory().gmail(), params),
-            "gmail_get_message",
-        )
+        return self._run_deferred(params, state, "gmail_get_message")
 
     @platform_process(
         name="gmail_send",
         display_name="Gmail: Send Message",
         description=(
             "Send a plain-text email from the connected account. Optional 'attachments' is a list "
-            "of blob ids (from blob storage) attached by filename + mime type. Returns the sent "
-            "message id + thread id. Requires a connected account."
+            "of blob ids (from blob storage) attached by filename + mime type. Runs as a background "
+            "job: this dispatches the send and returns a job_id immediately; the sent message id + "
+            "thread id arrive via a follow-up message once delivery completes. Requires a connected "
+            "account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "to": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -658,18 +949,13 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Sent message id and thread id.",
+            description="job_id for the queued send plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def gmail_send(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: gmail_actions.send_message(
-                self._require_factory().gmail(), params, self._load_attachment
-            ),
-            "gmail_send",
-        )
+        return self._run_deferred(params, state, "gmail_send")
 
     # ------------------------------------------------------------------
     # @platform_process implementations — Drive
@@ -686,7 +972,9 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
             f"acknowledge_default_limit_override=true together with an explicit row_limit (up to "
             f"{DRIVE_PAGE_SIZE_CAP}, Drive's own real single-call maximum, Google, current as of "
             "this writing) — both are required together, and a row_limit above the cap is refused "
-            "rather than silently clamped. Requires a connected account."
+            "rather than silently clamped. Runs as a background job: this dispatches the listing "
+            "and returns a job_id immediately; the matching files arrive via a follow-up message "
+            "once the listing completes. Requires a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -724,28 +1012,31 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
                 ),
             ),
         },
+        is_async=True,
+        is_long_running=True,
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Matching files with id/name/mime/modified/size.",
+            description="job_id for the queued listing plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def drive_list_files(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: drive_actions.list_files(self._require_factory().drive(), params),
-            "drive_list_files",
-        )
+        return self._run_deferred(params, state, "drive_list_files")
 
     @platform_process(
         name="drive_download_file",
         display_name="Drive: Download File",
         description=(
-            "Download a binary Drive file (PDF, image, zip, etc.) into blob storage and return its "
-            "file_blob_key. Google-native docs (Docs/Sheets/Slides) cannot be downloaded — use the "
+            "Download a binary Drive file (PDF, image, zip, etc.) into blob storage. Runs as a "
+            "background job: this dispatches the download and returns a job_id immediately; the "
+            "file_blob_key, name, and mime arrive via a follow-up message once the download "
+            "completes. Google-native docs (Docs/Sheets/Slides) cannot be downloaded — use the "
             "matching export verb instead. Requires a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -755,18 +1046,13 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="file_blob_key + namespace referencing the stored bytes, plus name and mime.",
+            description="job_id for the queued download plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def drive_download_file(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: drive_actions.download_file(
-                self._require_factory().drive(), params, self._store_blob
-            ),
-            "drive_download_file",
-        )
+        return self._run_deferred(params, state, "drive_download_file")
 
     @platform_process(
         name="drive_upload_file",
@@ -774,10 +1060,14 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Upload bytes to Drive from a blob (blob_key). Content comes from blob storage only — "
             "to upload a local file, ingest it via blob_storage_service.store_blob_from_file first "
-            "and pass the resulting blob_key. Optional parent folder id and mime override. Returns "
-            "the new file's id and web view link. Requires a connected account."
+            "and pass the resulting blob_key. Optional parent folder id and mime override. Runs as "
+            "a background job: this dispatches the upload and returns a job_id immediately; the "
+            "new file's id and web view link arrive via a follow-up message once the upload "
+            "completes. Requires a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "name": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -802,27 +1092,26 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="New Drive file id and web view link.",
+            description="job_id for the queued upload plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def drive_upload_file(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: drive_actions.upload_file(
-                self._require_factory().drive(), params, self._load_attachment
-            ),
-            "drive_upload_file",
-        )
+        return self._run_deferred(params, state, "drive_upload_file")
 
     @platform_process(
         name="drive_create_folder",
         display_name="Drive: Create Folder",
         description=(
-            "Create a Drive folder, optionally nested under a parent folder id. Returns the new "
-            "folder's id. Requires a connected account."
+            "Create a Drive folder, optionally nested under a parent folder id. Runs as a "
+            "background job: this dispatches the creation and returns a job_id immediately; the "
+            "new folder's id arrives via a follow-up message once creation completes. Requires a "
+            "connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "name": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -837,26 +1126,27 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="New folder id.",
+            description="job_id for the queued folder creation plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def drive_create_folder(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: drive_actions.create_folder(self._require_factory().drive(), params),
-            "drive_create_folder",
-        )
+        return self._run_deferred(params, state, "drive_create_folder")
 
     @platform_process(
         name="drive_share",
         display_name="Drive: Share File",
         description=(
-            "Grant a Drive file or folder permission to an email address at a given role "
-            "(reader, commenter, writer). No notification email is sent. Requires a connected "
-            "account."
+            "Share a Drive file or folder with an email address at a given permission role "
+            "(reader, commenter, writer). No notification email is sent. Runs as a background "
+            "job: this dispatches the share and returns a job_id immediately; confirmation and the "
+            "new permission id arrive via a follow-up message once it completes. Requires a "
+            "connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -876,16 +1166,13 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Confirmation and the new permission id.",
+            description="job_id for the queued share plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def drive_share(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: drive_actions.share_file(self._require_factory().drive(), params),
-            "drive_share",
-        )
+        return self._run_deferred(params, state, "drive_share")
 
     # ------------------------------------------------------------------
     # @platform_process implementations — Sheets
@@ -894,8 +1181,15 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="sheets_create",
         display_name="Sheets: Create Spreadsheet",
-        description="Create a new spreadsheet with the given title. Returns its id. Requires a connected account.",
+        description=(
+            "Create a new spreadsheet with the given title. Runs as a background job: this "
+            "dispatches the creation and returns a job_id immediately; the new spreadsheet's id "
+            "arrives via a follow-up message once creation completes. Requires a connected "
+            "account."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "title": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -905,26 +1199,27 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="New spreadsheet id.",
+            description="job_id for the queued spreadsheet creation plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def sheets_create(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: sheets_actions.create_spreadsheet(self._require_factory().sheets(), params),
-            "sheets_create",
-        )
+        return self._run_deferred(params, state, "sheets_create")
 
     @platform_process(
         name="sheets_create_from_files",
         display_name="Sheets: Create Spreadsheet From Files",
         description=(
             "Create a new spreadsheet with one tab per entry, each tab's values loaded from a "
-            "local .csv or .tsv file (delimiter from extension). Returns id, per-tab "
-            "{name, sheet_id} pairs, and total cells written. Requires a connected account."
+            "local .csv or .tsv file (delimiter from extension). Runs as a background job: this "
+            "dispatches the creation and returns a job_id immediately; the new spreadsheet's id, "
+            "per-tab {name, sheet_id} pairs, and total cells written arrive via a follow-up "
+            "message once it completes. Requires a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "title": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -943,10 +1238,7 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description=(
-                "New spreadsheet id, ordered {name, sheet_id} pairs (sheet_id addresses the tab "
-                "in batchUpdate requests), and total updated cell count."
-            ),
+            description="job_id for the queued spreadsheet creation plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
@@ -954,12 +1246,7 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
     def sheets_create_from_files(
         self, params: dict[str, Any], state: dict[str, Any]
     ) -> dict[str, Any]:
-        return self._run(
-            lambda: sheets_actions.create_spreadsheet_from_files(
-                self._require_factory().sheets(), params
-            ),
-            "sheets_create_from_files",
-        )
+        return self._run_deferred(params, state, "sheets_create_from_files")
 
     @platform_process(
         name="sheets_get_values",
@@ -974,9 +1261,13 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
             "range if the goal is a smaller call. To raise the limit, pass "
             "acknowledge_default_limit_override=true together with an explicit row_limit (up to "
             f"{SHEETS_ROW_LIMIT_CAP}) — both are required together, and a row_limit above the cap "
-            "is refused rather than silently clamped. Requires a connected account."
+            "is refused rather than silently clamped. Runs as a background job: this dispatches "
+            "the read and returns a job_id immediately; the grid arrives via a follow-up message "
+            "once the read completes. Requires a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -1009,25 +1300,26 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="2D grid of cell values, bounded by the effective row limit.",
+            description="job_id for the queued read plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def sheets_get_values(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: sheets_actions.get_values(self._require_factory().sheets(), params),
-            "sheets_get_values",
-        )
+        return self._run_deferred(params, state, "sheets_get_values")
 
     @platform_process(
         name="sheets_update_values",
         display_name="Sheets: Update Values",
         description=(
-            "Overwrite a cell range (A1 notation) with a 2D grid of values. Requires a connected "
-            "account."
+            "Overwrite a cell range (A1 notation) with a 2D grid of values. Runs as a background "
+            "job: this dispatches the update and returns a job_id immediately; the count of "
+            "cells updated arrives via a follow-up message once it completes. Requires a "
+            "connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -1047,25 +1339,26 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Count of cells updated.",
+            description="job_id for the queued update plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def sheets_update_values(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: sheets_actions.update_values(self._require_factory().sheets(), params),
-            "sheets_update_values",
-        )
+        return self._run_deferred(params, state, "sheets_update_values")
 
     @platform_process(
         name="sheets_append_values",
         display_name="Sheets: Append Values",
         description=(
-            "Append a 2D grid of values after the last row of a range's table. Requires a "
-            "connected account."
+            "Append a 2D grid of values after the last row of a range's table. Runs as a "
+            "background job: this dispatches the append and returns a job_id immediately; the "
+            "count of cells updated arrives via a follow-up message once it completes. Requires "
+            "a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -1085,26 +1378,27 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Count of cells updated by the append.",
+            description="job_id for the queued append plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def sheets_append_values(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: sheets_actions.append_values(self._require_factory().sheets(), params),
-            "sheets_append_values",
-        )
+        return self._run_deferred(params, state, "sheets_append_values")
 
     @platform_process(
         name="sheets_batch_update",
         display_name="Sheets: Batch Update",
         description=(
             "Apply a list of raw Google Sheets API batchUpdate request objects (rename/add "
-            "tabs, cell number formats, column widths, frozen rows, etc.) to a spreadsheet. "
+            "tabs, cell number formats, column widths, frozen rows, etc.) to a spreadsheet. Runs "
+            "as a background job: this dispatches the batch update and returns a job_id "
+            "immediately; the replies arrive via a follow-up message once it completes. "
             "Requires a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -1119,16 +1413,13 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Replies from the batch update.",
+            description="job_id for the queued batch update plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def sheets_batch_update(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: sheets_actions.batch_update(self._require_factory().sheets(), params),
-            "sheets_batch_update",
-        )
+        return self._run_deferred(params, state, "sheets_batch_update")
 
     @platform_process(
         name="sheets_export",
@@ -1174,9 +1465,13 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         display_name="Docs: Create Document",
         description=(
             "Create a new document with the given title and optional initial plain-text content. "
-            "Returns its id. Requires a connected account."
+            "Runs as a background job: this dispatches the creation and returns a job_id "
+            "immediately; the new document's id arrives via a follow-up message once creation "
+            "completes. Requires a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "title": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -1191,22 +1486,25 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="New document id.",
+            description="job_id for the queued document creation plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def docs_create(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: docs_actions.create_document(self._require_factory().docs(), params),
-            "docs_create",
-        )
+        return self._run_deferred(params, state, "docs_create")
 
     @platform_process(
         name="docs_get",
         display_name="Docs: Get Document",
-        description="Fetch a document's title and plain-text body content. Requires a connected account.",
+        description=(
+            "Fetch a document's title and plain-text body content. Runs as a background job: this "
+            "dispatches the fetch and returns a job_id immediately; the title + body arrive via a "
+            "follow-up message once it completes. Requires a connected account."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -1216,25 +1514,26 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Document title and body_text.",
+            description="job_id for the queued fetch plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def docs_get(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: docs_actions.get_document(self._require_factory().docs(), params),
-            "docs_get",
-        )
+        return self._run_deferred(params, state, "docs_get")
 
     @platform_process(
         name="docs_batch_update",
         display_name="Docs: Batch Update",
         description=(
             "Apply a list of raw Google Docs API batchUpdate request objects (insert/replace "
-            "text, formatting, etc.) to a document. Requires a connected account."
+            "text, formatting, etc.) to a document. Runs as a background job: this dispatches the "
+            "batch update and returns a job_id immediately; the replies arrive via a follow-up "
+            "message once it completes. Requires a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -1249,16 +1548,13 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Replies from the batch update.",
+            description="job_id for the queued batch update plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def docs_batch_update(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: docs_actions.batch_update(self._require_factory().docs(), params),
-            "docs_batch_update",
-        )
+        return self._run_deferred(params, state, "docs_batch_update")
 
     @platform_process(
         name="docs_export",
@@ -1302,8 +1598,15 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="slides_create",
         display_name="Slides: Create Presentation",
-        description="Create a new presentation with the given title. Returns its id. Requires a connected account.",
+        description=(
+            "Create a new presentation with the given title. Runs as a background job: this "
+            "dispatches the creation and returns a job_id immediately; the new presentation's id "
+            "arrives via a follow-up message once creation completes. Requires a connected "
+            "account."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "title": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -1313,25 +1616,26 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="New presentation id.",
+            description="job_id for the queued presentation creation plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def slides_create(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: slides_actions.create_presentation(self._require_factory().slides(), params),
-            "slides_create",
-        )
+        return self._run_deferred(params, state, "slides_create")
 
     @platform_process(
         name="slides_get",
         display_name="Slides: Get Presentation",
         description=(
             "Fetch a presentation's slide list — object id and page-element count per slide. "
+            "Runs as a background job: this dispatches the fetch and returns a job_id "
+            "immediately; the slide list arrives via a follow-up message once it completes. "
             "Requires a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -1341,25 +1645,26 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Slide list and count.",
+            description="job_id for the queued fetch plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def slides_get(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: slides_actions.get_presentation(self._require_factory().slides(), params),
-            "slides_get",
-        )
+        return self._run_deferred(params, state, "slides_get")
 
     @platform_process(
         name="slides_batch_update",
         display_name="Slides: Batch Update",
         description=(
             "Apply a list of raw Google Slides API batchUpdate request objects (add slide, "
-            "insert text/image, etc.) to a presentation. Requires a connected account."
+            "insert text/image, etc.) to a presentation. Runs as a background job: this "
+            "dispatches the batch update and returns a job_id immediately; the replies arrive "
+            "via a follow-up message once it completes. Requires a connected account."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -1374,16 +1679,13 @@ class GSuitePlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Replies from the batch update.",
+            description="job_id for the queued batch update plus its status ('queued').",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def slides_batch_update(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: slides_actions.batch_update(self._require_factory().slides(), params),
-            "slides_batch_update",
-        )
+        return self._run_deferred(params, state, "slides_batch_update")
 
     @platform_process(
         name="slides_export",
@@ -1449,3 +1751,19 @@ def _classify_http_error(exc: HttpError) -> tuple[str, str]:
     if code_value == 429:
         return ERROR_RATE_LIMITED, f"Google rate limit hit (429): {exc}"
     return ERROR_API_ERROR, f"Google API error ({code_value}): {exc}"
+
+
+def _classify_deferred_exception(exc: Exception) -> tuple[str, str]:
+    """Map a background job's raised exception to (error_code, message).
+
+    Same taxonomy _run() used inline before the D0.3 migration — moved to a
+    module function so a background job failure classifies identically to a
+    synchronous one, and so _process_job's own branching stays low.
+    """
+    if isinstance(exc, ValueError):
+        return ERROR_INVALID_PARAMS, str(exc)
+    if isinstance(exc, (TokenStoreError, sheets_actions.ResultTooLargeError)):
+        return exc.code, str(exc)
+    if isinstance(exc, HttpError):
+        return _classify_http_error(exc)
+    return ERROR_API_ERROR, f"Google API call failed: {exc}"

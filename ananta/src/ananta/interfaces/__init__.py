@@ -23,7 +23,6 @@ from .edge_process_provider import EdgeProcessDefinition as EdgeProcessDefinitio
 from .edge_process_provider import EdgeProcessProvider as EdgeProcessProvider
 from .embedding_aware_plugin import EmbeddingAwarePlugin as EmbeddingAwarePlugin
 from .embedding_service_interface import EmbeddingServiceInterface as EmbeddingServiceInterface
-from .guarded_agent_interface import GuardedAgentInterface as GuardedAgentInterface
 
 # Errors
 from .inference_errors import (

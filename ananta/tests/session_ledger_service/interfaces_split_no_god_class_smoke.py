@@ -52,6 +52,7 @@ EXPECTED_VERBS_BY_ABC: dict[str, set[str]] = {
         "ingest_raw_chunk",
         "get_import_status",
         "backfill_export_blob_identity",
+        "set_source_enabled",
     },
     "SessionLedgerPollingDriverAPI": {
         "trigger_poll",
@@ -67,6 +68,7 @@ EXPECTED_VERBS_BY_ABC: dict[str, set[str]] = {
         "backfill_first_last_event_at_repair",
         "backfill_orphan_running_batches_for_source",
         "backfill_summary_embedding_vector_ids",
+        "retire_duplicate_source",
     },
     "SessionLedgerEventExternalIdBackfillAPI": {
         "backfill_event_external_ids",

@@ -11,6 +11,11 @@ Coverage:
   in SchemaStandardizer._validate_no_protected_field_overrides).
 * Partial unique indexes on source_cursor (discovery vs event_read) and
   on deployment.oauth_client_id are present.
+* Schema-debt-external-id lane, 2a (2026-08-06): the standardizer accepts an
+  explicit ``external_id: unique=False`` override (leg 1), and ``event``'s
+  composite ``idx_event_session_external_unique`` survives standardization
+  unchanged alongside that opt-out (leg 3) — see
+  workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md.
 
 Run:
     .venv/bin/python3 ananta/tests/llm/session_ledger/schema_smoke.py
@@ -39,7 +44,13 @@ from ananta.llm.session_ledger.schema import (  # noqa: E402
     TABLE_TOOL_CALL,
     get_session_ledger_schema,
 )
+from ananta.types.column_types import ColumnType  # noqa: E402
 from ananta.types.schema_standardizer import SchemaStandardizer  # noqa: E402
+from ananta.types.schema_types import (  # noqa: E402
+    ColumnDefinition,
+    SchemaDefinition,
+    TableSchema,
+)
 
 _passed = 0
 _failed: list[str] = []
@@ -133,12 +144,84 @@ def test_partial_unique_indexes_present() -> None:
     )
 
 
+def test_standardizer_accepts_external_id_unique_false_override() -> None:
+    """Schema-debt-external-id lane, 2a leg (1): the standardizer's relax.
+
+    Reverting ``SchemaStandardizer._validate_constrainable_field``'s
+    external_id relax (i.e. restoring the old hard-raise on
+    ``unique=False``) reds this leg.
+    """
+    table = TableSchema(
+        table_name="probe",
+        columns={
+            "external_id": ColumnDefinition(type=ColumnType.TEXT, unique=False),
+        },
+    )
+    schema = SchemaDefinition(namespace="probe_ns", tables={"probe": table})
+    standardizer = SchemaStandardizer()
+    standardized = standardizer.standardize_schema(schema)  # must not raise
+    _check(
+        standardized.tables["probe"].columns["external_id"].unique is False,
+        "standardizer honors an explicit external_id unique=False override "
+        "(does not silently force it back to True)",
+    )
+
+
+def test_event_composite_external_id_index_survives_standardization() -> None:
+    """2a leg (3): the composite domain key remains declared and installed.
+
+    Guards against 2a's fix accidentally dropping (or the standardizer
+    silently overriding) ``idx_event_session_external_unique`` while opting
+    the ``event`` table out of the standalone constraint — nobody should be
+    able to drop the real domain key by accident and stay green.
+    """
+    schema = get_session_ledger_schema()
+    event_table = schema.tables[TABLE_EVENT]
+    _check(
+        event_table.columns["external_id"].unique is False,
+        "event.external_id declares unique=False (the 2a opt-out)",
+    )
+    composite = next(
+        (idx for idx in event_table.indexes if idx.name == "idx_event_session_external_unique"),
+        None,
+    )
+    _check(composite is not None, "idx_event_session_external_unique is still declared")
+    if composite is not None:
+        _check(
+            list(composite.columns) == ["session_id", "external_id"] and composite.unique,
+            f"idx_event_session_external_unique is UNIQUE(session_id, external_id) "
+            f"(got columns={composite.columns!r}, unique={composite.unique!r})",
+        )
+
+    standardizer = SchemaStandardizer()
+    standardized = standardizer.standardize_schema(schema)
+    standardized_event = standardized.tables[TABLE_EVENT]
+    _check(
+        standardized_event.columns["external_id"].unique is False,
+        "unique=False survives standardization (not reset to the platform default)",
+    )
+    standardized_composite = next(
+        (
+            idx
+            for idx in standardized_event.indexes
+            if idx.name == "idx_event_session_external_unique"
+        ),
+        None,
+    )
+    _check(
+        standardized_composite is not None and standardized_composite.unique,
+        "the composite index survives standardization unchanged",
+    )
+
+
 def main() -> int:
     print("=== session_ledger schema_smoke ===")
     test_namespace_and_table_set()
     test_no_protected_field_overrides()
     test_standardizer_round_trip()
     test_partial_unique_indexes_present()
+    test_standardizer_accepts_external_id_unique_false_override()
+    test_event_composite_external_id_index_survives_standardization()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

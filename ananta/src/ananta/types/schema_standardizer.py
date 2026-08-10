@@ -163,9 +163,14 @@ class SchemaStandardizer:
         "is_deleted",   # Soft delete flag - platform managed
     })
 
-    # Fields that allow specific constraint additions (not removals)
+    # Fields that allow specific constraint additions/relaxations:
     # - name: can add unique=True and/or not_null=True
-    # - external_id: can add not_null=True (unique is already platform-enforced)
+    # - external_id: can add not_null=True, OR declare unique=False to opt
+    #   out of the platform-wide standalone uniqueness for a table whose true
+    #   identity is composite and expressed via its own indexes instead (2a,
+    #   2026-08-06 — schema-debt-external-id lane; see
+    #   workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md).
+    #   unique=True needs no override at all — it's the platform default.
     CONSTRAINABLE_FIELDS: frozenset[str] = frozenset({"name", "external_id"})
 
     def __init__(self) -> None:
@@ -229,9 +234,13 @@ class SchemaStandardizer:
 
         Rules:
         - PROTECTED_STANDARD_FIELDS: No overrides allowed
-        - CONSTRAINABLE_FIELDS (name, external_id): Can add constraints only
+        - CONSTRAINABLE_FIELDS (name, external_id): Can add constraints, and
+          external_id can additionally relax to unique=False
           - name: can add unique=True and/or not_null=True
-          - external_id: can add not_null=True (unique is platform-enforced)
+          - external_id: can add not_null=True; unique=True needs no
+            override; unique=False opts a table out of the platform-wide
+            standalone uniqueness when its true identity is composite and
+            expressed via the table's own indexes instead
 
         Args:
             table_name: Name of table being validated
@@ -274,10 +283,8 @@ class SchemaStandardizer:
         if not platform_def:
             return
 
-        # external_id: platform has unique=True, override must preserve it
-        if field_name == "external_id" and not column_def.unique:
-            raise ValueError(
-                f"SCHEMA VALIDATION FAILED: Table '{table_name}' overrides 'external_id' "
-                f"without unique=True. The platform requires external_id to be unique. "
-                f"Either remove the override or include unique=True."
-            )
+        # external_id: unique=True (the platform default) and unique=False
+        # (the declared composite-identity opt-out, 2a 2026-08-06) are both
+        # legal table-level choices — nothing left to reject here. See
+        # workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md
+        # for why a table would opt out.

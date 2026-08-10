@@ -43,7 +43,7 @@ _HOMUNCULUS: Final[str] = _homunculus_or_fail()
 PLUGIN_NAME: Final[str] = "jira_plugin"
 PLUGIN_VERSION: Final[str] = "1.0.0"
 
-# Blob storage namespace (attachment downloads + JQL result spills).
+# Blob storage namespace (attachment downloads + JQL result exports).
 BLOB_NAMESPACE: Final[str] = "jira_plugin"
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ ADDRESS_BOOK_FIELD_SCOPE_NOTE: Final[str] = "scope_note"
 # ---------------------------------------------------------------------------
 # Caps (business-data limits, 2026-08-03 operator revision —
 # workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md
-# §0.1/§5.4). Jira EXITED the spill floor (operator veto, "no PII in Jira —
+# §0.1/§5.4). Jira EXITED the data-export requirement (operator veto, "no PII in Jira —
 # just company internal accounts"): jql_search/list_comments are LIMITS-ONLY,
 # g_suite-class -- inline returns, no containment gate, no caller-supplied
 # path. §5.4 (paging-must-be-hidden ruling) also retired §5.3's "nothing to

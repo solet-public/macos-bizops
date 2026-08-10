@@ -27,6 +27,12 @@ _PER_SMOKE_TIMEOUT = 120
 _SMOKE_REGISTER_REL = "quality_gates/gate_smokes.txt"
 _RUN_SMOKES_REL = "quality_gates/run_smokes.py"
 
+# The automake/Meson/CTest SKIP_RETURN_CODE convention, matching
+# run_smokes.py's own _SKIP_EXIT_CODE — a smoke exits this code to report a
+# disclosed, non-blocking dependency gap, not a genuine failure. Undeclared-
+# dependency audit: workbench/2026-08-08_undeclared_system_dependencies_findings_d3-impl.md.
+_SMOKE_SKIP_EXIT_CODE = 77
+
 
 class QualityGateError(ValueError):
     """Typed rejection: an unknown gate name or an unregistered smoke path."""
@@ -106,6 +112,8 @@ class QualityOperations:
         return {
             "gate": spec.name,
             "passed": result.exit_code == 0,
+            # Static gates never emit the smoke SKIP convention; always False.
+            "skipped": False,
             "exit_code": result.exit_code,
             "timed_out": result.timed_out,
             "summary": _last_meaningful_line(result.output),
@@ -140,9 +148,17 @@ class QualityOperations:
             timeout=_SUITE_WALL_TIMEOUT,
             extra_env=self._env(),
         )
+        # Single-smoke path: the smoke's own raw exit code is ground truth for
+        # SKIP. Suite path: run_smokes.py's exit code already encodes its own
+        # pass/fail policy over any skips it saw (see its --fail-on-skip) --
+        # this verb doesn't currently parse the suite's per-smoke skip lines
+        # out of `output`, so `skipped` stays False there rather than guessing
+        # from prose.
+        skipped = smoke is not None and result.exit_code == _SMOKE_SKIP_EXIT_CODE
         return {
             "target": target,
             "passed": result.exit_code == 0,
+            "skipped": skipped,
             "exit_code": result.exit_code,
             "timed_out": result.timed_out,
             "summary": _last_meaningful_line(result.output),

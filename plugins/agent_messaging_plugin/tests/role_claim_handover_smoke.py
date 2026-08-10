@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -154,6 +155,7 @@ class _RecordingNotifier:
         bridge_manager: Any,  # noqa: ARG002
         peer_registry: Any,  # noqa: ARG002
         agent_messaging_service: Any,  # noqa: ARG002
+        state_service: Any = None,  # noqa: ARG002
         peer_id: str,
         peer_agent_instance_id: str,
         prose: str,
@@ -172,6 +174,7 @@ class _RecordingNotifier:
                 bridge_manager=None,
                 peer_registry=self._registry,
                 agent_messaging_service=None,
+                state_service=None,
                 **kwargs,
             )
         finally:
@@ -191,6 +194,7 @@ class _RecordingNotifier:
                 bridge_manager=None,
                 peer_registry=self._registry,
                 agent_messaging_service=None,
+                state_service=None,
                 **kwargs,
             ).to_public()
         finally:
@@ -345,16 +349,10 @@ class _PeerResult:
 class _DirectService:
     def __init__(self) -> None:
         self.sent: list[Any] = []
-        self.direct_wakes: list[dict[str, Any]] = []
 
     def peer_send(self, request: Any) -> _PeerResult:
         self.sent.append(request)
         return _PeerResult()
-
-    def persist_direct_wake(self, **kwargs: Any) -> None:
-        # REL-05: dispatch_peer_send insures every IMPORTANT direct send via the
-        # outbox; this fake just records the call.
-        self.direct_wakes.append(kwargs)
 
 
 def _recip_binding() -> BridgeBinding:
@@ -400,6 +398,22 @@ class _DirectRegistry:
         return 0
 
 
+class _LiveBridge:
+    """A4 Amendment 5: binding_is_live now reads ``closed``/``last_seen_at``
+    off the bridge for EVERY recipient kind (was watcher-only), so a stand-in
+    that ``get()`` returns must carry both — a bare ``None`` return used to be
+    safe here (only watcher bindings were checked) and would now
+    false-negative every dispatch as unreachable."""
+
+    closed = False
+    last_seen_at = datetime.now(UTC).isoformat()
+    # H2 quiet-gap capture reads this off the RECIPIENT's live bridge.
+    last_model_activity_at = ""
+
+    def touch(self) -> None:
+        return
+
+
 class _DirectManager:
 
     # WS-2a W3: the dispatch liveness gate reads this off its bridge_manager
@@ -407,8 +421,9 @@ class _DirectManager:
     @property
     def binding_liveness_window_s(self) -> int:
         return DEFAULT_BINDING_LIVENESS_WINDOW_S
-    def get(self, bridge_id: str) -> None:
-        return None
+    def get(self, bridge_id: str) -> _LiveBridge:
+        del bridge_id
+        return _LiveBridge()
 
     def append_event(
         self, bridge_id: str, event: str, prose: str, meta: dict[str, object],
@@ -518,12 +533,63 @@ def test_new_holder_notice_names_the_pull_contract() -> None:
     prose = plugin.notices[-1]["prose"]
     _check("peer_inbox" in prose, "notice names the peer_inbox process key")
     _check(
-        "include_important=true" in prose,
-        "notice tells the holder to pass include_important=true",
+        "agent_session_id" in prose,
+        "notice tells the holder to pass their own agent_session_id",
+    )
+    _check(
+        "include_important" not in prose,
+        "A4 (2026-08-04): notice no longer mentions the retired include_important "
+        "parameter",
     )
     _check(
         "role_after" in prose and "next_role_cursor" in prose,
         "notice tells the holder to page role_after until next_role_cursor is null",
+    )
+
+
+def test_new_holder_notice_states_the_attestation_closing_step() -> None:
+    """rotation-systematization fix loop (2026-08-08, ``workbench/2026-08-07_
+    rotation_systematization_findings_rotation-impl.md``) — the covered-mark
+    floor was found permanently inert for every role because nothing ever
+    called ``peer_mark_role_covered`` in practice: the verb is registered-
+    route-only BY DESIGN, so only the role holder's own live turn can ever
+    attest. This notice is the ONE place that instruction can live and reach
+    every deployment. Content-level, not a source grep, matching this file's
+    own convention (the prose is f-string fragments, not one literal)."""
+    plugin = _RecordingNotifier()
+    plugin.notify(
+        name=_ARBITRARY_ROLE,
+        new_agent_id="claude_code",
+        new_agent_instance_id="agi-new",
+        new_agent_session_id="sess-new",
+        prior=None,
+    )
+    prose = plugin.notices[-1]["prose"]
+    _check(
+        "peer_mark_role_covered" in prose,
+        "notice names the attestation verb by process key",
+    )
+    _check(
+        "message_id" in prose,
+        "notice tells the holder to attest by message_id",
+    )
+    _check(
+        "never a computed or assumed" in prose or "never the newest message in the whole backlog" in prose,
+        "notice states the correctness condition IN the prose, not merely documented elsewhere "
+        "(a safety rule that lives outside the instruction the reader receives gets followed unsafely)",
+    )
+    _check(
+        "registered bridge" in prose,
+        "notice names the registered-route requirement for attestation",
+    )
+    _check(
+        "cannot attest" in prose or "cannot perform this step" in prose,
+        "notice states plainly, for a session with no registered bridge, that it cannot attest — "
+        "never implying a capability the reader may not have",
+    )
+    _check(
+        "attest" in prose.lower(),
+        "notice uses a pull/self-attestation verb, not a push framing",
     )
 
 
@@ -798,6 +864,7 @@ def main() -> int:
     test_notice_skipped_when_bridge_not_started()
     test_prose_is_role_agnostic()
     test_new_holder_notice_names_the_pull_contract()
+    test_new_holder_notice_states_the_attestation_closing_step()
     test_new_holder_notice_is_pull_shaped_never_a_push_claim()
     test_settle_public_result_is_json_serializable()
     test_settle_public_result_covers_every_declared_schema_property()

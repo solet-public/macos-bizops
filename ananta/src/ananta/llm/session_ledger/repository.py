@@ -20,6 +20,9 @@ from ananta.llm.session_ledger.canonical_pointer_repair import (
     SessionLedgerCanonicalPointerRepairMixin,
 )
 from ananta.llm.session_ledger.deployment import SessionLedgerDeploymentMixin
+from ananta.llm.session_ledger.duplicate_source_repair import (
+    SessionLedgerDuplicateSourceRepairMixin,
+)
 from ananta.llm.session_ledger.event_external_id_backfill import (
     SessionLedgerEventExternalIdBackfillMixin,
 )
@@ -109,6 +112,7 @@ class SessionLedgerRepository(
     SessionLedgerSummarizeMixin,
     SessionLedgerDeploymentMixin,
     SessionLedgerSearchMixin,
+    SessionLedgerDuplicateSourceRepairMixin,
 ):
     """SQL adapter over the ``session_ledger`` schema.
 

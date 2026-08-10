@@ -190,6 +190,7 @@ class Forwarder:
         session_label: str,
         parent_pid: int,
         provides_inference: bool,
+        wake_capable: bool = True,
         session_role: str = "",
         monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -216,6 +217,12 @@ class Forwarder:
         # off it, and the sidecar entry does not survive a reconnect, so
         # the capability must be re-asserted each time.
         self._provides_inference = provides_inference
+        # codex-watch-migration wake_capable design (2026-08-06): declared on
+        # every register POST, same re-assertion discipline as
+        # provides_inference above — the server stores it on the
+        # BridgeBinding, and a reconnect must re-declare it (nothing here
+        # survives implicitly).
+        self._wake_capable = wake_capable
         self._monotonic_clock = monotonic_clock
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
@@ -227,10 +234,10 @@ class Forwarder:
         self._poll_active: bool = False
         self._reconnect_lock = asyncio.Lock()
         self._write_stream: MemoryObjectSendStream[SessionMessage] | None = None
-        # v10 Control #5 + REL-05: client-side at-least-once OWED delivery — role
-        # (live settle + repair drain) AND direct (repair drain). Structurally
-        # satisfies OwedDeliveryTransport via the bridge_ready / running /
-        # emit_event / drain_page / flip_delivered / confirm_direct surface.
+        # v10 Control #5: client-side at-least-once OWED role delivery (live
+        # settle + repair drain). Structurally satisfies OwedDeliveryTransport
+        # via the bridge_ready / running / emit_event / drain_page /
+        # flip_delivered surface.
         self._owed_delivery = OwedDeliveryCoordinator(self)
 
     # ------------------------------------------------------------------
@@ -322,6 +329,7 @@ class Forwarder:
             "session_label": self._session_label,
             "parent_pid": self._parent_pid,
             "provides_inference": self._provides_inference,
+            "wake_capable": self._wake_capable,
             "session_role": self._session_role,
         }
         for attempt in range(1, REGISTER_IDENTITY_ATTEMPTS + 1):
@@ -392,6 +400,7 @@ class Forwarder:
                     "session_label": self._session_label,
                     "parent_pid": self._parent_pid,
                     "provides_inference": self._provides_inference,
+                    "wake_capable": self._wake_capable,
                     "session_role": self._session_role,
                 },
             )
@@ -863,10 +872,7 @@ class Forwarder:
     async def drain_page(self, limit: int) -> dict[str, Any]:
         """POST ``/peer/drain``; return the full payload.
 
-        REL-05: one call returns BOTH owed kinds —
-        ``{"undelivered": [...role], "undelivered_direct": [...direct],
-        "re_emit_cap": N}`` — so the coordinator's repair pass makes one
-        round-trip for role + direct.
+        ``{"undelivered": [...role rows], "re_emit_cap": N}``.
         """
         async def call() -> dict[str, Any]:
             return await self._post(self._bridge_path("/peer/drain"), {"limit": limit})
@@ -882,16 +888,6 @@ class Forwarder:
             )
 
         await self._call_with_reconnect("peer_delivered", call)
-
-    async def confirm_direct(self, *, message_id: str) -> None:
-        """POST ``/peer/delivered_direct`` to record a DIRECT row's re-emission."""
-        async def call() -> dict[str, Any]:
-            return await self._post(
-                self._bridge_path("/peer/delivered_direct"),
-                {"message_id": message_id},
-            )
-
-        await self._call_with_reconnect("peer_delivered_direct", call)
 
     # ------------------------------------------------------------------
     # Tool surface — claude_code_channel half
@@ -1021,6 +1017,7 @@ class Forwarder:
             "session_label": session_label or self._session_label,
             "parent_pid": self._parent_pid,
             "provides_inference": self._provides_inference,
+            "wake_capable": self._wake_capable,
         }
 
         async def call() -> dict[str, Any]:
@@ -1087,51 +1084,3 @@ class Forwarder:
 
         return await self._call_with_reconnect("peer_inbox", call)
 
-    async def agent_thread_open(self, *, args: dict[str, Any]) -> dict[str, Any]:
-        async def call() -> dict[str, Any]:
-            return await self._post(self._bridge_path("/agent/thread/open"), args)
-
-        return await self._call_with_reconnect("agent_thread_open", call)
-
-    async def agent_send(
-        self,
-        *,
-        thread_id: str,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        async def call() -> dict[str, Any]:
-            path = self._bridge_path(f"/agent/{quote(thread_id, safe='')}/send")
-            return await self._post(path, args)
-
-        return await self._call_with_reconnect("agent_send", call)
-
-    async def agent_messages(
-        self,
-        *,
-        thread_id: str,
-        after_cursor: int = 0,
-        limit: int = 50,
-    ) -> dict[str, Any]:
-        params = urlencode({"after_cursor": after_cursor, "limit": limit})
-
-        async def call() -> dict[str, Any]:
-            path = self._bridge_path(
-                f"/agent/{quote(thread_id, safe='')}/messages?{params}",
-            )
-            return await self._get(path)
-
-        return await self._call_with_reconnect("agent_messages", call)
-
-    async def agent_status(self, *, thread_id: str) -> dict[str, Any]:
-        async def call() -> dict[str, Any]:
-            path = self._bridge_path(f"/agent/{quote(thread_id, safe='')}/status")
-            return await self._get(path)
-
-        return await self._call_with_reconnect("agent_status", call)
-
-    async def agent_close(self, *, thread_id: str) -> dict[str, Any]:
-        async def call() -> dict[str, Any]:
-            path = self._bridge_path(f"/agent/{quote(thread_id, safe='')}/close")
-            return await self._post(path, {})
-
-        return await self._call_with_reconnect("agent_close", call)

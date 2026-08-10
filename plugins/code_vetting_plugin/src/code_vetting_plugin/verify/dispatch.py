@@ -11,9 +11,9 @@ touching the verifier:
     findings today.
   - the inference dispatcher (Wave 2) implements the same
     :class:`SkepticDispatcher` protocol by sending ``request.prompt`` to N
-    independent reviewer sessions via ``agent_thread_open(backend=claude_code|
-    codex)`` and parsing their structured verdicts. It slots in with no change
-    to :mod:`.verifier`.
+    independent reviewer sessions over the platform's peer-messaging bridge
+    (``peer_send`` / ``peer_inbox``) and parsing their structured verdicts.
+    It slots in with no change to :mod:`.verifier`.
 
 Precision bias (design brief §3.3): a skeptic that cannot decide returns
 ``UNCERTAIN``, which the aggregator counts toward refutation — when in doubt,

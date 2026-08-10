@@ -2,7 +2,7 @@
 
 Each function takes an already-built client + a ``params`` dict, and returns a
 plain result dict. Business-data limits, 2026-08-03 operator revision
-(design doc §0.1/§5.4): jira EXITED the spill floor (operator veto — "no PII
+(design doc §0.1/§5.4): jira EXITED the data-export requirement (operator veto — "no PII
 in Jira, just company internal accounts") and its "paging must be hidden"
 ruling retired the disclosure-only shape jql_search briefly had. jql_search
 is now LIMITS-ONLY, g_suite-class: results return INLINE, never to a file, no

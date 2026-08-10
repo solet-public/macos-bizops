@@ -215,7 +215,7 @@ def _start_interface_host(config: dict[str, object], params: dict[str, object]) 
 
 
 def test_start_interface_host_selection() -> None:
-    """Dax Part 19.3: local-safe IPv4 default, explicit cloud bind preserved."""
+    """Local-safe IPv4 default, explicit cloud bind preserved."""
     _assert(
         "local callback default is explicit IPv4 loopback",
         _start_interface_host({}, {}) == "127.0.0.1",

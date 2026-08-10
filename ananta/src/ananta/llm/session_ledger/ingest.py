@@ -90,6 +90,72 @@ RELOAD_SAFE = True
 # Phase 2 demotion INSERT via ``write_state``. No raw SQL remains in this module.
 
 
+# 2026-08-06 finding (workbench/2026-08-05_canonical_memory_and_ledger_verification_findings.md
+# #3): the SchemaStandardizer auto-injects its OWN full-table ``UNIQUE(external_id)``
+# constraint on every table by platform convention (the standardizer's opaque
+# write-idempotency conflict key) — a name collision with THIS table's own,
+# unrelated reuse of ``external_id`` as a composite, per-session-scoped business
+# column (the GAP-5 ``idx_event_session_external_unique (session_id, external_id)``
+# index above). Measured live: this standardizer constraint is named
+# ``session_ledger__event_external_id_key`` and is a SEPARATE, single-column
+# index the ``ON CONFLICT (session_id, external_id) DO NOTHING`` upsert does not
+# target — a rare cross-session external_id collision (structurally possible
+# whenever two different sessions' events land on the derived-hash fallback path)
+# trips this constraint, is NOT absorbed by the upsert, and raises. Un-caught here,
+# that skipped the WHOLE session in the importer's outer per-session handler
+# (``ledger poll: skipping session``), and — because a failed session's read
+# cursor never advances — the SAME poisoned event re-fired on every subsequent
+# poll (observed: some sessions skipped 30-40x). This narrows the blast radius to
+# the ONE call site that can hit it, degrading a known collision to the same
+# already-exists outcome the intended composite upsert already produces for a
+# same-session duplicate — never the whole session.
+#
+# ROOT CAUSE FIXED AT THE SCHEMA LAYER (schema-debt-external-id lane, 2a,
+# 2026-08-06): ``session_ledger/schema.py``'s ``event`` table now declares an
+# explicit ``external_id: unique=False`` override, opting out of the
+# standardizer's standalone constraint; the standalone
+# ``session_ledger__event_external_id_key`` this module was catching drops
+# automatically at the next homunculus boot after that fix lands (the
+# platform's own schema-diff reconciliation, no separate migration step —
+# see workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md).
+# This catch REMAINS regardless, as defence for pre-migration databases (a
+# clone or seed instance booting against data created before that boot ran)
+# — once the constraint is actually gone on a given database, this branch
+# simply never matches and is a harmless no-op, never a silent hazard.
+_STALE_EXTERNAL_ID_UNIQUE_CONSTRAINT = "session_ledger__event_external_id_key"
+
+
+def _is_known_external_id_collision(exc: LedgerRepositoryError) -> bool:
+    """True iff ``exc`` is the specific, understood
+    ``_STALE_EXTERNAL_ID_UNIQUE_CONSTRAINT`` violation — never a broader
+    "any unique-constraint failure" match. An unrelated database failure
+    (connection loss, a genuinely unexpected constraint) must still raise
+    loud; only this ONE known, named collision degrades to a dedup."""
+    return _STALE_EXTERNAL_ID_UNIQUE_CONSTRAINT in str(exc)
+
+
+def _upsert_event_or_dedup_known_collision(
+    upsert_do_nothing: Callable[..., bool], record: dict[str, object],
+) -> bool:
+    """``append_event``'s upsert call, wrapped: degrades the ONE known
+    ``_STALE_EXTERNAL_ID_UNIQUE_CONSTRAINT`` violation to the same
+    ``inserted=False`` outcome the intended composite upsert already
+    produces for a same-session duplicate. Split out (module-level, not a
+    mixin method) to keep ``SessionLedgerIngestMixin`` under the god-class
+    LOC threshold — a genuine gate red caught while landing this fix."""
+    try:
+        return upsert_do_nothing(
+            TABLE_EVENT,
+            record,
+            conflict_columns=["session_id", "external_id"],
+            conflict_predicate=[],
+        )
+    except LedgerRepositoryError as exc:
+        if not _is_known_external_id_collision(exc):
+            raise
+        return False
+
+
 # ─── EventInsertResult dataclass (W5.O C8 fold) ───────────────────────────
 
 
@@ -771,6 +837,7 @@ class SessionLedgerIngestMixin(SessionLedgerRepositoryBase):
             None if content_blob_id is not None else _strip_nuls(normalized.content_text)
         )
         content_json_obj = _strip_nuls_in_json(normalized.content_json)
+        usage_json_obj = _strip_nuls_in_json(normalized.usage_json)
         vendor_event_id = _strip_nuls(normalized.vendor_event_id)
         vendor_parent_event_id = _strip_nuls(normalized.vendor_parent_event_id)
         actor_session_label = _strip_nuls(normalized.actor_session_label)
@@ -808,14 +875,12 @@ class SessionLedgerIngestMixin(SessionLedgerRepositoryBase):
             "actor_agent_instance_id": actor_agent_instance_id,
             "session_vendor": session_vendor.value,
             "source_kind": source_kind.value,
+            "usage_json": usage_json_obj,  # same JSONB-or-NULL contract as content_json above
             "created_at": now,
             "updated_at": now,
         }
-        inserted = self._upsert_do_nothing(
-            TABLE_EVENT,
-            record,
-            conflict_columns=["session_id", "external_id"],
-            conflict_predicate=[],
+        inserted = _upsert_event_or_dedup_known_collision(
+            self._upsert_do_nothing, record,
         )
         if inserted:
             with self._state.transactional() as txn:

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """SOQL query + export + override-friction smoke tests for salesforce_plugin.
 
-Business-data limits + spill-floor migration, 2026-08-02
+Business-data limits + data-export migration, 2026-08-02
 (workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md).
 Both soql_query and export_soql now ALWAYS write to the caller-supplied
 output_tsv_path — the former inline-return/INLINE_BYTE_CAP branch is deleted,
-not lowered (07-29 spill floor, unconditional). Effective record ceiling is
+not lowered (07-29 data-export requirement, unconditional). Effective record ceiling is
 DEFAULT_ROW_LIMIT (500) unless the caller supplies BOTH
 acknowledge_default_limit_override=true and an explicit row_limit.
 

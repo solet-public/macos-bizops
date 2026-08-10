@@ -58,7 +58,7 @@ def create_spreadsheet(sheets: Any, params: dict[str, Any]) -> dict[str, Any]:
 def get_values(sheets: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Read a cell range (A1 notation) as a 2D grid of values.
 
-    Business-data limits (2026-08-02, resource guard, not the spill floor):
+    Business-data limits (2026-08-02, resource guard, not the data-export requirement):
     defaults to SHEETS_DEFAULT_ROW_LIMIT (500) rows; acknowledge_default_
     limit_override=true + an explicit row_limit (up to SHEETS_ROW_LIMIT_CAP,
     1000, OURS-ARBITRARY -- no vendor citation exists for a values.get row

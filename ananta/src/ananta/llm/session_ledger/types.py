@@ -176,6 +176,13 @@ class NormalizedSessionEvent:
     # None for sources / event-types without an actor identity.
     actor_session_label: str | None = None
     actor_agent_instance_id: str | None = None
+    # T1 usage-capture lane (2026-08-05 ruling): per-message token usage,
+    # persisted verbatim from the vendor's own raw shape (no re-derivation
+    # or field renaming) rather than a rigid typed schema -- vendors vary
+    # (Claude Code's cache_creation/cache_read fields have no Codex
+    # equivalent). None for every event the source vendor doesn't (yet)
+    # populate usage for -- widened additively, not a required field.
+    usage_json: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

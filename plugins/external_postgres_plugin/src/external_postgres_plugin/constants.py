@@ -5,16 +5,20 @@ address-book shape, the platform-DB containment markers (§8.4), session
 hardening knobs, the Datagrip-parity read-leader set (belt), result caps,
 error codes, and result types.
 
-Posture (operator-ratified rev-D/rev-F): READ-ONLY, HARD. There is NO write
-verb. The load-bearing write-stopper is the psycopg3 connection read-only
-characteristic (``conn.read_only = True``, connection.py); the read-leader
-guard + single-statement parser are belts. See knowledge_base/
+Posture (operator-ratified rev-D/rev-F for the READ verbs; reversed for write
+by operator ruling 2026-08-09 + Amendment 1 — "vendor RBAC is the control
+plane"): every read verb is READ-ONLY, HARD via the psycopg3 connection
+read-only characteristic (``conn.read_only = True``, connection.py); the
+read-leader guard + single-statement parser are belts, read-verb-only. The
+write verb (``run_statement``) opens with ``read_only=False`` and performs NO
+plugin-side access control — what it can do is decided entirely by the
+registered credential's own server-side Postgres GRANTs. See knowledge_base/
 01_external_postgres_overview.md for the full posture + containment invariants.
 
 This is a "super Datagrip" over FOREIGN Postgres databases the operator
 registers as ``external_pg::<name>`` address-book entries — never the platform's
 own DB (postgres_state_management_plugin owns that). The containment guard
-(§8.4) refuses the platform's own instance role-independently.
+(§8.4) refuses the platform's own instance role-independently, for every verb.
 """
 
 import os
@@ -120,10 +124,10 @@ READ_LEADERS: Final[frozenset[str]] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
-# Result caps (business-data limits + spill-floor migration, 2026-08-02 —
+# Result caps (business-data limits + data-export migration, 2026-08-02 —
 # workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md).
 # Both run_query and export_query now ALWAYS write to a caller-supplied path
-# (07-29 spill floor, unconditional — the former INLINE_BYTE_CAP/inline-return
+# (07-29 data-export requirement, unconditional — the former INLINE_BYTE_CAP/inline-return
 # branch is deleted, not lowered: no record-read verb returns record values
 # inline at any size). DEFAULT_ROW_LIMIT is the fetch ceiling absent an
 # explicit, acknowledged override; MAX_ROWS_HARD_CAP is run_query's override
@@ -196,6 +200,7 @@ GENERIC_MESSAGE_READ_ONLY: Final[str] = (
 # Result types
 # ---------------------------------------------------------------------------
 RESULT_TYPE_RUN_QUERY: Final[str] = "external_postgres_run_query_result"
+RESULT_TYPE_RUN_STATEMENT: Final[str] = "external_postgres_run_statement_result"
 RESULT_TYPE_LIST_CONNECTIONS: Final[str] = "external_postgres_list_connections_result"
 RESULT_TYPE_LIST_SCHEMAS: Final[str] = "external_postgres_list_schemas_result"
 RESULT_TYPE_LIST_TABLES: Final[str] = "external_postgres_list_tables_result"

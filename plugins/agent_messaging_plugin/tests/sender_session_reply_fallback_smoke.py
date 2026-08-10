@@ -329,6 +329,7 @@ def test_streamable_handler_threads_the_session_key_into_shared_dispatch() -> No
         bridge_manager=h.manager,
         peer_registry=h.registry,
         agent_messaging_service=h.service,
+        state_service=None,
     )
     payload = _streamable_peer_send(
         {

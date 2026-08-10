@@ -16,8 +16,7 @@ learn it from the plugin rather than from an abandoned test, and so nobody
 re-derives it.
 
 Established 2026-07-29 against Adobe's published Marketo Developer Guide, in
-response to a field report from a live Marketo instance. Research record:
-`workbench/2026-07-29_dax_part28_3_campaign_flow_inspection_research_coordinator_dawn.md`.
+response to a field report from a live Marketo instance.
 
 ## The flow is not readable, and this is permanent
 
@@ -84,8 +83,8 @@ One compounding trap in how a caller reaches this verb: `trigger_campaign` needs
 a `campaign_id`, and `list_campaigns` is the way to find one — but on a large
 instance the full set can exceed the effective row limit (500 default, 5,000
 with an acknowledged override — `list_campaigns` pages internally across
-Marketo's 300-per-call ceiling and hides that from the caller, Dax 29.2,
-2026-08-03), and even a complete listing means the caller is reading the
+Marketo's 300-per-call ceiling and hides that from the caller (2026-08-03
+hide-paging change), and even a complete listing means the caller is reading the
 result back out of a workspace TSV file, not an inline list. So the
 documented route asks a caller to pick from a list they may not be able to
 read in full, in order to fire a flow they cannot inspect. Prefer a campaign

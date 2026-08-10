@@ -4,7 +4,7 @@
 Hermetic — a faked JIRA client with .raw-bearing Comment resources and
 list-of-dict transitions. Red-first: each check asserts real parsing /
 internal-pagination / override / transition behavior against the 2026-08-03
-reopened design (jira EXITED the spill floor entirely, operator veto "no PII
+reopened design (jira EXITED the data-export requirement entirely, operator veto "no PII
 in Jira"; paging is hidden inside the effective row limit, operator ruling
 "the paging is an implementation detail that should be hidden" — design doc
 §0.1/§5.4). There is no output_tsv_path, no containment gate, and no

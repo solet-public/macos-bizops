@@ -1,6 +1,7 @@
 # Snowflake Plugin (`snowflake_plugin`)
 
-A read-only query connector over the operator's Snowflake warehouse account.
+A query (and, per the operator's 2026-08-09 posture reversal + Amendment 1,
+write) connector over the operator's Snowflake warehouse account.
 Executor: `snowflake-connector-python`. Auth: key-pair (RSA JWT) as the
 operator's own Snowflake user — no PAT, no browser flow, no callback server
 (the platform's durable-non-interactive-auth principle: a homunculus runs
@@ -13,38 +14,74 @@ ride-the-operator's-own-login pattern.
 Single account v1: the "snowflake_account" address-book entry. Per-account
 entries (`snowflake::<name>`) are a v2 extension if a second account appears.
 
-## Read/write posture — READ-ONLY, HARD (operator-ratified, RATIFY-2)
+## Read/write posture (reversed for write 2026-08-10, operator ruling
+## 2026-08-09 + Amendment 1 — "vendor RBAC is the control plane")
 
-The operator's dividing line: *"if someone deleted a database that would be a
-big deal."* Because this is a developer tool used by multiple people, a stray
-write must be structurally impossible. So there is **no write verb**.
+The original posture (RATIFY-2) was READ-ONLY, HARD, on the operator's
+dividing line: *"if someone deleted a database that would be a big deal."*
+That ban is REVERSED (user complaints about connectors that cannot
+manage/write the services they integrate — same ruling that reversed
+`external_postgres_plugin`'s posture). What survives from the original
+reasoning is an engineering constraint, not an access-control invention:
+Amendment 1 withdrew the idea of any plugin-side write gate ("Don't invent
+problems to solve — especially ones that the systems we are connecting to
+already have solutions built in"). So: every READ verb stays read-only, hard,
+exactly as designed; ONE write verb (`run_statement`) exists, and it performs
+NO access-control classification of its own — the registered role's own
+server-side grants are the entire control plane for what it can do.
 
 **The asymmetry with `external_postgres_plugin` matters here.** Postgres has a
-session-level `conn.read_only` connection characteristic that is LOAD-BEARING —
-it structurally refuses any write at the server, even for an over-privileged
-credential. **Snowflake has no equivalent session-level read-only flag.** So:
+session-level `conn.read_only` connection characteristic that is LOAD-BEARING
+for its read verbs — it structurally refuses any write at the server, even for
+an over-privileged credential — and its write verb flips that characteristic
+off per-call. **Snowflake has no equivalent session-level read-only flag at
+all**, for either read or write verbs. So:
 
-1. **The connector-side statement-leader guard is FAST-FAIL ONLY** (belt,
-   not boundary). It admits the Datagrip-parity read family
-   `{SELECT, SHOW, DESCRIBE/DESC, EXPLAIN, WITH}`; everything else fails fast
-   with `snowflake.read_only_violation`. It CANNOT, by itself, stop an
-   over-privileged role from writing.
-2. **The TRUE developer-proof boundary is the read-only ROLE** the connection
-   is pinned to: `GRANT USAGE ON WAREHOUSE/DATABASE/SCHEMA` +
-   `SELECT ON ALL/FUTURE TABLES` — **no** `INSERT`/`UPDATE`/`DELETE`/`MERGE`/DDL
-   grants, ever. This is **mandatory, not optional** — unlike the Postgres
-   connector where the read-only connection characteristic makes the role
-   grant a defense-in-depth nicety, here the role grant IS the boundary.
-   `test_connection` surfaces the resolved role so a misconfigured
-   write-capable role is visible immediately.
-3. **Single-statement is native.** Snowflake's `MULTI_STATEMENT_COUNT`
-   defaults to 1 and this plugin never calls `execute_string`, so no
-   statement-splitting parser is needed (unlike Postgres's `sqlparse` belt).
+1. **The connector-side statement-leader guard is FAST-FAIL ONLY, read-verbs
+   only** (belt, not boundary). It admits the Datagrip-parity read family
+   `{SELECT, SHOW, DESCRIBE/DESC, EXPLAIN, WITH}` on `run_query`/`export_query`/
+   the introspection verbs; everything else fails fast with
+   `snowflake.read_only_violation`. It CANNOT, by itself, stop an
+   over-privileged role from writing, and `run_statement` never calls it at
+   all — no read/write classification exists on the write path, by design.
+2. **The TRUE developer-proof boundary for the READ verbs is the read-only
+   ROLE** the connection is pinned to: `GRANT USAGE ON WAREHOUSE/DATABASE/
+   SCHEMA` + `SELECT ON ALL/FUTURE TABLES` — no `INSERT`/`UPDATE`/`DELETE`/
+   `MERGE`/DDL grants, if the operator wants those verbs to stay genuinely
+   read-only. `test_connection` surfaces the resolved role so a misconfigured
+   write-capable role is visible immediately. **For `run_statement`, this is
+   inverted**: whatever that same role IS granted (write or not) is exactly
+   what `run_statement` can do — there is no separate, more-privileged
+   credential and no plugin-side gate standing between them. An operator who
+   wants `run_statement` to actually write registers (or grants) a role with
+   the needed privileges; an operator who wants every verb to stay read-only
+   simply never grants this connector's role anything beyond `SELECT`/`USAGE`
+   — the boundary is entirely the operator's registration-time decision, in
+   Snowflake's own terms.
+3. **Single-statement is native, for every verb including the write one.**
+   Snowflake's `MULTI_STATEMENT_COUNT` defaults to 1 and this plugin never
+   calls `execute_string`, so no statement-splitting parser is needed
+   anywhere (unlike Postgres's `sqlparse` belt, which its own `run_statement`
+   still reuses as a shape guard) — verified live against the operator's own
+   account: a two-statement string submitted through `run_query` was refused
+   by the driver itself, not by any plugin code.
+4. **`run_statement` manages its own transaction, not a connection
+   characteristic.** Snowflake sessions default to `AUTOCOMMIT=TRUE` (every
+   other verb here is unaffected by this — a single read statement completes
+   or fails on its own either way). `run_statement` explicitly disables
+   autocommit on its own connection before executing, so a statement that
+   turns out to produce a result set (e.g. a RETURNING clause, where the
+   target object supports one) but arrives with no `output_tsv_path` can be
+   rolled back instead of silently committing while discarding the returned
+   rows — the same always-TSV, never-inline contract every export verb here
+   already follows.
 
-**v1 limitation:** scratch/temp writes (`CREATE TEMPORARY TABLE`) are refused
-by the read-only role, same as the Postgres connector's `CREATE TEMP`
-limitation. CTEs are the covered path for scratch computation. A
-temp-schema-write mode is a deliberate, operator-gated v2 decision.
+**v1 limitation (read verbs only):** scratch/temp writes
+(`CREATE TEMPORARY TABLE`) are refused by a read-only role, same as the
+Postgres connector's `CREATE TEMP` limitation on ITS read verbs. CTEs are the
+covered path for scratch computation on the read side. `run_statement` has no
+such limitation — a `CREATE TEMPORARY TABLE` there is just another statement
+the registered role's grants either permit or refuse.
 
 ## Connecting the operator's account (one-time)
 
@@ -151,6 +188,8 @@ contains no SQL string literals and stays fully gated.
 | `src/snowflake_plugin/constants.py` | Every magic value: address-book field names, read-leader set, result caps, error codes. |
 | `src/snowflake_plugin/app_config.py` | Resolves `snowflake_account` from the address book; eagerly parses the PEM private key to DER (fail-loud on a flattened key). |
 | `src/snowflake_plugin/connection.py` | `snowflake.connector.connect(...)` with key-pair auth; session hardening (`ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS`); topology-safe error classification. |
-| `src/snowflake_plugin/statement_guard.py` | The read-leader guard (fast-fail belt — NOT the write boundary; see §1). |
-| `src/snowflake_plugin/query_actions.py` | Pure verb implementations: `run_query`, `list_databases`, `list_schemas`, `list_tables`, `describe_table`, `export_query`, `test_connection`. |
-| `src/snowflake_plugin/plugin.py` | The `SnowflakePlugin` EDGE provider — connection lifecycle, error mapping, EDGE registration. |
+| `src/snowflake_plugin/statement_guard.py` | The read-leader guard (fast-fail belt on the READ verbs only — NOT the write boundary; see the posture section above). Never called by `run_statement`. |
+| `src/snowflake_plugin/query_actions.py` | Pure verb implementations: `run_query`, `run_statement` (the write verb), `list_databases`, `list_schemas`, `list_tables`, `describe_table`, `export_query`, `test_connection`. |
+| `src/snowflake_plugin/plugin.py` | The `SnowflakePlugin` EDGE provider — connection lifecycle, error mapping, EDGE registration, D0.3 dispatch. |
+| `src/snowflake_plugin/async_jobs.py` | D0.3 deferred-completion machinery: the single lazily-started background worker thread that does the real connect + query/statement I/O for every verb. |
+| `src/snowflake_plugin/completion_templates.py` | Builds the `completion_handlers` block each async job's metadata carries, routing job completion back into the originating flow. |

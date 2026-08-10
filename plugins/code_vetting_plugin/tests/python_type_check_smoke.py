@@ -45,6 +45,29 @@ _CHECKS_RUN: list[str] = []
 _PYPROJECT = '[tool.pyright]\ninclude = ["src"]\n\n[tool.mypy]\nfiles = ["src"]\n'
 _BAD = "def add(a: int, b: int) -> int:\n    return a + b\n\n\nx: str = add(1, 2)\n"
 
+# The automake/Meson/CTest SKIP_RETURN_CODE convention, matching
+# run_smokes.py's own _SKIP_EXIT_CODE. This file has TWO independent
+# tool-availability guards, not one, and they are genuinely different
+# compound conditions -- deliberately NOT unified into a single "skip when
+# both are absent" rule, since that would be wrong for one of the two:
+#   1. _check_self_vs_foreign's FOREIGN block: `if tool_available("pyright")
+#      or tool_available("mypy")` -- an OR. Its skip condition (the negation,
+#      De Morgan's) is "BOTH absent." When exactly one is present, this
+#      block RUNS and checks generically against whichever tool actually
+#      produced findings -- correct as written, nothing to change here.
+#   2. _check_mypy_scope_live: `if not tool_available("mypy")` -- mypy
+#      SPECIFICALLY, unconditional on pyright. RIDER-2's live probe tests
+#      mypy's own files-less-config scope-enumeration behavior; pyright
+#      being present is not a substitute for that, so this correctly skips
+#      whenever mypy alone is absent, even with pyright present.
+# The overall smoke reports a skip if EITHER site actually skipped --
+# each represents real coverage that didn't run, and collapsing them into
+# one "only if both tools are absent" condition would be wrong for site 2.
+# Undeclared-dependency audit:
+# workbench/2026-08-08_undeclared_system_dependencies_findings_d3-impl.md.
+_SKIP_EXIT_CODE = 77
+_type_check_coverage_skipped = False
+
 
 class SmokeFailureError(AssertionError):
     """Raised on any check failure; message is the failure detail."""
@@ -144,7 +167,7 @@ def _write_executable(path: Path, body: str) -> None:
 
 
 def _check_failed_shim_is_gap(base: Path) -> None:
-    """Dax 32.2: a PATH shim that exits 127 is incomplete coverage, never clean."""
+    """A PATH shim that exits 127 is incomplete coverage, never clean."""
     fake_bin = base / "fake-bin"
     fake_bin.mkdir()
     target = base / "shim-target"
@@ -155,7 +178,7 @@ def _check_failed_shim_is_gap(base: Path) -> None:
     _write_executable(
         fake_bin / "mypy",
         "#!/bin/sh\n"
-        'if [ "$PWD" != "$DAX_TYPECHECK_TARGET" ]; then\n'
+        'if [ "$PWD" != "$TYPECHECK_TARGET" ]; then\n'
         "  printf '%s\\n' 'pyenv: mypy: command not found' >&2\n"
         "  exit 127\n"
         "fi\n"
@@ -167,21 +190,21 @@ def _check_failed_shim_is_gap(base: Path) -> None:
         "exit 127\n",
     )
     prior_path = os.environ.get("PATH", "")
-    prior_target = os.environ.get("DAX_TYPECHECK_TARGET")
+    prior_target = os.environ.get("TYPECHECK_TARGET")
     os.environ["PATH"] = f"{fake_bin}:{prior_path}"
-    os.environ["DAX_TYPECHECK_TARGET"] = str(target.resolve())
+    os.environ["TYPECHECK_TARGET"] = str(target.resolve())
     try:
-        result = scan(TargetTree.from_walk(target), "vr-dax-32-2", execute_target_toolchain=True)
+        result = scan(TargetTree.from_walk(target), "vr-typecheck-shim-gap", execute_target_toolchain=True)
     finally:
         os.environ["PATH"] = prior_path
         if prior_target is None:
-            os.environ.pop("DAX_TYPECHECK_TARGET", None)
+            os.environ.pop("TYPECHECK_TARGET", None)
         else:
-            os.environ["DAX_TYPECHECK_TARGET"] = prior_target
+            os.environ["TYPECHECK_TARGET"] = prior_target
     reason = result.coverage.gap_reason or ""
-    _check("Dax 32.2: failed pyenv shim marks coverage ran=False", result.coverage.ran is False, str(result.coverage))
-    _check("Dax 32.2: exit 127 is disclosed", "exited 127" in reason, reason)
-    _check("Dax 32.2: failed checker never reports zero diagnostics", "0 diagnostic(s)" not in reason, reason)
+    _check("failed pyenv shim marks coverage ran=False", result.coverage.ran is False, str(result.coverage))
+    _check("exit 127 is disclosed", "exited 127" in reason, reason)
+    _check("failed checker never reports zero diagnostics", "0 diagnostic(s)" not in reason, reason)
 
 
 def _check_diagnostic_exit_is_valid(base: Path) -> None:
@@ -226,10 +249,14 @@ def _check_self_vs_foreign(base: Path) -> None:
         str(self_result.coverage),
     )
     # Foreign emit + version/env disclosure — absence-tolerant on the host checkers.
+    global _type_check_coverage_skipped
     if tool_available("pyright") or tool_available("mypy"):
         foreign = scan(_fixture(base / "fgn", config=True, venv=True, foreign=True), "vr", execute_target_toolchain=True)
         _check("FOREIGN: emits TYPE_COVERAGE findings when a host checker is present", any(f.dimension is Dimension.TYPE_COVERAGE for f in foreign.findings), str([f.constraint_violated for f in foreign.findings]))
         _check("FOREIGN: coverage discloses the env + per-checker version", "env=.venv" in (foreign.coverage.gap_reason or ""), foreign.coverage.gap_reason or "")
+    else:
+        print("  SKIP  FOREIGN checks: neither pyright nor mypy on PATH (self-suppress check above still ran)")
+        _type_check_coverage_skipped = True
 
 
 def _filesless_scope_tree(base: Path) -> TargetTree:
@@ -244,7 +271,10 @@ def _filesless_scope_tree(base: Path) -> TargetTree:
 
 def _check_mypy_scope_live(fl_tree: TargetTree) -> None:
     """RIDER-2 live probe (absence-tolerant): a files-less config + host mypy catches the planted error."""
+    global _type_check_coverage_skipped
     if not tool_available("mypy"):
+        print("  SKIP  RIDER-2 live probe: mypy not on PATH (pyright presence is not a substitute)")
+        _type_check_coverage_skipped = True
         return
     result = scan(fl_tree, "vr-rider", execute_target_toolchain=True)
     caught = any(f.constraint_violated.startswith("mypy:") for f in result.findings)
@@ -288,6 +318,13 @@ def main() -> int:
         print(f"  ({len(_CHECKS_RUN)} checks attempted before failure)", file=sys.stderr)
         return 1
     print(f"python_type_check_smoke OK: {len(_CHECKS_RUN)} checks passed")
+    if _type_check_coverage_skipped:
+        print(
+            "SKIP: at least one host type-checker was absent -- some live "
+            "coverage disclosed a gap rather than running; every other "
+            "check ran and passed."
+        )
+        return _SKIP_EXIT_CODE
     return 0
 
 

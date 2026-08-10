@@ -64,23 +64,15 @@ _PEER_SEND_DESCRIPTION: Final[str] = "\n".join(
         "  only after that instance is peer_unreachable. A live instance",
         "  always wins, even if the session key points elsewhere.",
         "",
-        "Loop-prevention contract:",
+        "Delivery contract:",
         "  Messages are ALWAYS persisted in the (sender_bridge, peer_instance)",
-        "  agent_thread. They only fire a notification on the receiver if the",
-        '  prose begins with the marker "IMPORTANT" (case-sensitive, followed',
-        '  by ":" or whitespace). The marker is stripped before delivery.',
-        "",
-        "  - With IMPORTANT marker -> notification fires. Claude Code wakes",
-        "    through its registered native adapter; locally patched Codex",
-        "    wakes through notifications/homunculus/peer_message. Use ONLY when",
-        "    you genuinely need a response.",
-        "  - Without marker -> silent persistence. The receiver only sees the",
-        "    message if they explicitly call peer_inbox. Use for acks, status",
-        "    updates, FYI notes -- anything that does not require a response.",
-        "",
-        "Forgetting the marker on a real question means the receiver never sees",
-        "it -- you will need to resend with the marker. That is by design: it",
-        'forces conscious "I want a response" choices and breaks ack loops.',
+        "  agent_thread, and ALWAYS delivery-attempted against the resolved",
+        "  recipient's live binding -- wake is a transport property, not",
+        "  something the sender opts into. Claude Code wakes through its",
+        "  registered native adapter; locally patched Codex wakes through",
+        "  notifications/homunculus/peer_message. A leading 'IMPORTANT:' in",
+        "  the prose is stripped as input hygiene only; it no longer gates",
+        "  delivery.",
         "",
         "Fails (HTTP 400) if the peer is not currently registered, the",
         "peer_id is ambiguous without an instance hint (peer_ambiguous),",
@@ -101,10 +93,12 @@ _PEER_SEND_BY_NAME_DESCRIPTION: Final[str] = "\n".join(
         "Git-Controller, and Codex-Reviewer, depending on which roles are",
         "currently claimed in the homunculus.",
         "",
-        "Loop-prevention contract:",
-        "  Prefix content with \"IMPORTANT: \" only when the role holder should",
-        "  wake and act now. Without IMPORTANT the message is persisted for the",
-        "  holder's role inbox but does not wake a live session.",
+        "Delivery contract:",
+        "  Every send is persisted to the role's durable inbox AND",
+        "  delivery-attempted against the current holder's live binding --",
+        "  wake is a transport property, not something the sender opts into.",
+        "  A leading 'IMPORTANT:' in the content is stripped as input",
+        "  hygiene only; it no longer gates delivery.",
         "",
         "This is the preferred task-assignment tool. Use peer_send only for",
         "direct replies or an operator-requested exact live instance.",
@@ -115,14 +109,11 @@ _PEER_INBOX_DESCRIPTION: Final[str] = "\n".join(
     [
         "Pull peer messages addressed to your agent_id.",
         "",
-        "Default behavior: return silent and IMPORTANT-marked messages",
-        "as a durable catch-up view. Use an `after` timestamp when polling",
-        "during an active incident so old IMPORTANT history does not flood",
-        "the context window.",
-        "",
-        "Set include_important=false only for intentional silent-only",
-        "status checks where previously-notified IMPORTANT messages would",
-        "be noise.",
+        "Returns the durable catch-up view of every message addressed to",
+        "you -- delivery is a transport property now, not a sender-declared",
+        "one, so there is no silent-vs-notified split to filter on here.",
+        "Use an `after` timestamp when polling during an active incident so",
+        "old history does not flood the context window.",
         "",
         "Spans every peer thread targeting you, regardless of which bridge owns",
         "the thread. Pagination uses after (ISO-8601 timestamp); pass the previous",
@@ -272,155 +263,6 @@ TOOLS: Final[list[dict[str, Any]]] = [
         },
     },
     {
-        "name": "agent_thread_open",
-        "description": (
-            "Open a durable inter-agent thread targeting a backend "
-            "(codex|claude_code). Optionally include initial_message to "
-            "dispatch a first turn immediately. Returns thread_id + (if "
-            "initial_message) message_id/action_id/flow_id. Async -- turn "
-            "results arrive as bridge_delivery_result channel notifications."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "backend": {
-                    "type": "string",
-                    "enum": ["codex", "claude_code"],
-                    "description": "Backend that owns the thread.",
-                },
-                "working_directory": {
-                    "type": "string",
-                    "description": (
-                        "Filesystem root for the backend; must be inside "
-                        "allowed_working_directory_roots if configured."
-                    ),
-                },
-                "title": {"type": "string", "description": "Optional short label."},
-                "context": {
-                    "type": "object",
-                    "description": "Optional context passed to the backend.",
-                    "properties": {
-                        "summary": {"type": "string"},
-                        "tags": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "additionalProperties": False,
-                },
-                "initial_message": {
-                    "type": "object",
-                    "description": (
-                        "Optional first message; if present the thread is "
-                        "dispatched immediately."
-                    ),
-                    "properties": {
-                        "content": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "type": {"type": "string", "enum": ["text"]},
-                                    "text": {"type": "string"},
-                                },
-                                "required": ["type", "text"],
-                                "additionalProperties": False,
-                            },
-                            "minItems": 1,
-                        },
-                        "response_mode": {"type": "string", "enum": ["async"]},
-                        "timeout_seconds": {"type": "integer", "minimum": 1},
-                    },
-                    "required": ["content"],
-                    "additionalProperties": False,
-                },
-            },
-            "required": ["backend"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "agent_send",
-        "description": (
-            "Append a follow-up message to an existing thread and dispatch "
-            "the next turn. Async -- completion arrives as a "
-            "bridge_delivery_result notification with the structured "
-            "payload (payload.status discriminates idle/interrupted/error)."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "thread_id": {"type": "string"},
-                "content": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "type": {"type": "string", "enum": ["text"]},
-                            "text": {"type": "string"},
-                        },
-                        "required": ["type", "text"],
-                        "additionalProperties": False,
-                    },
-                    "minItems": 1,
-                },
-                "response_mode": {"type": "string", "enum": ["async"]},
-                "timeout_seconds": {"type": "integer", "minimum": 1},
-            },
-            "required": ["thread_id", "content"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "agent_messages",
-        "description": (
-            "Read messages from a thread using cursor pagination. Returns "
-            "messages with cursor strictly greater than after_cursor, "
-            "ordered ascending."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "thread_id": {"type": "string"},
-                "after_cursor": {"type": "integer", "minimum": 0, "default": 0},
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100,
-                    "default": 50,
-                },
-            },
-            "required": ["thread_id"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "agent_status",
-        "description": (
-            "Snapshot read of a thread: status "
-            "(open|queued|running|idle|interrupted|error|closed), backend, "
-            "last cursor, active_action_id/active_flow_id if a turn is in "
-            "flight."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {"thread_id": {"type": "string"}},
-            "required": ["thread_id"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "agent_close",
-        "description": (
-            "Close a thread terminally. Refuses (HTTP 409 "
-            "agent_thread_running) if the thread has an active turn -- "
-            "wait for it to land or for agent_interrupt support to ship."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {"thread_id": {"type": "string"}},
-            "required": ["thread_id"],
-            "additionalProperties": False,
-        },
-    },
-    {
         "name": "peer_register",
         "description": _PEER_REGISTER_DESCRIPTION,
         "inputSchema": {
@@ -514,8 +356,9 @@ TOOLS: Final[list[dict[str, Any]]] = [
                 "content": {
                     "type": "string",
                     "description": (
-                        "Message text. Prefix with 'IMPORTANT: ' to wake the "
-                        "current role holder."
+                        "Message text. Delivery is a transport property, not a "
+                        "sender-declared one: every send is delivery-attempted "
+                        "against the resolved recipient's live binding."
                     ),
                 },
             },
@@ -538,16 +381,6 @@ TOOLS: Final[list[dict[str, Any]]] = [
                     "minimum": 1,
                     "maximum": 100,
                     "default": 50,
-                },
-                "include_important": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": (
-                        "When true, return the durable catch-up view including "
-                        "messages whose sender used the IMPORTANT marker. "
-                        "Default true. Set false only for intentional "
-                        "silent-only status checks."
-                    ),
                 },
                 "role_after": {
                     "type": "string",
@@ -601,8 +434,8 @@ def build_server_instructions(homunculus_name: str) -> str:
             "`process_call` for any known process_key (zero inference), then "
             "`process_result` with the returned action_id to read completion.  "
             "Peer messages between you and other live MCP-connected agents flow "
-            "through `peer_send`; the loop-prevention contract gates wake-up "
-            "on the IMPORTANT marker.",
+            "through `peer_send`; delivery is unconditional -- wake is a "
+            "transport property, not something the sender opts into.",
             "",
             "When acting as an operator control plane, assign work through "
             "`peer_send_by_name` to a durable role such as Coordinator, "

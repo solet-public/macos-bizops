@@ -92,6 +92,56 @@ def is_system_role(name: str) -> bool:
     """True iff ``name`` is in the reserved system-slot keyspace (``sys:`` prefix)."""
     return name.startswith(SYSTEM_ROLE_PREFIX)
 
+
+# Fleet session-management Phase B (§2) — the R4 role-class taxonomy. A first-class
+# column on the ``role`` row (class attaches to the NAME, not the binding —
+# offices-vs-callsigns, C4), validated at claim time in the plugin's claim gate. Lives
+# here (not only in the plugin) alongside ``COL_ORIGIN``/``is_system_role`` because
+# core's ``list_silent_for_roles``-style enumeration reads share this same contract
+# module as their single source of truth for the ``role`` row shape (AMEND 1a).
+COL_ROLE_CLASS = "role_class"
+
+ROLE_CLASS_PRIMARY = "primary"
+ROLE_CLASS_PRINCIPAL = "principal"
+ROLE_CLASS_PROJECT = "project"
+ROLE_CLASS_EPHEMERAL = "ephemeral"
+ROLE_CLASS_CHAT = "chat"
+
+# Existing (pre-Phase-B) rows backfill to this class (§3.1) — the default a bare
+# ``project`` lane role predates this design under.
+ROLE_CLASS_DEFAULT = ROLE_CLASS_PROJECT
+
+ROLE_CLASSES = (
+    ROLE_CLASS_PRIMARY,
+    ROLE_CLASS_PRINCIPAL,
+    ROLE_CLASS_PROJECT,
+    ROLE_CLASS_EPHEMERAL,
+    ROLE_CLASS_CHAT,
+)
+
+# The reserved ``primary``-shape name suffix (design §2: "<homunculus>-Main",
+# e.g. any name of that shape). Dawn ruling (2026-08-03, Q1): peer_claim_role is
+# enforce-by-class ONLY, never class-assignment — a fresh mint always stamps
+# ROLE_CLASS_DEFAULT ('project'), so a pre-D4 claim of a reserved-pattern name
+# would otherwise squat it as an ordinary project role. The ONE claim-path
+# guard that IS D1 scope: refuse a FRESH MINT (no pre-existing role row) of a
+# reserved-pattern name with 'reserved_role_name' — a string-pattern check,
+# nothing more. A name whose role row ALREADY exists (legislated via
+# agent_messaging_plugin's legislate_role governance-act verb, D4, entirely
+# outside D1) is unaffected — this guards MINTING, not claiming an
+# already-legislated primary seat.
+RESERVED_PRIMARY_NAME_SUFFIX = "-Main"
+
+
+def is_reserved_primary_name(name: str) -> bool:
+    """True iff ``name`` matches the reserved primary-seat pattern
+    (``<homunculus>-Main``). Distinct from :func:`is_system_role`: that one is
+    a DISJOINT keyspace rejected outright for ANY claim; this one only guards
+    a FRESH MINT (§3.1 — "validated against class at claim time... NOT
+    keyspace-rejected... claimable-with-displacement through the normal
+    path" once legislated)."""
+    return name.endswith(RESERVED_PRIMARY_NAME_SUFFIX)
+
 # The discriminated BINDING authority (Control-#2 continuity; sole writable
 # resolution + CAS authority). Reuses COL_ROLE / COL_AGENT_INSTANCE_ID /
 # COL_AGENT_SESSION_ID / COL_CLAIMED_AT — the two identity columns are NULLABLE
@@ -123,11 +173,20 @@ __all__ = [
     "COL_ORIGIN",
     "COL_PROPERTIES",
     "COL_ROLE",
+    "COL_ROLE_CLASS",
     "COL_SESSION_LABEL",
     "HOLDER_KIND_INFERENCE_PROVIDER",
     "HOLDER_KIND_SESSION",
     "INDEX_AGENT_ROLE_BINDING_INSTANCE",
     "INDEX_ROLE_BINDING_INSTANCE",
+    "RESERVED_PRIMARY_NAME_SUFFIX",
+    "ROLE_CLASSES",
+    "ROLE_CLASS_CHAT",
+    "ROLE_CLASS_DEFAULT",
+    "ROLE_CLASS_EPHEMERAL",
+    "ROLE_CLASS_PRIMARY",
+    "ROLE_CLASS_PRINCIPAL",
+    "ROLE_CLASS_PROJECT",
     "ROLE_ORIGIN_SYSTEM",
     "ROLE_ORIGIN_USER",
     "SYSTEM_ROLE_PREFIX",
@@ -135,6 +194,7 @@ __all__ = [
     "TABLE_AGENT_ROLE_BINDING",
     "TABLE_ROLE",
     "TABLE_ROLE_BINDING",
+    "is_reserved_primary_name",
     "is_system_role",
     "role_binding_external_id",
 ]

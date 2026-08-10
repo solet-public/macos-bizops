@@ -56,9 +56,8 @@ def test_mint_site_new_values() -> None:
         "S6: DELIVERY_QUEUED_NOTIFICATION == 'queued_notification'",
     )
     _check(
-        peer_dispatch.DELIVERY_PERSISTED_SILENT == "persisted_silent"
-        and peer_dispatch.DELIVERY_QUEUED_FOR_REPLAY == "queued_for_replay",
-        "S6: the already-honest values (persisted_silent / queued_for_replay) are unchanged",
+        peer_dispatch.DELIVERY_QUEUED_FOR_REPLAY == "queued_for_replay",
+        "S6: the already-honest queued_for_replay value is unchanged",
     )
 
 
@@ -70,6 +69,11 @@ def test_old_identifiers_gone() -> None:
     _check(
         not hasattr(peer_dispatch, "DELIVERY_NOTIFIED"),
         "S6: the old DELIVERY_NOTIFIED identifier is gone (hard rename)",
+    )
+    _check(
+        not hasattr(peer_dispatch, "DELIVERY_PERSISTED_SILENT"),
+        "A4: the retired DELIVERY_PERSISTED_SILENT identifier is gone — no "
+        "delivery outcome skips the queue anymore",
     )
 
 

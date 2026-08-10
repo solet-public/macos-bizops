@@ -57,13 +57,47 @@ def _check_entry_against_manifest(
         res.check(interface.get("capabilities") == ["Hooks"], "plugin declares only the Hooks capability")
 
 
+def _check_manifest_standalone(manifest: dict[str, Any], res: Results) -> None:
+    """The half that is checkable wherever the plugin exists.
+
+    The marketplace file is rendered into a clone at HYDRATION, not shipped in the
+    bundle, so a born clone has the plugin but no marketplace to cross-check it
+    against. Requiring one made this smoke unpassable on a clean install — an
+    external adopter reported exactly that. These assertions need only the shipped
+    manifest, so they run everywhere and keep real coverage in a bundle rather
+    than the smoke degrading to a no-op.
+    """
+    res.check(manifest.get("name") == PLUGIN_NAME, "plugin manifest identity is the reviewed plugin")
+    version = manifest.get("version")
+    res.check(isinstance(version, str) and SEMVER.fullmatch(version) is not None,
+              "plugin version is semver", str(version))
+    interface = manifest.get("interface")
+    res.check(isinstance(interface, dict), "plugin interface metadata is an object")
+    if isinstance(interface, dict):
+        res.check(interface.get("capabilities") == ["Hooks"], "plugin declares only the Hooks capability")
+        res.check(isinstance(interface.get("category"), str) and bool(interface.get("category")),
+                  "plugin declares a category")
+
+
 def main() -> int:
     preflight()
     res = Results("Codex marketplace consistency")
     repo_root = PLUGIN_ROOT.parents[3]
     marketplace_path = repo_root / ".agents" / "plugins" / "marketplace.json"
-    marketplace = _object(marketplace_path)
     manifest = _object(PLUGIN_ROOT / ".codex-plugin" / "plugin.json")
+
+    # Always: the shipped manifest must stand on its own.
+    _check_manifest_standalone(manifest, res)
+
+    if not marketplace_path.is_file():
+        # A bundle / un-hydrated clone. Say so in the output rather than passing
+        # silently — a reader must be able to tell which assertions ran.
+        print("  mode: no rendered marketplace (bundle / pre-hydration) — "
+              "manifest-only assertions; cross-check is out of scope here")
+        return res.finish()
+
+    print("  mode: rendered marketplace present — manifest + cross-check")
+    marketplace = _object(marketplace_path)
 
     name = marketplace.get("name")
     res.check(
