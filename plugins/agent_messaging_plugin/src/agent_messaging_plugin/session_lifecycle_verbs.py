@@ -318,10 +318,25 @@ class SpawnSessionRequest:
     # permission_mode. Empty here means "let the resolver fill it from
     # policy," never "spawn with no transport declared."
     transport: str = ""
+    # Per-spawn inference provider selection (2026-08-10). The SPAWNING
+    # session directs which provider its worker runs on -- "bedrock" or
+    # "anthropic" -- independent of whatever provider the platform daemon
+    # itself was launched under. Empty ("") means INHERIT: the worker gets
+    # the daemon's own environment untouched, which is exactly today's
+    # behavior (a headless worker inherits `dict(os.environ)`), so an
+    # omitted provider is fully backward-compatible. The actual credentials
+    # for "bedrock" are resolved from the vault at the platform_process
+    # shim (which holds the injected VaultServiceProxy) and passed to the
+    # host driver through the dispatch dict ONLY -- never persisted onto the
+    # managed_session ledger row, so no secret ever lands in durable state.
+    provider: str = ""
 
 
 def spawn_session(
-    state: StateManagementInterface, req: SpawnSessionRequest,
+    state: StateManagementInterface,
+    req: SpawnSessionRequest,
+    *,
+    provider_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """§4 ``spawn_session``: validate -> write the ledger row (spawning,
     BEFORE dispatch) -> dispatch through the resolved host driver. A
@@ -334,6 +349,15 @@ def spawn_session(
     driver (``headless``) can inject it into the spawned process's own
     environment — that is what lets ``backfill_registration`` find the right
     ledger row when the process later registers with the platform.
+
+    ``provider_env`` (2026-08-10) is the pre-resolved inference-provider
+    environment overlay for ``req.provider`` — vault-resolved by the
+    ``platform_process`` shim, which holds the ``VaultServiceProxy`` this
+    pure verb deliberately does not. It flows into the driver dispatch dict
+    ONLY, never onto ``ManagedSessionSpec`` / the ledger row, so a spawn's
+    provider credentials never touch durable state. ``None`` (the ordinary
+    case — no provider directed, or a fake/test driver) leaves the worker
+    inheriting the daemon environment exactly as before.
     """
     if req.role_class not in _VALID_SPAWN_ROLE_CLASSES:
         raise VerbError(
@@ -394,6 +418,14 @@ def spawn_session(
                 # delegation contract; a fake driver ignores them.
                 "role_class": req.role_class,
                 "spawned_by_role": req.spawned_by_role,
+                # Per-spawn provider selection (2026-08-10): the provider
+                # NAME is provenance a real driver may log; the resolved
+                # ENV overlay is what actually switches the worker's
+                # inference endpoint. Both ride the dispatch dict only —
+                # a fake/test driver ignores them, and neither is written
+                # to the ledger row.
+                "provider": req.provider,
+                "provider_env": provider_env or {},
             },
         )
     except HostCannotSpawnError as exc:

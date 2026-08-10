@@ -413,6 +413,18 @@ plugins/agent_messaging_plugin/tests/session_hosts_smoke.py
 # unmapped exception through the clear_session/compact_session verb layer.
 plugins/agent_messaging_plugin/tests/headless_adapter_smoke.py
 
+# Per-spawn inference-provider selection (2026-08-10) — the spawning session
+# directs its worker's provider ("bedrock" | "anthropic"), independent of the
+# daemon's own provider. Covers the pure overlay helpers (_coerce/_apply_
+# provider_env: set-for-bedrock, strip-for-anthropic, no-op-when-absent), the
+# ONE vault-reading seam (_resolve_provider_env: inherit / anthropic-strip /
+# bedrock-resolve / fail-loud on missing credential or unknown provider — never
+# a silent wrong-provider spawn), and the headless spawn() env wiring (a
+# provider_env on the dispatch spec reaches the worker; an omitted provider
+# leaves the inherited daemon env untouched — backward compatible). Fakes only:
+# no real process, no real vault, no real claude binary.
+plugins/agent_messaging_plugin/tests/spawn_provider_env_smoke.py
+
 # T1 usage-capture lane (2026-08-05) — red-first regression guard for the
 # stdout-never-read fix in headless_adapter.py's spawn(): before the fix,
 # stdout was piped but never drained (only stderr was), so a chatty child

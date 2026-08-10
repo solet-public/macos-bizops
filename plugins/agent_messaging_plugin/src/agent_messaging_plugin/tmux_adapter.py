@@ -82,6 +82,7 @@ from typing import TYPE_CHECKING, Any
 from .headless_adapter import (
     WorkerHookResolutionError,
     _authority_system_prompt,
+    _coerce_provider_env,
     _pid_alive,
     _resolve_heartbeat_marker_dir,
     _resolve_session_mapping_spool_dir,
@@ -135,6 +136,7 @@ def _emit_role_tag_path() -> Path:
 def _env_pairs(
     *, agent_instance_id: str, agent_session_id: str, label: str,
     homunculus_name: str, allowed_tools: object, transport: str,
+    provider_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """``-e KEY=VAL`` args for ``tmux new-session`` — split out of
     :meth:`TmuxHostDriver.spawn` to keep it under the radon cc threshold.
@@ -142,7 +144,17 @@ def _env_pairs(
     ``transport`` is caller-resolved (fleet-watch-transport-migration phase
     2 slice 1, 2026-08-06) -- never hardcoded here, the same declared,
     never-probed FLEET_TRANSPORT contract every consumer reads
-    independently."""
+    independently.
+
+    ``provider_env`` (2026-08-10) is the vault-resolved per-spawn inference
+    provider overlay — parity with ``headless_adapter._spawn_env``. Unlike
+    headless (which strips-then-sets over an inherited ``dict(os.environ)``),
+    tmux only ADDS ``-e`` pairs onto the tmux server's own environment, so
+    every overlay entry is emitted as an explicit pair: a real value sets
+    the variable, and an empty value (the ``anthropic`` strip signal) forces
+    it empty — which Claude Code reads as "Bedrock off," the tmux-side
+    equivalent of the headless unset. An empty/absent overlay adds nothing
+    (inherit — today's behavior)."""
     pairs: list[str] = []
     for key, value in {
         "HOMUNCULUS_NAME": homunculus_name,
@@ -165,6 +177,12 @@ def _env_pairs(
         pairs += ["-e", f"{key}={value}"]
     if isinstance(allowed_tools, (list, tuple)) and allowed_tools:
         pairs += ["-e", f"FLEET_HEADLESS_TOOL_ALLOWLIST={','.join(str(t) for t in allowed_tools)}"]
+    # Per-spawn provider overlay (2026-08-10) — parity with headless. Emit
+    # every overlay entry as an explicit -e pair (real value sets it; empty
+    # value forces it empty, the tmux-side equivalent of headless's unset).
+    if provider_env:
+        for key, value in provider_env.items():
+            pairs += ["-e", f"{key}={value}"]
     # T1 usage-capture lane (ruling 2026-08-05, Q1(a)): same declared-not-
     # derived contract as headless_adapter._spawn_env -- omitted entirely
     # when APP_HOME is unset.
@@ -679,6 +697,7 @@ class TmuxHostDriver:
             agent_instance_id=agent_instance_id, agent_session_id=agent_session_id,
             label=label, homunculus_name=self._homunculus_name,
             allowed_tools=spec.get("allowed_tools") or (), transport=transport,
+            provider_env=_coerce_provider_env(spec),
         )
         try:
             claude_cmd = self._spawn_command(spec, transport=transport)

@@ -68,6 +68,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -78,7 +79,7 @@ from .authority_contract import render_authority_delegation_contract
 from .schema import CAPTURE_SOURCE_INIT_EVENT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +246,60 @@ def _coerce_allowed_tools(spec: Mapping[str, object]) -> tuple[str, ...]:
     if isinstance(raw, (list, tuple)):
         return tuple(str(t) for t in raw)
     return ()
+
+
+# Per-spawn inference-provider env (2026-08-10). The full set of variables a
+# provider switch must set OR clear, so switching to one provider can never
+# leave the other's variables lingering in the inherited daemon environment.
+# A provider overlay maps each of these to its value ("" is a real, intended
+# "unset this variable" signal, distinct from the key being absent). Mirrors
+# the operator's own ~/.zshrc `_claude_apply_provider` toggle exactly — the
+# same contract, resolved server-side from the vault for a daemon-spawned
+# worker instead of from the interactive shell's env.
+_PROVIDER_ENV_KEYS: tuple[str, ...] = (
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+)
+
+
+def _coerce_provider_env(spec: Mapping[str, object]) -> dict[str, str]:
+    """The spawn spec's ``provider_env`` overlay (vault-resolved at the
+    platform_process shim), tolerant of a missing or wrong-shaped value —
+    split out of :meth:`HeadlessHostDriver.spawn` to keep it under the radon
+    cc threshold, mirroring :func:`_coerce_allowed_tools`. An empty dict (the
+    default — no provider directed) means "inherit the daemon environment
+    untouched," today's behavior."""
+    raw = spec.get("provider_env") or {}
+    if isinstance(raw, Mapping):
+        return {str(k): str(v) for k, v in raw.items()}
+    return {}
+
+
+def _apply_provider_env(
+    env: dict[str, str], provider_env: Mapping[str, str] | None,
+) -> None:
+    """Apply a resolved provider overlay onto a spawn's env IN PLACE.
+
+    A provider switch is not additive: it must both SET the target
+    provider's variables and REMOVE the other provider's, or a worker that
+    inherited the daemon's Bedrock env would keep talking to Bedrock even
+    when the spawner asked for Anthropic (and vice versa). So a non-empty
+    overlay first strips every provider variable this platform knows about
+    (:data:`_PROVIDER_ENV_KEYS`), then applies exactly the overlay's own
+    entries — a "" value means "leave unset" (the strip already did it),
+    a non-empty value sets it. An empty/absent overlay is a no-op: the
+    worker inherits the daemon environment exactly as before (backward
+    compatible)."""
+    if not provider_env:
+        return
+    for key in _PROVIDER_ENV_KEYS:
+        env.pop(key, None)
+    for key, value in provider_env.items():
+        if value:
+            env[str(key)] = str(value)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -539,8 +594,10 @@ class HeadlessHostDriver:
     def _spawn_env(
         self, *, agent_instance_id: str, agent_session_id: str, label: str,
         allowed_tools: tuple[str, ...], transport: str,
+        provider_env: Mapping[str, str] | None = None,
     ) -> dict[str, str]:
         env = dict(os.environ)
+        _apply_provider_env(env, provider_env)
         env["HOMUNCULUS_NAME"] = self._homunculus_name
         env["AGENT_IDENTITY"] = "claude_code"
         env["AGENT_INSTANCE_ID"] = agent_instance_id
@@ -798,6 +855,7 @@ class HeadlessHostDriver:
         env = self._spawn_env(
             agent_instance_id=agent_instance_id, agent_session_id=agent_session_id,
             label=label, allowed_tools=_coerce_allowed_tools(spec), transport=transport,
+            provider_env=_coerce_provider_env(spec),
         )
         try:
             cmd = self._spawn_command(spec, label=label, transport=transport)

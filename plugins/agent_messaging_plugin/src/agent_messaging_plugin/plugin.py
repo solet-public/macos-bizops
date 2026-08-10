@@ -382,6 +382,56 @@ def _bearer_hmac_key_vault_name() -> str:
 
 _BEARER_HMAC_KEY_VAULT_NAME = _bearer_hmac_key_vault_name()
 
+# Per-spawn provider selection (2026-08-10). Recognized provider names for
+# spawn_session's ``provider`` argument; "" (absent) means inherit.
+_PROVIDER_BEDROCK = "bedrock"
+_PROVIDER_ANTHROPIC = "anthropic"
+_VALID_SPAWN_PROVIDERS = frozenset({_PROVIDER_BEDROCK, _PROVIDER_ANTHROPIC})
+
+# Scoped vault credential names holding the Bedrock gateway token and base
+# URL. Same scoping convention as the bearer HMAC key
+# (``<homunculus>.agent_messaging_plugin.<credential>``) so the injected,
+# caller-bound VaultServiceProxy resolves them under this plugin's identity.
+_VAULT_CRED_BEDROCK_TOKEN = "bedrock_auth_token"
+_VAULT_CRED_BEDROCK_BASE_URL = "bedrock_base_url"
+
+
+class _ProviderResolutionError(Exception):
+    """A spawn_session ``provider`` could not be resolved to an env overlay
+    (unknown provider name, or a Bedrock spawn whose vault credentials are
+    missing). Carries a stable ``code`` so the shim returns a typed
+    ``_failure_result`` rather than a bare 500."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _bedrock_vault_name(credential: str) -> str:
+    """Scoped vault entry name for a Bedrock provider credential — same
+    convention as :func:`_bearer_hmac_key_vault_name`."""
+    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    if not name:
+        raise _ProviderResolutionError(
+            "provider_env_unresolved",
+            "HOMUNCULUS_NAME is not set — cannot resolve the scoped Bedrock "
+            "provider vault entry name for a provider='bedrock' spawn.",
+        )
+    return f"{name}.agent_messaging_plugin.{credential}"
+
+
+def _vault_retrieve_value(vault: Any, key: str) -> str | None:
+    """Return a vault secret's plaintext value, or None when absent — the
+    same success-envelope shape :func:`_load_or_create_bearer_hmac_key`
+    reads."""
+    retrieved = vault.retrieve(key)
+    if isinstance(retrieved, dict) and retrieved.get("status") == "success":
+        value = retrieved.get("data", {}).get("value")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
 
 def _load_or_create_bearer_hmac_key(vault: Any) -> bytes:
     """Return the homunculus's HMAC bearer-signing secret as raw bytes.
@@ -818,8 +868,19 @@ class AgentMessagingPlugin(
         Per W-ADDRESS-BOOK-RENAME §A.2.4 the bearer_token_hmac_key now
         writes/reads under the scoped form built in
         ``_bearer_hmac_key_vault_name()``.
+
+        The two Bedrock provider credentials (2026-08-10) are DECLARED, not
+        required: a spawn_session ``provider='bedrock'`` reads them, but a
+        deployment that never spawns Bedrock workers never needs them, so
+        their absence must not fail readiness (that is why they appear here
+        and NOT in ``get_required_vault_keys``).
         """
-        return [_BEARER_HMAC_KEY_VAULT_NAME]
+        keys = [_BEARER_HMAC_KEY_VAULT_NAME]
+        name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+        if name:
+            keys.append(f"{name}.agent_messaging_plugin.{_VAULT_CRED_BEDROCK_TOKEN}")
+            keys.append(f"{name}.agent_messaging_plugin.{_VAULT_CRED_BEDROCK_BASE_URL}")
+        return keys
 
     # ------------------------------------------------------------------
     # ServicePlugin lifecycle (no background workers; lazy build)
@@ -2408,6 +2469,22 @@ class AgentMessagingPlugin(
                 required=False,
                 type=ParameterType.STRING,
             ),
+            "provider": ParameterMetadata(
+                description=(
+                    "Per-spawn inference provider for the worker: 'bedrock' | "
+                    "'anthropic'. Omitted (the default) means the worker inherits "
+                    "the platform daemon's own provider environment unchanged — "
+                    "today's behavior. 'bedrock' resolves the gateway token + base "
+                    "URL from this homunculus's vault "
+                    "(<name>.agent_messaging_plugin.bedrock_auth_token / "
+                    "bedrock_base_url) and injects them into the worker only; "
+                    "'anthropic' strips any inherited Bedrock variables so the "
+                    "worker uses the default Anthropic endpoint. The spawning "
+                    "session directs this per spawn."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
         },
         output_type="object",
         output_description=(
@@ -2461,10 +2538,85 @@ class AgentMessagingPlugin(
         req = _spawn_session_request_from_params(raw, format_directed_by(state.get("call_context")))
         req = _apply_spawn_session_policy(req, self._build_session_lifecycle_policy_config())
         try:
-            result = lifecycle_spawn_session(state_service, req)
+            provider_env = self._resolve_provider_env(req.provider)
+        except _ProviderResolutionError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        try:
+            result = lifecycle_spawn_session(state_service, req, provider_env=provider_env)
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
+
+    def _resolve_provider_env(self, provider: str) -> dict[str, str] | None:
+        """Resolve a spawn_session ``provider`` name into the environment
+        overlay the host driver applies to the worker.
+
+        This is the ONE place vault-backed provider credentials are read —
+        the shim holds the injected ``VaultServiceProxy``; the pure
+        ``spawn_session`` verb and the stateless host driver deliberately do
+        not. Returns ``None`` for an omitted provider (inherit the daemon
+        environment — today's behavior), an explicit strip-map for
+        ``anthropic`` (remove any inherited Bedrock variables so the worker
+        uses the default Anthropic endpoint), and the token + base-URL
+        overlay for ``bedrock``. Raises :class:`_ProviderResolutionError`
+        for an unknown provider name or a Bedrock spawn whose vault
+        credentials are absent — a fail-loud outcome the shim surfaces as a
+        typed failure, never a worker that silently launches on the wrong
+        provider."""
+        provider = (provider or "").strip().lower()
+        if not provider:
+            return None
+        if provider not in _VALID_SPAWN_PROVIDERS:
+            raise _ProviderResolutionError(
+                "unknown_provider",
+                f"provider {provider!r} is not one of "
+                f"{sorted(_VALID_SPAWN_PROVIDERS)} (or '' to inherit the daemon "
+                "provider).",
+            )
+        if provider == _PROVIDER_ANTHROPIC:
+            # Explicit strip: every provider variable set to "" so the driver
+            # removes any Bedrock config the worker would otherwise inherit
+            # from the daemon. A non-empty map (not None) is what signals the
+            # driver to perform the strip at all.
+            return {
+                "CLAUDE_CODE_USE_BEDROCK": "",
+                "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "",
+                "ANTHROPIC_BEDROCK_BASE_URL": "",
+                "ANTHROPIC_AUTH_TOKEN": "",
+            }
+        # provider == bedrock
+        vault = self._vault_service
+        if vault is None:
+            raise _ProviderResolutionError(
+                "provider_env_unresolved",
+                "provider='bedrock' requires a bound vault to resolve the "
+                "gateway credentials, but no vault service is bound on this "
+                "homunculus.",
+            )
+        token = _vault_retrieve_value(vault, _bedrock_vault_name(_VAULT_CRED_BEDROCK_TOKEN))
+        base_url = _vault_retrieve_value(vault, _bedrock_vault_name(_VAULT_CRED_BEDROCK_BASE_URL))
+        missing = [
+            name
+            for name, value in (
+                (_VAULT_CRED_BEDROCK_TOKEN, token),
+                (_VAULT_CRED_BEDROCK_BASE_URL, base_url),
+            )
+            if not value
+        ]
+        if missing:
+            raise _ProviderResolutionError(
+                "provider_env_unresolved",
+                "provider='bedrock' spawn cannot proceed — missing vault "
+                f"credential(s): {missing}. Store them under "
+                f"'<name>.agent_messaging_plugin.<credential>' before spawning "
+                "a Bedrock worker.",
+            )
+        return {
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1",
+            "ANTHROPIC_BEDROCK_BASE_URL": str(base_url),
+            "ANTHROPIC_AUTH_TOKEN": str(token),
+        }
 
     @platform_process(
         name="legislate_role",
@@ -6665,6 +6817,7 @@ def _spawn_dispatch_overrides_from_params(raw: dict[str, Any]) -> dict[str, Any]
         "effort": str(raw.get("effort", "") or ""),
         "allowed_tools": _as_str_tuple(raw.get("allowed_tools"), default=()),
         "permission_mode": str(raw.get("permission_mode", "") or ""),
+        "provider": str(raw.get("provider", "") or ""),
     }
 
 
