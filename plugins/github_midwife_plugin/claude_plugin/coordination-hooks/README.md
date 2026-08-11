@@ -2,13 +2,13 @@
 
 Fleet coordination hooks for multi-session Claude Code workflows:
 
-- **Knowledge-base-first reminder** (`UserPromptSubmit`) — suggests checking
+- **Knowledge-base-first reminder** (`SessionStart`) — suggests checking
   this project's documented conventions before non-trivial work. A reminder,
   not an enforced gate: the underlying search this suggests is asynchronous,
   so the hook cannot block on its result. Unconditionally armed — no
   environment variable disarms it, unlike every other hook below — so a
   session never silently loses awareness that the mechanism exists.
-- **Check-your-messages reminder** (`SessionStart` + `UserPromptSubmit`) —
+- **Check-your-messages reminder** (`SessionStart`) —
   a plain nudge to check for unread coordination messages. Intentionally has
   no backend dependency: it always fires the same reminder and lets the
   model's own tool call determine whether anything is actually there.
@@ -112,6 +112,20 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   Code `session_id`, for the platform's own session-ledger reconciliation
   — non-fatal by design, like the memory-passthrough capture hook. See
   `SECURITY.md` for the full contract of each.
+
+## Cadence ruling (2026-08-11)
+
+The knowledge-base-first and check-your-messages reminders fire on
+`SessionStart` (`startup`, `resume`, `clear`) only, not `UserPromptSubmit` —
+both used to re-fire on every prompt turn, which accumulated one copy per
+turn in the transcript. This changes CADENCE ONLY: the 2026-08-01 ruling
+that the knowledge-base-first reminder is unconditionally armed (no
+environment gate) is unchanged and still enforced by
+`tests/reminder_hooks_smoke.py`'s `check_step_zero_fires_everywhere`. The
+memory-passthrough session-context hook still fires on both
+`SessionStart` and `UserPromptSubmit` — it was never in scope for this
+move, since it is not a reminder, it is the context-gauge/hydrate-drain
+instruction surface.
 
 ## Configuration
 

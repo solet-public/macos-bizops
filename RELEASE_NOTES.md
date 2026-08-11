@@ -4,6 +4,34 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-11 — reminder-hook cadence + managed Codex worker runtime
+
+**The coordination-hooks reminders now fire once per session, not once per
+prompt — both runtimes.** The Step Zero and check-messages reminders were
+bound to every prompt submission; every copy also accumulates in the session
+transcript, so long sessions carried dozens of duplicates in context. Both
+reminders now fire at session start (and again on resume and on a context
+clear), in the Claude and Codex plugin variants alike. The always-armed
+property is unchanged — installed still means armed, with no environment
+gating; only the cadence moved. If you review or ship these hooks downstream,
+the per-prompt binding is gone from both `hooks.json` files, and re-adding one
+is a named failing mutation in the shipped smokes.
+
+**New capability: managed Codex workers (opt-in).** `spawn_session` gains
+`agent_runtime` (`claude_code`, the default, or `codex`) — the fleet's session
+lifecycle (spawn / drive / clear / compact / terminate) now runs Codex CLI
+workers on both host drivers, with a fresh-backend-thread translation for
+context clears and the same ledger contract as Claude workers. Two honest
+bounds: provider selection is rejected for Codex workers (fail-loud), and
+**a Codex spawn currently requires an explicit Codex-valid `model`** — an
+omitted model falls through to a Claude-vocabulary default that the Codex
+runtime rejects at first inference with a hard API error (measured on a live
+spawn; the fix — per-runtime model defaults — is queued for the next update).
+Nothing changes for any `claude_code` path — the capability is inert unless
+you pass `agent_runtime="codex"`.
+
+---
+
 ## 2026-08-10 (second update) — response to adopter feedback Parts 36–40
 
 Five feedback parts arrived after this morning's release; every defect they

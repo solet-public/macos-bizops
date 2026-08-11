@@ -17,10 +17,17 @@ sys.dont_write_bytecode = True
 
 from _harness import HOOKS_DIR, PLUGIN_ROOT, Results, preflight  # noqa: E402
 
+# Cadence ruling (2026-08-11, cadence-only): step_zero and check_messages
+# moved from UserPromptSubmit to SessionStart(startup|resume|clear) so they
+# stop re-firing every prompt turn. The 2026-08-01 always-armed ruling for
+# step_zero_reminder.js is untouched by this move (no environment gate was
+# added or removed) and stays pinned by reminder_hooks_smoke.py's
+# check_step_zero_fires_everywhere. RED MUTATION for this Counter: re-adding
+# either reminder to any UserPromptSubmit entry, or dropping either from the
+# SessionStart(startup|resume|clear) group.
 EXPECTED = Counter(
     {
-        ("UserPromptSubmit", "", "step_zero_reminder.js"): 1,
-        ("UserPromptSubmit", "", "check_messages_reminder.js"): 1,
+        ("SessionStart", "startup|resume|clear", "step_zero_reminder.js"): 1,
         ("SessionStart", "startup|resume|clear", "check_messages_reminder.js"): 1,
         ("SessionStart", "startup|resume|clear", "role_binding_reminder.js"): 1,
         ("Stop", "", "wake_waiter.js"): 1,

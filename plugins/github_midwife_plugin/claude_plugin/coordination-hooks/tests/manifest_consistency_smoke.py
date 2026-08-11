@@ -192,6 +192,25 @@ SHELL_METACHARACTERS = ("$(", "`", ";", "|", "&", ">", "<", "\n")
 ALLOWED_COMMANDS = frozenset({"python3"})
 PLUGIN_ROOT_TOKEN = "${CLAUDE_PLUGIN_ROOT}/hooks/"
 
+# Cadence ruling (2026-08-11, cadence-only): step_zero_reminder.py and
+# check_messages_reminder.py moved from UserPromptSubmit to
+# SessionStart(startup|resume|clear) so they stop re-firing every prompt
+# turn. The 2026-08-01 always-armed ruling for step_zero_reminder.py (no
+# environment gate) is untouched by this move and stays pinned by
+# reminder_hooks_smoke.py's check_step_zero_fires_everywhere.
+# session_context.py was never in scope for this move (it is the
+# memory-passthrough context-gauge hook, not a reminder) and keeps its
+# pre-existing UserPromptSubmit + SessionStart bindings.
+REQUIRED_SESSION_START_CADENCE = {
+    "step_zero_reminder.py",
+    "check_messages_reminder.py",
+    "role_binding_reminder.py",
+}
+# RED MUTATION: re-adding either of these two to any UserPromptSubmit entry.
+FORBIDDEN_ON_USER_PROMPT_SUBMIT = frozenset(
+    {"step_zero_reminder.py", "check_messages_reminder.py"}
+)
+
 
 def _read(relative: str) -> str:
     return (PLUGIN_ROOT / relative).read_text(encoding="utf-8")
@@ -281,6 +300,82 @@ def check_manifest_is_exec_form(res: Results, entries: list[dict[str, object]]) 
             f"script path is plugin-root relative: {label}",
             f"got {first!r}",
         )
+
+
+def _group_scripts(group: object) -> set[str]:
+    """The script basenames a single hooks.json matcher-group invokes."""
+    if not isinstance(group, dict):
+        return set()
+    inner = group.get("hooks")
+    if not isinstance(inner, list):
+        return set()
+    scripts: set[str] = set()
+    for entry in inner:
+        args = entry.get("args") if isinstance(entry, dict) else None
+        if isinstance(args, list) and args and isinstance(args[0], str):
+            scripts.add(Path(args[0]).name)
+    return scripts
+
+
+def _group_matcher(group: object) -> str:
+    matcher = group.get("matcher", "") if isinstance(group, dict) else ""
+    return matcher if isinstance(matcher, str) else ""
+
+
+def _bind_by_event_matcher(hooks: dict[str, object]) -> dict[tuple[str, str], set[str]]:
+    """Flatten hooks.json into {(event, matcher): {script names}}.
+
+    check_tree_matches_manifest proves each script is wired SOMEWHERE; this
+    keeps the (event, matcher) grouping, unlike _manifest_entries' full
+    flatten, because check_reminder_cadence's claim is specifically about
+    which matcher group a script sits in, not merely that it is referenced
+    anywhere in the manifest.
+    """
+    bound: dict[tuple[str, str], set[str]] = {}
+    for event, groups in hooks.items():
+        if not isinstance(event, str) or not isinstance(groups, list):
+            continue
+        for group in groups:
+            key = (event, _group_matcher(group))
+            bound.setdefault(key, set()).update(_group_scripts(group))
+    return bound
+
+
+def check_reminder_cadence(res: Results, manifest: dict[str, object]) -> None:
+    """Pin the 2026-08-11 cadence ruling directly against hooks.json."""
+    hooks = manifest.get("hooks")
+    if not res.check(isinstance(hooks, dict), "hooks.json has a hooks object"):
+        return
+    assert isinstance(hooks, dict)
+    bound = _bind_by_event_matcher(hooks)
+
+    session_start = bound.get(("SessionStart", "startup|resume|clear"), set())
+    res.check(
+        REQUIRED_SESSION_START_CADENCE <= session_start,
+        "step_zero/check_messages/role_binding reminders all fire on "
+        "SessionStart(startup|resume|clear)",
+        f"missing {sorted(REQUIRED_SESSION_START_CADENCE - session_start)}",
+    )
+
+    on_user_prompt_submit: set[str] = set()
+    for (event, _matcher), scripts in bound.items():
+        if event == "UserPromptSubmit":
+            on_user_prompt_submit |= scripts
+    offenders = on_user_prompt_submit & FORBIDDEN_ON_USER_PROMPT_SUBMIT
+    res.check(
+        not offenders,
+        "step_zero/check_messages carry no UserPromptSubmit binding",
+        f"found {sorted(offenders)} still bound to UserPromptSubmit",
+    )
+    # session_context.py is deliberately NOT in FORBIDDEN_ON_USER_PROMPT_SUBMIT
+    # -- it keeps its pre-existing UserPromptSubmit binding, unaffected by
+    # this ruling.
+    res.check(
+        "session_context.py" in on_user_prompt_submit,
+        "session_context.py keeps its pre-existing UserPromptSubmit binding "
+        "(out of scope for the reminder-cadence move)",
+        f"UserPromptSubmit carries {sorted(on_user_prompt_submit)}",
+    )
 
 
 def check_tree_matches_manifest(res: Results, entries: list[dict[str, object]], hooks: list[str]) -> None:
@@ -655,6 +750,7 @@ def main() -> int:
     res.check(bool(entries), "hooks.json registers at least one hook")
 
     check_manifest_is_exec_form(res, entries)
+    check_reminder_cadence(res, manifest)
     check_tree_matches_manifest(res, entries, hooks)
     check_siblings_are_not_orphans(res, siblings, hooks)
     check_every_hook_is_documented(res, hooks)

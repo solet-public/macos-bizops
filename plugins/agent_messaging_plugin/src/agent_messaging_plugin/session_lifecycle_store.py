@@ -63,7 +63,7 @@ from .schema import (
     TABLE_MANAGED_SESSION,
     TABLE_SESSION_TRANSITION,
 )
-from .session_hosts import OPERATOR_HOST
+from .session_hosts import DEFAULT_AGENT_RUNTIME, OPERATOR_HOST
 
 if TYPE_CHECKING:
     from ananta.core.services.call_context import CallContext
@@ -142,6 +142,7 @@ class ManagedSessionSpec:
     work_class: str
     budget_line: str
     host: str
+    agent_runtime: str = DEFAULT_AGENT_RUNTIME
     spawned_by_instance_id: str = ""
     spawned_by_role: str = ""
     role_name: str = ""
@@ -169,6 +170,7 @@ def insert_managed_session(
         "work_class": spec.work_class,
         "budget_line": spec.budget_line,
         "host": spec.host,
+        "agent_runtime": spec.agent_runtime,
         "spawned_by_instance_id": spec.spawned_by_instance_id,
         "spawned_by_role": spec.spawned_by_role,
         "visibility": spec.visibility,

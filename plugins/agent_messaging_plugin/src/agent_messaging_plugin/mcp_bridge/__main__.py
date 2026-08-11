@@ -55,6 +55,7 @@ PORT_DISCOVERY_RETRY_S: Final[float] = 2.0
 # Discriminator for the Codex agent kind. A Codex session spawns the bridge as
 # its child, so CODEX_THREAD_ID is inherited.
 CODEX_AGENT_ID: Final[str] = "codex"
+AGENT_ROLE_AUTOBIND_ENV: Final[str] = "AGENT_ROLE_AUTOBIND"
 
 # Per-agent-kind ordered carriers for the stable logical-session key
 # (`agent_session_id`), highest precedence first. Resolution is keyed on the
@@ -511,10 +512,25 @@ def _compute_session_role(session_label: str) -> str:
     """Resolve the standing role this bridge must claim after registration.
 
     An explicit role may differ from the human-readable session label. When a
-    launcher supplies only ``AGENT_SESSION_LABEL``, that explicit
-    label is also the role by convention. Cwd-inferred labels never claim roles.
+    launcher supplies only ``AGENT_SESSION_LABEL``, that explicit label is also
+    the role by convention. Managed launchers set
+    ``AGENT_ROLE_AUTOBIND=0`` to preserve the label as display metadata while
+    leaving authority unbound until a model-initiated claim. Cwd-inferred labels
+    never claim roles.
     """
+    autobind = os.environ.get(AGENT_ROLE_AUTOBIND_ENV, "1").strip()
+    if autobind not in {"0", "1"}:
+        msg = f"{AGENT_ROLE_AUTOBIND_ENV} must be '0' or '1' when set"
+        raise RuntimeError(msg)
     explicit_role = os.environ.get(AGENT_ROLE_ENV)
+    if autobind == "0":
+        if explicit_role is not None:
+            msg = (
+                f"{AGENT_ROLE_AUTOBIND_ENV}=0 conflicts with explicit "
+                f"{AGENT_ROLE_ENV}; omit one"
+            )
+            raise RuntimeError(msg)
+        return ""
     if explicit_role is not None:
         role = explicit_role.strip()
         if not role:

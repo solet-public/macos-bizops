@@ -3,7 +3,7 @@
 This is the stock-Codex sibling of the Claude coordination plugin. The current
 increment contains:
 
-- fixed `UserPromptSubmit` and `SessionStart` context reminders;
+- fixed `SessionStart` context reminders;
 - the WS-4b.1 `PreToolUse` Bash Git-Controller gate;
 - the WS-4b.3 synchronous `Stop` wake waiter.
 
@@ -20,12 +20,21 @@ not rewrite Codex's private trust state behind that review boundary.
 
 | event | script | behavior |
 |---|---|---|
-| `UserPromptSubmit` | `step_zero_reminder.js` | fixed project-orientation reminder |
-| `UserPromptSubmit` | `check_messages_reminder.js` | fixed unread-coordination reminder |
-| `SessionStart` (`startup`, `resume`, `clear`) | `check_messages_reminder.js` | the same fixed unread-coordination reminder |
+| `SessionStart` (`startup`, `resume`, `clear`) | `step_zero_reminder.js` | fixed project-orientation reminder |
+| `SessionStart` (`startup`, `resume`, `clear`) | `check_messages_reminder.js` | fixed unread-coordination reminder |
 | `SessionStart` (`startup`, `resume`, `clear`) | `role_binding_reminder.js` | fixed label-versus-role reminder |
 | `Stop` | `wake_waiter.js` | synchronous, nudge-only idle-wake waiter |
 | `PreToolUse` (`Bash` only) | `git_controller_gate.py` | opt-in Git-Controller mistake-prevention gate |
+
+**Cadence ruling (2026-08-11):** `step_zero_reminder.js` and
+`check_messages_reminder.js` moved from `UserPromptSubmit` to
+`SessionStart` (`startup`, `resume`, `clear`) — both used to re-fire on
+every prompt turn, accumulating one copy per turn in the transcript. This
+changes CADENCE ONLY: the always-armed ruling for `step_zero_reminder.js`
+below is unchanged and still enforced by `tests/manifest_consistency_smoke.py`'s
+`EXPECTED` inventory (re-adding either reminder to a `UserPromptSubmit`
+binding reds that check) and `tests/reminder_hooks_smoke.py`'s
+`check_step_zero_fires_everywhere`.
 
 `step_zero_reminder.js` is unconditionally armed — installed means armed,
 with no environment condition (§7 re-key, 2026-08-02; parity with the Claude
