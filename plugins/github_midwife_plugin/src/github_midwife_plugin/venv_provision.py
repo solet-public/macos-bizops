@@ -130,13 +130,24 @@ def create_venv_and_install_seed(target: Path, *, run: Runner) -> Path:
             f"(exit {result.returncode}): {(result.stderr or '').strip()[:500]}"
         )
 
-    for package_dir in (
-        target / "ananta",
-        target / "plugins" / "macos_vault_plugin",
-        target / "plugins" / "github_midwife_plugin",
+    # born-clone-gates fix (2026-08-10, Dax Part 38): `ananta/setup.py`
+    # declares the commit-gate toolchain (ruff/pyright/radon) in
+    # extras_require["gate"], deliberately NOT absence-tolerant -- a bare
+    # `pip install -e <dir>` pulls only install_requires, so the gate
+    # toolchain could never arrive at birth by construction. `ananta`
+    # installs with `[gate]` specifically; the other two package dirs stay
+    # bare -- do NOT widen this to `.[all]` or sweep in any other plugin's
+    # extras (code_vetting_plugin's typecheck/coverage extras are
+    # deliberately absence-tolerant by a DIFFERENT, opposite contract; see
+    # ananta/setup.py's own comment forbidding exactly this "harmonisation").
+    for package_dir, extras in (
+        (target / "ananta", "[gate]"),
+        (target / "plugins" / "macos_vault_plugin", ""),
+        (target / "plugins" / "github_midwife_plugin", ""),
     ):
         install_cmd = [
-            str(venv_python), "-m", "pip", "install", "--no-build-isolation", "-e", str(package_dir),
+            str(venv_python), "-m", "pip", "install", "--no-build-isolation", "-e",
+            f"{package_dir}{extras}",
         ]
         result = run(install_cmd, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_S)
         if result.returncode != 0:

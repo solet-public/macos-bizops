@@ -76,8 +76,9 @@ import shutil
 import signal
 import subprocess
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .headless_adapter import (
     WorkerHookResolutionError,
@@ -88,9 +89,6 @@ from .headless_adapter import (
     _resolve_worker_hook_paths,
     _sigterm_then_kill,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +124,85 @@ def _needs_dev_channels_confirmation(claude_cmd: list[str]) -> bool:
 
 def _pane_shows_dev_channels_prompt(pane_text: str) -> bool:
     return any(marker in pane_text for marker in _DEV_CHANNELS_PROMPT_MARKERS)
+
+
+# Third-party-provider fix (§39.1/§40.1, reported and field-verified by a seed
+# adopter): on a third-party inference provider, Claude Code IGNORES
+# --dangerously-load-development-channels ("... ignored (server:<name>)" /
+# "Channels are not available on third-party providers") and never raises the
+# interactive confirmation. The expect loop above has exactly two branches --
+# prompt-appeared -> confirm, no-prompt -> assume-hung -> KILL -- so a
+# fully-booted worker was killed after DEFAULT_CONFIRM_TIMEOUT_SECONDS on every
+# such spawn, making the swap-durable tmux fleet unspawnable on exactly the
+# provider configuration an enterprise adopter without Anthropic-API access is
+# forced onto.
+#
+# The fix is to omit the flag when it is already inert, so no prompt is ever
+# expected: with the flag absent, _needs_dev_channels_confirmation returns False
+# and the loop is skipped entirely. ONE mechanism, not two -- deliberately NOT
+# also adding a pane-text success marker for the "ignored" lines, because a
+# second guard would make this guard's smoke legs vacuous. The Anthropic /
+# no-provider path is byte-for-byte unchanged (flag present, prompt-and-confirm
+# exactly as before).
+#
+# EVIDENCE BOUND ON THIS TUPLE: CLAUDE_CODE_USE_BEDROCK is the ONLY marker with
+# live evidence behind it (the adopter's verified spawn). Other third-party
+# providers plausibly have their own switches, but we have no third-party
+# endpoint in this checkout and no field report naming one, so adding a marker
+# here on inference would be an unmarked guess -- a wrong name is silently inert
+# and a right-name-wrong-semantics entry would omit the flag on an Anthropic
+# spawn. Extend this tuple ONLY with a measured spawn or an adopter report.
+_THIRD_PARTY_PROVIDER_ENV_MARKERS = ("CLAUDE_CODE_USE_BEDROCK",)
+
+
+def _effective_spawn_env(spec: Mapping[str, object]) -> Mapping[str, str]:
+    """The environment the spawned worker will ACTUALLY receive, which is what
+    provider-detection must key on -- not this driver's own notion of a
+    provider, and not the adopter's ``provider_env`` overlay alone (their Part
+    36 §36.1 per-spawn provider selection does not exist in our tree yet; that
+    is the ``provider-select-design`` lane).
+
+    TODAY that is this process's own environment: the tmux driver injects only
+    identity vars via ``new-session -e`` (see :func:`_env_pairs`), so any
+    provider switch reaches the worker by inheritance. LATER, when the per-spawn
+    overlay lands, it composes here and nowhere else -- the ``provider_env``
+    read below is the seam, deliberately written now so the predicate needs no
+    rework at that landing.
+
+    ⚠ Two honest limits, neither silently papered over:
+    * The overlay KEY NAME (``provider_env``) is taken from the adopter's
+      described shape; nothing in our tree defines it yet, so it is inert until
+      the provider-select lane lands and MUST be reconciled with whatever that
+      lane actually threads through (a key that is never passed is a knob that
+      does nothing).
+    * When a tmux SERVER already exists, a new pane inherits that server's
+      environment, which is the environment of whoever started the server --
+      not necessarily this process's. In the deployed shape (launchd daemon
+      creates the server on first spawn) the two are the same; under an
+      operator-started pre-existing server they can diverge.
+    """
+    env: dict[str, str] = dict(os.environ)
+    overlay = spec.get("provider_env")
+    if overlay is None:
+        return env
+    if not isinstance(overlay, Mapping):
+        raise TypeError(
+            "spawn spec 'provider_env' must be a mapping of environment "
+            f"variables, got {type(overlay).__name__} -- refusing to guess the "
+            "effective spawn environment provider detection keys on.",
+        )
+    env.update({str(key): str(value) for key, value in overlay.items()})
+    return env
+
+
+def _provider_ignores_dev_channels(spawn_env: Mapping[str, str]) -> bool:
+    """True when the effective spawn environment selects a third-party provider
+    that ignores ``--dangerously-load-development-channels``. Adopter's shape,
+    bound to OUR effective-env computation rather than to their overlay."""
+    return any(
+        str(spawn_env.get(marker, "")).strip() == "1"
+        for marker in _THIRD_PARTY_PROVIDER_ENV_MARKERS
+    )
 
 
 def _emit_role_tag_path() -> Path:
@@ -478,7 +555,9 @@ class TmuxHostDriver:
             )
         return remedies
 
-    def _claude_launch_remedies(self, *, permission_mode: str | None) -> list[str]:
+    def _claude_launch_remedies(
+        self, *, permission_mode: str | None, transport: str | None,
+    ) -> list[str]:
         """Split out of :meth:`verify_config` to keep it under the radon cc
         threshold — the same underlying-``claude``-launch checks
         :meth:`HeadlessHostDriver.verify_config` makes, since a tmux-hosted
@@ -502,16 +581,45 @@ class TmuxHostDriver:
                 "needs an explicit operator-ruled posture; this driver never "
                 "defaults to bypass.",
             )
-        if not self._mcp_config_path.exists():
-            remedies.append(f"no MCP config found at {self._mcp_config_path}")
+        resolved_transport = transport if transport is not None else (self._transport or "watch")
+        if resolved_transport == "mcp" and not self._mcp_config_path.exists():
+            remedies.append(
+                f"no MCP config found at {self._mcp_config_path} — required because "
+                "the resolved transport is 'mcp' (a real MCP bridge config must "
+                "exist and is passed verbatim to --mcp-config); 'watch' transport "
+                "spawns with an inline empty MCP config and never reads this file, "
+                "so switching FLEET_SESSION_HOST/transport to 'watch' (the charter "
+                "default) also satisfies this remedy without creating the file.",
+            )
         return remedies
 
-    def verify_config(self, *, permission_mode: str | None = None) -> list[str]:
+    def verify_config(
+        self, *, permission_mode: str | None = None, transport: str | None = None,
+    ) -> list[str]:
         """Config-time, fail-closed remedies (§5) — empty means ready to
-        spawn."""
+        spawn.
+
+        ``transport`` is a per-spawn override, same shape and same reason as
+        the one :meth:`HeadlessHostDriver.verify_config` grew for Dax Part 36
+        §36.3 (ported here 2026-08-10, authorized scope addition — the tmux
+        driver carried the identical unconditional check): :meth:
+        `_spawn_command` only ever reads ``self._mcp_config_path`` when the
+        resolved transport is ``"mcp"`` — a ``"watch"`` spawn passes an inline
+        literal empty MCP config (``'{"mcpServers":{}}'``) and never touches
+        the file. Requiring the file unconditionally refused every
+        watch-transport tmux spawn on a born clone, which ships no
+        ``.mcp.json`` at all, for a file that spawn was never going to read —
+        and tmux is the swap-durable fleet host, so that refusal took out the
+        durable substrate on exactly the clone that has no MCP config to
+        begin with. Resolution mirrors :meth:`_resolve_transport` exactly
+        (spec-level override, then this driver's constructor/env floor, then
+        the charter default ``"watch"``) so a bare call sees the same posture
+        :meth:`spawn` would actually take."""
         return [
             *self._tmux_binary_remedies(),
-            *self._claude_launch_remedies(permission_mode=permission_mode),
+            *self._claude_launch_remedies(
+                permission_mode=permission_mode, transport=transport,
+            ),
         ]
 
     def capability_report(self) -> dict[str, object]:
@@ -625,14 +733,18 @@ class TmuxHostDriver:
         # mirrors headless_adapter.py's own posture exactly -- "mcp" gets
         # the real bridge config, "watch" gets an EXPLICIT empty one
         # (WS-6-verified precedent), never omitted (omitting risks ambient
-        # .mcp.json re-attachment). Dev-channel loading stays unconditional
-        # -- orthogonal to MCP-vs-watch, a separate mechanism per the
-        # phase-2 scope ruling.
+        # .mcp.json re-attachment). Dev-channel loading is orthogonal to
+        # MCP-vs-watch -- a separate mechanism per the phase-2 scope ruling.
         if transport == "mcp":
             cmd += ["--mcp-config", str(self._mcp_config_path), "--strict-mcp-config"]
         else:
             cmd += ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
-        cmd += ["--dangerously-load-development-channels", f"server:{self._homunculus_name}"]
+        # §39.1/§40.1: append the dev-channels flag ONLY where it does
+        # something. On a third-party provider it is inert AND the confirm
+        # loop it arms would kill the booted worker -- see
+        # _provider_ignores_dev_channels.
+        if not _provider_ignores_dev_channels(_effective_spawn_env(spec)):
+            cmd += ["--dangerously-load-development-channels", f"server:{self._homunculus_name}"]
         model = str(spec.get("model") or "")
         if model:
             cmd += ["--model", model]
@@ -656,7 +768,14 @@ class TmuxHostDriver:
         # driver registry — a module-level import here would be circular.
         from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
 
-        remedies = self.verify_config(permission_mode=str(spec.get("permission_mode") or ""))
+        # Resolved ONCE, here, and threaded into verify_config (the .mcp.json
+        # existence gate, transport-scoped since Dax Part 36 §36.3), _env_pairs
+        # (FLEET_TRANSPORT) and _spawn_command (the MCP-config argv posture).
+        transport = self._resolve_transport(spec)
+        remedies = self.verify_config(
+            permission_mode=str(spec.get("permission_mode") or ""),
+            transport=transport,
+        )
         if remedies:
             raise HostCannotSpawnError("; ".join(remedies))
         agent_instance_id = str(spec.get("agent_instance_id") or "")
@@ -671,9 +790,6 @@ class TmuxHostDriver:
         # Minted exactly ONCE, here — never re-derived elsewhere (two
         # evaluations of an identity expression is two identities).
         agent_session_id = f"ases-{agent_instance_id}"
-        # Resolved ONCE, here, threaded into both _env_pairs (FLEET_TRANSPORT)
-        # and _spawn_command (the MCP-config argv posture).
-        transport = self._resolve_transport(spec)
 
         env_pairs = _env_pairs(
             agent_instance_id=agent_instance_id, agent_session_id=agent_session_id,

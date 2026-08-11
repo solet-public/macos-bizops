@@ -32,6 +32,13 @@ plugins/macos_self_deployment_plugin/tests/supervisor_smoke.py
 plugins/macos_self_deployment_plugin/tests/backstop_loop_integration_smoke.py
 plugins/macos_self_deployment_plugin/tests/drain_sigterm_exit_smoke.py
 plugins/macos_self_deployment_plugin/tests/router_socket_wait_smoke.py
+# LaunchAgent plist render contract (Option-B supervisor KeepAlive, out-of-tree
+# CWD, and the §39.2 Homebrew-inclusive PATH the daemon needs to see tmux at
+# all). Pure render assertions -- no launchctl, no filesystem mutation outside
+# the smoke's own scratch dir. Registered 2026-08-10: it existed and was green
+# but was never on this allowlist, so the gate had been blind to a silent
+# regression of the boot-path plist.
+plugins/macos_self_deployment_plugin/tests/autostart_plist_render_smoke.py
 
 # Phase 0 "freeze current contracts" — substrate-contract guards that must stay
 # green through the coding-agent substrate transition
@@ -412,6 +419,14 @@ plugins/agent_messaging_plugin/tests/session_hosts_smoke.py
 # swallows the broken pipe (fire-and-forget contract) instead of raising an
 # unmapped exception through the clear_session/compact_session verb layer.
 plugins/agent_messaging_plugin/tests/headless_adapter_smoke.py
+
+# Vault-read envelope bug (Dax Part 36 §36.2) — _vault_retrieve_value keys on
+# the REAL macos_vault_plugin ActionResult envelope (action_status=="completed"
+# for both a hit and a genuine miss, distinguished by data shape), not the
+# imagined top-level "status"=="success" the old bearer-HMAC-key read checked
+# and never got. The fake vault returns the real envelope shape byte-for-byte
+# — a fake returning the imagined shape is exactly what let this ship.
+plugins/agent_messaging_plugin/tests/vault_bearer_hmac_key_envelope_smoke.py
 
 # T1 usage-capture lane (2026-08-05) — red-first regression guard for the
 # stdout-never-read fix in headless_adapter.py's spawn(): before the fix,

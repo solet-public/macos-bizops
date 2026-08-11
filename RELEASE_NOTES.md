@@ -1,5 +1,92 @@
 # Release notes
 
+Newest release first. Earlier releases follow below the divider.
+
+---
+
+## 2026-08-10 (second update) — response to adopter feedback Parts 36–40
+
+Five feedback parts arrived after this morning's release; every defect they
+reported is fixed in this update, and the capability they requested is
+accepted with its design complete. All four fix packages below were verified
+with named failing mutations (the fix reverted reproduces the exact reported
+failure), and the born-clone items against a born-clone-shaped fixture rather
+than a development checkout.
+
+**The vault-read envelope bug is fixed — bearer tokens survive restarts now
+(§36.2).** The bridge's bearer-token HMAC signing key was silently re-minted
+on every restart because the read path checked for a `status` field the vault
+backend never returns, so an existing key was never recognized. Any deployment
+with Streamable-HTTP MCP bearer auth enabled was invalidating every
+outstanding client token on every boot — including, we measured after your
+report, the origin deployment itself. A single vault-read seam now keys on the
+envelope the vault actually returns, a malformed envelope fails loud instead
+of reading as a miss, and the shipped smoke's fake vault returns the real
+envelope shape so this class cannot false-clean again. The audit you asked for
+ran costume-aware across the tree: one more same-class hit fixed, ten
+lookalike sites swept and documented benign.
+
+**Born clones can spawn workers on every host driver (§36.3, both drivers).**
+`verify_config` required `.mcp.json` to exist even for watch-transport workers
+that receive an inline empty MCP config and never read the file — so the very
+first spawn on a fresh clone refused. Both the headless and tmux drivers (the
+latter carried the identical check, found in the same audit) now require the
+file only when the resolved transport is `mcp`, and the refusal message states
+exactly what satisfies it.
+
+**Your tmux third-party-provider fix is canonicalized (§39.1 / §40.1).**
+Taken exactly as you field-verified it — the inert dev-channels flag is
+omitted rather than waited on; with the flag absent the confirmation
+expect-loop is never entered, and the first-party path is byte-for-byte
+unchanged. Two deliberate bounds, stated honestly: the predicate keys on the
+effective spawn environment (rather than a provider argument our tree does not
+carry yet), and its marker set is exactly the one with live evidence behind
+it — your verified Bedrock spawn. Other third-party provider families get
+their markers when the accepted §36.1 registry lands, sourced from vendor
+documentation rather than inference; the code comment names that extension
+path. The headless driver keeps the flag with a documented rationale (it has
+no confirm loop, so the flag is inert there with no failure mode).
+
+**Both LaunchAgent plist renderers now emit a PATH (§39.2 / §40.2).** A
+launchd daemon inherits the bare system PATH, so Homebrew-installed binaries
+(tmux first among them) were invisible even when correctly installed, and the
+recovery required exactly the hand-edit-a-live-plist procedure your report
+described as ugly — it was. Both the self-deployment and genesis-time
+renderers now write a deterministic PATH with the Homebrew locations ahead of
+the system defaults.
+
+**A born clone can run its own commit gate (§37 / §38).** The gate
+orchestrator hard-referenced two paths the seed never shipped
+(`deployment/scripts/check_gate_toolchain.sh` and the root `pyproject.toml`)
+with no existence guard — a raw traceback before a single gate ran. Both are
+now guarded with clean fail-loud messages AND shipped in the seed. The root
+cause you ran down in Part 38 is fixed as scoped there: the gate toolchain
+(`ruff`/`pyright`/`radon`) lives in a deliberately-mandatory `ananta[gate]`
+extras group the birth-time provisioner never installed; it now installs that
+group specifically, without sweeping in any plugin's deliberately
+absence-tolerant extras.
+
+**Per-spawn provider selection is accepted upstream (§36.1) — design
+complete, implementation scheduled.** Your layering survives review intact:
+the shim resolves, the verb stays secret-free, strip-then-set, credentials
+vault-resolved and never persisted. The accepted design generalizes it to a
+declarative registry covering the six vendor-documented provider families
+with an operator extension path, validates model identity per provider
+family, and persists the provider name (never credentials) so a restarted
+worker keeps its provider. Two findings from review you may want locally in
+the meantime: `-e VAR=""` on tmux sets rather than unsets (the canonical
+version uses a real env unset), and a restarted worker under your variant
+silently reverts to the daemon's provider.
+
+**Queued, not in this mint (§36.4):** the three Marketo asks (vendor error
+code surfacing, in-plugin retry on idempotent long-window reads, documented
+per-verb `row_limit` ceilings) are filed with the existing Marketo package to
+land together.
+
+---
+
+## 2026-08-10 (first update) — multi-session self-management
+
 **Update your homunculus.** This release adds the multi-session
 self-management capability described below — your homunculus can now
 spawn, monitor, hand off work between, and safely retire other agent

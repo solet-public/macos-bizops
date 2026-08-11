@@ -31,6 +31,7 @@ universal:
     - CONTRIBUTING.md
     - root_manifest.yaml
     - bootstrap.py
+    - pyproject.toml           # gate-parity ruff/pyright config (born-clone-gates fix, 2026-08-10); moved here FROM sanctioned: below — that entry's absence-tolerance was written for the packaging-install angle only and predates this gate-config dependency
   directories:
     - ananta
     - plugins
@@ -102,10 +103,6 @@ sanctioned:
   - path: .claude-plugin
     reason: "Claude Code plugin-marketplace surface; holds the reviewed marketplace.json that registers the in-repo coordination-hooks plugin as an in-place directory marketplace (used where it sits, never cloned, so the installed catalog cannot drift from the reviewed one); written by clone setup/hydration after birth, so it may be absent at a newborn's first cutover gate"
     operator_approved: "2026-08-06"
-
-  - path: pyproject.toml
-    reason: "development-checkout surface; a seed-born homunculus installs from the shipped plugin trees, not from a root project definition"
-    operator_approved: "2026-07-28"
 
   - path: .githooks
     reason: "development-checkout surface; tracked hooks are wired by deployment/scripts/setup_clone.sh, which is origin-only"

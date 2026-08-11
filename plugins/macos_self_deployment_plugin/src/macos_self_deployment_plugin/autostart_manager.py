@@ -63,6 +63,7 @@ from ananta.interfaces.lifecycle_result_types import AutostartResult, AutostartS
 from macos_self_deployment_plugin.constants import (
     AUTOSTART_LABEL_PREFIX,
     AUTOSTART_LOG_DIR_DEFAULT,
+    AUTOSTART_PATH_ENV,
     AUTOSTART_PLIST_DIR_DEFAULT,
     AUTOSTART_SUPERVISOR_MODULE,
     PLUGIN_NAME,
@@ -401,6 +402,10 @@ class AutostartManager:
             f'  <key>WorkingDirectory</key>\n  <string>{_xml_escape(str(working_dir))}</string>\n'
             '  <key>EnvironmentVariables</key>\n  <dict>\n'
             f'    <key>HOMUNCULUS_NAME</key>\n    <string>{_xml_escape(self._homunculus_name)}</string>\n'
+            # §39.2: without this key the daemon gets launchd's bare PATH and
+            # cannot see Homebrew binaries (tmux) even when installed. See
+            # AUTOSTART_PATH_ENV for why it is a fixed literal.
+            f'    <key>PATH</key>\n    <string>{_xml_escape(AUTOSTART_PATH_ENV)}</string>\n'
             '  </dict>\n'
             '  <key>RunAtLoad</key>\n  <true/>\n'
             '  <key>KeepAlive</key>\n  <true/>\n'

@@ -71,6 +71,29 @@ AUTOSTART_LABEL_PREFIX: Final[str] = "local.homunculus"
 AUTOSTART_PLIST_DIR_DEFAULT: Final[str] = "~/Library/LaunchAgents"
 AUTOSTART_LOG_DIR_DEFAULT: Final[str] = "~/.ananta/logs"
 
+# PATH written into the LaunchAgent's EnvironmentVariables (§39.2, reported and
+# field-verified by a seed adopter). A launchd-spawned process inherits NO login
+# shell, so with no PATH key it gets launchd's bare default
+# ``/usr/bin:/bin:/usr/sbin:/sbin`` -- which excludes both Homebrew prefixes.
+# The platform shells out to Homebrew-installed SYSTEM binaries (``tmux`` at
+# minimum, the substrate of the swap-durable fleet host), so in-daemon
+# ``shutil.which("tmux")`` returned None on a machine where tmux was correctly
+# installed at ``/opt/homebrew/bin/tmux`` -- present but invisible.
+#
+# DETERMINISTIC BY CONSTRUCTION: a fixed literal, never the operator's live
+# ``$PATH``. Capturing the interactive PATH would make the rendered plist vary
+# by whoever ran the install (breaking the byte-comparison staleness check in
+# ``_classify_install_prior``) and would leak the operator's local layout --
+# personal toolchain dirs, checkout paths, employer-specific prefixes -- into a
+# generated artifact. Both Homebrew prefixes are listed unconditionally
+# (``/opt/homebrew`` Apple Silicon, ``/usr/local`` Intel) rather than
+# arch-detected: a non-existent directory on PATH is inert, and one literal
+# keeps the render arch-independent.
+AUTOSTART_PATH_ENV: Final[str] = (
+    "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:"
+    "/usr/bin:/bin:/usr/sbin:/sbin"
+)
+
 # Option-B supervisor (2026-06-28). The LaunchAgent runs this module —
 # NOT ``ananta.cli`` directly — so the launchd-managed process is a thin,
 # colour-agnostic crash-supervisor that spawns + re-spawns the active homunculus

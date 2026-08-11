@@ -491,7 +491,9 @@ class HeadlessHostDriver:
         self._lock = RLock()
         self._processes: dict[str, _TrackedHeadlessProcess] = {}
 
-    def verify_config(self, *, permission_mode: str | None = None) -> list[str]:
+    def verify_config(
+        self, *, permission_mode: str | None = None, transport: str | None = None,
+    ) -> list[str]:
         """Config-time, fail-closed remedies (§5) — empty means ready to
         spawn. Checked explicitly at the top of :meth:`spawn` too, so a
         caller can never bypass this by skipping the call.
@@ -504,7 +506,19 @@ class HeadlessHostDriver:
         spec) can only ever check the constructor/env-sourced floor
         (``self._permission_mode``). Passing it here is what lets a
         per-spawn config resolution actually reach this gate instead of
-        silently refusing on the floor value alone."""
+        silently refusing on the floor value alone.
+
+        ``transport`` is the same kind of per-spawn override, for the same
+        reason (Dax Part 36 §36.3): :meth:`_spawn_command` only ever reads
+        ``self._mcp_config_path`` when the resolved transport is ``"mcp"`` —
+        a ``"watch"`` spawn passes an inline literal empty MCP config
+        (``'{"mcpServers":{}}'``) and never touches the file. Requiring the
+        file unconditionally refused every watch-transport spawn on a born
+        clone, which ships no ``.mcp.json`` at all, for a file that spawn
+        was never going to read. Resolution mirrors :meth:`_resolve_transport`
+        exactly (spec-level override, then this driver's constructor/env
+        floor, then the charter default ``"watch"``) so a bare call sees the
+        same posture :meth:`spawn` would actually take."""
         remedies: list[str] = []
         if not (self._claude_bin and os.access(self._claude_bin, os.X_OK)):
             remedies.append(
@@ -524,8 +538,16 @@ class HeadlessHostDriver:
                 "needs an explicit operator-ruled posture; this driver never "
                 "defaults to bypass.",
             )
-        if not self._mcp_config_path.exists():
-            remedies.append(f"no MCP config found at {self._mcp_config_path}")
+        resolved_transport = transport if transport is not None else (self._transport or "watch")
+        if resolved_transport == "mcp" and not self._mcp_config_path.exists():
+            remedies.append(
+                f"no MCP config found at {self._mcp_config_path} — required because "
+                "the resolved transport is 'mcp' (a real MCP bridge config must "
+                "exist and is passed verbatim to --mcp-config); 'watch' transport "
+                "spawns with an inline empty MCP config and never reads this file, "
+                "so switching FLEET_SESSION_HOST/transport to 'watch' (the charter "
+                "default) also satisfies this remedy without creating the file.",
+            )
         return remedies
 
     def capability_report(self) -> dict[str, object]:
@@ -745,6 +767,23 @@ class HeadlessHostDriver:
         # (distinct from MCP tool config; the phase-2 scope ruling names
         # this explicitly as a separate mechanism to verify at seat
         # migration, phase 4 -- not something slice 1 changes).
+        #
+        # DELIBERATELY UNCONDITIONAL HERE, unlike tmux_adapter._spawn_command
+        # (§39.1/§40.1, decided 2026-08-10). The tmux driver must omit this
+        # flag on a third-party provider because the flag ARMS a PTY confirm
+        # loop whose no-prompt branch kills a fully-booted worker. This driver
+        # has no such loop -- the confirmation prompt is PTY-only and a
+        # piped-stdin spawn never sees it -- so the flag is merely inert here,
+        # with no failure mode to fix. Mirroring the omission would buy
+        # symmetry at the cost of (a) a second provider-detection site to keep
+        # in lock-step with the tmux predicate when the per-spawn provider
+        # overlay lands, and (b) an unmeasurable behaviour change on a working
+        # boot path: we have no third-party endpoint in this checkout, so we
+        # cannot observe what a headless spawn does with the flag on one.
+        # Changing a green path on inference is the more expensive error, so
+        # this stays as-is until a measurement or an adopter report says
+        # otherwise. If that arrives, import the tmux predicate rather than
+        # writing a second one.
         cmd += ["--dangerously-load-development-channels", f"server:{self._homunculus_name}"]
         model = str(spec.get("model") or "")
         if model:
@@ -777,7 +816,15 @@ class HeadlessHostDriver:
         # circular (breaks whichever module the caller imports first).
         from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
 
-        remedies = self.verify_config(permission_mode=str(spec.get("permission_mode") or ""))
+        # Resolved ONCE, here, and threaded into verify_config (the
+        # .mcp.json existence gate, transport-scoped since Dax Part 36
+        # §36.3), _spawn_env (the FLEET_TRANSPORT env var), and
+        # _spawn_command (the MCP-config argv posture).
+        transport = self._resolve_transport(spec)
+        remedies = self.verify_config(
+            permission_mode=str(spec.get("permission_mode") or ""),
+            transport=transport,
+        )
         if remedies:
             raise HostCannotSpawnError("; ".join(remedies))
         agent_instance_id = str(spec.get("agent_instance_id") or "")
@@ -791,10 +838,6 @@ class HeadlessHostDriver:
         # Minted exactly ONCE, here — never re-derived elsewhere (two
         # evaluations of an identity expression is two identities).
         agent_session_id = f"ases-{agent_instance_id}"
-        # Resolved ONCE, here, and threaded into both _spawn_env (the
-        # FLEET_TRANSPORT env var) and _spawn_command (the MCP-config
-        # argv posture).
-        transport = self._resolve_transport(spec)
         env = self._spawn_env(
             agent_instance_id=agent_instance_id, agent_session_id=agent_session_id,
             label=label, allowed_tools=_coerce_allowed_tools(spec), transport=transport,

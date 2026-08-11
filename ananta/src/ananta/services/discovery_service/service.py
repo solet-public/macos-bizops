@@ -315,7 +315,7 @@ class DiscoveryService:
                 schema=schema,
             )
 
-            if result.get("status") == "success":
+            if result.get("action_status") == "completed":
                 logger.debug(
                     "🔧 USAGE_TABLE_002: usage_stats table created successfully with unique constraints"
                 )
