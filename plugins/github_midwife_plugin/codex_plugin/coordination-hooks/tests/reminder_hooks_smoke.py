@@ -11,9 +11,19 @@ sys.dont_write_bytecode = True
 
 from _harness import Results, preflight, run_hook  # noqa: E402
 
+# Reminders that read hook_event_name off stdin and echo it back, so the same
+# script serves whichever event hooks.json currently wires it to, instead of
+# a compiled-in literal that can desync from that wiring (the 2026-08-11
+# cadence fix moved step_zero's wiring to SessionStart without updating its
+# then-hardcoded "UserPromptSubmit" literal -- a silent hookEventName-mismatch
+# failure on a strict host). role_binding_reminder.js is deliberately NOT
+# here: it is single-event by design (a role re-claim only makes sense at
+# SessionStart) and stays a fixed literal.
+EVENT_ECHOING = ("step_zero_reminder.js", "check_messages_reminder.js")
+
 REMINDERS = {
     "step_zero_reminder.js": {
-        "event": "UserPromptSubmit",
+        "event": "SessionStart",
         "context": (
             "For non-trivial work, checking a persistent knowledge base "
             "available to this session (via a local CLI or a connected tool, "
@@ -164,8 +174,32 @@ def check_exact_fixed_output(res: Results) -> None:
         second = _context(res, script, label=DYNAMIC_SENTINELS[3], stdin="{not-json")
         if first is None or second is None:
             continue
-        res.check(first == second, f"{script} output is invariant across payload and label")
-        res.check(first[0] == expected["event"], f"{script} emits the documented default event")
+        res.check(
+            first[1] == second[1],
+            f"{script} additionalContext is invariant across payload and label",
+        )
+        if script in EVENT_ECHOING:
+            # hostile_payload declares hook_event_name=UserPromptSubmit -- an
+            # event-echoing hook is SUPPOSED to reflect that, not stay pinned
+            # to its own default; the malformed-stdin pass is what proves the
+            # default (checked in check_malformed_stdin_degrades-equivalent
+            # logic below via `second`).
+            res.check(
+                first[0] == "UserPromptSubmit",
+                f"{script} echoes the hostile payload's declared event",
+                f"got {first[0]!r}",
+            )
+            res.check(
+                second[0] == expected["event"],
+                f"{script} falls back to its documented default event on malformed stdin",
+                f"got {second[0]!r}",
+            )
+        else:
+            res.check(
+                first[0] == second[0] == expected["event"],
+                f"{script} emits the documented default event",
+                f"got first={first[0]!r} second={second[0]!r}",
+            )
         res.check(first[1] == expected["context"], f"{script} emits the exact reviewed literal")
         for sentinel in DYNAMIC_SENTINELS:
             res.check(sentinel not in first[1], f"{script} does not relay {sentinel.split('-')[0].lower()} data")

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 "use strict";
 
-// UserPromptSubmit hook. ALWAYS ARMED: installed means armed, with no
-// environment condition of any kind.
+// SessionStart hook (fires on startup|resume|clear). ALWAYS ARMED: installed
+// means armed, with no environment condition of any kind.
 //
 // The homunculus is a system-wide resource, so awareness of it is not
 // fleet-only. This hook previously no-op'd unless AGENT_SESSION_LABEL was set;
@@ -23,10 +23,39 @@
 // AGENTS.md's Step Zero), which blocks/polls for its result before
 // returning (agent_messaging_plugin/local_cli/cli.py's call_and_wait) — a
 // genuinely synchronous mechanism, not drift from the Claude wording.
+//
+// Reads hook_event_name off stdin (same pattern as the sibling
+// check_messages_reminder.js) instead of hardcoding one, so this script's
+// own output always matches however hooks.json currently wires it -- the
+// 2026-08-11 cadence fix moved this hook's *wiring* to SessionStart but left
+// a hardcoded "UserPromptSubmit" literal here, which a strict host (Claude
+// Code) rejects outright as a hookEventName mismatch: a silent failure,
+// since the reminder just never fires and nothing surfaces to the operator.
+
+let raw = "";
+try {
+  raw = require("fs").readFileSync(0, "utf8");
+} catch {
+  raw = "";
+}
+
+let eventName = "SessionStart";
+try {
+  const payload = JSON.parse(raw);
+  if (
+    payload &&
+    (payload.hook_event_name === "UserPromptSubmit" ||
+      payload.hook_event_name === "SessionStart")
+  ) {
+    eventName = payload.hook_event_name;
+  }
+} catch {
+  // Malformed or absent stdin degrades to the SessionStart default.
+}
 
 const output = {
   hookSpecificOutput: {
-    hookEventName: "UserPromptSubmit",
+    hookEventName: eventName,
     additionalContext:
       "For non-trivial work, checking a persistent knowledge base " +
       "available to this session (via a local CLI or a connected tool, " +

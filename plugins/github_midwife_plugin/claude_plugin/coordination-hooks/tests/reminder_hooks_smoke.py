@@ -32,14 +32,17 @@ from _harness import Results, preflight, run_hook  # noqa: E402
 REMINDERS = ("step_zero_reminder.py", "check_messages_reminder.py", "role_binding_reminder.py")
 
 # Hooks that read Claude Code's stdin payload to learn which event fired.
-STDIN_AWARE = ("check_messages_reminder.py", "role_binding_reminder.py")
+STDIN_AWARE = ("step_zero_reminder.py", "check_messages_reminder.py", "role_binding_reminder.py")
 
 # The single hook SECURITY.md discloses as interpolating a value.
 INTERPOLATING = ("role_binding_reminder.py",)
 
 # Each hook's compiled-in default event name, used when stdin is absent or junk.
+# step_zero_reminder.py's default tracks its current hooks.json wiring
+# (SessionStart, since the 2026-08-11 cadence fix) rather than a stale literal --
+# see that file's docstring for the mismatch this fixes.
 DEFAULT_EVENT = {
-    "step_zero_reminder.py": "UserPromptSubmit",
+    "step_zero_reminder.py": "SessionStart",
     "check_messages_reminder.py": "UserPromptSubmit",
     "role_binding_reminder.py": "SessionStart",
 }
