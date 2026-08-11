@@ -128,6 +128,24 @@ standard is correct and shouldn't change; this was purely a local `pyenv`
 misconfiguration on the operator's machine, not something for the seed to
 accommodate.
 
+## Local interim state (this machine, not seed feedback — for the record)
+
+Pending the upstream fix, the two installed caches on this machine were
+hand-patched directly with the same fixed `step_zero_reminder.py` so the
+plugin actually works here today:
+
+- `~/.claude/plugins/cache/bizops-claude-code-plugin/coordination-hooks/0.5.1/hooks/step_zero_reminder.py`
+- `~/.claude/plugins/cache/dax/coordination-hooks/0.5.1/hooks/step_zero_reminder.py`
+
+**These are landmines, not a real fix.** The next `claude plugin
+install`/`update coordination-hooks@bizops-claude-code-plugin` (or `@dax`)
+will overwrite the patched file with whatever that marketplace currently
+ships and silently reintroduce this bug — no error, no warning. Symptom to
+watch for: the Step Zero reminder quietly stops appearing at session start
+again. Resolved permanently only once the fix above lands in
+`bizops-claude-code-plugin` (and this repo's own seed lineage) and a normal
+install/update picks it up.
+
 ## Priority for Ada
 
 1. **Port the `step_zero_reminder` event-echo fix upstream** (Issue 1) — it
