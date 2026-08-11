@@ -43,6 +43,7 @@ from unittest.mock import patch
 
 import agent_messaging_plugin.mcp_bridge.forwarder as fwd_mod
 from agent_messaging_plugin.mcp_bridge.__main__ import (
+    AGENT_ROLE_AUTOBIND_ENV,
     AGENT_ROLE_ENV,
     AGENT_SESSION_LABEL_ENV,
     _compute_session_role,
@@ -345,6 +346,36 @@ def test_explicit_role_can_differ_from_session_label() -> None:
         assert _compute_session_role(_LABEL) == explicit_role
 
 
+def test_managed_session_can_disable_label_autobind() -> None:
+    with patch.dict(
+        os.environ,
+        {
+            AGENT_SESSION_LABEL_ENV: _LABEL,
+            AGENT_ROLE_AUTOBIND_ENV: "0",
+        },
+        clear=True,
+    ):
+        assert _compute_session_role(_LABEL) == ""
+
+
+def test_managed_autobind_opt_out_conflicts_with_explicit_role() -> None:
+    with patch.dict(
+        os.environ,
+        {
+            AGENT_SESSION_LABEL_ENV: _LABEL,
+            AGENT_ROLE_ENV: "Release-Coordinator",
+            AGENT_ROLE_AUTOBIND_ENV: "0",
+        },
+        clear=True,
+    ):
+        try:
+            _compute_session_role(_LABEL)
+        except RuntimeError as exc:
+            assert "conflicts" in str(exc)
+        else:
+            raise AssertionError("managed no-autobind plus explicit role must fail loud")
+
+
 def test_inferred_session_label_does_not_claim_a_role() -> None:
     with patch.dict(os.environ, {}, clear=True):
         assert _compute_session_role("claude_code on example") == ""
@@ -444,6 +475,8 @@ def main() -> int:
         test_failed_role_claim_is_loud_without_breaking_bridge_registration,
         test_explicit_session_label_defaults_to_standing_role,
         test_explicit_role_can_differ_from_session_label,
+        test_managed_session_can_disable_label_autobind,
+        test_managed_autobind_opt_out_conflicts_with_explicit_role,
         test_inferred_session_label_does_not_claim_a_role,
     ]
     for test in tests:

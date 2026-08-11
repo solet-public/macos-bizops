@@ -312,6 +312,16 @@ def health() -> None:
     help="Disable the wake-hook spool tee (the `wake` hook then never fires).",
 )
 @click.option(
+    "--no-claim",
+    is_flag=True,
+    default=False,
+    help=(
+        "Register presence and stream this instance's inbox without claiming "
+        "ROLE. Intended for managed launchers: spawn_session.role_name does "
+        "not bind a role; the worker claims its assigned role on its first turn."
+    ),
+)
+@click.option(
     "--exit-with-parent",
     "exit_with_parent",
     type=int,
@@ -339,6 +349,7 @@ def watch(
     agent_id: str,
     spool_path: Path | None,
     no_spool: bool,
+    no_claim: bool,
     exit_with_parent: int | None,
     takeover: bool,
 ) -> None:
@@ -351,9 +362,10 @@ def watch(
     Message-bearing lines are also teed to a per-session spool consumed by
     `wake`, the shipped Stop-hook waker that turns a delivery into a session
     turn (zero idle token cost; see the hydration settings template).
-    Auto-reconnects and re-claims across bridge rotation (blue-green swap)
-    and idle-reap. Stop with Ctrl-C; the durable role binding remains, so
-    role-addressed messages queue for the next start.
+    Auto-reconnects and, unless ``--no-claim`` was selected, re-claims across
+    bridge rotation (blue-green swap) and idle-reap. Stop with Ctrl-C; any
+    separately established durable role binding remains, so role-addressed
+    messages queue for the next start.
     """
     identity = _resolve_watch_identity(role, agent_id)
     try:
@@ -386,12 +398,18 @@ def watch(
         # Marks are keyed on SESSION identity, never on the spool path: a
         # --spool move changes where lines are teed, not what this session has
         # already been shown (census D1).
+        watch_kwargs: dict[str, bool] = {"takeover": takeover}
+        # Preserve the established injectable _watch_forever call shape for
+        # ordinary watchers; only managed launchers selecting --no-claim
+        # exercise the new keyword.
+        if no_claim:
+            watch_kwargs["no_claim"] = True
         _watch_forever(
             identity,
             spool,
             watch_marks_path(homunculus_name, identity.agent_instance_id),
             exit_with_parent,
-            takeover=takeover,
+            **watch_kwargs,
         )
     except HomunculusIdentityError as exc:
         _die(str(exc), ExitCodes.CONNECTION_ERROR)
@@ -518,6 +536,7 @@ def _watch_forever(
     marks: Path,
     exit_with_parent: int | None = None,
     takeover: bool = False,
+    no_claim: bool = False,
 ) -> NoReturn:
     """Reconnect loop: (re)discover the bridge, re-arm, and stream until drop.
 
@@ -548,6 +567,7 @@ def _watch_forever(
                 _arm_and_stream(
                     client, identity, spool, marks, exit_with_parent,
                     takeover=arm_takeover,
+                    no_claim=no_claim,
                 )
         except (httpx.HTTPError, BridgeCallError, BridgeResultTimeoutError):
             # bridge rotated (swap 404), idle-reaped, or a transient error:
@@ -562,13 +582,18 @@ def _arm_and_stream(
     marks: Path,
     exit_with_parent: int | None = None,
     takeover: bool = False,
+    no_claim: bool = False,
 ) -> None:
     """One bridge lifetime: register, claim, drain catch-up, then long-poll.
 
     The armed line is deliberately NOT spooled: waking a session because its
     own watcher (re)armed is noise, not a delivery.
     """
-    claim = _register_and_claim(client, identity, takeover=takeover)
+    claim = (
+        _register_without_claim(client, identity)
+        if no_claim
+        else _register_and_claim(client, identity, takeover=takeover)
+    )
     # The armed line carries the resolved spool (null when the tee is off) so
     # the pairing is legible to an operator reading the stream, not only to the
     # wake hook reading the sidecar — census D4.
@@ -580,6 +605,25 @@ def _arm_and_stream(
     })
     _drain_inbox(client, spool, marks)
     _stream_events(client, identity, spool, marks, exit_with_parent)
+
+
+def _register_without_claim(
+    client: BridgeClient, identity: WatchIdentity,
+) -> dict[str, Any]:
+    """Register a managed worker without treating its label as a role claim.
+
+    This is the non-MCP counterpart of an MCP bridge's auto-registration.
+    It exists specifically to preserve the fleet invariant that
+    ``spawn_session.role_name`` authorizes a later model-driven claim but
+    never binds a role as a launcher side effect.
+    """
+    client.peer_register(
+        agent_id=identity.agent_id,
+        agent_instance_id=identity.agent_instance_id,
+        session_label=identity.role,
+        agent_session_id=identity.agent_session_id,
+    )
+    return {"claimed": False, "reason": "managed_registration_only"}
 
 
 def _register_and_claim(

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -72,6 +73,9 @@ from .schema import (
     WORK_CLASS_READ_ONLY,
 )
 from .session_hosts import (
+    DEFAULT_AGENT_RUNTIME,
+    AgentRuntimeNotSupportedError,
+    DriverChannelSendError,
     HostCannotSpawnError,
     HostMechanismMissingError,
     HostNotDeclaredError,
@@ -101,7 +105,7 @@ from .session_role_claim_store import (
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
-    from .session_hosts import DriverChannel
+    from .session_hosts import DriverChannel, HostDriver
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +289,10 @@ class SpawnSessionRequest:
     brief_ref: str
     work_class: str
     budget_line: str
+    # Exact peer-registry agent_id vocabulary.  Kept orthogonal to ``host``:
+    # claude_code/codex select the worker runtime; headless/tmux/operator
+    # select the hosting topology.
+    agent_runtime: str = DEFAULT_AGENT_RUNTIME
     role_name: str = ""
     host: str | None = None
     visibility: str = ""
@@ -351,7 +359,9 @@ def spawn_session(
     _validate_spawn_role(state, role_class=req.role_class, role_name=req.role_name)
 
     try:
-        driver, resolved_host = resolve_host_driver(req.host)
+        driver, resolved_host = resolve_host_driver(req.host, req.agent_runtime)
+    except AgentRuntimeNotSupportedError as exc:
+        raise VerbError("agent_runtime_unsupported", str(exc)) from exc
     except HostNotDeclaredError as exc:
         raise VerbError("host_not_declared", str(exc)) from exc
     except HostMechanismMissingError as exc:
@@ -364,6 +374,7 @@ def spawn_session(
         brief_ref=req.brief_ref,
         work_class=req.work_class,
         budget_line=req.budget_line,
+        agent_runtime=req.agent_runtime,
         host=resolved_host,
         spawned_by_instance_id=req.spawned_by_instance_id,
         spawned_by_role=req.spawned_by_role,
@@ -387,6 +398,7 @@ def spawn_session(
                 "allowed_tools": req.allowed_tools,
                 "permission_mode": req.permission_mode,
                 "transport": req.transport,
+                "agent_runtime": req.agent_runtime,
                 # T2 authority-template (seat's design ruling 2026-08-05):
                 # the ONLY two ManagedSessionSpec fields the trusted spawn
                 # surface needs that weren't already forwarded -- a real
@@ -418,6 +430,7 @@ def spawn_session(
 
     return {
         "agent_instance_id": agent_instance_id,
+        "agent_runtime": req.agent_runtime,
         "host": resolved_host,
         "host_ref": host_ref,
         "lifecycle_state": str(row.get("lifecycle_state") or ""),
@@ -557,10 +570,15 @@ def _resolve_driver_channel(row: dict[str, Any]) -> DriverChannel:
     host_ref, e.g. the degenerate ``operator`` driver), never a silent
     degradation."""
     host = str(row.get("host") or "")
+    agent_runtime = str(row.get("agent_runtime") or DEFAULT_AGENT_RUNTIME)
     agent_instance_id = str(row.get("agent_instance_id") or "")
     try:
-        driver, _resolved_host = resolve_host_driver(host)
-    except (HostNotDeclaredError, HostMechanismMissingError) as exc:
+        driver, _resolved_host = resolve_host_driver(host, agent_runtime)
+    except (
+        AgentRuntimeNotSupportedError,
+        HostNotDeclaredError,
+        HostMechanismMissingError,
+    ) as exc:
         raise VerbError(
             "unsupported_on_host",
             f"host {host!r} for {agent_instance_id!r} has no driver in this "
@@ -578,6 +596,14 @@ def _resolve_driver_channel(row: dict[str, Any]) -> DriverChannel:
             "equivalent for this session.",
         )
     return channel
+
+
+def _send_driver_text(channel: DriverChannel, text: str) -> None:
+    """Map an acknowledgement-capable channel failure to a stable verb error."""
+    try:
+        channel.send(text)
+    except DriverChannelSendError as exc:
+        raise VerbError("driver_delivery_failed", str(exc)) from exc
 
 
 # Drive-on-delivery lane (2026-08-04): the ONLY states a delivery-driven
@@ -684,7 +710,7 @@ def clear_session(
             "never receive driver-channel commands.",
         )
     channel = _resolve_driver_channel(row)
-    channel.send("/clear")
+    _send_driver_text(channel, "/clear")
     if not park:
         return {"lifecycle_state": current, "parked": False}
     try:
@@ -718,7 +744,7 @@ def compact_session(state: StateManagementInterface, *, agent_instance_id: str) 
             "never receive driver-channel commands.",
         )
     channel = _resolve_driver_channel(row)
-    channel.send("/compact")
+    _send_driver_text(channel, "/compact")
     return {"lifecycle_state": current}
 
 
@@ -760,7 +786,7 @@ def drive_session(
             "never receive driver-channel commands.",
         )
     channel = _resolve_driver_channel(row)
-    channel.send(text)
+    _send_driver_text(channel, text)
     _rearm_report_by(
         state, agent_instance_id, report_by_seconds=_row_report_by_seconds(row),
     )
@@ -779,6 +805,41 @@ def drive_session(
 
 
 DEFAULT_TERMINATE_GRACE_SECONDS = 30
+
+
+def _resolve_termination_driver(
+    row: Mapping[str, object], agent_instance_id: str,
+) -> tuple[HostDriver, str]:
+    host = str(row.get("host") or "")
+    agent_runtime = str(row.get("agent_runtime") or DEFAULT_AGENT_RUNTIME)
+    try:
+        driver, _resolved_host = resolve_host_driver(host, agent_runtime)
+    except (
+        AgentRuntimeNotSupportedError,
+        HostNotDeclaredError,
+        HostMechanismMissingError,
+    ) as exc:
+        raise VerbError(
+            "unsupported_on_host",
+            f"host {host!r} for {agent_instance_id!r} has no driver in this "
+            f"build ({exc}) — terminate_session cannot reach the host; stop "
+            "the process manually.",
+        ) from exc
+    return driver, host
+
+
+def _terminate_host(
+    driver: HostDriver, *, host_ref: str, grace_seconds: int,
+    agent_instance_id: str, host: str,
+) -> None:
+    try:
+        driver.terminate(host_ref, grace_seconds)
+    except HostCannotSpawnError:
+        logger.info(
+            "terminate_session %s: host %r driver is degenerate (no spawn, "
+            "no kill) — proceeding with the ledger-only transition.",
+            agent_instance_id, host,
+        )
 
 
 def terminate_session(
@@ -832,24 +893,14 @@ def terminate_session(
             "already_terminal": True, "lifecycle_state": current,
             "session_terminal_edges_fired": fired,
         }
-    host = str(row.get("host") or "")
-    try:
-        driver, _resolved_host = resolve_host_driver(host)
-    except (HostNotDeclaredError, HostMechanismMissingError) as exc:
-        raise VerbError(
-            "unsupported_on_host",
-            f"host {host!r} for {agent_instance_id!r} has no driver in this "
-            f"build ({exc}) — terminate_session cannot reach the host; stop "
-            "the process manually.",
-        ) from exc
-    try:
-        driver.terminate(str(row.get("host_ref") or ""), grace_seconds)
-    except HostCannotSpawnError:
-        logger.info(
-            "terminate_session %s: host %r driver is degenerate (no spawn, "
-            "no kill) — proceeding with the ledger-only transition.",
-            agent_instance_id, host,
-        )
+    driver, host = _resolve_termination_driver(row, agent_instance_id)
+    _terminate_host(
+        driver,
+        host_ref=str(row.get("host_ref") or ""),
+        grace_seconds=grace_seconds,
+        agent_instance_id=agent_instance_id,
+        host=host,
+    )
     try:
         transition_lifecycle_state(
             state, agent_instance_id=agent_instance_id, from_state=current,

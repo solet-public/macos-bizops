@@ -1185,12 +1185,17 @@ class AgentMessagingPlugin(
         self._update_choreography_progress(
             job_manager, job_id, progress_percent=10, leg="resolve_ledger_row",
         )
-        lifecycle_session_status(state_service, agent_instance_id)
+        row = lifecycle_session_status(state_service, agent_instance_id)
+        agent_runtime = _str_field(row.get("agent_runtime")) or "claude_code"
 
-        existing_ids = {
-            str(m.get("claude_session_id") or "")
-            for m in lifecycle_list_session_claude_mappings(state_service, agent_instance_id)
-        }
+        existing_ids = set()
+        if agent_runtime == "claude_code":
+            existing_ids = {
+                str(m.get("claude_session_id") or "")
+                for m in lifecycle_list_session_claude_mappings(
+                    state_service, agent_instance_id,
+                )
+            }
 
         self._update_choreography_progress(
             job_manager, job_id, progress_percent=25, leg="durable_pickup_dispatch",
@@ -1222,6 +1227,23 @@ class AgentMessagingPlugin(
         )
 
         self._update_choreography_progress(job_manager, job_id, progress_percent=85, leg="verify")
+        if agent_runtime == "codex":
+            # Both Codex channels acknowledge pickup before send() returns:
+            # app-server returns a JSON-RPC turn/start|steer response; tmux
+            # observes a styled pane-state transition after a separate Enter.
+            # That acknowledgement is the Codex-native generation witness;
+            # the Claude-only session-mapping spool cannot observe it.
+            self._complete_choreography_job(
+                job_manager,
+                job_id,
+                {
+                    "turn_observed": True,
+                    "agent_runtime": "codex",
+                    "verification": "driver_channel_acknowledged",
+                    "new_claude_session_ids": [],
+                },
+            )
+            return
         new_ids = self._wait_for_new_claude_session(
             state_service, agent_instance_id, existing_ids,
             self._ROTATE_VERIFY_MAX_WAIT_SECONDS, self._ROTATE_VERIFY_POLL_INTERVAL_SECONDS,
@@ -1258,6 +1280,10 @@ class AgentMessagingPlugin(
             "brief_ref": _str_field(old_row.get("brief_ref")),
             "work_class": _str_field(old_row.get("work_class")),
             "budget_line": _str_field(old_row.get("budget_line")),
+            # Runtime is restart-sticky for the same reason host/model/effort
+            # are: defaulting this fresh request would silently respawn a
+            # Codex worker as Claude.  Older rows have the compatibility floor.
+            "agent_runtime": _str_field(old_row.get("agent_runtime")) or "claude_code",
             "role_name": role_name,
             "host": _str_field(old_row.get("host")),
             "visibility": _str_field(old_row.get("visibility")),
@@ -2395,6 +2421,15 @@ class AgentMessagingPlugin(
                 required=True,
                 type=ParameterType.STRING,
             ),
+            "agent_runtime": ParameterMetadata(
+                description=(
+                    "Worker runtime using the exact peer-registry agent_id vocabulary: "
+                    "claude_code | codex. Orthogonal to host; omitted defaults to "
+                    "claude_code for compatibility."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
             "role_name": ParameterMetadata(
                 description=(
                     "Named role to fill on boot (project: may mint; principal: "
@@ -2475,6 +2510,7 @@ class AgentMessagingPlugin(
             description="spawn_session outcome (D1 §4)",
             properties={
                 "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "agent_runtime": ParameterMetadata(type=ParameterType.STRING),
                 "host": ParameterMetadata(type=ParameterType.STRING),
                 "host_ref": ParameterMetadata(type=ParameterType.STRING),
                 "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
@@ -6718,6 +6754,7 @@ def _spawn_dispatch_overrides_from_params(raw: dict[str, Any]) -> dict[str, Any]
     overrides), so grouping them is a real seam, not an arbitrary split."""
     return {
         "host": (str(raw["host"]) if raw.get("host") else None),
+        "agent_runtime": str(raw.get("agent_runtime", "") or "claude_code"),
         "model": str(raw.get("model", "") or ""),
         "effort": str(raw.get("effort", "") or ""),
         "allowed_tools": _as_str_tuple(raw.get("allowed_tools"), default=()),

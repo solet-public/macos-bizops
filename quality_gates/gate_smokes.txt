@@ -2905,6 +2905,14 @@ plugins/agent_messaging_plugin/tests/seat_idle_watcher_smoke.py
 # reds test_wake_capable_false_persists_through_register_and_resolve.
 # Offline, in-memory Store backend only.
 plugins/agent_messaging_plugin/tests/peer_registry_wake_capable_persistence_smoke.py
+
+# managed Codex runtime parity (2026-08-10) -- orthogonal
+# agent_runtime x host registry, declarative ledger/default + restart carry,
+# Codex-native app-server/config/identity path, provider-overlay refusal,
+# /clear and /compact protocol translation, styled tmux pickup verification,
+# and watch registration without an implicit role claim. Offline records-only
+# fakes; no model turn, tmux server, bridge, or database.
+plugins/agent_messaging_plugin/tests/codex_managed_session_smoke.py
 # initialization/tests/profile_loader_smoke.py — profile-loading smoke, brought
 # into the per-file static-gate scope by the tail-class widening (625f70886 +
 # d89b0dca7). Registered 2026-08-09 after Git-Controller's landing check found

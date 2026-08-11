@@ -38,6 +38,12 @@ _ENV_FLEET_SESSION_HOST = "FLEET_SESSION_HOST"
 DEFAULT_HOST = "headless"
 
 OPERATOR_HOST = "operator"
+AGENT_RUNTIME_CLAUDE_CODE = "claude_code"
+AGENT_RUNTIME_CODEX = "codex"
+DEFAULT_AGENT_RUNTIME = AGENT_RUNTIME_CLAUDE_CODE
+SUPPORTED_AGENT_RUNTIMES = frozenset(
+    {AGENT_RUNTIME_CLAUDE_CODE, AGENT_RUNTIME_CODEX},
+)
 
 
 class DriverChannel(Protocol):
@@ -51,6 +57,17 @@ class DriverChannel(Protocol):
     ``None`` — ``unsupported_on_host``, never a silent degradation)."""
 
     def send(self, text: str) -> None: ...
+
+
+class DriverChannelSendError(Exception):
+    """A host channel could not confirm that it accepted a dispatch.
+
+    Claude's established channels remain best-effort and do not raise this
+    error.  Runtime drivers that have an acknowledgement surface (Codex's
+    app-server JSON-RPC response, or tmux pane-state verification) use it so
+    ``first_turn_delivered=True`` and lifecycle-verb success never mean only
+    "bytes were written somewhere".
+    """
 
 
 class HostDriver(Protocol):
@@ -98,6 +115,18 @@ class HostMechanismMissingError(Exception):
         super().__init__(f"host_mechanism_missing: {host!r} — {remedy}")
 
 
+class AgentRuntimeNotSupportedError(Exception):
+    """The requested peer-runtime vocabulary value is not implemented."""
+
+    def __init__(self, agent_runtime: str) -> None:
+        self.agent_runtime = agent_runtime
+        super().__init__(
+            f"agent_runtime_unsupported: {agent_runtime!r} is not one of "
+            f"{sorted(SUPPORTED_AGENT_RUNTIMES)}; agent_runtime uses the exact "
+            "peer-registry agent_id vocabulary.",
+        )
+
+
 class HostCannotSpawnError(Exception):
     """The resolved host driver is registered but DEGENERATE — it observes
     via registration only, never spawns (the ``operator`` driver, §5)."""
@@ -142,20 +171,27 @@ class OperatorHostDriver:
         return []
 
 
-def _build_registry() -> dict[str, HostDriver]:
+RegistryKey = str | tuple[str, str]
+
+
+def _build_registry() -> dict[RegistryKey, HostDriver]:
     # Deferred import: headless_adapter/tmux_adapter import HostCannotSpawnError
     # from THIS module, so a top-level import here would be circular.
+    from .codex_adapter import CodexAppServerHostDriver, CodexTmuxHostDriver  # noqa: PLC0415
     from .headless_adapter import HeadlessHostDriver  # noqa: PLC0415
     from .tmux_adapter import TmuxHostDriver  # noqa: PLC0415
 
     return {
-        OPERATOR_HOST: OperatorHostDriver(),
-        "headless": HeadlessHostDriver(),
-        "tmux": TmuxHostDriver(),
+        (AGENT_RUNTIME_CLAUDE_CODE, OPERATOR_HOST): OperatorHostDriver(),
+        (AGENT_RUNTIME_CLAUDE_CODE, "headless"): HeadlessHostDriver(),
+        (AGENT_RUNTIME_CLAUDE_CODE, "tmux"): TmuxHostDriver(),
+        (AGENT_RUNTIME_CODEX, OPERATOR_HOST): OperatorHostDriver(),
+        (AGENT_RUNTIME_CODEX, "headless"): CodexAppServerHostDriver(),
+        (AGENT_RUNTIME_CODEX, "tmux"): CodexTmuxHostDriver(),
     }
 
 
-_REGISTRY: dict[str, HostDriver] = _build_registry()
+_REGISTRY: dict[RegistryKey, HostDriver] = _build_registry()
 
 
 def shutdown_all_drivers() -> None:
@@ -164,13 +200,47 @@ def shutdown_all_drivers() -> None:
     into ``plugin.py``'s ``stop_services`` so a graceful shutdown/restart
     never leaves an orphaned worker process burning tokens with nothing
     tracking it."""
+    seen: set[int] = set()
     for driver in _REGISTRY.values():
+        # The degenerate operator driver may be registered for more than one
+        # runtime.  A shared future driver must still be shut down once.
+        if id(driver) in seen:
+            continue
+        seen.add(id(driver))
         shutdown = getattr(driver, "shutdown", None)
         if callable(shutdown):
             shutdown()
 
 
-def resolve_host_driver(requested_host: str | None) -> tuple[HostDriver, str]:
+def _resolve_host_name(requested_host: str | None) -> str:
+    if requested_host is not None and not requested_host.strip():
+        raise HostNotDeclaredError()
+    return (requested_host or os.environ.get(_ENV_FLEET_SESSION_HOST) or DEFAULT_HOST).strip()
+
+
+def _driver_for(agent_runtime: str, host: str) -> HostDriver | None:
+    driver = _REGISTRY.get((agent_runtime, host))
+    if driver is not None or agent_runtime != DEFAULT_AGENT_RUNTIME:
+        return driver
+    # Test/embedding compatibility for the pre-runtime registry injection
+    # seam. Production _build_registry returns tuple keys.
+    return _REGISTRY.get(host)
+
+
+def _registered_hosts(agent_runtime: str) -> list[str]:
+    hosts: set[str] = set()
+    for key in _REGISTRY:
+        if isinstance(key, str):
+            hosts.add(key)
+        elif key[0] == agent_runtime:
+            hosts.add(key[1])
+    return sorted(hosts)
+
+
+def resolve_host_driver(
+    requested_host: str | None,
+    agent_runtime: str = DEFAULT_AGENT_RUNTIME,
+) -> tuple[HostDriver, str]:
     """Resolve ``requested_host`` (per-spawn override) or the
     ``FLEET_SESSION_HOST`` env default to a registered host driver.
 
@@ -183,15 +253,16 @@ def resolve_host_driver(requested_host: str | None) -> tuple[HostDriver, str]:
     Raises :class:`HostMechanismMissingError` when the resolved name has no
     driver registered in this build.
     """
-    if requested_host is not None and not requested_host.strip():
-        raise HostNotDeclaredError()
-    host = (requested_host or os.environ.get(_ENV_FLEET_SESSION_HOST) or DEFAULT_HOST).strip()
-    driver = _REGISTRY.get(host)
+    if agent_runtime not in SUPPORTED_AGENT_RUNTIMES:
+        raise AgentRuntimeNotSupportedError(agent_runtime)
+    host = _resolve_host_name(requested_host)
+    driver = _driver_for(agent_runtime, host)
     if driver is None:
-        registered = sorted(_REGISTRY)
+        registered = _registered_hosts(agent_runtime)
         raise HostMechanismMissingError(
             host,
-            f"no host driver registered for host {host!r} in this build "
+            f"no host driver registered for agent_runtime={agent_runtime!r}, "
+            f"host={host!r} in this build "
             f"(registered: {registered}) — pass one of those or wait for a "
             "new host driver to land.",
         )
@@ -200,8 +271,14 @@ def resolve_host_driver(requested_host: str | None) -> tuple[HostDriver, str]:
 
 __all__ = [
     "DEFAULT_HOST",
+    "DEFAULT_AGENT_RUNTIME",
+    "AGENT_RUNTIME_CLAUDE_CODE",
+    "AGENT_RUNTIME_CODEX",
+    "SUPPORTED_AGENT_RUNTIMES",
     "OPERATOR_HOST",
+    "AgentRuntimeNotSupportedError",
     "DriverChannel",
+    "DriverChannelSendError",
     "HostCannotSpawnError",
     "HostDriver",
     "HostMechanismMissingError",

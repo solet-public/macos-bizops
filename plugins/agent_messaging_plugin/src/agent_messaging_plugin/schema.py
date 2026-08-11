@@ -699,6 +699,16 @@ def get_managed_session_schema() -> TableSchema:
                 not_null=True,
                 description="tmux | headless | operator (§5 adapter contract).",
             ),
+            "agent_runtime": ColumnDefinition(
+                type=ColumnType.TEXT,
+                default="claude_code",
+                description=(
+                    "Exact peer-registry agent_id vocabulary for the worker runtime: "
+                    "claude_code | codex. Orthogonal to host topology; nullable for "
+                    "declarative migration of pre-runtime rows, whose read floor is "
+                    "claude_code."
+                ),
+            ),
             "host_ref": ColumnDefinition(
                 type=ColumnType.TEXT,
                 description="tmux session name / driver pid / null (§5).",

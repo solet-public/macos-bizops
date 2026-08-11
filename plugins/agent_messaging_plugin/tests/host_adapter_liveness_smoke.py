@@ -40,6 +40,9 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src")
 
 from agent_messaging_plugin import session_hosts  # noqa: E402
 from agent_messaging_plugin.session_hosts import (  # noqa: E402
+    AGENT_RUNTIME_CLAUDE_CODE,
+    AGENT_RUNTIME_CODEX,
+    DEFAULT_AGENT_RUNTIME,
     HostMechanismMissingError,
     resolve_host_driver,
 )
@@ -50,11 +53,15 @@ from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
 # The module docstring's own claims (session_hosts.py, read at authoring
 # time — this list is this smoke's spec of what the docstring says, not a
 # parse of the prose itself): "operator", "headless", and "tmux" (D2) all
-# ship REGISTERED in this build. No driver is currently claimed deferred;
+# ship REGISTERED for both runner runtimes in this build. No driver is claimed deferred;
 # the set stays declared (not deleted) so the next D-step that adds one has
 # an obvious place to name it.
-_CLAIMED_LIVE_DRIVERS = frozenset({"operator", "headless", "tmux"})
-_CLAIMED_DEFERRED_DRIVERS: frozenset[str] = frozenset()
+_CLAIMED_LIVE_DRIVERS = frozenset(
+    (runtime, host)
+    for runtime in (AGENT_RUNTIME_CLAUDE_CODE, AGENT_RUNTIME_CODEX)
+    for host in ("operator", "headless", "tmux")
+)
+_CLAIMED_DEFERRED_DRIVERS: frozenset[tuple[str, str]] = frozenset()
 
 _passed = 0
 _failed: list[str] = []
@@ -84,11 +91,11 @@ def test_a_real_consumer_is_wired_to_the_interface() -> None:
 
 
 def test_claimed_live_drivers_actually_resolve() -> None:
-    for name in _CLAIMED_LIVE_DRIVERS:
-        driver, resolved_host = resolve_host_driver(name)
+    for runtime, host in _CLAIMED_LIVE_DRIVERS:
+        driver, resolved_host = resolve_host_driver(host, runtime)
         _check(
-            driver is not None and resolved_host == name,
-            f"docstring-claimed live driver {name!r} actually resolves to a "
+            driver is not None and resolved_host == host,
+            f"docstring-claimed live driver {(runtime, host)!r} actually resolves to a "
             "registered HostDriver (not just claimed in prose)",
         )
 
@@ -100,15 +107,15 @@ def test_claimed_deferred_driver_is_not_secretly_registered() -> None:
         "deferred (D2 registered the last one, tmux) — this loop is "
         "intentionally a no-op below, not a silently-vacuous check",
     )
-    for name in _CLAIMED_DEFERRED_DRIVERS:
+    for runtime, host in _CLAIMED_DEFERRED_DRIVERS:
         raised = False
         try:
-            resolve_host_driver(name)
+            resolve_host_driver(host, runtime)
         except HostMechanismMissingError:
             raised = True
         _check(
             raised,
-            f"docstring-claimed DEFERRED driver {name!r} is still correctly "
+            f"docstring-claimed DEFERRED driver {(runtime, host)!r} is still correctly "
             "unregistered -- the docstring and the registry agree on what "
             "has NOT shipped, not just what has",
         )
@@ -143,7 +150,7 @@ def test_a_claimed_driver_going_missing_is_actually_caught() -> None:
     driver (headless) out of the registry — the "docstring names an
     implementer that does not exist" failure shape — confirm resolution then
     raises, then restore."""
-    target = "headless"
+    target = (DEFAULT_AGENT_RUNTIME, "headless")
     _check(
         target in session_hosts._REGISTRY,
         f"precondition: {target!r} is really registered before mutating it",
@@ -152,7 +159,7 @@ def test_a_claimed_driver_going_missing_is_actually_caught() -> None:
     try:
         raised = False
         try:
-            resolve_host_driver(target)
+            resolve_host_driver(target[1], target[0])
         except HostMechanismMissingError:
             raised = True
         _check(

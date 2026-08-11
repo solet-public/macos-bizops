@@ -1,31 +1,15 @@
 {
   "hooks": {
-    "UserPromptSubmit": [
+    "SessionStart": [
       {
+        "matcher": "startup|resume|clear",
         "hooks": [
           {
             "type": "command",
             "command": "node ${PLUGIN_ROOT}/hooks/step_zero_reminder.js",
             "timeout": 5,
             "statusMessage": "Loading project-orientation reminder"
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node ${PLUGIN_ROOT}/hooks/check_messages_reminder.js",
-            "timeout": 5,
-            "statusMessage": "Loading coordination reminder"
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "matcher": "startup|resume|clear",
-        "hooks": [
+          },
           {
             "type": "command",
             "command": "node ${PLUGIN_ROOT}/hooks/check_messages_reminder.js",
