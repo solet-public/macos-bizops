@@ -894,6 +894,15 @@ def _check_gate_toolchain(project_root: Path) -> bool:
     audit: workbench/2026-08-08_undeclared_system_dependencies_findings_d3-impl.md.
     """
     script = project_root / "deployment" / "scripts" / "check_gate_toolchain.sh"
+    if not script.exists():
+        print(
+            f"FAIL: the gate-toolchain preflight script itself is missing: {script}\n"
+            "This platform ships it at deployment/scripts/check_gate_toolchain.sh, so "
+            "this homunculus cannot verify ruff/pyright/radon are installed before "
+            "running the gate. Pull an update that carries this file (born-clone-gate-"
+            "toolchain fix) rather than proceeding without a toolchain check.",
+        )
+        return False
     result = subprocess.run([str(script), "gate"], capture_output=True, text=True)
     if result.returncode != 0:
         print(result.stderr, end="")
@@ -1036,6 +1045,16 @@ def _check_ruff(project_root: Path, venv_python: Path) -> bool:
     signal) any more than it should read as a silent pass.
     """
     print("\n📊 Linting with ruff...")
+    pyproject = project_root / "pyproject.toml"
+    if not pyproject.exists():
+        raise ToolUnavailableError(
+            f"ruff cannot run correctly -- its --config target is missing: {pyproject}. "
+            "This file's [tool.ruff] section is what activates import-sort (I001) and "
+            "typing-modernization (UP035) rules; running ruff without it would silently "
+            "diverge from this platform's own gate rather than failing loud, so this "
+            "checks the config target before invoking ruff at all, not after. Pull an "
+            "update that ships this file (born-clone-gate-toolchain fix).",
+        )
     ruff_cmd = f"cd {project_root} && {venv_python} -m ruff check ananta/src ananta/tests plugins initialization/src --config pyproject.toml 2>&1"
     success, output = run_command(ruff_cmd, "Running ruff linter")
 

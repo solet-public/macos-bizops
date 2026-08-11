@@ -88,13 +88,20 @@
       "seed_id": "5cc9b89c-3fff-5149-8850-2cf418508a66",
       "source_commit": "71159c02e1a4ce373db6561a30a1b4b00d0b0b91",
       "source_date": "2026-08-02T21:33:31-07:00"
+    },
+    {
+      "manifest_sha256": "558f0577d032a78e4b93df0528ea8ea5503e1892e10e90444f4a346a501a82fb",
+      "origin_id": "31bfa93c-fe20-4988-b019-f8186684e88e",
+      "seed_id": "5538bf8c-526d-5e25-a782-894ec4b51aa6",
+      "source_commit": "e447c91c5e8f03b20fd287c75c8524415ea8a3a8",
+      "source_date": "2026-08-10T09:43:17-07:00"
     }
   ],
-  "manifest_sha256": "558f0577d032a78e4b93df0528ea8ea5503e1892e10e90444f4a346a501a82fb",
+  "manifest_sha256": "bcfc06c5f9bf742505a12be718fdfad96880736809201998e031727fa3449c6b",
   "origin_id": "31bfa93c-fe20-4988-b019-f8186684e88e",
   "schema_version": 1,
-  "seed_id": "5538bf8c-526d-5e25-a782-894ec4b51aa6",
+  "seed_id": "597b6991-c6eb-5ceb-9a4c-cea794c62cb0",
   "signature": null,
-  "source_commit": "e447c91c5e8f03b20fd287c75c8524415ea8a3a8",
-  "source_date": "2026-08-10T09:43:17-07:00"
+  "source_commit": "50cf539ba80031dc3797391f1dfbb34a65ae6fc0",
+  "source_date": "2026-08-10T17:28:25-07:00"
 }

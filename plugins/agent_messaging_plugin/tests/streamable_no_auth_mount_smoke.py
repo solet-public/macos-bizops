@@ -223,11 +223,22 @@ class _FakeVault:
         self._oauth_registry = _FakeOAuthRegistry(self._client)
 
     def retrieve(self, key: str) -> dict[str, object]:
+        # REAL macos_vault_plugin ActionResult envelope (Dax Part 36 §36.2):
+        # action_status=="completed" for BOTH a hit and a genuine miss --
+        # there is no top-level "status" key. This fake used to return the
+        # imagined {"status": "success"/"error", ...} shape, which is
+        # exactly the shape that let the original bearer-HMAC-key bug ship
+        # undetected (see vault_bearer_hmac_key_envelope_smoke.py).
         if key not in self._values:
-            return {"status": "error", "error": "not found"}
+            return {
+                "action_status": "completed",
+                "data": {"found": False, "key": key, "message": f"Secret '{key}' not found"},
+                "error": None,
+            }
         return {
-            "status": "success",
-            "data": {"value": self._values[key]},
+            "action_status": "completed",
+            "data": {"key": key, "value": self._values[key]},
+            "error": None,
         }
 
     def store(
@@ -239,7 +250,11 @@ class _FakeVault:
         metadata: dict[str, str],
     ) -> dict[str, object]:
         self._values[key] = value
-        return {"status": "success", "data": {"key": key}}
+        return {
+            "action_status": "completed",
+            "data": {"key": key, "version": 1, "message": "Secret stored"},
+            "error": None,
+        }
 
     def lookup_oauth_client(self, client_id: str) -> dict[str, object] | None:
         if client_id == self._client["client_id"]:

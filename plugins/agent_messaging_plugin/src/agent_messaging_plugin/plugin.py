@@ -49,7 +49,7 @@ from ananta.core.actions.action_metadata import (
     ReturnValueSchema,
     platform_process,
 )
-from ananta.core.domain.enums import ProcessorPolicyCategory
+from ananta.core.domain.enums import ActionStatus, ProcessorPolicyCategory
 from ananta.core.domain.types import ActionResult, ErrorDetail
 from ananta.core.plugins.plugin_base import ServicePlugin
 from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
@@ -421,44 +421,74 @@ def _bedrock_vault_name(credential: str) -> str:
     return f"{name}.agent_messaging_plugin.{credential}"
 
 
-def _vault_retrieve_value(vault: Any, key: str) -> str | None:
-    """Return a vault secret's plaintext value, or None when absent.
+class VaultEnvelopeError(RuntimeError):
+    """Raised by :func:`_vault_retrieve_value` when a vault ``retrieve``
+    call returns anything other than a well-formed hit or a well-formed
+    miss — a REAL vault error (``action_status == "error"``, e.g. keychain
+    unavailable) or an unrecognized envelope shape. This is deliberately
+    NOT swallowed into "key absent": a caller treating a malformed/error
+    envelope as a miss is exactly the vault-read envelope bug this seam
+    exists to close (Dax Part 36 §36.2) — a weird envelope must never
+    silently trigger a read-or-create caller's mint-and-store path."""
 
-    The vault plugin's ``retrieve`` returns the standard ActionResult
-    envelope — ``{"action_status": "completed", "data": {"value": ...}}`` on
-    a hit, and the same ``completed`` status with no ``value`` on a
-    business-level not-found (macos_vault_plugin ``_success``/``_not_found``,
-    the shape its OWN in-process consumers key on, e.g. the address-book
-    ``resolve_with_secrets`` path at ``action_status ==
-    ActionStatus.COMPLETED.value``). Key on ``action_status == 'completed'``
-    plus a present, non-empty ``value``; a missing credential is therefore a
-    clean ``None`` (the caller turns that into a fail-loud
-    ``provider_env_unresolved``), never a false hit."""
-    retrieved = vault.retrieve(key)
-    if isinstance(retrieved, dict) and retrieved.get("action_status") == "completed":
-        value = retrieved.get("data", {}).get("value")
-        if isinstance(value, str) and value:
-            return value
-    return None
+
+def _vault_retrieve_value(vault: Any, name: str) -> str | None:
+    """Single seam for every vault ``retrieve`` consumer in this plugin.
+
+    Keys on the REAL ``macos_vault_plugin`` ``ActionResult`` envelope
+    (``plugin.py::_success``/``_not_found``): ``action_status`` is
+    ``"completed"`` for BOTH a hit and a genuine miss — the vault never
+    returns a top-level ``"status"`` key, so a caller keyed on that (the
+    §36.2 bug) never recognizes a hit and re-mints on every read. A hit
+    and a miss are distinguished by ``data`` shape instead: a hit carries
+    a present, non-empty string ``data["value"]``; a well-formed miss
+    carries ``data["found"] is False`` (``_not_found``'s exact shape,
+    no ``"value"`` key at all).
+
+    Returns the stored string value on a well-formed hit, ``None`` on a
+    well-formed miss, and raises :class:`VaultEnvelopeError` on anything
+    else — fast-fail, no silent fallback.
+    """
+    retrieved = vault.retrieve(name)
+    if not isinstance(retrieved, dict):
+        raise VaultEnvelopeError(
+            f"vault.retrieve({name!r}) returned "
+            f"{type(retrieved).__name__}, not a dict envelope",
+        )
+    if retrieved.get("action_status") != ActionStatus.COMPLETED.value:
+        raise VaultEnvelopeError(
+            f"vault.retrieve({name!r}) did not complete: "
+            f"action_status={retrieved.get('action_status')!r}, "
+            f"error={retrieved.get('error')!r}",
+        )
+    data = retrieved.get("data")
+    if not isinstance(data, dict):
+        raise VaultEnvelopeError(
+            f"vault.retrieve({name!r}) returned action_status="
+            f"'completed' with a non-dict data payload: {data!r}",
+        )
+    value = data.get("value")
+    if isinstance(value, str) and value:
+        return value
+    if data.get("found") is False:
+        return None
+    raise VaultEnvelopeError(
+        f"vault.retrieve({name!r}) returned action_status='completed' "
+        "with an unrecognized data shape (neither a hit with a "
+        f"non-empty 'value' nor a well-formed miss with found=False): {data!r}",
+    )
 
 
 def _load_or_create_bearer_hmac_key(vault: Any) -> bytes:
     """Return the homunculus's HMAC bearer-signing secret as raw bytes.
 
-    Reads from the vault under :data:`_BEARER_HMAC_KEY_VAULT_NAME`;
-    on first boot the entry is absent so we mint a fresh
-    ``secrets.token_bytes(HMAC_KEY_BYTE_LENGTH)`` and persist its
-    base64 encoding before returning. The value is base64-encoded in
-    storage because the vault's ``store`` interface accepts a string.
-
-    Reads through :func:`_vault_retrieve_value`, which keys on the vault's
-    real ``action_status == 'completed'`` envelope. A prior inline check
-    here keyed on ``status == 'success'`` — a shape the vault plugin never
-    returns — so an EXISTING key was never recognized on a hit and this
-    function silently re-minted it every boot, rotating the HMAC secret and
-    invalidating every outstanding bearer token each time. Fixed as part of
-    the same class of bug found in the provider-credential read
-    (2026-08-10).
+    Reads from the vault under :data:`_BEARER_HMAC_KEY_VAULT_NAME` via
+    :func:`_vault_retrieve_value`; on first boot the entry is absent so
+    we mint a fresh ``secrets.token_bytes(HMAC_KEY_BYTE_LENGTH)`` and
+    persist its base64 encoding before returning. The value is
+    base64-encoded in storage because the vault's ``store`` interface
+    accepts a string. The provider-credential read (below) shares the
+    same vault-read seam and the same bug class this fixed (2026-08-10).
     """
     stored_value = _vault_retrieve_value(vault, _BEARER_HMAC_KEY_VAULT_NAME)
     if stored_value is not None:

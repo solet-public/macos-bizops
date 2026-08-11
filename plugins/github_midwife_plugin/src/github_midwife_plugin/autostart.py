@@ -13,9 +13,13 @@ profile does not bind `macos_self_deployment_plugin` at all).
 Plist requirements (build spec §6.2 — every field here is load-bearing
 on the boot path):
   * `Label`: `local.homunculus.<name>` (mirrors the existing convention).
-  * `EnvironmentVariables`: `{HOMUNCULUS_NAME: <name>}` — boot
-    FAST-FAILS without it (`environment_config.py` identity/schema
-    routing + the DB-password vault-key resolution both key off it).
+  * `EnvironmentVariables`: `{HOMUNCULUS_NAME: <name>, PATH: <fixed>}`.
+    Boot FAST-FAILS without `HOMUNCULUS_NAME` (`environment_config.py`
+    identity/schema routing + the DB-password vault-key resolution both
+    key off it). `PATH` is a deterministic Homebrew-inclusive literal
+    (`_PATH_ENV`, §39.2): a launchd process with no `PATH` key gets the
+    bare `/usr/bin:/bin:/usr/sbin:/sbin`, so `shutil.which("tmux")`
+    fails in-daemon even with tmux installed under `/opt/homebrew/bin`.
   * `WorkingDirectory`: `~/.ananta/runtime/<name>` — NOT the clone
     root. A launchd-managed process's CWD must never be a code tree: a
     stray relative-path write (an error log, a library temp/cache)
@@ -57,6 +61,29 @@ from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
 
 _LABEL_PREFIX = "local.homunculus"
+# PATH written into the plist's EnvironmentVariables (§39.2, reported and
+# field-verified by a seed adopter). A launchd-spawned process inherits no login
+# shell: with no PATH key it gets launchd's bare ``/usr/bin:/bin:/usr/sbin:/sbin``,
+# which excludes both Homebrew prefixes, so in-daemon ``shutil.which("tmux")``
+# returns None on a machine where tmux IS installed at ``/opt/homebrew/bin/tmux``
+# -- present but invisible, and tmux is the substrate of the swap-durable fleet
+# host. A born clone hits this wall on its first tmux-hosted spawn.
+#
+# Fixed literal, never the operator's live ``$PATH``: capturing the interactive
+# PATH would make the render vary by whoever ran genesis (breaking the
+# byte-comparison staleness check in ``_classify_install_prior``) and would leak
+# the operator's local layout into a generated artifact. Both Homebrew prefixes
+# ship unconditionally (``/opt/homebrew`` Apple Silicon, ``/usr/local`` Intel)
+# rather than arch-detected -- a non-existent directory on PATH is inert, and
+# one literal keeps the render arch-independent.
+#
+# Own-copy of macos_self_deployment_plugin.constants.AUTOSTART_PATH_ENV, per
+# this module's stated fork convention (genesis's profile does not bind that
+# plugin at all -- see the module docstring). Keep the two values in lock-step.
+_PATH_ENV = (
+    "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:"
+    "/usr/bin:/bin:/usr/sbin:/sbin"
+)
 _LAUNCHCTL_TIMEOUT_S = 10.0
 _LAUNCHCTL_NOT_FOUND_MARKER = "Could not find service"
 
@@ -269,6 +296,10 @@ class SimpleAutostartRenderer:
             f'  <key>WorkingDirectory</key>\n  <string>{_xml_escape(str(self.runtime_dir))}</string>\n'
             '  <key>EnvironmentVariables</key>\n  <dict>\n'
             f'    <key>HOMUNCULUS_NAME</key>\n    <string>{_xml_escape(self.homunculus_name)}</string>\n'
+            # §39.2: without this key the daemon gets launchd's bare PATH and
+            # cannot see Homebrew binaries (tmux) even when installed. See
+            # _PATH_ENV for why it is a fixed literal.
+            f'    <key>PATH</key>\n    <string>{_xml_escape(_PATH_ENV)}</string>\n'
             '  </dict>\n'
             '  <key>RunAtLoad</key>\n  <true/>\n'
             '  <key>KeepAlive</key>\n  <dict>\n'

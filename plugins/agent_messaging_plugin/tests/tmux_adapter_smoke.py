@@ -29,6 +29,7 @@ Run:
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import shlex
@@ -49,10 +50,13 @@ from agent_messaging_plugin.headless_adapter import (  # noqa: E402
 )
 from agent_messaging_plugin.session_hosts import HostCannotSpawnError  # noqa: E402
 from agent_messaging_plugin.tmux_adapter import (  # noqa: E402
+    _THIRD_PARTY_PROVIDER_ENV_MARKERS,
     TmuxHostDriver,
+    _effective_spawn_env,
     _emit_role_tag_path,
     _needs_dev_channels_confirmation,
     _parse_tmux_version,
+    _provider_ignores_dev_channels,
     _sanitize_session_name,
 )
 
@@ -197,14 +201,20 @@ def test_verify_config_remedies_are_independent() -> None:
             homunculus_name="", permission_mode="",
             mcp_config_path=tmp_dir / "missing.json", cwd=tmp_dir,
         )
-        remedies = unconfigured.verify_config()
+        # transport="mcp" is what makes the MCP-config remedy reachable at
+        # all (Dax Part 36 §36.3) -- see the dedicated watch/mcp legs below.
+        remedies = unconfigured.verify_config(transport="mcp")
         _check(
             len(remedies) == 5,
-            f"all 5 remedies fire when nothing is configured (got {len(remedies)}: {remedies})",
+            f"all 5 remedies fire when nothing is configured, mcp transport "
+            f"(got {len(remedies)}: {remedies})",
         )
         _check_each_remedy_names_its_own_gap(remedies)
         configured = _configured_driver(tmp_dir)
-        _check(configured.verify_config() == [], "a fully-configured driver has zero remedies")
+        _check(
+            configured.verify_config(transport="mcp") == [],
+            "a fully-configured driver has zero remedies",
+        )
 
 
 def _check_each_remedy_names_its_own_gap(remedies: list[str]) -> None:
@@ -216,6 +226,103 @@ def _check_each_remedy_names_its_own_gap(remedies: list[str]) -> None:
     _check(any("HOMUNCULUS_NAME" in r for r in remedies), "the HOMUNCULUS_NAME remedy names its gap")
     _check(any("permission mode" in r for r in remedies), "the permission-mode remedy names its gap")
     _check(any("MCP config" in r for r in remedies), "the MCP-config remedy names its gap")
+
+
+def test_verify_config_mcp_config_required_only_for_mcp_transport() -> None:
+    """Regression guard for Dax Part 36 §36.3, ported to the tmux driver
+    2026-08-10 (authorized scope addition — the identical unconditional check
+    landed here too, and was fixed in ``headless_adapter`` by ``dc7c7c9bf``
+    without this site). ``verify_config()`` used to require ``.mcp.json``
+    unconditionally, even though ``_spawn_command()`` only ever reads
+    ``self._mcp_config_path`` when the resolved transport is ``'mcp'`` -- a
+    ``'watch'`` spawn passes an inline literal empty MCP config
+    (``'{"mcpServers":{}}'``) and never touches the file. A born clone ships
+    no ``.mcp.json`` at all, so every watch-transport tmux spawn (the charter
+    default) refused for a file it was never going to read -- and tmux is the
+    swap-durable host, so the durable substrate was exactly what went missing.
+
+    FAILING MUTATION: drop the ``resolved_transport == "mcp"`` conjunct from
+    ``_claude_launch_remedies`` (i.e. revert to the unconditional
+    ``exists()`` check) -> the watch and bare legs both red.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = TmuxHostDriver(
+            tmux_bin=_executable_stub(tmp_dir, "fake-tmux"),
+            claude_bin=_executable_stub(tmp_dir, "fake-claude"),
+            homunculus_name="testhom", permission_mode="bypassPermissions",
+            mcp_config_path=tmp_dir / "missing.mcp.json",  # never created -- born-clone shape
+            cwd=tmp_dir,
+            run_fn=_confirm_flow_run_fn([]),
+            sleep_fn=lambda _seconds: None,
+        )
+        _check(
+            not (tmp_dir / "missing.mcp.json").exists(),
+            "precondition: .mcp.json genuinely absent, born-clone shape",
+        )
+        _check(
+            driver.verify_config(transport="watch") == [],
+            "watch transport never reads .mcp.json -- verify_config must not "
+            "refuse a tmux spawn for its absence",
+        )
+        _check(
+            driver.verify_config() == [],
+            "bare verify_config() with no transport arg resolves through the same "
+            "floor spawn() would ('' -> charter default 'watch') and likewise does "
+            "not require .mcp.json",
+        )
+        _check(
+            any("MCP config" in r for r in driver.verify_config(transport="mcp")),
+            "an MCP-reading transport still refuses when .mcp.json is genuinely absent",
+        )
+
+
+def test_spawn_watch_transport_succeeds_without_mcp_json_present() -> None:
+    """End-to-end companion: ``spawn()`` itself -- not just ``verify_config()``
+    in isolation -- must not refuse a watch-transport tmux worker for a missing
+    ``.mcp.json``. This is the leg that proves the resolved transport actually
+    REACHES the gate: ``spawn()`` resolves it once and threads it in, so a fix
+    that only widened ``verify_config``'s signature without rewiring the call
+    site would still red here.
+
+    FAILING MUTATION: revert ``spawn()`` to calling ``verify_config`` without
+    ``transport=`` -> the driver's own constructor floor is '' -> 'watch', so
+    this specific leg would still pass; ALSO drop the ``== "mcp"`` conjunct and
+    it reds. The stronger guard is the pair: this leg plus the mcp leg above.
+    """
+    calls: list[list[str]] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        _stub_worker_hook_files(tmp_dir)
+        driver = TmuxHostDriver(
+            tmux_bin=_executable_stub(tmp_dir, "fake-tmux"),
+            claude_bin=_executable_stub(tmp_dir, "fake-claude"),
+            homunculus_name="testhom", permission_mode="bypassPermissions",
+            mcp_config_path=tmp_dir / "missing.mcp.json",  # never created
+            cwd=tmp_dir,
+            run_fn=_confirm_flow_run_fn(calls),
+            sleep_fn=lambda _seconds: None,
+        )
+        session_name = driver.spawn(
+            {"agent_instance_id": "agi-bornclone-1", "transport": "watch"},
+        )
+        _check(
+            bool(session_name),
+            "a watch-transport tmux spawn succeeds on a clone with no .mcp.json "
+            "(pre-fix: host_cannot_spawn, 'no MCP config found at ...')",
+        )
+        new_session_call = next(c for c in calls if "new-session" in c)
+        claude_argv = _extract_claude_argv_from_pane_command(new_session_call[-1])
+        idx = claude_argv.index("--mcp-config")
+        _check(
+            claude_argv[idx + 1] == '{"mcpServers":{}}',
+            "and it spawned with the inline empty MCP config -- confirming the file "
+            "the old gate demanded is genuinely never read on this path",
+        )
+        _check(
+            str(tmp_dir / "missing.mcp.json") not in " ".join(claude_argv),
+            "the absent .mcp.json path appears nowhere in the spawn argv",
+        )
 
 
 def test_verify_config_refuses_old_tmux_version() -> None:
@@ -402,7 +509,9 @@ def test_spawn_transport_watch_uses_explicit_empty_mcp_config() -> None:
         )
         _check(
             "--dangerously-load-development-channels" in claude_argv,
-            "dev-channel loading stays unconditional -- orthogonal to MCP-vs-watch",
+            "dev-channel loading is orthogonal to MCP-vs-watch -- the watch "
+            "transport does not by itself drop the flag (§39.1 gates it on the "
+            "PROVIDER, never on the transport)",
         )
 
 
@@ -639,6 +748,213 @@ def test_needs_dev_channels_confirmation_guard() -> None:
         _needs_dev_channels_confirmation(["claude", "--model", "opus"]) is False,
         "an argv without the flag skips the confirm loop entirely (no-flag path untouched)",
     )
+
+
+_BEDROCK_MARKER = "CLAUDE_CODE_USE_BEDROCK"
+
+
+@contextlib.contextmanager
+def _effective_env_marker(value: str | None) -> Any:
+    """Set (or SCRUB) the third-party-provider marker in this process's own
+    environment for the duration of a leg, then restore it exactly.
+
+    Scrubbing matters as much as setting: this smoke can run inside a spawned
+    fleet worker, whose environment is whatever the daemon that spawned it
+    carried. A leg asserting "no third-party behaviour" that merely INHERITED
+    the ambient environment would be a negative control that never controlled
+    anything -- it would pass on a clean box and silently invert on a
+    Bedrock-configured one. ``value=None`` is the ``env -u`` equivalent.
+    """
+    previous = os.environ.get(_BEDROCK_MARKER)
+    if value is None:
+        os.environ.pop(_BEDROCK_MARKER, None)
+    else:
+        os.environ[_BEDROCK_MARKER] = value
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(_BEDROCK_MARKER, None)
+        else:
+            os.environ[_BEDROCK_MARKER] = previous
+
+
+def _third_party_provider_run_fn(calls: list[list[str]]) -> Any:
+    """A fake ``run_fn`` that plays what a third-party provider ACTUALLY does
+    (adopter's live pane capture, §39.1): Claude Code reports the dev-channels
+    flag as ignored and sits at a ready prompt -- the confirmation markers
+    never appear, on any poll, ever. Under the pre-fix driver this is precisely
+    the input that burned the full confirm timeout and then killed a
+    fully-booted worker."""
+
+    def _fake(cmd: list[str], **_kw: Any) -> _FakeCompleted:
+        calls.append(cmd)
+        if "capture-pane" in cmd:
+            return _FakeCompleted(
+                stdout=(
+                    "--dangerously-load-development-channels ignored (server:testhom)\n"
+                    "Channels are not available on third-party providers\n"
+                    "> \n"
+                ),
+            )
+        return _FakeCompleted(returncode=0)
+
+    return _fake
+
+
+def test_provider_ignores_dev_channels_predicate() -> None:
+    """The pure predicate, §39.1/§40.1 -- adopter's shape, keyed on OUR
+    effective spawn environment. Only the literal ``"1"`` counts: Claude Code's
+    own switch is a 1/unset flag, and treating any truthy-looking string as
+    enabled would omit the flag (and silently drop dev channels) on an
+    Anthropic spawn that merely had the variable set to ``0``.
+
+    FAILING MUTATION: return a constant ``False`` -> the first leg reds.
+    Return a constant ``True`` -> every remaining leg reds.
+    """
+    _check(
+        _provider_ignores_dev_channels({_BEDROCK_MARKER: "1"}) is True,
+        "marker set to '1' -> the flag is inert, omit it",
+    )
+    _check(
+        _provider_ignores_dev_channels({_BEDROCK_MARKER: " 1 "}) is True,
+        "surrounding whitespace is stripped before comparison",
+    )
+    _check(
+        _provider_ignores_dev_channels({}) is False,
+        "no marker at all -> Anthropic path, keep the flag",
+    )
+    _check(
+        _provider_ignores_dev_channels({_BEDROCK_MARKER: "0"}) is False,
+        "marker explicitly disabled ('0') -> keep the flag",
+    )
+    _check(
+        _provider_ignores_dev_channels({_BEDROCK_MARKER: ""}) is False,
+        "empty marker -> keep the flag",
+    )
+    _check(
+        _provider_ignores_dev_channels({_BEDROCK_MARKER: "true"}) is False,
+        "only the literal '1' counts -- 'true' is not the vendor's switch value",
+    )
+    _check(
+        _BEDROCK_MARKER in _THIRD_PARTY_PROVIDER_ENV_MARKERS,
+        "the field-verified marker is the one the predicate actually reads",
+    )
+
+
+def test_effective_spawn_env_is_process_env_plus_optional_overlay() -> None:
+    """The effective spawn environment is what the WORKER will receive, which
+    today is this process's own environment (the driver injects only identity
+    vars via ``new-session -e``). The ``provider_env`` overlay read is the seam
+    the per-spawn provider-selection lane composes into -- inert until that
+    lands, and asserted here so the seam cannot rot unnoticed."""
+    with _effective_env_marker(None):
+        _check(
+            _effective_spawn_env({}).get(_BEDROCK_MARKER) is None,
+            "with the marker scrubbed, the effective env carries no provider switch",
+        )
+        _check(
+            _effective_spawn_env({"provider_env": {_BEDROCK_MARKER: "1"}}).get(
+                _BEDROCK_MARKER,
+            )
+            == "1",
+            "a per-spawn overlay reaches the effective env (forward-compat seam)",
+        )
+    with _effective_env_marker("1"):
+        _check(
+            _effective_spawn_env({"provider_env": {_BEDROCK_MARKER: "0"}}).get(
+                _BEDROCK_MARKER,
+            )
+            == "0",
+            "the per-spawn overlay WINS over the inherited daemon environment",
+        )
+    # Fast failure, not a silent fallback: a malformed overlay must never be
+    # quietly ignored -- ignoring it would resolve to the daemon environment
+    # and silently re-arm the confirm loop on a third-party spawn.
+    raised = False
+    try:
+        _effective_spawn_env({"provider_env": "CLAUDE_CODE_USE_BEDROCK=1"})
+    except TypeError:
+        raised = True
+    _check(raised, "a non-mapping provider_env fails loud rather than being ignored")
+
+
+def test_third_party_provider_spawn_omits_flag_and_skips_confirm_loop() -> None:
+    """RED-FIRST (§39.1/§40.1): with the marker set, the pre-fix driver appended
+    the dev-channels flag unconditionally, entered the confirm loop, never saw a
+    prompt the provider does not raise, and KILLED a fully-booted worker --
+    ``spawn`` raised ``host_cannot_spawn`` every single time, making the
+    swap-durable tmux fleet unspawnable on that provider. This asserts all three
+    halves of the fix: flag omitted, loop never entered, spawn succeeds.
+
+    FAILING MUTATION: revert ``_provider_ignores_dev_channels`` to a constant
+    ``False`` -> the flag returns, the loop runs against a pane that never shows
+    the prompt, and this whole leg reds with the original kill.
+    """
+    calls: list[list[str]] = []
+    with tempfile.TemporaryDirectory() as tmp, _effective_env_marker("1"):
+        driver = _configured_driver(
+            Path(tmp), run_fn=_third_party_provider_run_fn(calls),
+        )
+        session_name = driver.spawn(
+            {"agent_instance_id": "agi-bedrock-1", "transport": "watch"},
+        )
+        _check(
+            bool(session_name),
+            "spawn RETURNS a session on a third-party provider (pre-fix: killed + raised)",
+        )
+        new_session_call = next(c for c in calls if "new-session" in c)
+        claude_argv = _extract_claude_argv_from_pane_command(new_session_call[-1])
+        _check(
+            "--dangerously-load-development-channels" not in claude_argv,
+            "the inert dev-channels flag is OMITTED when the provider ignores it",
+        )
+        _check(
+            f"server:{'testhom'}" not in claude_argv,
+            "the flag's server: argument goes with it -- no orphaned value left in argv",
+        )
+        _check(
+            not any("capture-pane" in c for c in calls),
+            "the expect loop is never ENTERED -- zero capture-pane polls, so zero "
+            "chance of the assume-hung branch killing a ready worker",
+        )
+        _check(
+            not any(_is_send_enter(c) for c in calls),
+            "no confirmation Enter is sent for a prompt that never appears",
+        )
+        _check(
+            not any("kill-session" in c for c in calls),
+            "the booted worker is NOT killed",
+        )
+
+
+def test_anthropic_path_keeps_flag_and_confirm_loop_byte_for_byte() -> None:
+    """The negative control for the leg above, with the marker explicitly
+    SCRUBBED rather than merely assumed absent (this smoke may run inside a
+    spawned worker whose environment is inherited, not clean).
+
+    FAILING MUTATION: make ``_provider_ignores_dev_channels`` return a constant
+    ``True`` -> the flag disappears from the Anthropic path and this leg reds.
+    """
+    calls: list[list[str]] = []
+    with tempfile.TemporaryDirectory() as tmp, _effective_env_marker(None):
+        driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
+        driver.spawn({"agent_instance_id": "agi-anthropic-1", "transport": "watch"})
+        new_session_call = next(c for c in calls if "new-session" in c)
+        claude_argv = _extract_claude_argv_from_pane_command(new_session_call[-1])
+        idx = claude_argv.index("--dangerously-load-development-channels")
+        _check(
+            claude_argv[idx + 1] == "server:testhom",
+            "with no third-party marker the flag AND its server: argument are unchanged",
+        )
+        _check(
+            any("capture-pane" in c for c in calls),
+            "the confirm loop still runs on the Anthropic path",
+        )
+        _check(
+            any(_is_send_enter(c) for c in calls),
+            "the confirmation Enter is still sent on the Anthropic path",
+        )
 
 
 def test_spawn_confirms_dev_channels_prompt_before_returning() -> None:
@@ -887,9 +1203,21 @@ def test_real_tmux_terminate_is_idempotent_on_already_dead_session() -> None:
 
 
 def main() -> int:
+    # Provider-marker hygiene (§39.1/§40.1): every pre-existing leg below was
+    # written when the dev-channels flag was unconditional, so each one
+    # implicitly assumes an Anthropic-path spawn. This smoke can run inside a
+    # SPAWNED fleet worker, which inherits the daemon's environment -- on a
+    # third-party-configured box that inheritance would silently flip those
+    # legs' meaning. Scrub the marker once for the whole process; the two legs
+    # that genuinely care set and restore it themselves via
+    # _effective_env_marker.
+    for marker in _THIRD_PARTY_PROVIDER_ENV_MARKERS:
+        os.environ.pop(marker, None)
     test_parse_tmux_version()
     test_sanitize_session_name()
     test_verify_config_remedies_are_independent()
+    test_verify_config_mcp_config_required_only_for_mcp_transport()
+    test_spawn_watch_transport_succeeds_without_mcp_json_present()
     test_verify_config_refuses_old_tmux_version()
     test_spawn_refuses_when_unconfigured()
     test_spawn_refuses_without_agent_instance_id()
@@ -905,6 +1233,10 @@ def main() -> int:
     test_spawn_wraps_nonzero_exit()
     test_capability_report_shape()
     test_needs_dev_channels_confirmation_guard()
+    test_provider_ignores_dev_channels_predicate()
+    test_effective_spawn_env_is_process_env_plus_optional_overlay()
+    test_third_party_provider_spawn_omits_flag_and_skips_confirm_loop()
+    test_anthropic_path_keeps_flag_and_confirm_loop_byte_for_byte()
     test_spawn_confirms_dev_channels_prompt_before_returning()
     test_spawn_kills_pane_and_fails_closed_when_prompt_never_appears()
     test_spawn_kills_pane_and_fails_closed_when_prompt_never_clears()

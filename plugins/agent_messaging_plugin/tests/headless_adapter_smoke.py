@@ -327,10 +327,12 @@ def test_verify_config_remedies_are_independent() -> None:
             claude_bin="/nonexistent/claude", homunculus_name="", permission_mode="",
             mcp_config_path=tmp_dir / "missing.json", cwd=tmp_dir,
         )
-        remedies = unconfigured.verify_config()
+        # transport="mcp" is what makes the MCP-config remedy reachable at
+        # all (Dax Part 36 §36.3) -- see the dedicated watch/mcp legs below.
+        remedies = unconfigured.verify_config(transport="mcp")
         _check(
             len(remedies) == 4,
-            f"all 4 remedies fire when nothing is configured (got {len(remedies)})",
+            f"all 4 remedies fire when nothing is configured, mcp transport (got {len(remedies)})",
         )
         _check(
             any("claude" in r for r in remedies)
@@ -340,7 +342,72 @@ def test_verify_config_remedies_are_independent() -> None:
             "each remedy names its own specific gap",
         )
         configured = _configured_driver(tmp_dir)
-        _check(configured.verify_config() == [], "a fully-configured driver has zero remedies")
+        _check(
+            configured.verify_config(transport="mcp") == [],
+            "a fully-configured driver has zero remedies",
+        )
+
+
+def test_verify_config_mcp_config_required_only_for_mcp_transport() -> None:
+    """Regression guard for Dax Part 36 §36.3: verify_config() used to
+    require .mcp.json unconditionally, even though _spawn_command() only
+    ever reads self._mcp_config_path when the resolved transport is 'mcp'
+    -- a 'watch' spawn passes an inline literal empty MCP config
+    ('{"mcpServers":{}}') and never touches the file. A born clone ships
+    no .mcp.json at all, so every watch-transport spawn (the charter
+    default) refused for a file it was never going to read. Fails if the
+    exists() check reverts to firing regardless of transport."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = HeadlessHostDriver(
+            claude_bin=_executable_stub(tmp_dir), homunculus_name="testhom",
+            permission_mode="bypassPermissions",
+            mcp_config_path=tmp_dir / "missing.mcp.json",  # never created -- born-clone shape
+            cwd=tmp_dir,
+        )
+        _check(
+            not (tmp_dir / "missing.mcp.json").exists(),
+            "precondition: .mcp.json genuinely absent, born-clone shape",
+        )
+        _check(
+            driver.verify_config(transport="watch") == [],
+            "watch transport never reads .mcp.json -- verify_config must not "
+            "refuse a spawn for its absence",
+        )
+        _check(
+            driver.verify_config() == [],
+            "bare verify_config() with no transport arg resolves through the same "
+            "floor spawn() would ('' -> charter default 'watch') and likewise does "
+            "not require .mcp.json",
+        )
+        _check(
+            any("MCP config" in r for r in driver.verify_config(transport="mcp")),
+            "an MCP-reading transport still refuses when .mcp.json is genuinely absent",
+        )
+
+
+def test_spawn_watch_transport_succeeds_without_mcp_json_present() -> None:
+    """End-to-end companion to the verify_config regression above: spawn()
+    itself (not just verify_config() in isolation) must not refuse a
+    watch-transport worker for a missing .mcp.json."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        _stub_worker_hook_files(tmp_dir)
+        driver = HeadlessHostDriver(
+            claude_bin=_executable_stub(tmp_dir), homunculus_name="testhom",
+            permission_mode="bypassPermissions",
+            mcp_config_path=tmp_dir / "missing.mcp.json",
+            cwd=tmp_dir,
+            popen_fn=lambda *a, **k: _FakeProc(pid=4242),
+        )
+        host_ref = driver.spawn(
+            {"agent_instance_id": "agi-watchspawn", "transport": "watch"},
+        )
+        _check(
+            host_ref == "4242",
+            "spawn() with transport='watch' succeeds on a born-clone tree "
+            "(no .mcp.json present anywhere)",
+        )
 
 
 def test_verify_config_accepts_a_per_spawn_permission_mode_override() -> None:
@@ -965,8 +1032,10 @@ def main() -> int:
     test_resolve_worker_hook_paths_resolves_every_required_filename()
     test_spawn_refuses_when_a_worker_hook_resolves_at_neither_rung()
     test_verify_config_remedies_are_independent()
+    test_verify_config_mcp_config_required_only_for_mcp_transport()
     test_verify_config_accepts_a_per_spawn_permission_mode_override()
     test_spawn_refuses_when_unconfigured()
+    test_spawn_watch_transport_succeeds_without_mcp_json_present()
     test_spawn_succeeds_via_per_spawn_permission_mode_with_no_env_floor()
     test_spawn_refuses_without_agent_instance_id()
     test_spawn_env_and_command_wiring()

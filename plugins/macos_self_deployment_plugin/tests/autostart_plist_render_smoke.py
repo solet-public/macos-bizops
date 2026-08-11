@@ -30,6 +30,7 @@ Run:
 
 from __future__ import annotations
 
+import os
 import plistlib
 import sys
 from pathlib import Path
@@ -40,6 +41,12 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
 from ananta.core.runtime import get_runtime_dir  # noqa: E402
 from macos_self_deployment_plugin.autostart_manager import AutostartManager  # noqa: E402
+from macos_self_deployment_plugin.constants import AUTOSTART_PATH_ENV  # noqa: E402
+
+# A value no real PATH can plausibly hold, used to MANUFACTURE a distinguishable
+# ambient environment for the anti-capture leg rather than hoping the real one
+# happens to be distinguishable from the rendered literal.
+_PATH_CAPTURE_SENTINEL = "/sentinel-capture-canary"
 
 # A non-existent, non-/tmp scratch path. Since the §4.5 role-1 fix
 # (2026-06-28) the rendered interpreter is the baked LITERAL ``current``
@@ -166,13 +173,101 @@ def test_working_directory_out_of_tree() -> None:
     )
 
 
+def test_environment_variables_carry_homebrew_path() -> None:
+    """§39.2 (adopter-reported, field-verified): a launchd process with no PATH
+    key inherits the bare ``/usr/bin:/bin:/usr/sbin:/sbin``, so in-daemon
+    ``shutil.which("tmux")`` returns None even with tmux installed at
+    ``/opt/homebrew/bin/tmux`` -- the swap-durable tmux fleet host is
+    unreachable from the daemon that has to spawn it.
+
+    Asserted on the PARSED plist, not a substring of the XML: a rendered key
+    that launchd cannot parse would still satisfy a substring check.
+    """
+    raw, _ = _render()
+    parsed = plistlib.loads(raw)
+    env = parsed.get("EnvironmentVariables") if isinstance(parsed, dict) else None
+    if not isinstance(env, dict):
+        _check(False, "parsed EnvironmentVariables is a dict")
+        return
+    path = env.get("PATH")
+    # FAILING MUTATION: drop the PATH line from _render_plist -> reds here.
+    _check(
+        isinstance(path, str) and bool(path),
+        f"EnvironmentVariables carries a PATH (daemon cannot find Homebrew tmux without it), got {path!r}",
+    )
+    # FAILING MUTATION: reorder the literal so /usr/bin precedes
+    # /opt/homebrew/bin, or drop either Homebrew prefix -> reds here. Exact
+    # equality, not per-component containment: a partial match stays green
+    # while the daemon still resolves a system binary ahead of the Homebrew one.
+    _check(
+        path == AUTOSTART_PATH_ENV
+        == "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        f"PATH is the exact deterministic literal, both Homebrew prefixes first (got {path!r})",
+    )
+    _check(
+        env.get("HOMUNCULUS_NAME") == "example",
+        f"HOMUNCULUS_NAME still rendered alongside PATH (got {env.get('HOMUNCULUS_NAME')!r})",
+    )
+
+
+def test_path_is_not_an_ambient_capture() -> None:
+    """Anti-capture negative control, ENVIRONMENT-INDEPENDENT by construction.
+
+    The previous form asserted ``path != os.environ["PATH"]``, which relied on
+    the ambient PATH happening to differ from the rendered literal. That is the
+    same weak class that made this smoke's ``github_midwife_plugin`` sibling
+    false-positive in the born-clone publish gate's declared-minimum
+    environment (there the sibling used substring containment and ambient
+    ``/usr/bin:/bin`` IS contained in the correct literal; this equality form
+    did not fail, but rests on the same assumption). Both are now rebuilt to
+    MANUFACTURE a distinguishable ambient value instead of hoping for one.
+
+    FAILING MUTATION: make ``_render_plist`` emit ``os.environ["PATH"]``
+    instead of ``AUTOSTART_PATH_ENV`` -> the sentinel appears in the render and
+    this reds, deterministically, on every machine including the constrained
+    gate environment.
+
+    Why this matters beyond the smoke: the plist is byte-compared by
+    ``_classify_install_prior``, so a machine-varying render would make every
+    install read as ``present_but_stale`` forever.
+    """
+    previous = os.environ.get("PATH")
+    os.environ["PATH"] = _PATH_CAPTURE_SENTINEL
+    try:
+        raw, body = _render()
+    finally:
+        if previous is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = previous
+    parsed = plistlib.loads(raw)
+    env = parsed.get("EnvironmentVariables") if isinstance(parsed, dict) else None
+    rendered_path = env.get("PATH") if isinstance(env, dict) else None
+    _check(
+        _PATH_CAPTURE_SENTINEL not in body,
+        "PATH is a fixed literal, NOT a capture of the ambient $PATH "
+        "(rendered under a sentinel PATH; a capturing renderer would leak it)",
+    )
+    _check(
+        rendered_path == AUTOSTART_PATH_ENV,
+        "the render still carries the module constant while the ambient PATH is "
+        f"the sentinel — the renderer ignores the environment (got {rendered_path!r})",
+    )
+    _check(
+        os.environ.get("PATH") == previous,
+        "the ambient PATH is restored exactly after the sentinel render",
+    )
+
+
 def main() -> int:
-    print("=== autostart_plist_render_smoke (Option-B supervisor KeepAlive + §5 CWD) ===")
+    print("=== autostart_plist_render_smoke (Option-B supervisor KeepAlive + §5 CWD + §39.2 PATH) ===")
     test_render_plist_xml_strings_present()
     test_render_plist_parses_as_dict()
     test_parsed_keepalive_is_unconditional_true()
     test_parsed_program_arguments_launch_supervisor()
     test_working_directory_out_of_tree()
+    test_environment_variables_carry_homebrew_path()
+    test_path_is_not_an_ambient_capture()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

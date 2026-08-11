@@ -14,16 +14,23 @@ plugins/github_midwife_plugin/tests/autostart_render_smoke.py``.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 from github_midwife_plugin.autostart import (
+    _PATH_ENV,
     AutostartError,
     LaunchctlObservationError,
     SimpleAutostartRenderer,
 )
+
+# A value no real PATH can plausibly hold, used to MANUFACTURE a
+# distinguishable ambient environment for the anti-capture leg below rather
+# than hoping the real one happens to be distinguishable.
+_PATH_CAPTURE_SENTINEL = "/sentinel-capture-canary"
 
 _CHECKS_RUN: list[str] = []
 _LAUNCHCTL_TIMEOUT_S_FOR_SMOKE = 10.0
@@ -134,11 +141,91 @@ def _check_rendered_plist_fields(root: Path) -> None:
         f"<string>--app-home</string>\n    <string>{expected_profile}</string>" in xml,
         xml,
     )
+    # §39.2 (adopter-reported, field-verified): a launchd process with no PATH
+    # key gets the bare /usr/bin:/bin:/usr/sbin:/sbin and cannot see
+    # /opt/homebrew/bin/tmux even when tmux is installed.
+    # FAILING MUTATION: drop the PATH line from SimpleAutostartRenderer.
+    # _render_plist -> this leg reds (it is the only assertion on PATH presence).
+    _check(
+        "plist EnvironmentVariables sets PATH (daemon cannot find Homebrew tmux without it)",
+        "<key>PATH</key>\n    <string>" in xml,
+        xml,
+    )
+    # FAILING MUTATION: reorder the literal to put /usr/bin ahead of
+    # /opt/homebrew/bin, or drop either Homebrew prefix -> this leg reds.
+    # Asserted as the EXACT value against the MODULE's own constant (not a
+    # hand-copied string, which can silently drift from the renderer): a
+    # per-component substring test would stay green while the daemon still
+    # resolved the system binary first.
+    _check(
+        "plist PATH is the exact deterministic literal, both Homebrew prefixes ahead of the system defaults",
+        f"<key>PATH</key>\n    <string>{_PATH_ENV}</string>" in xml,
+        xml,
+    )
+    _check(
+        _PATH_ENV.startswith("/opt/homebrew/bin:") and ":/usr/bin:" in _PATH_ENV,
+        "the module literal itself puts a Homebrew prefix ahead of the system defaults",
+        _PATH_ENV,
+    )
     _check("plist sets RunAtLoad true", "<key>RunAtLoad</key>\n  <true/>" in xml, xml)
     _check(
         "KeepAlive is the SIMPLE crash-restart form (SuccessfulExit=false), not an unconditional <true/>",
         "<key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>" in xml,
         xml,
+    )
+
+
+def _check_path_is_not_an_ambient_capture(root: Path) -> None:
+    """The anti-capture negative control for §39.2's PATH, rebuilt 2026-08-10
+    to be ENVIRONMENT-INDEPENDENT.
+
+    The original leg asserted ``os.environ["PATH"] not in xml`` — it relied on
+    the ambient PATH happening to be distinguishable from the rendered literal.
+    That held on a developer machine and FALSE-POSITIVED against a correct
+    render in the born-clone publish gate's declared-minimum environment, where
+    ambient PATH is ``/usr/bin:/bin`` — a literal SUBSTRING of the correct
+    output ``/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:
+    /usr/sbin:/sbin``. The smoke went red on code that was right, and it
+    blocked a seed mint.
+
+    The fix is to MANUFACTURE the distinguishable value instead of hoping for
+    one: render with PATH set to a sentinel no real environment holds, and
+    assert the sentinel is absent. A renderer that captured the ambient PATH
+    would emit the sentinel — on every machine, including the constrained one —
+    so the control is now valid under ANY ambient PATH, including one that
+    equals or is contained in the literal.
+
+    FAILING MUTATION: change ``SimpleAutostartRenderer._render_plist`` to emit
+    ``os.environ["PATH"]`` instead of ``_PATH_ENV`` -> the sentinel appears in
+    the render and this leg reds, deterministically, everywhere.
+    """
+    fake_launchctl = _FakeLaunchctl()
+    renderer = _make_renderer(root, fake_launchctl)
+    previous = os.environ.get("PATH")
+    os.environ["PATH"] = _PATH_CAPTURE_SENTINEL
+    try:
+        xml = renderer._render_plist().decode("utf-8")  # noqa: SLF001
+    finally:
+        if previous is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = previous
+    _check(
+        _PATH_CAPTURE_SENTINEL not in xml,
+        "plist PATH is a fixed literal, NOT a capture of the ambient $PATH "
+        "(rendered under a sentinel PATH; a capturing renderer would leak it)",
+        xml,
+    )
+    _check(
+        f"<key>PATH</key>\n    <string>{_PATH_ENV}</string>" in xml,
+        "and the render still carries the module literal even while the ambient "
+        "PATH is the sentinel — proving the renderer ignores the environment",
+        xml,
+    )
+    _check(
+        os.environ.get("PATH") == previous,
+        "the ambient PATH is restored exactly after the sentinel render",
+        f"{os.environ.get('PATH')!r} vs {previous!r}",
     )
 
 
@@ -326,6 +413,8 @@ def main() -> int:
             _check_label_and_paths(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_rendered_plist_fields(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_path_is_not_an_ambient_capture(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_install_load_idempotent_reload(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,0 +1,175 @@
+[tool.black]
+line-length = 320
+
+[tool.isort]
+profile = "black"
+line_length = 320
+
+[tool.ruff]
+line-length = 320
+target-version = "py313"
+extend-exclude = [
+    # RULING (reviewing seat, 2026-08-08):
+    # stays OUT — gates protect code that runs or ships, and disabled code
+    # does neither. CONDITION, the exemption's only exit: re-enabling ANY
+    # disabled plugin requires bringing it into scope and landing it CLEAN
+    # as part of the re-enable, not as a follow-up. Stands on category, not
+    # on being clean — measured 2026-08-08: 76 files, 2 ruff / 195 pyright
+    # errors (workbench/2026-08-08_gate_scope_widening_measurement_d3-impl.md).
+    "disabled_plugins",
+    "dev_tools",
+    ".venv",
+    # Bundled per-plugin venvs (.venv_cosyvoice, .venv_cosyvoice2, etc.)
+    # ship vendored library code (Cython, torch internals, networkx
+    # examples, etc.) under `plugins/<X>/src/.venv_<name>/`. Per
+    # `quality_gates/code_quality_check.py:74` `_BUNDLED_VENV_PREFIX =
+    # ".venv"` they're not part of the platform's quality surface; ruff
+    # invoked directly (outside the gate wrapper) was picking them up
+    # because the top-level `.venv` exact-match pattern didn't catch the
+    # nested bundled-venv naming convention. Glob handles every depth.
+    "**/.venv_*/**",
+    # Vendored third-party instrument library scripts (Sonatina Symphonic,
+    # vcsl, salamander, karoryfer, ixox flute, etc.) — not our code.
+    "plugins/musical_synthesis_plugin/instruments",
+    "**/instruments/**",
+    # Operator-tooling at plugin scope — the blanket 2026-05-26 exemption
+    # below is NARROWED by the operator ruling of 2026-08-08 ("quality
+    # gates apply to everything, boy scout rules"). `tools/` (8 plugins, 26
+    # files) and `parity_tests/` (musical_synthesis_plugin, 12 files) both
+    # landed CC-clean 2026-08-09 (ruff+pyright+radon_cc) and are off this
+    # list entirely — see
+    # workbench/2026-08-08_gate_scope_widening_measurement_d3-impl.md.
+    # `migrations/` (3 files across 3 plugins) was not addressed by either
+    # the in-scope ruling or the research-stays-out ruling below — status
+    # OPEN, left excluded pending a ruling, not a decision.
+    #
+    # RULING (reviewing seat, 2026-08-08):
+    # `research/` stays OUT — scratch is not shipped code, and 1,071
+    # pyright errors would block every writer for weeks to protect code
+    # that never runs. CONDITION, the exemption's only exit: anything
+    # PROMOTED from research/ into src/ comes in clean AT PROMOTION TIME —
+    # cleanup is not deferred as a sidecar to the structural move.
+    "plugins/*/research/**",
+    "plugins/*/migrations/**",
+]
+force-exclude = true
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+]
+ignore = [
+    "E501",  # line length — no constraint, AI agents don't care
+    "N803",  # argument name should be lowercase (APP_HOME is convention)
+    "N806",  # variable in function should be lowercase (APP_HOME is convention)
+    "UP047", # generic function type parameters (intentional design)
+]
+
+[tool.ruff.lint.isort]
+# When ruff is invoked WITHOUT --config from inside a plugin tree, it
+# picks up that plugin's own pyproject.toml (which has its own
+# `[tool.ruff.lint]` but no `[tool.ruff.lint.isort]`), and ruff
+# auto-detects the plugin's own package as first-party. To keep the
+# root-config invocation in agreement, mirror that auto-detection
+# here for cross-plugin test files that exercise multi-package
+# surfaces. Other in-repo plugins import each other from their own
+# trees (where they remain "third-party" under the same auto-detection
+# rule), so we deliberately do NOT add them. Add a plugin here ONLY
+# when a test under it imports both ananta and the plugin's own
+# package and the import-block ordering trips ruff isort under the
+# root-config invocation.
+known-first-party = ["agent_messaging_plugin", "default_blob_storage_plugin", "secrets_manager_vault_plugin"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = false  # Too noisy for dict returns
+warn_unused_configs = true
+warn_unused_ignores = false  # Allow outdated type: ignore comments temporarily
+ignore_missing_imports = true
+show_error_codes = true
+exclude = [
+    "setup\\.py$",
+    "conftest\\.py$",
+    "tests/",
+    "disabled_plugins/",
+]
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+
+# CRITICAL: Lock pyright to project venv - prevents using system Python
+venvPath = "."
+venv = ".venv"
+
+# Allow plugins to resolve ananta.* imports
+extraPaths = ["ananta/src"]
+
+include = ["ananta/src", "plugins", "initialization/src"]
+exclude = [
+    "**/tests",
+    # RULING (reviewing seat, 2026-08-08):
+    # stays OUT — gates protect code that runs or ships, and disabled code
+    # does neither. CONDITION, the exemption's only exit: re-enabling ANY
+    # disabled plugin requires bringing it into scope and landing it CLEAN
+    # as part of the re-enable, not as a follow-up. Stands on category, not
+    # on being clean — measured 2026-08-08: 76 files, 2 ruff / 195 pyright
+    # errors (workbench/2026-08-08_gate_scope_widening_measurement_d3-impl.md).
+    "disabled_plugins",
+    "dev_tools",
+    "**/.venv",
+    "**/.venv_*",
+    "**/venv",
+    "**/venv_*",
+    "**/node_modules",
+    # Vendored third-party instrument library scripts — not our code
+    "**/instruments/**",
+    "plugins/musical_synthesis_plugin/instruments",
+    # Operator-tooling at plugin scope — the blanket 2026-05-26 exemption
+    # below is NARROWED by the operator ruling of 2026-08-08 ("quality
+    # gates apply to everything, boy scout rules"). See pyproject.toml
+    # [tool.ruff] extend-exclude for the full note (tools/ and
+    # parity_tests/ both landed CC-clean 2026-08-09 and are off this list
+    # entirely; migrations/ is unaddressed and OPEN; research/ stays OUT
+    # with a promotion-clean condition, mirrored below).
+    #
+    # RULING (reviewing seat, 2026-08-08):
+    # `research/` stays OUT — scratch is not shipped code, and 1,071
+    # pyright errors would block every writer for weeks to protect code
+    # that never runs. CONDITION, the exemption's only exit: anything
+    # PROMOTED from research/ into src/ comes in clean AT PROMOTION TIME —
+    # cleanup is not deferred as a sidecar to the structural move.
+    "plugins/*/research/**",
+    "plugins/*/migrations/**",
+]
+# Relaxed only for third-party library type inference (not defensive programming):
+reportUnknownVariableType = "none"      # third-party libs without stubs
+reportUnknownMemberType = "none"        # third-party libs without stubs
+reportUnknownArgumentType = "none"      # third-party libs without stubs
+reportUnknownLambdaType = "none"        # third-party libs without stubs
+reportUnknownParameterType = "none"     # third-party libs without stubs
+reportMissingParameterType = "none"     # third-party libs without stubs
+reportMissingTypeStubs = "none"         # third-party libs without stubs (mido, soundfile, etc.)
+reportAttributeAccessIssue = "none"     # third-party libs without stubs (mido, tinysoundfont, pedalboard)
+reportPrivateUsage = "none"             # internal access across modules is ok
+reportUnsupportedDunderAll = "none"     # __all__ exports pattern
+
+[tool.vulture]
+min_confidence = 80
+paths = ["ananta/src", "plugins"]
+# Without this exclude, bare `vulture` crashes trying to parse the bundled
+# py3.10 third-party venv under cosyvoice2_tts_plugin (+ any stray site-packages
+# / node_modules). Mirrors the invocation used in the 2026-06-20 dead-code sweep.
+exclude = ["*/.venv_cosyvoice/*", "*/site-packages/*", "*/.venv/*", "*/node_modules/*"]
+# `state` is part of the @platform_process action contract (params, state); the
+# framework hands the second positional argument in even when individual actions
+# don't read it. Excluding it stops vulture from flagging every action handler.
+ignore_names = ["state"]
