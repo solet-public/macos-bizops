@@ -4,6 +4,36 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-12 — the seed no longer ships the origin's creative working corpus, and deletion-only KB updates get an explicit re-ingestion step
+
+**What was removed, and why.** The platform's thinking plugin
+(`default_thinking_plugin`) doubles as a working store for authored
+thinking artifacts, and the origin's own store had accumulated its
+pre-product creative-domain corpus — composition designs, sketch
+packets, dated working plans, WBS specifications, and one legacy plan
+template. None of that is product surface for a deployment, but the seed
+shipped it wholesale (91 of the thinking KB's 93 files), and the two
+indexed slices (`plans/`, `wbs/`) went straight into every newborn's
+retrieval. The seed manifest now excludes the corpus: the KB
+registrations and the generic thinking system prompt still ship, the
+artifact directories start empty exactly as a newborn's own store
+should, and nothing else in the plugin changed.
+
+**If you update an existing deployment, one extra step.** This is a
+deletion-only KB change, and the startup re-index cannot see one: it
+re-indexes when a surviving file changed, and here no surviving file
+changed. After pulling and restarting, re-install the two affected
+knowledge bases (idempotent; drops each KB's chunks and re-indexes from
+the files on disk), then verify with a negative search — full procedure
+in the seed update runbook (`05_seed_update_runbook.md`, Step 6, fourth
+stale copy):
+
+    homunculus call service_interface::knowledge_service::install '{"name": "thinking_plans"}'
+    homunculus call service_interface::knowledge_service::install '{"name": "plan_templates"}'
+
+Born-fresh deployments need nothing: the corpus was never load-bearing
+for any shipped behavior, and no shipped test reads it.
+
 ## 2026-08-12 — coordination-hooks 0.5.4: the README caught up with the bounded wake wait, and doc/argv drift is now a tested class
 
 **Docs-only release — no hook behavior changes.** The 2026-08-09

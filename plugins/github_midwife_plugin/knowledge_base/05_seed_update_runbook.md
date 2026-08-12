@@ -8,7 +8,7 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born homunculus without losing its state — why a fast-forward git pull from the same seed repo is the default update path and teardown-plus-re-birth is only the fallback, the exact sequence (health probe, pull --ff-only, restart preferring apply_manifest's zero-downtime blue-green swap over a bare LaunchAgent restart when a router is present, startup quiescence wait, automatic knowledge-base re-ingest), when the virtual environment needs attention (editable installs make pulled code live at restart; only NEW plugins or changed dependencies need a pip step), configuring the business-connector export/workspace root on an already-hydrated install when a release adds or extends connector containment (the one-time gap an existing clone never closes on its own), re-running the changed hydration steps afterward — including adding a release-added plugin to the clone's profile manifest and running its hydration guidance so it actually activates — the three stale copies a restart alone never refreshes (the installed Claude Code plugin's version-keyed CACHE copy, an already-open MCP bridge subprocess, an armed watcher) with the verifiable diff-based refresh check for the plugin cache, and the verification checklist including the watcher role-claim ground truth.
+Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born homunculus without losing its state — why a fast-forward git pull from the same seed repo is the default update path and teardown-plus-re-birth is only the fallback, the exact sequence (health probe, pull --ff-only, restart preferring apply_manifest's zero-downtime blue-green swap over a bare LaunchAgent restart when a router is present, startup quiescence wait, automatic knowledge-base re-ingest for changed files), when the virtual environment needs attention (editable installs make pulled code live at restart; only NEW plugins or changed dependencies need a pip step), configuring the business-connector export/workspace root on an already-hydrated install when a release adds or extends connector containment (the one-time gap an existing clone never closes on its own), re-running the changed hydration steps afterward — including adding a release-added plugin to the clone's profile manifest and running its hydration guidance so it actually activates — the four stale copies a restart alone never refreshes (the installed Claude Code plugin's version-keyed CACHE copy, an already-open MCP bridge subprocess, an armed watcher, and knowledge-base chunks indexed from files the release removed — a deletion-only KB change is invisible to the startup staleness check and needs an explicit knowledge-service re-install with a negative-search verification) with the verifiable diff-based refresh check for the plugin cache, and the verification checklist including the watcher role-claim ground truth.
 
 ## When to use this runbook
 
@@ -153,10 +153,10 @@ installed-but-inert until it is listed there. Add it to that manifest's
 Step 4c for it — the `hydration_guidance.md` glob picks up the new plugin's
 activation work and first-use credential contract.
 
-## Step 6 — the three stale copies a restart alone does not refresh
+## Step 6 — the four stale copies a restart alone does not refresh
 
 A restart makes the platform run the new code. It does not make every
-already-running client execute it. Three separate copies sit downstream of
+already-running client execute it. Four separate copies sit downstream of
 "pulled and restarted," and each needs its own refresh.
 
 **1. The installed Claude Code plugin runs from a CACHE COPY, not the source
@@ -264,10 +264,34 @@ the session that ran it. Verify against the live session id (the watcher
 spool path matches it), never against the fact that a watch command was run
 at some point.
 
+**4. Knowledge-base chunks indexed from files the release REMOVED.** The
+startup auto-install pass re-indexes a knowledge base when a surviving
+file's mtime moves past the install record's `indexed_at` — it walks the
+files that exist NOW, so a release that only deletes content from a KB is
+invisible to it: the pull removes the files, the restart finds nothing
+modified, and the old chunks keep answering searches indefinitely. The
+`update` verb has the same blind spot — it collects changed files from
+disk, and a vanished file is not on disk to collect. The deterministic
+re-ingestion step, for every knowledge base the release notes name as
+having content removed, is a re-install:
+
+```bash
+homunculus call service_interface::knowledge_service::install '{"name": "<kb-name>"}'
+```
+
+Re-install is the documented idempotent path: it drops the KB's entire
+chunk set by the KB's own tag (embeddings included) and re-indexes from
+the files now on disk, so a removed article cannot survive it. Verify
+with a negative search afterward — a query that used to retrieve the
+removed content must no longer surface it. "The restart re-indexed" is
+not evidence for a deletion-only change; nothing in the restart path can
+see one.
+
 Until this wave runs — plugin cache refresh, client relaunch, watcher
-re-arm — no observation from an old session or an old plugin cache measures
-the new code. A green result taken before the wave completes is scope-class
-false: it is evidence about the copy that no longer matters.
+re-arm, KB re-install where the release removed content — no observation
+from an old session or an old plugin cache measures the new code. A green
+result taken before the wave completes is scope-class false: it is
+evidence about the copy that no longer matters.
 
 ## Step 7 — verify
 
@@ -292,6 +316,40 @@ LaunchAgent alone either way.
   peer-list entry.
 - `git -C <clone> log --oneline -1` shows the release commit the operator
   expected.
+- When the release removed KB content: a search for a distinctive phrase
+  from the removed material returns nothing from the affected KB. Run this
+  AFTER Step 6's re-install — before it, a hit is the expected stale-copy
+  signal, not evidence the update failed.
+
+## What changed in this release — origin working-corpus removal from the shipped thinking KBs (2026-08-12 update)
+
+The seed no longer ships the minting origin's own pre-product working
+corpus inside `default_thinking_plugin`: composition designs, sketch
+packets, dated working plans, WBS specifications, and one legacy
+creative-domain plan template — material from the origin's earlier
+creative work that was never part of the business-ops product surface.
+Two shipped knowledge bases lose indexed articles and gain nothing:
+`thinking_plans` (its `plans/` and `wbs/` articles) and `plan_templates`
+(its single legacy template). The same release also stops shipping two
+never-indexed artifact directories in the same plugin. The KB
+registrations and the thinking system prompt still ship; an empty
+article set is a store's normal newborn state (a sibling thinking KB
+already ships registration-only).
+
+This is exactly the deletion-only KB change Step 6's fourth stale copy
+describes: pull plus restart leaves every previously-indexed article
+still answering searches. After the restart, run the re-install pair,
+then the negative check:
+
+```bash
+homunculus call service_interface::knowledge_service::install '{"name": "thinking_plans"}'
+homunculus call service_interface::knowledge_service::install '{"name": "plan_templates"}'
+```
+
+Then search for a phrase only the removed corpus contained (any
+composition-specific phrase your deployment used to retrieve). A hit
+from either KB means the re-install has not yet run against the store
+actually serving your searches.
 
 ## What changed in this release — multi-session self-management adoption, connector write reversal (2026-08-10 update)
 

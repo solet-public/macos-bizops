@@ -20,6 +20,8 @@ target_queries:
   - "business connector reads fail loud after updating, no workspace root configured"
   - "configure export root on an already-hydrated homunculus"
   - "should I use apply_manifest or launchctl to restart after a seed update"
+  - "seed update removed knowledge base articles but old content still shows up in search"
+  - "purge indexed knowledge base chunks for files a seed release deleted"
 min_rank: 3
 
 forbidden_queries:
