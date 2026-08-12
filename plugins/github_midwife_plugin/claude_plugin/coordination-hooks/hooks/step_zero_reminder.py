@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook. ALWAYS ARMED: installed means armed, with no
+"""SessionStart hook. ALWAYS ARMED: installed means armed, with no
 environment condition of any kind.
 
 The homunculus is a system-wide resource, so awareness of it is not
@@ -9,6 +9,18 @@ FAILURE DIRECTION INVERTED WITH IT: a silently disarmed awareness reminder
 means a session never learns the platform exists, which is the silent-absence
 class. Re-adding any env condition here is the red mutation for this hook's
 smoke leg.
+
+The emitted hookEventName is read off stdin and echoed back, mirroring
+check_messages_reminder.py, with the compiled-in default matching this
+hook's own manifest binding. It was previously a hardcoded literal, which
+silently desynced when the 2026-08-11 cadence move rebound this hook from
+UserPromptSubmit to SessionStart: Claude Code rejects (at debug level only)
+a hook whose declared event name does not match the event that invoked it,
+so the reminder was discarded on every session start -- the same
+silent-absence class as an env gate. Found 2026-08-11, confirmed
+independently by an adopter (feedback Part 41); the red mutation for this
+is re-hardcoding any event name the manifest does not wire this hook to
+(`check_manifest_bound_events_echo`).
 
 The literal below is true wherever the plugin is installed: it names no
 deployment-relative path and no fleet-specific command, so it reads correctly
@@ -26,24 +38,39 @@ from __future__ import annotations
 import json
 import sys
 
-output = {
-  "hookSpecificOutput": {
-    "hookEventName": "UserPromptSubmit",
-    "additionalContext": (
-      "For non-trivial work, checking a persistent knowledge base "
-      "available to this session (via a local CLI or a connected MCP "
-      "tool, if any) or the current project's own docs (e.g. "
-      "CLAUDE.md/AGENTS.md, if present) before other work is usually "
-      "faster than re-deriving an answer partway through. Such a lookup "
-      "may run asynchronously -- its result can arrive after other work "
-      "has already started, so there is no need to block on it once it "
-      "is under way."
-    ),
-  },
-}
+_CONTEXT = (
+    "For non-trivial work, checking a persistent knowledge base "
+    "available to this session (via a local CLI or a connected MCP "
+    "tool, if any) or the current project's own docs (e.g. "
+    "CLAUDE.md/AGENTS.md, if present) before other work is usually "
+    "faster than re-deriving an answer partway through. Such a lookup "
+    "may run asynchronously -- its result can arrive after other work "
+    "has already started, so there is no need to block on it once it "
+    "is under way."
+)
+
+
+def _read_stdin_event_name(default: str) -> str:
+    try:
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw.strip() else {}
+    except Exception:  # noqa: BLE001 -- malformed/absent stdin, fall through
+        return default
+    if isinstance(payload, dict):
+        event_name = payload.get("hook_event_name")
+        if isinstance(event_name, str) and event_name:
+            return event_name
+    return default
 
 
 def main() -> int:
+    event_name = _read_stdin_event_name("SessionStart")
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": _CONTEXT,
+        },
+    }
     print(json.dumps(output))
     return 0
 

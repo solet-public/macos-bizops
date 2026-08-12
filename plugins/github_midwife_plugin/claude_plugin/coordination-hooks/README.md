@@ -121,7 +121,19 @@ both used to re-fire on every prompt turn, which accumulated one copy per
 turn in the transcript. This changes CADENCE ONLY: the 2026-08-01 ruling
 that the knowledge-base-first reminder is unconditionally armed (no
 environment gate) is unchanged and still enforced by
-`tests/reminder_hooks_smoke.py`'s `check_step_zero_fires_everywhere`. The
+`tests/reminder_hooks_smoke.py`'s `check_step_zero_fires_everywhere`.
+
+**Tag-echo fix (2026-08-11, §41):** the cadence move initially shipped with
+`step_zero_reminder.py` still hardcoding `"hookEventName":
+"UserPromptSubmit"` — Claude Code rejects a hook output whose declared
+event name mismatches the firing event (debug-level only), so the reminder
+silently never landed after the rebinding. All three reminders now read
+`hook_event_name` off stdin and echo it back, and
+`check_manifest_bound_events_echo` derives each reminder's expected events
+from `hooks.json` itself, so a hardcoded tag can never silently desync from
+the wiring again.
+
+The
 memory-passthrough session-context hook still fires on both
 `SessionStart` and `UserPromptSubmit` — it was never in scope for this
 move, since it is not a reminder, it is the context-gauge/hydrate-drain

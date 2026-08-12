@@ -36,6 +36,16 @@ below is unchanged and still enforced by `tests/manifest_consistency_smoke.py`'s
 binding reds that check) and `tests/reminder_hooks_smoke.py`'s
 `check_step_zero_fires_everywhere`.
 
+**Tag-echo fix (2026-08-11, §41):** the cadence move initially shipped with
+`step_zero_reminder.js` still hardcoding `"hookEventName":
+"UserPromptSubmit"` — a host that validates the declared event name against
+the firing event silently discards the output, so the reminder never landed
+after the rebinding. `step_zero_reminder.js` now echoes stdin's
+`hook_event_name` (two-value allowlist, like `check_messages_reminder.js`),
+and `tests/reminder_hooks_smoke.py`'s `check_manifest_bound_events_echo`
+derives each reminder's expected events from `hooks.json` itself, so a
+hardcoded tag can never silently desync from the wiring again.
+
 `step_zero_reminder.js` is unconditionally armed — installed means armed,
 with no environment condition (§7 re-key, 2026-08-02; parity with the Claude
 sibling's `2fb49dbf2`). `check_messages_reminder.js` keys on

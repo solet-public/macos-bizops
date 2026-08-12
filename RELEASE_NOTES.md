@@ -4,6 +4,36 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-11 (hotfix) — the cadence release left the KB-first reminder silently undelivered; fixed, both runtimes
+
+**What was broken.** The cadence release below moved the reminders to
+`SessionStart` but left `step_zero_reminder`'s own emitted `hookEventName`
+hardcoded to the old `UserPromptSubmit`, in both runtime variants. Claude
+Code discards hook output whose declared event name does not match the event
+that fired — and the rejection is visible at debug level only — so the
+knowledge-base-first reminder stopped landing entirely: installed no longer
+meant delivered, the exact silent-absence class its always-armed ruling
+exists to prevent. Found live in the origin fleet and reported independently
+by an adopter (with the debug-level rejection line) within the same day.
+
+**The fix.** Both scripts now read `hook_event_name` off stdin and echo it
+back, exactly like their `check_messages_reminder` siblings, defaulting to
+their own `SessionStart` binding. The Claude plugin is version 0.5.2 —
+existing installs pick it up with `claude plugin update
+coordination-hooks@<marketplace>` (the plugin cache is version-keyed, so an
+un-updated install keeps the broken 0.5.1 copy indefinitely). The Codex
+variant carries a fresh cachebuster suffix; re-add the plugin and re-trust
+the changed definitions per its README.
+
+**Why the suites missed it, and what now prevents the class.** Both reminder
+smoke suites asserted the stale literal as the expected default — the defect
+was rendered in the test's own assertion. Each suite now carries
+`check_manifest_bound_events_echo`, which derives every reminder's expected
+events from `hooks.json` itself and asserts the emitted tag matches, so a
+hardcoded tag that desyncs from the wiring is a named red in both runtimes.
+
+---
+
 ## 2026-08-11 — reminder-hook cadence + managed Codex worker runtime
 
 **The coordination-hooks reminders now fire once per session, not once per

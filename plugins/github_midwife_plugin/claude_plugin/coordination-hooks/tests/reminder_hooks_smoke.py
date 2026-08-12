@@ -27,19 +27,28 @@ sys.dont_write_bytecode = True
 import json  # noqa: E402
 from typing import Any  # noqa: E402
 
-from _harness import Results, preflight, run_hook  # noqa: E402
+from _harness import HOOKS_DIR, Results, preflight, run_hook  # noqa: E402
 
 REMINDERS = ("step_zero_reminder.py", "check_messages_reminder.py", "role_binding_reminder.py")
 
 # Hooks that read Claude Code's stdin payload to learn which event fired.
-STDIN_AWARE = ("check_messages_reminder.py", "role_binding_reminder.py")
+# step_zero joined 2026-08-11 (§41): its previously hardcoded tag silently
+# desynced from hooks.json when the cadence move rebound it to SessionStart.
+STDIN_AWARE = (
+    "step_zero_reminder.py",
+    "check_messages_reminder.py",
+    "role_binding_reminder.py",
+)
 
 # The single hook SECURITY.md discloses as interpolating a value.
 INTERPOLATING = ("role_binding_reminder.py",)
 
 # Each hook's compiled-in default event name, used when stdin is absent or junk.
+# These are FALLBACKS only — the authoritative tag-vs-wiring assertion is
+# `check_manifest_bound_events_echo`, which derives the expected events from
+# hooks.json itself instead of asserting a literal that can go stale (§41).
 DEFAULT_EVENT = {
-    "step_zero_reminder.py": "UserPromptSubmit",
+    "step_zero_reminder.py": "SessionStart",
     "check_messages_reminder.py": "UserPromptSubmit",
     "role_binding_reminder.py": "SessionStart",
 }
@@ -249,6 +258,62 @@ def check_event_echo(res: Results) -> None:
             res.check(got == event, f"{hook} echoes hookEventName={event}", f"got {got!r}")
 
 
+def check_manifest_bound_events_echo(res: Results) -> None:
+    """★ §41 (2026-08-11): the emitted tag must match the WIRING — derived, not asserted.
+
+    The cadence move rebound step_zero to SessionStart while its output still
+    hardcoded "UserPromptSubmit"; Claude Code rejects a hookSpecificOutput
+    whose hookEventName mismatches the firing event (debug-level only), so
+    the reminder silently never landed — and this suite stayed green because
+    DEFAULT_EVENT asserted the stale literal as correct. This leg derives
+    each reminder's bound events from hooks.json itself and asserts the
+    script echoes exactly the event that fired, so the assertion can never
+    desync from the wiring again.
+
+    RED MUTATION for this leg: hardcode any hookEventName in a reminder, or
+    rebind one in hooks.json to an event it cannot echo.
+    """
+    for hook, events in _manifest_bound_events(REMINDERS).items():
+        res.check(bool(events), f"{hook} is wired in hooks.json", "no binding found")
+        for event in events:
+            _assert_echoes_bound_event(res, hook, event)
+
+
+def _manifest_bound_events(scripts: tuple[str, ...]) -> dict[str, list[str]]:
+    """Derive {script: [bound events]} from hooks.json — the wiring is the authority."""
+    manifest = json.loads((HOOKS_DIR / "hooks.json").read_text())
+    bound: dict[str, list[str]] = {script: [] for script in scripts}
+    for event, groups in manifest.get("hooks", {}).items():
+        for command in _group_command_strings(groups):
+            for script in scripts:
+                if command.endswith(f"/{script}"):
+                    bound[script].append(event)
+    return bound
+
+
+def _group_command_strings(groups: list[dict[str, Any]]) -> list[str]:
+    """Flatten one event's hook groups into the arg strings that name scripts."""
+    commands: list[str] = []
+    for group in groups:
+        for entry in group.get("hooks", []):
+            commands.extend(a for a in entry.get("args", []) if isinstance(a, str))
+    return commands
+
+
+def _assert_echoes_bound_event(res: Results, hook: str, event: str) -> None:
+    proc = run_hook(hook, env=_armed(), stdin=json.dumps({"hook_event_name": event}))
+    payload = _parse(res, proc.stdout, f"{hook} bound-event {event} output")
+    if payload is None:
+        return
+    inner = payload.get("hookSpecificOutput", {})
+    got = inner.get("hookEventName") if isinstance(inner, dict) else None
+    res.check(
+        got == event,
+        f"{hook} emits its manifest-bound event {event}",
+        f"got {got!r} — the emitted tag has desynced from hooks.json wiring",
+    )
+
+
 def check_malformed_stdin_degrades(res: Results) -> None:
     for hook in REMINDERS:
         for stdin in ("", "not json {{{", "null", "[]", '{"hook_event_name": 42}'):
@@ -341,6 +406,7 @@ def main() -> int:
     check_armed_emits_valid_context(res)
     check_never_blocks(res)
     check_event_echo(res)
+    check_manifest_bound_events_echo(res)
     check_malformed_stdin_degrades(res)
     check_fixed_literal_claim(res)
     check_label_injection_is_escaped(res)
