@@ -1,0 +1,23 @@
+# Retrieval-test companion for the deployment report card article.
+# Gated by service_interface::knowledge_service::test_retrieval.
+
+article_path: knowledge_bases/github_midwife_plugin/08_deployment_report_card.md
+consumer_profile: both
+
+target_queries:
+  - "is everything set up what is missing from this deployment"
+  - "deployment report card how much is configured"
+  - "fully deployed state checklist for a homunculus"
+  - "is the session ledger optional for a new homunculus"
+  - "should spawned workers run under tmux"
+  - "operator declined ingestion how do we track that"
+
+forbidden_queries:
+  - "seed hydration environment setup postgres launchers"     # 01_hydration_runbook owns this
+  - "first days onboarding a new owner"                       # 04_first_days_runbook owns this
+  - "how do I report a platform bug to the seed maintainers"  # 07_upstream_feedback_runbook owns this
+
+min_rank: 3
+forbidden_min_rank: 4
+
+process_key_assertions: []

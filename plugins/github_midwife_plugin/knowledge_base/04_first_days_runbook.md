@@ -8,7 +8,7 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:owner-onboarding, consumer_profile:both
 
-Embedding Description: The runbook a newborn homunculus's driving agent follows in the first sessions after genesis and hydration to establish the working relationship with its owner. Covers the conversational interview, explaining the collaboration model in plain words, writing the minimum viable charter, establishing the standing-positions document, the first autonomy grant with its grant record, pointing at growth without pushing it, offering the reflection loop, and the push-back license.
+Embedding Description: The runbook a newborn homunculus's driving agent follows in the first sessions after genesis and hydration to establish the working relationship with its owner. Covers the conversational interview, explaining the collaboration model in plain words, writing the minimum viable charter, establishing the standing-positions document, the first autonomy grant with its grant record, pointing at growth without pushing it, keeping the deployment report card current so what remains unconfigured stays visible without setup pressure, reporting platform defects and feature requests upstream on the owner's behalf, offering the reflection loop, and the push-back license.
 
 **When you need this**: the environment hydration just completed and real conversations with the owner are starting; deciding what to ask a new owner and what to record; making the first autonomy proposal; writing the minimum viable charter with the owner; handling a confusing owner request in the first weeks.
 
@@ -65,6 +65,36 @@ Propose exactly one small, low-stakes task drawn from the interview. The safest 
 
 When the owner's needs surface a capability, a connector or a new workflow, that is the moment to pitch the relevant hydration guidance, not before. Sketch the road once, so they know it exists: capabilities, then conventions, then autonomy, then, only if they ever need it, multiple coordinated sessions. Fleet patterns, git-coordination roles, and multi-session coordination are deliberately NOT part of the first days; the hydration runbook covers them when more than one session becomes real.
 
+## Step 6a: keep the deployment report card current
+
+Growth stays visible through the deployment report card
+(`plugins/github_midwife_plugin/knowledge_base/08_deployment_report_card.md`):
+the measured summary of what is configured against the fully-deployed state and
+what remains. Hydration delivered the first card; during the first days, keep it
+honest — re-present it at a natural pause in week one, after any update, and
+whenever the owner asks a "is everything set up?" question. Present it in plain
+words with one recommended next step, per that article's rules.
+
+This is not a contradiction of "point at growth, don't push it" — it is how
+pointing works without pushing. The card measures and shows; configuring
+anything still waits for the owner's yes. What the card refuses to do is let a
+core capability (session memory above all) sit unconfigured and *invisible*: a
+declined or deferred core row stays on the card with its cost stated, and gets
+re-offered when something changes, never buried mid-task.
+
+## When the platform itself is the problem, report it upstream
+
+Some friction in the first days is not this deployment's to fix: a platform
+defect, a confusing shipped behavior, a capability that simply does not exist
+yet. Do not silently work around those — report them upstream through the
+feedback channel
+(`plugins/github_midwife_plugin/knowledge_base/07_upstream_feedback_runbook.md`),
+with the owner's ok on anything outbound. Writing the report is your job, not
+the owner's; their involvement is a yes and, for feature requests, the outcome
+they actually need. Tell the owner in plain words: *"this one is a bug in the
+platform I'm built on — I've reported it to its maintainers, and fixes come
+back to us through updates."*
+
 ## Step 7: offer the reflection loop, optional and token-conscious
 
 Offer the reflection loop only once real work has accumulated, in week two or three rather than day one. The offer: *"If you'd like, I can periodically review how we've been working, where I got confused, where we lost time, and flag it gently when you have a minute, instead of us repeating the same friction. It costs a small amount of periodic analysis; entirely optional."* On yes, schedule the weekly reflection, the Friction Census pattern with collaboration signatures included, and deliver findings only as a queued "when you have a minute" note, never as an interruption. On no: dormant is fine; offer again only if the owner raises frustration themselves.
@@ -79,7 +109,7 @@ Two boundaries keep the license honest. **Push back once, then follow the owner'
 
 Four anti-goals keep the first days honest and cheap for the owner.
 
-- No setup theater: nothing gets configured that the interview didn't motivate.
+- No setup theater: nothing gets configured that the interview didn't motivate. (Measuring is not theater: the deployment report card runs and is shown regardless — it is configuration-on-yes that waits for motivation, never the visibility of what remains.)
 - No fabricated enthusiasm: offer, and take no for an answer; dormant is a supported steady state for every capability, and for the relationship features too.
 - No jargon: if a shipped internal term would appear in an explanation to the owner, find the plain phrase instead.
 - Never promise memory you haven't written. Say "I've recorded that" only after the write.
@@ -91,3 +121,5 @@ Four anti-goals keep the first days honest and cheap for the owner.
 - `knowledge_bases/ananta_platform/24_operator_communication/02_homunculus_charter_template.md` — the charter template Step 3 fills.
 - `knowledge_bases/ananta_platform/24_operator_communication/03_collaboration_craft.md` — the owner-collaboration craft distilled from the platform's operating history.
 - `knowledge_bases/ananta_platform/24_operator_communication/04_session_start_orientation.md` — where later sessions re-find the documents this runbook establishes.
+- `plugins/github_midwife_plugin/knowledge_base/08_deployment_report_card.md` — the measured what-is-configured/what-remains card Step 6a keeps current.
+- `plugins/github_midwife_plugin/knowledge_base/07_upstream_feedback_runbook.md` — the upstream channel for platform defects and feature requests the first days surface.

@@ -1,0 +1,23 @@
+# Retrieval-test companion for the upstream feedback runbook article.
+# Gated by service_interface::knowledge_service::test_retrieval.
+
+article_path: knowledge_bases/github_midwife_plugin/07_upstream_feedback_runbook.md
+consumer_profile: both
+
+target_queries:
+  - "how do I report a platform bug to the seed maintainers"
+  - "request a feature upstream from a deployed homunculus"
+  - "seed feedback pull request convention numbered parts"
+  - "what is safe to include in an outbound feedback report"
+  - "carrying a local fix should we upstream it"
+  - "our seed feedback got no response is it deprioritized or overlooked"
+
+forbidden_queries:
+  - "seed hydration environment setup postgres launchers"     # 01_hydration_runbook owns this
+  - "updating a live homunculus from a re-minted seed"        # 05_seed_update_runbook owns this
+  - "deployment report card what remains to configure"        # 08_deployment_report_card owns this
+
+min_rank: 3
+forbidden_min_rank: 4
+
+process_key_assertions: []

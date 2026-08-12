@@ -8,7 +8,7 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Agent-facing runbook for setting up the user's own environment around a homunculus birth, covering wizard step one per-homunculus role and database provisioning before a verb-mode or same-machine birth (create the homunculus's own non-superuser role, its database, the pgvector extension, the PUBLIC-connect revoke, the one-time default-scram pg_hba block, and the negative-auth and isolation probes — no cross-homunculus credential copy, and shared-vs-separate Postgres instance as the driving agent's topology decision), then after genesis the shell launcher for a properly named Claude Code session, optional multi-role fleet setup, additive shell integration with recoverable backups, install-all-now configure-on-first-use plugin hydration guidance, generated project CLAUDE.md and AGENTS.md knowledge-bootstrap files (the same access-mode contract for Claude Code and Codex sessions: no-MCP `<name>` CLI as the default, MCP strictly opt-in on explicit operator request, and source-artifact recovery — reading the KB's raw markdown directly — as the last-resort fallback when the homunculus runtime itself is unavailable) and settings hooks, no-MCP default command-line operation through the per-homunculus `<name>` command including the `<name> watch` registered-presence watcher that claims each session's role and receives role-addressed messages and the `<name> wake` Stop-hook waker that turns deliveries to an idle session into session turns on any inference provider, MCP as a strictly optional add-on offered only on explicit operator request, a connectivity glossary separating the bridge, the blue-green router, MCP registration, development channels, and peer-registry presence versus the durable role binding, and the homunculus-alive verification checklist.
+Embedding Description: Agent-facing runbook for setting up the user's own environment around a homunculus birth, covering wizard step one per-homunculus role and database provisioning before a verb-mode or same-machine birth (create the homunculus's own non-superuser role, its database, the pgvector extension, the PUBLIC-connect revoke, the one-time default-scram pg_hba block, and the negative-auth and isolation probes — no cross-homunculus credential copy, and shared-vs-separate Postgres instance as the driving agent's topology decision), then after genesis the shell launcher for a properly named Claude Code session, optional multi-role fleet setup, additive shell integration with recoverable backups, install-all-now configure-on-first-use plugin hydration guidance, generated project CLAUDE.md and AGENTS.md knowledge-bootstrap files (the same access-mode contract for Claude Code and Codex sessions: no-MCP `<name>` CLI as the default, MCP strictly opt-in on explicit operator request, and source-artifact recovery — reading the KB's raw markdown directly — as the last-resort fallback when the homunculus runtime itself is unavailable) and settings hooks, no-MCP default command-line operation through the per-homunculus `<name>` command including the `<name> watch` registered-presence watcher that claims each session's role and receives role-addressed messages and the `<name> wake` Stop-hook waker that turns deliveries to an idle session into session turns on any inference provider, MCP as a strictly optional add-on offered only on explicit operator request, a connectivity glossary separating the bridge, the blue-green router, MCP registration, development channels, and peer-registry presence versus the durable role binding, the session-ledger ingestion setup step (core and consent-gated, covering every coding agent the operator uses), the homunculus-alive verification checklist, and the deployment report card delivered to the operator as the hydration close-out.
 
 ## When to use this runbook
 
@@ -553,6 +553,38 @@ Some plugins still need real operator-specific setup before first useful invocat
 
 **Authoring convention, for the next plugin that needs this:** a `hydration_guidance.md` is a normal KB article (proper `Article Layer`/`Article Role: hydration_guidance`/`Article Tags`/`Embedding Description` header, so it is also findable by normal KB search once the plugin is active). Keep `## Setup` concrete enough that a first-use agent can run it without rediscovering the plugin's credential model.
 
+## Step 4d — session-ledger ingestion (core capability, consent-gated — not a connector)
+
+Do this as its own step. Ledger ingestion is NOT one of Step 4c's
+configure-on-first-use connectors, and treating it as one is the most common
+deployment gap measured in the field: nothing visibly breaks without it, so
+newborn deployments have skipped it as "optional" and silently lost
+cross-session memory — no prior-session search, no "what did we decide last
+week", no history-grounded answers. The platform's stance is settled: ledger
+functionality is core platform correctness, not a privacy knob (operator
+ruling 2026-08-02, quoted in full in the ingestion disclosure section below).
+
+Consent is still required — ingestion reads the operator's own transcript
+files, so this step runs as an offer with an explicit yes, like everything
+else in this ladder. The setup procedures live with the session-source
+plugins themselves: follow
+`plugins/claude_code_filesystem_session_source_plugin/knowledge_base/hydration_guidance.md`
+for Claude Code transcripts and
+`plugins/codex_filesystem_session_source_plugin/knowledge_base/hydration_guidance.md`
+where the operator also uses Codex — cover EVERY coding agent the operator
+actually uses, not just the one driving this hydration.
+
+Verify by retrieval, not by registration: after the initial backfill, a
+`session_ledger_service::search_event_content` query for a topic from a real
+prior session must return content. `list_sources` showing rows proves
+registration; only a successful search proves ingestion.
+
+On decline: respect it — no partial wiring — and record the decline. The
+deployment report card (`08_deployment_report_card.md`) carries this as an
+unconfigured CORE row on every future card, with what it costs stated
+plainly; it is re-offered at natural moments, never silently reclassified as
+optional.
+
 ## Step 5 — optional MCP bridge, ONLY on explicit operator request
 
 Skip this step by default — it is not part of baseline hydration on any
@@ -591,6 +623,20 @@ Then, that the no-MCP command and session tooling work:
 - In a labeled session, the rename skill arms `<name> watch` and its first output line is `"watch": "armed"` with a `claimed`/`updated`/`displaced` result — role-addressed receive is live with zero MCP.
 - Role-claim ground truth: `<name> call plugin::agent_messaging_plugin::peer_holds_role` with the role name and the watcher's `agent_instance_id` resolves the claim to this session. An entry in raw peer-list output is connection presence, not a claim — never verify registration from a peer list.
 - Only if the operator explicitly requested MCP in Step 5: `claude mcp list` shows `<name>` and a fresh session can call one `mcp__<name>__*` tool. Absence of MCP is not a finding.
+
+Then, that session-ledger ingestion (Step 4d) actually ingests, for every
+coding agent the operator uses:
+
+- `<name> call service_interface::session_ledger_service::list_sources '{}'` shows registered rows for each agent in use (Claude Code and, where used, Codex).
+- A `search_event_content` query about a topic from a real prior session returns that content — registration without retrieval is not a pass.
+
+**Close out by delivering the deployment report card.** Step 6's checks verify
+the deployment for YOU; the report card (`08_deployment_report_card.md`)
+converts them into something the OPERATOR sees and keeps: what is configured,
+what remains, what each remaining item would give them, and one recommended
+next step. A hydration that ends without delivering the card has not finished —
+the card is what keeps consent-gated or deferred components (the ledger above,
+fleet coordination, tmux worker hosting) visible instead of silently optional.
 
 ## Your blue-green router (auto-installed at birth)
 
@@ -700,3 +746,5 @@ Senders see it named honestly: every send to a watcher-held session is delivery-
 - `service_interface::knowledge_service::search` — the Step Zero search the generated `CLAUDE.md` and `AGENTS.md` both instruct the newborn's driving agent to run through `<name> call`.
 - `<name> watch` (`plugins/agent_messaging_plugin/src/agent_messaging_plugin/local_cli/cli.py`) — the registered-presence watcher the generated rename skill arms: register, claim, drain, stream, reconnect.
 - `plugin::agent_messaging_plugin::peer_claim_role` — the role-claim process the watcher dispatches over its registered bridge.
+- `plugins/github_midwife_plugin/knowledge_base/08_deployment_report_card.md` — the fully-deployed-state roster and the operator-facing card Step 6 closes out with.
+- `plugins/github_midwife_plugin/knowledge_base/07_upstream_feedback_runbook.md` — how this deployment reports defects and requests features upstream once it is running.

@@ -4,6 +4,59 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-11 — the feedback channel is now official, and your deployment gets a report card
+
+**Upstream feedback has a shipped runbook now.** Adopters invented the
+pattern this release formalizes — pull requests of dated, numbered feedback
+documents against the seed repository — and it worked well enough that it is
+now the documented channel, with the conventions that made it work stated
+explicitly: monotonically numbered parts with per-item numbering so every
+item is individually answerable, defect/question/feature-request/closure
+classification, evidence discipline (the command, the output, the release
+measured against), an outbound content gate (no personal or employer
+identifiers, credentials, or business records — ever), outcome-first feature
+requests, and "is this a deliberate no?" as the sanctioned way to re-raise
+an unanswered item. Release notes — this file — are the primary response
+surface: items you raise land here when they land. The runbook is
+`plugins/github_midwife_plugin/knowledge_base/07_upstream_feedback_runbook.md`.
+
+**New: the deployment report card.** A canonical definition of a
+fully-deployed homunculus — four tiers, each component with the evidence
+command that proves it configured — and the operator-facing card your
+driving agent produces against it: what is set up, what remains, what each
+remaining item would give you, and one recommended next step. Delivering the
+card is now the mandatory close-out of hydration, re-run after every update
+and whenever you ask "is everything set up?". The definition lives in
+`plugins/github_midwife_plugin/knowledge_base/08_deployment_report_card.md`.
+
+**Honest reframing: the session ledger was never optional, and our own docs
+said otherwise.** Both session-source plugins' hydration guidance described
+an empty session ledger as "a fully supported steady state", and ledger
+setup was not a numbered step in the hydration ladder at all — which is
+exactly how deployments end up with no cross-session memory and nothing
+visibly broken. The hydration runbook now carries session-ledger ingestion
+as its own core, consent-gated step (Step 4d, covering every coding agent
+you use, verified by retrieval rather than registration), the guidance
+files state plainly that consent-gated is not the same as optional, and a
+declined ingestion stays visible on the report card instead of silently
+normalizing. The same applies to tmux worker hosting for fleets: a
+tmux-hosted worker survives platform updates, a headless one does not, and
+the report card now says so.
+
+**Also: the session-start memory block no longer loads twice.** Deployments
+wired both ways — the checkout's own memory-passthrough hook plus the
+installed coordination-hooks plugin, which is the `setup_clone.sh` default —
+paid the full HYDRATE/DRAIN instruction block twice on every session start,
+citing two divergent sibling-script paths. Both copies now carry a
+checkout-copy-wins guard: the plugin copy stays silent in a project whose
+checkout carries its own emitter, and still emits everywhere else (born
+clones without the local wiring are unaffected). Plugin version 0.5.3;
+existing installs pick it up with `claude plugin update
+coordination-hooks@<marketplace>` (the plugin cache is version-keyed — an
+un-updated install keeps double-emitting indefinitely).
+
+---
+
 ## 2026-08-11 (hotfix) — the cadence release left the KB-first reminder silently undelivered; fixed, both runtimes
 
 **What was broken.** The cadence release below moved the reminders to
