@@ -4,6 +4,53 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-12 — coordination-hooks 0.5.4: the README caught up with the bounded wake wait, and doc/argv drift is now a tested class
+
+**Docs-only release — no hook behavior changes.** The 2026-08-09
+bounded-wait fix changed the idle-wake waiter's invocation from
+`$AGENT_WAKE_CLI wake` to `$AGENT_WAKE_CLI wake --max-wait <seconds>`
+(bounded so the harness can stamp an idle session at all; a delivery still
+wakes immediately). `SECURITY.md` was updated with that fix; `README.md`
+was not — it kept describing "the single fixed argument `wake`" and never
+named the `AGENT_WAKE_MAX_WAIT_S` override. For a plugin whose documents
+ARE the security review, a doc describing an argv the code doesn't run is
+a defect even when the code is right. Both README passages now describe
+the real argv and the override variable.
+
+**What prevents the class.** The manifest smoke gains
+`check_docs_name_the_bounded_wake_argv`: it derives the waiter's argv
+tokens from the source literal and fails unless every prose surface names
+them (and refuses the stale unbounded form outright) — the same
+derive-from-the-wiring pattern as the 0.5.2 hotfix's
+`check_manifest_bound_events_echo`, which ended the hardcoded-event-tag
+class the same way. Plugin version 0.5.4; existing installs pick it up
+with `claude plugin update coordination-hooks@<marketplace>` (the plugin
+cache is version-keyed — an un-updated install keeps the stale README, and
+its hooks were already correct).
+
+**The Codex variant carried the same class twice over — both fixed.** Its
+`wake_waiter.js` still spawned the unbounded `["wake"]` argv: the
+2026-08-09 bounded-wait fix had only reached the Claude variant, so a
+quiet Codex session's Stop hook still blocked on the CLI's ~23.9h default.
+And its README described an arming rule ("`FLEET_TRANSPORT` is exactly
+`watch`") that the source and its own arm-matrix smoke retired on
+2026-08-06 (unset and empty also arm). The bounded wait is now ported —
+same compiled-in default, same `AGENT_WAKE_MAX_WAIT_S` override contract,
+announced fallback on a malformed value — both documents describe the real
+argv and arming rule, and the smokes pin the bounded argv at source and
+behavior level. Fresh cachebuster version; re-add the plugin and re-trust
+the changed definitions per the Codex README.
+
+**Known issue, acknowledged rather than left for you to find.** The
+hydration runbook's (`01_hydration_runbook.md`) retrieval self-test is red
+on master: 7 of its queries no longer retrieve the runbook's articles at
+the expected rank, A/B-verified as pre-existing drift rather than
+something the 2026-08-11/12 releases introduced. The runbook's content and
+steps remain correct to follow; the gap is in search reaching them. A
+repair lane is queued, and this entry closes when it lands.
+
+---
+
 ## 2026-08-11 — the feedback channel is now official, and your deployment gets a report card
 
 **Upstream feedback has a shipped runbook now.** Adopters invented the

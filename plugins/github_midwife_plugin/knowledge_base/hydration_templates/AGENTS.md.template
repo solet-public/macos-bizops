@@ -54,6 +54,15 @@ knowledge base produces drift. If a search returns nothing relevant, that is
 information too: confirm the gap before inventing a pattern, and add an
 article documenting what you ended up with.
 
+Step Zero is a sequence, not a substitution. {{HOMUNCULUS_NAME}}'s knowledge
+base governs platform access and cross-session knowledge; the directory this
+session was started in governs the task. After the platform search, the next
+step is the working directory's own context — its `CLAUDE.md`/`AGENTS.md`,
+its docs, and any knowledge base it carries. A session launched outside this
+directory, with {{HOMUNCULUS_NAME}} as support, anchors its work in that
+directory's own guidance — the platform search must never preempt it, and
+task-specific guidance from the working directory governs the task.
+
 Before editing code, changing config, or explaining a subsystem in this repo,
 search {{HOMUNCULUS_NAME}}'s knowledge base for the current design record and
 recent implementation notes using the actual nouns from the request — do not
@@ -146,6 +155,15 @@ here — search for the terms below rather than assuming the mechanism:
   working with your operator.
 - `session history ingestion session ledger hydration current notes` — how
   and when session-ledger recall becomes available.
+- `fleet launcher session configuration model effort per role` — how model,
+  effort, and transport are configured per session role. As the driving
+  session you manage the fleet, not just your own context: dispatch
+  parallelizable, mechanical, or long-running work to additional sessions
+  rather than absorbing it inline, and declare each dispatch's model,
+  effort, and lifetime explicitly, matched to the work — a mechanical lane
+  on a cheaper model with bounded effort, a judgment-heavy lane on a
+  stronger tier, never inherited silently. Token efficiency is part of the
+  dispatch decision, and no session is left idling past its usefulness.
 
 ## Development standards (if you extend the platform)
 

@@ -7,10 +7,16 @@ consumer_profile: both
 target_queries:
   - "is everything set up what is missing from this deployment"
   - "deployment report card how much is configured"
-  - "fully deployed state checklist for a homunculus"
+  - "functional scorecard checklist for a homunculus"
   - "is the session ledger optional for a new homunculus"
   - "should spawned workers run under tmux"
-  - "operator declined ingestion how do we track that"
+  - "operator says no to session ledger ingestion does the row disappear from the deployment card"
+  - "derive setup checks from the active plugin roster instead of a fixed list"
+  - "does a local model actually perform session summarization"
+  - "how do I know a role binding is stale instead of live"
+  - "one row per plugin setup completeness and validated usage"
+  - "not all users will have access to a connector is that a deficiency"
+  - "demonstrate spawning a session at different models and effort levels"
 
 forbidden_queries:
   - "seed hydration environment setup postgres launchers"     # 01_hydration_runbook owns this

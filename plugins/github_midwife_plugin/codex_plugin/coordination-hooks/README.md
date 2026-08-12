@@ -61,13 +61,20 @@ the project's native `AGENTS.md` instruction surface, which Codex loads without
 introducing a second environment-authored prompt channel.
 
 The `Stop` waiter arms only when `AGENT_SESSION_ID` and `AGENT_WAKE_CLI` are
-non-empty and `FLEET_TRANSPORT` is exactly `watch`. It parses Codex's
-`stop_hook_active` loop guard, runs exactly `AGENT_WAKE_CLI wake` without a
-shell, and discards the child's streams unread. Exit `2` from that CLI produces
-one fixed factual continuation nudge; exit `0` produces no continuation. The
-manifest's 86,400-second synchronous bound is longer than the CLI's 86,100-
-second default wait, so ordinary idle expiry is owned by the CLI rather than a
-hook-timeout cancellation.
+non-empty and `FLEET_TRANSPORT` is unset, empty, or `watch` — a declared
+non-watch transport (e.g. `mcp`) disarms it; an unset or empty value is not
+a declaration and leaves it armed, the same rule the Claude variant pins.
+It parses Codex's `stop_hook_active` loop guard, runs exactly
+`AGENT_WAKE_CLI wake --max-wait <seconds>` without a shell — the literal
+subcommand `wake`, the literal flag `--max-wait`, and the bounded wait in
+seconds (the compiled-in default, or `AGENT_WAKE_MAX_WAIT_S` when it parses
+as a positive integer; anything else is announced on stderr and falls back,
+so raw environment text never reaches the argv) — and discards the child's
+streams unread. Exit `2` from that CLI produces one fixed factual
+continuation nudge; exit `0` (a delivery-less bounded-wait expiry included)
+produces no continuation. The manifest's 86,400-second synchronous bound is
+a backstop well above the bounded wait, so ordinary idle expiry is owned by
+the CLI's bounded wait rather than a hook-timeout cancellation.
 
 The Bash gate is separately opt-in through `GIT_CONTROLLER_NAME`. It authorizes
 only from `AGENT_ROLE`; labels, session IDs, hook thread IDs, and runner identity

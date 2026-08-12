@@ -601,6 +601,52 @@ def check_child_output_is_unread(res: Results) -> None:
         )
 
 
+def check_docs_name_the_bounded_wake_argv(res: Results) -> None:
+    """README.md/SECURITY.md must describe the wake waiter's REAL argv.
+
+    The failing mutation this names: the waiter's argument vector changes
+    (as it did on 2026-08-09, when the bounded `--max-wait` was added) and a
+    prose surface keeps describing the old shape -- README.md did exactly
+    that, claiming "the single fixed argument `wake`" for three days while
+    the source and SECURITY.md both already carried the bound. The expected
+    tokens are DERIVED from the source literal (the same one
+    check_subprocess_capable_hooks pins), so a future argv change goes red
+    here until every prose surface names the new shape -- the same
+    derive-from-the-wiring class as reminder_hooks_smoke.py's
+    check_manifest_bound_events_echo.
+    """
+    waiter = (HOOKS_DIR / SUBPROCESS_OWNER).read_text(encoding="utf-8")
+    argv_literal = re.search(
+        r'\[cli,\s*((?:"[^"]+",\s*)+)str\(resolve_max_wait_s\(\)\)\]', waiter,
+    )
+    res.check(
+        argv_literal is not None,
+        f"{SUBPROCESS_OWNER}'s argv literal is extractable for doc coupling",
+        "the argv literal's shape changed; update this check alongside the docs",
+    )
+    tokens = re.findall(r'"([^"]+)"', argv_literal.group(1)) if argv_literal else []
+    for surface in ("README.md", "SECURITY.md"):
+        text = _read_prose(surface)
+        for token in tokens:
+            res.check(
+                token in text,
+                f"{surface} names the waiter argv token {token!r}",
+                f"the source argv carries {token!r} but {surface} never mentions it",
+            )
+        res.check(
+            "AGENT_WAKE_MAX_WAIT_S" in text,
+            f"{surface} names the wait-bound override variable",
+            "AGENT_WAKE_MAX_WAIT_S absent",
+        )
+        # The stale pre-bound form closes its backtick right after `wake`;
+        # the current form always continues with the bound.
+        res.check(
+            re.search(r"\$AGENT_WAKE_CLI wake`", text) is None,
+            f"{surface} does not describe the stale unbounded argv",
+            "found the pre-2026-08-09 `$AGENT_WAKE_CLI wake` (no --max-wait) form",
+        )
+
+
 # The one disclosed, narrow exception to "stdlib-only": rotation_due_watch.py
 # imports agent_messaging_plugin.rotation_thresholds -- a zero-third-party-
 # dependency SAME-PLATFORM module (not a PyPI package; ships alongside this
@@ -760,6 +806,7 @@ def main() -> int:
     check_file_write_hooks_write_only_markers(res)
     check_subprocess_capable_hooks(res, hooks, siblings)
     check_child_output_is_unread(res)
+    check_docs_name_the_bounded_wake_argv(res)
     check_stdlib_only(res, hooks, siblings)
     check_verification_section(res)
     check_artifact_is_self_contained(res)
