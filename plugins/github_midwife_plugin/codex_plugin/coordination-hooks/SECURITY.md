@@ -61,8 +61,11 @@ peer-message content. Two of the four Node hooks (`check_messages_reminder.js`,
 `role_binding_reminder.js` reads only `AGENT_SESSION_LABEL`. Only
 `wake_waiter.js` additionally
 uses `child_process.spawn`, exactly once, to run the configured executable with
-literal argv `["wake"]`, `shell: false`, and all three child streams set to
-`ignore`. The Python gate is standard-library-only
+the fixed argv `["wake", "--max-wait", <seconds>]` — the bounded wait is the
+compiled-in default or `AGENT_WAKE_MAX_WAIT_S` when it parses as a positive
+integer (anything else is announced on stderr and falls back, so raw
+environment text never reaches the argv) — `shell: false`, and all three
+child streams set to `ignore`. The Python gate is standard-library-only
 and imports byte-identical materialized policy modules from its plugin
 directory. CPython may create `__pycache__` files unless the launcher sets
 `PYTHONDONTWRITEBYTECODE=1`; the plugin never reads them.

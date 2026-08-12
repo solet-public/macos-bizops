@@ -125,7 +125,10 @@ def _check_javascript_source(res: Results, path: Path, source: str) -> None:
             "wake_waiter.js does not use an exec-family or synchronous process call",
             repr(process_tokens),
         )
-        res.check('spawn(cli, ["wake"]' in source, "wake_waiter.js argv is fixed")
+        res.check(
+            'spawn(cli, ["wake", "--max-wait", String(resolveMaxWaitS())]' in source,
+            "wake_waiter.js argv is fixed (bounded wait included)",
+        )
         res.check("shell: false" in source, "wake_waiter.js explicitly disables shell execution")
         res.check(
             'stdio: ["ignore", "ignore", "ignore"]' in source,

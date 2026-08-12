@@ -839,6 +839,7 @@ way Claude Code invokes them.
 | The wake waiter discards the child's output unread | `tests/manifest_consistency_smoke.py` and `tests/wake_waiter_smoke.py` |
 | The wake waiter conveys exactly one bit, via a compiled-in nudge | `tests/wake_waiter_smoke.py` |
 | The wake waiter's argv is fixed, with no shell | `tests/manifest_consistency_smoke.py` |
+| The prose surfaces (README.md, this page) describe the wake waiter's real argv — expected tokens derived from the source literal, the stale unbounded form refused | `tests/manifest_consistency_smoke.py` |
 | A broken wake path never traps the session | `tests/wake_waiter_smoke.py` |
 | Fourteen of fifteen hooks are default-off behind an environment or filesystem-presence guard; `step_zero_reminder.py` is unconditionally armed by design | `tests/reminder_hooks_smoke.py` and `tests/wake_waiter_smoke.py` |
 | The git-mutation guard blocks every mutating git invocation (direct, shell-wrapped, chained, path-qualified) for a non-controller session, allows it for the controller, and is fail-open when its env var is unset | `tests/git_controller_gate_smoke.py` |

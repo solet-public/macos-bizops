@@ -4,6 +4,136 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-12 — coordination-hooks 0.5.4: the README caught up with the bounded wake wait, and doc/argv drift is now a tested class
+
+**Docs-only release — no hook behavior changes.** The 2026-08-09
+bounded-wait fix changed the idle-wake waiter's invocation from
+`$AGENT_WAKE_CLI wake` to `$AGENT_WAKE_CLI wake --max-wait <seconds>`
+(bounded so the harness can stamp an idle session at all; a delivery still
+wakes immediately). `SECURITY.md` was updated with that fix; `README.md`
+was not — it kept describing "the single fixed argument `wake`" and never
+named the `AGENT_WAKE_MAX_WAIT_S` override. For a plugin whose documents
+ARE the security review, a doc describing an argv the code doesn't run is
+a defect even when the code is right. Both README passages now describe
+the real argv and the override variable.
+
+**What prevents the class.** The manifest smoke gains
+`check_docs_name_the_bounded_wake_argv`: it derives the waiter's argv
+tokens from the source literal and fails unless every prose surface names
+them (and refuses the stale unbounded form outright) — the same
+derive-from-the-wiring pattern as the 0.5.2 hotfix's
+`check_manifest_bound_events_echo`, which ended the hardcoded-event-tag
+class the same way. Plugin version 0.5.4; existing installs pick it up
+with `claude plugin update coordination-hooks@<marketplace>` (the plugin
+cache is version-keyed — an un-updated install keeps the stale README, and
+its hooks were already correct).
+
+**The Codex variant carried the same class twice over — both fixed.** Its
+`wake_waiter.js` still spawned the unbounded `["wake"]` argv: the
+2026-08-09 bounded-wait fix had only reached the Claude variant, so a
+quiet Codex session's Stop hook still blocked on the CLI's ~23.9h default.
+And its README described an arming rule ("`FLEET_TRANSPORT` is exactly
+`watch`") that the source and its own arm-matrix smoke retired on
+2026-08-06 (unset and empty also arm). The bounded wait is now ported —
+same compiled-in default, same `AGENT_WAKE_MAX_WAIT_S` override contract,
+announced fallback on a malformed value — both documents describe the real
+argv and arming rule, and the smokes pin the bounded argv at source and
+behavior level. Fresh cachebuster version; re-add the plugin and re-trust
+the changed definitions per the Codex README.
+
+**Known issue, acknowledged rather than left for you to find.** The
+hydration runbook's (`01_hydration_runbook.md`) retrieval self-test is red
+on master: 7 of its queries no longer retrieve the runbook's articles at
+the expected rank, A/B-verified as pre-existing drift rather than
+something the 2026-08-11/12 releases introduced. The runbook's content and
+steps remain correct to follow; the gap is in search reaching them. A
+repair lane is queued, and this entry closes when it lands.
+
+---
+
+## 2026-08-11 — the feedback channel is now official, and your deployment gets a report card
+
+**Upstream feedback has a shipped runbook now.** Adopters invented the
+pattern this release formalizes — pull requests of dated, numbered feedback
+documents against the seed repository — and it worked well enough that it is
+now the documented channel, with the conventions that made it work stated
+explicitly: monotonically numbered parts with per-item numbering so every
+item is individually answerable, defect/question/feature-request/closure
+classification, evidence discipline (the command, the output, the release
+measured against), an outbound content gate (no personal or employer
+identifiers, credentials, or business records — ever), outcome-first feature
+requests, and "is this a deliberate no?" as the sanctioned way to re-raise
+an unanswered item. Release notes — this file — are the primary response
+surface: items you raise land here when they land. The runbook is
+`plugins/github_midwife_plugin/knowledge_base/07_upstream_feedback_runbook.md`.
+
+**New: the deployment report card.** A canonical definition of a
+fully-deployed homunculus — four tiers, each component with the evidence
+command that proves it configured — and the operator-facing card your
+driving agent produces against it: what is set up, what remains, what each
+remaining item would give you, and one recommended next step. Delivering the
+card is now the mandatory close-out of hydration, re-run after every update
+and whenever you ask "is everything set up?". The definition lives in
+`plugins/github_midwife_plugin/knowledge_base/08_deployment_report_card.md`.
+
+**Honest reframing: the session ledger was never optional, and our own docs
+said otherwise.** Both session-source plugins' hydration guidance described
+an empty session ledger as "a fully supported steady state", and ledger
+setup was not a numbered step in the hydration ladder at all — which is
+exactly how deployments end up with no cross-session memory and nothing
+visibly broken. The hydration runbook now carries session-ledger ingestion
+as its own core, consent-gated step (Step 4d, covering every coding agent
+you use, verified by retrieval rather than registration), the guidance
+files state plainly that consent-gated is not the same as optional, and a
+declined ingestion stays visible on the report card instead of silently
+normalizing. The same applies to tmux worker hosting for fleets: a
+tmux-hosted worker survives platform updates, a headless one does not, and
+the report card now says so.
+
+**Also: the session-start memory block no longer loads twice.** Deployments
+wired both ways — the checkout's own memory-passthrough hook plus the
+installed coordination-hooks plugin, which is the `setup_clone.sh` default —
+paid the full HYDRATE/DRAIN instruction block twice on every session start,
+citing two divergent sibling-script paths. Both copies now carry a
+checkout-copy-wins guard: the plugin copy stays silent in a project whose
+checkout carries its own emitter, and still emits everywhere else (born
+clones without the local wiring are unaffected). Plugin version 0.5.3;
+existing installs pick it up with `claude plugin update
+coordination-hooks@<marketplace>` (the plugin cache is version-keyed — an
+un-updated install keeps double-emitting indefinitely).
+
+---
+
+## 2026-08-11 (hotfix) — the cadence release left the KB-first reminder silently undelivered; fixed, both runtimes
+
+**What was broken.** The cadence release below moved the reminders to
+`SessionStart` but left `step_zero_reminder`'s own emitted `hookEventName`
+hardcoded to the old `UserPromptSubmit`, in both runtime variants. Claude
+Code discards hook output whose declared event name does not match the event
+that fired — and the rejection is visible at debug level only — so the
+knowledge-base-first reminder stopped landing entirely: installed no longer
+meant delivered, the exact silent-absence class its always-armed ruling
+exists to prevent. Found live in the origin fleet and reported independently
+by an adopter (with the debug-level rejection line) within the same day.
+
+**The fix.** Both scripts now read `hook_event_name` off stdin and echo it
+back, exactly like their `check_messages_reminder` siblings, defaulting to
+their own `SessionStart` binding. The Claude plugin is version 0.5.2 —
+existing installs pick it up with `claude plugin update
+coordination-hooks@<marketplace>` (the plugin cache is version-keyed, so an
+un-updated install keeps the broken 0.5.1 copy indefinitely). The Codex
+variant carries a fresh cachebuster suffix; re-add the plugin and re-trust
+the changed definitions per its README.
+
+**Why the suites missed it, and what now prevents the class.** Both reminder
+smoke suites asserted the stale literal as the expected default — the defect
+was rendered in the test's own assertion. Each suite now carries
+`check_manifest_bound_events_echo`, which derives every reminder's expected
+events from `hooks.json` itself and asserts the emitted tag matches, so a
+hardcoded tag that desyncs from the wiring is a named red in both runtimes.
+
+---
+
 ## 2026-08-11 — reminder-hook cadence + managed Codex worker runtime
 
 **The coordination-hooks reminders now fire once per session, not once per

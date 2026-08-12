@@ -24,8 +24,10 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   on it as the PRIMARY idle-wake mechanism as of 2026-08-06, not a
   fallback — see `SECURITY.md`'s "Operational status" note. Nudge-only.
   When a session with
-  an `AGENT_SESSION_ID` goes idle, invokes exactly `$AGENT_WAKE_CLI wake` (fixed argv, no
-  shell) — the operator-configured coordination CLI's blocking wait verb —
+  an `AGENT_SESSION_ID` goes idle, invokes exactly
+  `$AGENT_WAKE_CLI wake --max-wait <seconds>` (fixed argv, no
+  shell) — the operator-configured coordination CLI's blocking wait verb,
+  bounded so the quiet case releases the turn boundary (see Configuration) —
   and **discards its output entirely**. On the wake signal (exit 2) it
   emits its own fixed nudge: deliveries are pending in the peer inbox. The
   session then fetches the actual messages itself via the normal tool
@@ -121,7 +123,19 @@ both used to re-fire on every prompt turn, which accumulated one copy per
 turn in the transcript. This changes CADENCE ONLY: the 2026-08-01 ruling
 that the knowledge-base-first reminder is unconditionally armed (no
 environment gate) is unchanged and still enforced by
-`tests/reminder_hooks_smoke.py`'s `check_step_zero_fires_everywhere`. The
+`tests/reminder_hooks_smoke.py`'s `check_step_zero_fires_everywhere`.
+
+**Tag-echo fix (2026-08-11, §41):** the cadence move initially shipped with
+`step_zero_reminder.py` still hardcoding `"hookEventName":
+"UserPromptSubmit"` — Claude Code rejects a hook output whose declared
+event name mismatches the firing event (debug-level only), so the reminder
+silently never landed after the rebinding. All three reminders now read
+`hook_event_name` off stdin and echo it back, and
+`check_manifest_bound_events_echo` derives each reminder's expected events
+from `hooks.json` itself, so a hardcoded tag can never silently desync from
+the wiring again.
+
+The
 memory-passthrough session-context hook still fires on both
 `SessionStart` and `UserPromptSubmit` — it was never in scope for this
 move, since it is not a reminder, it is the context-gauge/hydrate-drain
@@ -160,8 +174,14 @@ blocked.
 
 The idle-wake waiter is separately opt-in via `AGENT_WAKE_CLI`: unset, it is
 fully OFF. Set it to the coordination CLI the hook should invoke; the hook
-runs exactly that executable with the single fixed argument `wake`, no shell
-involved. A declared non-watch transport (`FLEET_TRANSPORT` set to any
+runs exactly that executable with a fixed argument vector — the literal
+subcommand `wake`, the literal flag `--max-wait`, and the bounded wait in
+seconds (the compiled-in default, or `AGENT_WAKE_MAX_WAIT_S` when it parses
+as a positive integer; anything else is announced on stderr and falls back,
+so raw environment text never reaches the argv) — no shell involved. The
+bound is what lets the harness stamp the session idle at all; a delivery
+still wakes the session immediately (see `wake_waiter.py`'s module
+docstring for the measured incident behind it). A declared non-watch transport (`FLEET_TRANSPORT` set to any
 **non-empty** value other than `watch`) disarms it even when the CLI variable
 is set, so deployments whose live bridge connection already does the waking
 never double-arm. An unset **or empty** `FLEET_TRANSPORT` is not a

@@ -21,7 +21,7 @@ target_queries:
   - "setup agent should inspect zshrc before asking about shell integration"
   - "command line way to start claude with a properly named session"
   - "generated CLAUDE.md for a newborn homunculus clone"
-  - "generated AGENTS.md knowledge bootstrap file for a Codex session"
+  - "where does the generated AGENTS.md file come from after birthing a homunculus"
   - "newborn claude code settings session start hook"
   - "why does the launcher never pass dangerously-skip-permissions"
   - "wizard step one create the database before birthing a homunculus"

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 "use strict";
 
-// SessionStart hook (fires on startup|resume|clear). ALWAYS ARMED: installed
-// means armed, with no environment condition of any kind.
+// SessionStart hook. ALWAYS ARMED: installed means armed, with no
+// environment condition of any kind.
 //
 // The homunculus is a system-wide resource, so awareness of it is not
 // fleet-only. This hook previously no-op'd unless AGENT_SESSION_LABEL was set;
@@ -11,6 +11,18 @@
 // means a session never learns the platform exists, which is the silent-absence
 // class. Re-adding any env condition here is the red mutation for this hook's
 // smoke leg.
+//
+// The emitted hookEventName is read off stdin and echoed back (two-value
+// allowlist, mirroring check_messages_reminder.js), with the compiled-in
+// default matching this hook's own manifest binding. It was previously a
+// hardcoded literal, which silently desynced when the 2026-08-11 cadence
+// move rebound this hook from UserPromptSubmit to SessionStart: a host that
+// validates the declared event name against the event that invoked the hook
+// discards the output, so the reminder never lands -- the same
+// silent-absence class as an env gate. Found 2026-08-11, confirmed
+// independently by an adopter (feedback Part 41); the red mutation for this
+// is re-hardcoding any event name the manifest does not wire this hook to
+// (`check_manifest_bound_events_echo`).
 //
 // The literal below is true wherever the plugin is installed: it names no
 // deployment-relative path and no fleet-specific command, so it reads
@@ -23,14 +35,6 @@
 // AGENTS.md's Step Zero), which blocks/polls for its result before
 // returning (agent_messaging_plugin/local_cli/cli.py's call_and_wait) — a
 // genuinely synchronous mechanism, not drift from the Claude wording.
-//
-// Reads hook_event_name off stdin (same pattern as the sibling
-// check_messages_reminder.js) instead of hardcoding one, so this script's
-// own output always matches however hooks.json currently wires it -- the
-// 2026-08-11 cadence fix moved this hook's *wiring* to SessionStart but left
-// a hardcoded "UserPromptSubmit" literal here, which a strict host (Claude
-// Code) rejects outright as a hookEventName mismatch: a silent failure,
-// since the reminder just never fires and nothing surfaces to the operator.
 
 let raw = "";
 try {
@@ -50,7 +54,7 @@ try {
     eventName = payload.hook_event_name;
   }
 } catch {
-  // Malformed or absent stdin degrades to the SessionStart default.
+  // Malformed or absent stdin degrades to this hook's own bound event.
 }
 
 const output = {

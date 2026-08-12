@@ -226,8 +226,8 @@ def check_wake_is_one_bit(res: Results, work: Path) -> None:
     res.check(marker.exists(), "wake path actually spawned the CLI", "stub never ran")
     if marker.exists():
         res.check(
-            _marker_payload(marker).get("argv") == ["wake"],
-            "wake CLI receives the exact fixed argv",
+            _marker_payload(marker).get("argv") == ["wake", "--max-wait", "2400"],
+            "wake CLI receives the exact fixed argv (bounded wait included)",
             repr(_marker_payload(marker)),
         )
     output = json.loads(proc.stdout)
@@ -316,9 +316,47 @@ def check_cancellation_reaps_child(res: Results, work: Path) -> None:
         res.check(_wait_for_exit(child_pid), "cancelled hook reaps its child", f"pid {child_pid} alive")
 
 
+def check_bounded_wait(res: Results, work: Path) -> None:
+    """The wait must be bounded: `--max-wait` always reaches the CLI.
+
+    Ported 2026-08-12 from claude_plugin's wake_waiter_smoke bounded-wait
+    cases. A valid AGENT_WAKE_MAX_WAIT_S override replaces the default; a
+    malformed or non-positive override is ANNOUNCED on stderr and falls back
+    to the default — never silently, and never passing raw environment text
+    through to the argv."""
+    cli = _stub(work, "bounded_stub", exit_code=0)
+    cases = (
+        ("valid override", "900", "900", False),
+        ("malformed override", "soon", "2400", True),
+        ("non-positive override", "0", "2400", True),
+    )
+    for label, override, expected, announces in cases:
+        marker = work / f"bounded_{label.replace(' ', '_')}"
+        marker.unlink(missing_ok=True)
+        env = _env(marker, cli)
+        env["AGENT_WAKE_MAX_WAIT_S"] = override
+        proc = run_hook(HOOK, env=env, stdin=_payload())
+        res.check(proc.returncode == 0, f"bounded wait ({label}): exit 0", f"exit {proc.returncode}")
+        res.check(marker.exists(), f"bounded wait ({label}): CLI spawned", "the stub never ran")
+        if marker.exists():
+            res.check(
+                _marker_payload(marker).get("argv") == ["wake", "--max-wait", expected],
+                f"bounded wait ({label}): CLI argv is ['wake', '--max-wait', {expected!r}]",
+                repr(_marker_payload(marker)),
+            )
+        res.check(
+            (NOTE_PREFIX in proc.stderr) == announces,
+            f"bounded wait ({label}): fallback is announced exactly when it happens",
+            repr(proc.stderr),
+        )
+
+
 def check_source_pins_discard_contract(res: Results) -> None:
     source = (HOOKS_DIR / HOOK).read_text(encoding="utf-8")
-    res.check('spawn(cli, ["wake"]' in source, "source pins the fixed wake argv")
+    res.check(
+        'spawn(cli, ["wake", "--max-wait", String(resolveMaxWaitS())]' in source,
+        "source pins the fixed bounded wake argv",
+    )
     res.check(
         'stdio: ["ignore", "ignore", "ignore"]' in source,
         "source pins all child streams to ignore",
@@ -336,6 +374,7 @@ def main() -> int:
         check_disarm_and_loop_guard(res, work)
         check_arm_matrix(res, work)
         check_malformed_input(res, work)
+        check_bounded_wait(res, work)
         check_wake_is_one_bit(res, work)
         check_nonwake_outcomes(res, work)
         check_cancellation_reaps_child(res, work)

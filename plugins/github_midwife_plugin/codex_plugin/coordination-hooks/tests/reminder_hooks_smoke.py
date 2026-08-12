@@ -9,18 +9,13 @@ from typing import Any
 
 sys.dont_write_bytecode = True
 
-from _harness import Results, preflight, run_hook  # noqa: E402
+from _harness import HOOKS_DIR, Results, preflight, run_hook  # noqa: E402
 
-# Reminders that read hook_event_name off stdin and echo it back, so the same
-# script serves whichever event hooks.json currently wires it to, instead of
-# a compiled-in literal that can desync from that wiring (the 2026-08-11
-# cadence fix moved step_zero's wiring to SessionStart without updating its
-# then-hardcoded "UserPromptSubmit" literal -- a silent hookEventName-mismatch
-# failure on a strict host). role_binding_reminder.js is deliberately NOT
-# here: it is single-event by design (a role re-claim only makes sense at
-# SessionStart) and stays a fixed literal.
-EVENT_ECHOING = ("step_zero_reminder.js", "check_messages_reminder.js")
-
+# "event" is each script's compiled-in DEFAULT (used when stdin is absent or
+# junk) — a fallback, not the authority. The authoritative tag-vs-wiring
+# assertion is `check_manifest_bound_events_echo`, which derives the expected
+# events from hooks.json itself (§41, 2026-08-11: step_zero's hardcoded tag
+# silently desynced when the cadence move rebound it to SessionStart).
 REMINDERS = {
     "step_zero_reminder.js": {
         "event": "SessionStart",
@@ -160,6 +155,11 @@ def check_step_zero_fires_everywhere(res: Results) -> None:
     )
 
 
+#: Scripts that echo stdin's hook_event_name (two-value allowlist); the rest
+#: emit a fixed tag. step_zero joined 2026-08-11 (§41).
+ECHO_AWARE = ("step_zero_reminder.js", "check_messages_reminder.js")
+
+
 def check_exact_fixed_output(res: Results) -> None:
     hostile_payload = json.dumps(
         {
@@ -174,32 +174,15 @@ def check_exact_fixed_output(res: Results) -> None:
         second = _context(res, script, label=DYNAMIC_SENTINELS[3], stdin="{not-json")
         if first is None or second is None:
             continue
-        res.check(
-            first[1] == second[1],
-            f"{script} additionalContext is invariant across payload and label",
-        )
-        if script in EVENT_ECHOING:
-            # hostile_payload declares hook_event_name=UserPromptSubmit -- an
-            # event-echoing hook is SUPPOSED to reflect that, not stay pinned
-            # to its own default; the malformed-stdin pass is what proves the
-            # default (checked in check_malformed_stdin_degrades-equivalent
-            # logic below via `second`).
+        res.check(first[1] == second[1], f"{script} context is invariant across payload and label")
+        res.check(second[0] == expected["event"], f"{script} emits the documented default event")
+        if script in ECHO_AWARE:
             res.check(
                 first[0] == "UserPromptSubmit",
-                f"{script} echoes the hostile payload's declared event",
-                f"got {first[0]!r}",
-            )
-            res.check(
-                second[0] == expected["event"],
-                f"{script} falls back to its documented default event on malformed stdin",
-                f"got {second[0]!r}",
+                f"{script} echoes the declared supported event",
             )
         else:
-            res.check(
-                first[0] == second[0] == expected["event"],
-                f"{script} emits the documented default event",
-                f"got first={first[0]!r} second={second[0]!r}",
-            )
+            res.check(first[0] == expected["event"], f"{script} emits its fixed event")
         res.check(first[1] == expected["context"], f"{script} emits the exact reviewed literal")
         for sentinel in DYNAMIC_SENTINELS:
             res.check(sentinel not in first[1], f"{script} does not relay {sentinel.split('-')[0].lower()} data")
@@ -232,25 +215,88 @@ def check_step_zero_async_clause_deliberately_absent(res: Results) -> None:
 
 
 def check_shared_event_echo(res: Results) -> None:
-    script = "check_messages_reminder.js"
-    expected = REMINDERS[script]["context"]
-    for event in ("UserPromptSubmit", "SessionStart"):
-        got = _context(
+    for script in ECHO_AWARE:
+        expected = REMINDERS[script]["context"]
+        default = REMINDERS[script]["event"]
+        for event in ("UserPromptSubmit", "SessionStart"):
+            got = _context(
+                res,
+                script,
+                label="Coordinator-Codex",
+                stdin=json.dumps({"hook_event_name": event, "prompt": DYNAMIC_SENTINELS[0]}),
+            )
+            if got is not None:
+                res.check(got == (event, expected), f"{script} echoes only supported event {event}")
+        unknown = _context(
             res,
             script,
             label="Coordinator-Codex",
-            stdin=json.dumps({"hook_event_name": event, "prompt": DYNAMIC_SENTINELS[0]}),
+            stdin=json.dumps({"hook_event_name": "Stop"}),
         )
-        if got is not None:
-            res.check(got == (event, expected), f"{script} echoes only supported event {event}")
-    unknown = _context(
+        if unknown is not None:
+            res.check(
+                unknown[0] == default,
+                f"{script} degrades an unsupported event to its own default {default}",
+            )
+
+
+def check_manifest_bound_events_echo(res: Results) -> None:
+    """★ §41 (2026-08-11): the emitted tag must match the WIRING — derived, not asserted.
+
+    The cadence move rebound step_zero to SessionStart while its output still
+    hardcoded "UserPromptSubmit"; a host that validates the declared event
+    name against the firing event discards the output silently, and this
+    suite stayed green because REMINDERS asserted the stale literal as
+    correct. This leg derives each reminder's bound events from hooks.json
+    itself and asserts the script emits exactly the event that fired, so the
+    assertion can never desync from the wiring again.
+
+    RED MUTATION for this leg: hardcode any hookEventName a reminder's own
+    hooks.json entry does not wire it to, or rebind one to an event it
+    cannot echo.
+    """
+    for script, events in _manifest_bound_events(tuple(REMINDERS)).items():
+        res.check(bool(events), f"{script} is wired in hooks.json", "no binding found")
+        for event in events:
+            _assert_echoes_bound_event(res, script, event)
+
+
+def _manifest_bound_events(scripts: tuple[str, ...]) -> dict[str, list[str]]:
+    """Derive {script: [bound events]} from hooks.json — the wiring is the authority."""
+    manifest = json.loads((HOOKS_DIR / "hooks.json").read_text())
+    bound: dict[str, list[str]] = {script: [] for script in scripts}
+    for event, groups in manifest.get("hooks", {}).items():
+        for command in _group_command_strings(groups):
+            for script in scripts:
+                if command.endswith(f"/{script}"):
+                    bound[script].append(event)
+    return bound
+
+
+def _group_command_strings(groups: list[dict[str, Any]]) -> list[str]:
+    """Flatten one event's hook groups into the command strings that name scripts."""
+    commands: list[str] = []
+    for group in groups:
+        for entry in group.get("hooks", []):
+            command = entry.get("command", "")
+            if isinstance(command, str) and command:
+                commands.append(command)
+    return commands
+
+
+def _assert_echoes_bound_event(res: Results, script: str, event: str) -> None:
+    got = _context(
         res,
         script,
         label="Coordinator-Codex",
-        stdin=json.dumps({"hook_event_name": "Stop"}),
+        stdin=json.dumps({"hook_event_name": event}),
     )
-    if unknown is not None:
-        res.check(unknown[0] == "UserPromptSubmit", "unsupported event degrades to harmless default")
+    if got is not None:
+        res.check(
+            got[0] == event,
+            f"{script} emits its manifest-bound event {event}",
+            f"got {got[0]!r} — the emitted tag has desynced from hooks.json wiring",
+        )
 
 
 def main() -> int:
@@ -261,6 +307,7 @@ def main() -> int:
     check_exact_fixed_output(res)
     check_step_zero_async_clause_deliberately_absent(res)
     check_shared_event_echo(res)
+    check_manifest_bound_events_echo(res)
     return res.finish()
 
 

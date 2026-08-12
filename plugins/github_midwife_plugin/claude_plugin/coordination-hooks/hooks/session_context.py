@@ -49,6 +49,24 @@ def _spool_path() -> Path:
     return _journal.state_dir() / "spool" / "export.json"
 
 
+def _checkout_copy_owns_emission() -> bool:
+    """Two-rung emission dedupe (2026-08-11): when the project checkout carries
+    its OWN memory_passthrough emitter, that copy owns the project's emission
+    and any other running copy (the vendored plugin copy, wired user-scope)
+    stays silent -- otherwise a checkout wired both ways pays the entire
+    HYDRATE/DRAIN block twice on every session start, citing two divergent
+    sibling-script paths. The self-comparison keeps this guard copy-agnostic:
+    the checkout copy is never silenced by its own existence, so the same
+    function body ships verbatim in both copies (parity guard)."""
+    checkout_copy = (
+        Path(_PROJECT_DIR) / ".claude" / "hooks" / "memory_passthrough" / "session_context.py"
+    )
+    try:
+        return checkout_copy.is_file() and checkout_copy.resolve() != Path(__file__).resolve()
+    except OSError:
+        return False
+
+
 def _hydrate_instructions(pending: int, origin_tag: str, spool: str) -> str:
     return (
         "MEMORY PASSTHROUGH (this local memory dir is a disposable projection of the homunculus's "
@@ -102,6 +120,8 @@ def main() -> int:
         event = payload.get("hook_event_name") if isinstance(payload, dict) else None
         if not _journal.memory_dir().exists():
             return 0  # bare/no-memory session: emit nothing
+        if _checkout_copy_owns_emission():
+            return 0  # the checkout's own copy emits for this project
         pending = _journal.pending_count()
         if event == "SessionStart":
             _emit("SessionStart", _hydrate_instructions(

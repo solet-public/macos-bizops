@@ -26,6 +26,42 @@ function diagnostic(message) {
   process.stderr.write(`${NOTE_PREFIX} ${message}\n`);
 }
 
+// BOUNDED WAIT (ported 2026-08-12 from claude_plugin's wake_waiter.py, where
+// it landed 2026-08-09). The wait is capped instead of inheriting the CLI's
+// own ~23.9h default: a Stop hook that blocks for the CLI's full default
+// holds this session's turn boundary for the whole quiet stretch — starving
+// any host-side machinery that needs to observe the session idle, and
+// leaving a near-day-long child running for a session that may have nothing
+// to say. The cap stays inside the ~1h prompt-cache TTL so a quiet session
+// releases its boundary while still warm; a delivery still wakes the
+// session immediately — the cap only bounds the QUIET case. Override
+// per-session with AGENT_WAKE_MAX_WAIT_S; a malformed or non-positive
+// override is announced on stderr and falls back to the default — never
+// silently, and raw environment text never reaches the argv.
+const DEFAULT_MAX_WAIT_S = 2400;
+const MAX_WAIT_ENV = "AGENT_WAKE_MAX_WAIT_S";
+
+function resolveMaxWaitS() {
+  const raw = (process.env[MAX_WAIT_ENV] || "").trim();
+  if (!raw) {
+    return DEFAULT_MAX_WAIT_S;
+  }
+  if (!/^-?[0-9]+$/.test(raw)) {
+    diagnostic(
+      `${MAX_WAIT_ENV}=${JSON.stringify(raw)} is not an integer; using ${DEFAULT_MAX_WAIT_S}s`
+    );
+    return DEFAULT_MAX_WAIT_S;
+  }
+  const value = parseInt(raw, 10);
+  if (value <= 0) {
+    diagnostic(
+      `${MAX_WAIT_ENV}=${value} is not positive; using ${DEFAULT_MAX_WAIT_S}s`
+    );
+    return DEFAULT_MAX_WAIT_S;
+  }
+  return value;
+}
+
 function readStopPayload() {
   let value;
   try {
@@ -80,7 +116,7 @@ if (!sessionId || !cli || (transport && transport !== "watch")) {
 
 let child;
 try {
-  child = spawn(cli, ["wake"], {
+  child = spawn(cli, ["wake", "--max-wait", String(resolveMaxWaitS())], {
     shell: false,
     stdio: ["ignore", "ignore", "ignore"],
   });

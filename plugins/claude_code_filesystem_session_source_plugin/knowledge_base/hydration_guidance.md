@@ -12,7 +12,7 @@ Embedding Description: Operator-facing pitch and setup steps for ingesting Claud
 
 With this plugin present but not wired up, the homunculus has zero visibility into its own conversation history — no `search_sessions`, no `search_event_content`, no cross-session recall, and the homunculus-first "ask the homunculus what happened" pattern this platform runs on has nothing to search. Every session with it starts from a blank slate.
 
-Enabling this means the homunculus reads your local Claude Code session transcript files (`~/.claude/projects/<encoded_cwd>/<session_id>.jsonl`, one per session, on THIS machine). Nothing leaves the machine, but it is real filesystem access to your own conversation history, and that is exactly why it's opt-in rather than on by default. Ask before wiring it up: "Right now this homunculus can't recall anything about past conversations, even the one you're having right now once it ends. I can set up ingestion of your Claude Code session transcripts so it can search its own history — that means reading your local `~/.claude/projects/` files. Want this set up?"
+Enabling this means the homunculus reads your local Claude Code session transcript files (`~/.claude/projects/<encoded_cwd>/<session_id>.jsonl`, one per session, on THIS machine). Nothing leaves the machine, but it is real filesystem access to your own conversation history, and that is exactly why it needs an explicit yes before wiring. Consent-gated is not the same as optional: this is a CORE capability of the platform — the deployment report card tracks it until configured. Ask before wiring it up: "Right now this homunculus can't recall anything about past conversations, even the one you're having right now once it ends. I can set up ingestion of your Claude Code session transcripts so it can search its own history — that means reading your local `~/.claude/projects/` files. Want this set up?"
 
 ## Setup
 
@@ -30,4 +30,4 @@ MCP.
 
 If the operator also uses Codex, see `plugins/codex_filesystem_session_source_plugin/knowledge_base/hydration_guidance.md` for the equivalent source rows. The shared setup is `ledger_allowed_roots`, not a session-ledger service binding.
 
-On decline: stop, no partial wiring. An empty session ledger is a fully supported, privacy-preserving steady state, not a broken one.
+On decline: stop, no partial wiring — the consent boundary is real and a no is respected. But state what it means, and keep it visible: without ingestion this homunculus has no session memory at all, and the platform treats ledger functionality as core correctness, not an optional extra (operator ruling 2026-08-02, quoted in the hydration runbook's ingestion disclosure). The deployment report card (`plugins/github_midwife_plugin/knowledge_base/08_deployment_report_card.md`) carries the decline as an unconfigured core row on every future card; re-offer at natural moments rather than silently accepting the gap as permanent.
