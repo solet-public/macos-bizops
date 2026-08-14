@@ -1,7 +1,7 @@
 # Radon-MI tracked-debt register.
 #
 # File paths whose reformed-MI rank C is acknowledged and deferred to
-# the post-AWS-homunculus cycle. Operator decision: 2026-05-25.
+# the post-AWS-solet cycle. Operator decision: 2026-05-25.
 # Tracking: Task #74.
 #
 # Per `workbench/2026-05-25_plugin_god_class_remediation.md`

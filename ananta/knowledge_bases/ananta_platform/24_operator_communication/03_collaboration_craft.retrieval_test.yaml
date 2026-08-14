@@ -17,7 +17,7 @@ forbidden_queries:
   # naturally at rank 2 behind the owner for the owner's broadest phrasing, so
   # the forbidden probe uses format-specific vocabulary the owner alone carries.
   - "the eight parts of a decision brief and its deadline default"   # 01_operator_decision_briefs owns this
-  - "homunculus charter template platform constant"     # 02_homunculus_charter_template owns this
+  - "solet charter template platform constant"     # 02_solet_charter_template owns this
   - "vault credential storage conventions"              # the vault/address-book KB section owns this
 
 min_rank: 3

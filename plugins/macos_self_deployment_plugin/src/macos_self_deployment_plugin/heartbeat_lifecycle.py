@@ -353,7 +353,7 @@ def reconcile_pending_finisher(
       record for the NEW active color.
     * ``active_instance_id != self_instance_id`` → ``SKIPPED_NOT_ACTIVE``
       (B2·2 fence): ONLY the router-active instance finishes a swap; any other
-      same-homunculus heartbeat leaves the record untouched.
+      same-solet heartbeat leaves the record untouched.
     * ``current_release != record.candidate_release_id`` →
       ``SKIPPED_NOT_DURABLE`` (B2·1): the record is inert until ``current``
       actually names the candidate — a tick in the ``{record-write → swap}``

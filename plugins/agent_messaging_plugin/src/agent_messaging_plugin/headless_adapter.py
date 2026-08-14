@@ -10,7 +10,7 @@ send/turn semantics).
 EPHEMERAL BY DESIGN, NOT PERSISTED (mirrors
 ``macos_coding_agent_session_plugin.bridge_tracker``'s proven "no persistence
 across plugin restarts" posture): the ``host_ref -> Popen`` map lives in this
-driver INSTANCE's memory only. A homunculus restart loses that map even
+driver INSTANCE's memory only. A solet restart loses that map even
 though the OS process may survive as an orphan (``start_new_session=True``
 detaches it from the parent's process group on purpose — see ``shutdown()``).
 So ``driver_channel()`` correctly returns ``None`` for any host_ref this
@@ -91,7 +91,7 @@ def _resolve_default_cwd() -> Path:
 
     Prefers ``APP_HOME``'s parent (the shared ``<clone>/profile`` every
     colour is launched with -- ``cli.py`` bakes ``--app-home`` into the env
-    var) over a bare ``Path.cwd()``: the running homunculus process's own OS
+    var) over a bare ``Path.cwd()``: the running solet process's own OS
     working directory has no guaranteed relationship to the checkout at all
     (observed live: a deployed colour's cwd was ``~/.ananta/runtime``, a pure
     state/spool directory with no ``.mcp.json`` or source in it). Mirrors
@@ -446,7 +446,7 @@ class HeadlessHostDriver:
         self,
         *,
         claude_bin: str | None = None,
-        homunculus_name: str | None = None,
+        solet_name: str | None = None,
         permission_mode: str | None = None,
         transport: str | None = None,
         mcp_config_path: Path | None = None,
@@ -464,9 +464,9 @@ class HeadlessHostDriver:
             claude_bin if claude_bin is not None
             else shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
         )
-        self._homunculus_name = (
-            homunculus_name if homunculus_name is not None
-            else os.environ.get("HOMUNCULUS_NAME") or ""
+        self._solet_name = (
+            solet_name if solet_name is not None
+            else os.environ.get("SOLET_NAME") or ""
         )
         self._permission_mode = (
             permission_mode if permission_mode is not None
@@ -526,9 +526,9 @@ class HeadlessHostDriver:
                 f"shutil.which, then {self._claude_bin!r}) — install Claude "
                 "Code or pass claude_bin explicitly.",
             )
-        if not self._homunculus_name:
+        if not self._solet_name:
             remedies.append(
-                "HOMUNCULUS_NAME is not set — the spawned process cannot "
+                "SOLET_NAME is not set — the spawned process cannot "
                 "discover its bridge port without it.",
             )
         if not (permission_mode or self._permission_mode):
@@ -563,19 +563,19 @@ class HeadlessHostDriver:
         allowed_tools: tuple[str, ...], transport: str,
     ) -> dict[str, str]:
         env = dict(os.environ)
-        env["HOMUNCULUS_NAME"] = self._homunculus_name
+        env["SOLET_NAME"] = self._solet_name
         env["AGENT_IDENTITY"] = "claude_code"
         env["AGENT_INSTANCE_ID"] = agent_instance_id
         env["AGENT_SESSION_ID"] = agent_session_id
         env["AGENT_SESSION_LABEL"] = label
         # Deaf-wake fix (2026-08-08): MUST be the wake CLI's own binary name
-        # ("homunculus"), never self._homunculus_name (the homunculus
-        # INSTANCE name, e.g. "myhomunculus") -- same defect, same fix, as
+        # ("solet"), never self._solet_name (the solet
+        # INSTANCE name, e.g. "mysolet") -- same defect, same fix, as
         # tmux_adapter.py's identical _env_pairs bug (measured together:
-        # `which <instance-name>` fails, `which homunculus` resolves). wake_waiter.py
+        # `which <instance-name>` fails, `which solet` resolves). wake_waiter.py
         # runs `subprocess.run([$AGENT_WAKE_CLI, "wake"])`; the instance
         # name is not a resolvable command.
-        env["AGENT_WAKE_CLI"] = "homunculus"
+        env["AGENT_WAKE_CLI"] = "solet"
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
         # caller-resolved (spec's policy-filled value, or this driver's
         # constructor/charter-default floor -- see spawn()) -- never
@@ -624,7 +624,7 @@ class HeadlessHostDriver:
         step_zero_reminder.py hooks -- all scoped to THIS spawned worker
         only, never the shared ``.claude/settings.json`` (that would
         double-fire the wake hook for the seat, which already gets the
-        equivalent JS hooks via the user-scope coordination-hooks@<homunculus>
+        equivalent JS hooks via the user-scope coordination-hooks@<solet>
         plugin). Merges with (does not replace) whatever
         ``--setting-sources project`` loads (e.g. the git-controller
         gate), per the standing "--settings MERGES" trap note.
@@ -656,7 +656,7 @@ class HeadlessHostDriver:
         heartbeat_hook_path = resolved_hooks["heartbeat_report_alive.py"]
         rotation_due_hook_path = resolved_hooks["rotation_due_watch.py"]
         # Deaf-wake fix (2026-08-08): project-vendored Python ports of
-        # coordination-hooks@<homunculus>'s four JS hooks, wired here (this
+        # coordination-hooks@<solet>'s four JS hooks, wired here (this
         # adapter's own generated --settings blob) rather than the shared
         # project-scope .claude/settings.json, specifically so this does
         # not double-fire the wake for the seat -- the seat already gets
@@ -680,7 +680,7 @@ class HeadlessHostDriver:
                 "SessionStart": [
                     {"hooks": [{"type": "command", "command": f"python3 {capture_hook_path}"}]},
                     {
-                        # Matches coordination-hooks@<homunculus>'s own hooks.json
+                        # Matches coordination-hooks@<solet>'s own hooks.json
                         # matcher for this event exactly (fidelity, not a
                         # new choice) -- check_messages_reminder.py also
                         # fires here (in addition to UserPromptSubmit
@@ -784,7 +784,7 @@ class HeadlessHostDriver:
         # this stays as-is until a measurement or an adopter report says
         # otherwise. If that arrives, import the tmux predicate rather than
         # writing a second one.
-        cmd += ["--dangerously-load-development-channels", f"server:{self._homunculus_name}"]
+        cmd += ["--dangerously-load-development-channels", f"server:{self._solet_name}"]
         model = str(spec.get("model") or "")
         if model:
             cmd += ["--model", model]

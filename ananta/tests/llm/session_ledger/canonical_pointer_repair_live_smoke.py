@@ -8,7 +8,7 @@ row-lock for a deterministic-survivor + conditional ``update_state``; and
 ``lift_canonical_pointer_for_duplicate_sessions`` LOOPS (recount + re-lift) until
 no duplicate group remains — the convergence the dropped-lock soundness rests on.
 
-WHY A SANDBOX TABLE (not the live homunculus schema): the repair exists for the
+WHY A SANDBOX TABLE (not the live solet schema): the repair exists for the
 PRE-INDEX state — multiple canonical rows sharing a ``(vendor, external_session_id)``
 pair. The live schema's partial-unique index
 ``idx_session_canonical_one_per_vendor_pair`` makes that state UNCONSTRUCTABLE.

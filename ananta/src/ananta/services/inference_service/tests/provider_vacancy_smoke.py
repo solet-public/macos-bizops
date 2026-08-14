@@ -21,7 +21,7 @@ The guarantees this file enforces (INF-03, operator-ruled 2026-07-03):
    typed vacancy error on a VACANT box: loud, never a silent turn loss.
 5. Bound-name and env-override construction behave exactly as before.
 
-Offline: fake plugin-manager / plugin / state collaborators, no live homunculus.
+Offline: fake plugin-manager / plugin / state collaborators, no live solet.
 
 Run from repo root:
     .venv/bin/python3 ananta/src/ananta/services/inference_service/tests/provider_vacancy_smoke.py

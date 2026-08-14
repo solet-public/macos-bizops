@@ -23,7 +23,7 @@ Pins (all four quadrants of the placement):
   deferral is exactly one class wide.
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 ananta/tests/lifecycle_management_service/preflight_entry_point_deferral_smoke.py
+    SOLET_NAME=<name> .venv/bin/python3 ananta/tests/lifecycle_management_service/preflight_entry_point_deferral_smoke.py
 """
 
 from __future__ import annotations

@@ -11,7 +11,7 @@ Pins the spine that makes the L1 roster multi-ecosystem-aware without forking it
     single-stack field would false-skip eslint on pure JS (the honesty failure R7 closes).
   * ``run_all``: a STACK scanner whose stacks miss the detected set skips execution and
     ledgers a distinct ``not_applicable:`` record (roster never forks, Y stays full);
-    it executes when the stacks intersect. The homunculus's self-vet is ``{PYTHON}`` so the TS
+    it executes when the stacks intersect. The solet's self-vet is ``{PYTHON}`` so the TS
     scanners self-skip with no self/foreign special-casing.
   * The report header carries a ``- **Stacks:** …`` provenance line.
 

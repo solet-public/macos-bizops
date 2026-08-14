@@ -70,7 +70,7 @@ class ServiceTransitionCoordinator:
         # applies. The bootstrap path runs on a separate plugin_manager
         # instance whose _allowed_plugins is uninitialized, so omitting this
         # arg loads every installed entry point. 2026-05-31 incident: that
-        # path loaded rds_pgvector_service_plugin into a local homunculus and
+        # path loaded rds_pgvector_service_plugin into a local solet and
         # cratered boot through the state-service upsert cascade.
         self.plugin_manager.discover_plugins(
             allowed_plugins=self._load_allowed_plugins(),

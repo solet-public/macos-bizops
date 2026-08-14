@@ -254,7 +254,7 @@ def _check_real_profile_a_allowlist_loads() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     profile_path = (
         repo_root / "plugins" / "github_midwife_plugin" / "knowledge_base"
-        / "profile_templates" / "macos-free-homunculus.yaml"
+        / "profile_templates" / "macos-free-solet.yaml"
     )
     allowlist = load_plugin_allowlist(profile_path)
     _check(

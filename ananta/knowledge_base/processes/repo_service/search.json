@@ -13,6 +13,6 @@
   "error_processor_customizations": {
     "action_context": "Running a repo-root-confined ripgrep content search with server-fixed flags over the platform worktree.",
     "error_interpretation": "RepoToolError: ripgrep (rg) is not installed, or the search timed out — the verb never silent-falls-back to a slower scan (B-N2). A search that finds nothing returns hit_count=0 (not an error).",
-    "recovery_guidance": "For RepoToolError (rg absent): install ripgrep on the homunculus host. For a timeout: narrow the query or scope with path_glob. For zero hits: broaden the query or check the path_glob."
+    "recovery_guidance": "For RepoToolError (rg absent): install ripgrep on the solet host. For a timeout: narrow the query or scope with path_glob. For zero hits: broaden the query or check the path_glob."
   }
 }

@@ -46,7 +46,7 @@ def _validate_schema(payload: dict[str, Any]) -> str | None:
 def _coerce_manifest(payload: dict[str, Any]) -> Manifest:
     return Manifest(
         schema_version=int(payload["schema_version"]),
-        homunculus_name=str(payload["homunculus_name"]),
+        solet_name=str(payload["solet_name"]),
         universal_files=tuple(payload["universal"]["files"]),
         universal_directories=tuple(payload["universal"]["directories"]),
         platform_managed_directories=tuple(payload["platform_managed"]["directories"]),
@@ -73,6 +73,13 @@ def load_manifest(manifest_path: Path) -> tuple[Manifest | None, str | None]:
         return None, f"root_manifest.yaml is not parseable YAML: {exc}"
     if not isinstance(raw, dict):
         return None, "root_manifest.yaml top-level must be a mapping"
+    if "homunculus_name" in raw and "solet_name" not in raw:
+        return None, (
+            "root_manifest.yaml carries the pre-rename `homunculus_name:` key — "
+            "this deployment is un-migrated (P2 rename, 2026-08-13, no aliases). "
+            "Run deployment/scripts/migrate_to_solet.py or the seed-update "
+            "runbook's migration step, then retry."
+        )
     schema_err = _validate_schema(raw)
     if schema_err is not None:
         return None, schema_err
@@ -169,7 +176,7 @@ def classify_root_entries(
         return Classification(
             manifest_path=manifest_path,
             repo_root=repo_root,
-            homunculus_name=None,
+            solet_name=None,
             schema_validation_error=error,
         )
 
@@ -202,7 +209,7 @@ def classify_root_entries(
     return Classification(
         manifest_path=manifest_path,
         repo_root=repo_root,
-        homunculus_name=manifest.homunculus_name,
+        solet_name=manifest.solet_name,
         unknown_entries=tuple(unknown),
         missing_universal=tuple(missing_universal),
         missing_sanctioned=tuple(missing_sanctioned),

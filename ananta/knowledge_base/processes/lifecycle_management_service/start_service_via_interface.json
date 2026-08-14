@@ -2,7 +2,7 @@
   "process_key": "service_interface::lifecycle_management_service::start_service_via_interface",
   "display_name": "Start Service Via Interface",
   "description": "Start a service plugin with specified configuration",
-  "embedding_description": "Bring up a service plugin at runtime. Boot a background service that was not started at platform startup. Initialize and start a named service with its config. Spin up a worker or daemon plugin on demand. Launch a service interface implementation. Bring an inactive service online without restarting the homunculus.",
+  "embedding_description": "Bring up a service plugin at runtime. Boot a background service that was not started at platform startup. Initialize and start a named service with its config. Spin up a worker or daemon plugin on demand. Launch a service interface implementation. Bring an inactive service online without restarting the solet.",
   "result_processor_customizations": {
     "action_label": "Service started",
     "result_type": "service_lifecycle",

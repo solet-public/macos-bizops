@@ -6,7 +6,7 @@ This plugin wears three hats (see plugin.yaml for the headline summary):
    ``core__agent_message`` schema host for peer messaging and the
    session-ledger's unscoped thread/message reads.
 2. **IOInterfacePlugin** — ``start_interface`` / ``stop_interface`` /
-   ``post_message`` / ``get_supported_capabilities``.  The homunculus
+   ``post_message`` / ``get_supported_capabilities``.  The solet
    delivers prose to Claude Code (or any MCP-connected peer) through this surface.
 3. **Bridge service** — FastAPI HTTP API on a dynamically allocated
    port, peer registry with multi-instance routing, bridge sessions
@@ -327,7 +327,7 @@ _INFERENCE_TOMBSTONE_CAP = 2048
 _SERVER_START_TIMEOUT_S = 10.0
 _SERVER_JOIN_TIMEOUT_S = 5.0
 
-# The plugin whose presence in the active manifest means "this homunculus
+# The plugin whose presence in the active manifest means "this solet
 # has a blue-green router" (D11 ruling R1). Must match
 # macos_self_deployment_plugin.constants.PLUGIN_NAME — duplicated as a
 # plain string rather than cross-plugin-imported (no plugin in this
@@ -335,14 +335,14 @@ _SERVER_JOIN_TIMEOUT_S = 5.0
 _ROUTER_PLUGIN_NAME = "macos_self_deployment_plugin"
 
 # Vault entry holding the HMAC secret that signs Streamable HTTP MCP
-# bearer tokens (HS256). Generated on first homunculus boot if absent;
+# bearer tokens (HS256). Generated on first solet boot if absent;
 # never rotated except by explicit operator action (vault entry
-# replacement + homunculus restart invalidates all outstanding tokens, which
+# replacement + solet restart invalidates all outstanding tokens, which
 # is the expected one-time disruption window). See
 # ``workbench/2026-05-24_hmac_bearer_tokens_design.md`` §3.
 #
-# Scoped per master plan §3.3.1: <homunculus>.<plugin>.<credential>.
-# Built at module-import time from HOMUNCULUS_NAME; fast-fails if unset.
+# Scoped per master plan §3.3.1: <solet>.<plugin>.<credential>.
+# Built at module-import time from SOLET_NAME; fast-fails if unset.
 # Per W-ADDRESS-BOOK-RENAME §A.2.4 path b — write under the scoped name
 # directly so W-VAULT-CALLER-ENFORCE Tier 2 doesn't need a compat-mode
 # entry for this row. The lazy-create path in `_load_or_create_bearer_hmac_key`
@@ -371,10 +371,10 @@ def _coerce_takeover(raw: object) -> bool:
 
 
 def _bearer_hmac_key_vault_name() -> str:
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "agent_messaging_plugin: HOMUNCULUS_NAME env var is required to "
+            "agent_messaging_plugin: SOLET_NAME env var is required to "
             "resolve the scoped bearer_token_hmac_key vault entry name.",
         )
     return f"{name}.agent_messaging_plugin.bearer_token_hmac_key"
@@ -442,7 +442,7 @@ def _vault_retrieve_value(vault: Any, name: str) -> str | None:
 
 
 def _load_or_create_bearer_hmac_key(vault: Any) -> bytes:
-    """Return the homunculus's HMAC bearer-signing secret as raw bytes.
+    """Return the solet's HMAC bearer-signing secret as raw bytes.
 
     Reads from the vault under :data:`_BEARER_HMAC_KEY_VAULT_NAME` via
     :func:`_vault_retrieve_value`; on first boot the entry is absent so
@@ -486,7 +486,7 @@ class _BridgeRuntimeConfig:
     # Preferred bridge HTTP port. ``None`` (default) -> ``find_available_port``
     # returns an OS-assigned port via ``bind(0)``. Setting this to a
     # fixed value (via the ANANTA_PLUGIN_AGENT_MESSAGING_PLUGIN_PORT env
-    # var or plugin yaml) pins the port — used by dry-run homunculus
+    # var or plugin yaml) pins the port — used by dry-run solet
     # deployments that need a stable host port mapping (8001:8000) for
     # first-boot orchestration. The port is in-process only: Slice 3 of
     # the bridge-port-routing design eliminated the per-color port file
@@ -1376,7 +1376,7 @@ class AgentMessagingPlugin(
         """M2.2 choreography, run OFF the dispatch path: fetch this origin's
         memory records once, build the fact index, rank the caller-supplied
         head lines. Raises ``VerbError`` (``memory_service_unavailable``,
-        ``homunculus_name_unset``, ``memory_fetch_failed``) on any precondition
+        ``solet_name_unset``, ``memory_fetch_failed``) on any precondition
         this job cannot proceed without — propagates to
         :func:`_process_choreography_job`, which fails the job with that
         code/message, same contract as rotate/restart."""
@@ -1394,18 +1394,18 @@ class AgentMessagingPlugin(
         )
         if self._memory_service is None:
             raise VerbError(
-                "memory_service_unavailable", "memory_service is not bound on this homunculus.",
+                "memory_service_unavailable", "memory_service is not bound on this solet.",
             )
-        homunculus_name = _resolve_homunculus_name_for_memory_tags()
-        if not homunculus_name:
+        solet_name = _resolve_solet_name_for_memory_tags()
+        if not solet_name:
             raise VerbError(
-                "homunculus_name_unset",
-                "Could not resolve a homunculus name to scope the memory fetch to this "
-                "origin -- HOMUNCULUS_NAME is unset, root_manifest.yaml is unreadable or "
+                "solet_name_unset",
+                "Could not resolve a solet name to scope the memory fetch to this "
+                "origin -- SOLET_NAME is unset, root_manifest.yaml is unreadable or "
                 "still carries its unwritten placeholder, and CLAUDE_PROJECT_DIR is unset "
                 "(the final fallback needs it too).",
             )
-        fetch_result = self._memory_service.get_memories_by_tag(tag=origin_tag(homunculus_name))
+        fetch_result = self._memory_service.get_memories_by_tag(tag=origin_tag(solet_name))
         records = fetch_result.get("memories") if isinstance(fetch_result, dict) else None
         if not isinstance(records, list):
             raise VerbError(
@@ -1416,7 +1416,7 @@ class AgentMessagingPlugin(
         self._update_choreography_progress(
             job_manager, job_id, progress_percent=65, leg="build_index_and_rank",
         )
-        fact_index = build_fact_index(records, homunculus_name)
+        fact_index = build_fact_index(records, solet_name)
         report = build_curation_report(
             head_lines, fact_index,
             bottom_n=bottom_n, byte_budget=byte_budget, line_budget=line_budget,
@@ -2085,7 +2085,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         # v10 Control #2.C cutover: resolution authority is now the
         # agent_role_binding table (state-interface), not the address book. A
@@ -2370,7 +2370,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         # Fleet session-management Phase B, D1 (§2 rule 3, Architect ratification
         # #2): capture the PRE-release holder's agent_session_id so the
@@ -2549,7 +2549,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         req = _spawn_session_request_from_params(raw, format_directed_by(state.get("call_context")))
         req = _apply_spawn_session_policy(req, self._build_session_lifecycle_policy_config())
@@ -2617,7 +2617,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         req = LegislateRoleRequest(
             name=str(raw.get("name") or ""),
@@ -2693,7 +2693,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         req = CaptureLaneCharterRequest(
             lane_id=str(raw.get("lane_id") or ""),
@@ -2766,7 +2766,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         req = ArmSessionDependencyRequest(
             waiter_instance_id=str(raw.get("waiter_instance_id") or ""),
@@ -2811,7 +2811,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         result = lifecycle_drain_session_claude_mapping_spool(state_service)
         return _success_result(data=result)
@@ -2853,7 +2853,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         filters = {
             key: str(raw[key])
@@ -2918,7 +2918,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         result = lifecycle_build_budget_report(
             state_service,
@@ -2991,7 +2991,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         mappings = lifecycle_list_session_claude_mappings(state_service, agent_instance_id)
         return _success_result(data={"mappings": mappings})
@@ -3044,7 +3044,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         try:
             row = lifecycle_session_status(state_service, str(raw.get("agent_instance_id", "")))
@@ -3090,7 +3090,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         try:
             result = lifecycle_clear_session(
@@ -3133,7 +3133,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         try:
             result = lifecycle_compact_session(
@@ -3184,7 +3184,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         try:
             result = lifecycle_drive_session(
@@ -3246,7 +3246,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         grace_raw = raw.get("grace_seconds")
         try:
@@ -3292,7 +3292,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         try:
             result = lifecycle_retire_session(
@@ -3341,7 +3341,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         try:
             result = lifecycle_report_alive(
@@ -3407,7 +3407,7 @@ class AgentMessagingPlugin(
         if job_manager is None:
             return _failure_result(
                 code="async_job_manager_unavailable",
-                message="AsyncJobManager is not available on this homunculus.",
+                message="AsyncJobManager is not available on this solet.",
             )
         req = RotateSessionDispatchRequest(
             agent_instance_id=str(raw.get("agent_instance_id", "")),
@@ -3471,7 +3471,7 @@ class AgentMessagingPlugin(
         if job_manager is None:
             return _failure_result(
                 code="async_job_manager_unavailable",
-                message="AsyncJobManager is not available on this homunculus.",
+                message="AsyncJobManager is not available on this solet.",
             )
         req = RestartSessionDispatchRequest(
             agent_instance_id=str(raw.get("agent_instance_id", "")),
@@ -3526,7 +3526,7 @@ class AgentMessagingPlugin(
         if job_manager is None:
             return _failure_result(
                 code="async_job_manager_unavailable",
-                message="AsyncJobManager is not available on this homunculus.",
+                message="AsyncJobManager is not available on this solet.",
             )
         try:
             result = lifecycle_check_choreography_job_status(
@@ -3593,7 +3593,7 @@ class AgentMessagingPlugin(
         if job_manager is None:
             return _failure_result(
                 code="async_job_manager_unavailable",
-                message="AsyncJobManager is not available on this homunculus.",
+                message="AsyncJobManager is not available on this solet.",
             )
         head_lines_raw = raw.get("head_lines")
         head_lines = tuple(str(x) for x in head_lines_raw) if isinstance(head_lines_raw, list) else ()
@@ -3658,18 +3658,18 @@ class AgentMessagingPlugin(
         if self._memory_service is None:
             return _failure_result(
                 code="memory_service_unavailable",
-                message="memory_service is not bound on this homunculus.",
+                message="memory_service is not bound on this solet.",
             )
-        homunculus_name = _resolve_homunculus_name_for_memory_tags()
-        if not homunculus_name:
+        solet_name = _resolve_solet_name_for_memory_tags()
+        if not solet_name:
             return _failure_result(
-                code="homunculus_name_unset",
-                message="Could not resolve a homunculus name to resolve a slug's slot tag "
-                "-- HOMUNCULUS_NAME is unset, root_manifest.yaml is unreadable or still "
+                code="solet_name_unset",
+                message="Could not resolve a solet name to resolve a slug's slot tag "
+                "-- SOLET_NAME is unset, root_manifest.yaml is unreadable or still "
                 "carries its unwritten placeholder, and CLAUDE_PROJECT_DIR is unset (the "
                 "final fallback needs it too).",
             )
-        tag = slug_to_slot_tag(homunculus_name, slug)
+        tag = slug_to_slot_tag(solet_name, slug)
         lookup = self._memory_service.get_memories_by_tag(tag=tag)
         matches = lookup.get("memories") if isinstance(lookup, dict) else None
         try:
@@ -3740,7 +3740,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         try:
             result = lifecycle_report_context_status(
@@ -3803,7 +3803,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         try:
             result = lifecycle_session_context_status(
@@ -3879,7 +3879,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         agent_session_id = self._claimant_session_id(agent_instance_id)
         holds = holds_role(state_service, name, agent_session_id)
@@ -3951,7 +3951,7 @@ class AgentMessagingPlugin(
         ._lift_inference_vertex_identity`` ONLY for a call dispatched through
         a registered bridge's ``process_call`` (``PlatformSurface
         ._build_process_call_trigger_data``). A caller arriving over an
-        unregistered route — a one-shot ``homunculus call`` from the local
+        unregistered route — a one-shot ``solet call`` from the local
         CLI, which stamps the DIFFERENT ``caller_attribution_*`` family
         instead (§34.6) — is refused loud with ``unregistered_route``. That
         family is deliberately NEVER consulted here, even as a fallback.
@@ -3976,7 +3976,7 @@ class AgentMessagingPlugin(
                 code="unregistered_route",
                 message=(
                     "peer_mark_role_covered requires a call dispatched through "
-                    "a registered bridge's process_call; a one-shot homunculus "
+                    "a registered bridge's process_call; a one-shot solet "
                     "call carries no registered-route identity to attest with."
                 ),
             )
@@ -3984,7 +3984,7 @@ class AgentMessagingPlugin(
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
-                message="state_service is not bound on this homunculus.",
+                message="state_service is not bound on this solet.",
             )
         agent_session_id = self._claimant_session_id(caller_instance_id)
         if not agent_session_id:
@@ -4176,9 +4176,9 @@ class AgentMessagingPlugin(
 
         Before this verb the ONLY read of the durable inbox was
         the ``GET .../peer/inbox`` bridge route, whose identity comes from the
-        CALLING bridge's peer registration. ``homunculus call`` opens a fresh,
+        CALLING bridge's peer registration. ``solet call`` opens a fresh,
         unregistered bridge, so a no-MCP session had no pull path at all —
-        streaming ``homunculus watch`` was the only receive, and a session
+        streaming ``solet watch`` was the only receive, and a session
         without a live watcher simply could not read its backlog.
 
         Identity is therefore an explicit argument, but a caller may only name
@@ -4199,7 +4199,7 @@ class AgentMessagingPlugin(
                 code="bridge.not_running",
                 message=(
                     "The agent messaging bridge is not active on this "
-                    "homunculus, so no inbox can be read. This is NOT an empty "
+                    "solet, so no inbox can be read. This is NOT an empty "
                     "inbox — start the interface and retry."
                 ),
             )
@@ -4230,7 +4230,7 @@ class AgentMessagingPlugin(
                     f"no live peer_binding for agent_session_id "
                     f"{agent_session_id!r}. This usually means this session's "
                     f"watcher or bridge is no longer registered — re-arm it "
-                    f"('<homunculus> watch --role <role>', or peer_register "
+                    f"('<solet> watch --role <role>', or peer_register "
                     f"over MCP) and retry. Read this as 'the reader is "
                     f"unknown', never as 'the reader has no mail': the "
                     f"messages are durable and still waiting. A wrong "
@@ -4262,7 +4262,7 @@ class AgentMessagingPlugin(
         parameters={},
         output_type="object",
         output_description=(
-            "A snapshot of every live peer registered on this homunculus: "
+            "A snapshot of every live peer registered on this solet: "
             "the sorted list of distinct agent_ids present, and per agent_id "
             "the list of its live instances (agent_instance_id, "
             "session_label, parent_pid, registered_at, created_at, "
@@ -4289,18 +4289,18 @@ class AgentMessagingPlugin(
     ) -> dict[str, Any]:
         """No-MCP peer enumeration — closes the peer-enumeration asymmetry.
 
-        WS-1a's ``peer_inbox`` gave a no-MCP session (``homunculus call``, no
+        WS-1a's ``peer_inbox`` gave a no-MCP session (``solet call``, no
         registered bridge) a way to read its OWN mail. It left a companion
         gap open: that same session had no way to see who ELSE was live —
         ``peer_list`` existed only as an MCP-bridge HTTP route and its
         Streamable/stdio MCP mirrors, all of which resolve identity from the
-        CALLING bridge's registration, something ``homunculus call`` never
+        CALLING bridge's registration, something ``solet call`` never
         has. This verb needs no such resolution: it is a global, unfiltered
         registry snapshot, identical for every caller regardless of identity
         — there is nothing to scope BY, so unlike ``peer_inbox`` it takes no
         arguments and does no per-caller lookup.
 
-        No fencing beyond "reached this homunculus at all": localhost is the
+        No fencing beyond "reached this solet at all": localhost is the
         existing trust boundary for enumerating peers on this MCP surface
         (the pre-existing route and tool have never required more), and this
         verb decides that explicitly rather than inheriting it silently —
@@ -4314,7 +4314,7 @@ class AgentMessagingPlugin(
                 code="bridge.not_running",
                 message=(
                     "The agent messaging bridge is not active on this "
-                    "homunculus, so no peer registry can be read. This is "
+                    "solet, so no peer registry can be read. This is "
                     "NOT an empty registry — start the interface and retry."
                 ),
             )
@@ -5011,7 +5011,7 @@ class AgentMessagingPlugin(
             return agent_instance_id in self._inference_provider_tombstones
 
     def _router_is_declared(self) -> bool:
-        """True if this homunculus's active manifest declares the router.
+        """True if this solet's active manifest declares the router.
 
         D11 ruling R1: the "router present" predicate is MANIFEST-DECLARED,
         never runtime-probed (live plugin registry start-order is a race;
@@ -5024,7 +5024,7 @@ class AgentMessagingPlugin(
         determined — an absent ``orchestrator_ref``/``APP_HOME`` or an
         absent manifest.yaml (``load_manifest_plugin_set`` returns
         ``None``, its "no gating" sentinel) means we cannot tell whether
-        the router is in this homunculus's topology, and D11's routerless
+        the router is in this solet's topology, and D11's routerless
         write path must never guess.
         """
         orchestrator = getattr(self, "orchestrator_ref", None)
@@ -5045,7 +5045,7 @@ class AgentMessagingPlugin(
             raise RuntimeError(
                 f"{self.name}: {app_home}/config/manifest.yaml is absent — "
                 "the D11 router-presence predicate cannot be determined "
-                "(never guessed). A homunculus without a manifest must "
+                "(never guessed). A solet without a manifest must "
                 "still declare its topology before the bridge can decide "
                 "whether it owns its own port-discovery file.",
             )
@@ -5709,7 +5709,7 @@ class AgentMessagingPlugin(
             max_promoted_tools=max_promoted,
         )
 
-    def _mint_session_id(self, homunculus_name: str) -> str:  # noqa: ARG002  # pyright: ignore[reportUnusedParameter]
+    def _mint_session_id(self, solet_name: str) -> str:  # noqa: ARG002  # pyright: ignore[reportUnusedParameter]
         if self._session_manager is None:
             raise RuntimeError(
                 f"{self.name}: session_manager not injected; "
@@ -5818,7 +5818,7 @@ class AgentMessagingPlugin(
     ) -> FastAPI:
         from fastapi import FastAPI  # noqa: PLC0415
         app = FastAPI(
-            title="Homunculus Bridge API",
+            title="Solet Bridge API",
             version="1.0.0",
         )
         # REL-05: stamp last_model_activity_at on every MODEL-INITIATED bridge
@@ -6439,7 +6439,7 @@ class AgentMessagingPlugin(
             peer_registry=peer_registry,
         )
         self._streamable_session_manager = session_manager
-        homunculus_name = _resolve_homunculus_name()
+        solet_name = _resolve_solet_name()
         router = build_streamable_router(
             bridge_manager=bridge_manager,
             peer_registry=peer_registry,
@@ -6452,7 +6452,7 @@ class AgentMessagingPlugin(
             resource_metadata_url=resource_metadata_url,
             cors_origins=bridge_config.streamable_cors_origins,
             path_aliases=(STREAMABLE_ALIAS_PATH,),
-            homunculus_name=homunculus_name,
+            solet_name=solet_name,
         )
         app.include_router(router)
         self._mount_oauth_routers(
@@ -7305,8 +7305,8 @@ def _as_work_class_tool_allowlists(value: object) -> dict[str, tuple[str, ...]]:
     return result
 
 
-def _resolve_homunculus_name() -> str:
-    """Return the homunculus identity from ``$HOMUNCULUS_NAME``.
+def _resolve_solet_name() -> str:
+    """Return the solet identity from ``$SOLET_NAME``.
 
     Single source of truth across the platform: every plugin that
     surfaces a deployment label to external clients reads the same
@@ -7314,21 +7314,21 @@ def _resolve_homunculus_name() -> str:
     dev mode); downstream callers apply their own fallback.
     """
     import os  # noqa: PLC0415 — kept local so the import is greppable here
-    return os.environ.get("HOMUNCULUS_NAME", "").strip()
+    return os.environ.get("SOLET_NAME", "").strip()
 
 
 # R4 seed-packaging audit, Package B (2026-08-10): root_manifest.yaml's own
-# unwritten placeholder for `homunculus_name:` -- the midwife rewrites this
+# unwritten placeholder for `solet_name:` -- the midwife rewrites this
 # field ONLY at genesis, so a raw/pre-genesis checkout keeps this exact
 # literal, which rung 2 below must skip rather than treat as a real name.
-_ROOT_MANIFEST_PLACEHOLDER = "homunculus"
+_ROOT_MANIFEST_PLACEHOLDER = "solet"
 
 
-def _resolve_homunculus_name_for_memory_tags() -> str:
+def _resolve_solet_name_for_memory_tags() -> str:
     """Three-rung origin-resolution ladder for memory-tag scoping ONLY.
 
-    SEPARATE from :func:`_resolve_homunculus_name` by deliberate ruling
-    (coordinator seat, arm-8491e1ba, 2026-08-10): ``_resolve_homunculus_name`` has
+    SEPARATE from :func:`_resolve_solet_name` by deliberate ruling
+    (coordinator seat, arm-8491e1ba, 2026-08-10): ``_resolve_solet_name`` has
     an unrelated third caller (the MCP streamable router's own identity
     label) whose consumers were never traced, so it stays byte-identical
     here -- containment over elegance on mint night. This function is
@@ -7337,7 +7337,7 @@ def _resolve_homunculus_name_for_memory_tags() -> str:
     resolvers, after tracing the router-identity string's actual
     consumers, is a named post-mint backlog item, not this change.
 
-    The SAME ladder as the hooks' own ``_journal.homunculus_name()``
+    The SAME ladder as the hooks' own ``_journal.solet_name()``
     (``.claude/hooks/memory_passthrough/_journal.py`` and its vendored
     plugin copy), a parity test asserts the two agree on OUTPUT across a
     matrix of env/file/dirname combinations -- never on implementation
@@ -7345,21 +7345,21 @@ def _resolve_homunculus_name_for_memory_tags() -> str:
     while the hooks' side runs outside it (a minimal regex line-scan,
     since PyYAML is a venv-only dependency there, measured 2026-08-10).
 
-    1. ``HOMUNCULUS_NAME`` env var, if set.
-    2. ``root_manifest.yaml``'s own ``homunculus_name:`` field, placeholder-
+    1. ``SOLET_NAME`` env var, if set.
+    2. ``root_manifest.yaml``'s own ``solet_name:`` field, placeholder-
        skipped.
-    3. ``CLAUDE_PROJECT_DIR``-basename -- :func:`_resolve_homunculus_name`'s
+    3. ``CLAUDE_PROJECT_DIR``-basename -- :func:`_resolve_solet_name`'s
        existing sole behavior, preserved here as the final fallback.
 
     Empty string only when every rung is exhausted (no env var AND no
     resolvable ``CLAUDE_PROJECT_DIR``) -- callers apply their own
     fail-loud contract on an empty result, same as the existing function.
     """
-    import os  # noqa: PLC0415 — kept local, mirrors _resolve_homunculus_name's own style
+    import os  # noqa: PLC0415 — kept local, mirrors _resolve_solet_name's own style
 
     import yaml  # noqa: PLC0415
 
-    env_name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    env_name = os.environ.get("SOLET_NAME", "").strip()
     if env_name:
         return env_name
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
@@ -7368,7 +7368,7 @@ def _resolve_homunculus_name_for_memory_tags() -> str:
     try:
         with open(os.path.join(project_dir, "root_manifest.yaml"), encoding="utf-8") as handle:
             data = yaml.safe_load(handle)
-        candidate = str((data or {}).get("homunculus_name", "")).strip()
+        candidate = str((data or {}).get("solet_name", "")).strip()
         if candidate and candidate != _ROOT_MANIFEST_PLACEHOLDER:
             return candidate
     except (OSError, yaml.YAMLError):

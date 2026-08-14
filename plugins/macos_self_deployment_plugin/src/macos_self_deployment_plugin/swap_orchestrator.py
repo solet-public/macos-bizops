@@ -20,7 +20,7 @@ mirroring the cloud sibling's pattern in
 ``plugins/aws_self_deployment_plugin/.../deployer.py``.
 
 The spawn helper is also pulled out so smokes can override it with a
-fake that records the call but doesn't actually launch another the homunculus.
+fake that records the call but doesn't actually launch another the solet.
 """
 
 from __future__ import annotations
@@ -38,16 +38,16 @@ from ananta.core.root_manifest.report import format_report
 from ananta.core.runtime import get_runtime_dir
 from ananta.interfaces.lifecycle_result_types import RestartResult, RestartStatus
 
-from macos_self_deployment_plugin.child_spawn import spawn_homunculus_child
+from macos_self_deployment_plugin.child_spawn import spawn_solet_child
 from macos_self_deployment_plugin.constants import (
     AUDIT_TOKEN_PREFIX,
     COLOR_BLUE,
     COLOR_GREEN,
     DEFAULT_GREEN_READY_POLL_INTERVAL_SECONDS,
     DEFAULT_GREEN_READY_TIMEOUT_SECONDS,
-    ENV_HOMUNCULUS_COLOR,
-    ENV_HOMUNCULUS_INSTANCE_ID,
-    ENV_HOMUNCULUS_RELEASE_ID,
+    ENV_SOLET_COLOR,
+    ENV_SOLET_INSTANCE_ID,
+    ENV_SOLET_RELEASE_ID,
     PLUGIN_NAME,
     STATUS_FAILED,
     STATUS_QUEUED,
@@ -215,7 +215,7 @@ def _preflight_root_manifest(
     or schema violation; ``None`` to proceed.
 
     No-op when ``root_manifest.yaml`` is absent (early-cycle bootstrap
-    window — F1 IMPL has not landed at every homunculus yet).
+    window — F1 IMPL has not landed at every solet yet).
     """
     repo_root = _resolve_project_root(app_home).resolve()
     manifest_path = repo_root / MANIFEST_FILENAME
@@ -331,10 +331,10 @@ def default_spawn(
     app_home: Path,
     next_color: str,
     next_instance_id: str,
-    homunculus_name: str,
+    solet_name: str,
     candidate: CandidatePaths,
 ) -> int:
-    """Spawn the next-color homunculus FROM the materialized candidate release.
+    """Spawn the next-color solet FROM the materialized candidate release.
 
     §4.5 spawn invariant (design 2026-06-27): the green child is launched
     from the **candidate ``rel-<id>`` directly** — its own
@@ -356,13 +356,13 @@ def default_spawn(
             ``profile/data/`` is shared across releases per §4.3).
         next_color: ``"blue"`` or ``"green"`` — the router routing/identity
             axis (independent of the release axis).
-        next_instance_id: Pre-minted id the new the homunculus uses when it calls
+        next_instance_id: Pre-minted id the new the solet uses when it calls
             ``router.register_color``.
-        homunculus_name: The shared homunculus name, propagated so the
+        solet_name: The shared solet name, propagated so the
             child can resolve the runtime dir.
         candidate: The freshly-built release this child runs — its
             ``venv_python`` is the interpreter and ``release_id`` is
-            recorded in ``HOMUNCULUS_RELEASE_ID`` (audit-only, §4.8).
+            recorded in ``SOLET_RELEASE_ID`` (audit-only, §4.8).
 
     Returns:
         The OS pid of the spawned child.
@@ -378,18 +378,18 @@ def default_spawn(
     # and the supervisor's cold-start/crash path cannot drift. The candidate
     # interpreter + explicit colour/instance/release env is the swap-specific
     # part: register + activate target this exact child.
-    proc = spawn_homunculus_child(
+    proc = spawn_solet_child(
         interpreter=str(candidate.venv_python),
         app_home=app_home,
-        homunculus_name=homunculus_name,
+        solet_name=solet_name,
         log_path=log_path,
         extra_env={
-            ENV_HOMUNCULUS_COLOR: next_color,
-            ENV_HOMUNCULUS_INSTANCE_ID: next_instance_id,
+            ENV_SOLET_COLOR: next_color,
+            ENV_SOLET_INSTANCE_ID: next_instance_id,
             # Audit-only (§4.8): which immutable release this child runs, so
             # the colour axis and the release axis stay separate, auditable
             # fields.
-            ENV_HOMUNCULUS_RELEASE_ID: candidate.release_id,
+            ENV_SOLET_RELEASE_ID: candidate.release_id,
         },
     )
     return proc.pid
@@ -464,7 +464,7 @@ class SwapOrchestrator:
         router_client: RouterClient,
         action_factory: ActionFactoryProtocol,
         session_factory: Callable[[], str],
-        homunculus_name: str,
+        solet_name: str,
         release_manager: ReleaseManagerProtocol,
         schema_preflight: SchemaPreflightFn,
         preflight_probe: PreflightProbeFn,
@@ -482,11 +482,11 @@ class SwapOrchestrator:
         # no-op probe would be a silent fail-open bypass of the L2 gate
         # (operator-confirmed fail-closed posture, design §11 Q2).
         self._preflight_probe = preflight_probe
-        self._homunculus_name = homunculus_name
+        self._solet_name = solet_name
         self._logger = logger or logging.getLogger(PLUGIN_NAME)
         # B2: pending-finisher record dir (smokes inject a scratch dir so live
         # state is never touched); defaults to the live runtime dir.
-        resolved_runtime_dir = runtime_dir or get_runtime_dir(homunculus_name)
+        resolved_runtime_dir = runtime_dir or get_runtime_dir(solet_name)
         # The spawn → wait → activate → symlink-swap → quiesce → enqueue spine
         # (incl. the GreenCandidate router lifecycle) lives in the executor,
         # shared verbatim by the forward cutover and the durable rollback. The
@@ -497,7 +497,7 @@ class SwapOrchestrator:
             router_client=router_client,
             action_factory=action_factory,
             session_factory=session_factory,
-            homunculus_name=homunculus_name,
+            solet_name=solet_name,
             runtime_dir=resolved_runtime_dir,
             set_color_active=set_color_active,
             spawn_fn=spawn_fn,
@@ -667,7 +667,7 @@ class SwapOrchestrator:
         and sufficient. A second ``rollback_release`` rolls forward again
         (``rollback`` toggles ``current``↔``previous``) — undo/redo.
 
-        Cold-boot fallback (DOCUMENTED, out of band — NOT this verb): if the homunculus
+        Cold-boot fallback (DOCUMENTED, out of band — NOT this verb): if the solet
         is DEAD and so cannot serve this verb, the operator rolls back
         directly against the on-disk releases — call
         ``ReleaseManager.rollback()`` (flips the durable ``current``/``previous``
@@ -809,7 +809,7 @@ class SwapOrchestrator:
         # ``current``, which still names the live old release until ``cutover``
         # flips it post-activate.
         snapshot_fn = build_schema_snapshot_fn(
-            homunculus_name=self._homunculus_name,
+            solet_name=self._solet_name,
             app_home=app_home,
             source_root=_resolve_project_root(app_home),
         )

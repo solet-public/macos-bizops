@@ -12,7 +12,7 @@ the pruned-MINT-tree end-to-end.
 
 Offline: pure filesystem ops under a tmp tree; no live Postgres, no MCP.
 
-Run directly: ``HOMUNCULUS_NAME=<name> .venv/bin/python3
+Run directly: ``SOLET_NAME=<name> .venv/bin/python3
 plugins/github_midwife_plugin/tests/kb_symlinks_smoke.py``.
 """
 

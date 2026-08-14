@@ -1,9 +1,9 @@
-"""Workstream A — git-init the born homunculus worktree at genesis.
+"""Workstream A — git-init the born solet worktree at genesis.
 
 At genesis a seed-born tree is a plain source directory: the seed never ships
 ``.git`` (the "no contaminated history travels" invariant — the whole reason
 ``.git/`` is ``never_copy`` in ``seed_manifest.yaml``), so a freshly-born
-homunculus is NOT a git worktree and ``platform_dev_surface_plugin``'s readiness
+solet is NOT a git worktree and ``platform_dev_surface_plugin``'s readiness
 probe (``git rev-parse --is-inside-work-tree``) fail-louds. This module gives the
 born tree a FRESH, EMPTY git history of its OWN: a sensible ``.gitignore``, a
 LOCAL git identity, and one initial commit — so the tree is a real worktree from
@@ -36,7 +36,7 @@ class GitInitError(RuntimeError):
     """Raised when git-initializing the born worktree fails."""
 
 
-# The born homunculus tree's ``.gitignore``. Focused on runtime state + secrets +
+# The born solet tree's ``.gitignore``. Focused on runtime state + secrets +
 # per-launch-regenerated files; source (``ananta/``, ``plugins/``, the newborn's
 # own materialized configs) is tracked. Kept deliberately shorter than the origin
 # dev-repo ignore list (no audio/media/binary-library families a fresh seed never
@@ -96,7 +96,7 @@ Thumbs.db
 *~
 """
 
-_INITIAL_COMMIT_SUBJECT = "Genesis: initial commit of the {name} homunculus worktree"
+_INITIAL_COMMIT_SUBJECT = "Genesis: initial commit of the {name} solet worktree"
 
 
 def _git(clone_root: Path, args: list[str], timeout: int, run: Runner) -> subprocess.CompletedProcess[str]:

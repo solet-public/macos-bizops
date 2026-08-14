@@ -5,12 +5,12 @@ Validates the static + library-level contract surfaces that Cycle 6 (the
 local_restart_plugin retirement) could have broken. The live blue/green
 cutover assertions per design memo §2.3 (b)–(f) — ``restart_with_manifest``
 contract envelope, ``stop_self`` contract envelope, blue/green router
-swap completes, the homunculus healthy post-cutover — are STRUCTURALLY DEFERRED to
+swap completes, the solet healthy post-cutover — are STRUCTURALLY DEFERRED to
 the Goal 1 GOAL-VALIDATED checkpoint (per Coordinator-Day 2026-06-16 PT
 concur), matching the F3 ``install_plugin_from_path_smoke.py`` A4
 precedent + the ``root_manifest_smoke.py`` §7.3 b/c/d precedent that
 multi-process integration territory beyond the per-cycle scope is owned
-by a follow-on live-homunculus smoke. The C4 new-pip-deps smoke + crash-recovery
+by a follow-on live-solet smoke. The C4 new-pip-deps smoke + crash-recovery
 smoke + manifest diagnostic on polluted root at the Goal 1 checkpoint
 will exercise the swap machinery end-to-end.
 

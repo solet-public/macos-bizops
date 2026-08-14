@@ -52,7 +52,7 @@ PROVIDER = "iam_provisioning_service"
 
 _BIRTHER_NAME_PARAM = ParameterMetadata(
     description=(
-        "The birther homunculus whose midwife + undertaker IAM roles are "
+        "The birther solet whose midwife + undertaker IAM roles are "
         "being provisioned or audited. Validated against "
         "``[a-z][a-z0-9_-]{1,62}``. Used to compose role names "
         "``<birther_name>-midwife`` and ``<birther_name>-undertaker``."

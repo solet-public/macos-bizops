@@ -4,7 +4,7 @@ Article Layer: 1
 
 Article Role: plugin_reference
 
-Article Tags: planning-stage:execution, evidence-category:capability-reference, domain:salesforce, domain:local-homunculus, domain:cloud-homunculus
+Article Tags: planning-stage:execution, evidence-category:capability-reference, domain:salesforce, domain:local-solet, domain:cloud-solet
 
 Embedding Description: Salesforce plugin reference — the one-time operator setup for connecting a Salesforce org via the operator's sf CLI login (standalone CLI bundle install, one browser login via sf org login web, two-field salesforce_org address-book registration with a pinned instance host), the eight verbs with argument shapes (SOQL query, record get/describe/list/create/update/delete, test_connection), typed sf.* errors with recovery when the CLI has no live session, and the full-CRUD-including-delete posture under full CLI delegation.
 
@@ -16,7 +16,7 @@ client factory, which is dead on current CLI releases: `sf org display
 2.142.7 — there is no longer a way to borrow a usable token from CLI output
 at all). This is the enterprise-governance-friendly mode — it rides the
 org's already-blessed Salesforce CLI Connected App, so enabling the connector requires
-NO new org artifacts, no change request, and no admin ceremony. The homunculus acts as
+NO new org artifacts, no change request, and no admin ceremony. The solet acts as
 the operator's own user; its access dies with the CLI's login (logout/
 revocation) — both the feature and the operational caveat. Single org v1:
 the "salesforce_org" address-book entry.
@@ -83,7 +83,7 @@ mid-flight expired session this process must detect and retry.
 **This needs a Salesforce user account, nothing more.** No new Connected
 App, no certificates, no admin change request: the flow rides the org's
 already-blessed Salesforce CLI app, exactly like the operator's own `sf`
-usage. The homunculus acts as the operator's user — its permissions are
+usage. The solet acts as the operator's user — its permissions are
 that user's permissions, and its audit trail shows that user.
 
 ### Stage 1 — install the sf CLI (agent-executed)
@@ -157,7 +157,7 @@ that user's permissions, and its audit trail shows that user.
   rejected an in-flight call, most likely because the CLI's refresh token
   died mid-session (org-side revocation or password change). One browser
   re-login restores everything; nothing platform-side to rotate.
-- Credential lifecycle caveat (by design): the homunculus's Salesforce access
+- Credential lifecycle caveat (by design): the solet's Salesforce access
   is bound to the operator's login on THIS machine. Operator logout or
   org-side revocation turns the connector off until the next login — the
   fully-supported dormant state, not a breakage.

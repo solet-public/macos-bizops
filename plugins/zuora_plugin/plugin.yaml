@@ -37,7 +37,7 @@ config:
 # (base_url — the environment selector: US prod rest.zuora.com, EU
 # rest.eu.zuora.com, sandbox rest.apisandbox.zuora.com — and client_id) plus
 # a client_secret field that stores a
-# "vault::<homunculus>.default_address_book_plugin.zuora_client_secret"
+# "vault::<solet>.default_address_book_plugin.zuora_client_secret"
 # reference (chain-consumed). The secret lives in the RESOLVER's namespace so
 # the address book reads it under its own identity (resolve_with_secrets).
 # It is chain-consumed — this plugin neither declares nor reads that vault

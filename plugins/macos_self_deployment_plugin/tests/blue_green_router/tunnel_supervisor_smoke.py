@@ -99,7 +99,7 @@ def main() -> int:
                 sys.executable,
                 "-m",
                 "macos_self_deployment_plugin.blue_green_router.tunnel_supervisor",
-                "--homunculus",
+                "--solet",
                 "example",
                 "--tunnel-client-path",
                 str(fake_client),

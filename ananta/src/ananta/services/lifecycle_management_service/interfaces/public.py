@@ -11,7 +11,7 @@ Discoverability Policy (Task #47, 2026-05-24):
   reload_python_module, list_plugins, list_available_plugins,
   set_plugin_enabled, set_plugin_priority, reload_plugin_config,
   update_platform_config, install_plugin_from_path, apply_manifest), so the
-  per-method flag overrides the default. the homunculus is the operator's primary tool;
+  per-method flag overrides the default. the solet is the operator's primary tool;
   these are first-class agent operations.
 - Adding a new method without ``is_discoverable=True`` will SILENTLY exclude it
   from ``process_search`` and the agent will not be able to find it.
@@ -215,7 +215,7 @@ class LifecycleManagementAPI(ABC):
     )
     @abstractmethod
     def reload_python_module(self, module_name: str) -> dict[str, Any]:
-        """Reload a Python module marked ``RELOAD_SAFE = True`` without restarting the homunculus.
+        """Reload a Python module marked ``RELOAD_SAFE = True`` without restarting the solet.
 
         The service refuses to reload modules that do not declare a module-level
         ``RELOAD_SAFE = True`` constant. Stateful modules (plugin classes,
@@ -323,7 +323,7 @@ class LifecycleManagementAPI(ABC):
             usage_patterns=[
                 "Populate apply_manifest's diff preview before writing a new manifest",
                 "Confirm a candidate plugin is installable before referencing it in a manifest",
-                "Survey the homunculus image's plugin catalog",
+                "Survey the solet image's plugin catalog",
             ],
         ),
         is_enabled=True,
@@ -385,7 +385,7 @@ class LifecycleManagementAPI(ABC):
                 ),
                 "restart_required": ParameterMetadata(
                     type=ParameterType.BOOLEAN,
-                    description="True if the persisted change needs a homunculus restart to fully apply",
+                    description="True if the persisted change needs a solet restart to fully apply",
                     required=False,
                 ),
                 "plugin_name": ParameterMetadata(
@@ -400,7 +400,7 @@ class LifecycleManagementAPI(ABC):
                 ),
             },
             usage_patterns=[
-                "Disable a misbehaving plugin without restarting the homunculus",
+                "Disable a misbehaving plugin without restarting the solet",
                 "Re-enable a plugin after fixing its config",
             ],
         ),
@@ -553,7 +553,7 @@ class LifecycleManagementAPI(ABC):
                 ),
             },
             usage_patterns=[
-                "Pick up a per-plugin config edit without restarting the homunculus",
+                "Pick up a per-plugin config edit without restarting the solet",
                 "Apply a tweaked sample rate or model selection mid-session",
             ],
         ),
@@ -631,7 +631,7 @@ class LifecycleManagementAPI(ABC):
                     type=ParameterType.BOOLEAN,
                     description=(
                         "True if the new value cannot be applied in-process and only takes "
-                        "effect on the next homunculus restart"
+                        "effect on the next solet restart"
                     ),
                     required=False,
                 ),
@@ -728,7 +728,7 @@ class LifecycleManagementAPI(ABC):
                 ),
             },
             usage_patterns=[
-                "Install a freshly-checked-out plugin without restarting the homunculus",
+                "Install a freshly-checked-out plugin without restarting the solet",
                 "Bring a sibling plugin online from a workbench scratch directory",
             ],
         ),

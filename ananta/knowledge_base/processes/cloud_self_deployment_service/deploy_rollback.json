@@ -11,7 +11,7 @@
   },
   "error_processor_customizations": {
     "action_context": "Modifying the ALB listener rule back to the previous version during the observation window.",
-    "error_interpretation": "no_listener_rule_for_homunculus: provisioning was incomplete or the ALB has been modified externally. The rollback verb cannot recover from missing AWS state.",
+    "error_interpretation": "no_listener_rule_for_solet: provisioning was incomplete or the ALB has been modified externally. The rollback verb cannot recover from missing AWS state.",
     "recovery_guidance": "Confirm via AWS Console that both the current and prior target groups still exist; if the prior is already gone, the deploy passed the observation window and rollback is no longer possible — operator must run a fresh deploy_self with the old image tag."
   }
 }

@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .mcp_ingress import ingress_port_file_path, read_router_port
-from .service_install import validate_homunculus_name
+from .service_install import validate_solet_name
 
 logger = logging.getLogger("local_blue_green.tunnel_supervisor")
 
@@ -26,7 +26,7 @@ class TunnelSupervisor:
     def __init__(
         self,
         *,
-        homunculus: str,
+        solet: str,
         tunnel_client_path: Path,
         tunnel_id: str,
         control_plane_api_key: str,
@@ -36,8 +36,8 @@ class TunnelSupervisor:
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         health_listen_addr: str = DEFAULT_HEALTH_LISTEN_ADDR,
     ) -> None:
-        validate_homunculus_name(homunculus)
-        self.homunculus = homunculus
+        validate_solet_name(solet)
+        self.solet = solet
         self.tunnel_client_path = tunnel_client_path
         self.tunnel_id = tunnel_id
         self.control_plane_api_key = control_plane_api_key
@@ -63,7 +63,7 @@ class TunnelSupervisor:
             elif desired_port != self._active_port:
                 logger.info(
                     "ingress port changed for %s: %s -> %s; restarting tunnel-client",
-                    self.homunculus,
+                    self.solet,
                     self._active_port,
                     desired_port,
                 )
@@ -120,7 +120,7 @@ class TunnelSupervisor:
         argv = self._child_argv(port)
         logger.info(
             "starting tunnel-client for %s against %s",
-            self.homunculus,
+            self.solet,
             self._mcp_url(port),
         )
         self._child = await asyncio.create_subprocess_exec(*argv)
@@ -156,12 +156,12 @@ def _install_signal_handlers(
 
 async def _amain(args: argparse.Namespace) -> int:
     supervisor = TunnelSupervisor(
-        homunculus=args.homunculus,
+        solet=args.solet,
         tunnel_client_path=args.tunnel_client_path,
         tunnel_id=args.tunnel_id,
         control_plane_api_key=args.control_plane_api_key,
         ingress_port_file=(
-            args.ingress_port_file or ingress_port_file_path(args.homunculus)
+            args.ingress_port_file or ingress_port_file_path(args.solet)
         ),
         health_url_file=args.health_url_file,
         mcp_path=args.mcp_path,
@@ -176,11 +176,11 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="tunnel_supervisor",
         description=(
-            "Run tunnel-client against the current per-homunculus MCP ingress "
+            "Run tunnel-client against the current per-solet MCP ingress "
             "port and restart it when that local ingress port changes."
         ),
     )
-    parser.add_argument("--homunculus", required=True, help="Homunculus name.")
+    parser.add_argument("--solet", required=True, help="Solet name.")
     parser.add_argument(
         "--tunnel-client-path",
         type=Path,

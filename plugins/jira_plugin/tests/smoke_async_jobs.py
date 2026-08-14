@@ -38,7 +38,7 @@ Exercises:
      plugin.py <-> async_jobs.py circular top-level import).
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/jira_plugin/tests/smoke_async_jobs.py
 
 Exits 0 on success, 1 on first failure.

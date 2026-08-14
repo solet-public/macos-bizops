@@ -12,5 +12,5 @@ The 4-verb cloud extension surface lives in the sibling
 ``ananta.services.cloud_self_deployment_service`` package — those verbs
 are not bound on macOS profiles so the namespace separation keeps
 ``process_search('self_deployment')`` returning only the 1-verb base on
-macOS-bound homunculi.
+macOS-bound solets.
 """

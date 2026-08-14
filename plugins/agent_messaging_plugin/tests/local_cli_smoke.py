@@ -1,7 +1,7 @@
-"""Hermetic smoke for the `homunculus` local-invocation CLI.
+"""Hermetic smoke for the `solet` local-invocation CLI.
 
 Exercises the CLI and its `BridgeClient` end-to-end against an in-process
-`httpx.MockTransport` — no live homunculus, no LM Studio, no network. Verifies:
+`httpx.MockTransport` — no live solet, no LM Studio, no network. Verifies:
 
 * health / search / call happy paths and their JSON output,
 * `call` polls `process/result` until a completed result payload is stored,
@@ -213,7 +213,7 @@ def test_call_exit_nonzero_when_not_completed() -> None:
 
 def test_not_running_maps_to_connection_error() -> None:
     def boom(_name: str | None = None) -> str:
-        raise client_mod.HomunculusNotRunningError("down")
+        raise client_mod.SoletNotRunningError("down")
 
     with patch.object(cli_mod, "resolve_base_url", boom):
         result = CliRunner().invoke(cli_mod.cli, ["health"], obj={})
@@ -228,11 +228,11 @@ def test_bad_json_args_maps_to_unknown_error() -> None:
 
 def test_cli_import_chain_needs_no_ambient_env() -> None:
     # The no-MCP-first contract: a bare `<name>` symlink must work on a fresh
-    # machine with NO ambient env. A subprocess import with HOMUNCULUS_NAME
+    # machine with NO ambient env. A subprocess import with SOLET_NAME
     # scrubbed proves the console script's whole import chain stays lazy
     # (regression: the package __init__ used to import the server plugin, which
-    # requires HOMUNCULUS_NAME at import time — the bare CLI tracebacked).
-    env = {k: v for k, v in os.environ.items() if k != "HOMUNCULUS_NAME"}
+    # requires SOLET_NAME at import time — the bare CLI tracebacked).
+    env = {k: v for k, v in os.environ.items() if k != "SOLET_NAME"}
     proc = subprocess.run(
         [sys.executable, "-c", "import agent_messaging_plugin.local_cli.cli"],
         capture_output=True, text=True, env=env, timeout=60, check=False,
@@ -241,12 +241,12 @@ def test_cli_import_chain_needs_no_ambient_env() -> None:
 
 
 def test_identity_prefers_manifest_name() -> None:
-    manifest = SimpleNamespace(homunculus_name="shelby")
+    manifest = SimpleNamespace(solet_name="shelby")
     with (
         patch.object(client_mod, "_clone_root", lambda: Path("/tmp/other-dir")),
         patch.object(client_mod, "load_manifest", lambda _p: (manifest, None)),
     ):
-        assert client_mod.resolve_homunculus_name() == "shelby"
+        assert client_mod.resolve_solet_name() == "shelby"
 
 
 def test_identity_falls_back_to_basename_on_placeholder() -> None:
@@ -256,7 +256,7 @@ def test_identity_falls_back_to_basename_on_placeholder() -> None:
         patch.object(client_mod, "_clone_root", lambda: Path("/tmp/shelby")),
         patch.object(client_mod, "load_manifest", lambda _p: (None, "unreadable")),
     ):
-        assert client_mod.resolve_homunculus_name() == "shelby"
+        assert client_mod.resolve_solet_name() == "shelby"
 
 
 _WATCH_ENV = {

@@ -1,6 +1,6 @@
 ---
 name: rename
-description: Take ownership of a session role name on the declared fleet transport — arms the {{HOMUNCULUS_NAME}} watch registered-presence watcher (default) or re-registers over the optional MCP bridge (when declared) — keeping the platform-side role binding, the address book, and the local Claude Code session label in lock-step. Use on /rename <Role-Name> and on SessionStart re-claim prompts.
+description: Take ownership of a session role name on the declared fleet transport — arms the {{SOLET_NAME}} watch registered-presence watcher (default) or re-registers over the optional MCP bridge (when declared) — keeping the platform-side role binding, the address book, and the local Claude Code session label in lock-step. Use on /rename <Role-Name> and on SessionStart re-claim prompts.
 ---
 
 The user (or the SessionStart re-claim hook) supplied a role name as the
@@ -36,22 +36,22 @@ standing default on hydrated machines).
    previous watcher from this conversation is running for a different role,
    stop it first):
    ```bash
-   {{HOMUNCULUS_NAME}} watch --role "$ROLE"
+   {{SOLET_NAME}} watch --role "$ROLE"
    ```
    On arming it registers this session in the peer registry (identity from
    the launcher-exported `AGENT_SESSION_ID`), claims `$ROLE` as
    the durable role binding, drains messages that arrived while unwatched,
    then streams one JSON line per delivery — and nothing while idle. It
-   reconnects and re-claims automatically across homunculus restarts and
+   reconnects and re-claims automatically across solet restarts and
    blue-green swaps. It also tees each delivery into a per-session spool
-   consumed by the `{{HOMUNCULUS_NAME}} wake` Stop hook (installed at user
+   consumed by the `{{SOLET_NAME}} wake` Stop hook (installed at user
    scope by hydration): when this session goes idle, that hook blocks at
    zero token cost and turns the next delivery into a session turn — no MCP,
    and it works the same on any inference provider. If the hook is absent (a
    harness without hook support), deliveries wait in the watch output for
    the next look; that is the floor, not the ceiling. If the watcher exits
    immediately complaining about a missing session id, the session was not
-   started via the `claude-{{HOMUNCULUS_NAME}}` launcher or fleet
+   started via the `claude-{{SOLET_NAME}}` launcher or fleet
    functions — say so rather than inventing an id.
 
 2. Verify from the watcher's first output line: `"watch": "armed"` with the
@@ -62,16 +62,16 @@ standing default on hydrated machines).
 
 ## MCP path (transport `mcp`)
 
-Requires the `mcp__{{HOMUNCULUS_NAME}}__*` tools in this session (the
+Requires the `mcp__{{SOLET_NAME}}__*` tools in this session (the
 operator explicitly wired the optional MCP bridge, and the launcher attaches
 it in this mode). If they are absent, that is a launch/configuration error —
 report it.
 
-1. Call `mcp__{{HOMUNCULUS_NAME}}__peer_register` with
+1. Call `mcp__{{SOLET_NAME}}__peer_register` with
    `agent_id="claude_code"` and `session_label="$ROLE"`. Capture BOTH
    `agent_instance_id` AND `parent_pid` from the response.
 
-2. Call `mcp__{{HOMUNCULUS_NAME}}__process_call` with:
+2. Call `mcp__{{SOLET_NAME}}__process_call` with:
    - `process_key`: `plugin::agent_messaging_plugin::peer_claim_role`
    - `arguments`: `{"name": "$ROLE", "agent_id": "claude_code", "agent_instance_id": "<value from step 1>", "session_label": "$ROLE"}`
    - `reason`: brief explanation of the rename
@@ -103,7 +103,7 @@ report it.
 
 Notes:
 - Ground truth for any claim, on demand:
-  `{{HOMUNCULUS_NAME}} call plugin::agent_messaging_plugin::peer_holds_role`
+  `{{SOLET_NAME}} call plugin::agent_messaging_plugin::peer_holds_role`
   with `{"name": "$ROLE", "agent_instance_id": "<from the armed line / step 1>"}`
   — a raw peer-list entry is presence, not a claim.
 - If the role is already held by ANOTHER live session, the claim still

@@ -223,7 +223,7 @@ class KnowledgeSearchAPI(ABC):
                 description=(
                     "Repo-relative path to the article under test, starting at "
                     "'knowledge_bases/' (e.g. "
-                    "knowledge_bases/ananta_platform/13_homunculus_setup/"
+                    "knowledge_bases/ananta_platform/13_solet_setup/"
                     "04_when_to_split_a_service_plugin.md)."
                 ),
                 required=True,

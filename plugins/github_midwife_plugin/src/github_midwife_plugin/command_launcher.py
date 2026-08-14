@@ -1,13 +1,13 @@
-"""SEED — install the per-homunculus command launcher at birth.
+"""SEED — install the per-solet command launcher at birth.
 
 A genesis spine phase that puts a ``<name>`` command on the operator's PATH,
-pointing at the newborn's own ``homunculus`` console script. This is the
+pointing at the newborn's own ``solet`` console script. This is the
 no-MCP-first primary interface: after birth, ``<name> search ...`` and
-``<name> call ...`` drive the homunculus over its localhost bridge with NO
+``<name> call ...`` drive the solet over its localhost bridge with NO
 MCP required.
 
-Bare symlink by design: the ``homunculus`` CLI derives its identity from its OWN
-install location (``local_cli.client.resolve_homunculus_name`` walks to the
+Bare symlink by design: the ``solet`` CLI derives its identity from its OWN
+install location (``local_cli.client.resolve_solet_name`` walks to the
 clone root), so a symlink from anywhere on PATH resolves into THIS newborn's
 venv and pins THIS newborn — reaching no sibling. UNCONDITIONAL (every profile
 ships ``agent_messaging_plugin``, so every newborn has the console script).
@@ -24,13 +24,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .constants import NAME_PATTERN, is_valid_homunculus_name
+from .constants import NAME_PATTERN, is_valid_solet_name
 
 # The generic console-script name the launcher points at (the
 # ``[project.scripts]`` entry of ``agent_messaging_plugin``). One generic name
-# on disk; the per-homunculus name is the SYMLINK, resolved to identity by
-# install location — so no shipped surface carries a specific homunculus name.
-CONSOLE_SCRIPT_NAME = "homunculus"
+# on disk; the per-solet name is the SYMLINK, resolved to identity by
+# install location — so no shipped surface carries a specific solet name.
+CONSOLE_SCRIPT_NAME = "solet"
 
 # Default operator-PATH bin dir for the launcher: user-writable, no sudo. The
 # hydration shell step ensures it is on PATH.
@@ -38,7 +38,7 @@ DEFAULT_BIN_DIR = Path.home() / ".local" / "bin"
 
 
 class CommandLauncherError(RuntimeError):
-    """The per-homunculus command launcher could not be installed."""
+    """The per-solet command launcher could not be installed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +55,7 @@ def install_command_launcher_at_birth(
     clone_root: Path,
     bin_dir: Path = DEFAULT_BIN_DIR,
 ) -> CommandLauncherResult:
-    """Symlink ``<bin_dir>/<name>`` -> the newborn's ``homunculus`` console script.
+    """Symlink ``<bin_dir>/<name>`` -> the newborn's ``solet`` console script.
 
     Raises :class:`CommandLauncherError` when the console script is missing (the
     venv must be provisioned + the plugin installed first) or when a NON-symlink
@@ -63,9 +63,9 @@ def install_command_launcher_at_birth(
     """
     # Defense in depth: genesis validates the name first, but the launcher path
     # is `bin_dir / name`, so a bad name could escape bin_dir — refuse one here.
-    if not is_valid_homunculus_name(name):
+    if not is_valid_solet_name(name):
         raise CommandLauncherError(
-            f"refusing to install a launcher for invalid homunculus name {name!r} "
+            f"refusing to install a launcher for invalid solet name {name!r} "
             f"(must match {NAME_PATTERN.pattern})."
         )
     target = clone_root / ".venv" / "bin" / CONSOLE_SCRIPT_NAME
@@ -99,7 +99,7 @@ def install_command_launcher_at_birth(
     launcher.symlink_to(target)
     return CommandLauncherResult(
         status="installed",
-        reason="per-homunculus command launcher installed on PATH",
+        reason="per-solet command launcher installed on PATH",
         launcher_path=str(launcher), target=str(target),
     )
 

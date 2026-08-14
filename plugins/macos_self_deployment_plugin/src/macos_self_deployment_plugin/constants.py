@@ -17,16 +17,16 @@ from ananta.core.runtime import (
 PLUGIN_NAME: Final[str] = "macos_self_deployment_plugin"
 
 # Env var contract — mirrored from ananta.core.runtime.port_manager.
-ENV_HOMUNCULUS_NAME: Final[str] = "HOMUNCULUS_NAME"
-ENV_HOMUNCULUS_COLOR: Final[str] = "HOMUNCULUS_COLOR"
-ENV_HOMUNCULUS_INSTANCE_ID: Final[str] = "HOMUNCULUS_INSTANCE_ID"
+ENV_SOLET_NAME: Final[str] = "SOLET_NAME"
+ENV_SOLET_COLOR: Final[str] = "SOLET_COLOR"
+ENV_SOLET_INSTANCE_ID: Final[str] = "SOLET_INSTANCE_ID"
 ENV_APP_HOME: Final[str] = "APP_HOME"
 # Audit-only (design 2026-06-27 §4.8): set on every materialized-release
 # green-spawn so a child's logs/env record which immutable release id it
 # is running, keeping the color axis (router routing identity) and the
 # release axis (code tree) separate, auditable axes. Nothing reads it back
 # at runtime — it is purely an observability/log field.
-ENV_HOMUNCULUS_RELEASE_ID: Final[str] = "HOMUNCULUS_RELEASE_ID"
+ENV_SOLET_RELEASE_ID: Final[str] = "SOLET_RELEASE_ID"
 
 # Color tokens accepted by the router. Mirrored here from
 # ``blue_green_router/router_state.py`` so callers that only need the
@@ -65,9 +65,9 @@ RESULT_TYPE_AUTOSTART_UNINSTALL: Final[str] = "macos_self_deployment_autostart_u
 RESULT_TYPE_AUTOSTART_STATUS: Final[str] = "macos_self_deployment_autostart_status_result"
 
 # LaunchAgent autostart conventions. Label scheme is operator-neutral
-# (no "com.<org>" prefix) so a homunculus's autostart never collides
+# (no "com.<org>" prefix) so a solet's autostart never collides
 # with an organization-owned plist.
-AUTOSTART_LABEL_PREFIX: Final[str] = "local.homunculus"
+AUTOSTART_LABEL_PREFIX: Final[str] = "local.solet"
 AUTOSTART_PLIST_DIR_DEFAULT: Final[str] = "~/Library/LaunchAgents"
 AUTOSTART_LOG_DIR_DEFAULT: Final[str] = "~/.ananta/logs"
 
@@ -96,15 +96,15 @@ AUTOSTART_PATH_ENV: Final[str] = (
 
 # Option-B supervisor (2026-06-28). The LaunchAgent runs this module —
 # NOT ``ananta.cli`` directly — so the launchd-managed process is a thin,
-# colour-agnostic crash-supervisor that spawns + re-spawns the active homunculus
+# colour-agnostic crash-supervisor that spawns + re-spawns the active solet
 # from ``current`` and survives blue-green cutovers untouched. Because no
-# homunculus colour is ever launchd-managed under this model, a drained/SIGTERM'd
+# solet colour is ever launchd-managed under this model, a drained/SIGTERM'd
 # colour is never respawned by launchd: the ghost-respawn class is
 # structurally impossible. Run as ``<current>/venv/bin/python3 -m
 # macos_self_deployment_plugin.supervisor --app-home <profile>``.
 AUTOSTART_SUPERVISOR_MODULE: Final[str] = "macos_self_deployment_plugin.supervisor"
 
-# Router mgmt unix-socket filename suffix, appended to the homunculus name
+# Router mgmt unix-socket filename suffix, appended to the solet name
 # under the runtime dir: ``<runtime>/<name>.router.sock``. Single-sourced
 # so the router bind path, the plugin's client path, and the supervisor's
 # liveness-poll path cannot drift.
@@ -134,7 +134,7 @@ DEFAULT_HEARTBEAT_INTERVAL_SECONDS: Final[float] = 10.0
 DEFAULT_PRIOR_TERM_GRACE_SECONDS: Final[float] = 10.0
 DEFAULT_PRIOR_TERM_POLL_INTERVAL_SECONDS: Final[float] = 0.2
 # prepare_for_readiness bounded wait for the router socket. The router is a
-# SEPARATE KeepAlive LaunchAgent that comes up independently of the homunculus; at a fresh
+# SEPARATE KeepAlive LaunchAgent that comes up independently of the solet; at a fresh
 # BIRTH both agents load ~simultaneously (RunAtLoad), so the main boot can reach
 # the router-socket check a beat before the router has created its socket. Poll
 # this bounded window rather than failing one-shot on that benign race (the FATAL
@@ -145,7 +145,7 @@ DEFAULT_ROUTER_SOCKET_POLL_INTERVAL_SECONDS: Final[float] = 0.5
 
 # GTE-06 L2 fresh-source preflight probe (design §3.3 / Q1 ruling). The
 # probe imports + bare-instantiates the manifest's plugin set in a fresh
-# subprocess — no homunculus boot, no DB, no embedder — so a healthy pass is
+# subprocess — no solet boot, no DB, no embedder — so a healthy pass is
 # seconds. Timeout ⇒ process-group SIGKILL ⇒ classified ProbeTimeout RED
 # (fail-closed; blocks the swap). Operator-tunable per Q1 via the plugin
 # config key below; the constant is the default.
@@ -159,7 +159,7 @@ CONFIG_KEY_PREFLIGHT_PROBE_TIMEOUT_SECONDS: Final[str] = (
 # NO active colour (``active_instance_id is None``) — deferring liveness
 # entirely to the router's authoritative ``_heartbeat_gc`` (which clears a
 # dead active binding within ~heartbeat-timeout + gc-interval). So crash
-# recovery is "always recovers within ~router-GC + the homunculus-boot", distinct
+# recovery is "always recovers within ~router-GC + the solet-boot", distinct
 # from the zero-downtime planned cutover; the latency floor is the
 # router's heartbeat timeout, a router-side tunable, NOT shortened here.
 # The backoff bounds a crash-loop when the ``current`` release is broken:
@@ -207,7 +207,7 @@ DEFAULT_REGISTRATION_POLL_INTERVAL_SECONDS: Final[float] = 0.5
 #
 # The ``LOCAL`` qualifier on the bridge-port-appeared token disambiguates
 # the in-process attribute ``agent_messaging_plugin.bridge_port`` (where
-# THIS homunculus's own bridge HTTP server bound) from the on-disk file
+# THIS solet's own bridge HTTP server bound) from the on-disk file
 # ``~/.ananta/runtime/<name>.bridge.port`` (router-owned, used by MCP
 # bridge subprocesses to discover the router). The Phase 1 bind-wait
 # polls the in-process LOCAL port via cross-plugin lookup
@@ -230,7 +230,7 @@ FAILED_REGISTRATION_LOCAL_BRIDGE_PORT_NEVER_APPEARED: Final[str] = (
 AGENT_MESSAGING_PLUGIN_NAME: Final[str] = "agent_messaging_plugin"
 BRIDGE_PORT_ATTRIBUTE: Final[str] = "bridge_port"
 
-# Single cross-color drain marker `~/.ananta/runtime/<name>.draining`. this homunculus's
+# Single cross-color drain marker `~/.ananta/runtime/<name>.draining`. this solet's
 # CORE SIGTERM handler reads it (ananta.core.runtime.is_draining) and exits 0
 # on an intentional drain so launchd KeepAlive does NOT respawn the drained
 # color. (The Slice-4 LaunchAgent PathState predicate this once gated was
@@ -243,7 +243,7 @@ DRAINING_SENTINEL_SUFFIX: Final[str] = _CORE_DRAINING_SENTINEL_SUFFIX
 # Slice 4.5 stop_self timing. Pre-SIGTERM delay gives the verb's
 # response the time it needs to flush back to the MCP caller before
 # the detached watchdog signals our pid; SIGKILL escalation matches
-# the dispatch's "bounded ~10s window" framing for a homunculus child that
+# the dispatch's "bounded ~10s window" framing for a solet child that
 # ignores SIGTERM.
 DEFAULT_STOP_SELF_PRE_SIGTERM_DELAY_SECONDS: Final[float] = 0.5
 DEFAULT_STOP_SELF_SIGKILL_ESCALATION_SECONDS: Final[float] = 10.0

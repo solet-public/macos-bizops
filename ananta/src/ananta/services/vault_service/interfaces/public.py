@@ -319,7 +319,7 @@ class VaultServiceAPI(ABC):
 
         The plaintext never leaves the vault process — only ``key`` and a
         one-way ``plaintext_fingerprint`` are returned. Used by first-boot
-        orchestrators that need to seed tokens into a homunculus without
+        orchestrators that need to seed tokens into a solet without
         the bytes touching any caller-reachable surface.
         """
         pass
@@ -427,7 +427,7 @@ class VaultServiceAPI(ABC):
     # Credential Ingestion Operations
     #
     # The agent issues an MCP call naming a *source* (env var, file path, kv
-    # field, keychain entry); the homunculus process reads the source, encrypts the
+    # field, keychain entry); the solet process reads the source, encrypts the
     # value, and stores it. The agent never sees the plaintext value.
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -899,7 +899,7 @@ class VaultServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "recipient_identifier": ParameterMetadata(
-                description="Free-text peer label for the audit log (e.g. homunculus name)",
+                description="Free-text peer label for the audit log (e.g. solet name)",
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -950,7 +950,7 @@ class VaultServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "sender_identifier": ParameterMetadata(
-                description="Free-text peer label for the audit log (e.g. homunculus name)",
+                description="Free-text peer label for the audit log (e.g. solet name)",
                 required=False,
                 type=ParameterType.STRING,
             ),

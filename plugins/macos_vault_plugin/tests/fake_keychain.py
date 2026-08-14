@@ -11,7 +11,7 @@ substrate.
 Codex sign-off correction #4: CI must not touch the real macOS keychain;
 the dual-write smokes use this fake. The production ``SystemKeychain``
 backend is exercised end-to-end only by the sacrificial-cutover smoke
-(SC-17) against a freshly-birthed homunculus.
+(SC-17) against a freshly-birthed solet.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class FakeKeychain:
     ) -> bool:
         return self._key(plugin_name, credential) in self._store
 
-    def list_credentials_under_homunculus(self) -> list[tuple[str, str]]:
+    def list_credentials_under_solet(self) -> list[tuple[str, str]]:
         """Return every (plugin_name, credential) in the fake — sorted."""
         return sorted(self._store.keys())
 

@@ -85,7 +85,7 @@ Inputs, exhaustively:
   both hooks still function — heartbeat reports unthrottled, rotation-due
   watch falls back to a fixed OS-temp-dir marker root — see the "heartbeat
   and rotation-due watch" section below for why this is deliberate, not a
-  bug), `HOMUNCULUS_NAME` (rung 1 of the memory-passthrough origin-
+  bug), `SOLET_NAME` (rung 1 of the memory-passthrough origin-
   resolution ladder — see the memory-passthrough section below; read-only,
   never arms or disarms anything), `FLEET_HEADLESS_TOOL_ALLOWLIST` (arms
   the spawn-injected tool-allowlist gate — set only by a spawning host
@@ -106,7 +106,7 @@ Inputs, exhaustively:
   this agent's own memory directory (existence check, and its contents
   when rendering/journaling), this agent's own append-only journal file,
   this agent's own `root_manifest.yaml` (rung 2 of the origin-resolution
-  ladder — a single `homunculus_name:` line, read via a minimal regex
+  ladder — a single `solet_name:` line, read via a minimal regex
   scan, never a full YAML parse — see the memory-passthrough section),
   and — `hydrate_render.py`/`sync.py` only — an already-exported JSON
   snapshot file path the AGENT supplies as an argument (the export itself
@@ -142,7 +142,7 @@ Outputs, exhaustively:
   fixed-format failure note (the numeric exit status is the only variable
   part; the child's own output is discarded unread); the heartbeat and
   rotation-due watch hooks' fixed-template diagnostic lines on a missing
-  env var, an unreadable transcript, or a failed `homunculus` call —
+  env var, an unreadable transcript, or a failed `solet` call —
   always best-effort telemetry, never read by anything, never blocking;
   `hydrate_render.py`/`sync.py`'s own fixed-template failure lines
   (malformed record, unreachable platform on export) on their own error
@@ -199,8 +199,8 @@ separately-stated guarantee instead, described on its own terms here and in
 the Threat model section below.
 
 Beyond that: no network I/O of any kind in any hook (no HTTP, no sockets,
-no DNS) — the hooks/utilities that shell out to `homunculus` do not
-perform network I/O themselves; the `homunculus` CLI is a separate,
+no DNS) — the hooks/utilities that shell out to `solet` do not
+perform network I/O themselves; the `solet` CLI is a separate,
 independently reviewable local process, same reasoning as the wake
 waiter's configured CLI below. No hook writes a file as an action of its
 own, **except the seven disclosed exceptions** — the heartbeat and
@@ -223,7 +223,7 @@ hooks have no credential access at all. **Exactly four** subprocess
 executions exist in the plugin, each with its own fixed-shape contract
 detailed below: the wake waiter's fixed-argv invocation of the
 operator-configured CLI; the heartbeat's and rotation-due watch's
-fixed-argv `homunculus call <fixed process_key> <JSON payload>` invocations
+fixed-argv `solet call <fixed process_key> <JSON payload>` invocations
 (no shell, `subprocess.run` only, built entirely from this session's own
 environment and its own transcript — never from tool-call content); and
 `sync.py`'s (agent-invoked, never auto-fired) same-shape invocations, one
@@ -302,7 +302,7 @@ CLI/network round trip on a throttled tick.
 
 `heartbeat_report_alive.py`: when un-throttled (at most once per ~180s per
 `agent_instance_id`), runs exactly
-`["homunculus", "call", "plugin::agent_messaging_plugin::report_alive", <payload>]`
+`["solet", "call", "plugin::agent_messaging_plugin::report_alive", <payload>]`
 — the fixed process key `report_alive`, and a JSON payload built entirely
 from this session's own `AGENT_INSTANCE_ID` plus two fixed literals
 (`status: "working"`, a fixed `status_note`). It has no persistent process
@@ -346,11 +346,11 @@ due notification would `peer_send` a steward on every single completed
 tool call above threshold, which the heartbeat's simpler liveness stamp
 has no equivalent runaway-repeat risk for.
 
-**Command provenance.** Both resolve `homunculus` via `PATH`, the same
+**Command provenance.** Both resolve `solet` via `PATH`, the same
 convention this plugin's other subprocess-capable hook and this checkout's
 other hooks already rely on for `python3`. Neither takes an operator-
 configurable executable name (unlike the wake waiter's `$AGENT_WAKE_CLI`)
-— the command is always literally `homunculus`, and only the JSON payload
+— the command is always literally `solet`, and only the JSON payload
 varies, built entirely from this session's own environment and (for
 rotation-due watch) its own transcript file, never from tool-call content
 or another session's input.
@@ -366,8 +366,8 @@ calling session's own context.
 
 **Failure posture.** Both are non-fatal by design, the same contract as
 every other hook in this plugin: a missing env var, an unreadable
-transcript, a malformed stdin payload, an unresolvable `homunculus`
-binary, or a failed `homunculus call` all warn to stderr and exit `0` —
+transcript, a malformed stdin payload, an unresolvable `solet`
+binary, or a failed `solet call` all warn to stderr and exit `0` —
 neither hook can ever cost a tool call, and neither uses exit code `2`.
 One accepted gap, stated in the heartbeat's own docstring rather than
 engineered around: a single tool call longer than a session's report-by
@@ -428,13 +428,13 @@ Configuration surface section.)
   No subprocess, no network.
 - `sync.py`: the disclosed subprocess exception in this group — wraps the
   hydrate/drain steps above into one Bash call per direction and DOES
-  shell out, via the same PATH-resolved `homunculus` convention as the
+  shell out, via the same PATH-resolved `solet` convention as the
   heartbeat/rotation-due-watch hooks: one `export_memories` call on
   hydrate, and — on drain — one `upsert_memory_by_tag` call PER pending
   journal entry (unbounded per invocation, bounded only by how many local
-  edits are actually pending). Every argv is `["homunculus", "call",
+  edits are actually pending). Every argv is `["solet", "call",
   <fixed process_key>, <JSON payload>]`, no shell, `subprocess.run` only —
-  same shape-fixity property as every other homunculus-calling hook in
+  same shape-fixity property as every other solet-calling hook in
   this plugin, just not a Claude-Code-fired one. A failed drain upsert
   never advances the watermark — the failed (and only the failed) entries
   retry on the next run, reported loudly, never silently swallowed.
@@ -444,14 +444,14 @@ this agent's memory-dir/state-dir path resolution, the tag-shape helpers,
 and — the one piece with real cross-machine correctness stakes — the
 origin-resolution ladder:
 
-1. `HOMUNCULUS_NAME` env var, if set.
-2. `root_manifest.yaml`'s own `homunculus_name:` field, read via a
+1. `SOLET_NAME` env var, if set.
+2. `root_manifest.yaml`'s own `solet_name:` field, read via a
    minimal regex line-scan — **never a real YAML parse**: PyYAML is a
    venv-only dependency on this platform (measured 2026-08-10: available
    under `.venv/bin/python3`, absent under the bare `python3` these files
    actually run under), so a YAML parse here would silently violate this
    loop's own stdlib-only claim. Skipped when the field still carries the
-   unwritten placeholder `"homunculus"` — the midwife rewrites this field
+   unwritten placeholder `"solet"` — the midwife rewrites this field
    ONLY at genesis, so a raw/pre-genesis checkout keeps the placeholder
    and must fall through, never treat it as a real name.
 3. `CLAUDE_PROJECT_DIR`-basename — the final fallback, this module's
@@ -459,13 +459,13 @@ origin-resolution ladder:
    neither rung above resolves.
 
 Fails fast (raises, caught by every caller's own non-fatal contract) only
-when `CLAUDE_PROJECT_DIR` itself is unset AND `HOMUNCULUS_NAME` is unset —
+when `CLAUDE_PROJECT_DIR` itself is unset AND `SOLET_NAME` is unset —
 there is nothing left to derive a name from at all. This resolved name
 becomes this agent's `origin` tag (`claude_code.<name>`), which scopes
 every memory record this loop reads or writes so hydrate never pulls
 another agent's records. The SAME ladder, same placeholder-skip guard,
 is implemented independently in a separate, distinctly-named function on
-the platform-verb side (never in this shared `_resolve_homunculus_name()`,
+the platform-verb side (never in this shared `_resolve_solet_name()`,
 which an unrelated MCP-router-identity caller also depends on and which
 this package deliberately leaves untouched) — a parity test proves the
 two agree across a matrix of env/file/dirname combinations rather than
@@ -638,7 +638,7 @@ is made — only what was measured.
 **Peer enumeration — confirmed.** Discovering which peer sessions are
 currently registered is a capability of the MCP transport only. A session on
 a non-MCP transport reaches the platform solely through
-`homunculus call <process_key>`, and no registered process returns the peer
+`solet call <process_key>`, and no registered process returns the peer
 registry: the CLI exposes no `peers` subcommand, semantic discovery over the
 knowledge base surfaces no peer-registry verb, and `peer_list` exists only as
 an MCP tool. Sending is unaffected — `peer_send_by_name` resolves and
@@ -650,7 +650,7 @@ returns a well-formed, successful, and incorrect result (`0 bridge(s)
 tracked` against a live multi-session fleet) rather than an error; treat it
 as unreliable for this purpose, not as a substitute for peer enumeration. A
 fix is scoped but not built: three thin CLI subcommands
-(`homunculus inbox`, `homunculus peers`, `homunculus whoami`) over routes
+(`solet inbox`, `solet peers`, `solet whoami`) over routes
 that already exist would close this gap; none of the three exist today.
 
 **Idle-session wake — confirmed.** A session on the MCP transport that goes
@@ -758,8 +758,8 @@ input, never another session's.
   Blocking decisions are made only on affirmatively parsed evidence.
 - **Heartbeat / rotation-due watch**: disarmed (no `AGENT_INSTANCE_ID`) →
   immediate exit `0`, silent. Every other failure mode (missing marker
-  dir, unreadable transcript, malformed stdin, unresolvable `homunculus`
-  binary, a non-zero or unparseable `homunculus call` result) warns to
+  dir, unreadable transcript, malformed stdin, unresolvable `solet`
+  binary, a non-zero or unparseable `solet call` result) warns to
   stderr and exits `0` — never `2`, never blocking a tool call. A broken
   heartbeat degrades to "liveness reporting stops" (the fleet's own
   overdue-session detection is the backstop, not this hook); a broken
@@ -781,7 +781,7 @@ input, never another session's.
   `drain.py` never advances its watermark on a partial failure, so failed
   entries retry next run rather than being silently dropped. `sync.py`
   preserves both of those contracts verbatim (it imports and calls the
-  same functions, never reimplements them) and additionally: homunculus/platform
+  same functions, never reimplements them) and additionally: solet/platform
   unreachable on export → hydrate is skipped entirely, non-zero exit, the
   last local projection stays untouched, never a partial write.
 - The reminders, gate, and wake waiter are stateless and idempotent — no
@@ -843,7 +843,7 @@ way Claude Code invokes them.
 | A broken wake path never traps the session | `tests/wake_waiter_smoke.py` |
 | Fourteen of fifteen hooks are default-off behind an environment or filesystem-presence guard; `step_zero_reminder.py` is unconditionally armed by design | `tests/reminder_hooks_smoke.py` and `tests/wake_waiter_smoke.py` |
 | The git-mutation guard blocks every mutating git invocation (direct, shell-wrapped, chained, path-qualified) for a non-controller session, allows it for the controller, and is fail-open when its env var is unset | `tests/git_controller_gate_smoke.py` |
-| The heartbeat and rotation-due watch hooks' `homunculus call` argv carries their fixed process key, never a shell, never `subprocess.call`/`Popen` | `tests/manifest_consistency_smoke.py` |
+| The heartbeat and rotation-due watch hooks' `solet call` argv carries their fixed process key, never a shell, never `subprocess.call`/`Popen` | `tests/manifest_consistency_smoke.py` |
 | The heartbeat and rotation-due watch hooks never print a `hookSpecificOutput` block | disclosed here (source-read); no dedicated behavioral smoke ships in this plugin's own `tests/` yet — see the Known gaps note below |
 | The origin-resolution ladder (env → root_manifest.yaml, placeholder-skipped → dirname) resolves identically across both independent implementations (the hooks' `_journal.py` and the memory-tag verb resolver), across a matrix of env/file/dirname combinations | `.claude/hooks/tests/memory_passthrough_origin_ladder_smoke.py` — checkout-external, see the Known gaps note below |
 | The heartbeat, rotation-due watch, capture, and session-context hook copies in this plugin and in the checkout's `.claude/hooks/` behave identically (throttle/latch marker paths, arming, argv/output shape) | the checkout's own `.claude/hooks/tests/coordination_hook_ports_smoke.py` parity legs — external to this plugin's own `tests/`, so not run by `tests/run_all.py`; see the Known gaps note below |
@@ -867,7 +867,7 @@ their own dedicated behavioral smoke inside this plugin's `tests/`
 directory (mirroring `wake_waiter_smoke.py`'s role) — their behavioral
 coverage tonight is the checkout-external cross-copy parity smoke only,
 which proves the copies agree with each other, not that any one copy's
-behavior is independently correct against a live `homunculus` fixture.
+behavior is independently correct against a live `solet` fixture.
 `manifest_consistency_smoke.py`'s source-level checks (fixed process key,
 no shell, `subprocess.run` only, marker/write shape) still apply and are
 real coverage, just not a live-process behavioral proof. Additionally:
@@ -946,12 +946,12 @@ an operator deliberately opts a session in or a project has a memory
 directory.
 
 **Adopter setup note.** The heartbeat and rotation-due watch hooks'
-arming variable, `AGENT_INSTANCE_ID`, and `HOMUNCULUS_NAME` (rung 1 of
+arming variable, `AGENT_INSTANCE_ID`, and `SOLET_NAME` (rung 1 of
 the memory-passthrough origin-resolution ladder — see that section above;
 also read by other platform verbs these hooks call into) are both
 expected to be exported in the environment Claude Code is launched from
 — see the fleet's own enablement runbook for the exact launch-time
-export convention. `HOMUNCULUS_NAME` is a soft dependency, not a hard
+export convention. `SOLET_NAME` is a soft dependency, not a hard
 one: an adopter who never sets it still gets a correctly-resolved name
 via the ladder's rung 2 (`root_manifest.yaml`, once genesis has rewritten
 it) or rung 3 (`CLAUDE_PROJECT_DIR`-basename) — exporting it just makes

@@ -11,7 +11,7 @@ the whole step completes — the regression class the isolation smoke misses
 by construction (the same boot-only-check class as the set_autonomic_slot
 EDGE-declaration incident).
 
-Offline: fake orchestrator/bindings/plugin-manager; no live homunculus, no DB.
+Offline: fake orchestrator/bindings/plugin-manager; no live solet, no DB.
 
 Run from repo root:
     .venv/bin/python3 ananta/src/ananta/services/inference_service/tests/vacant_boot_wrappers_smoke.py

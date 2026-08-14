@@ -1633,7 +1633,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             # Always attempt to remove the live APScheduler job, even when the
             # DB/metadata row is already gone. Otherwise an orphaned job (row
             # hard-deleted but the in-memory job still firing) is unkillable by
-            # any verb and survives until a homunculus restart. remove_job is
+            # any verb and survives until a solet restart. remove_job is
             # exception-safe (no-op when the job is absent); get_job lets us
             # report cancellation accurately for the orphan-recovery case.
             job_removed = False

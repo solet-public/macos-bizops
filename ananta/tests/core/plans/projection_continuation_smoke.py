@@ -20,7 +20,7 @@ de-registered ``thinking_service`` verb:
 Blanket assertion on every projection: none of the six DEP-01-retired
 verb keys appears anywhere in the emitted step text.
 
-Offline: pure text projection, no live homunculus, no DB.
+Offline: pure text projection, no live solet, no DB.
 
 Run:
     .venv/bin/python3 ananta/tests/core/plans/projection_continuation_smoke.py

@@ -139,7 +139,7 @@ to non-provider).
 
 The declaration is capability-honest, keyed on the host agent kind: only
 `claude_code` bridges send `true`. A Codex holder would be deaf — the patched
-Codex CLI consumes ONLY `notifications/homunculus/peer_message`
+Codex CLI consumes ONLY `notifications/solet/peer_message`
 (`forwarder._notification_method_for`), so vertex forwards and
 `inference_completion_request` events emitted on the claude-channel method
 would never reach the Codex session, parking organism turns until the

@@ -14,15 +14,15 @@ MAX_PORT = 65535
 
 
 def _get_default_schema() -> str:
-    """The per-homunculus identity default (HOMUNCULUS_NAME, the single source
-    of truth). Shared by BOTH pg_schema and the database name -- each homunculus
+    """The per-solet identity default (SOLET_NAME, the single source
+    of truth). Shared by BOTH pg_schema and the database name -- each solet
     has its own database AND schema, both named after it (operator ruling,
     2026-07-11). Name kept as-is for cross-plugin consistency (the same helper
     exists in the rds/pgvector siblings).
     """
     from ananta.core.config.environment_config import EnvironmentConfig
 
-    return EnvironmentConfig.homunculus_name()
+    return EnvironmentConfig.solet_name()
 
 
 class PostgresConfig(BaseModel):
@@ -34,8 +34,8 @@ class PostgresConfig(BaseModel):
     port: int = Field(default=5432, description="PostgreSQL server port")
     database: str = Field(
         default_factory=_get_default_schema,
-        description="Database name (defaults to HOMUNCULUS_NAME for"
-        " per-homunculus isolation, mirroring pg_schema)",
+        description="Database name (defaults to SOLET_NAME for"
+        " per-solet isolation, mirroring pg_schema)",
     )
     user: str = Field(default="ananta_user", description="Database user")
     password: str = Field(default="change_me", description="Database password")
@@ -43,7 +43,7 @@ class PostgresConfig(BaseModel):
     # Type is str | None only because pydantic Field needs to accept None initially
     pg_schema: str | None = Field(
         default=None,
-        description="Schema name (defaults to HOMUNCULUS_NAME for isolation)",
+        description="Schema name (defaults to SOLET_NAME for isolation)",
         alias="schema",
     )
 
@@ -58,8 +58,8 @@ class PostgresConfig(BaseModel):
     connection_timeout: int = Field(default=30, description="Connection timeout in seconds")
 
     @model_validator(mode="after")
-    def set_schema_from_homunculus_name(self) -> Self:
-        """Default pg_schema to homunculus name if not explicitly set."""
+    def set_schema_from_solet_name(self) -> Self:
+        """Default pg_schema to solet name if not explicitly set."""
         if self.pg_schema is None:
             self.pg_schema = _get_default_schema()
         return self

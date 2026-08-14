@@ -29,11 +29,11 @@ state fake:
       and any non-failed row are kept.
 
 Offline: the shared REAL-SHAPE state fake (no schema enforcement on this table).
-Needs HOMUNCULUS_NAME set (agent_messaging_plugin package init resolves
+Needs SOLET_NAME set (agent_messaging_plugin package init resolves
 vault-scoped constants eagerly) — no default, raises if unset. No live platform.
 
 Run from repo root:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/forward_vertex_redrive_smoke.py
 """
 

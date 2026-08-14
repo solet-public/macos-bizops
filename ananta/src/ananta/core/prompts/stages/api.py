@@ -1056,7 +1056,7 @@ class APIStage:
     def _format_identity(self, memories: list[dict[str, Any]]) -> str:
         """Format identity memories as plain content without section headers.
 
-        Identity is unique to each Homunculus and should appear as natural
+        Identity is unique to each Solet and should appear as natural
         first-person statements, not as bullet-point context.
 
         Args:

@@ -8,7 +8,7 @@ MCP bridge subprocess management. Per
 agent_messaging_plugin.mcp_bridge`` as a child process when the iTerm2
 plugin opens a new claude-code / codex tab, terminates the subprocess
 when the tab closes, and restarts the subprocess transparently when
-``<homunculus>.bridge.port`` content changes (router blue-green swap).
+``<solet>.bridge.port`` content changes (router blue-green swap).
 
 Eliminates the operator's ``/mcp reconnect`` ceremony by making the
 bridge subprocess silently rediscover the router port on every change.
@@ -47,7 +47,7 @@ class CodingAgentSessionServiceInterface(ABC):
         self,
         *,
         agent_instance_id: str,
-        homunculus_name: str,
+        solet_name: str,
     ) -> BridgeSpawnResult:
         """Spawn an MCP bridge subprocess for a coding-agent tab.
 
@@ -55,7 +55,7 @@ class CodingAgentSessionServiceInterface(ABC):
 
         - The bridge subprocess is ``python -m
           agent_messaging_plugin.mcp_bridge`` with
-          ``HOMUNCULUS_NAME=<homunculus_name>`` and
+          ``SOLET_NAME=<solet_name>`` and
           ``AGENT_IDENTITY=claude_code`` in its environment. The
           plugin records the spawned pid keyed by
           ``agent_instance_id`` so subsequent ``terminate_bridge`` /
@@ -70,9 +70,9 @@ class CodingAgentSessionServiceInterface(ABC):
                 tab; the iTerm2 plugin obtains it from the agent's MCP
                 peer-registration handshake (``agent_messaging_plugin``
                 peer registry).
-            homunculus_name: Target homunculus the bridge connects to
+            solet_name: Target solet the bridge connects to
                 (e.g. ``"example"`` for a locally-run
-                homunculus).
+                solet).
 
         Returns:
             :class:`BridgeSpawnResult` carrying status, pid, and audit
@@ -107,7 +107,7 @@ class CodingAgentSessionServiceInterface(ABC):
         Contract:
 
         - Composes ``terminate_bridge`` + ``spawn_bridge`` against the
-          same ``agent_instance_id`` and ``homunculus_name`` the prior
+          same ``agent_instance_id`` and ``solet_name`` the prior
           spawn recorded. The new subprocess preserves the
           ``agent_instance_id`` binding; only the OS pid changes.
         - When no prior bridge is tracked, the verb behaves like a

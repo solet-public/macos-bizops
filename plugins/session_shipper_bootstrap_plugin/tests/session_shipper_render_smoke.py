@@ -59,7 +59,7 @@ def _check(condition: object, label: str) -> None:
 
 
 _FIXTURE_CONTEXT: dict[str, str] = {
-    "HOMUNCULUS_PUBLIC_URL": "https://example.test",
+    "SOLET_PUBLIC_URL": "https://example.test",
     "DEPLOYMENT_ID": "dep-test-render-001",
     "MACHINE_ID": "machine-render-fixture",
     "INSTALL_DIR": "/opt/session-shipper/dep-test-render-001",

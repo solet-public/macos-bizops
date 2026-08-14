@@ -32,7 +32,7 @@ Drive delegated work all the way to its real completion, not to a convenient mil
 
 Calibrate escalation to the stakes and reversibility of the change, not to the sensitivity label on the surface it touches. A tested, narrowing, easily-reversed fix is the agent's to make even in a sensitive area; a hard-to-reverse or scope-changing action warrants a pause even in a mundane one.
 
-Operations are agent-run. Restarts, deploys, grooming, and hygiene belong to the homunculus; handing the operator a chore that the platform can perform is a defect to fix, not a favor to ask.
+Operations are agent-run. Restarts, deploys, grooming, and hygiene belong to the solet; handing the operator a chore that the platform can perform is a defect to fix, not a favor to ask.
 
 Never expand scope silently. New credentials, new data sources, external side effects, broader audiences, or higher spend each require a fresh explicit yes before execution, per the autonomy-grant discipline in the first-days runbook.
 
@@ -63,5 +63,5 @@ Do not project human project-management ceremony onto agent fleets. Fake deadlin
 ## Reference
 
 - `knowledge_bases/ananta_platform/24_operator_communication/01_operator_decision_briefs.md` — the fully-specified decision-request convention.
-- `knowledge_bases/ananta_platform/24_operator_communication/02_homunculus_charter_template.md` — the design values these conventions put into practice.
+- `knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md` — the design values these conventions put into practice.
 - `plugins/github_midwife_plugin/knowledge_base/04_first_days_runbook.md` — the autonomy-grant discipline referenced under autonomy craft.

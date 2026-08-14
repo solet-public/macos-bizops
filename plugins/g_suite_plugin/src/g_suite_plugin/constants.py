@@ -14,23 +14,23 @@ import os
 from typing import Final
 
 
-def _homunculus_or_fail() -> str:
-    """Resolve HOMUNCULUS_NAME at import-time for scoped vault keys.
+def _solet_or_fail() -> str:
+    """Resolve SOLET_NAME at import-time for scoped vault keys.
 
-    Vault keys follow the ``<homunculus>.<plugin>.<credential>`` convention.
+    Vault keys follow the ``<solet>.<plugin>.<credential>`` convention.
     Mirrors the fast-fail helper in schwab_market_data_plugin.constants +
     soundcloud_artist_studio_plugin.constants.
     """
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "g_suite_plugin.constants: HOMUNCULUS_NAME env var is required to "
+            "g_suite_plugin.constants: SOLET_NAME env var is required to "
             "resolve scoped vault keys.",
         )
     return name
 
 
-_HOMUNCULUS = _homunculus_or_fail()
+_SOLET = _solet_or_fail()
 
 # ---------------------------------------------------------------------------
 # Plugin identity
@@ -80,10 +80,10 @@ ACCESS_TOKEN_VALUE_KEY_TOKEN: Final[str] = "token"
 ACCESS_TOKEN_VALUE_KEY_EXPIRES_AT: Final[str] = "expires_at"
 
 # ---------------------------------------------------------------------------
-# Vault keys — scoped ``<homunculus>.<plugin>.<credential>`` (single-account)
+# Vault keys — scoped ``<solet>.<plugin>.<credential>`` (single-account)
 # ---------------------------------------------------------------------------
-VAULT_KEY_REFRESH_TOKEN: Final[str] = f"{_HOMUNCULUS}.g_suite_plugin.refresh_token"
-VAULT_KEY_ACCESS_TOKEN: Final[str] = f"{_HOMUNCULUS}.g_suite_plugin.access_token"
+VAULT_KEY_REFRESH_TOKEN: Final[str] = f"{_SOLET}.g_suite_plugin.refresh_token"
+VAULT_KEY_ACCESS_TOKEN: Final[str] = f"{_SOLET}.g_suite_plugin.access_token"
 
 VAULT_TAG_REFRESH_TOKEN: Final[str] = "g_suite_refresh_token"
 VAULT_TAG_ACCESS_TOKEN: Final[str] = "g_suite_access_token"
@@ -97,7 +97,7 @@ VAULT_TAG_ACCESS_TOKEN: Final[str] = "g_suite_access_token"
 # get_declared_vault_keys. Canonical convention: VAULT_AND_ADDRESS_BOOK.md
 # §"Pattern: Plugin Configuration via Address Book + Vault".
 VAULT_KEY_CLIENT_SECRET: Final[str] = (
-    f"{_HOMUNCULUS}.default_address_book_plugin.google_client_secret"
+    f"{_SOLET}.default_address_book_plugin.google_client_secret"
 )
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 Until now, ``profile/config/prompts/thinking_system_prompt.md`` was the
 ONLY source for the reasoning system prompt -- but ``profile/config/`` is
 deliberately excluded from every seed (genesis boundary), so every
-homunculus born from the github-seed pipeline silently ran with an EMPTY
+solet born from the github-seed pipeline silently ran with an EMPTY
 planning prompt (confirmed live on the v9/v10 from-scratch verification
 runs). The fix ships a plugin-owned default at
 ``knowledge_base/prompts/thinking_system_prompt.md`` (package-relative,

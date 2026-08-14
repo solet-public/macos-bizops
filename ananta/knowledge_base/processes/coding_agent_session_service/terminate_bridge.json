@@ -12,6 +12,6 @@
   "error_processor_customizations": {
     "action_context": "Terminate a tracked MCP bridge subprocess.",
     "error_interpretation": "sigterm_denied: os.kill returned PermissionError, meaning the bridge subprocess is owned by a different user. tracker_corruption: the tracking entry pointed at a pid the OS no longer recognises AND the tracker's removal step failed.",
-    "recovery_guidance": "sigterm_denied: confirm the homunculus is running as the operator's user account; cross-user bridge ownership is not supported. tracker_corruption: re-issue list_bridges to inspect the tracker state; if the entry persists, restart the plugin via apply_manifest."
+    "recovery_guidance": "sigterm_denied: confirm the solet is running as the operator's user account; cross-user bridge ownership is not supported. tracker_corruption: re-issue list_bridges to inspect the tracker state; if the entry persists, restart the plugin via apply_manifest."
   }
 }

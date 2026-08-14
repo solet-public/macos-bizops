@@ -90,29 +90,39 @@ class EnvironmentConfig:
         return EnvironmentConfig.get_string("APP_HOME")
 
     @staticmethod
-    def homunculus_name() -> str:
-        """Get the homunculus name (single source of truth).
+    def solet_name() -> str:
+        """Get the solet name (single source of truth).
 
-        This is THE canonical way to get the homunculus identity.
+        This is THE canonical way to get the solet identity.
         Used for: PostgreSQL schema name, logging, identity systems.
 
-        The HOMUNCULUS_NAME environment variable MUST be set. A silent
+        The SOLET_NAME environment variable MUST be set. A silent
         default would route schema-qualified queries to a stale or
         non-existent schema and surface as inscrutable downstream
         errors; fast-fail with a discoverable message instead.
         """
-        from ananta.constants import HOMUNCULUS_NAME_ENV_VAR
+        from ananta.constants import SOLET_NAME_ENV_VAR
 
-        value = os.environ.get(HOMUNCULUS_NAME_ENV_VAR)
+        value = os.environ.get(SOLET_NAME_ENV_VAR)
         if value:
             return value
 
+        legacy = os.environ.get("HOMUNCULUS_NAME")
+        if legacy:
+            raise RuntimeError(
+                f"un-migrated launcher: legacy HOMUNCULUS_NAME={legacy!r} is set "
+                f"but {SOLET_NAME_ENV_VAR} is not. The P2 rename (2026-08-13) has "
+                "no compatibility alias. Run deployment/scripts/migrate_to_solet.py "
+                "(or the seed-update runbook's migration step) to rewrite the "
+                "LaunchAgent/launcher environment, then relaunch."
+            )
+
         app_home = os.environ.get("APP_HOME", "<unset>")
         msg = (
-            f"{HOMUNCULUS_NAME_ENV_VAR} environment variable is required but not set. "
-            f"Set {HOMUNCULUS_NAME_ENV_VAR} to the name of this homunculus before "
-            f"invoking the homunculus. Hint: this process's APP_HOME is {app_home!r} — use the "
-            f"basename of the homunculus directory (e.g. 'example' if APP_HOME is "
+            f"{SOLET_NAME_ENV_VAR} environment variable is required but not set. "
+            f"Set {SOLET_NAME_ENV_VAR} to the name of this solet before "
+            f"invoking the solet. Hint: this process's APP_HOME is {app_home!r} — use the "
+            f"basename of the solet directory (e.g. 'example' if APP_HOME is "
             f"'~/Workspace/example'). See knowledge_bases/ananta_platform/18_cli_conventions/ "
             f"for the convention."
         )

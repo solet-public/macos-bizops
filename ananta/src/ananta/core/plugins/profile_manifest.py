@@ -1,13 +1,13 @@
 """Profile manifest loader for runtime plugin filtering.
 
-A homunculus's birth-time profile (cloud / local / custom) is captured
+A solet's birth-time profile (cloud / local / custom) is captured
 in ``<APP_HOME>/config/manifest.yaml``. At startup, the plugin manager
 reads this file and only loads entry points whose name appears in its
 ``plugins`` list — everything else is skipped even if installed.
 
 Manifest absent = no gating (load every installed entry point). This is
-the sensible default for dev boxes and pre-A5 homunculi that pre-date
-profile templates; new homunculi born under A5+ always write a manifest.
+the sensible default for dev boxes and pre-A5 solets that pre-date
+profile templates; new solets born under A5+ always write a manifest.
 """
 
 from __future__ import annotations

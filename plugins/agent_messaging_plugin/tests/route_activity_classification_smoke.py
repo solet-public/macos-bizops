@@ -17,7 +17,7 @@ idle-reap timestamp the forwarder's long-poll bumps) must ALSO not stamp
 model activity — else a deaf session's polling would read as a live turn.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/route_activity_classification_smoke.py
 """
 
@@ -189,7 +189,7 @@ def test_model_routes_do_stamp() -> None:
 
 def test_touch_does_not_stamp_but_activity_does() -> None:
     mgr = _bridge_manager()
-    bridge = mgr.open(homunculus_name="", parent_pid=9)
+    bridge = mgr.open(solet_name="", parent_pid=9)
     _check(
         bridge.last_model_activity_at == "",
         "S4: a fresh bridge has NO model-activity stamp",
@@ -209,7 +209,7 @@ def test_touch_does_not_stamp_but_activity_does() -> None:
 def test_stamp_mirrors_to_binding_only_for_model_route() -> None:
     mgr = _bridge_manager()
     reg = _peer_registry()
-    bridge = mgr.open(homunculus_name="", parent_pid=9)
+    bridge = mgr.open(solet_name="", parent_pid=9)
     bridge.agent_instance_id = "agi-R"
     reg.register(
         BridgeBinding(

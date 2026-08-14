@@ -56,7 +56,7 @@ The bridge is the FastAPI + Python MCP stdio surface that backs every
   `bridge.*` error namespace,
 - the Python MCP stdio entry point at
   `python -m agent_messaging_plugin.mcp_bridge`, which discovers the
-  homunculus HTTP port via `~/.ananta/runtime/<homunculus>.bridge.port` (no
+  solet HTTP port via `~/.ananta/runtime/<solet>.bridge.port` (no
   hardcoded port anywhere in client configs).
 
 See `05_http_reference.md` for the full route table and
@@ -89,15 +89,15 @@ right `/api/v1/bridge/*` endpoint and bridges long-poll events back as
 transport-specific MCP notifications. The default and Claude Code
 method is `notifications/claude/channel`. For Codex sessions registered
 with `AGENT_IDENTITY=codex`, peer-message wake events use
-`notifications/homunculus/peer_message` so the locally patched Codex CLI can
+`notifications/solet/peer_message` so the locally patched Codex CLI can
 route the message into its inter-agent mailbox and start a normal turn.
 Port discovery is fully runtime: the bridge subprocess reads
-`HOMUNCULUS_NAME` from its environment, opens
-`~/.ananta/runtime/<homunculus>.bridge.port`, and connects. That file
-has exactly one writer per homunculus topology — the blue-green router
-when this homunculus has one, `agent_messaging_plugin` itself (via
+`SOLET_NAME` from its environment, opens
+`~/.ananta/runtime/<solet>.bridge.port`, and connects. That file
+has exactly one writer per solet topology — the blue-green router
+when this solet has one, `agent_messaging_plugin` itself (via
 `write_routerless_bridge_port_file`, gated on a manifest-declared
-router-presence check) when it does not. Minimal-bundle homunculi ship
+router-presence check) when it does not. Minimal-bundle solets ship
 without the router, so their bridge is discoverable only because of this
 router-less writer path (D11 ruling, 2026-07-13,
 `workbench/2026-07-13_d11_bridge_port_discovery_routerless_ruling.md`).
@@ -105,14 +105,14 @@ The discovery contract from the client's side is unchanged either way —
 one filename, read the same way.
 
 The MCP client caches this subprocess and its tool descriptors for the
-life of the Codex session. If the homunculus restarts or a bridge source edit needs
+life of the Codex session. If the solet restarts or a bridge source edit needs
 to be loaded, refresh the live session with `/mcp reconnect` when
 available, or restart through the configured Codex launcher. The local
 patched-Codex runbook covers stale `agc-*` bridge ids and update procedure.
 
 ## Where to go next
 
-- Agent calling the homunculus (`process_*`, `download`) →
+- Agent calling the solet (`process_*`, `download`) →
   `02_platform_call_surface.md`.
 - Agent calling another live agent (`peer_*`) → `03_inter_agent_messaging.md`.
 - HTTP route table behind every MCP tool → `05_http_reference.md`.

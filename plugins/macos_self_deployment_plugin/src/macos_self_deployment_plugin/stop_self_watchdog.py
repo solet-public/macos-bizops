@@ -4,17 +4,17 @@ Slice 4.5 of
 ``workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md``
 introduces the ``stop_self`` verb on the
 :class:`SelfDeploymentServiceInterface` base. The verb runs INSIDE the
-the homunculus process it's being asked to kill; a synchronous SIGTERM would
+the solet process it's being asked to kill; a synchronous SIGTERM would
 prevent the verb's response from flushing back to the caller (the
 network write races the signal handler). The fix is a detached
 subprocess: ``stop_self`` spawns a tiny Python subprocess that sleeps
 briefly, sends SIGTERM, waits a bounded window, escalates to SIGKILL
-if the target is still alive — all from outside the homunculus process, so
+if the target is still alive — all from outside the solet process, so
 the verb's response has time to fully serialize and ship before any
 signal arrives.
 
 ``start_new_session=True`` puts the watchdog in its own POSIX session,
-so the SIGTERM it later sends to the homunculus doesn't cascade back to the
+so the SIGTERM it later sends to the solet doesn't cascade back to the
 watchdog itself.
 
 Lives as a sibling module to :mod:`drain_sentinel` so it's easy to
@@ -72,7 +72,7 @@ def spawn(target_pid: int) -> int:
         stderr=subprocess.DEVNULL,
     )
     _logger.info(
-        "%s: stop_self watchdog spawned pid=%d targeting the homunculus pid=%d "
+        "%s: stop_self watchdog spawned pid=%d targeting the solet pid=%d "
         "(SIGTERM in %.1fs, SIGKILL escalation in %.1fs)",
         PLUGIN_NAME,
         proc.pid,

@@ -22,7 +22,7 @@ Architect-mandated red-first cases:
         residual that needs role-addressed delivery, not this read).
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/peer_inbox_session_visibility_smoke.py
 """
 

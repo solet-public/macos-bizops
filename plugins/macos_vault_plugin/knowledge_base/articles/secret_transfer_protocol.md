@@ -1,14 +1,14 @@
-# Cross-Homunculus Sealed-Box Secret Transfer
+# Cross-Solet Sealed-Box Secret Transfer
 
 ## When to use this
 
-Use the sealed-box protocol when one homunculus needs to hand a credential
-(API key, OAuth token, bot secret, etc.) to another homunculus and the
+Use the sealed-box protocol when one solet needs to hand a credential
+(API key, OAuth token, bot secret, etc.) to another solet and the
 plaintext must never enter the agent's context, transcript, MCP log, or
 any other caller-reachable surface.
 
-The canonical case is bootstrapping a fresh cloud homunculus: it boots
-empty, the operator's home homunculus has the keys, and the four processes
+The canonical case is bootstrapping a fresh cloud solet: it boots
+empty, the operator's home solet has the keys, and the four processes
 documented here move them across without ever passing through the
 agent's context window.
 
@@ -21,14 +21,14 @@ secrets between separate vault instances.
 
 The transfer is three calls plus an idempotent bootstrap, all driven by
 the operator agent. Plaintext exists only inside the two vault entries (at
-rest, protected by each homunculus's vault substrate — the macOS Keychain
+rest, protected by each solet's vault substrate — the macOS Keychain
 locally, AWS Secrets Manager + KMS in the cloud) and momentarily inside the
 sender's `export_encrypted` and the recipient's `import_encrypted` process
 frames.
 
 ```
-Bootstrap (each homunculus, one time, idempotent):
-    homunculus.vault.ensure_encryption_keypair()
+Bootstrap (each solet, one time, idempotent):
+    solet.vault.ensure_encryption_keypair()
         -> { created: bool, public_key: <base64 X25519 pubkey> }
 
 Recipient publishes its public key:
@@ -149,6 +149,6 @@ plaintext, never ciphertext.
 - `plugins/macos_vault_plugin/knowledge_base/articles/secret_transfer_protocol_design.md` —
   protocol design and threat model.
 - `plugins/macos_vault_plugin/tests/secret_transfer_protocol_smoke.py` —
-  end-to-end verification of the four verbs against a running homunculus via MCP.
+  end-to-end verification of the four verbs against a running solet via MCP.
 - `workbench/2026-05-17_homunculus_aws_deployment_plan.md` §13 —
   the architectural context (why cloud-bootstrap needs this).

@@ -59,7 +59,7 @@ it.
 
 - **A gitignore entry for a staging location.** The genesis git-init step
   (`plugins/github_midwife_plugin/src/github_midwife_plugin/git_init.py`) writes a
-  `staging/` entry into every newly-initialized homunculus worktree's `.gitignore` at
+  `staging/` entry into every newly-initialized solet worktree's `.gitignore` at
   birth (never clobbering an existing `.gitignore` — the same idempotent-and-preserving
   rule genesis applies everywhere else). Treat `staging/` as the default name for this
   convention's staging location in a fresh project directory; rename it if you already
@@ -92,6 +92,6 @@ gate.
 - `24_operator_communication/07_business_data_retention_and_deletion.md` — the companion
   disclosure on how long anything committed or staged is kept.
 - `plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md`, "What this
-  homunculus ingests and embeds" — states why keeping values out of session content
+  solet ingests and embeds" — states why keeping values out of session content
   matters upstream of this convention: anything that does reach a session is ingested at
   full fidelity, by design.

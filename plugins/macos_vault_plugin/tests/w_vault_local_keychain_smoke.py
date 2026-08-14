@@ -16,11 +16,11 @@ plugin's package installed.
 
 Codex sign-off correction #4: CI must not touch the real macOS keychain.
 Production ``SystemKeychain`` is exercised end-to-end only by the
-sacrificial-cutover smoke SC-17 against a freshly-birthed homunculus.
+sacrificial-cutover smoke SC-17 against a freshly-birthed solet.
 
 Standalone — not pytest.  Run with::
 
-    HOMUNCULUS_NAME=smoke .venv/bin/python3 plugins/macos_vault_plugin/tests/w_vault_local_keychain_smoke.py
+    SOLET_NAME=smoke .venv/bin/python3 plugins/macos_vault_plugin/tests/w_vault_local_keychain_smoke.py
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ import traceback
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-if "HOMUNCULUS_NAME" not in os.environ:
-    os.environ["HOMUNCULUS_NAME"] = "smoke"
+if "SOLET_NAME" not in os.environ:
+    os.environ["SOLET_NAME"] = "smoke"
 
 from macos_vault_plugin.plugin import MacosVaultPlugin  # noqa: E402
 
@@ -48,7 +48,7 @@ else:
         sys.path.insert(0, _TESTS_DIR)
     from fake_keychain import FakeKeychain  # noqa: E402
 
-HOMUNCULUS = "smoke"
+SOLET = "smoke"
 PLUGIN = "macos_vault_plugin"
 OTHER_PLUGIN = "soundcloud_artist_studio_plugin"
 
@@ -134,7 +134,7 @@ def make_vault() -> MacosVaultPlugin:
 
 
 def scoped_key(credential: str, plugin: str = PLUGIN) -> str:
-    return f"{HOMUNCULUS}.{plugin}.{credential}"
+    return f"{SOLET}.{plugin}.{credential}"
 
 
 def fake(vault: MacosVaultPlugin) -> FakeKeychain:
@@ -434,27 +434,27 @@ def test_sc13_keypair_migration_failure_refuses_fresh_mint() -> None:
 # ─────────────────────────────────────────────────────────────────────────
 
 def test_sc15_operator_keychain_namespace_disjoint() -> None:
-    """The per-credential service name ``<homunculus>.<plugin>`` MUST NOT collide with operator-managed entries."""
+    """The per-credential service name ``<solet>.<plugin>`` MUST NOT collide with operator-managed entries."""
     from macos_vault_plugin.keychain import SystemKeychain
 
-    # Pin the fixture: _scoped_service_name reads HOMUNCULUS_NAME from the env,
+    # Pin the fixture: _scoped_service_name reads SOLET_NAME from the env,
     # so the assertion must not float with the runner's env (the gate exports
-    # the real HOMUNCULUS_NAME). Set it to this test's fixture homunculus, restore after.
-    _prev_homunculus = os.environ.get("HOMUNCULUS_NAME")
-    os.environ["HOMUNCULUS_NAME"] = HOMUNCULUS
+    # the real SOLET_NAME). Set it to this test's fixture solet, restore after.
+    _prev_solet = os.environ.get("SOLET_NAME")
+    os.environ["SOLET_NAME"] = SOLET
     try:
         sk = SystemKeychain()
         scoped_service = sk._scoped_service_name(PLUGIN)
-        assert scoped_service == f"{HOMUNCULUS}.{PLUGIN}"
+        assert scoped_service == f"{SOLET}.{PLUGIN}"
         assert "-vault" not in scoped_service
         operator_service_examples = ["Anthropic API", "soundcloud_oauth_app", "GitHub"]
         for op_svc in operator_service_examples:
             assert op_svc != scoped_service
     finally:
-        if _prev_homunculus is None:
-            os.environ.pop("HOMUNCULUS_NAME", None)
+        if _prev_solet is None:
+            os.environ.pop("SOLET_NAME", None)
         else:
-            os.environ["HOMUNCULUS_NAME"] = _prev_homunculus
+            os.environ["SOLET_NAME"] = _prev_solet
 
 
 # ─────────────────────────────────────────────────────────────────────────

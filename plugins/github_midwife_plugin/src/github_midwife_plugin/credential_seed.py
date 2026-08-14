@@ -13,25 +13,25 @@ post-boot process call would deadlock the bootstrap phase. Only Layer 1
 (in-venv, pre-first-boot) can do this; Layer 0 stays stdlib and never
 handles a credential value at all.
 
-Per-homunculus role isolation (operator override, 2026-07-12; Architect
+Per-solet role isolation (operator override, 2026-07-12; Architect
 amended ruling `workbench/2026-07-12_per_homunculus_db_role_isolation_ruling.md`):
-each homunculus has its OWN non-superuser Postgres role named after it
-(db = schema = role = HOMUNCULUS_NAME), owning its own database. There is
-NO shared cluster role and NO credential ever crosses a homunculus's
+each solet has its OWN non-superuser Postgres role named after it
+(db = schema = role = SOLET_NAME), owning its own database. There is
+NO shared cluster role and NO credential ever crosses a solet's
 namespace — the shared-`ananta` model and the parent-provisions-child
 credential copy it required are both retired. This module ALWAYS seeds the
-CURRENT process's own role (`HOMUNCULUS_NAME`), generating a fresh password
+CURRENT process's own role (`SOLET_NAME`), generating a fresh password
 and `ALTER ROLE`-ing that role. A verb-mode newborn runs this exact path in
-ITS OWN venv subprocess (`--seed`, HOMUNCULUS_NAME=<newborn>), same as the
+ITS OWN venv subprocess (`--seed`, SOLET_NAME=<newborn>), same as the
 fresh-machine CLI path — never seeded from a parent.
 
-Two keys, one value (Architect F11 ruling, 2026-07-11): this homunculus's
+Two keys, one value (Architect F11 ruling, 2026-07-11): this solet's
 own role password is stored under TWO vault keys, because
 `enforce_namespace` only lets a plugin read keys whose middle `<plugin>`
 segment equals its own name, and BOTH owner plugins connect as this
-homunculus's role with the SAME password:
-  * `<homunculus>.postgres_state_management_plugin.db_password`
-  * `<homunculus>.pgvector_service_plugin.password`
+solet's role with the SAME password:
+  * `<solet>.postgres_state_management_plugin.db_password`
+  * `<solet>.pgvector_service_plugin.password`
 They are BY DEFINITION the same value; divergence is a bug. Every mutation
 path here writes BOTH keys store-first, and the two-state guard backfills
 the pgvector key if a valid postgres key predates it (F11) — shipping the
@@ -40,10 +40,10 @@ whose pgvector crash-loops at readiness.
 
 Sequence (build spec §6.1's steps, STORE-FIRST order per Codex's
 2026-07-09 must-fix review — see "Store-first" note below):
-  1. HOMUNCULUS_NAME must be set (checked by SystemKeychain construction
+  1. SOLET_NAME must be set (checked by SystemKeychain construction
      and re-checked explicitly here for a clearer error).
   2. If a `db_password` entry already exists: probe whether this
-     homunculus's role currently authenticates with it. If yes -> SKIP
+     solet's role currently authenticates with it. If yes -> SKIP
      (idempotent no-op; backfill the pgvector key if missing). If no ->
      fall through and ROTATE BOTH by construction (regenerate, ALTER
      ROLE, store --force) -- never one without the other, so the Keychain
@@ -91,22 +91,22 @@ NOT proof of isolation (it means the scram gate or the seed is broken); the
 classifier distinguishes the two so a scram regression can't masquerade as
 isolation. This probe reads ONLY the newborn's own Keychain namespace,
 runs in the newborn's own venv, and is verb-mode only (a fresh-machine
-first homunculus has no sibling to be isolated from).
+first solet has no sibling to be isolated from).
 
 Key-shape verified against the live reader (2026-07-09): the state
 plugin's boot-time credential read
 (`postgres_state_management_plugin.plugin`) calls
-`vault_service.retrieve(key=f"{homunculus}.postgres_state_management_plugin.db_password")`,
+`vault_service.retrieve(key=f"{solet}.postgres_state_management_plugin.db_password")`,
 which `macos_vault_plugin`'s `_parse_scoped_key` splits into exactly
 `(plugin_name="postgres_state_management_plugin", credential="db_password")`
 before calling `SystemKeychain.retrieve_credential(*pair)` -- the same two
 arguments this module passes to `store_credential`. No key-shape mismatch.
 
-Importing `macos_vault_plugin.keychain` requires `HOMUNCULUS_NAME` to be
+Importing `macos_vault_plugin.keychain` requires `SOLET_NAME` to be
 set (the package's `__init__.py` resolves vault-scoped constants eagerly
 at import time) -- this module cannot be imported without it either, which
 is consistent with step 1 of the sequence above and with resolving the
-role name (== HOMUNCULUS_NAME) at import.
+role name (== SOLET_NAME) at import.
 """
 
 from __future__ import annotations
@@ -120,69 +120,69 @@ from collections.abc import Callable
 
 from macos_vault_plugin.keychain import PerCredentialKeychain, SystemKeychain
 
-from .constants import is_valid_homunculus_name
+from .constants import is_valid_solet_name
 
 
 class CredentialSeedError(RuntimeError):
     """Raised when the scram DB-password seed cannot complete safely."""
 
 
-def _require_homunculus_name() -> str:
-    """Resolve + VALIDATE this homunculus's name at the sole derivation boundary.
+def _require_solet_name() -> str:
+    """Resolve + VALIDATE this solet's name at the sole derivation boundary.
 
     The returned name is used verbatim as `_ROLE_NAME` in the `ALTER ROLE
     "<name>"` SQL (F1) and the `rolname='<name>'` existence probe (F2), both run
     as the trust-superuser admin role. Validating here against
-    `NAME_PATTERN` (via `is_valid_homunculus_name`) fail-closes a name carrying a
+    `NAME_PATTERN` (via `is_valid_solet_name`) fail-closes a name carrying a
     quote/semicolon/space/leading-hyphen BEFORE it can reach any SQL site --
     closing the injection class Codex flagged in `bootstrap.py`, in this Layer-1
     module where it runs as the admin role. The pattern forbids `"`/`'` outright,
     so the double-quoted identifier and single-quoted literal sites can no longer
     be broken out of.
     """
-    homunculus = os.environ.get("HOMUNCULUS_NAME", "").strip()
-    if not homunculus:
+    solet = os.environ.get("SOLET_NAME", "").strip()
+    if not solet:
         raise CredentialSeedError(
-            "HOMUNCULUS_NAME env var is required to resolve the per-homunculus "
+            "SOLET_NAME env var is required to resolve the per-solet "
             "Keychain service name and Postgres role identity."
         )
-    if not is_valid_homunculus_name(homunculus):
+    if not is_valid_solet_name(solet):
         raise CredentialSeedError(
-            f"HOMUNCULUS_NAME {homunculus!r} is not a valid homunculus name -- it "
+            f"SOLET_NAME {solet!r} is not a valid solet name -- it "
             "must be a lowercase letter followed by 1-62 chars from [a-z0-9_-]. "
             "This name is interpolated into admin `ALTER ROLE`/catalog SQL as the "
             "role identity; names with quotes, semicolons, spaces, or a leading "
             "hyphen are refused before any Postgres call."
         )
-    return homunculus
+    return solet
 
 
 _STATE_PLUGIN = "postgres_state_management_plugin"
 _CREDENTIAL = "db_password"
-# The pgvector service connects to the SAME per-homunculus role with the SAME
+# The pgvector service connects to the SAME per-solet role with the SAME
 # password, but `enforce_namespace` only lets a plugin read vault keys whose
 # middle `<plugin>` segment equals its own name -- so the one role credential
 # is stored under TWO keys, one per owner plugin's namespace. The two keys are
 # BY DEFINITION the same value (one role password, two consumer namespaces);
 # divergence is a bug, and every mutation path here writes both. pgvector's
-# live reader is `<homunculus>.pgvector_service_plugin.password`
+# live reader is `<solet>.pgvector_service_plugin.password`
 # (`pgvector_service_plugin.plugin._resolve_db_password`).
 _PGVECTOR_PLUGIN = "pgvector_service_plugin"
 _PGVECTOR_CREDENTIAL = "password"
-# This homunculus's own Postgres role. db = schema = role = HOMUNCULUS_NAME
-# (operator per-homunculus-isolation ruling, 2026-07-12). Resolved at import
+# This solet's own Postgres role. db = schema = role = SOLET_NAME
+# (operator per-solet-isolation ruling, 2026-07-12). Resolved at import
 # (like bootstrap.py's `_DATABASE`) so every role-touching site sees one
-# identity and the module refuses to import without a name. `_require_homunculus_name`
+# identity and the module refuses to import without a name. `_require_solet_name`
 # now VALIDATES the name against NAME_PATTERN at resolution, so the double-quoted
 # `ALTER ROLE` identifier and the single-quoted `rolname='...'` literal below can
 # never be broken out of (F1/F2, 2026-07-19); hyphenated names remain fine.
-_ROLE_NAME = _require_homunculus_name()
+_ROLE_NAME = _require_solet_name()
 # Cluster-global admin database. `ALTER ROLE` and the role-existence probe are
 # cluster-wide catalog operations, so they target `postgres` rather than any
-# homunculus db -- pointing them at a per-homunculus db would add a needless
+# solet db -- pointing them at a per-solet db would add a needless
 # ordering edge (the db must exist first). The role-auth probe, by contrast,
-# targets this homunculus's OWN db (its purpose is "role authenticates AND can
-# reach my db"), resolved from HOMUNCULUS_NAME at call time.
+# targets this solet's OWN db (its purpose is "role authenticates AND can
+# reach my db"), resolved from SOLET_NAME at call time.
 _ADMIN_DB = "postgres"
 # The Postgres admin/superuser role (Layer 1 side). MUST resolve identically
 # to bootstrap.py's Layer 0 _ADMIN_ROLE -- both use getpass.getuser(), the OS
@@ -194,7 +194,7 @@ _PW_TOKEN_BYTES = 32
 _PSQL_TIMEOUT_S = 15
 
 # CLI flags (verb-mode newborn self-seed subprocess). `--seed` runs the full
-# self-seed against this process's own HOMUNCULUS_NAME role; the optional
+# self-seed against this process's own SOLET_NAME role; the optional
 # `--isolation-sibling-db <db>` adds the post-seed isolation self-proof.
 _SEED_FLAG = "--seed"
 _ISOLATION_FLAG = "--isolation-sibling-db"
@@ -203,10 +203,10 @@ _ISOLATION_FLAG = "--isolation-sibling-db"
 def _default_alter_role_password(pw: str) -> None:
     """`ALTER ROLE "<name>" PASSWORD '<pw>'` via the trust-superuser admin role.
 
-    Targets `-d postgres` (`_ADMIN_DB`), NOT any per-homunculus db: `ALTER
+    Targets `-d postgres` (`_ADMIN_DB`), NOT any per-solet db: `ALTER
     ROLE` is a cluster-wide catalog operation, so pointing it at this
-    homunculus's own db would add a needless ordering edge (that db must be
-    created first). Do NOT "fix" this back to the homunculus db.
+    solet's own db would add a needless ordering edge (that db must be
+    created first). Do NOT "fix" this back to the solet db.
 
     The password is embedded in the SQL text (ALTER ROLE has no
     bind-parameter form), so the SQL is piped over stdin rather than
@@ -234,14 +234,14 @@ def _default_alter_role_password(pw: str) -> None:
 
 
 def _default_role_authenticates(pw: str) -> bool:
-    """Probe whether this homunculus's role currently authenticates with `pw`
+    """Probe whether this solet's role currently authenticates with `pw`
     AND can reach its OWN db.
 
-    Targets `-d <HOMUNCULUS_NAME>` (the per-homunculus db, per the
-    operator's "database per homunculus, named after it" ruling), NOT a
+    Targets `-d <SOLET_NAME>` (the per-solet db, per the
+    operator's "database per solet, named after it" ruling), NOT a
     cluster db: the probe's purpose is "the role authenticates and can
-    connect to the db this homunculus will actually use", so it runs
-    after the db has been provisioned. The db name is the RAW homunculus
+    connect to the db this solet will actually use", so it runs
+    after the db has been provisioned. The db name is the RAW solet
     name (identical to the role and schema names -- one identity, no
     second derivation); psql receives it as a `-d`/`-U` argv value (data,
     not SQL text), so hyphenated names need no quoting here.
@@ -252,7 +252,7 @@ def _default_role_authenticates(pw: str) -> bool:
     env = os.environ.copy()
     env["PGPASSWORD"] = pw
     result = subprocess.run(  # noqa: S603
-        ["psql", "-U", _ROLE_NAME, "-d", _require_homunculus_name(),
+        ["psql", "-U", _ROLE_NAME, "-d", _require_solet_name(),
          "-v", "ON_ERROR_STOP=1", "-q", "-c", "SELECT 1;"],
         capture_output=True, text=True, timeout=_PSQL_TIMEOUT_S, env=env,
     )
@@ -261,7 +261,7 @@ def _default_role_authenticates(pw: str) -> bool:
 
 def _default_role_exists() -> bool:
     """Assume-and-verify probe (Architect R5, 2026-07-12): does this
-    homunculus's own role exist? Wizard step 1's `createuser "<name>"`
+    solet's own role exist? Wizard step 1's `createuser "<name>"`
     creates it BEFORE this in-venv seed ever runs, so an absent role means
     the wizard step was not performed -- fail loud NAMING it, rather than
     letting the later `ALTER ROLE` die with a raw psql "role does not
@@ -317,7 +317,7 @@ def _backfill_pgvector_key(kc: PerCredentialKeychain, value: bytes) -> None:
 
     Deterministic COMPLETION of the two-keys-one-value invariant (pgvector
     reads its db password from its own vault namespace), NOT lazy
-    initialization: a resumed partial birth, or a homunculus seeded before the
+    initialization: a resumed partial birth, or a solet seeded before the
     dual-key change, can hold a valid postgres key while the pgvector key is
     still absent -- and the dual-seed would otherwise silently no-op in exactly
     the state where the missing key must be created. `value` is the postgres
@@ -341,10 +341,10 @@ def _should_skip_seeding(
     absent AND the role itself does not exist (wizard step 1 not run) --
     extracted from `seed_db_password` to keep its cyclomatic complexity A/B.
 
-    Under per-homunculus role isolation there is no foreign owner to protect:
+    Under per-solet role isolation there is no foreign owner to protect:
     a set-but-unknown password on our OWN role is unambiguously ours to rotate,
-    and there is no "prior homunculus seeded this role" refusal (each role is
-    private to one homunculus).
+    and there is no "prior solet seeded this role" refusal (each role is
+    private to one solet).
     """
     if kc.exists_credential(_STATE_PLUGIN, _CREDENTIAL):
         stored = kc.retrieve_credential(_STATE_PLUGIN, _CREDENTIAL)
@@ -370,13 +370,13 @@ def _should_skip_seeding(
     if not role_exists_fn():
         raise CredentialSeedError(
             f"Postgres role {_ROLE_NAME!r} does not exist -- wizard step 1 was "
-            "not performed. Create this homunculus's role/database first (see "
+            "not performed. Create this solet's role/database first (see "
             "plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md "
             f"'wizard step 1': `createuser -U <admin> \"{_ROLE_NAME}\"` + "
             f"`createdb -U <admin> -O \"{_ROLE_NAME}\" \"{_ROLE_NAME}\"` + pgvector "
             "extension + REVOKE + scram hba), then re-run."
         )
-    # Role present, own key absent -- this homunculus is seeding it fresh.
+    # Role present, own key absent -- this solet is seeding it fresh.
     return False
 
 
@@ -387,7 +387,7 @@ def seed_db_password(
     role_authenticates: Callable[[str], bool] | None = None,
     role_exists: Callable[[], bool] | None = None,
 ) -> None:
-    """Generate and seed the scram `db_password` for THIS homunculus's own
+    """Generate and seed the scram `db_password` for THIS solet's own
     role, idempotently.
 
     `keychain`/`alter_role_password`/`role_authenticates`/`role_exists` are
@@ -398,7 +398,7 @@ def seed_db_password(
     Raises `CredentialSeedError` (before any mutation) when the own-namespace
     entry is absent AND the role does not exist (wizard step 1 not run).
     """
-    _require_homunculus_name()
+    _require_solet_name()
 
     kc = keychain if keychain is not None else SystemKeychain()
     alter_fn = alter_role_password if alter_role_password is not None else _default_alter_role_password
@@ -430,7 +430,7 @@ def seed_db_password(
 
 
 def _default_sibling_connect_probe(sibling_db: str, pw: str) -> subprocess.CompletedProcess[str]:
-    """Attempt to connect as this homunculus's role to `sibling_db` with its
+    """Attempt to connect as this solet's role to `sibling_db` with its
     REAL password. Returns the `CompletedProcess` for the classifier to read.
 
     The password travels via `PGPASSWORD` (env, not argv). This is a real
@@ -457,7 +457,7 @@ def _assert_role_cannot_reach_db(
     connect: SiblingConnectProbe | None = None,
 ) -> None:
     """Isolation self-proof (Architect §5.2/R6.6b, 2026-07-12): assert this
-    homunculus's role, authenticating with its REAL password, is REFUSED at
+    solet's role, authenticating with its REAL password, is REFUSED at
     `sibling_db` with a CONNECT-privilege denial.
 
     Distinguishes three outcomes so a scram regression cannot masquerade as

@@ -4,7 +4,7 @@ Mints a JWT via OAuth client_credentials against kara's /oauth/token, opens
 a bridge session, POSTs ingest_raw_chunk + search_sessions process_call
 envelopes, polls each terminal result, and reports SUCCESS or FAILURE.
 
-This is a LIVE network smoke against the kara-keen-keeper remote homunculus
+This is a LIVE network smoke against the kara-keen-keeper remote solet
 (W5.G elevation target). When kara is unreachable (DNS fails / network down /
 host offline) OR when local OAuth credentials are missing, the smoke SKIPs
 with rc=0 instead of failing the suite — mirroring the pattern in

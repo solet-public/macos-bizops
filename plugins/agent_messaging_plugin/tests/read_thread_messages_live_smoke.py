@@ -226,7 +226,7 @@ def test_ownership_bypass_discriminator(service: AgentMessagingService) -> None:
 def main() -> int:
     if os.environ.get("READ_THREAD_MESSAGES_LIVE_SMOKE") != "1":
         print("=== read_thread_messages_live_smoke ===")
-        print("  SKIP  set READ_THREAD_MESSAGES_LIVE_SMOKE=1 to run; needs the live homunculus DB.")
+        print("  SKIP  set READ_THREAD_MESSAGES_LIVE_SMOKE=1 to run; needs the live solet DB.")
         return 0
     print("=== read_thread_messages_live_smoke ===")
     schema_name = f"example_test_readthreadmsg_{secrets.token_hex(3)}"

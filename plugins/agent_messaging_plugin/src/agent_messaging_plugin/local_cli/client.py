@@ -1,4 +1,4 @@
-"""Minimal synchronous client for a homunculus's localhost bridge surface.
+"""Minimal synchronous client for a solet's localhost bridge surface.
 
 Speaks the `/api/v1/bridge/*` contract the stdio MCP bridge forwards to,
 but as one-shot request/response rather than a persistent MCP session.
@@ -32,10 +32,10 @@ DEFAULT_REQUEST_TIMEOUT_S: Final[float] = 30.0
 DEFAULT_POLL_TIMEOUT_S: Final[float] = 120.0
 POLL_INTERVAL_S: Final[float] = 0.5
 
-# A genesis-born clone rewrites root_manifest.yaml's homunculus_name to its own
+# A genesis-born clone rewrites root_manifest.yaml's solet_name to its own
 # name, but an unmaterialized source tree still carries this literal
 # placeholder -- so it is the signal to use the clone-dir basename.
-_NAME_PLACEHOLDER: Final[str] = "homunculus"
+_NAME_PLACEHOLDER: Final[str] = "solet"
 
 # Action statuses that mean "still working". A completed action is also still
 # settling until process/result carries the separately persisted result row.
@@ -44,12 +44,12 @@ NON_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
 )
 
 
-class HomunculusNotRunningError(RuntimeError):
-    """The homunculus bridge is not reachable (no port file present)."""
+class SoletNotRunningError(RuntimeError):
+    """The solet bridge is not reachable (no port file present)."""
 
 
-class HomunculusIdentityError(RuntimeError):
-    """The CLI could not determine WHICH homunculus it is installed under — its
+class SoletIdentityError(RuntimeError):
+    """The CLI could not determine WHICH solet it is installed under — its
     clone's ``root_manifest.yaml`` is present but unreadable, so falling back to
     the clone-dir basename could silently retarget a corrupt/mis-seeded clone.
     """
@@ -86,7 +86,7 @@ class BridgeResultTimeoutError(RuntimeError):
 
 
 def _clone_root() -> Path | None:
-    """The homunculus clone root: the nearest ancestor of this module carrying
+    """The solet clone root: the nearest ancestor of this module carrying
     ``root_manifest.yaml``. ``None`` when the CLI runs outside a clone.
     """
     for parent in Path(__file__).resolve().parents:
@@ -95,66 +95,66 @@ def _clone_root() -> Path | None:
     return None
 
 
-def resolve_homunculus_name() -> str:
-    """The homunculus this CLI is installed under — derived from the CLI's OWN
+def resolve_solet_name() -> str:
+    """The solet this CLI is installed under — derived from the CLI's OWN
     resolved install location, never a caller flag or ambient env, so a bare
-    per-homunculus symlink (``~/.local/bin/<name>`` -> ``<clone>/.venv/bin/...``)
-    pins its own homunculus and reaches no sibling.
+    per-solet symlink (``~/.local/bin/<name>`` -> ``<clone>/.venv/bin/...``)
+    pins its own solet and reaches no sibling.
 
     Precedence: the clone's genesis-rewritten ``root_manifest.yaml`` name; else
     the clone-dir basename (the birth/clone convention is ``~/Workspace/<name>/``);
-    else ``$HOMUNCULUS_NAME`` (when run outside any clone). A root_manifest that
+    else ``$SOLET_NAME`` (when run outside any clone). A root_manifest that
     is PRESENT but unreadable (malformed / schema-invalid) fails loud rather than
     silently retargeting a corrupt clone by its directory name.
     """
     root = _clone_root()
     if root is None:
-        return EnvironmentConfig.homunculus_name()
+        return EnvironmentConfig.solet_name()
     manifest_path = root / MANIFEST_FILENAME
     manifest, error = load_manifest(manifest_path)
     if manifest is not None:
         # Genesis rewrites this to the newborn's name; an unmaterialized source
         # tree keeps the literal placeholder -> use the clone-dir basename.
-        if manifest.homunculus_name != _NAME_PLACEHOLDER:
-            return manifest.homunculus_name
+        if manifest.solet_name != _NAME_PLACEHOLDER:
+            return manifest.solet_name
         return root.name
     if manifest_path.is_file():
-        raise HomunculusIdentityError(
+        raise SoletIdentityError(
             f"root_manifest at {manifest_path} is present but unreadable ({error}) "
-            "— refusing to guess the homunculus identity by clone-dir basename."
+            "— refusing to guess the solet identity by clone-dir basename."
         )
     # ABSENT root_manifest -> the clone-dir basename is the name.
     return root.name
 
 
-def resolve_base_url(homunculus_name: str | None = None) -> str:
-    """Discover the running homunculus's bridge base URL from its port file.
+def resolve_base_url(solet_name: str | None = None) -> str:
+    """Discover the running solet's bridge base URL from its port file.
 
     Args:
-        homunculus_name: Test-only override. Production resolves identity from
-            the CLI's install location (:func:`resolve_homunculus_name`) — no
+        solet_name: Test-only override. Production resolves identity from
+            the CLI's install location (:func:`resolve_solet_name`) — no
             ``-H`` flag, no ambient env — so each installed command (and any
-            symlink to it) reaches ONLY its own homunculus.
+            symlink to it) reaches ONLY its own solet.
 
     Returns:
         ``http://127.0.0.1:<port>`` for the discovered bridge port.
 
     Raises:
-        HomunculusNotRunningError: No bridge port file exists for the homunculus.
+        SoletNotRunningError: No bridge port file exists for the solet.
     """
-    name = homunculus_name or resolve_homunculus_name()
+    name = solet_name or resolve_solet_name()
     port = read_port_file(BRIDGE_SERVICE_NAME, name)
     if port is None:
-        raise HomunculusNotRunningError(
-            f"no bridge port file for homunculus '{name}' "
+        raise SoletNotRunningError(
+            f"no bridge port file for solet '{name}' "
             f"(~/.ananta/runtime/{name}.{BRIDGE_SERVICE_NAME}.port). "
-            "Is the homunculus running?",
+            "Is the solet running?",
         )
     return f"http://127.0.0.1:{port}"
 
 
 class BridgeClient:
-    """One-shot synchronous client over a homunculus's bridge HTTP surface."""
+    """One-shot synchronous client over a solet's bridge HTTP surface."""
 
     def __init__(
         self,
@@ -250,7 +250,7 @@ class BridgeClient:
         The action-event row is marked completed immediately before the result
         row is written. A snapshot in that narrow window has
         ``status=completed`` but no ``result`` key; treating it as terminal
-        makes ``homunculus call`` nondeterministically omit successful output.
+        makes ``solet call`` nondeterministically omit successful output.
         """
         deadline = time.monotonic() + poll_timeout_s
         while True:

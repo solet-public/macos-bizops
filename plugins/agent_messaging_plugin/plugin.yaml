@@ -3,7 +3,7 @@ description: |
   Consolidated bridge plugin.  Wears three hats:
 
   1. IO interface (post_message / start_interface / stop_interface /
-     get_supported_capabilities) — the canonical "homunculus delivers prose
+     get_supported_capabilities) — the canonical "solet delivers prose
      to Claude Code or other MCP-connected agents" surface.
   2. Bridge service — FastAPI HTTP surface on a dynamically allocated
      port, peer registry with multi-instance routing, bridge sessions
@@ -110,10 +110,10 @@ config:
       shelf capability: populate a work_class here and the corresponding
       spawns are gated again, whenever usage data argues for it. Keyed by
       work_class; each entry is a list of exact tool names (e.g.
-      "mcp__<homunculus>__process_call" -- Claude Code's MCP tool-name pattern,
+      "mcp__<solet>__process_call" -- Claude Code's MCP tool-name pattern,
       mcp__<server>__<tool>). Example:
         work_class_tool_allowlists:
-          read_only: [mcp__<homunculus>__peer_register, mcp__<homunculus>__process_call]
+          read_only: [mcp__<solet>__peer_register, mcp__<solet>__process_call]
 
   headless_permission_mode:
     type: string
@@ -164,12 +164,16 @@ config:
       This is the SOURCE the fleet-wide default is declared from, not a
       per-session override -- per-session FLEET_TRANSPORT (env, read
       directly by the rename skill, spawned workers' hook guards, and
-      wake_waiter.js) remains the declared-never-probed override and is
-      never read through this config. Platform-side spawn paths (the host
-      adapters, spawn_session) are the authoritative consumers of this
-      value once they wire FLEET_TRANSPORT into spawn env (fleet-watch-
-      transport-migration phase-2 slice 1); this value is a "shelf
-      capability" landed ahead of that consumer, matching the precedent
+      wake_waiter.js, the Claude-side coordination-hooks Stop-hook reader --
+      stock Codex has no equivalent Stop reader; async command hooks do not
+      execute on it, so FLEET_TRANSPORT reaches a Codex worker only through
+      the Codex process and its managed host/launcher environment) remains
+      the declared-never-probed override and is never read through this
+      config. Platform-side spawn paths (the host adapters, spawn_session)
+      are the authoritative consumers of this value once they wire
+      FLEET_TRANSPORT into spawn env (fleet-watch-transport-migration
+      phase-2 slice 1); this value is a "shelf capability" landed ahead of
+      that consumer, matching the precedent
       work_class_tool_allowlists set (declared before every consumer reads
       it). Operator shell launchers that source a bare env var (not this
       config) get their own documented one-line export, not a shell-parses-
@@ -177,9 +181,9 @@ config:
 
   # --- Bridge / IO surface ------------------------------------------
   # Port is intentionally NOT a config field.  Port allocation is owned
-  # by ananta.core.runtime.port_manager (dynamic, per-homunculus, lowest
+  # by ananta.core.runtime.port_manager (dynamic, per-solet, lowest
   # available 8100-8199).  Pinning a port here would break multi-
-  # homunculus operation.
+  # solet operation.
   host:
     type: string
     required: false

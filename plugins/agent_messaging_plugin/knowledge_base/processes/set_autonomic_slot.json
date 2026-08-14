@@ -12,7 +12,7 @@
   },
   "error_processor_customizations": {
     "action_context": "Claims the sys:autonomic role_binding row via the v4 CAS (claim_role_binding_v4) after validating the target session has a live bridge-open inference provider. Notices and the deferred-queue drain are best-effort side effects; the claim itself is the authority.",
-    "error_interpretation": "missing_argument: agent_instance_id was empty. no_live_provider: the target session has no live inference provider (not registered with provides_inference=True, or its bridge is closed/swept). not_registered: the target has no live peer registration on any open bridge. bridge.not_started: the bridge interface is not running on this homunculus.",
+    "error_interpretation": "missing_argument: agent_instance_id was empty. no_live_provider: the target session has no live inference provider (not registered with provides_inference=True, or its bridge is closed/swept). not_registered: the target has no live peer registration on any open bridge. bridge.not_started: the bridge interface is not running on this solet.",
     "recovery_guidance": "no_live_provider / not_registered: have the target session (re)connect its MCP bridge — a coding-agent session registers with provides_inference=True automatically — then retry with its current agent_instance_id from peer_list. bridge.not_started: start the agent_messaging bridge interface first."
   }
 }

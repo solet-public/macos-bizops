@@ -22,7 +22,7 @@ stable anchor). Each seam carries a negative control that proves the detector
 localizes (returns False when the symbol is not called in that function), so a
 green result cannot be a trivially-true detector.
 
-Project policy: no pytest. Offline — no live homunculus / LM Studio / Postgres. Exits 0
+Project policy: no pytest. Offline — no live solet / LM Studio / Postgres. Exits 0
 on success, 1 on first-failed-check aggregate.
 
 Run from repo root:

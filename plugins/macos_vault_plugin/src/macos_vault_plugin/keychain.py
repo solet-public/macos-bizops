@@ -1,10 +1,10 @@
-"""OS Keychain integration for vault key storage (local-homunculus only).
+"""OS Keychain integration for vault key storage (local-solet only).
 
 Single backend: :class:`SystemKeychain` — macOS Keychain via the
 ``keyring`` library. Stores the master key wrapped with a
-passphrase-derived KEK at (service=``<homunculus>-vault``, account=
+passphrase-derived KEK at (service=``<solet>-vault``, account=
 ``master-key``) and per-plugin credentials directly at
-(service=``<homunculus>.<plugin>``, account=``<credential>``) per the
+(service=``<solet>.<plugin>``, account=``<credential>``) per the
 :class:`PerCredentialKeychain` Protocol.
 
 The previous file-substrate fallback (:class:`FileKeychain`) and the
@@ -14,7 +14,7 @@ AWS Secrets Manager backend were retired:
   2026-05-22) under the "Interface -> Plugin" rule.
 * File-substrate retired in P0-A Round 4 (2026-06-09) under
   ``NO fallback code`` — non-macOS hosts use the cloud profile bindings;
-  the local profile is macOS-only per ``[[homunculus-locality]]``.
+  the local profile is macOS-only per ``[[solet-locality]]``.
 
 The Keychain layer is paired with the vault plugin's state-service-
 backed substrate; the plugin owns no Postgres driver per
@@ -29,18 +29,18 @@ from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
-# Keychain identifiers. The service name is per-homunculus
-# (``<homunculus_name>-vault``, e.g. ``example-vault``); resolved lazily on
-# the ``SystemKeychain`` instance from ``HOMUNCULUS_NAME`` and fast-fails
+# Keychain identifiers. The service name is per-solet
+# (``<solet_name>-vault``, e.g. ``example-vault``); resolved lazily on
+# the ``SystemKeychain`` instance from ``SOLET_NAME`` and fast-fails
 # if the env var is absent. The account names are platform-wide.
 MASTER_KEY_ACCOUNT = "master-key"
 RECOVERY_KEY_ACCOUNT = "recovery-key"
 
 # Per-credential service-name template. The fully-resolved service name
-# is ``<homunculus>.<plugin_name>`` (e.g. ``<homunculus>.macos_vault_plugin``),
-# disjoint from the master-key path's ``<homunculus>-vault`` so the two
+# is ``<solet>.<plugin_name>`` (e.g. ``<solet>.macos_vault_plugin``),
+# disjoint from the master-key path's ``<solet>-vault`` so the two
 # surfaces never collide inside the same OS keychain. The dot separator
-# matches the scoped vault-key shape ``<homunculus>.<plugin>.<credential>``
+# matches the scoped vault-key shape ``<solet>.<plugin>.<credential>``
 # from master plan §3.3.1.
 PER_CREDENTIAL_SERVICE_SEPARATOR = "."
 
@@ -136,9 +136,9 @@ class PerCredentialKeychain(Protocol):
     """Per-credential entry surface (vault dual-write substrate).
 
     Distinct from :class:`KeychainBackend`: the master-key path stores ONE
-    wrapped key per (service=``<homunculus>-vault``, account=``master-key``)
+    wrapped key per (service=``<solet>-vault``, account=``master-key``)
     pair; the per-credential surface stores ONE plugin secret per
-    (service=``<homunculus>.<plugin_name>``, account=``<credential>``) pair
+    (service=``<solet>.<plugin_name>``, account=``<credential>``) pair
     and is the Keychain side of the W-VAULT-LOCAL-KEYCHAIN dual-write
     contract.
 
@@ -152,7 +152,7 @@ class PerCredentialKeychain(Protocol):
     def store_credential(
         self, plugin_name: str, credential: str, value: bytes,
     ) -> None:
-        """Store ``value`` at (service=``<homunculus>.<plugin_name>``, account=``<credential>``).
+        """Store ``value`` at (service=``<solet>.<plugin_name>``, account=``<credential>``).
 
         Replaces any existing entry at the same (service, account) pair —
         the dual-write contract's atomicity guarantees come from the
@@ -163,7 +163,7 @@ class PerCredentialKeychain(Protocol):
     def retrieve_credential(
         self, plugin_name: str, credential: str,
     ) -> bytes | None:
-        """Return the bytes at (service=``<homunculus>.<plugin_name>``, account=``<credential>``).
+        """Return the bytes at (service=``<solet>.<plugin_name>``, account=``<credential>``).
 
         Returns ``None`` if no entry exists. Does NOT fall through to
         the state-service substrate — the caller layers that fallback
@@ -174,7 +174,7 @@ class PerCredentialKeychain(Protocol):
     def delete_credential(
         self, plugin_name: str, credential: str,
     ) -> bool:
-        """Delete (service=``<homunculus>.<plugin_name>``, account=``<credential>``).
+        """Delete (service=``<solet>.<plugin_name>``, account=``<credential>``).
 
         Returns ``True`` when an entry was actually deleted, ``False`` when
         no entry was present (idempotent).
@@ -184,15 +184,15 @@ class PerCredentialKeychain(Protocol):
     def exists_credential(
         self, plugin_name: str, credential: str,
     ) -> bool:
-        """Return whether an entry exists at (service=``<homunculus>.<plugin_name>``, account=``<credential>``)."""
+        """Return whether an entry exists at (service=``<solet>.<plugin_name>``, account=``<credential>``)."""
         ...
 
-    def list_credentials_under_homunculus(self) -> list[tuple[str, str]]:
-        """Return ``[(plugin_name, credential), ...]`` for every entry the homunculus owns.
+    def list_credentials_under_solet(self) -> list[tuple[str, str]]:
+        """Return ``[(plugin_name, credential), ...]`` for every entry the solet owns.
 
         Enumerates every ``kSecClassGenericPassword`` item whose service is
-        ``<homunculus>.<plugin_name>`` (exactly two dot-separated segments).
-        Excludes the master-key entry (``<homunculus>-vault``) and any
+        ``<solet>.<plugin_name>`` (exactly two dot-separated segments).
+        Excludes the master-key entry (``<solet>-vault``) and any
         legacy operator-written entries that don't match the per-credential
         scheme — those surface to the operator separately via punch-list
         review, not via the runtime ``vault::list`` verb.
@@ -207,11 +207,11 @@ class SystemKeychain:
         import keyring
         from keyring.backends import fail
 
-        name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+        name = os.environ.get("SOLET_NAME", "").strip()
         if not name:
             raise RuntimeError(
-                "macos_vault_plugin.keychain: HOMUNCULUS_NAME env var "
-                "is required to resolve the per-homunculus keychain "
+                "macos_vault_plugin.keychain: SOLET_NAME env var "
+                "is required to resolve the per-solet keychain "
                 "service name.",
             )
         self._service_name: str = f"{name}-vault"
@@ -219,11 +219,11 @@ class SystemKeychain:
 
     @property
     def service_name(self) -> str:
-        """Per-homunculus keychain service name (e.g. ``example-vault``).
+        """Per-solet keychain service name (e.g. ``example-vault``).
 
-        Resolved eagerly in ``__init__`` from ``HOMUNCULUS_NAME``;
+        Resolved eagerly in ``__init__`` from ``SOLET_NAME``;
         fast-fails at construction time if the env var is absent — a
-        keychain read/write without an owning homunculus would silently
+        keychain read/write without an owning solet would silently
         land in the wrong entry.
         """
         return self._service_name
@@ -270,26 +270,26 @@ class SystemKeychain:
     # ─────────────────────────────────────────────────────────────────────
     # PerCredentialKeychain implementation (W-VAULT-LOCAL-KEYCHAIN Tier 3).
     #
-    # The per-credential surface scopes service=``<homunculus>.<plugin>``,
+    # The per-credential surface scopes service=``<solet>.<plugin>``,
     # account=``<credential>`` — disjoint from the master-key path's
-    # ``<homunculus>-vault`` service so the two coexist in one OS keychain.
+    # ``<solet>-vault`` service so the two coexist in one OS keychain.
     # ─────────────────────────────────────────────────────────────────────
 
     def _scoped_service_name(self, plugin_name: str) -> str:
-        """Per-credential service name: ``<homunculus>.<plugin_name>``.
+        """Per-credential service name: ``<solet>.<plugin_name>``.
 
-        Fast-fails when ``HOMUNCULUS_NAME`` is unset — a per-credential
-        write without an owning homunculus would silently land in the
+        Fast-fails when ``SOLET_NAME`` is unset — a per-credential
+        write without an owning solet would silently land in the
         wrong tenant's keychain.
         """
-        homunculus = os.environ.get("HOMUNCULUS_NAME", "").strip()
-        if not homunculus:
+        solet = os.environ.get("SOLET_NAME", "").strip()
+        if not solet:
             raise RuntimeError(
-                "macos_vault_plugin.keychain: HOMUNCULUS_NAME env var is "
+                "macos_vault_plugin.keychain: SOLET_NAME env var is "
                 "required to resolve the per-credential keychain service "
                 "name.",
             )
-        return f"{homunculus}{PER_CREDENTIAL_SERVICE_SEPARATOR}{plugin_name}"
+        return f"{solet}{PER_CREDENTIAL_SERVICE_SEPARATOR}{plugin_name}"
 
     def store_credential(
         self, plugin_name: str, credential: str, value: bytes,
@@ -340,26 +340,26 @@ class SystemKeychain:
             is not None
         )
 
-    def list_credentials_under_homunculus(self) -> list[tuple[str, str]]:
-        """Enumerate per-credential entries owned by this homunculus.
+    def list_credentials_under_solet(self) -> list[tuple[str, str]]:
+        """Enumerate per-credential entries owned by this solet.
 
         macOS implementation: shells out to ``security dump-keychain`` and
         filters to entries whose service field is exactly
-        ``<homunculus>.<plugin_name>`` (two dot-separated segments,
+        ``<solet>.<plugin_name>`` (two dot-separated segments,
         non-empty plugin name). Anomalous entries (3+ dots, flat-account,
         bare-service) are excluded — they are operator-side review state
         per the punch list, not part of the runtime vault contract.
 
         Returns ``[(plugin_name, credential), ...]`` sorted for stable
-        output. Excludes ``<homunculus>-vault`` (master-key path).
+        output. Excludes ``<solet>-vault`` (master-key path).
         """
-        homunculus = os.environ.get("HOMUNCULUS_NAME", "").strip()
-        if not homunculus:
+        solet = os.environ.get("SOLET_NAME", "").strip()
+        if not solet:
             raise RuntimeError(
-                "macos_vault_plugin.keychain.list_credentials_under_homunculus: "
-                "HOMUNCULUS_NAME env var is required.",
+                "macos_vault_plugin.keychain.list_credentials_under_solet: "
+                "SOLET_NAME env var is required.",
             )
-        expected_service_prefix = f"{homunculus}{PER_CREDENTIAL_SERVICE_SEPARATOR}"
+        expected_service_prefix = f"{solet}{PER_CREDENTIAL_SERVICE_SEPARATOR}"
         dump = _security_dump_keychain()
         seen: set[tuple[str, str]] = set()
         for record in _split_keychain_dump_records(dump):
@@ -433,7 +433,7 @@ def get_keychain() -> KeychainBackend:
         raise RuntimeError(
             "macos_vault_plugin: SystemKeychain reports no real keyring backend "
             "available on this host. The local profile requires macOS Keychain "
-            "per [[homunculus-locality]]; non-macOS hosts use the cloud profile "
+            "per [[solet-locality]]; non-macOS hosts use the cloud profile "
             "bindings (secrets_manager_vault_plugin).",
         )
     return keychain

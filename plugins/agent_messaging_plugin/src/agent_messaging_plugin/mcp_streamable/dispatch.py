@@ -166,11 +166,11 @@ class JsonRpcError(Exception):
 class DispatchContext:
     """Platform collaborators the dispatcher uses to satisfy tool calls.
 
-    ``homunculus_name`` is the identity the platform was booted with
-    (``$HOMUNCULUS_NAME``); it flows into the ``initialize`` response's
+    ``solet_name`` is the identity the platform was booted with
+    (``$SOLET_NAME``); it flows into the ``initialize`` response's
     ``serverInfo.name`` + ``instructions`` so MCP clients surface the
     actual deployment identity rather than a generic label.
-    Empty string = no homunculus identity available; the tools-layer
+    Empty string = no solet identity available; the tools-layer
     fallback kicks in.
     """
 
@@ -179,7 +179,7 @@ class DispatchContext:
     platform_surface: PlatformSurface
     agent_messaging_service: Any  # AgentMessagingServiceInterface — Any avoids cycle
     state_service: Any | None = None
-    homunculus_name: str = ""
+    solet_name: str = ""
 
 
 # ---------------------------------------------------------------------
@@ -229,7 +229,7 @@ def dispatch_request(
         a JSON-RPC error response.
     """
     if request.method == "initialize":
-        return _handle_initialize(request, homunculus_name=context.homunculus_name)
+        return _handle_initialize(request, solet_name=context.solet_name)
     if request.method.startswith("notifications/"):
         # Notifications have no id and expect no response.  The router
         # returns 202 Accepted at the HTTP layer.  We still validate
@@ -259,7 +259,7 @@ def dispatch_request(
 
 
 def _handle_initialize(
-    request: JsonRpcRequest, *, homunculus_name: str,
+    request: JsonRpcRequest, *, solet_name: str,
 ) -> JsonRpcResponse:
     """Return InitializeResult; the router allocates the session header."""
     client_protocol = str(request.params.get("protocolVersion") or "")
@@ -276,7 +276,7 @@ def _handle_initialize(
         result={
             "protocolVersion": protocol_version,
             "serverInfo": {
-                "name": build_server_name(homunculus_name),
+                "name": build_server_name(solet_name),
                 "version": SERVER_VERSION,
             },
             "capabilities": {
@@ -287,7 +287,7 @@ def _handle_initialize(
                 # phone-side renderer handles both transports.
                 "experimental": {"claude/channel": {}},
             },
-            "instructions": build_server_instructions(homunculus_name),
+            "instructions": build_server_instructions(solet_name),
         },
     )
 
@@ -469,7 +469,7 @@ def _tool_current_identity(
 ) -> dict[str, Any]:
     return {
         "transport": "streamable_http",
-        "homunculus_name": context.homunculus_name,
+        "solet_name": context.solet_name,
         "agent_id": session.agent_id,
         "agent_instance_id": session.agent_instance_id,
         "agent_session_id": session.agent_session_id,

@@ -119,7 +119,7 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         """No vault keys are required — per-connection passwords are chain-consumed.
 
         Each connection's password lives in the address book RESOLVER's namespace
-        (``<homunculus>.default_address_book_plugin.external_pg_<name>_password``)
+        (``<solet>.default_address_book_plugin.external_pg_<name>_password``)
         and is read only through ``resolve_with_secrets`` under the resolver's
         identity — never a direct vault verb under this plugin. Post-2026-06-07
         namespace enforcement would reject such a key, so it is declared nowhere.

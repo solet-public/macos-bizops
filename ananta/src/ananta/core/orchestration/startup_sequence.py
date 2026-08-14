@@ -183,8 +183,8 @@ def _init_plugin_manager(orch: Any) -> None:
 
     Profile manifest gating: if ``<APP_HOME>/config/manifest.yaml`` exists,
     only plugins listed in its ``plugins:`` array are loaded. Absent manifest
-    falls back to "load every installed entry point" (the homunculus itself, pre-A5
-    homunculi, dev boxes).
+    falls back to "load every installed entry point" (the solet itself, pre-A5
+    solets, dev boxes).
     """
     from ananta.core.plugins.plugin_manager import PluginManager
     from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
@@ -722,7 +722,7 @@ def _validate_scoped_key_shape(name: str, key: str) -> None:
     if len(parts) < 3 or parts[1] != name:
         raise MalformedVaultKeyDeclarationError(
             f"plugin {name!r} declared key {key!r} which is not in "
-            f"<homunculus>.{name}.<credential> form (plugin segment "
+            f"<solet>.{name}.<credential> form (plugin segment "
             f"must match the plugin's own name)",
         )
 
@@ -770,7 +770,7 @@ def _check_vault_keys_for_plugin(name: str, plugin: Any) -> None:
     ``ananta.interfaces.vault_keys_provider.VaultKeysProvider``. The
     gate iterates the returned scoped keys, validates each declaration
     against the plugin's own name (per master plan §3.3.1 the plugin
-    segment of ``<homunculus>.<plugin>.<credential>`` must match), and
+    segment of ``<solet>.<plugin>.<credential>`` must match), and
     calls ``vault_service.exists()`` via the plugin's pre-injected
     caller-bound proxy.
 
@@ -783,7 +783,7 @@ def _check_vault_keys_for_plugin(name: str, plugin: Any) -> None:
 
     Raises:
         MalformedVaultKeyDeclarationError: declared key isn't in
-            ``<homunculus>.{plugin.name}.<credential>`` shape (BOTH
+            ``<solet>.{plugin.name}.<credential>`` shape (BOTH
             modes — declaration bugs are always fatal).
         MissingVaultKeyError: declared required key is absent in vault
             (FAIL mode only).
@@ -1121,14 +1121,14 @@ def _init_service_manager(orch: Any) -> None:
     logger.debug("✅ ServiceManager initialized")
 
 
-_PROBE_MODE_ENV_VAR = "HOMUNCULUS_PROBE_MODE"
+_PROBE_MODE_ENV_VAR = "SOLET_PROBE_MODE"
 _PROBE_READY_FILENAME = "probe_ready"
 
 
 def _probe_exit_if_in_probe_mode(orch: Any) -> None:
     """L2 probe checkpoint: terminate cleanly if running as a boot probe.
 
-    When ``HOMUNCULUS_PROBE_MODE=1`` is set in the environment, the platform is
+    When ``SOLET_PROBE_MODE=1`` is set in the environment, the platform is
     running as a sandboxed boot probe spawned by
     ``macos_self_deployment_plugin`` (Architect's local blue/green
     design §3). At this point every service plugin has been started,
@@ -1149,7 +1149,7 @@ def _probe_exit_if_in_probe_mode(orch: Any) -> None:
       paths and can hang on long-running pools; ``_exit`` bypasses them
       cleanly, which is what we want for a sandboxed scratch process.
 
-    No-op when ``HOMUNCULUS_PROBE_MODE`` is unset — production boots continue
+    No-op when ``SOLET_PROBE_MODE`` is unset — production boots continue
     through ``init_actions`` unchanged.
     """
     if os.environ.get(_PROBE_MODE_ENV_VAR) != "1":
@@ -1224,7 +1224,7 @@ def _verify_action_factory_injected_into_scheduling_plugin(orch: Any) -> None:
     """Fail-loud if `default_scheduling_plugin._action_executor` is None post-injection.
 
     W5.K backstop: between 2026-06-12 20:35 PT and 2026-06-13 11:51 PT (PT) the live
-    the homunculus had `default_scheduling_plugin._action_executor=None`, causing every cron
+    the solet had `default_scheduling_plugin._action_executor=None`, causing every cron
     callback to fail silently (only an ERROR log line; nothing surfaced to operator
     sessions). The condition was state corruption from a prior blue-green cycle and
     self-healed at the 11:51 cutover, but the silent-failure window was 22 hours.
@@ -1505,9 +1505,9 @@ def _auto_install_knowledge_bases(orch: Any) -> None:
     immediately after creation. Accesses the knowledge plugin directly
     through plugin_manager.
 
-    Skipped when ``HOMUNCULUS_PROBE_MODE=1``: the L2 probe shares the live
+    Skipped when ``SOLET_PROBE_MODE=1``: the L2 probe shares the live
     Postgres per Architect's 2026-05-30 design §3.2, so install
-    records, embeddings, and KB chunks set by the running homunculus are
+    records, embeddings, and KB chunks set by the running solet are
     already visible. Re-running auto-install in the probe duplicates
     that work and currently pushes boot past the 120s probe ceiling
     (2026-06-01 investigation; compositions KB alone takes ~109s when
@@ -1517,7 +1517,7 @@ def _auto_install_knowledge_bases(orch: Any) -> None:
     """
     if os.environ.get(_PROBE_MODE_ENV_VAR) == "1":
         logger.info(
-            "auto_install_knowledge_bases skipped: HOMUNCULUS_PROBE_MODE=1 "
+            "auto_install_knowledge_bases skipped: SOLET_PROBE_MODE=1 "
             "(probe shares live Postgres; install records already present)",
         )
         return
@@ -1552,11 +1552,11 @@ def _auto_register_declared_pulling_sources(service: Any) -> None:
 
     A filesystem ``root_uri`` denied by the secure-default ledger authz gate
     (P1.1.E — it needs an operator-configured ``ledger_allowed_roots`` entry AND
-    an operator-equivalent principal, neither of which a FRESH homunculus boot
+    an operator-equivalent principal, neither of which a FRESH solet boot
     has for a seed's ``~/.claude/*`` sources) is EXPECTED and skipped NON-fatally:
     the ledger ingests nothing from that source until the operator opts it in via
     ``ledger_allowed_roots`` during hydration. A hard raise here would crash-loop
-    the newborn's whole boot. The origin homunculus is unaffected — its sources are already
+    the newborn's whole boot. The origin solet is unaffected — its sources are already
     registered (the existing-kind skip below).
     """
     from ananta.interfaces.llm_session_source_interface import PullingSourceMixin
@@ -1776,7 +1776,7 @@ STARTUP_SEQUENCE = [
         _init_session_ledger_service,
         ["create_service_wrappers", "start_service_plugins"],
     ),
-    # L2 probe checkpoint — runs only when HOMUNCULUS_PROBE_MODE=1. Probe spawns
+    # L2 probe checkpoint — runs only when SOLET_PROBE_MODE=1. Probe spawns
     # via macos_self_deployment_plugin (Architect's local blue/green
     # design §3); on production boots this step no-ops and the sequence
     # continues into init_actions normally.

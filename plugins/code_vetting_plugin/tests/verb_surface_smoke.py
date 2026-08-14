@@ -5,7 +5,7 @@ shell out to pyright/gitleaks/… and take minutes): the EDGE decorated<->declar
 parity (the #1 startup fatal — a missing get_edge_process_definitions entry ->
 process_registry.edge_process_mismatch), the mandatory result-envelope shape, the
 deploy-invariant worktree anchoring (APP_HOME walk, fail-loud off the worktree),
-and the bounded-report cap. Pure Python, no live homunculus / LM Studio / subprocess /
+and the bounded-report cap. Pure Python, no live solet / LM Studio / subprocess /
 mocks. Run via the gate-smoke runner (``quality_gates/run_smokes.py``) or directly
 with ``.venv/bin/python3 plugins/code_vetting_plugin/tests/verb_surface_smoke.py``
 (exit 0/1); the ``code_vetting_plugin`` package must be installed (``pip install

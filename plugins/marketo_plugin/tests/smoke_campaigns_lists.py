@@ -18,7 +18,7 @@ Exercises:
   6. MarketoClient exposes a delete_json method distinct from get_json/post_json
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/marketo_plugin/tests/smoke_campaigns_lists.py
 
 Exits 0 on success, 1 on first failure.

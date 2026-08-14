@@ -663,9 +663,9 @@ class DefaultThinkingPlugin(ServicePlugin):
 
         The operator override (profile-relative, set via
         ``system_prompt_path``) wins when present -- that is the intended
-        per-homunculus customization path. Otherwise fall back to this
+        per-solet customization path. Otherwise fall back to this
         plugin's own shipped default, which ships in every seed (unlike
-        ``profile/config/``, which genesis excludes) so a fresh homunculus
+        ``profile/config/``, which genesis excludes) so a fresh solet
         never silently runs with an empty planning prompt.
         """
         prompt_path_str = str(config_provider.get("system_prompt_path"))

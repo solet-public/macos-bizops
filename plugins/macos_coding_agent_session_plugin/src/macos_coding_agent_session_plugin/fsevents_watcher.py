@@ -2,7 +2,7 @@
 
 macOS-native FSEvents via the pyobjc ``FSEvents`` framework. Watches
 the runtime directory the bridge port file lives in and, on every
-event whose path matches the canonical ``<homunculus>.bridge.port``,
+event whose path matches the canonical ``<solet>.bridge.port``,
 calls into the supplied tracker to restart every tracked bridge.
 
 The watcher runs on a dedicated thread spawned by the plugin's
@@ -44,7 +44,7 @@ def bridge_port_changed(
     """Decide whether a bridge-port filesystem event reflects a real value change.
 
     The watcher must act on CONTENT change, not on raw filesystem events:
-    the router's watchdog rewrites ``<homunculus>.bridge.port`` every ~5s
+    the router's watchdog rewrites ``<solet>.bridge.port`` every ~5s
     with the SAME value (idempotent re-materialisation — load-bearing, do
     not remove). The pre-fix watcher restarted ALL tracked bridges on every
     such write; once the tracked set grows under multi-session load, each

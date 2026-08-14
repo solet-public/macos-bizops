@@ -237,7 +237,7 @@ def test_empty_filter_hard_delete_is_rejected(provider: PostgresProvider, schema
 def main() -> int:
     if os.environ.get("ACTR_CLEAR_SESSION_MIGRATION_LIVE_SMOKE") != "1":
         print("=== actr_memory_clear_session_migration_live_smoke ===")
-        print("  SKIP  set ACTR_CLEAR_SESSION_MIGRATION_LIVE_SMOKE=1 to run; needs the live homunculus DB.")
+        print("  SKIP  set ACTR_CLEAR_SESSION_MIGRATION_LIVE_SMOKE=1 to run; needs the live solet DB.")
         return 0
     print("=== actr_memory_clear_session_migration_live_smoke ===")
     schema_name = f"example_test_actrclr_{secrets.token_hex(3)}"

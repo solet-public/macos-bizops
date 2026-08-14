@@ -174,6 +174,13 @@ def check_step_zero_text_verify(res: Results) -> None:
     RED MUTATION: reintroduce "is not required before proceeding" (the old
     conflated phrasing), drop "before other work" (the primacy claim), or add
     a process-key/deployment-path literal.
+
+    0.5.5 adds the SEQUENCING claims (bootstrap contract: Step Zero is a
+    sequence, not a substitution — platform knowledge base first, then the
+    working directory's own docs, neither replacing the other). RED MUTATION
+    for these: drop "in sequence" (reverting to the 0.5.4 either/or framing),
+    or swap the order so the working directory is named before the knowledge
+    base.
     """
     context = _context(res, "step_zero_reminder.py", LABEL_A)
     if context is None:
@@ -199,8 +206,20 @@ def check_step_zero_text_verify(res: Results) -> None:
         f"got: {context!r}",
     )
     res.check(
-        "::" not in context and "/Users/" not in context and "homunculus call" not in context,
+        "::" not in context and "/Users/" not in context and "solet call" not in context,
         "step_zero names no process verb, deployment path, or fleet-specific command",
+        f"got: {context!r}",
+    )
+    res.check(
+        "in sequence" in context,
+        "step_zero states the two sources are checked in sequence (0.5.5)",
+        f"got: {context!r}",
+    )
+    res.check(
+        "knowledge base" in context
+        and "working directory" in context
+        and context.index("knowledge base") < context.index("working directory"),
+        "step_zero orders the knowledge base before the working directory's docs",
         f"got: {context!r}",
     )
 

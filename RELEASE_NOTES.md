@@ -4,6 +4,191 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-13 — BREAKING: the homunculus→solet rename, a new feedback channel, and the seed's new home
+
+**This is the final release published at this repository.** Everything from
+here is published at the seed's new home. The move is the last section of this
+entry, and it needs one command from you.
+
+### BREAKING — every live identifier is renamed, and a migration step is mandatory
+
+The platform's own name for a deployment changed from `homunculus` to `solet`,
+and the rename reaches every live identifier. There are **no compatibility
+aliases**, by design: an alias layer here would have to survive in every
+launchd plist, shell function, and config key indefinitely, and a rename that
+half-works is worse than one that fails loudly.
+
+What renames:
+
+| Surface | Was | Is now |
+|---|---|---|
+| CLI console script | `homunculus …` | `solet …` (`solet call`, `solet health`) |
+| Environment family | `HOMUNCULUS_*` | `SOLET_*` (`SOLET_NAME` foremost) |
+| Root manifest key | `homunculus_name:` | `solet_name:` |
+| launchd labels | `local.homunculus.<name>` | `local.solet.<name>` |
+| Lifecycle verbs | `birth_homunculus`, `teardown_homunculus`, `provision_homunculus` | `birth_solet`, `teardown_solet`, `provision_solet` |
+| Entry-point flag | `--homunculus` | `--solet` |
+
+Result envelopes, error codes, and process JSON follow the same rename.
+
+**The migration is mandatory and it is not optional bookkeeping.** A code pull
+does not rewrite your LaunchAgent plists, launcher shell functions, venv
+console script, or root manifest — that is deployment state, and it still
+carries the old names after you pull. The platform refuses to boot when it
+finds the old environment or manifest keys, on purpose, with an error naming
+the step. Run this BEFORE restarting, dry run first:
+
+    <clone>/.venv/bin/python3 <clone>/deployment/scripts/migrate_to_solet.py
+    <clone>/.venv/bin/python3 <clone>/deployment/scripts/migrate_to_solet.py --apply
+
+It is idempotent — re-running reports already-migrated pieces and changes
+nothing. Full procedure, including the residual config-key guard to run after
+the platform is back, is Step 3a of the seed update runbook
+(`05_seed_update_runbook.md`).
+
+**A note on that script, because it affects what "update" means for you.** The
+migration script was not included in the shipped file set of any earlier
+release — it existed only in the maintainers' own checkout. An adopter updating
+across the rename boundary would have hit the refused boot, been pointed at
+Step 3a, and found no such file in their clone, with no documented recovery.
+This release ships the script. If you are reading these notes before updating,
+you are ahead of that problem and there is nothing extra to do; the sequence
+above is the whole story.
+
+**What does NOT change — do not "fix" these.** Each of these looks like a
+missed rename and is not:
+
+- **The messaging wire route `notifications/homunculus/peer_message` and the
+  channel `source="homunculus"` attribute.** These are protocol names on a
+  wire with two independent implementations. Renaming them is a versioned
+  protocol change, deliberately deferred — not an oversight. Changing them
+  locally will break your messaging.
+- **AWS-side resource names** — load balancer, bucket, registry, IAM, and tag
+  values keep their existing spellings. Renaming deployed cloud resources is a
+  migration with its own blast radius, out of scope for a rename release.
+- **History, in every form.** Ledger rows, memories, existing tag values,
+  persisted enum values, dated working notes, and past release entries keep
+  their original spellings. History is a record of what was true, and
+  rewriting it to match current vocabulary would make it a worse record.
+
+Knowledge-base articles were renamed in place. Because a rename is a delete
+plus an add, the startup staleness check cannot see the deletion half — the
+update runbook's Step 6 re-install with a negative-search verification applies
+to this release.
+
+### Closing items you raised
+
+**The `SessionStart` reminder that silently never fired — closed, fixed,
+and the class killed.** A cadence change rebound the knowledge-base-first
+reminder from `UserPromptSubmit` to `SessionStart` in both runtime variants'
+wiring, but the scripts kept emitting a hardcoded `UserPromptSubmit` event
+name. Claude Code rejects hook output whose declared event name mismatches the
+firing event, and it reports that rejection at debug level only — so the
+reminder silently never landed on any session start, in either runtime, while
+every test stayed green because the suites asserted the stale literal as the
+expected value. The defect was rendered in its own assertion.
+
+This came in as adopter feedback, with a before/after `claude --debug -p`
+capture showing exactly one `SessionStart` hook failing every time, plus a
+proposed diff and a recommendation to derive the expected event names from the
+wiring rather than restating them. All of it was correct, and the
+recommendation was adopted as the actual fix shape. Canonicalized upstream in
+`392e93130`: the reminder now echoes the event name from the hook's own stdin,
+and both suites gained a check that derives every reminder's expected events
+from `hooks.json` itself and fails if an emitted tag desyncs from the wiring —
+so the assertion can no longer drift away from the configuration the way it
+did here. Verified by deliberate red-mutation in both runtimes, not by
+observing green. Thank you for the report; a defect that is invisible from the
+origin and only visible on a real install is precisely the kind we cannot find
+without you.
+
+**The hydration runbook's retrieval self-test — closed.** The 2026-08-12
+entry acknowledged that 7 of the hydration runbook's retrieval queries no
+longer reached its articles at the expected rank, and stated that the entry
+would close when the repair landed. It has landed: all 7 queries pass, and the
+repair was checked against the neighbouring runbooks to confirm it did not
+demote any of their ranks in the process. The runbook's steps were always
+correct to follow; this was search reaching them, and it now does.
+
+**The two intermediate re-mints.** The releases dated 2026-08-12 in this file —
+the coordination-hooks 0.5.4 documentation-drift fix and the removal of the
+origin's creative working corpus from the shipped thinking knowledge bases —
+shipped without a direct reply to the deployments whose reports prompted them.
+Those entries are the formal disposition; nothing about them is still open on
+our side. If you raised something in that window that you cannot find answered
+in this file, it fell through — re-raise it by number through the channel
+below and it will be treated as open, not as a duplicate.
+
+### The feedback channel changed shape
+
+Feedback is now filed as **GitHub issues through the repository's issue
+forms**, rather than as a pull request carrying a numbered document. Design
+proposals are the exception and still travel as a pull request.
+
+What did not change: rounds are still `Part N`, items are still `§N.M`, the
+four item classes are the same, and the evidence and content rules are the
+same. To move: instead of writing one document per round and opening a pull
+request, open the repository's issue chooser and file one issue per item using
+the form for its class — the forms ask for the command, the observed output,
+the expected behavior, and the release you measured against, so the evidence
+you were already writing now has named fields. A multi-item round gets a parent
+issue with the items attached as sub-issues; a single-item round is just the
+one issue. Answers arrive as issue closures, and fixes land with `Fixes #N` so
+the commit is reachable from your item. **Subscribe to the new repository's
+releases** — that is now how you learn a round was answered, and how you learn
+a release exists at all. The rewritten `07_upstream_feedback_runbook.md` in
+this release is the full procedure.
+
+### coordination-hooks 0.5.5
+
+coordination-hooks 0.5.5 (Claude Code plugin): the session-start knowledge
+reminder now states the two-source sequence — the platform knowledge base
+first, then the working directory's own docs — rather than presenting them as
+alternatives; neither source replaces the other. New test legs pin the
+sequencing claim and the source order, and were red-mutation verified. The
+Codex twin carries the same sequencing literal (build
+`0.1.0+codex.20260814002958`), without the async clause because its CLI lookup
+blocks by design. The 0.5.4→0.5.5 version bump is what makes installed copies
+refresh: after pulling this update, run `claude plugin uninstall
+coordination-hooks@<your-marketplace>` then `claude plugin install
+coordination-hooks@<your-marketplace>`, and verify the `installPath` printed in
+`~/.claude/plugins/installed_plugins.json` exists on disk (the update runbook's
+three-outcome table explains why an in-place update without the uninstall can
+silently keep stale bytes).
+
+### THE MOVE — this repository is retired after this release
+
+Going forward the seed lives at:
+
+    https://github.com/solet-public/macos-bizops
+
+The new repository was seeded with this repository's history before this
+release published there, so the two share a common ancestor. Your move is one
+command, not a re-birth: nothing your deployment has become — database,
+memories, knowledge, credentials, LaunchAgents — is affected, and your next
+update is an ordinary fast-forward pull.
+
+Take this release's update from here FIRST (it published to both repositories),
+then re-point:
+
+    git -C <clone> remote get-url origin                    # note your current URL
+    git -C <clone> remote set-url origin https://github.com/solet-public/macos-bizops
+    git -C <clone> remote get-url origin                    # confirm it took
+    git -C <clone> fetch origin                             # prove the new home is reachable
+
+If that `fetch` fails with an access or not-found error, put your old URL back
+and talk to whoever administers your deployment's access — access to the new
+home is granted per-deployment. A clone pointed at a repository it cannot read
+has no update path at all, which is worse than where you started.
+
+**If you skip this, nothing breaks today and you stop receiving updates
+forever.** A clone still pointed here will report "already up to date" on every
+future pull, which is indistinguishable from "there have been no new releases."
+That is the failure this section exists to prevent. Full procedure, including
+the end-of-update verification, is Step 2a of `05_seed_update_runbook.md`.
+
+---
+
 ## 2026-08-12 — the seed no longer ships the origin's creative working corpus, and deletion-only KB updates get an explicit re-ingestion step
 
 **What was removed, and why.** The platform's thinking plugin
@@ -28,8 +213,8 @@ the files on disk), then verify with a negative search — full procedure
 in the seed update runbook (`05_seed_update_runbook.md`, Step 6, fourth
 stale copy):
 
-    homunculus call service_interface::knowledge_service::install '{"name": "thinking_plans"}'
-    homunculus call service_interface::knowledge_service::install '{"name": "plan_templates"}'
+    solet call service_interface::knowledge_service::install '{"name": "thinking_plans"}'
+    solet call service_interface::knowledge_service::install '{"name": "plan_templates"}'
 
 Born-fresh deployments need nothing: the corpus was never load-bearing
 for any shipped behavior, and no shipped test reads it.
@@ -98,7 +283,7 @@ surface: items you raise land here when they land. The runbook is
 `plugins/github_midwife_plugin/knowledge_base/07_upstream_feedback_runbook.md`.
 
 **New: the deployment report card.** A canonical definition of a
-fully-deployed homunculus — four tiers, each component with the evidence
+fully-deployed solet — four tiers, each component with the evidence
 command that proves it configured — and the operator-facing card your
 driving agent produces against it: what is set up, what remains, what each
 remaining item would give you, and one recommended next step. Delivering the
@@ -275,8 +460,8 @@ land together.
 
 ## 2026-08-10 (first update) — multi-session self-management
 
-**Update your homunculus.** This release adds the multi-session
-self-management capability described below — your homunculus can now
+**Update your solet.** This release adds the multi-session
+self-management capability described below — your solet can now
 spawn, monitor, hand off work between, and safely retire other agent
 sessions of itself, with an operating manual (the maintenance-verbs joseki
 cards) that ships in the same update. If you've been running a single
@@ -284,7 +469,7 @@ always-on session, updating is what makes the fleet capability available
 to it; nothing about your current setup breaks if you don't use it yet.
 The seed's own update runbook (`plugins/github_midwife_plugin/knowledge_base/05_seed_update_runbook.md`,
 or its plain-language companion `06_seed_update_operator_guide.md`) walks
-an already-running homunculus through picking this up — point a coding
+an already-running solet through picking this up — point a coding
 agent at it and ask it to "update me."
 
 This is the first release-notes package shipped with this seed. Previous
@@ -332,7 +517,7 @@ time pressure, including for tasks that look like plain code or config
 work, or where the answer feels already known. A short block now opens
 the template, naming Step Zero before anything else references it and
 stating plainly that acting from prior assumptions, source reading, web
-search, or MCP tools before searching the homunculus is a defect, not a
+search, or MCP tools before searching the solet is a defect, not a
 shortcut. If you've been carrying a local edit to this template to
 strengthen the same instruction, you can drop it — diff first if you want
 to confirm nothing else in your local version is worth keeping.
@@ -365,7 +550,7 @@ unattended (fully non-interactive, or driving a real interactive
 terminal), a registered-presence message transport as the new default for
 newly spawned sessions, automatic rotation for a session approaching its
 context limit, and per-session token usage accounting. None of this
-affects a homunculus that never spawns other sessions.
+affects a solet that never spawns other sessions.
 
 **Session-registration behavior clarified — a registration and a live
 watcher process are different things.** A durable role registration
@@ -458,11 +643,11 @@ capability set, in this release (`0.4.0` then `0.4.1`).** `0.4.0` vendors
 a heartbeat and a rotation-due watcher directly into the plugin, both
 wired as `PostToolUse` hooks; `0.4.1` — the same commit — additionally
 vendors the memory-passthrough capture/session-context pair and a
-new origin-resolution ladder for deciding which homunculus a session's
+new origin-resolution ladder for deciding which solet a session's
 memory writes belong to. All of this is part of this release's
-self-management enablement work — see "Update your homunculus" above and
+self-management enablement work — see "Update your solet" above and
 the seed's own update runbook for the exact hook list and the
-`HOMUNCULUS_NAME` export this ladder's first rung depends on. **Not yet
+`SOLET_NAME` export this ladder's first rung depends on. **Not yet
 tested end-to-end on a fresh adopter install** — see Known Issues below.
 
 **Salesforce, Schwab market data, Jira, and Snowflake's read verbs moved
@@ -519,8 +704,8 @@ behind other in-progress work. No date is promised.
 on any machine that doesn't add it to its own live platform manifest.**
 This is a per-adopter manifest/credentials fact, not something this seed
 can decide for you at ship time — the plugin's code, tests, and knowledge
-base are all present and correct; whether a given homunculus can actually
-call it depends on that homunculus's own manifest. If you try a Marketo
+base are all present and correct; whether a given solet can actually
+call it depends on that solet's own manifest. If you try a Marketo
 verb and get a not-found error, check your manifest before assuming
 something is broken.
 
@@ -565,7 +750,7 @@ this stack as freshly landed rather than battle-tested until one happens.
 ## How to safely update
 
 1. **Check you're starting from a healthy, unmodified clone.** Confirm
-   your homunculus responds normally, and note that files like
+   your solet responds normally, and note that files like
    `AGENTS.md`, `CLAUDE.md`, and any `client/` directory showing as
    untracked or modified in `git status` is normal — those are generated
    for your own machine and an update never touches them directly.

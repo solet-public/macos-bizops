@@ -182,7 +182,7 @@ def test_all_memory_service_interface_implementers_are_concrete() -> None:
     Phase 2 IMPL added concrete impls only to ACTRMemoryPlugin, missing
     MemoryService (the service-wrapper that the dispatcher actually
     instantiates via `provider_manager.get_service_instance("memory_service")`).
-    Without this assertion, the breakage surfaces only at homunculus boot time.
+    Without this assertion, the breakage surfaces only at solet boot time.
 
     This smoke iterates every concrete MemoryServiceInterface subclass and
     asserts the abstract-method set is empty.

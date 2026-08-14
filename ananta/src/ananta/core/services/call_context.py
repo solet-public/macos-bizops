@@ -116,7 +116,7 @@ class VaultKeyMalformedError(Exception):
     """Raised by VaultService implementations on malformed scoped keys.
 
     Tier 2 W-VAULT-CALLER-ENFORCE: scoped keys MUST be in the form
-    ``<homunculus>.<plugin>.<credential>`` (at least three segments
+    ``<solet>.<plugin>.<credential>`` (at least three segments
     separated by ``.``; the credential portion may contain further dots).
     Plugin-principal calls with a key that fails this shape raise
     ``VaultKeyMalformedError`` from ``_enforce_namespace`` BEFORE the

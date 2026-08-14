@@ -1,34 +1,34 @@
-# {{HOMUNCULUS_NAME}} — project instructions
+# {{SOLET_NAME}} — project instructions
 
-<!-- BEGIN HOMUNCULUS HYDRATION -->
+<!-- BEGIN SOLET HYDRATION -->
 
-This directory is the home of **{{HOMUNCULUS_NAME}}**, a homunculus on the Ananta
+This directory is the home of **{{SOLET_NAME}}**, a solet on the Ananta
 platform: a named, persistent agentic instance with its own PostgreSQL schema,
 memories, knowledge bases, and plugins. You — the AGENTS.md-convention
 session reading this — are its driving agent. This managed block governs
-{{HOMUNCULUS_NAME}} access for sessions opened in this directory. Existing
+{{SOLET_NAME}} access for sessions opened in this directory. Existing
 project instructions still apply; if they conflict with how to reach
-{{HOMUNCULUS_NAME}}, follow this block for access and ask the operator about
+{{SOLET_NAME}}, follow this block for access and ask the operator about
 the conflict.
 
 ## Access mode — no-MCP CLI is the default
 
 Before responding to any question or starting any non-trivial task, ask
-{{HOMUNCULUS_NAME}} through the local command genesis installed:
+{{SOLET_NAME}} through the local command genesis installed:
 
 ```bash
-{{HOMUNCULUS_NAME}} call service_interface::knowledge_service::search '{"query": "<plain-English description>", "top_k": 8}'
+{{SOLET_NAME}} call service_interface::knowledge_service::search '{"query": "<plain-English description>", "top_k": 8}'
 ```
 
-This talks to {{HOMUNCULUS_NAME}} over its local bridge and is the primary,
+This talks to {{SOLET_NAME}} over its local bridge and is the primary,
 complete path for knowledge-base search and process calls. After history
 ingestion is enabled it is also the path for session-ledger recall:
 
 ```bash
-{{HOMUNCULUS_NAME}} call service_interface::session_ledger_service::search_event_content '{"query": "<topic>", "limit": 8}'
+{{SOLET_NAME}} call service_interface::session_ledger_service::search_event_content '{"query": "<topic>", "limit": 8}'
 ```
 
-It needs no MCP server and no `mcp__{{HOMUNCULUS_NAME}}__*` tools.
+It needs no MCP server and no `mcp__{{SOLET_NAME}}__*` tools.
 
 MCP is optional and exists only for the operator who explicitly asks for it
 and whose machine policy permits it. Do not register, debug, or search for MCP
@@ -37,78 +37,78 @@ CLI path above is not a fallback, it is the default. Runner-specific
 peer-to-peer wake is a separate concern from knowledge/process access; retrieve
 the current messaging contract before assuming its transport.
 
-If `{{HOMUNCULUS_NAME}} call` itself fails (the homunculus process is not
-running — check with `{{HOMUNCULUS_NAME}} health`), the fallback is
+If `{{SOLET_NAME}} call` itself fails (the solet process is not
+running — check with `{{SOLET_NAME}} health`), the fallback is
 source-artifact recovery: read the KB source markdown directly under this
 deployment's own knowledge-base directories (`ananta/knowledge_bases/`,
 `ananta/knowledge_base/`, each plugin's `knowledge_base/`, and any real
 directories under `knowledge_bases/`) instead of the live search. This is an unranked,
 degraded recovery, not a substitute for the live path — it means the
-homunculus needs attention before claiming live retrieval; say so rather than
+solet needs attention before claiming live retrieval; say so rather than
 treating the source read as sufficient. There is no offline query script shipped in
 this deployment to try first: `default_knowledge_plugin`'s query script lives only
 in the platform's own development repo and is pruned from every seed.
 
-Building on assumptions when a canonical answer exists in {{HOMUNCULUS_NAME}}'s
+Building on assumptions when a canonical answer exists in {{SOLET_NAME}}'s
 knowledge base produces drift. If a search returns nothing relevant, that is
 information too: confirm the gap before inventing a pattern, and add an
 article documenting what you ended up with.
 
-Step Zero is a sequence, not a substitution. {{HOMUNCULUS_NAME}}'s knowledge
+Step Zero is a sequence, not a substitution. {{SOLET_NAME}}'s knowledge
 base governs platform access and cross-session knowledge; the directory this
 session was started in governs the task. After the platform search, the next
 step is the working directory's own context — its `CLAUDE.md`/`AGENTS.md`,
 its docs, and any knowledge base it carries. A session launched outside this
-directory, with {{HOMUNCULUS_NAME}} as support, anchors its work in that
+directory, with {{SOLET_NAME}} as support, anchors its work in that
 directory's own guidance — the platform search must never preempt it, and
 task-specific guidance from the working directory governs the task.
 
 Before editing code, changing config, or explaining a subsystem in this repo,
-search {{HOMUNCULUS_NAME}}'s knowledge base for the current design record and
+search {{SOLET_NAME}}'s knowledge base for the current design record and
 recent implementation notes using the actual nouns from the request — do not
 reconstruct architecture from local code fragments alone.
 
 Two carve-outs: locating a specific known code symbol or file in this repo
-(grep directly), and repairing a not-running `{{HOMUNCULUS_NAME}}` command
-(`{{HOMUNCULUS_NAME}} health`, launchd state, logs under
+(grep directly), and repairing a not-running `{{SOLET_NAME}}` command
+(`{{SOLET_NAME}} health`, launchd state, logs under
 `profile/data/logs/`).
 
 ## Startup discipline
 
-After any restart of {{HOMUNCULUS_NAME}} (LaunchAgent reload or foreground
+After any restart of {{SOLET_NAME}} (LaunchAgent reload or foreground
 launch), wait for startup to finish before querying: poll the newest log under
 `profile/data/logs/` with `wc -l <logfile> && sleep 5 && wc -l <logfile>` and
 proceed only once the two counts match. Querying mid-startup competes with the
 embedding rebuild and causes inference timeouts.
 
-## Running {{HOMUNCULUS_NAME}}
+## Running {{SOLET_NAME}}
 
 - Picking up updated code or config for an ALREADY-INSTALLED plugin (a
   brand-new plugin comes online via `install_plugin_from_path` instead):
-  check whether `macos_self_deployment_plugin` is in this homunculus's
+  check whether `macos_self_deployment_plugin` is in this solet's
   plugin roster (`list_plugins`). If it is, `apply_manifest` swaps in the
-  new version through the per-homunculus blue-green router, verifying
+  new version through the per-solet blue-green router, verifying
   before cutover, and leaves `previous` as an intact rollback target —
   zero downtime for this no-MCP CLI path (an MCP-connected caller sees the
   bridge go dark for roughly 30–60 seconds during cutover regardless).
   Search the knowledge base for "picking up new code without a bare
   restart apply_manifest" via Step Zero for the exact call shape (it needs
-  `new_manifest` and `reason`). If that plugin is absent, this homunculus
+  `new_manifest` and `reason`). If that plugin is absent, this solet
   has no router and no blue-green path (single-color by design) — restart
   the LaunchAgent below instead. Either way, a bare LaunchAgent restart is a
   full stop that drops in-memory state (blob storage by default); prefer
   `apply_manifest` whenever the router is present.
 - Normal mode (bringing the daemon up or down, not a code/config pickup):
-  the LaunchAgent `local.homunculus.{{HOMUNCULUS_NAME}}` (starts at login,
+  the LaunchAgent `local.solet.{{SOLET_NAME}}` (starts at login,
   restarts on failure); stop/start with `launchctl unload -w` / `load -w`
-  on `~/Library/LaunchAgents/local.homunculus.{{HOMUNCULUS_NAME}}.plist`.
-- Foreground (debugging): `{{CLONE_DIR}}/client/bin/launch-{{HOMUNCULUS_NAME}}`
+  on `~/Library/LaunchAgents/local.solet.{{SOLET_NAME}}.plist`.
+- Foreground (debugging): `{{CLONE_DIR}}/client/bin/launch-{{SOLET_NAME}}`
   (stop the LaunchAgent first — never run two instances).
-- The `{{HOMUNCULUS_NAME}}` CLI is on PATH via genesis's
-  `~/.local/bin/{{HOMUNCULUS_NAME}}` symlink; no venv activation needed for
-  `{{HOMUNCULUS_NAME}} call` / `{{HOMUNCULUS_NAME}} health`.
+- The `{{SOLET_NAME}}` CLI is on PATH via genesis's
+  `~/.local/bin/{{SOLET_NAME}}` symlink; no venv activation needed for
+  `{{SOLET_NAME}} call` / `{{SOLET_NAME}} health`.
 - Start stock Codex through
-  `{{CLONE_DIR}}/client/bin/codex-{{HOMUNCULUS_NAME}} [role] [codex arguments ...]`.
+  `{{CLONE_DIR}}/client/bin/codex-{{SOLET_NAME}} [role] [codex arguments ...]`.
   The launcher exports one stable session ID, registers `agent_id=codex`, claims
   the supplied durable role, and arms the parent-bound no-MCP watcher when the
   selected fleet transport is `watch`. Do not substitute a locally patched
@@ -116,13 +116,16 @@ embedding rebuild and causes inference timeouts.
 
 ## Stock Codex durable inbox
 
-The Stop hook carries only a fixed fact — that coordination deliveries are
-pending. It never places peer-message content into hook output. When that nudge
-creates a turn, or whenever a reminder says to check messages, read this
-session's own durable inbox through the local CLI:
+No `Stop` hook ships currently: stock Codex does not execute async command
+hooks on any measured build, so a bound one never fires, and this plugin does
+not carry a synchronous one either (it would block the turn boundary).
+Delivery to this session is durable but silent — nothing surfaces it
+automatically, per-turn or otherwise. Check this session's own durable inbox
+directly, on your own initiative and whenever a reminder says to check
+messages, through the local CLI:
 
 ```bash
-{{HOMUNCULUS_NAME}} call plugin::agent_messaging_plugin::peer_inbox '{"agent_session_id":"'"$AGENT_SESSION_ID"'","limit":5}'
+{{SOLET_NAME}} call plugin::agent_messaging_plugin::peer_inbox '{"agent_session_id":"'"$AGENT_SESSION_ID"'","limit":5}'
 ```
 
 The response has two independent sections and two independent cursors:
@@ -141,7 +144,7 @@ message ID and the action actually taken.
 
 ## Messaging, connectivity, and governance — found via Step Zero
 
-The full contract for these lives in {{HOMUNCULUS_NAME}}'s knowledge base, not
+The full contract for these lives in {{SOLET_NAME}}'s knowledge base, not
 here — search for the terms below rather than assuming the mechanism:
 
 - `router bridge blue-green local deployment architecture` — the bridge vs.
@@ -150,7 +153,7 @@ here — search for the terms below rather than assuming the mechanism:
 - `peer registry role binding durable claim` — why an entry in a raw peer
   list is presence, not a claim, and how `peer_send_by_name` actually
   resolves.
-- `first days owner onboarding` / `homunculus charter template` / `operator
+- `first days owner onboarding` / `solet charter template` / `operator
   decision brief` / `operator collaboration craft` — the governance set for
   working with your operator.
 - `session history ingestion session ledger hydration current notes` — how
@@ -175,9 +178,9 @@ better than you found it. Database access goes through the
 
 ## Reference
 
-The genesis ladder that created this homunculus, and the hydration runbook
+The genesis ladder that created this solet, and the hydration runbook
 that generated this file, live in the knowledge base — search "genesis
 bootstrap ladder" or "hydration operator environment setup" via Step Zero
 above.
 
-<!-- END HOMUNCULUS HYDRATION -->
+<!-- END SOLET HYDRATION -->

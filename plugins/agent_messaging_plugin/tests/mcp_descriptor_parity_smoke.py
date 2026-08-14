@@ -6,7 +6,7 @@ for process_call/process_result, where hosted Streamable clients must poll
 process_result and stdio clients receive bridge_delivery_result notifications.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/mcp_descriptor_parity_smoke.py
 """
 

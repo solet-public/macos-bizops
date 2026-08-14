@@ -4,7 +4,7 @@ Implements :class:`CodingAgentSessionServiceInterface` per
 ``workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md``
 §3.6 + §4.4 + §6 Slice 5. Owns MCP bridge subprocess lifecycle for every
 coding-agent tab the iTerm2 plugin opens, plus the FSEvents watcher on
-``<homunculus>.bridge.port`` that silently restarts every tracked bridge
+``<solet>.bridge.port`` that silently restarts every tracked bridge
 whenever router blue-green swap rewrites the port file.
 
 Mirrors the ``macos_self_deployment_plugin`` shape: each verb has a
@@ -59,7 +59,7 @@ from macos_coding_agent_session_plugin.bridge_tracker import (
     default_spawn,
 )
 from macos_coding_agent_session_plugin.constants import (
-    ENV_HOMUNCULUS_NAME,
+    ENV_SOLET_NAME,
     PLUGIN_NAME,
     RESULT_TYPE_LIST,
     RESULT_TYPE_RESTART,
@@ -77,8 +77,8 @@ _AGENT_INSTANCE_ID_PARAM = ParameterMetadata(
     required=True,
     type=ParameterType.STRING,
 )
-_HOMUNCULUS_NAME_PARAM = ParameterMetadata(
-    description="Target homunculus the bridge connects to.",
+_SOLET_NAME_PARAM = ParameterMetadata(
+    description="Target solet the bridge connects to.",
     required=True,
     type=ParameterType.STRING,
 )
@@ -92,7 +92,7 @@ def _spawn_return_schema() -> ReturnValueSchema:
         properties={
             "status": ParameterMetadata(type=ParameterType.STRING, description="."),
             "agent_instance_id": ParameterMetadata(type=ParameterType.STRING, description="."),
-            "homunculus_name": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "solet_name": ParameterMetadata(type=ParameterType.STRING, description="."),
             "pid": ParameterMetadata(type=ParameterType.INTEGER, description="."),
             "started_at": ParameterMetadata(type=ParameterType.STRING, description="."),
             "message": ParameterMetadata(type=ParameterType.STRING, description="."),
@@ -147,8 +147,8 @@ def _runtime_dir() -> Path:
     return Path.home() / ".ananta" / "runtime"
 
 
-def _bridge_port_filename(homunculus_name: str) -> str:
-    return f"{homunculus_name}.bridge.port"
+def _bridge_port_filename(solet_name: str) -> str:
+    return f"{solet_name}.bridge.port"
 
 
 def _utc_now_iso() -> str:
@@ -158,7 +158,7 @@ def _utc_now_iso() -> str:
 def _bridge_status_to_dict(row: BridgeStatus) -> dict[str, Any]:
     return {
         "agent_instance_id": row.agent_instance_id,
-        "homunculus_name": row.homunculus_name,
+        "solet_name": row.solet_name,
         "pid": row.pid,
         "alive": row.alive,
         "started_at": row.started_at,
@@ -185,7 +185,7 @@ class MacosCodingAgentSessionPlugin(
         super().__init__()
         self.name = PLUGIN_NAME
         self.logger: logging.Logger = logging.getLogger(self.name)
-        self._homunculus_name: str = ""
+        self._solet_name: str = ""
         self._tracker: BridgeTracker | None = None
         self._watcher: FSEventsWatcher | None = None
         # Smoke-only override: tests inject a fake spawn function so no
@@ -204,19 +204,19 @@ class MacosCodingAgentSessionPlugin(
 
     def prepare_for_readiness(self) -> None:
         """Validate env, build tracker + watcher, mark ready."""
-        homunculus_name = os.environ.get(ENV_HOMUNCULUS_NAME)
-        if not homunculus_name:
+        solet_name = os.environ.get(ENV_SOLET_NAME)
+        if not solet_name:
             msg = (
-                f"{PLUGIN_NAME}: {ENV_HOMUNCULUS_NAME} env var is required "
+                f"{PLUGIN_NAME}: {ENV_SOLET_NAME} env var is required "
                 "(set by the launching script)."
             )
             raise RuntimeError(msg)
-        self._homunculus_name = homunculus_name
+        self._solet_name = solet_name
         runtime_dir = _runtime_dir()
         runtime_dir.mkdir(parents=True, exist_ok=True)
         tracker = BridgeTracker(logger=self.logger, spawn_fn=self._spawn_fn)
         self._tracker = tracker
-        target_filename = _bridge_port_filename(homunculus_name)
+        target_filename = _bridge_port_filename(solet_name)
         watcher = FSEventsWatcher(
             watch_path=runtime_dir,
             target_filename=target_filename,
@@ -296,17 +296,17 @@ class MacosCodingAgentSessionPlugin(
         self,
         *,
         agent_instance_id: str,
-        homunculus_name: str,
+        solet_name: str,
     ) -> BridgeSpawnResult:
         tracker = self._require_tracker()
         status, row, message = tracker.spawn(
-            agent_instance_id=agent_instance_id, homunculus_name=homunculus_name,
+            agent_instance_id=agent_instance_id, solet_name=solet_name,
         )
         if status == "failed" or row is None:
             return BridgeSpawnResult(
                 status=BridgeSpawnStatus.FAILED,
                 agent_instance_id=agent_instance_id,
-                homunculus_name=homunculus_name,
+                solet_name=solet_name,
                 pid=0,
                 started_at="",
                 message=message,
@@ -319,7 +319,7 @@ class MacosCodingAgentSessionPlugin(
         return BridgeSpawnResult(
             status=spawn_status,
             agent_instance_id=row.agent_instance_id,
-            homunculus_name=row.homunculus_name,
+            solet_name=row.solet_name,
             pid=row.pid,
             started_at=row.started_at,
             message=message,
@@ -390,7 +390,7 @@ class MacosCodingAgentSessionPlugin(
         statuses = tuple(
             BridgeStatus(
                 agent_instance_id=row.agent_instance_id,
-                homunculus_name=row.homunculus_name,
+                solet_name=row.solet_name,
                 pid=row.pid,
                 alive=tracker.is_alive(row.pid),
                 started_at=row.started_at,
@@ -411,7 +411,7 @@ class MacosCodingAgentSessionPlugin(
         context_handling=ContextHandling.NONE,
         parameters={
             "agent_instance_id": _AGENT_INSTANCE_ID_PARAM,
-            "homunculus_name": _HOMUNCULUS_NAME_PARAM,
+            "solet_name": _SOLET_NAME_PARAM,
         },
         output_type="object",
         output_description="spawn_bridge envelope.",
@@ -429,16 +429,16 @@ class MacosCodingAgentSessionPlugin(
     ) -> dict[str, Any]:
         del state
         agent_instance_id = str(params.get("agent_instance_id") or "")
-        homunculus_name = str(params.get("homunculus_name") or "")
-        if not agent_instance_id or not homunculus_name:
+        solet_name = str(params.get("solet_name") or "")
+        if not agent_instance_id or not solet_name:
             return self._error_envelope(
                 "missing_args",
-                "spawn_bridge requires agent_instance_id + homunculus_name.",
+                "spawn_bridge requires agent_instance_id + solet_name.",
             )
         try:
             result = self.spawn_bridge(
                 agent_instance_id=agent_instance_id,
-                homunculus_name=homunculus_name,
+                solet_name=solet_name,
             )
         except Exception as err:  # noqa: BLE001 — return structured failure
             self.logger.exception("spawn_bridge crashed")
@@ -447,7 +447,7 @@ class MacosCodingAgentSessionPlugin(
             {
                 "status": result.status.value,
                 "agent_instance_id": result.agent_instance_id,
-                "homunculus_name": result.homunculus_name,
+                "solet_name": result.solet_name,
                 "pid": result.pid,
                 "started_at": result.started_at,
                 "message": result.message,

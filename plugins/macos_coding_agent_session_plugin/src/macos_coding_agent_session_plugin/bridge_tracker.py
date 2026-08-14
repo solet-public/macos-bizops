@@ -7,7 +7,7 @@ interface: ``spawn``, ``terminate``, ``restart``, ``list``. Holds the
 that converts platform-side arguments into these calls.
 
 No persistence across plugin restarts — per D-W-SLICE-5-2 the iTerm2
-plugin re-registers bridges on homunculus restart, so the tracker is
+plugin re-registers bridges on solet restart, so the tracker is
 ephemeral by design.
 """
 
@@ -31,7 +31,7 @@ from macos_coding_agent_session_plugin.constants import (
     DEFAULT_TERMINATE_POLL_INTERVAL_SECONDS,
     ENV_AGENT_IDENTITY,
     ENV_AGENT_INSTANCE_ID,
-    ENV_HOMUNCULUS_NAME,
+    ENV_SOLET_NAME,
 )
 
 
@@ -40,7 +40,7 @@ class TrackedBridge:
     """One row in the tracker's registry."""
 
     agent_instance_id: str
-    homunculus_name: str
+    solet_name: str
     pid: int
     started_at: str
 
@@ -65,18 +65,18 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def default_spawn(agent_instance_id: str, homunculus_name: str) -> subprocess.Popen[Any]:
+def default_spawn(agent_instance_id: str, solet_name: str) -> subprocess.Popen[Any]:
     """Production spawn: launch ``python -m agent_messaging_plugin.mcp_bridge``.
 
     The child inherits the parent's PATH + PYTHONPATH so the same
-    ananta editable install reaches it. ``HOMUNCULUS_NAME`` +
+    ananta editable install reaches it. ``SOLET_NAME`` +
     ``AGENT_IDENTITY`` are the env keys the bridge subprocess
     requires per the bridge overview KB article. agent_instance_id is
     passed through ``AGENT_INSTANCE_ID`` for stable registry
     identity across bridge reconnects.
     """
     env = os.environ.copy()
-    env[ENV_HOMUNCULUS_NAME] = homunculus_name
+    env[ENV_SOLET_NAME] = solet_name
     env.setdefault(ENV_AGENT_IDENTITY, DEFAULT_AGENT_IDENTITY)
     env[ENV_AGENT_INSTANCE_ID] = agent_instance_id
     return subprocess.Popen(
@@ -120,7 +120,7 @@ class BridgeTracker:
         self,
         *,
         agent_instance_id: str,
-        homunculus_name: str,
+        solet_name: str,
     ) -> tuple[str, TrackedBridge | None, str]:
         """Spawn a new bridge subprocess and register it.
 
@@ -128,8 +128,8 @@ class BridgeTracker:
         of ``"success" / "already_running" / "failed"``. ``tracked`` is
         the registry row when status is success or already_running.
         """
-        if not agent_instance_id or not homunculus_name:
-            return ("failed", None, "spawn requires agent_instance_id + homunculus_name")
+        if not agent_instance_id or not solet_name:
+            return ("failed", None, "spawn requires agent_instance_id + solet_name")
         with self._lock:
             existing = self._registry.get(agent_instance_id)
             if existing is not None and _pid_alive(existing.pid):
@@ -139,7 +139,7 @@ class BridgeTracker:
                     f"bridge already tracked under {agent_instance_id} (pid={existing.pid})",
                 )
             try:
-                proc = self._spawn_fn(agent_instance_id, homunculus_name)
+                proc = self._spawn_fn(agent_instance_id, solet_name)
             except OSError as exc:
                 self._logger.exception(
                     "spawn failed for agent_instance_id=%s", agent_instance_id,
@@ -147,7 +147,7 @@ class BridgeTracker:
                 return ("failed", None, f"subprocess.Popen raised: {exc}")
             row = TrackedBridge(
                 agent_instance_id=agent_instance_id,
-                homunculus_name=homunculus_name,
+                solet_name=solet_name,
                 pid=proc.pid,
                 started_at=_utc_now_iso(),
             )
@@ -182,8 +182,8 @@ class BridgeTracker:
         prior bridge is tracked the status is ``"not_running"`` and the
         caller surfaces it without raising — the FSEvents watcher
         relies on this idempotent semantic. The re-spawn step uses the
-        prior row's ``homunculus_name``; without a prior row there is
-        no homunculus to preserve and the verb returns
+        prior row's ``solet_name``; without a prior row there is
+        no solet to preserve and the verb returns
         ``(not_running, 0, None, ...)``.
         """
         with self._lock:
@@ -199,7 +199,7 @@ class BridgeTracker:
                     self._handles[agent_instance_id] = handle
             return ("failed", row.pid, None, f"terminate step failed: {terminate_msg}")
         spawn_status, fresh_row, spawn_msg = self.spawn(
-            agent_instance_id=agent_instance_id, homunculus_name=row.homunculus_name,
+            agent_instance_id=agent_instance_id, solet_name=row.solet_name,
         )
         if spawn_status == "failed":
             return ("failed", row.pid, None, f"spawn step failed: {spawn_msg}")

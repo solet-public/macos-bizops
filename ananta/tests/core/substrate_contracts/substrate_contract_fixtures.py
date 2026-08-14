@@ -17,7 +17,7 @@ references to non-existent keys, tests included), and none is a companion
 (``::upsert_plan`` / ``::post_message``) or an excluded shape, so all are valid
 deterministic-continuation keys.
 
-Everything here is offline: no live homunculus, no LM Studio, no Postgres. Plans flow
+Everything here is offline: no live solet, no LM Studio, no Postgres. Plans flow
 through the real ``core.plans.parser`` and the validators exercised by the
 smokes are the real production functions; only the DB / service collaborators
 are recording stubs.

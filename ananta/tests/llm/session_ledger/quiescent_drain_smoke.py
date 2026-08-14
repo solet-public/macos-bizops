@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Singleton drain-until-empty auto-summarizer smoke (no homunculus/Postgres/LM Studio).
+"""Singleton drain-until-empty auto-summarizer smoke (no solet/Postgres/LM Studio).
 
 Covers the singleton drain design (Coordinator-Dawn assignment, 2026-07-02) that
 replaced the bounded ≤5-per-fire pass — the fix that eats the ~10k-session

@@ -260,7 +260,7 @@ def test_twins_and_parity(provider: PostgresProvider, schema: str) -> None:
 def main() -> int:
     if os.environ.get("PGVECTOR_FIND_MISSING_LIVE_SMOKE") != "1":
         print("=== find_missing_external_ids_live_smoke ===")
-        print("  SKIP  set PGVECTOR_FIND_MISSING_LIVE_SMOKE=1 to run; needs the live homunculus DB.")
+        print("  SKIP  set PGVECTOR_FIND_MISSING_LIVE_SMOKE=1 to run; needs the live solet DB.")
         return 0
     print("=== find_missing_external_ids_live_smoke ===")
     schema_name = f"example_test_findmissing_{secrets.token_hex(3)}"

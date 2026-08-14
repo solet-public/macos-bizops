@@ -59,7 +59,7 @@ group leader. :meth:`terminate` signals the WHOLE group (``os.killpg`` via
 ``headless_adapter``'s single-pid ``_sigterm_then_kill``/``_pid_alive``
 helpers only if ``os.getpgid`` itself fails), not just the leader pid — a
 child the claude process backgrounds (e.g. a watch-transport worker's own
-``homunculus watch --role X &``, the standard rename-skill onboarding path)
+``solet watch --role X &``, the standard rename-skill onboarding path)
 shares the pane's process group and would otherwise survive the leader's
 death as a launchd orphan, still holding the worker's role in the peer
 registry (measured live, 2026-08-09/10 restart_session run — see
@@ -211,7 +211,7 @@ def _emit_role_tag_path() -> Path:
 
 def _env_pairs(
     *, agent_instance_id: str, agent_session_id: str, label: str,
-    homunculus_name: str, allowed_tools: object, transport: str,
+    solet_name: str, allowed_tools: object, transport: str,
 ) -> list[str]:
     """``-e KEY=VAL`` args for ``tmux new-session`` — split out of
     :meth:`TmuxHostDriver.spawn` to keep it under the radon cc threshold.
@@ -222,21 +222,21 @@ def _env_pairs(
     independently."""
     pairs: list[str] = []
     for key, value in {
-        "HOMUNCULUS_NAME": homunculus_name,
+        "SOLET_NAME": solet_name,
         "AGENT_IDENTITY": "claude_code",
         "AGENT_INSTANCE_ID": agent_instance_id,
         "AGENT_SESSION_ID": agent_session_id,
         "AGENT_SESSION_LABEL": label,
         # Deaf-wake fix (2026-08-08): this MUST be the wake CLI's own binary
-        # name ("homunculus"), never `homunculus_name` (the homunculus
-        # INSTANCE name, e.g. "myhomunculus") -- wake_waiter.py runs
+        # name ("solet"), never `solet_name` (the solet
+        # INSTANCE name, e.g. "mysolet") -- wake_waiter.py runs
         # `subprocess.run([$AGENT_WAKE_CLI, "wake"])` and the instance name
         # is not a resolvable command (measured: `which <instance-name>` fails, `which
-        # homunculus` resolves). The prior value was a currently-masked
+        # solet` resolves). The prior value was a currently-masked
         # second defect -- masked because the Stop hook that reads this
         # variable was never wired at all until this same fix; fixing only
         # the wiring without this would silently reintroduce a dead wake.
-        "AGENT_WAKE_CLI": "homunculus",
+        "AGENT_WAKE_CLI": "solet",
         "FLEET_TRANSPORT": transport,
     }.items():
         pairs += ["-e", f"{key}={value}"]
@@ -481,7 +481,7 @@ class TmuxHostDriver:
         *,
         tmux_bin: str | None = None,
         claude_bin: str | None = None,
-        homunculus_name: str | None = None,
+        solet_name: str | None = None,
         permission_mode: str | None = None,
         transport: str | None = None,
         mcp_config_path: Path | None = None,
@@ -502,7 +502,7 @@ class TmuxHostDriver:
         self._claude_bin = _resolve_bin(
             claude_bin, "claude", str(Path.home() / ".local" / "bin" / "claude"),
         )
-        self._homunculus_name = _resolve_str(homunculus_name, "HOMUNCULUS_NAME")
+        self._solet_name = _resolve_str(solet_name, "SOLET_NAME")
         self._permission_mode = _resolve_str(permission_mode, _ENV_PERMISSION_MODE)
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
         # mirrors headless_adapter.HeadlessHostDriver's own floor exactly --
@@ -569,9 +569,9 @@ class TmuxHostDriver:
                 f"shutil.which, then {self._claude_bin!r}) — install Claude "
                 "Code or pass claude_bin explicitly.",
             )
-        if not self._homunculus_name:
+        if not self._solet_name:
             remedies.append(
-                "HOMUNCULUS_NAME is not set — the spawned session cannot "
+                "SOLET_NAME is not set — the spawned session cannot "
                 "discover its bridge port without it.",
             )
         if not (permission_mode or self._permission_mode):
@@ -649,7 +649,7 @@ class TmuxHostDriver:
         heartbeat_hook_path = resolved_hooks["heartbeat_report_alive.py"]
         rotation_due_hook_path = resolved_hooks["rotation_due_watch.py"]
         # Deaf-wake fix (2026-08-08): project-vendored Python ports of
-        # coordination-hooks@<homunculus>'s four JS hooks, wired here (the adapter's
+        # coordination-hooks@<solet>'s four JS hooks, wired here (the adapter's
         # own generated --settings blob) rather than the shared project-
         # scope .claude/settings.json, specifically so this does not
         # double-fire the wake for the seat -- the seat already gets these
@@ -682,7 +682,7 @@ class TmuxHostDriver:
                 "SessionStart": [
                     {"hooks": [{"type": "command", "command": f"python3 {capture_hook_path}"}]},
                     {
-                        # Matches coordination-hooks@<homunculus>'s own hooks.json
+                        # Matches coordination-hooks@<solet>'s own hooks.json
                         # matcher for this event exactly (fidelity, not a
                         # new choice) -- check_messages_reminder.py also
                         # fires here (in addition to UserPromptSubmit
@@ -744,7 +744,7 @@ class TmuxHostDriver:
         # loop it arms would kill the booted worker -- see
         # _provider_ignores_dev_channels.
         if not _provider_ignores_dev_channels(_effective_spawn_env(spec)):
-            cmd += ["--dangerously-load-development-channels", f"server:{self._homunculus_name}"]
+            cmd += ["--dangerously-load-development-channels", f"server:{self._solet_name}"]
         model = str(spec.get("model") or "")
         if model:
             cmd += ["--model", model]
@@ -793,7 +793,7 @@ class TmuxHostDriver:
 
         env_pairs = _env_pairs(
             agent_instance_id=agent_instance_id, agent_session_id=agent_session_id,
-            label=label, homunculus_name=self._homunculus_name,
+            label=label, solet_name=self._solet_name,
             allowed_tools=spec.get("allowed_tools") or (), transport=transport,
         )
         try:
@@ -943,7 +943,7 @@ class TmuxHostDriver:
             # Signal the pane's WHOLE process group, not just pane_pid: a
             # tmux pane is a fresh process-group leader, and any child the
             # pane's own claude process backgrounds (e.g. a watch-transport
-            # worker's `homunculus watch --role X &`, the standard
+            # worker's `solet watch --role X &`, the standard
             # rename-skill onboarding path for every non-MCP spawn) inherits
             # that same group. Signaling pane_pid alone leaves such a child
             # orphaned under launchd, still holding the worker's role in the

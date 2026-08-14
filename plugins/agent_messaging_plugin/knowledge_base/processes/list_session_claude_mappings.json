@@ -12,7 +12,7 @@
   },
   "error_processor_customizations": {
     "action_context": "A single filtered read on agent_instance_id against the session_claude_mapping table (is_deleted=0). No writes, no host interaction.",
-    "error_interpretation": "missing_agent_instance_id: the caller passed an empty agent_instance_id. state_service_unavailable: the state service is not bound on this homunculus.",
+    "error_interpretation": "missing_agent_instance_id: the caller passed an empty agent_instance_id. state_service_unavailable: the state service is not bound on this solet.",
     "recovery_guidance": "For missing_agent_instance_id, supply a real agent_instance_id (from list_sessions or a spawn_session result) rather than retrying with an empty value. state_service_unavailable indicates a platform binding problem, not a caller error."
   }
 }

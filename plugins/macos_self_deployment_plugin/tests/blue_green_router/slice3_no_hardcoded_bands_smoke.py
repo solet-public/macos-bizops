@@ -17,12 +17,12 @@ Validates the structural change from Slice 3 of
 
 * **``port_manager.write_port_file(service_name='bridge', ...)`` is
   rejected.** The fail-fast guard prevents a regression where a
-  homunculus-side component overwrites the router's canonical
+  solet-side component overwrites the router's canonical
   ``<name>.bridge.port`` file. Same guard on ``remove_port_file``.
 
-Runs entirely in-process — no router subprocess, no homunculus spawn.
+Runs entirely in-process — no router subprocess, no solet spawn.
 The dispatch's heavier end-to-end scenarios (``apply_manifest`` cycle,
-multi-homunculus collision) are deferred to Slice 6 per the
+multi-solet collision) are deferred to Slice 6 per the
 operator-locked C+ sequencing.
 
 No ``pytest``; runs directly via
@@ -182,20 +182,20 @@ def _scenario_port_file_round_trip_for_non_bridge() -> None:
 
             # Color env var must NOT affect the resolved path — Slice 3
             # eliminated the color-aware branch.
-            prior_color = os.environ.get("HOMUNCULUS_COLOR")
-            os.environ["HOMUNCULUS_COLOR"] = "blue"
+            prior_color = os.environ.get("SOLET_COLOR")
+            os.environ["SOLET_COLOR"] = "blue"
             try:
                 written_with_color = write_port_file(9877, "rest", "example")
                 _expect(
                     written_with_color.name == "example.rest.port",
-                    "HOMUNCULUS_COLOR=blue does NOT yield a per-color path "
+                    "SOLET_COLOR=blue does NOT yield a per-color path "
                     f"(got {written_with_color.name!r})",
                 )
             finally:
                 if prior_color is None:
-                    os.environ.pop("HOMUNCULUS_COLOR", None)
+                    os.environ.pop("SOLET_COLOR", None)
                 else:
-                    os.environ["HOMUNCULUS_COLOR"] = prior_color
+                    os.environ["SOLET_COLOR"] = prior_color
         finally:
             if prior_xdg is None:
                 os.environ.pop("XDG_RUNTIME_DIR", None)

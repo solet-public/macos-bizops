@@ -1,10 +1,10 @@
 """Verb-mode venv/seed installation + newborn credential self-seed.
 
 Own-copy of the shape `bootstrap.py`'s `ensure_venv_and_seed` uses, adapted
-for the "birth a SECOND homunculus from an already-running one" verb-mode
+for the "birth a SECOND solet from an already-running one" verb-mode
 case (design doc dual-use). `create_venv_and_install_seed` builds the
 newborn's `.venv` and editable-installs the platform + seed plugins;
-`birth_homunculus`'s §7 `provision_venv` variant (the `mint_and_birth_local`
+`birth_solet`'s §7 `provision_venv` variant (the `mint_and_birth_local`
 local-birth chain) calls it EXPLICITLY before genesis, since a seed folder
 from `assemble_seed` ships source-only.
 
@@ -15,12 +15,12 @@ clone URL, so the former arbitrary-code-as-LaunchAgent injection surface (a
 verb-argument clone URL landing in the newborn's autostart plist) is gone by
 construction, not merely guarded.
 
-Per-homunculus credential isolation (operator override, 2026-07-12):
-there is NO cross-process credential copy any more. Each homunculus has
-its OWN non-superuser role (name = HOMUNCULUS_NAME) and its OWN password;
-no credential ever crosses a homunculus namespace. `seed_newborn_credential`
+Per-solet credential isolation (operator override, 2026-07-12):
+there is NO cross-process credential copy any more. Each solet has
+its OWN non-superuser role (name = SOLET_NAME) and its OWN password;
+no credential ever crosses a solet namespace. `seed_newborn_credential`
 runs the newborn's OWN self-seed as a subprocess in the newborn's OWN venv
-(HOMUNCULUS_NAME=<newborn>), so `SystemKeychain` binds the newborn's
+(SOLET_NAME=<newborn>), so `SystemKeychain` binds the newborn's
 namespace by construction and the freshly-generated password never leaves
 that subprocess. `verify_newborn_db_scram_gated` (pre-seed) and the
 subprocess's post-seed isolation self-proof are the two verifications this
@@ -35,7 +35,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from .constants import BUILD_BACKEND_PACKAGES, is_valid_homunculus_name
+from .constants import BUILD_BACKEND_PACKAGES, is_valid_solet_name
 from .credential_seed import _ISOLATION_FLAG, _SEED_FLAG
 
 _INSTALL_TIMEOUT_S = 300
@@ -59,7 +59,7 @@ def _require_valid_newborn_name(name: str, *, role: str = "newborn") -> None:
     """Fail closed unless `name` matches NAME_PATTERN (F3, 2026-07-19).
 
     `newborn_name` is interpolated into psql connection arguments and passed as
-    the subprocess `HOMUNCULUS_NAME`; `sibling_db` reaches a `psql -d` argv in the
+    the subprocess `SOLET_NAME`; `sibling_db` reaches a `psql -d` argv in the
     isolation self-proof. Validating at these verb entrypoints fail-closes a name
     carrying a SPACE -- a libpq conninfo keyword-injection vector (libpq takes the
     LAST value for a repeated key, so a space could rewrite `host`/add
@@ -67,9 +67,9 @@ def _require_valid_newborn_name(name: str, *, role: str = "newborn") -> None:
     or any other metacharacter, complementing the discrete-argv connection form
     that removes the single-conninfo-string sink structurally.
     """
-    if not is_valid_homunculus_name(name):
+    if not is_valid_solet_name(name):
         raise VerbModeProvisionError(
-            f"{role} name {name!r} is not a valid homunculus name -- it must be a "
+            f"{role} name {name!r} is not a valid solet name -- it must be a "
             "lowercase letter followed by 1-62 chars from [a-z0-9_-]. Names with "
             "spaces (a libpq conninfo keyword-injection vector), quotes, or "
             "semicolons are refused before any psql connection."
@@ -79,7 +79,7 @@ def _require_valid_newborn_name(name: str, *, role: str = "newborn") -> None:
 def probe_target_absent_or_empty(target: Path) -> bool:
     """True iff `target` does not exist, or exists as an empty directory.
 
-    Used by `birth_homunculus` to fail loud on an absent/empty target: an
+    Used by `birth_solet` to fail loud on an absent/empty target: an
     empty directory is NOT a birthable clone (acquisition-mode
     clone-of-pinned-upstream was retired 2026-07-18; assemble a seed first).
     """
@@ -163,7 +163,7 @@ def verify_newborn_db_scram_gated(newborn_name: str, *, run: Runner) -> None:
     2026-07-12). PRE-seed check.
 
     The newborn's OWN database, its pgvector extension, its own non-superuser
-    role (name = `HOMUNCULUS_NAME`), and the localhost scram gate are created by
+    role (name = `SOLET_NAME`), and the localhost scram gate are created by
     WIZARD STEP 1 -- an agent-run pre-launch step the driving Claude performs
     with guidance -- NOT by genesis code, which ASSUMES them present. Of these,
     a MISSING database makes the verb/boot fail and a MISSING pgvector extension
@@ -193,7 +193,7 @@ def verify_newborn_db_scram_gated(newborn_name: str, *, run: Runner) -> None:
             "gating it). Wizard step 1 must insert the R3 default-scram lines "
             "immediately ABOVE the blanket trust block and reload "
             "(`SELECT pg_reload_conf()`) -- the all-databases form gates every "
-            "per-homunculus role at once:\n"
+            "per-solet role at once:\n"
             "  host    all     all          127.0.0.1/32            scram-sha-256\n"
             "  host    all     all          ::1/128                 scram-sha-256\n"
             "  local   all     all                                  scram-sha-256"
@@ -212,9 +212,9 @@ def seed_newborn_credential(
     Per-role isolation (operator override, 2026-07-12): the newborn seeds its
     OWN role via the same `credential_seed.seed_db_password` path the CLI uses
     -- there is NO parent-provisions-child credential copy any more (no
-    credential ever crosses a homunculus namespace). This runs
+    credential ever crosses a solet namespace). This runs
     `credential_seed --seed --isolation-sibling-db <sibling_db>` in a subprocess
-    bound to the NEWBORN's own venv with `HOMUNCULUS_NAME=<newborn_name>`, so
+    bound to the NEWBORN's own venv with `SOLET_NAME=<newborn_name>`, so
     SystemKeychain resolves the newborn's namespace by construction and the
     freshly-generated password never leaves that subprocess. The subprocess:
       1. generates + stores (both keys) + `ALTER ROLE "<newborn>"` its OWN role.
@@ -222,8 +222,8 @@ def seed_newborn_credential(
          -- a real-password connect must be refused with a CONNECT-privilege
          denial (R4 revoke), not an auth failure.
 
-    `sibling_db` is the PARENT homunculus's database (== the parent's own
-    `HOMUNCULUS_NAME`). The subprocess's stderr tail IS surfaced on failure:
+    `sibling_db` is the PARENT solet's database (== the parent's own
+    `SOLET_NAME`). The subprocess's stderr tail IS surfaced on failure:
     `credential_seed`'s `--seed` path is secret-free by construction (it never
     prints a password), and its FATAL diagnostic is the actionable error (e.g.
     "role does not exist -- wizard step 1", or an isolation breach).
@@ -231,7 +231,7 @@ def seed_newborn_credential(
     _require_valid_newborn_name(newborn_name)
     _require_valid_newborn_name(sibling_db, role="sibling database")
     env = os.environ.copy()
-    env["HOMUNCULUS_NAME"] = newborn_name
+    env["SOLET_NAME"] = newborn_name
     newborn_python = newborn_venv / "bin" / "python3"
     result = run(
         [str(newborn_python), "-m", "github_midwife_plugin.credential_seed",

@@ -72,7 +72,7 @@ def generate_encryption_keypair() -> tuple[bytes, bytes]:
 
     Returns ``(private_bytes, public_bytes)`` each 32 bytes long.
     Callers persist the private half as a vault secret and expose the
-    public half via ``get_public_key`` for cross-homunculus transfers.
+    public half via ``get_public_key`` for cross-solet transfers.
     """
     private_key = PrivateKey.generate()
     private_bytes = bytes(private_key)

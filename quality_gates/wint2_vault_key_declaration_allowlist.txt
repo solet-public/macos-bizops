@@ -27,7 +27,7 @@ D1.2::plugins/default_address_book_plugin/src/default_address_book_plugin/addres
 # Sub-2 additions (W-VAULT-CALLER-ENFORCE, 2026-06-07):
 #
 # - Per-plugin token_store.py modules and direct callers use f-string-built
-#   scoped vault-key constants (e.g. ``f"{_HOMUNCULUS}.<plugin>.<credential>"``)
+#   scoped vault-key constants (e.g. ``f"{_SOLET}.<plugin>.<credential>"``)
 #   at the module-level Final[str] declaration. The static-gate's
 #   constant-resolution pass (Codex correction #5) only evaluates pure
 #   literal Final[str] constants — f-strings are deliberately out of scope
@@ -39,7 +39,7 @@ D1.2::plugins/default_address_book_plugin/src/default_address_book_plugin/addres
 #   the f-string-built key matches the plugin's declared prefix.
 #
 #   Tracked-debt remediation: either replace the f-string constant with
-#   a runtime-init Final[str] literal once HOMUNCULUS_NAME is bound, OR
+#   a runtime-init Final[str] literal once SOLET_NAME is bound, OR
 #   add per-line ``# vault-key: <declared-prefix>`` annotations so the
 #   gate's annotation pass accepts them. Both routes remove an entry
 #   from this allowlist.

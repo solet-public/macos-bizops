@@ -13,6 +13,6 @@
   "error_processor_customizations": {
     "action_context": "Running a read-only 'git status --porcelain=v2 --branch' over the platform worktree with server-fixed argv.",
     "error_interpretation": "RepoToolError: the git subprocess timed out or exited non-zero (e.g. not a git worktree, or git unavailable). This is a read-only call; a failure is an environment problem, not a mutation.",
-    "recovery_guidance": "Confirm the homunculus is running from a git worktree with git installed. This verb takes no arguments; retry after the environment is healthy."
+    "recovery_guidance": "Confirm the solet is running from a git worktree with git installed. This verb takes no arguments; retry after the environment is healthy."
   }
 }

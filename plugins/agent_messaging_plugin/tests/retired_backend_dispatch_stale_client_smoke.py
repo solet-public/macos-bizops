@@ -20,7 +20,7 @@ tool names to any one of the three dispatch surfaces (or its HTTP route)
 is the failing mutation this smoke exists to catch.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/retired_backend_dispatch_stale_client_smoke.py
 """
 
@@ -131,7 +131,7 @@ def test_streamable_stale_call_is_clean_method_not_found() -> None:
         platform_surface=cast("Any", object()),
         agent_messaging_service=cast("Any", object()),
         state_service=cast("Any", object()),
-        homunculus_name="example-test",
+        solet_name="example-test",
     )
     for name in _RETIRED_TOOLS:
         raised: JsonRpcError | None = None

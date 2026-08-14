@@ -1,14 +1,14 @@
 """Hydration-time export-root validation and persistence (07-29 ruling §3).
 
 The 2026-07-29 data-boundary ruling requires hydration to ask two mutually
-exclusive questions: where the homunculus itself lives (``app_home``,
+exclusive questions: where the solet itself lives (``app_home``,
 unchanged) and where the operator keeps the projects they work in (the
 export root — "parent-of-jobs", stable and singular). The ruling's own
 words for the second question's guard are "the wizard validates prompt 2's
 answer rather than merely recording it... a few lines in the wizard" — but
 no scripted, interactive wizard exists on the seed-born path: genesis
 (``steps.py``) is a deterministic, non-interactive step machine by design,
-and the only actual interactive CLI wizard (``initialization/homunculi/
+and the only actual interactive CLI wizard (``initialization/solets/
 wizard.py``) is absent from ``seed_manifest.yaml``'s ``copy:`` allowlist and
 never reaches a seed-born instance. So this module supplies the "few lines"
 as a real, callable, testable function; the QUESTION itself is asked by the
@@ -100,13 +100,13 @@ def assert_export_root_valid(proposed_root: str, app_home: str) -> str:
     if root_real == home_real or os.path.commonpath([home_real, root_real]) == root_real:
         raise ExportRootRejectedError(
             f"export root {proposed_root!r} contains (or equals) the "
-            f"homunculus home {app_home!r} — an export destination must "
+            f"solet home {app_home!r} — an export destination must "
             "never admit the platform's own tree; choose a directory "
             "outside app_home, such as a parent-of-jobs workspace folder",
         )
     if os.path.commonpath([root_real, home_real]) == home_real:
         raise ExportRootRejectedError(
-            f"export root {proposed_root!r} is INSIDE the homunculus home "
+            f"export root {proposed_root!r} is INSIDE the solet home "
             f"{app_home!r} — exports would land inside the platform's own "
             "managed tree; choose a directory outside app_home",
         )

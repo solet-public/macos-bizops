@@ -11,7 +11,7 @@ auto-generated reply hint pointed at ``system``, which reaches nobody.
 The fix does NOT register the caller. Registering this bridge would be actively
 destructive — ``PeerRegistry.register`` hard-deletes any row sharing the incoming
 ``session_label`` (the single-active-session-per-name invariant) and
-``close_bridge`` unregisters by ``bridge_id``, so an ordinary ``homunculus call``
+``close_bridge`` unregisters by ``bridge_id``, so an ordinary ``solet call``
 would evict its own session's registry row and never restore it. Instead the
 caller supplies its opaque launcher-exported ``agent_session_id`` and the SERVER
 derives the identity from the registered binding that key resolves to: the
@@ -39,7 +39,7 @@ sentinel rather than promoting an unverifiable claim; and
 re-point the flow's inference vertex at the attributed session.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/cli_sender_attribution_smoke.py
 """
 
@@ -575,7 +575,7 @@ def _send_peer_message(state: dict[str, Any], state_service: object = _UNSET) ->
     # the recipient needs a REAL opened bridge (last_seen_at fresh at open),
     # not just a registered binding pointing at an id nothing ever opened.
     recipient_bridge_id = bridge_manager.open(
-        homunculus_name="test", parent_pid=None,
+        solet_name="test", parent_pid=None,
     ).bridge_id
     registry.register(
         BridgeBinding(

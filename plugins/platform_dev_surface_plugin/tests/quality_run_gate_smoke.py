@@ -92,7 +92,7 @@ def _test_argv_is_server_fixed() -> None:
 
 
 def _test_run_gate_rejects_unknown() -> None:
-    ops = QualityOperations(locate_repo_root(_APP_HOME), os.environ["HOMUNCULUS_NAME"])
+    ops = QualityOperations(locate_repo_root(_APP_HOME), os.environ["SOLET_NAME"])
     try:
         ops.run_gate("___bogus___")
     except QualityGateError:
@@ -130,7 +130,7 @@ def _test_bounded_output() -> None:
 
 def _test_real_gate_runs() -> None:
     """Integration: run a real, fast gate end-to-end through run_gate."""
-    ops = QualityOperations(locate_repo_root(_APP_HOME), os.environ["HOMUNCULUS_NAME"])
+    ops = QualityOperations(locate_repo_root(_APP_HOME), os.environ["SOLET_NAME"])
     result = ops.run_gate("service_interface_ast")
     expected_keys = {
         "gate",

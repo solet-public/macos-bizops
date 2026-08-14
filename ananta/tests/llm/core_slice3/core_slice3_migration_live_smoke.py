@@ -428,7 +428,7 @@ def main() -> int:
         print("=== core_slice3_migration_live_smoke ===")
         print(
             "  SKIP  set CORE_SLICE3_LIVE_SMOKE=1 to run; needs the live "
-            "homunculus DB (own throwaway schema)."
+            "solet DB (own throwaway schema)."
         )
         return 0
     print("=== core_slice3_migration_live_smoke ===")

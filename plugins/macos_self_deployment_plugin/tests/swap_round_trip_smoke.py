@@ -167,7 +167,7 @@ class _RouterHarness:
             ready_event = asyncio.Event()
             run_task = loop.create_task(
                 run_router(
-                    homunculus="smoke",
+                    solet="smoke",
                     public_port=self._public_port,
                     socket_path=self._socket_path,
                     drain_window_seconds=2,
@@ -230,7 +230,7 @@ def _listening_socket(port: int) -> socket.socket:
     ``SwapOrchestrator._wait_for_register`` opens a brief TCP connection to
     the green's registered port as a belt-and-suspenders reachability check.
     The smoke's ``fake_spawn_green`` registers a router binding but launches
-    no real homunculus, so nothing would be listening; this supplies a real
+    no real solet, so nothing would be listening; this supplies a real
     listener on the green test port. The caller closes it at teardown.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -349,7 +349,7 @@ def _make_plugin(
     """Build a plugin instance wired by hand (skipping prepare_for_readiness)."""
     plugin = MacosSelfDeploymentPlugin()
     plugin.action_factory = action_factory  # type: ignore[assignment]
-    plugin._homunculus_name = "smoke"  # noqa: SLF001 — smoke wiring
+    plugin._solet_name = "smoke"  # noqa: SLF001 — smoke wiring
     plugin._self_color = self_color  # noqa: SLF001
     plugin._self_instance_id = self_instance_id  # noqa: SLF001
     plugin._router_client = router_client  # noqa: SLF001
@@ -357,7 +357,7 @@ def _make_plugin(
         router_client=router_client,
         action_factory=action_factory,
         session_factory=lambda: "sess-smoke-round-trip",
-        homunculus_name="smoke",
+        solet_name="smoke",
         release_manager=release_manager,
         schema_preflight=_additive_preflight,
         preflight_probe=_smoke_green_probe,
@@ -410,7 +410,7 @@ def run_smoke() -> None:  # noqa: C901, PLR0915 — long-form smoke
         app_home: Path,
         next_color: str,
         next_instance_id: str,
-        homunculus_name: str,
+        solet_name: str,
         candidate: CandidatePaths,
     ) -> int:
         """Smoke-only spawn helper.
@@ -419,7 +419,7 @@ def run_smoke() -> None:  # noqa: C901, PLR0915 — long-form smoke
         and immediately registers a green binding via the smoke's
         RouterClient so the orchestrator's wait-for-register loop succeeds.
         Returns a fixed synthetic pid because the smoke does NOT actually
-        launch another homunculus; the pid is never signaled or otherwise
+        launch another solet; the pid is never signaled or otherwise
         dereferenced by the smoke afterwards.
         """
         spawn_calls.append(
@@ -427,7 +427,7 @@ def run_smoke() -> None:  # noqa: C901, PLR0915 — long-form smoke
                 "app_home": str(app_home),
                 "next_color": next_color,
                 "next_instance_id": next_instance_id,
-                "homunculus_name": homunculus_name,
+                "solet_name": solet_name,
                 "candidate_release_id": candidate.release_id,
             },
         )
@@ -560,7 +560,7 @@ def run_smoke() -> None:  # noqa: C901, PLR0915 — long-form smoke
     # the live start-time token still matches (no bare-pid kill). Seed a record
     # naming the stand-in prior (the real sleep child) with its real token, at
     # the path complete_swap reads, so the verb reaps exactly that process.
-    finisher_path = pending_finisher_path(_runtime_dir(), plugin._homunculus_name)  # noqa: SLF001
+    finisher_path = pending_finisher_path(_runtime_dir(), plugin._solet_name)  # noqa: SLF001
     write_pending_finisher(
         finisher_path,
         PendingFinisher(

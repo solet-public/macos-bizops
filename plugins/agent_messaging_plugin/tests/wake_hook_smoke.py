@@ -1,4 +1,4 @@
-"""Hermetic smoke for the `homunculus wake` Stop-hook waker.
+"""Hermetic smoke for the `solet wake` Stop-hook waker.
 
 The wake command is the MCP-free turn-injection half of the watch/wake pair:
 it blocks on the per-session spool `watch` tees deliveries into, surfaces new
@@ -36,7 +36,7 @@ _BARE_ENV = {
 def _invoke_wake(
     spool: Path, *, max_wait: float = 0.05, env: dict[str, str] | None = None,
 ) -> Result:
-    with patch.object(wake_mod, "resolve_homunculus_name", lambda: "testling"):
+    with patch.object(wake_mod, "resolve_solet_name", lambda: "testling"):
         return CliRunner().invoke(
             wake_mod.wake,
             ["--spool", str(spool), "--max-wait", str(max_wait)],
@@ -254,13 +254,13 @@ def test_watch_and_wake_derive_the_same_spool_path() -> None:
 
 
 def test_wake_identity_error_is_not_a_wake_exit() -> None:
-    # HomunculusIdentityError maps to UNKNOWN_ERROR (1) by design:
+    # SoletIdentityError maps to UNKNOWN_ERROR (1) by design:
     # ExitCodes.CONNECTION_ERROR is 2, which the hook contract reads as a
     # wake — an identity failure must never impersonate one.
     def boom() -> str:
-        raise cli_mod.HomunculusIdentityError("unreadable root_manifest")
+        raise cli_mod.SoletIdentityError("unreadable root_manifest")
 
-    with patch.object(wake_mod, "resolve_homunculus_name", boom):
+    with patch.object(wake_mod, "resolve_solet_name", boom):
         result = CliRunner().invoke(
             wake_mod.wake, ["--max-wait", "0.05"], env=dict(_FLEET_ENV), obj={},
         )

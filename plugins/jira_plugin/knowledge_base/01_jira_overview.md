@@ -1,6 +1,6 @@
 # Jira Cloud Connector (`jira_plugin`)
 
-`jira_plugin` gives the homunculus, peers, and plans read/write access to a Jira
+`jira_plugin` gives the solet, peers, and plans read/write access to a Jira
 Cloud site — issues, JQL search, comments, workflow transitions, and attachments.
 It is Lane C of the Enterprise Connector Suite and forks the shape of the
 `g_suite_plugin` reference vertical (sync `(params, state)` verbs over pure action
@@ -35,7 +35,7 @@ The plugin resolves one address-book entry named `jira_site` via
 |---|---|---|
 | `base_url` | literal | `https://your-org.atlassian.net` |
 | `email` | literal | the service account's email |
-| `api_token` | `vault::<homunculus>.default_address_book_plugin.jira_api_token` | chain-consumed |
+| `api_token` | `vault::<solet>.default_address_book_plugin.jira_api_token` | chain-consumed |
 | `expires_at` | literal (ISO-8601) | the token's expiry, e.g. `2027-01-15T00:00:00Z` |
 | `scope_note` | literal | the fixed-at-creation scope, for operator reference |
 
@@ -61,7 +61,7 @@ the `jira_site` entry shape are identical; only the account provenance differs.
    project roles it needs (browse, create, edit, transition, delete as
    appropriate). Mint an API token; note its expiry.
 2. Ingest the token agent-blind into the resolver's vault namespace under
-   `<homunculus>.default_address_book_plugin.jira_api_token`.
+   `<solet>.default_address_book_plugin.jira_api_token`.
 3. Register the `jira_site` address-book entry with `base_url`, `email`,
    `api_token` (the `vault::…` reference), `expires_at`, and `scope_note`.
 4. Verify with `test_connection` — it echoes the resolved `base_url` and the

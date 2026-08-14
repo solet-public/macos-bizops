@@ -20,7 +20,7 @@ Two layers, both production code:
   service and a plan advancer (asserted here, so a regression that injects an
   inference collaborator breaks the freeze).
 
-Offline: constructed inputs + recording stubs; no live homunculus / LM Studio / Postgres.
+Offline: constructed inputs + recording stubs; no live solet / LM Studio / Postgres.
 
 Run:
     .venv/bin/python3 \\

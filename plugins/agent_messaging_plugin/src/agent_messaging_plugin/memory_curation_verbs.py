@@ -9,7 +9,7 @@ validation/ranking here, orchestration there):
 
 1. ``slug_to_slot_tag`` / slug resolution support for cite->reinforce: a
    memory's slot tag is ``agent_memory:slot:<origin>:<slug>`` (origin fixed
-   as ``claude_code.<homunculus_name>``, matching the existing hydrate/drain
+   as ``claude_code.<solet_name>``, matching the existing hydrate/drain
    convention in ``.claude/hooks/memory_passthrough/*.py`` exactly — this
    module does not invent a new tag shape).
 2. ``build_curation_report``: ranks the CALLER-supplied current head lines
@@ -43,19 +43,19 @@ _PINNED_TAG = "agent_memory:pinned"
 _MD_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+\.md)\)")
 
 
-def slug_to_slot_tag(homunculus_name: str, slug: str) -> str:
+def slug_to_slot_tag(solet_name: str, slug: str) -> str:
     """The exact slot-tag shape ``.claude/hooks/memory_passthrough`` already
     writes and reads (``agent_memory:slot:<origin>:<slug>``) — single source
     of the tag format, so a future convention change only needs to land
     here, not be re-derived at every call site."""
-    return f"agent_memory:slot:{_ORIGIN_AGENT_KIND}.{homunculus_name}:{slug}"
+    return f"agent_memory:slot:{_ORIGIN_AGENT_KIND}.{solet_name}:{slug}"
 
 
-def origin_tag(homunculus_name: str) -> str:
+def origin_tag(solet_name: str) -> str:
     """The origin-scoped tag every ``agent_memory`` record for this
     checkout carries (``agent_memory:origin:<origin>``) — the same tag
     ``export_memories``'s hydrate contract already filters on."""
-    return f"agent_memory:origin:{_ORIGIN_AGENT_KIND}.{homunculus_name}"
+    return f"agent_memory:origin:{_ORIGIN_AGENT_KIND}.{solet_name}"
 
 
 def resolve_memory_id_by_slug(
@@ -102,7 +102,7 @@ def _parse_head_line_slugs(line: str) -> list[str]:
 
 
 def build_fact_index(
-    memory_records: list[dict[str, Any]], homunculus_name: str,
+    memory_records: list[dict[str, Any]], solet_name: str,
 ) -> dict[str, dict[str, Any]]:
     """One ``get_memories_by_tag(origin_tag(...))`` call's worth of records
     -> ``{slug: {"strength": float, "pinned": bool, "memory_id": str}}``.
@@ -110,7 +110,7 @@ def build_fact_index(
     record's ``name``/``id`` is the slug — the slot tag is the one
     authoritative source, exactly as ``export_memories``'s payload already
     carries it) and for the standalone ``agent_memory:pinned`` tag."""
-    prefix = f"agent_memory:slot:{_ORIGIN_AGENT_KIND}.{homunculus_name}:"
+    prefix = f"agent_memory:slot:{_ORIGIN_AGENT_KIND}.{solet_name}:"
     index: dict[str, dict[str, Any]] = {}
     for record in memory_records:
         tags = record.get("tags")

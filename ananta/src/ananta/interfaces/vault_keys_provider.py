@@ -34,7 +34,7 @@ Required vs declared:
 - ``get_declared_vault_keys()`` returns EVERY scoped key the plugin
   reads or writes, including required, lazy-created, and runtime-
   computed prefix patterns. Prefix patterns terminate in ``*`` (e.g.
-  ``"<homunculus>.soundcloud_artist_studio_plugin.refresh_token__*"``). The
+  ``"<solet>.soundcloud_artist_studio_plugin.refresh_token__*"``). The
   static gate accepts any literal that matches a declared prefix.
 
 The protocol is structurally typed (runtime-checkable Protocol) so
@@ -65,9 +65,9 @@ class VaultKeysProvider(Protocol):
         runtime-computed per-tenant keys (their identity is not knowable
         at startup).
 
-        Returned form: fully-scoped ``<homunculus>.<plugin>.<credential>``
+        Returned form: fully-scoped ``<solet>.<plugin>.<credential>``
         derived from the plugin's own runtime constants (NOT hardcoded
-        ``"<homunculus>."``).
+        ``"<solet>."``).
         """
         ...
 
@@ -76,7 +76,7 @@ class VaultKeysProvider(Protocol):
 
         Includes readiness-required keys + lazy-created keys + runtime-
         computed prefix patterns. Prefix patterns terminate in ``*``
-        (e.g. ``"<homunculus>.<plugin>.refresh_token__*"``); the static gate
+        (e.g. ``"<solet>.<plugin>.refresh_token__*"``); the static gate
         accepts any literal matching a declared prefix.
 
         Used by the W-INT Cycle 2 vault-key-declaration gate.
@@ -117,7 +117,7 @@ class VaultServiceUnavailableError(Exception):
 class MalformedVaultKeyDeclarationError(Exception):
     """Plugin declared a key that violates the scoped naming rules.
 
-    Per master plan §3.3.1, vault keys are ``<homunculus>.<plugin>.<credential>``
+    Per master plan §3.3.1, vault keys are ``<solet>.<plugin>.<credential>``
     with the plugin segment exactly matching the declaring plugin's
     ``name``. Mismatches (wrong plugin segment, fewer than three
     segments, etc.) raise this at readiness so declaration bugs surface

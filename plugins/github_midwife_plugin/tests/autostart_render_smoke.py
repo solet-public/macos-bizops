@@ -80,7 +80,7 @@ class _FakeLaunchctl:
 
 def _make_renderer(root: Path, fake_launchctl: _FakeLaunchctl) -> SimpleAutostartRenderer:
     return SimpleAutostartRenderer(
-        homunculus_name="testhum",
+        solet_name="testhum",
         clone_root=root / "clone",
         plist_dir=root / "LaunchAgents",
         home_dir=root / "home",
@@ -91,15 +91,15 @@ def _make_renderer(root: Path, fake_launchctl: _FakeLaunchctl) -> SimpleAutostar
 def _check_label_and_paths(root: Path) -> None:
     fake_launchctl = _FakeLaunchctl()
     renderer = _make_renderer(root, fake_launchctl)
-    _check("label matches local.homunculus.<name>", renderer.label == "local.homunculus.testhum", renderer.label)
+    _check("label matches local.solet.<name>", renderer.label == "local.solet.testhum", renderer.label)
     _check(
         "runtime_dir is home_dir/.ananta/runtime/<name> -- NOT the shared ananta.core.runtime.get_runtime_dir() path",
         renderer.runtime_dir == root / "home" / ".ananta" / "runtime" / "testhum",
         str(renderer.runtime_dir),
     )
     _check(
-        "plist_path is <plist_dir>/local.homunculus.<name>.plist",
-        renderer.plist_path == root / "LaunchAgents" / "local.homunculus.testhum.plist",
+        "plist_path is <plist_dir>/local.solet.<name>.plist",
+        renderer.plist_path == root / "LaunchAgents" / "local.solet.testhum.plist",
         str(renderer.plist_path),
     )
 
@@ -114,14 +114,14 @@ def _check_rendered_plist_fields(root: Path) -> None:
     expected_profile = str(clone / "profile")
     expected_working_dir = str(renderer.runtime_dir)
 
-    _check("plist sets Label", "<string>local.homunculus.testhum</string>" in xml, xml)
+    _check("plist sets Label", "<string>local.solet.testhum</string>" in xml, xml)
     _check(
-        "plist EnvironmentVariables sets HOMUNCULUS_NAME (boot fast-fails without it)",
-        "<key>HOMUNCULUS_NAME</key>\n    <string>testhum</string>" in xml,
+        "plist EnvironmentVariables sets SOLET_NAME (boot fast-fails without it)",
+        "<key>SOLET_NAME</key>\n    <string>testhum</string>" in xml,
         xml,
     )
     _check(
-        "plist WorkingDirectory is the per-homunculus runtime dir, not the clone root",
+        "plist WorkingDirectory is the per-solet runtime dir, not the clone root",
         f"<key>WorkingDirectory</key>\n  <string>{expected_working_dir}</string>" in xml
         and str(clone) not in xml.split("WorkingDirectory")[1].split("</string>")[0],
         xml,

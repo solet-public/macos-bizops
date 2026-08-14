@@ -6,13 +6,13 @@ Article Layer: 2
 
 Article Role: operations_runbook
 
-Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:client-deployment, consumer_profile:both
+Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Agent-facing runbook for setting up the user's own environment around a homunculus birth, covering wizard step one per-homunculus role and database provisioning before a verb-mode or same-machine birth (create the homunculus's own non-superuser role, its database, the pgvector extension, the PUBLIC-connect revoke, the one-time default-scram pg_hba block, and the negative-auth and isolation probes — no cross-homunculus credential copy, and shared-vs-separate Postgres instance as the driving agent's topology decision), then after genesis the shell launcher for a properly named Claude Code session, optional multi-role fleet setup, additive shell integration with recoverable backups, install-all-now configure-on-first-use plugin hydration guidance, generated project CLAUDE.md and AGENTS.md knowledge-bootstrap files (the same access-mode contract for Claude Code and Codex sessions: no-MCP `<name>` CLI as the default, MCP strictly opt-in on explicit operator request, and source-artifact recovery — reading the KB's raw markdown directly — as the last-resort fallback when the homunculus runtime itself is unavailable) and settings hooks, no-MCP default command-line operation through the per-homunculus `<name>` command including the `<name> watch` registered-presence watcher that claims each session's role and receives role-addressed messages and the `<name> wake` Stop-hook waker that turns deliveries to an idle session into session turns on any inference provider, MCP as a strictly optional add-on offered only on explicit operator request, a connectivity glossary separating the bridge, the blue-green router, MCP registration, development channels, and peer-registry presence versus the durable role binding, the session-ledger ingestion setup step (core and consent-gated, covering every coding agent the operator uses), the homunculus-alive verification checklist, and the deployment report card delivered to the operator as the hydration close-out.
+Embedding Description: Agent-facing runbook for setting up the user's own environment around a solet birth, covering per-solet database provisioning, launchers, optional multi-role fleets, additive shell integration, plugin hydration, generated CLAUDE.md and AGENTS.md knowledge-bootstrap files, and the default no-MCP CLI/watch transport. It distinguishes runner-specific delivery behavior: Claude may re-wake from its Stop hook; stock Codex currently ships no Stop-hook delivery mechanism at all (async command hooks are unsupported on measured stock builds), while managed spawn_session Codex workers are auto-driven through their host channel regardless. Also covers MCP as an explicit opt-in, bridge/router/role connectivity, session-ledger ingestion, verification, and the deployment report card.
 
 ## When to use this runbook
 
-Run this ladder after genesis completes and the newborn homunculus boots, when the user's own environment still lacks the launch tooling. Genesis provisions the homunculus side only, so a fresh clone gives the user no command to start a named Claude Code session, no project `CLAUDE.md` or `AGENTS.md`, and no Claude Code hooks. This runbook is written TO the driving coding agent, the same audience as the genesis section of the seed README, and applies equally whether that agent is Claude Code or Codex. Everything here follows the genesis ladder shape: probe first, offer, act only under the user's normal tool-approval flow, verify, and stop and ask rather than guess.
+Run this ladder after genesis completes and the newborn solet boots, when the user's own environment still lacks the launch tooling. Genesis provisions the solet side only, so a fresh clone gives the user no command to start a named Claude Code session, no project `CLAUDE.md` or `AGENTS.md`, and no Claude Code hooks. This runbook is written TO the driving coding agent, the same audience as the genesis section of the seed README, and applies equally whether that agent is Claude Code or Codex. Everything here follows the genesis ladder shape: probe first, offer, act only under the user's normal tool-approval flow, verify, and stop and ask rather than guess.
 
 Hydration is deliberately NOT genesis code. The files this ladder writes belong to the user's side of the genesis boundary, just like optional client registration does: the agent performs them with its own tools, in conversation, under the user's approval.
 
@@ -37,7 +37,7 @@ genesis-installed `<name>` command:
 <name> call service_interface::knowledge_service::search '{"query": "hydration runbook", "top_k": 8}'
 ```
 
-That command uses the homunculus's localhost bridge internally, but it is not an
+That command uses the solet's localhost bridge internally, but it is not an
 MCP server and needs no client-side MCP registration. Use it for knowledge-base
 search, process calls, session-history setup, and — via `<name> watch` — peer
 registration, role claiming, and message receive. The no-MCP path is the
@@ -51,10 +51,10 @@ on it only if the operator explicitly asks for it.
 Sessions repeatedly get lost by conflating these. When you explain or debug
 connectivity, name the layer you mean:
 
-- **Bridge** — the homunculus's localhost HTTP process-call surface; what the
+- **Bridge** — the solet's localhost HTTP process-call surface; what the
   `<name>` command talks to. Needs no MCP.
 - **Blue-green router** — a separate KeepAlive LaunchAgent (blue-green-capable
-  profiles only) holding the stable public port while homunculus instances swap
+  profiles only) holding the stable public port while solet instances swap
   behind it. Not a message path; a port-stability device.
 - **MCP bridge registration** — the optional `claude mcp add` client wiring
   that exposes `mcp__<name>__*` tools where policy permits MCP.
@@ -81,20 +81,20 @@ connectivity, name the layer you mean:
 
 ## Render contract
 
-All artifacts render from the flat template directory shipped in this plugin's knowledge base. The directory is `plugins/github_midwife_plugin/knowledge_base/hydration_templates/`. Substitute the double-brace tokens (`{{HOMUNCULUS_NAME}}`, `{{CLONE_DIR}}`, `{{HYDRATION_DATE}}`, `{{BACKUP_PATH}}`) by literal string replacement only. Do not use Python `str.format`, which mangles double braces, and do not pass templates through a shell heredoc, which would expand the live `$VAR` references they contain. Angle-bracket forms like `<name>` in prose are human-facing instructions, never render targets. The full token table and file map live in `plugins/github_midwife_plugin/knowledge_base/hydration_templates/TEMPLATE_VARS.md`.
+All artifacts render from the flat template directory shipped in this plugin's knowledge base. The directory is `plugins/github_midwife_plugin/knowledge_base/hydration_templates/`. Substitute the double-brace tokens (`{{SOLET_NAME}}`, `{{CLONE_DIR}}`, `{{HYDRATION_DATE}}`, `{{BACKUP_PATH}}`) by literal string replacement only. Do not use Python `str.format`, which mangles double braces, and do not pass templates through a shell heredoc, which would expand the live `$VAR` references they contain. Angle-bracket forms like `<name>` in prose are human-facing instructions, never render targets. The full token table and file map live in `plugins/github_midwife_plugin/knowledge_base/hydration_templates/TEMPLATE_VARS.md`.
 
 ## Step 0 — before the birth: provision the role and database (wizard step 1)
 
-Skip this section when `bootstrap.py` ran on this machine for this homunculus, because its role-and-db step already did everything here. It is REQUIRED before a verb-mode or existing-clone birth, and for any second homunculus on a machine that already runs one — the birth verb assumes it done and fail-louds if the auth line is missing. Canonical reference implementation: `bootstrap.py`'s `role_and_db` step (this section explains WHEN and WHY and gives the by-hand sequence; if the two ever disagree, `bootstrap.py` is the WHAT). Throughout, `<login-user>` is your macOS login user (the Homebrew-Postgres trust admin — run `whoami`).
+Skip this section when `bootstrap.py` ran on this machine for this solet, because its role-and-db step already did everything here. It is REQUIRED before a verb-mode or existing-clone birth, and for any second solet on a machine that already runs one — the birth verb assumes it done and fail-louds if the auth line is missing. Canonical reference implementation: `bootstrap.py`'s `role_and_db` step (this section explains WHEN and WHY and gives the by-hand sequence; if the two ever disagree, `bootstrap.py` is the WHAT). Throughout, `<login-user>` is your macOS login user (the Homebrew-Postgres trust admin — run `whoami`).
 
-Per-homunculus role isolation (operator override): each homunculus gets its OWN non-superuser PostgreSQL role, its OWN database, and its OWN schema — all named after it (`<name>` = `HOMUNCULUS_NAME`) — so no homunculus can access anything another created. There is NO shared `ananta` role, and NO credential ever crosses a homunculus namespace. The database must exist, be owned by the homunculus's own role, carry the `pgvector` extension (per-database), have PUBLIC connect revoked, and be password-gated over localhost. Only the scram gate is INVISIBLE if missing (a missing db fails the launch; a missing extension crash-loops at readiness; a missing revoke surfaces as an isolation-probe failure) — so this step ends with two explicit probes, the same ones the birth verb re-runs.
+Per-solet role isolation (operator override): each solet gets its OWN non-superuser PostgreSQL role, its OWN database, and its OWN schema — all named after it (`<name>` = `SOLET_NAME`) — so no solet can access anything another created. There is NO shared `ananta` role, and NO credential ever crosses a solet namespace. The database must exist, be owned by the solet's own role, carry the `pgvector` extension (per-database), have PUBLIC connect revoked, and be password-gated over localhost. Only the scram gate is INVISIBLE if missing (a missing db fails the launch; a missing extension crash-loops at readiness; a missing revoke surfaces as an isolation-probe failure) — so this step ends with two explicit probes, the same ones the birth verb re-runs.
 
 Instance topology is YOUR decision as the driving agent, never runtime code: a shared local Postgres instance is the DEFAULT. Choose a separate instance ONLY for a concrete reason — an incompatible existing Postgres major version, an extension conflict, a port or ownership conflict, or a customer policy that mandates separation. Honest boundary: on one machine under one OS user a cluster split adds no real isolation (the same user can read both data directories); full local standalone means a separate OS user or machine, which is out of scope here. When unsure, use the shared instance.
 
 1. **Probe (never clobber):** `psql -U <login-user> -d postgres -tAc "SELECT datdba::regrole FROM pg_database WHERE datname='<name>'"`. Empty output → continue. A row → the database EXISTS: STOP and present the facts (name, printed owner) to the user — resume-of-an-interrupted-birth vs foreign-name-collision is the user's call, made in conversation.
-2. **Create role + database (this homunculus's OWN, non-superuser):** `createuser -U <login-user> <name>` (plain — NO `-s`/`--createdb`/`--createrole`, so the role is non-superuser, which is load-bearing for the revoke below), then `createdb -U <login-user> -O <name> <name>`, then `psql -U <login-user> -d <name> -c 'CREATE EXTENSION IF NOT EXISTS "vector"'` (the `vector` extension is non-trusted, so the `<login-user>` superuser must create it — the newborn's own non-superuser role cannot).
-3. **Revoke PUBLIC (per-homunculus isolation, R4):** `psql -U <login-user> -d postgres -c 'REVOKE CONNECT, TEMP ON DATABASE "<name>" FROM PUBLIC'`. The owner role keeps implicit ALL and the `<login-user>` superuser bypasses; every OTHER role — including every sibling homunculus's role — is then refused at the front door with `permission denied for database`.
-4. **Gate (first newborn on this machine only):** find the auth config with `psql -U <login-user> -d postgres -tAc 'SHOW hba_file'`; if the default-scram block is not already present, insert these lines immediately ABOVE the blanket `trust` block (first-match-wins), substituting your `<login-user>` for the admin — the `all all` scram lines gate EVERY per-homunculus role at once, so this is one-time machine setup, never a per-birth edit:
+2. **Create role + database (this solet's OWN, non-superuser):** `createuser -U <login-user> <name>` (plain — NO `-s`/`--createdb`/`--createrole`, so the role is non-superuser, which is load-bearing for the revoke below), then `createdb -U <login-user> -O <name> <name>`, then `psql -U <login-user> -d <name> -c 'CREATE EXTENSION IF NOT EXISTS "vector"'` (the `vector` extension is non-trusted, so the `<login-user>` superuser must create it — the newborn's own non-superuser role cannot).
+3. **Revoke PUBLIC (per-solet isolation, R4):** `psql -U <login-user> -d postgres -c 'REVOKE CONNECT, TEMP ON DATABASE "<name>" FROM PUBLIC'`. The owner role keeps implicit ALL and the `<login-user>` superuser bypasses; every OTHER role — including every sibling solet's role — is then refused at the front door with `permission denied for database`.
+4. **Gate (first newborn on this machine only):** find the auth config with `psql -U <login-user> -d postgres -tAc 'SHOW hba_file'`; if the default-scram block is not already present, insert these lines immediately ABOVE the blanket `trust` block (first-match-wins), substituting your `<login-user>` for the admin — the `all all` scram lines gate EVERY per-solet role at once, so this is one-time machine setup, never a per-birth edit:
    ```
    local   all     <login-user>                            trust
    host    all     <login-user>    127.0.0.1/32            trust
@@ -104,21 +104,21 @@ Instance topology is YOUR decision as the driving agent, never runtime code: a s
    host    all     all             ::1/128                 scram-sha-256
    ```
    The three `<login-user>` trust lines re-assert passwordless admin access above the scram block. Insert-only: any existing legacy scram lines stay byte-identical. Reload: `psql -U <login-user> -d postgres -c 'SELECT pg_reload_conf()'`.
-5. **Verify — two probes.** (a) NEGATIVE scram: `PGPASSWORD=wrong psql "host=127.0.0.1 dbname=<name> user=<name>" -c 'SELECT 1'` MUST fail with `password authentication failed`. If it CONNECTS, the scram gate isn't taking effect (position? reload?) — fix and re-run; never proceed while a wrong password is accepted. (b) ISOLATION (verb-mode, after the credential is seeded): the newborn's own role, with its REAL password, connecting to a SIBLING database (the parent's) must fail with `permission denied for database`, NOT `password authentication failed` — the birth verb's seed subprocess runs this probe itself. On the FIRST homunculus on a machine there is no sibling, so (b) is recorded as not-applicable.
+5. **Verify — two probes.** (a) NEGATIVE scram: `PGPASSWORD=wrong psql "host=127.0.0.1 dbname=<name> user=<name>" -c 'SELECT 1'` MUST fail with `password authentication failed`. If it CONNECTS, the scram gate isn't taking effect (position? reload?) — fix and re-run; never proceed while a wrong password is accepted. (b) ISOLATION (verb-mode, after the credential is seeded): the newborn's own role, with its REAL password, connecting to a SIBLING database (the parent's) must fail with `permission denied for database`, NOT `password authentication failed` — the birth verb's seed subprocess runs this probe itself. On the FIRST solet on a machine there is no sibling, so (b) is recorded as not-applicable.
 
-**No credential copy.** Under per-homunculus isolation the newborn seeds its OWN role's password — a fresh value, generated in its own venv and `ALTER ROLE`-d onto its own role. There is NO pipe of another homunculus's password into this one; the old same-machine "credential pipe" sub-step is RETIRED, because reading another homunculus's Keychain entry is the exact cross-namespace access the isolation ruling exists to prevent.
+**No credential copy.** Under per-solet isolation the newborn seeds its OWN role's password — a fresh value, generated in its own venv and `ALTER ROLE`-d onto its own role. There is NO pipe of another solet's password into this one; the old same-machine "credential pipe" sub-step is RETIRED, because reading another solet's Keychain entry is the exact cross-namespace access the isolation ruling exists to prevent.
 
-**Resuming after Step 0 — which path called you here decides the next move.** On the README/`bootstrap.py` path (a cloned seed): re-run `bootstrap.py` — its `role_and_db` probe reads the reconciled state (role + your new database both present, revoke applied, auth line verified) as healthy and resumes at the next step. On the verb-mode path (an already-running homunculus births this one): proceed to the birth verb (`plugin::github_midwife_plugin::birth_homunculus`), which re-runs the negative-auth probe, seeds the newborn's OWN role in the newborn's OWN venv, and runs the isolation probe.
+**Resuming after Step 0 — which path called you here decides the next move.** On the README/`bootstrap.py` path (a cloned seed): re-run `bootstrap.py` — its `role_and_db` probe reads the reconciled state (role + your new database both present, revoke applied, auth line verified) as healthy and resumes at the next step. On the verb-mode path (an already-running solet births this one): proceed to the birth verb (`plugin::github_midwife_plugin::birth_solet`), which re-runs the negative-auth probe, seeds the newborn's OWN role in the newborn's OWN venv, and runs the isolation probe.
 
-Full derivation and rationale: the sequence relocated out of `github_midwife_plugin/venv_provision.py` (renamed from `acquisition.py` when acquisition mode was retired) when database creation became a wizard step, and shifted to per-homunculus role isolation. The verb keeps `venv_provision.verify_newborn_db_scram_gated` (the negative scram probe) plus the post-seed isolation probe. `bootstrap.py`'s `role_and_db` step is the canonical WHAT.
+Full derivation and rationale: the sequence relocated out of `github_midwife_plugin/venv_provision.py` (renamed from `acquisition.py` when acquisition mode was retired) when database creation became a wizard step, and shifted to per-solet role isolation. The verb keeps `venv_provision.verify_newborn_db_scram_gated` (the negative scram probe) plus the post-seed isolation probe. `bootstrap.py`'s `role_and_db` step is the canonical WHAT.
 
 ## Step 1 — probe
 
 Check each expected-good state read-only before writing anything.
 
 - `<clone>/client/` absent means hydration has not run; present means a re-run, so compare intended content before overwriting and prefer updating over clobbering.
-- `<clone>/CLAUDE.md` and `<clone>/AGENTS.md` may exist from a prior hydration; same re-run rule for both. Probe `~/.claude/settings.json` for the `HOMUNCULUS_STEP_ZERO_HOOK=` / `HOMUNCULUS_ROLE_RECLAIM_HOOK=` markers (this homunculus's or another's) and `~/.claude/skills/rename/SKILL.md` for prior installs; a pre-2026-07-22 hydration may have left hook copies in `<clone>/.claude/settings.json` — migrate those to user scope on a re-run rather than leaving both.
-- Read the shell templates that drive the integration: `zshrc.template`, `homunculus.zsh.template`, and any fleet/sample launcher file referenced by the clone or already present in the operator's startup file. Then inspect `~/.zshrc` or the active shell's startup file only far enough to classify its structure and choose an additive integration point. Do not print or copy secret-looking values into the transcript or generated files.
+- `<clone>/CLAUDE.md` and `<clone>/AGENTS.md` may exist from a prior hydration; same re-run rule for both. Probe `~/.claude/settings.json` for the `SOLET_STEP_ZERO_HOOK=` / `SOLET_ROLE_RECLAIM_HOOK=` markers (this solet's or another's) and `~/.claude/skills/rename/SKILL.md` plus `~/.claude/skills/feedback/SKILL.md` for prior installs; a pre-2026-07-22 hydration may have left hook copies in `<clone>/.claude/settings.json` — migrate those to user scope on a re-run rather than leaving both.
+- Read the shell templates that drive the integration: `zshrc.template`, `solet.zsh.template`, and any fleet/sample launcher file referenced by the clone or already present in the operator's startup file. Then inspect `~/.zshrc` or the active shell's startup file only far enough to classify its structure and choose an additive integration point. Do not print or copy secret-looking values into the transcript or generated files.
 - Confirm genesis actually finished: the newborn's LaunchAgent plist exists and the manifest marker `<clone>/profile/data/github_midwife/attempt.json` is present. If not, stop; hydration follows genesis, it does not replace it.
 
 ## Step 2 — install the clone-side and user-scope artifacts
@@ -129,7 +129,7 @@ scope (`~/.claude/`) by operator ruling 2026-07-22, and two render only on an
 accepted operator offer (marked ⚙ and handled at their own steps). The reason for user
 scope is load-bearing, so understand it before deviating: Claude Code loads
 project settings, skills, and project instructions from the directory a session
-starts in, and sessions that coordinate through the homunculus routinely start
+starts in, and sessions that coordinate through the solet routinely start
 in OTHER repositories (a work repo, a knowledge-base repo). Anything installed
 only in the deployment directory never reaches those sessions — verified in the
 field: a fleet session in another repo got no role-reclaim prompt and its role
@@ -175,7 +175,7 @@ instead — a restated count is a future stale arity.
 
 | Template | Destination | Mode |
 |---|---|---|
-| `homunculus.zsh.template` | `<clone>/client/<name>.zsh` | 0644 |
+| `solet.zsh.template` | `<clone>/client/<name>.zsh` | 0644 |
 | `claude_launcher.template` | `<clone>/client/bin/claude-<name>` | 0755 |
 | `codex_launcher.template` | `<clone>/client/bin/codex-<name>` | 0755 |
 | `launch.template` | `<clone>/client/bin/launch-<name>` | 0755 |
@@ -185,6 +185,7 @@ instead — a restated count is a future stale arity.
 | `codex_marketplace_json.template` | `<clone>/.agents/plugins/marketplace.json` | 0644 |
 | `claude_settings.json.template` | `~/.claude/settings.json` (reference shape only — the install commands below write the live file; see the coordination-hooks install step) | 0644 |
 | `rename_skill_SKILL.md.template` | `~/.claude/skills/rename/SKILL.md` | 0644 |
+| `feedback_skill_SKILL.md.template` | `~/.claude/skills/feedback/SKILL.md` | 0644 |
 | `user_claude_md_section.template` | `~/.claude/CLAUDE.md` (create-or-merge, one marker-delimited section) | 0644 |
 | ⚙ `zshrc.template` | the user's startup file — **CONDITIONAL: only on an accepted shell-integration offer** (Step 2); additive integration is preferred and whole-file replacement is the fallback, rendered with `{{BACKUP_PATH}}` | 0644 |
 | ⚙ `fleet_functions.zsh.template` | `<clone>/client/<name>-fleet.zsh` — **CONDITIONAL: only on an accepted Step 4a git-safety offer**; sourced from the user's startup file | 0644 |
@@ -214,8 +215,19 @@ definition in `/hooks`; uninstall alone retains its prior enabled/trusted state
 and an identical reinstall can reactivate it. Do not copy another installation's
 cache, trust hash, or private config stanza.
 
+The final `/hooks` listing shows no `Stop` definition — this plugin currently
+ships none (codex-0147-async-hook-regression, 2026-08-13). Stock Codex does
+not execute async command hooks on any measured build (0.141.0, 0.147.0); a
+prior `async: true` `Stop` binding never fired and was removed rather than
+left registered-but-dead, and a synchronous one is not an acceptable
+substitute (it would block the turn boundary). Autonomous Codex workers must
+be launched through `spawn_session`, where `drive_on_delivery` uses the host
+driver channel independent of this plugin's hooks; an operator-launched Codex
+TUI has no per-turn delivery notice and drains the durable inbox on its own
+initiative.
+
 Known limitation, state it rather than papering over it: on a machine running
-MORE THAN ONE homunculus, the per-deployment surfaces coexist cleanly — each
+MORE THAN ONE solet, the per-deployment surfaces coexist cleanly — each
 deployment registers its own marketplace and plugin under its own name in
 `~/.claude/settings.json`, and each owns its own name-keyed section in
 `~/.claude/CLAUDE.md` — but every labeled session then loads every
@@ -223,30 +235,32 @@ deployment's Claude plugin, so those reminders are per-deployment and they add
 up. Codex marketplaces remain separately named, but an operator can likewise
 install several coordination plugins into one Codex home and should enable only
 the deployment(s) intended for that session. The user-scope `rename` skill is a
-singleton, so the LAST hydrated homunculus owns it. Single-homunculus machines — the normal case — are unaffected. If the
-operator runs several homunculi and this bites, surface it as a decision rather
+singleton, so the LAST hydrated solet owns it. Single-solet machines — the normal case — are unaffected. If the
+operator runs several solets and this bites, surface it as a decision rather
 than inventing a scheme ad hoc.
 
 ### Generating the knowledge-bootstrap files: `CLAUDE.md` for Claude Code, `AGENTS.md` for a Codex session
 
 Step 2 renders both files for the newborn clone from templates: `CLAUDE.md.template` produces the generated `CLAUDE.md` a Claude Code session reads, and `AGENTS.md.template` produces the generated `AGENTS.md` a Codex session reads — the same knowledge-bootstrap contract, rendered once per runner.
 
-**Existing `CLAUDE.md` / `AGENTS.md` guidance.** The rendered `CLAUDE.md.template` and `AGENTS.md.template` each contain a homunculus-owned block bounded by the identical markers:
+**Existing `CLAUDE.md` / `AGENTS.md` guidance.** The rendered `CLAUDE.md.template` and `AGENTS.md.template` each contain a solet-owned block bounded by the identical markers:
 
 ```markdown
-<!-- BEGIN HOMUNCULUS HYDRATION -->
+<!-- BEGIN SOLET HYDRATION -->
 ...
-<!-- END HOMUNCULUS HYDRATION -->
+<!-- END SOLET HYDRATION -->
 ```
 
-If `<clone>/CLAUDE.md` or `<clone>/AGENTS.md` already exists, preserve its project-specific instructions and insert or update only that managed block — the same rule, applied independently to each file. On a re-run, replace the existing block exactly. On a first merge, insert the block after the first top-level heading when one exists; otherwise insert it at the top. Leave the rest of the file in place. Do not decide that an existing `CLAUDE.md` or `AGENTS.md` is "probably fine" and leave it untouched: the homunculus operating block is how future Claude Code and Codex sessions learn the access-mode contract — the no-MCP `<name> call` CLI as the default for knowledge/process/session-ledger access, MCP as strictly opt-in on explicit operator request, and source-artifact recovery (reading the KB's raw markdown directly) as the last-resort fallback when the homunculus runtime itself is unavailable — plus the implementation/debugging requirement to search the homunculus's own knowledge base first and the hook/messaging expectations for that tool.
+If `<clone>/CLAUDE.md` or `<clone>/AGENTS.md` already exists, preserve its project-specific instructions and insert or update only that managed block — the same rule, applied independently to each file. On a re-run, replace the existing block exactly. On a first merge, insert the block after the first top-level heading when one exists; otherwise insert it at the top. Leave the rest of the file in place. Do not decide that an existing `CLAUDE.md` or `AGENTS.md` is "probably fine" and leave it untouched: the solet operating block is how future Claude Code and Codex sessions learn the access-mode contract — the no-MCP `<name> call` CLI as the default for knowledge/process/session-ledger access, MCP as strictly opt-in on explicit operator request, and source-artifact recovery (reading the KB's raw markdown directly) as the last-resort fallback when the solet runtime itself is unavailable — plus the implementation/debugging requirement to search the solet's own knowledge base first and the hook/messaging expectations for that tool.
 
 Both templates carry the SAME access-mode contract in near-identical wording;
 they diverge only on genuinely tool-specific mechanics: Claude Code's
 `claude-<name>` integration versus stock Codex's generated `codex-<name>`
-launcher, Stop waiter, and exact durable-inbox command. If you find yourself
-rewriting one file's access-mode section without the other, stop and update
-both — this is exactly the drift the shared contract exists to prevent.
+launcher and exact durable-inbox command (currently no Stop-hook delivery
+notice — see the Stock Codex durable inbox section of `AGENTS.md.template`).
+If you find yourself rewriting one file's access-mode section without the
+other, stop and update both — this is exactly the drift the shared contract
+exists to prevent.
 
 **Installing `coordination-hooks` — run the explicit CLI commands, never a
 hand-merged declaration alone.** `claude_settings.json.template` still
@@ -287,12 +301,12 @@ are how it gets there reliably, not a hand-edit in addition to them. If either c
 paper over a failure by hand-writing the JSON anyway, since that reproduces
 exactly the broken-but-silent state this replaces.
 
-**If the existing file still carries this deployment's own pre-consolidation inline hooks** — a `HOMUNCULUS_STEP_ZERO_HOOK=<name>` command, a `HOMUNCULUS_ROLE_RECLAIM_HOOK=<name>` command, or a `HOMUNCULUS_WAKE_HOOK=<name>` `Stop` entry (the shape shipped before WS-5b-core moved these into the plugin) — back up `~/.claude/settings.json` first (same collision-probed backup naming as Step 3's zshrc backup), then remove them by hand before running the commands above. They are this deployment's own superseded configuration, not another tool's, and leaving them in place double-fires every reminder and races two wakers on one spool lock now that the plugin owns all three.
+**If the existing file still carries this deployment's own pre-consolidation inline hooks** — a `SOLET_STEP_ZERO_HOOK=<name>` command, a `SOLET_ROLE_RECLAIM_HOOK=<name>` command, or a `SOLET_WAKE_HOOK=<name>` `Stop` entry (the shape shipped before WS-5b-core moved these into the plugin) — back up `~/.claude/settings.json` first (same collision-probed backup naming as Step 3's zshrc backup), then remove them by hand before running the commands above. They are this deployment's own superseded configuration, not another tool's, and leaving them in place double-fires every reminder and races two wakers on one spool lock now that the plugin owns all three.
 
 **Correction, measured on a live deployment (fleet-watch-transport-migration phase 3,
 2026-08-06): the three literal marker strings above are not reliable search keys on every
 deployment.** On that machine's actual `~/.claude/settings.json`, only the `Stop`/wake entry
-carried its literal `HOMUNCULUS_WAKE_HOOK=` marker; the KB-first, check-messages, and
+carried its literal `SOLET_WAKE_HOOK=` marker; the KB-first, check-messages, and
 role-reclaim hooks were present but rendered from an older or differently-templated form that
 did not carry the other two marker strings at all. **Identify the four hooks to remove by ROLE
 and CONTENT (a `Stop` entry running the wake command; `UserPromptSubmit`/`SessionStart` entries
@@ -302,7 +316,7 @@ marker strings alone** — a marker-only search can silently undercount on a dep
 
 **Second correction: `<clone>` in the two install commands above must be a clone that carries
 `.claude-plugin/marketplace.json` at its root.** A hydrated seed clone gets this file from seed
-assembly; an ORIGIN dev checkout (one that was never assembled from a seed — e.g. the homunculus's
+assembly; an ORIGIN dev checkout (one that was never assembled from a seed — e.g. the solet's
 own primary development repo) does not, and `claude plugin marketplace add <clone>` fails
 against it with no `.claude-plugin/marketplace.json` present. If `<clone>` is such an origin
 checkout, render the file first: `deployment/scripts/setup_clone.sh` (run once per clone) now
@@ -323,19 +337,19 @@ install; if they still fail, re-read the rendered `marketplace.json` for a
 malformed catalogue (missing `owner`, unparseable JSON, a name colliding
 with a Claude Code reserved name) before assuming anything else.
 
-**`~/.claude/CLAUDE.md` — the production instruction surface (create-or-merge).** This is the file production sessions actually read, and on a fresh machine **it usually does not exist yet** — so this step CREATES it when absent and merges into it when present. Never rewrite it wholesale: it is the user's own file, and a homunculus owns exactly one marker-delimited section in it.
+**`~/.claude/CLAUDE.md` — the production instruction surface (create-or-merge).** This is the file production sessions actually read, and on a fresh machine **it usually does not exist yet** — so this step CREATES it when absent and merges into it when present. Never rewrite it wholesale: it is the user's own file, and a solet owns exactly one marker-delimited section in it.
 
 Render `user_claude_md_section.template` and install the result between its own markers:
 
 ```markdown
-<!-- BEGIN HOMUNCULUS <name> v1 -->
+<!-- BEGIN SOLET <name> v1 -->
 …rendered section body…
-<!-- END HOMUNCULUS <name> -->
+<!-- END SOLET <name> -->
 ```
 
 The rules are the same shape as the deployment-directory managed block, with two differences that matter:
 
-- **The marker is keyed to this deployment's name, not to a generic `HOMUNCULUS HYDRATION` label.** One `~/.claude/CLAUDE.md` may host sections from several homunculi; a generic marker would make each install clobber the last. On a re-run, replace this deployment's section exactly, in place; leave other deployments' sections and all of the user's own content untouched. On a first merge, append the section at the end of the file rather than at the top — the user's own instructions come first in their own file.
+- **The marker is keyed to this deployment's name, not to a generic `SOLET HYDRATION` label.** One `~/.claude/CLAUDE.md` may host sections from several solets; a generic marker would make each install clobber the last. On a re-run, replace this deployment's section exactly, in place; leave other deployments' sections and all of the user's own content untouched. On a first merge, append the section at the end of the file rather than at the top — the user's own instructions come first in their own file.
 - **The version in the opening marker is load-bearing.** A later installer shipping a newer section body reads `v1` and knows to re-merge rather than duplicate or silently leave a stale section in place. Uninstalling the deployment removes exactly this marker pair and everything between it.
 
 **Take the body from the template, not from memory.** The section names one process key and one pinned search query, and that query is tuned together with the knowledge-base orientation article it retrieves — the article's own retrieval test is what keeps them in agreement. A body retyped from an example, or copied from an older runbook, drifts out of retrieval silently: the command still looks right, still runs, and returns the wrong page or nothing.
@@ -350,7 +364,7 @@ deployment pattern. A generated launcher that bypasses either deletes that
 boundary. `CODEX_BIN` may select an explicit stock executable; never point it
 at a locally patched receive build.
 
-The coordination hooks no-op silently for bare sessions, and at user scope this guard is load-bearing for the user's ENTIRE Claude Code use: a plain `claude` session anywhere on the machine has no session-label environment variable set, and it must get zero output and zero errors. **The rule, not a count:** every shipped entrypoint but one (`step_zero_reminder.js`, `check_messages_reminder.js`, `role_binding_reminder.js`, `wake_waiter.js` — the last adding a transport gate on top) returns nothing unless `AGENT_SESSION_LABEL` is set. Read the roster from the plugin's own `hooks/hooks.json` rather than trusting a number in prose: entrypoints, registrations, and matcher groups are three different counts, and all three move as hooks land. The exception, `git_controller_gate.py`, reads no label at all: it holds the same invariant by a different boundary — it does nothing unless `GIT_CONTROLLER_NAME` is present in the environment (Step 4a), which on a deployment that never sets it is never. If you edit a hook, keep whichever of the two boundaries it already has; a hook that gains output on an unlabeled, unarmed session is a defect against this paragraph, not a feature.
+The coordination hooks no-op silently for bare sessions, and at user scope this guard is load-bearing for the user's ENTIRE Claude Code use: a plain `claude` session anywhere on the machine has no session-label environment variable set, and it must get zero output and zero errors. **The rule, not a count:** every shipped entrypoint but one (`step_zero_reminder.js`, `check_messages_reminder.js`, `role_binding_reminder.js`) returns nothing unless `AGENT_SESSION_LABEL` is set. Read the roster from the plugin's own `hooks/hooks.json` rather than trusting a number in prose: entrypoints, registrations, and matcher groups are three different counts, and all three move as hooks land (the Codex plugin currently ships no `Stop`-bound entrypoint at all — codex-0147-async-hook-regression, 2026-08-13). The exception, `git_controller_gate.py`, reads no label at all: it holds the same invariant by a different boundary — it does nothing unless `GIT_CONTROLLER_NAME` is present in the environment (Step 4a), which on a deployment that never sets it is never. If you edit a hook, keep whichever of the two boundaries it already has; a hook that gains output on an unlabeled, unarmed session is a defect against this paragraph, not a feature.
 
 ## Step 3 — review, recommend, then offer shell integration
 
@@ -361,7 +375,7 @@ The normal recommendation is additive shell integration: put a small managed sou
 Before asking for approval, prepare these facts for yourself:
 
 - which startup file you inspected, and whether it was missing, simple, already managed, or complex;
-- whether any existing Claude/homunculus launcher pattern was present, described only structurally and without quoting private values;
+- whether any existing Claude/solet launcher pattern was present, described only structurally and without quoting private values;
 - the exact source line or managed block you intend to add or update;
 - the backup path you will create before writing;
 - the operator-visible result: new terminals can run `claude-<name>` directly, while the absolute path `<clone>/client/bin/claude-<name>` remains available if they decline.
@@ -392,7 +406,7 @@ If `~/.zshrc` did not exist at probe time, write a minimal file directly and say
 
 ## Step 4 — named-session start
 
-Requirement 3 is satisfied by the launcher that step 2 installed on the user's machine. With the accepted zshrc (new terminal window, or `source ~/.zshrc`), the command `claude-<name>` is on PATH; declined, the absolute path form works identically. Optional arguments: a session label (default `Operator`), then a model alias, then an effort level. The launcher exports the session-label and stable session-id environment variables and execs `claude --name <label>`, which is what makes the session properly named in both Claude Code and the homunculus's peer registry.
+Requirement 3 is satisfied by the launcher that step 2 installed on the user's machine. With the accepted zshrc (new terminal window, or `source ~/.zshrc`), the command `claude-<name>` is on PATH; declined, the absolute path form works identically. Optional arguments: a session label (default `Operator`), then a model alias, then an effort level. The launcher exports the session-label and stable session-id environment variables and execs `claude --name <label>`, which is what makes the session properly named in both Claude Code and the solet's peer registry.
 
 ## Step 4a — offer: multi-role fleet coordination (optional)
 
@@ -419,8 +433,8 @@ probe may inform the phrasing (a managed policy file such as
 means MCP registration is restricted, so say the watcher is likely the only
 permitted path) — the probe informs wording, never the decision. If the
 operator pushes back and asks for MCP: run Step 5's explicit-request
-`claude mcp add` registration, set `{{HOMUNCULUS_NAME}}_FLEET_TRANSPORT=mcp`
-plus `{{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS=1` where the fleet file is
+`claude mcp add` registration, set `{{SOLET_NAME}}_FLEET_TRANSPORT=mcp`
+plus `{{SOLET_NAME}}_FLEET_MCP_CHANNELS=1` where the fleet file is
 sourced, and have them relaunch fleet sessions. If `claude mcp add` fails
 against policy, report exactly that and state the watcher default stands —
 on such a machine that IS the supported design, not a degraded state.
@@ -429,7 +443,7 @@ follow it and never silently switch to the other (fail-loud rule; design
 record: platform repo `workbench/2026-07-28_fleet_transport_parity_design.md`).
 
 **Target work repos get the guidance too.** Launcher-started Claude Code
-sessions carry the homunculus guidance from the user-scope hooks in every
+sessions carry the solet guidance from the user-scope hooks in every
 prompt, from any directory — but a BARE `claude` session in a work repo gets
 nothing (the label guard is deliberate), and Codex sessions have no
 equivalent hook injection at all. So when the operator names the repos the
@@ -437,9 +451,9 @@ fleet (Claude Code and/or Codex) will work in, OFFER the same managed-block
 merge Step 2 does for the clone's `CLAUDE.md` and `AGENTS.md` into EACH target
 repo's matching file — Claude-driven repos get `CLAUDE.md`, Codex-driven
 repos get `AGENTS.md`, a repo used by both gets both files (same
-`BEGIN/END HOMUNCULUS HYDRATION` markers, same insert-or-update rule,
+`BEGIN/END SOLET HYDRATION` markers, same insert-or-update rule,
 preserve everything else in the file). That block is what tells any future
-session in that repo — launcher-started or not — that the homunculus exists,
+session in that repo — launcher-started or not — that the solet exists,
 how to reach it (`<name> call`, and for Claude Code `<name> watch`), and that
 MCP is not needed for knowledge or process access.
 
@@ -453,9 +467,9 @@ clone's `.claude/settings.json`, that is a pre-ruling install: migrate them to
 user scope per Step 2 rather than debugging why fleet sessions get no
 role-reclaim prompt.
 
-Everything through Step 4 gives the operator ONE properly-named session. Some operators want to run SEVERAL Claude Code (and/or Codex) sessions concurrently against the same homunculus, each independently addressable — a coordinator session, a session that owns all git mutations, an architect/reviewer session, worker sessions. This is exactly the pattern this platform's own development runs on (see this repo's own `.zshrc` and `.claude/settings.json` for a live, battle-tested example — `claude-coordinator-dawn`, `claude-git-controller`, `claude-architect`, and so on). Offer this explicitly; do not build it unasked, and do not build it as part of the Step 2 baseline.
+Everything through Step 4 gives the operator ONE properly-named session. Some operators want to run SEVERAL Claude Code (and/or Codex) sessions concurrently against the same solet, each independently addressable — a coordinator session, a session that owns all git mutations, an architect/reviewer session, worker sessions. This is exactly the pattern this platform's own development runs on (see this repo's own `.zshrc` and `.claude/settings.json` for a live, battle-tested example — `claude-coordinator-dawn`, `claude-git-controller`, `claude-architect`, and so on). Offer this explicitly; do not build it unasked, and do not build it as part of the Step 2 baseline.
 
-**Ask first, don't prescribe.** "Do you want to run just one session with {{HOMUNCULUS_NAME}}, or several at once, each with its own role?" If several: "How many, and what should each be called?" Offer this platform's own roster as a concrete starting point, scaled to what the operator actually needs — most operators need far fewer than this repo's ~14 roles:
+**Ask first, don't prescribe.** "Do you want to run just one session with {{SOLET_NAME}}, or several at once, each with its own role?" If several: "How many, and what should each be called?" Offer this platform's own roster as a concrete starting point, scaled to what the operator actually needs — most operators need far fewer than this repo's ~14 roles:
 
 - A **coordinator** role (drives the work, delegates, holds the plan).
 - A **git-controller** role, if more than one session will edit files in the same clone — see the git-safety paragraph below for why this matters.
@@ -464,17 +478,17 @@ Everything through Step 4 gives the operator ONE properly-named session. Some op
 
 Let the operator pick names and count; do not invent roles they did not ask for.
 
-**What accepting builds.** Render `fleet_functions.zsh.template` to `<clone>/client/{{HOMUNCULUS_NAME}}-fleet.zsh` and add `source "<clone>/client/{{HOMUNCULUS_NAME}}-fleet.zsh"` to `<clone>/client/{{HOMUNCULUS_NAME}}.zsh` (the file Step 2 already installed). The template gives one shared `_claude_for_{{HOMUNCULUS_NAME}}(role, model, effort)` launcher plus ONE example role function to copy per role the operator chose (a restart variant is included in the same comment block). This is a genuinely different trust level than the Step 2 launcher — read the template's own header comment and carry that reasoning into the conversation with the operator, don't just render it silently:
+**What accepting builds.** Render `fleet_functions.zsh.template` to `<clone>/client/{{SOLET_NAME}}-fleet.zsh` and add `source "<clone>/client/{{SOLET_NAME}}-fleet.zsh"` to `<clone>/client/{{SOLET_NAME}}.zsh` (the file Step 2 already installed). The template gives one shared `_claude_for_{{SOLET_NAME}}(role, model, effort)` launcher plus ONE example role function to copy per role the operator chose (a restart variant is included in the same comment block). This is a genuinely different trust level than the Step 2 launcher — read the template's own header comment and carry that reasoning into the conversation with the operator, don't just render it silently:
 
 - `--remote-control "$role"` makes the session addressable by Claude Code's remote-control feature from another session — what lets a coordinator drive or monitor workers. A Claude Code feature; no MCP involved.
 - `--dangerously-skip-permissions` is opt-in and separately gated in the template (an env var the operator sets, not a hardcoded flag). It removes the per-action tool-approval prompt — necessary for several sessions to run without an operator babysitting each confirmation, but it removes the safety boundary Step 2's invariant exists to protect. State this tradeoff to the operator in plain language and let them decide; do not default it on.
-- Peer messaging, role binding, AND idle wake come from each session's watcher (armed by the SessionStart hook → rename skill) plus the user-scope `<name> wake` Stop hook — not from any launcher flag — on the default transport. The template's `{{HOMUNCULUS_NAME}}_FLEET_TRANSPORT` knob (default `watch`) declares the transport per Step 4a's offer paragraph; setting it to `mcp` re-points the rename skill to the MCP bridge and disarms the wake Stop hook via its guard. The optional MCP development-channel flag (`{{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS=1`) is the matching wake half and exists in the template gated OFF; the flag alone is inert (it also needs a registered MCP server via `claude mcp add` AND Anthropic-direct auth — unusable on Bedrock, impossible on an MCP-blocked machine), and it is only for an operator who explicitly asks for MCP and whose policy permits it — never suggest it unprompted.
+- Peer messaging, role binding, AND idle wake come from each session's watcher (armed by the SessionStart hook → rename skill) plus the user-scope `<name> wake` Stop hook — not from any launcher flag — on the default transport. The template's `{{SOLET_NAME}}_FLEET_TRANSPORT` knob (default `watch`) declares the transport per Step 4a's offer paragraph; setting it to `mcp` re-points the rename skill to the MCP bridge and disarms the wake Stop hook via its guard. The optional MCP development-channel flag (`{{SOLET_NAME}}_FLEET_MCP_CHANNELS=1`) is the matching wake half and exists in the template gated OFF; the flag alone is inert (it also needs a registered MCP server via `claude mcp add` AND Anthropic-direct auth — unusable on Bedrock, impossible on an MCP-blocked machine), and it is only for an operator who explicitly asks for MCP and whose policy permits it — never suggest it unprompted.
 
 **Git safety when more than one session shares this deployment directory — a nameable gate that hydration arms, and whose ONLY exemption is leaving it unset.** If the operator is choosing more than one role, ask directly: will more than one of these sessions ever run git commands (commit, push, checkout, stash, branch) against the SAME directory? If yes, concurrent mutating git from several sessions is a real collision risk — a stash or checkout from one session can silently clobber another session's in-progress work. The gate for exactly this ships in the `coordination-hooks` plugin Step 2 installs (`hooks/git_controller_gate.py`, registered on `PreToolUse`); the operator names the controller themselves: designate ONE role — **any name they choose** (`Git-Controller`, `gitops`, whatever) — as the sole git-mutator, and every other session is blocked from mutating git.
 
 **How it arms, and who writes that (RULED 2026-08-01, operator — this REVERSES the previous ship-unarmed position).** The gate reads exactly one variable, **`GIT_CONTROLLER_NAME`**, and its **presence is the arming boundary**. You — the configuring session — set it during hydration by rendering `{{GIT_CONTROLLER_NAME}}` into **all three** coordination launchers (`claude_launcher.template`, `codex_launcher.template`, and `fleet_functions.zsh.template`). Two consequences worth stating to the operator in these words:
 
-- ⚠ **`GIT_CONTROLLER_NAME` is the name the SHIPPED gate reads.** The platform ORIGIN repository's own private copy (`.claude/hooks/git_controller_gate.py`) reads `HOMUNCULUS_GIT_CONTROLLER_NAME` and **never ships** — a deliberate per-copy binding. Setting the origin's name on a seed-born deployment arms **nothing**, and because the gate is **fail-OPEN when its variable is unset**, the result is a gate the operator believes is armed and which silently allows everything. Do not carry the origin name into this conversation.
+- ⚠ **`GIT_CONTROLLER_NAME` is the name the SHIPPED gate reads.** The platform ORIGIN repository's own private copy (`.claude/hooks/git_controller_gate.py`) reads `SOLET_GIT_CONTROLLER_NAME` and **never ships** — a deliberate per-copy binding. Setting the origin's name on a seed-born deployment arms **nothing**, and because the gate is **fail-OPEN when its variable is unset**, the result is a gate the operator believes is armed and which silently allows everything. Do not carry the origin name into this conversation.
 - ⚠ **There is no project-scope fallback on a seed-born deployment.** The seed's copy allowlist is `ananta/`, `plugins/`, `disabled_plugins/`, `root_manifest.yaml` — `.claude/` is not in it, so the plugin copy is the *only* copy of this gate a deployment has. Do not tell the operator that protection also "travels with the directory"; here it does not.
 
 **SOLO EXEMPTION — the mechanism is the variable's ABSENCE.** A deployment where only one session ever runs simply omits the `GIT_CONTROLLER_NAME=` line from all three launchers: nothing is armed, day-one setup is unobstructed, and there is zero runtime machinery to go wrong. **Do not add a session-count probe to "implement" this** — configuration already implements it, and every runtime session-count source available here is known to lie. A *transiently*-solo fleet (a fleet deployment that happens to have one session up right now) is handled by policy language, not by deleting the export: the session claiming soloness cites a checkable basis for it (a just-run peer listing, or an operator statement), which makes the claim auditable afterwards.
@@ -515,7 +529,7 @@ this checkout's `workbench/` directory under that date; §3).
 
 **Two directories, asked separately, never conflated:**
 
-1. *Where does the homunculus itself live?* — `app_home` (`<clone>/profile`). Already fixed;
+1. *Where does the solet itself live?* — `app_home` (`<clone>/profile`). Already fixed;
    nothing to ask here.
 2. *Where do you keep the projects you work in?* — the export root. Ask in plain words: "Where
    do you keep the folders you work in day to day — the parent directory, not any one project?"
@@ -600,7 +614,7 @@ the `<name>` command (`<name> call`, `<name> watch`). If you notice the
 environment permits MCP, you may mention once that an optional MCP bridge
 exists for tool-native access, then move on; act only if the operator
 explicitly asks for it. When asked: follow the seed README's registration
-ladder. Reference form: `claude mcp add --scope user -e HOMUNCULUS_NAME=<name>
+ladder. Reference form: `claude mcp add --scope user -e SOLET_NAME=<name>
 -e AGENT_IDENTITY=claude_code <name> --
 <clone>/.venv/bin/python3 -m agent_messaging_plugin.mcp_bridge`. Probe
 `claude mcp add --help` before trusting that form; CLI flags drift.
@@ -609,11 +623,11 @@ ladder. Reference form: `claude mcp add --scope user -e HOMUNCULUS_NAME=<name>
 
 Verify each of the following before declaring hydration complete.
 
-### Checklist: is the newborn homunculus actually alive?
+### Checklist: is the newborn solet actually alive?
 
-First, that the homunculus itself is alive (not just reachable):
+First, that the solet itself is alive (not just reachable):
 
-- `launchctl list | grep <label>` shows the SAME process id across two checks a minute apart — a changing id means a crash-loop, not a running homunculus.
+- `launchctl list | grep <label>` shows the SAME process id across two checks a minute apart — a changing id means a crash-loop, not a running solet.
 - The newest log under `<clone>/profile/data/logs/` is quiescent: `wc -l <logfile> && sleep 5 && wc -l <logfile>` prints equal counts.
 - Optional: the log names the bridge port it bound (allocated dynamically at start; also in `~/.ananta/runtime/<name>.bridge.port`); `curl -s http://127.0.0.1:<port>/api/v1/bridge/health` answers.
 
@@ -622,11 +636,11 @@ Then, that the no-MCP command and session tooling work:
 - `<name> health` answers.
 - `<name> call service_interface::knowledge_service::search '{"query": "hydration runbook", "top_k": 3}'` returns a successful action/result path.
 - A fresh session started via `claude-<name>` carries the intended label and can use the `<name>` command without a venv activation.
-- `CLAUDE.md` and `AGENTS.md` each contain the `BEGIN HOMUNCULUS HYDRATION` / `END HOMUNCULUS HYDRATION` block, including the no-MCP Step Zero command, the access-mode contract (no-MCP CLI default, MCP by explicit operator request only, source-artifact recovery when the runtime is unavailable), the implementation/debugging KB-first rule, and the pointer to the router-vs-bridge distinction.
-- `~/.claude/settings.json` parses as JSON and contains exactly one `extraKnownMarketplaces` entry keyed to the rendered marketplace name (pointing at `<clone>` as a `directory` source) and exactly one `enabledPlugins.coordination-hooks@<marketplace-name>: true` entry — the session hooks moved into that plugin (Step 2), so this file no longer carries them and its own `hooks/hooks.json` roster is what determines which hooks execute, not a literal env-var-keyed command string here; `~/.claude/skills/rename/SKILL.md` exists.
+- `CLAUDE.md` and `AGENTS.md` each contain the `BEGIN SOLET HYDRATION` / `END SOLET HYDRATION` block, including the no-MCP Step Zero command, the access-mode contract (no-MCP CLI default, MCP by explicit operator request only, source-artifact recovery when the runtime is unavailable), the implementation/debugging KB-first rule, and the pointer to the router-vs-bridge distinction.
+- `~/.claude/settings.json` parses as JSON and contains exactly one `extraKnownMarketplaces` entry keyed to the rendered marketplace name (pointing at `<clone>` as a `directory` source) and exactly one `enabledPlugins.coordination-hooks@<marketplace-name>: true` entry — the session hooks moved into that plugin (Step 2), so this file no longer carries them and its own `hooks/hooks.json` roster is what determines which hooks execute, not a literal env-var-keyed command string here; `~/.claude/skills/rename/SKILL.md` and `~/.claude/skills/feedback/SKILL.md` both exist.
 - `~/.claude/plugins/installed_plugins.json` names `coordination-hooks@<marketplace-name>` with an `installPath` that **exists on disk** — `ls` it, do not stop at the JSON parsing. A present JSON entry with a missing path is the exact broken-but-registered state the install step's CLI commands exist to prevent; a JSON-only check would report this as passing.
 - The UserPromptSubmit hook in that session points the agent at `<name> call`, not MCP.
-- A bare `claude` session in an unrelated directory starts with no hook errors and no injected homunculus context (the label guard covers both hooks).
+- A bare `claude` session in an unrelated directory starts with no hook errors and no injected solet context (the label guard covers both hooks).
 - A LABELED session started in a different repo (not the clone) DOES receive the Step Zero and role-reclaim context — this is the fleet case the user-scope ruling exists for.
 - In a labeled session, the rename skill arms `<name> watch` and its first output line is `"watch": "armed"` with a `claimed`/`updated`/`displaced` result — role-addressed receive is live with zero MCP.
 - Role-claim ground truth: `<name> call plugin::agent_messaging_plugin::peer_holds_role` with the role name and the watcher's `agent_instance_id` resolves the claim to this session. An entry in raw peer-list output is connection presence, not a claim — never verify registration from a peer list.
@@ -648,11 +662,11 @@ fleet coordination, tmux worker hosting) visible instead of silently optional.
 
 ## Your blue-green router (auto-installed at birth)
 
-If your homunculus runs a **blue-green-capable profile** (its plugin allowlist includes `macos_self_deployment_plugin` — the `bizops`/standard tier), genesis **automatically installs a per-homunculus blue-green router** as the last birth step, right after the main autostart LaunchAgent. No operator action is needed: the router picks a free port in 8800-8999, writes its `<name>.router.port` + `<name>.bridge.port` discovery files, and loads under the label `local.homunculus.<name>.router`. That router is what lets the homunculus adopt new code with **zero downtime** via `apply_manifest` (blue-green swap). It is a separate KeepAlive LaunchAgent by design — it runs independently of Ananta and survives swaps untouched.
+If your solet runs a **blue-green-capable profile** (its plugin allowlist includes `macos_self_deployment_plugin` — the `bizops`/standard tier), genesis **automatically installs a per-solet blue-green router** as the last birth step, right after the main autostart LaunchAgent. No operator action is needed: the router picks a free port in 8800-8999, writes its `<name>.router.port` + `<name>.bridge.port` discovery files, and loads under the label `local.solet.<name>.router`. That router is what lets the solet adopt new code with **zero downtime** via `apply_manifest` (blue-green swap). It is a separate KeepAlive LaunchAgent by design — it runs independently of Ananta and survives swaps untouched.
 
-**Free-tier homunculi** (the `macos_free_minimal` profile, no self-deployment plugin) are **single-color by design** and have no router; their update path is a plain restart, not a blue-green swap. Genesis records the router step as `skipped` for them — that is expected, not a failure.
+**Free-tier solets** (the `macos_free_minimal` profile, no self-deployment plugin) are **single-color by design** and have no router; their update path is a plain restart, not a blue-green swap. Genesis records the router step as `skipped` for them — that is expected, not a failure.
 
-**One-line repair** if a capable homunculus ever loses its router (crash that KeepAlive didn't restore, manual removal): re-run the idempotent installer from the clone —
+**One-line repair** if a capable solet ever loses its router (crash that KeepAlive didn't restore, manual removal): re-run the idempotent installer from the clone —
 
 ```
 .venv/bin/python3 plugins/macos_self_deployment_plugin/src/macos_self_deployment_plugin/blue_green_router/install_router.py <name>
@@ -662,7 +676,7 @@ It is a no-op success when the router is already healthy. `uninstall_router.py <
 
 ## Your git worktree (auto-created at birth)
 
-A seed never ships `.git` — the "no contaminated history travels" invariant is exactly why `.git/` is `never_copy` in the seed manifest — so a freshly-hydrated seed clone arrives as a plain source tree, **not** a git worktree. Genesis fixes this as its final step: it `git init`s the born tree with a **fresh, empty history of its own** (never the minting homunculus's `.git`), writes a sensible `.gitignore`, sets a **local** git identity (repo config only — your global git config is never touched), and makes one initial commit. No operator action is needed.
+A seed never ships `.git` — the "no contaminated history travels" invariant is exactly why `.git/` is `never_copy` in the seed manifest — so a freshly-hydrated seed clone arrives as a plain source tree, **not** a git worktree. Genesis fixes this as its final step: it `git init`s the born tree with a **fresh, empty history of its own** (never the minting solet's `.git`), writes a sensible `.gitignore`, sets a **local** git identity (repo config only — your global git config is never touched), and makes one initial commit. No operator action is needed.
 
 This is what lets `platform_dev_surface_plugin` come ready (its readiness probe runs `git rev-parse --is-inside-work-tree`, which a plain source tree fails) and makes any git-based workflow in the clone work from first boot. The initial local identity (`<name>` / `<name>@localhost`) is a placeholder you are free to change with `git config`.
 
@@ -675,9 +689,9 @@ That second point is the correction. The `.gitignore` write used to sit behind t
 
 One consequence to expect on a cloned seed: because genesis must not touch your history, a `.gitignore` written into an existing worktree is left **untracked** rather than committed. Commit it yourself when convenient.
 
-## What this homunculus ingests and embeds
+## What this solet ingests and embeds
 
-In one sentence: what your homunculus captures and embeds from your sessions is
+In one sentence: what your solet captures and embeds from your sessions is
 everything — the full transcript of every coding-agent session it ingests, plus every
 peer-coordination message, embedded in full fidelity with no filtering and no opt-out.
 The rest of this section discloses exactly how.
@@ -692,7 +706,7 @@ redacting, I don't understand what it's about, and I don't like it." There is no
 per-session exclusion or content-redaction mechanism, and none is planned — ingestion
 completeness and ledger functionality are treated as core platform correctness, not as
 an optional privacy knob. What follows discloses how that ingestion actually works, so an
-operator deciding whether to run business-connector work through this homunculus knows
+operator deciding whether to run business-connector work through this solet knows
 what it means before they do. Measured 2026-07-29 (the architect ruling on
 business-connector data boundaries, filed in this checkout's `workbench/` directory under
 that date; §2, §4(a)).
@@ -713,8 +727,9 @@ platform's adopted convention on that half.
 - **Transcript tailing.** `claude_code_filesystem_session_source_plugin` and its Codex
   sibling tail the agent's own transcript file on disk
   (`.claude/projects/<encoded_cwd>/<session_id>.jsonl`) once its root is registered under
-  `ledger_allowed_roots` — see
-  `knowledge_bases/ananta_platform/19_session_ledger/07_ledger_allowed_roots_authz.md`.
+  `ledger_allowed_roots` — the authorization rules for that setting are an origin-side
+  platform reference that does not ship in a seed clone; search the knowledge base for
+  the ledger's allowed-roots authorization if you need the detail on a deployment.
 - **Direct table ingestion — yes, peer messaging gets ingested into the knowledge base
   too.** `agent_messaging_session_source_plugin` reads the platform's own
   `core__agent_thread` / `core__agent_message` tables directly — peer coordination
@@ -738,12 +753,12 @@ message bodies regardless of what any verb returns — to that provider. Check y
 bind before assuming either way; this runbook states the default, not your deployment.
 
 **Do not rely on a hand-listed source count here — it drifts.** The set of local
-session-source plugins a homunculus ships changes release to release, and a static list
+session-source plugins a solet ships changes release to release, and a static list
 in this document would go stale the first time it did. To see exactly which sources
 THIS install is actually ingesting from, run
 `<name> call service_interface::session_ledger_service::list_sources` — it joins
 loaded-plugin descriptors against registered database rows and answers "which sources is
-this homunculus actually ingesting from" without raw SQL. Re-run it after enabling or
+this solet actually ingesting from" without raw SQL. Re-run it after enabling or
 disabling any plugin; do not carry forward a count from a previous session or from this
 document.
 
@@ -751,16 +766,16 @@ document.
 
 With a session's watcher armed (the rename skill does this at session start), peer and role-addressed messages stream into the watch task's output and surface when the session next looks at it — not as live interruptions. Without a watcher, messages queue durably and drain when one next arms. This is designed behavior, not a defect; the generated CLAUDE.md states the same expectation to the user directly.
 
-Senders see it named honestly: every send to a watcher-held session is delivery-attempted unconditionally (A4, 2026-08-04 — there is no sender-declared marker to opt into a wake) and returns `delivery="queued_watcher"` — delivered into the watch output; an idle recipient with the Step 2 wake hook installed picks it up as a fresh turn (the `<name> wake` Stop hook blocks on the watcher's delivery spool and wakes the session), a busy one at its next look. The watcher's own event-stream ack marks the message consumed platform-side. There is no per-message escalation apparatus watching for a missed wake anymore; staleness is caught at the session level instead, through the recipient's own `report_by` promise (`sweep_overdue_sessions` / `_notify_steward_of_overdue`) — if you suspect a watcher is dead or its output is never being read, re-arm it (`/rename <Role>` or a fresh `<name> watch`) and resend rather than wait on an automatic re-queue. On a harness without hook support, a plain background `<name> watch` task still receives everything; deliveries then wait for the next look — that is the floor, and the wake hook is the shipped upgrade, MCP-free and provider-agnostic.
+Senders see it named honestly: every send to a watcher-held session is delivery-attempted unconditionally (A4, 2026-08-04 — there is no sender-declared marker to opt into a wake) and returns `delivery="queued_watcher"` — delivered into the watch output, not proof of a turn. Claude's re-wake hook may convert an idle delivery into a fresh turn. Codex currently ships no Stop-hook delivery mechanism at all (codex-0147-async-hook-regression, 2026-08-13: stock Codex does not execute async command hooks on any measured build) — an unmanaged Codex session drains the delivery on its own next user turn, while a managed `spawn_session` Codex worker is independently driven through its host channel regardless. The watcher's own event-stream ack marks the message consumed platform-side. There is no per-message escalation apparatus watching for a missed wake anymore; staleness is caught at the session level instead, through the recipient's own `report_by` promise (`sweep_overdue_sessions` / `_notify_steward_of_overdue`) — if you suspect a watcher is dead or its output is never being read, re-arm it (`/rename <Role>` or a fresh `<name> watch`) and resend rather than wait on an automatic re-queue. On a harness without hook support, a plain background `<name> watch` task still receives everything; deliveries then wait for the next look.
 
 ## Reference
 
 - `bootstrap.py` (repo root) — the canonical reference implementation of the step 0 sequence, in its `role_and_db` step.
 - `plugins/github_midwife_plugin/src/github_midwife_plugin/venv_provision.py` — `verify_newborn_db_scram_gated`, the negative-auth probe the birth verb re-runs against step 0's work.
 - `plugins/github_midwife_plugin/knowledge_base/hydration_templates/TEMPLATE_VARS.md` — render tokens, file map, and the pending env-var rename register.
-- `knowledge_bases/ananta_platform/17_client_deployment_pattern/01_pattern_overview.md` — the platform pattern hydration instantiates: in-clone package, agent-installed, zero secrets.
-- `knowledge_bases/ananta_platform/13_homunculus_setup/08_macos_homunculus_birth_runbook.md` — the birth runbook whose genesis this runbook follows.
-- `plugin::github_midwife_plugin::birth_homunculus` — the genesis verb that precedes hydration.
+- The platform deployment pattern hydration instantiates: in-clone package, agent-installed, zero secrets. **Origin-side reference — the platform knowledge-base section holding it does not ship in a seed clone**, so this is background for someone working in the originating checkout, not something to look up on a deployment.
+- The birth runbook whose genesis this runbook follows. Same caveat: origin-side only, not present in a seed clone.
+- `plugin::github_midwife_plugin::birth_solet` — the genesis verb that precedes hydration.
 - `service_interface::knowledge_service::search` — the Step Zero search the generated `CLAUDE.md` and `AGENTS.md` both instruct the newborn's driving agent to run through `<name> call`.
 - `<name> watch` (`plugins/agent_messaging_plugin/src/agent_messaging_plugin/local_cli/cli.py`) — the registered-presence watcher the generated rename skill arms: register, claim, drain, stream, reconnect.
 - `plugin::agent_messaging_plugin::peer_claim_role` — the role-claim process the watcher dispatches over its registered bridge.

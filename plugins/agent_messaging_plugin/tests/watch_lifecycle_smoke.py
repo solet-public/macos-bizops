@@ -9,7 +9,7 @@ of leaving one that dispatch then reports as ``queued_watcher``.
 
 Hermetic by construction: ``XDG_RUNTIME_DIR`` is redirected to a temp dir, so
 no port file is discoverable and every watcher parks in its reconnect backoff
-without reaching any homunculus — which is exactly the state that holds the
+without reaching any solet — which is exactly the state that holds the
 flock. Real subprocesses, because ``flock`` is a property of a process's open
 file description and an in-process runner cannot exercise it honestly.
 
@@ -37,7 +37,7 @@ _SRC = _REPO / "plugins/agent_messaging_plugin/src"
 sys.path.insert(0, str(_SRC))
 
 from agent_messaging_plugin.local_cli.cli import _parent_is_gone  # noqa: E402
-from agent_messaging_plugin.local_cli.client import resolve_homunculus_name  # noqa: E402
+from agent_messaging_plugin.local_cli.client import resolve_solet_name  # noqa: E402
 from agent_messaging_plugin.local_cli.spool import (  # noqa: E402
     watch_instance_digest,
     watch_singleton_lock_path,
@@ -53,13 +53,13 @@ _SIGTERM_DEFAULT_RC = -signal.SIGTERM
 
 _SESSION_ID = "ases-watch-lifecycle-smoke-0001"
 _ROLE = "Watch-Lifecycle-Smoke"
-# `watch`'s own identity resolution (resolve_homunculus_name) derives the name
+# `watch`'s own identity resolution (resolve_solet_name) derives the name
 # from this checkout's root_manifest.yaml / clone-dir basename, NOT from the
-# HOMUNCULUS_NAME env var this test sets for the child — a caller override
+# SOLET_NAME env var this test sets for the child — a caller override
 # cannot change what the child independently resolves. Deriving here the same
 # way keeps the two in agreement on any checkout (this one or a newborn's),
 # rather than pinning a literal that only happens to match this repo's name.
-_HOMUNCULUS = resolve_homunculus_name()
+_SOLET = resolve_solet_name()
 
 _LAUNCH = "from agent_messaging_plugin.local_cli.cli import cli; cli()"
 
@@ -90,7 +90,7 @@ def _env(runtime: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
         "PYTHONPATH": str(_SRC),
         "PYTHONDONTWRITEBYTECODE": "1",
         "XDG_RUNTIME_DIR": str(runtime),
-        "HOMUNCULUS_NAME": _HOMUNCULUS,
+        "SOLET_NAME": _SOLET,
         "AGENT_SESSION_ID": _SESSION_ID,
         "AGENT_SESSION_LABEL": _ROLE,
     }
@@ -121,7 +121,7 @@ def _lock_path(runtime: Path) -> Path:
     previous = os.environ.get("XDG_RUNTIME_DIR")
     os.environ["XDG_RUNTIME_DIR"] = str(runtime)
     try:
-        return watch_singleton_lock_path(_HOMUNCULUS, instance)
+        return watch_singleton_lock_path(_SOLET, instance)
     finally:
         if previous is None:
             os.environ.pop("XDG_RUNTIME_DIR", None)

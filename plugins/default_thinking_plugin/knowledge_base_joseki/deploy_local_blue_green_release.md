@@ -8,8 +8,8 @@ Article Tags: planning-stage:post-approval, planning-stage:wbs-execution, eviden
 
 
 JOSEKI_KEY: deploy_local_blue_green_release
-DESCRIPTION: Deploy committed code to the local homunculus via the materialized-release blue-green swap. Checks router swap state, captures the manifest etag with a dry run, commits the cutover under a compare-and-swap etag, confirms the old color drains, and verifies plugin health on the new release. Use after a merge to master when the running platform must pick up new code with zero downtime; not for manifest/plugin-set changes requiring binding review.
-EMBEDDING_DESCRIPTION: Deploy new committed code on the local homunculus with zero downtime using the blue-green release swap: check the router swap status for the active color, read the current manifest etag via an apply-manifest dry run, commit apply_manifest with the CAS etag so a new release color builds and cuts over, confirm cutover completion and old-color drain, verify plugin health on the new release. Routine local code deploy after a merge to master.
+DESCRIPTION: Deploy committed code to the local solet via the materialized-release blue-green swap. Checks router swap state, captures the manifest etag with a dry run, commits the cutover under a compare-and-swap etag, confirms the old color drains, and verifies plugin health on the new release. Use after a merge to master when the running platform must pick up new code with zero downtime; not for manifest/plugin-set changes requiring binding review.
+EMBEDDING_DESCRIPTION: Deploy new committed code on the local solet with zero downtime using the blue-green release swap: check the router swap status for the active color, read the current manifest etag via an apply-manifest dry run, commit apply_manifest with the CAS etag so a new release color builds and cuts over, confirm cutover completion and old-color drain, verify plugin health on the new release. Routine local code deploy after a merge to master.
 
 ## Input Contract
 

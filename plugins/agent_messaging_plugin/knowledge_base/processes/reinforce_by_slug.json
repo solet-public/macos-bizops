@@ -12,7 +12,7 @@
   },
   "error_processor_customizations": {
     "action_context": "One get_memories_by_tag lookup on the fact's own slot tag, then one reinforce call — both direct memory_service method calls, no job, no local file access.",
-    "error_interpretation": "missing_argument: slug was empty. memory_service_unavailable: memory_service is not bound on this homunculus. homunculus_name_unset: HOMUNCULUS_NAME is required to build the slot tag. slug_not_found: no memory record carries a slot tag for that slug — it may not exist, or has never been drained to canonical. slug_ambiguous: more than one record matched the slug's slot tag — a data-integrity signal, never resolved by picking one.",
+    "error_interpretation": "missing_argument: slug was empty. memory_service_unavailable: memory_service is not bound on this solet. solet_name_unset: SOLET_NAME is required to build the slot tag. slug_not_found: no memory record carries a slot tag for that slug — it may not exist, or has never been drained to canonical. slug_ambiguous: more than one record matched the slug's slot tag — a data-integrity signal, never resolved by picking one.",
     "recovery_guidance": "For slug_not_found, confirm the slug is the exact local file name minus '.md' (no path, no extension) and that the fact has been drained to canonical at least once via the memory-passthrough sync. slug_ambiguous needs operator/seat investigation, not a retry — duplicate slot tags should not exist."
   }
 }

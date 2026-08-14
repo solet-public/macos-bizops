@@ -24,9 +24,9 @@ Assertions (per Coordinator-Day's C4 dispatch brief Step 2):
   N4 - apply_manifest -> restart_with_manifest -> green spawn -> verb
        call against green returns expected. THIS IS THE OPERATOR-CITED
        CRITERION. Structurally requires live multi-process MCP dispatch
-       against the active homunculus (cutover machinery is the system under test);
+       against the active solet (cutover machinery is the system under test);
        not coverable by this library-level smoke harness. Coordinator
-       drives N4 manually via ``homunculus call <process_key>`` as part of the C4
+       drives N4 manually via ``solet call <process_key>`` as part of the C4
        cycle; the result is reported alongside this smoke in the Step 5
        IMPORTANT-back. See dispatch brief + advisor consultation
        2026-06-16 PT for the rationale.

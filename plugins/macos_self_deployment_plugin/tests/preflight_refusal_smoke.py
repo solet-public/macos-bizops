@@ -161,9 +161,9 @@ def run_smoke() -> int:
 
     def fake_spawn(
         app_home: Path, next_color: str, next_instance_id: str,
-        homunculus_name: str, candidate: CandidatePaths,
+        solet_name: str, candidate: CandidatePaths,
     ) -> int:
-        del app_home, next_color, homunculus_name, candidate
+        del app_home, next_color, solet_name, candidate
         spawn_calls.append(next_instance_id)
         return 4242
 
@@ -180,7 +180,7 @@ def run_smoke() -> int:
         router_client=cast("RouterClient", _StatusOnlyRouter()),
         action_factory=action_factory,
         session_factory=lambda: "sess-refusal",
-        homunculus_name="smoke",
+        solet_name="smoke",
         release_manager=release_mgr,
         schema_preflight=_non_additive_preflight,
         preflight_probe=_smoke_green_probe,

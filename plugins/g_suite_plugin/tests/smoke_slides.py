@@ -12,7 +12,7 @@ Exercises:
   4. export_presentation — default pdf mime, custom pptx mime, non-bytes rejected
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 plugins/g_suite_plugin/tests/smoke_slides.py
+    SOLET_NAME=<name> .venv/bin/python3 plugins/g_suite_plugin/tests/smoke_slides.py
 
 Exits 0 on success, 1 on first failure.
 """

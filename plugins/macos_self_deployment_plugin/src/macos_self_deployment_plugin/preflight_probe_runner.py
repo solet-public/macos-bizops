@@ -24,9 +24,9 @@ Design contract (``workbench/2026-07-06_gte06_fresh_source_preflight_probe_desig
   the swap.
 
 Env/cwd mirror the green spawn contract (:mod:`child_spawn`): inherited
-environment + ``HOMUNCULUS_NAME`` (module-level vault-name resolution in
+environment + ``SOLET_NAME`` (module-level vault-name resolution in
 agent_messaging fast-fails without it — the GTE-03 class) +
-``HOMUNCULUS_RELEASE_ID``; cwd = the out-of-tree runtime dir. Full child
+``SOLET_RELEASE_ID``; cwd = the out-of-tree runtime dir. Full child
 output is appended to a per-probe log file so a red probe always leaves
 a complete diagnostic even when the envelope tail is truncated.
 """
@@ -45,7 +45,7 @@ from typing import Any, Final, TypeGuard
 
 from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
 
-from macos_self_deployment_plugin.constants import ENV_HOMUNCULUS_NAME
+from macos_self_deployment_plugin.constants import ENV_SOLET_NAME
 from macos_self_deployment_plugin.release_manager import CandidatePaths
 
 PROBE_MODULE: Final[str] = (
@@ -59,7 +59,7 @@ PROBE_ERROR_TIMEOUT: Final[str] = "ProbeTimeout"
 PROBE_ERROR_HARNESS: Final[str] = "ProbeHarnessError"
 PROBE_ERROR_ENVELOPE: Final[str] = "ProbeEnvelopeError"
 
-_ENV_RELEASE_ID: Final[str] = "HOMUNCULUS_RELEASE_ID"
+_ENV_RELEASE_ID: Final[str] = "SOLET_RELEASE_ID"
 _FAILING_STEP_HARNESS: Final[str] = "harness"
 _STDOUT_CAP_BYTES: Final[int] = 262_144
 _DETAIL_TAIL_CHARS: Final[int] = 2_000
@@ -85,7 +85,7 @@ def run_preflight_probe(
     *,
     candidate: CandidatePaths,
     app_home: Path,
-    homunculus_name: str,
+    solet_name: str,
     cwd: Path,
     log_path: Path,
     timeout_seconds: float,
@@ -96,7 +96,7 @@ def run_preflight_probe(
         return _run_probe(
             candidate=candidate,
             app_home=app_home,
-            homunculus_name=homunculus_name,
+            solet_name=solet_name,
             cwd=cwd,
             log_path=log_path,
             timeout_seconds=timeout_seconds,
@@ -117,7 +117,7 @@ def _run_probe(
     *,
     candidate: CandidatePaths,
     app_home: Path,
-    homunculus_name: str,
+    solet_name: str,
     cwd: Path,
     log_path: Path,
     timeout_seconds: float,
@@ -125,7 +125,7 @@ def _run_probe(
 ) -> ProbeOutcome:
     manifest = _manifest_from_disk(app_home)
     env = os.environ.copy()
-    env[ENV_HOMUNCULUS_NAME] = homunculus_name
+    env[ENV_SOLET_NAME] = solet_name
     env[_ENV_RELEASE_ID] = candidate.release_id
     proc = subprocess.Popen(
         [str(candidate.venv_python), "-m", PROBE_MODULE],

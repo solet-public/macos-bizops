@@ -22,7 +22,7 @@ Exercises:
      connection is the real write-stopper at 25006)
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/external_postgres_plugin/tests/smoke_guard.py
 
 Exits 0 on success, 1 on first failure.

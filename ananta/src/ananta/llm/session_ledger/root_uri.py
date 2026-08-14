@@ -20,10 +20,10 @@ This module is the single home for the two halves of that contract:
   a concrete :class:`~pathlib.Path`. Used by the pulling plugins (P1.1.E) to
   walk the per-source root instead of a config singleton.
 
-Determinism scope (Codex C1): deterministic WITHIN a homunculus, NOT across —
+Determinism scope (Codex C1): deterministic WITHIN a solet, NOT across —
 ``expanduser`` / ``expandvars`` resolve against THIS host's HOME/env, so the
 same logical file is ``/Users/alice`` on one box and ``/home/x`` on another. That
-is correct: a ``__source`` row is homunculus-local.
+is correct: a ``__source`` row is solet-local.
 
 Module is import-pure (no platform deps) so callers retain their RELOAD_SAFE
 posture.

@@ -9,9 +9,9 @@ startup contract (F2-IMPL-PEER-VERIFY-9).
 Closes TLC counterexample #2 from Slice 1.5 of
 ``workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md``:
 a stale ``<name>.bridge.port`` value left by a crashed router lets the
-next cold-start homunculus bind a port matching the file's content; cleanup
+next cold-start solet bind a port matching the file's content; cleanup
 must run BEFORE port-binding so the file points at the router (post-
-install) and not at homunculus child.
+install) and not at solet child.
 """
 
 from __future__ import annotations
@@ -41,11 +41,11 @@ def runtime_dir() -> Path:
     return Path.home() / ".ananta" / "runtime"
 
 
-def cleanup_stale_runtime_files(homunculus_name: str) -> None:
-    """Remove runtime files left by a non-graceful prior the homunculus or router exit."""
+def cleanup_stale_runtime_files(solet_name: str) -> None:
+    """Remove runtime files left by a non-graceful prior the solet or router exit."""
     base = runtime_dir()
     for template in _STALE_FILENAME_TEMPLATES:
-        stale = base / template.format(name=homunculus_name)
+        stale = base / template.format(name=solet_name)
         if stale.exists() or stale.is_symlink():
             try:
                 stale.unlink()
@@ -55,10 +55,10 @@ def cleanup_stale_runtime_files(homunculus_name: str) -> None:
             logger.info("Removed stale runtime file: %s", stale)
 
 
-def restore_router_owned_bridge_port_file_if_router_live(homunculus_name: str) -> bool:
+def restore_router_owned_bridge_port_file_if_router_live(solet_name: str) -> bool:
     """Re-materialize ``<name>.bridge.port`` from the live router.
 
-    Cold start scrubs the canonical bridge-port file before homunculus spawn so
+    Cold start scrubs the canonical bridge-port file before solet spawn so
     stale router state cannot be mistaken for the current ingress. When the
     local blue-green router is already alive at scrub time, its
     ``<name>.router.sock`` management socket plus the ``<name>.router.port``
@@ -72,9 +72,9 @@ def restore_router_owned_bridge_port_file_if_router_live(homunculus_name: str) -
     liveness — the ``status`` reply does not carry the public port).
     """
     base = runtime_dir()
-    router_port_file = base / f"{homunculus_name}.router.port"
-    router_socket = base / f"{homunculus_name}.router.sock"
-    bridge_port_file = base / f"{homunculus_name}.bridge.port"
+    router_port_file = base / f"{solet_name}.router.port"
+    router_socket = base / f"{solet_name}.router.sock"
+    bridge_port_file = base / f"{solet_name}.bridge.port"
 
     router_port = _read_port_file(router_port_file)
     if router_port is None:
@@ -91,13 +91,13 @@ def restore_router_owned_bridge_port_file_if_router_live(homunculus_name: str) -
     return True
 
 
-def cleanup_and_restore(homunculus_name: str) -> None:
+def cleanup_and_restore(solet_name: str) -> None:
     """Scrub stale runtime files then restore bridge-port if router is live.
 
     Single entrypoint for the plugin's ``prepare_for_readiness`` hook.
     """
-    cleanup_stale_runtime_files(homunculus_name)
-    restore_router_owned_bridge_port_file_if_router_live(homunculus_name)
+    cleanup_stale_runtime_files(solet_name)
+    restore_router_owned_bridge_port_file_if_router_live(solet_name)
 
 
 def _read_port_file(path: Path) -> int | None:

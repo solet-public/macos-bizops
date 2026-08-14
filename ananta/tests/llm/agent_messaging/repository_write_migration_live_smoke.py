@@ -497,7 +497,7 @@ def _seed_message(
     W5's subject (``merge_message_metadata``) touches ONLY the ``metadata``
     column, so the fixture seeds just the existing NOT-NULL columns directly —
     independent of ``append_message`` (W4-pending raw SQL) and of the
-    ``important`` column the live homunculus DB only gains at the next schema
+    ``important`` column the live solet DB only gains at the next schema
     reconciliation (restart). ``created_at`` / ``is_deleted`` come from DB
     defaults.
     """

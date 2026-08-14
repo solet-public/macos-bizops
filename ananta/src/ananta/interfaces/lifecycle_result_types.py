@@ -121,7 +121,7 @@ class RestartResult:
 
 
 class TeardownStatus(StrEnum):
-    """Terminal status returned by ``teardown_homunculus``.
+    """Terminal status returned by ``teardown_solet``.
 
     ``completed`` — every phase ran to its expected terminal state for
     this attempt (resources gone where applicable, scheduled-deletion
@@ -143,7 +143,7 @@ class TeardownStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class TeardownResult:
-    """Typed envelope returned by ``teardown_homunculus``.
+    """Typed envelope returned by ``teardown_solet``.
 
     Carries the identifiers an operator needs to perform AWS-console-side
     recovery (per D17' drop of the platform-side ``cancel_teardown``
@@ -155,7 +155,7 @@ class TeardownResult:
 
     Attributes:
         status: Terminal status of the teardown attempt.
-        homunculus_name: The target homunculus.
+        solet_name: The target solet.
         idempotency_key: 16-hex sha256 derived from
             ``(name, snapshot_data, snapshot_retention_days,
             secret_recovery_days)``; used to tag the snapshot + the
@@ -176,7 +176,7 @@ class TeardownResult:
             "scheduled_deletion_at": "<ISO>"}``. Operator-recoverable
             via ``aws secretsmanager restore-secret`` inside the
             ``secret_recovery_days`` window.
-        scheduled_kms_deletion: The per-homunculus KMS key scheduled
+        scheduled_kms_deletion: The per-solet KMS key scheduled
             for deletion in Phase C5. Shape: ``{"key_id": str,
             "scheduled_deletion_at": "<ISO>"}``. Operator-recoverable
             via ``aws kms cancel-key-deletion`` inside the pending
@@ -188,7 +188,7 @@ class TeardownResult:
     """
 
     status: TeardownStatus
-    homunculus_name: str
+    solet_name: str
     idempotency_key: str
     dry_run: bool
     steps: tuple[dict[str, object], ...] = field(default_factory=tuple)
@@ -278,7 +278,7 @@ class AdminResult:
 
 
 class BirthStatus(StrEnum):
-    """Terminal status returned by ``MidwifeServiceInterface.birth_homunculus``.
+    """Terminal status returned by ``MidwifeServiceInterface.birth_solet``.
 
     ``success`` — every step of the canonical AWS provisioning sequence
     reached its expected terminal state (created / updated /
@@ -309,10 +309,10 @@ class BirthStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class BirthResult:
-    """Typed envelope returned by ``MidwifeServiceInterface.birth_homunculus``.
+    """Typed envelope returned by ``MidwifeServiceInterface.birth_solet``.
 
     Per the Step 4 ``aws_midwife_plugin`` design (§4.2) carrying the
-    Step 1 v2 §15 inventory: the operator needs the new homunculus's
+    Step 1 v2 §15 inventory: the operator needs the new solet's
     endpoint, the audit-trail manifest path, the IAM roles created
     (so subsequent `aws_account_admin_plugin` reconciliation has the
     inventory), and the RDS + KMS identifiers (used by
@@ -321,7 +321,7 @@ class BirthResult:
 
     Attributes:
         status: Terminal status of the birth attempt.
-        homunculus_name: Echo of the operator-supplied newborn name.
+        solet_name: Echo of the operator-supplied newborn name.
         idempotency_key: 16-hex sha256 derived from
             ``(name, profile_template, sorted(environment_config))``
             and stamped onto every AWS resource as
@@ -333,7 +333,7 @@ class BirthResult:
             ``skipped_already_current``, ``dry_run_planned``,
             ``failed``); per-step output detail is
             implementation-defined.
-        new_homunculus_endpoint: HTTPS URL the newborn is reachable
+        new_solet_endpoint: HTTPS URL the newborn is reachable
             at once the ALB listener rule + Route53 record + ACM cert
             are live (e.g. ``https://<name>.acute-focus.com``). Empty
             string until ``status=SUCCESS``.
@@ -356,11 +356,11 @@ class BirthResult:
     """
 
     status: BirthStatus
-    homunculus_name: str
+    solet_name: str
     idempotency_key: str
     dry_run: bool
     steps: tuple[dict[str, object], ...] = field(default_factory=tuple)
-    new_homunculus_endpoint: str = ""
+    new_solet_endpoint: str = ""
     manifest_path: str = ""
     iam_roles_created: tuple[str, ...] = field(default_factory=tuple)
     rds_endpoint: str = ""
@@ -382,7 +382,7 @@ class AutostartStatus(StrEnum):
     deleting the plist file. ``installed_loaded`` — plist on disk AND
     launchd knows it; the EXPECTED steady state with KeepAlive=false
     (the LaunchAgent fires at next login and exits cleanly after
-    handing off to the running homunculus). ``failed`` — the verb hit
+    handing off to the running solet). ``failed`` — the verb hit
     an error before reaching the target state (filesystem permission,
     launchctl reject, etc.). ``dry_run`` — ``dry_run=True`` returned
     the planned actions without writing the plist or invoking
@@ -409,13 +409,13 @@ class AutostartResult:
             (``install_autostart``, ``uninstall_autostart``,
             ``status_autostart``). Lets callers branch without
             unpacking shape.
-        homunculus_name: The target homunculus.
+        solet_name: The target solet.
         label: macOS LaunchAgent label (e.g.
-            ``local.homunculus.example``). Operator-neutral scheme
-            (``local.homunculus.<name>``) avoids hardcoding any
+            ``local.solet.example``). Operator-neutral scheme
+            (``local.solet.<name>``) avoids hardcoding any
             organization prefix.
         plist_path: Resolved path of the LaunchAgent plist (e.g.
-            ``~/Library/LaunchAgents/local.homunculus.example.plist``).
+            ``~/Library/LaunchAgents/local.solet.example.plist``).
             Returned even when no plist exists on disk so the operator
             knows where it WOULD have been written.
         prior_state: The state observed BEFORE the verb mutated
@@ -434,7 +434,7 @@ class AutostartResult:
 
     status: AutostartStatus
     verb: str
-    homunculus_name: str
+    solet_name: str
     label: str
     plist_path: str
     prior_state: str
@@ -529,13 +529,13 @@ class ImageBuildResult:
 class StopSelfStatus(StrEnum):
     """Terminal status returned by ``stop_self``.
 
-    ``success`` — the homunculus's primary serving process has been
+    ``success`` — the solet's primary serving process has been
     asked to terminate. On macOS, the detached watchdog has been
-    spawned and the drain sentinel is on disk; the homunculus child receives
+    spawned and the drain sentinel is on disk; the solet child receives
     SIGTERM shortly after the verb returns. On cloud, ECS
     ``UpdateService`` set ``DesiredCount=0`` and ``DescribeServices``
     polling confirmed ``runningCount=0``. ``already_stopped`` — the
-    homunculus was already in the stopped state (cloud: desiredCount
+    solet was already in the stopped state (cloud: desiredCount
     already 0 at the configured service; macOS: sentinel already on
     disk from a prior stop_self that the operator never cleaned up).
     Idempotent return so re-invocation is safe. ``failed`` — the verb
@@ -559,10 +559,10 @@ class StopSelfResult:
     Per workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md
     §6 Slice 4.5 (operator-scoped stop_self verb): leaves all infra in
     place, sets only the live serving capacity to zero. Cloud
-    operators bring the homunculus back with
+    operators bring the solet back with
     ``ecs update-service --desired-count 1``; macOS operators run
     ``./launch.py``, which scrubs the drain sentinel from
-    ``_cleanup_stale_runtime_files`` and re-spawns the homunculus.
+    ``_cleanup_stale_runtime_files`` and re-spawns the solet.
 
     Attributes:
         status: Terminal status. See :class:`StopSelfStatus`.

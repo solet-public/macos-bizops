@@ -49,7 +49,7 @@ Exercises:
  10. EDGE parity: validate_edge_process_provider raises nothing
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/marketo_plugin/tests/smoke_leads.py
 
 Exits 0 on success, 1 on first failure.

@@ -22,7 +22,7 @@ Every check below names the mutation that turns it red:
                          ``agent_ids``
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/peer_list_process_smoke.py
 """
 

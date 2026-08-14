@@ -1,7 +1,7 @@
 """
 Database Setup Utilities for start_build Wizard
 
-Standalone database creation functions called by the homunculi setup wizard.
+Standalone database creation functions called by the solets setup wizard.
 All connection parameters come from user input during setup.
 """
 

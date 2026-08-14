@@ -23,7 +23,7 @@ enforcement live at every token-issuance path.
   exact-matches ``redirect_uri`` against the client's pre-registered
   list, requires PKCE ``S256``, mints a single-use authorization
   code, and redirects to ``{redirect_uri}?code=...&state=...``.
-  Auto-approves the consent step (single-user homunculus; the
+  Auto-approves the consent step (single-user solet; the
   operator already proved possession of ``client_secret`` by
   registering the client out-of-band).
 * **POST ``/oauth/token``** — accepts ``authorization_code`` (claude.ai
@@ -35,7 +35,7 @@ enforcement live at every token-issuance path.
   ``refresh_token`` is only issued when the client opted in via
   ``grant_types``. Token issuance reuses the existing sealed-box
   bearer encoder so :class:`BearerVerifier` accepts the output
-  unchanged; the ``aud`` claim binds the token to this homunculus's
+  unchanged; the ``aud`` claim binds the token to this solet's
   canonical MCP URI per RFC 8707.
 * **POST ``/register``** — **hard-disabled**: returns plain 404
   (Task #31). Dynamic Client Registration is the only path the
@@ -1080,7 +1080,7 @@ def _validate_refresh_client_id_match(
 def _validate_refresh_audience(
     claims: dict[str, Any], endpoints: OAuthEndpoints,
 ) -> Response | None:
-    """Audience-binding: refuse rotation across migrated homunculi."""
+    """Audience-binding: refuse rotation across migrated solets."""
     bound_audience = claims.get("audience") or ""
     if bound_audience and not _resource_identifies_endpoint(bound_audience, endpoints):
         return _oauth_error(

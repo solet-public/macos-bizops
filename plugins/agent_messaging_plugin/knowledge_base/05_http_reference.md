@@ -8,7 +8,7 @@ Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:t
 
 Article Tags: planning-stage:server-side-internals, planning-stage:verifier-authoring, evidence-category:http-route-contract, evidence-category:bridge-event-shapes, domain:agent-messaging, domain:bridge, domain:http-surface
 
-Embedding Description: The localhost FastAPI route table exposed by agent_messaging_plugin under /api/v1/bridge, covering bridge lifecycle, the platform-call surface (process_*, download), peer messaging, the bridge-delivery EDGE_SINK processes that feed channel events back to MCP clients, and the Codex-specific homunculus peer-message notification used by the local patched Codex CLI.
+Embedding Description: The localhost FastAPI route table exposed by agent_messaging_plugin under /api/v1/bridge, covering bridge lifecycle, the platform-call surface (process_*, download), peer messaging, the bridge-delivery EDGE_SINK processes that feed channel events back to MCP clients, and the Codex-specific solet peer-message notification used by the local patched Codex CLI.
 
 ## Purpose
 
@@ -22,13 +22,13 @@ Every MCP tool the agent sees (`mcp__<server-name>__*`) maps to one of the
 routes below; the MCP bridge subprocess forwards the call, polls
 the event queue, and bridges results back as MCP notifications. Most
 events use `notifications/claude/channel`; Codex peer wake events use
-`notifications/homunculus/peer_message`.
+`notifications/solet/peer_message`.
 
 ## Bind point
 
 ```
 PortManager: bridge
-Runtime port file: ~/.ananta/runtime/<homunculus>.bridge.port
+Runtime port file: ~/.ananta/runtime/<solet>.bridge.port
 API prefix: /api/v1/bridge
 Bridge id prefix: agc-
 ```
@@ -36,9 +36,9 @@ Bridge id prefix: agc-
 The port is allocated dynamically at `start_interface`; **no port
 literal appears anywhere** — not in profile config, not in MCP
 client config. Callers must read the runtime port file
-(`~/.ananta/runtime/<homunculus>.bridge.port`) rather than
+(`~/.ananta/runtime/<solet>.bridge.port`) rather than
 hard-coding a value. The MCP bridge subprocess discovers the port
-via `HOMUNCULUS_NAME` env var plus the port file.
+via `SOLET_NAME` env var plus the port file.
 
 **Writer, by topology (D11 ruling, 2026-07-13,
 `workbench/2026-07-13_d11_bridge_port_discovery_routerless_ruling.md`):**
@@ -58,7 +58,7 @@ POST   /api/v1/bridge/open
 POST   /api/v1/bridge/{bridge_id}/close
 GET    /api/v1/bridge/{bridge_id}/events?after=N    (long-poll)
 
-# Platform call surface (agent → homunculus)
+# Platform call surface (agent → solet)
 POST   /api/v1/bridge/{bridge_id}/process/search
 POST   /api/v1/bridge/{bridge_id}/process/schema
 POST   /api/v1/bridge/{bridge_id}/process/call
@@ -224,7 +224,7 @@ For Codex bridges, `peer_message` and `post_message` events are emitted
 on the MCP transport as:
 
 ```text
-notifications/homunculus/peer_message
+notifications/solet/peer_message
   params.content = readable peer envelope + message prose
   params.meta    = bridge metadata, including thread/message ids,
                    sender ids, recipient ids, cursor, and
@@ -234,7 +234,7 @@ notifications/homunculus/peer_message
 This method is intentionally narrow. Bridge-delivery result/error events
 and non-peer Codex events still use `notifications/claude/channel`.
 
-## post_message (homunculus → agent)
+## post_message (solet → agent)
 
 This is the IO interface surface. Direct HTTP submission of
 `post_message` is not supported — the model authors
@@ -245,7 +245,7 @@ action, the action queue executes it, and the plugin enqueues a
 ```
 notifications/claude/channel
   params.content      = the message text (plain prose)
-  params.meta.source           = "homunculus"
+  params.meta.source           = "solet"
   params.meta.event_type       = "channel_message"
   params.meta.flow_id          = originating flow id
   params.meta.cursor           = monotonic event cursor

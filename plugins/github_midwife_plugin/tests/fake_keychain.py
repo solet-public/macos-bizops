@@ -32,7 +32,7 @@ class FakeKeychain:
     def exists_credential(self, plugin_name: str, credential: str) -> bool:
         return self._key(plugin_name, credential) in self._store
 
-    def list_credentials_under_homunculus(self) -> list[tuple[str, str]]:
+    def list_credentials_under_solet(self) -> list[tuple[str, str]]:
         return sorted(self._store.keys())
 
     def snapshot(self) -> dict[tuple[str, str], bytes]:

@@ -8,12 +8,12 @@ Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:t
 
 Article Tags: planning-stage:agent-to-agent-coordination, planning-stage:tool-discovery, evidence-category:peer-messaging-contracts, evidence-category:identity-model, domain:agent-messaging, domain:inter-agent-routing
 
-Embedding Description: How live agent sessions talk through the homunculus — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the `<name> wake` Stop-hook waker that turns a delivery to an idle watcher-held session into a session turn (spool tee + hook exit-2 wake, MCP-free and provider-agnostic), the unconditional delivery contract (wake is a transport property, not a sender-declared marker — every peer_send is delivery-attempted against the resolved recipient's live binding), the delivery-outcome vocabulary (queued_for_replay / queued_notification / queued_wake / queued_watcher) and the optional "IMPORTANT" prose-emphasis convention that is stripped as cosmetic input hygiene and never branched on, what unconditional delivery means for a watcher-held recipient (delivered into the watch stream, wakes an idle hooked session, next-look for a busy one, consumed on events-ack), drive-on-delivery for a MANAGED session (spawn_session-tracked fleet workers get an extra best-effort nudge through their driver channel alongside the ordinary delivery, honestly scoped — non-managed/operator-hosted sessions keep the unmodified no-waker property), the report_by / sweep_overdue_sessions staleness contract that replaced the retired per-message escalation apparatus, peer_inbox catch-up semantics including how to read your own inbox on demand with NO MCP by calling the registered peer_inbox process with your own stable session id, the two independent inbox cursors and why role-section exhaustion is a null cursor rather than an ok status, whether the role you hold still has a live delivery route attached to its current holder, multi-instance addressing, Claude Code native-channel wake routing, and the locally patched Codex peer-wake path.
+Embedding Description: How live agent sessions talk through the solet — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the runner-specific Stop-hook contract (Claude can re-wake; stock Codex currently ships no Stop-hook delivery mechanism at all — async command hooks are unsupported on measured stock builds, so the binding was removed rather than left registered-but-dead — see codex-0147-async-hook-regression, 2026-08-13), the unconditional delivery contract (wake is a transport property, not a sender-declared marker — every peer_send is delivery-attempted against the resolved recipient's live binding), the delivery-outcome vocabulary (queued_for_replay / queued_notification / queued_wake / queued_watcher) and the optional "IMPORTANT" prose-emphasis convention that is stripped as cosmetic input hygiene and never branched on, what unconditional delivery means for a watcher-held recipient, drive-on-delivery for a MANAGED session (spawn_session-tracked fleet workers get an extra best-effort nudge through their driver channel alongside the ordinary delivery, including exact stable-session reconciliation for watch registrations), the report_by / sweep_overdue_sessions staleness contract that replaced the retired per-message escalation apparatus, peer_inbox catch-up semantics including how to read your own inbox on demand with NO MCP by calling the registered peer_inbox process with your own stable session id, the two independent inbox cursors and why role-section exhaustion is a null cursor rather than an ok status, whether the role you hold still has a live delivery route attached to its current holder, multi-instance addressing, and Claude Code native-channel wake routing.
 
 ## Purpose
 
 How live MCP-connected agents (Claude Code sessions, Codex sessions,
-future agents) talk to one another through the homunculus. Covers the three
+future agents) talk to one another through the solet. Covers the three
 identity concepts, the unconditional delivery contract (wake is a transport
 property, resolved from the recipient's live binding, never a sender-declared
 marker), delivery-outcome vocabulary, peer_inbox semantics, and how multiple
@@ -113,7 +113,7 @@ not expected to find them. Use `tools/list` on the streamable MCP
 session to discover them.
 
 Use `current_identity` / `whoami` for identity introspection. It
-returns transport, homunculus name, `agent_id`, `agent_instance_id`,
+returns transport, solet name, `agent_id`, `agent_instance_id`,
 `agent_session_id`, `session_label`, bridge id, MCP session id,
 `roles_held`, and an identity-trust field without secrets. The
 `roles_held` value is a reverse lookup over `agent_role_binding`
@@ -235,23 +235,28 @@ not a per-message heuristic.
 
 An MCP-free fleet session receives through a `<name> watch` subprocess. The
 watcher itself is a PULL consumer: the queued event streams into the watch
-task's output. What turns that delivery into a TURN is the `<name> wake`
-Stop hook (hydration installs it at user scope): watch tees each delivery
-into a per-session spool, and when the session goes idle the wake hook
-blocks on that spool at zero token cost and wakes the session when a
-delivery lands — a shell hook, so it is MCP-free and works identically on
-Anthropic-direct and Bedrock. `queued_watcher` names the transport
-truthfully so a sender never reads a watcher delivery as a guaranteed live
-interrupt. Expectations to plan around:
+task's output and is also available through the durable inbox. The host then
+determines what a Stop hook may do. Claude's re-wake hook can convert the spool
+signal into a turn. Codex currently ships no Stop-hook delivery mechanism at
+all: stock Codex does not execute async command hooks on any measured build
+(0.141.0, 0.147.0), so the plugin's prior `async: true` binding never fired
+and was removed rather than left registered-but-dead
+(codex-0147-async-hook-regression, 2026-08-13) — do not assume a synchronous
+fallback exists either; that design was retired for blocking the turn
+boundary. `queued_watcher` therefore names transport delivery, never a
+guaranteed live interrupt. Expectations to plan around:
 
 - The message IS delivered (durable + streamed into the watch output within
   one long-poll cycle). It is not lost, and no resend is needed.
-- An IDLE recipient with the wake hook installed starts a turn on the
-  delivery (within the wake hook's ~1s spool poll). A recipient mid-turn,
-  or one running without hook support, acts on it at its next look — its
-  next prompt, its next Stop, or its next check of the watch output. If you
-  need action NOW and no turn starts, reach the operator or drive the
-  session directly.
+- An idle Claude recipient with the re-wake hook may start a turn on delivery.
+  An unmanaged Codex TUI has no automatic delivery notice at all right now; it
+  must poll `peer_inbox` itself, and gets a fresh unread-coordination reminder
+  only at its next `SessionStart` (startup/resume/`clear`), not per turn. A
+  managed Codex worker is unaffected — it receives an independent
+  driver-channel notice from `drive_on_delivery`, which can start its next
+  turn regardless of this plugin's hooks. If action is required now and the
+  recipient is not managed, reach the operator or drive the session through an
+  approved host channel.
 - Consumption is the watcher's events-ack, not model activity: when the
   watcher's long-poll cursor moves past the delivered event (it printed the
   line), the platform stamps the message consumed. There is no per-message
@@ -398,9 +403,8 @@ on the recipient's live bridge — the platform cannot observe whether the
 wake became a turn; REL-06). When the resolved recipient binding is a
 `<name> watch` subprocess, the same queued event reports
 `delivery="queued_watcher"` instead — the platform-side transport is pull,
-and the recipient's local `<name> wake` Stop hook (when installed and the
-session is idle) is what converts the delivery into a turn (see the delivery
-contract section above).
+and runner-specific Stop/managed-driver behavior follows the delivery contract
+section above.
 
 The pairing key is `parent_pid`: the bridge and the host MCP
 session share the same OS parent process. The native wake adapter
@@ -414,46 +418,30 @@ finds the sibling bridge by parent_pid match and appends a
  peer_id=codex, peer_agent_instance_id=agi-abc...)
 ```
 
-### Locally Patched Codex Peer Wake
+### Stock Codex Delivery And Managed Auto-Drive
 
-Codex is not registered in `peer_registry` as a Python native wake
-adapter, so `peer_send` currently reports `delivery="queued_notification"` for
-messages to Codex. The functional wake happens one layer later,
-inside the Codex MCP bridge and patched Codex CLI:
+The locally patched Codex notification sink is retired. Stock Codex receives
+through the watch/durable-inbox path. The coordination plugin currently ships
+no `Stop` binding at all (codex-0147-async-hook-regression, 2026-08-13): stock
+Codex does not execute async command hooks on any measured build, so a bound
+one never fires, and a synchronous one would block the turn boundary — the
+defect the async design was meant to fix. An unmanaged Codex session has no
+automatic delivery notice; it drains `peer_inbox` on its own initiative and
+gets the fixed unread-coordination reminder at `SessionStart` only.
 
-1. `peer_dispatch.py` persists the message and appends a `peer_message`
-   bridge event for the target Codex bridge.
-2. `mcp_bridge/forwarder.py` sees `agent_id == "codex"` and event type
-   `peer_message` or `post_message`.
-3. The bridge emits `notifications/homunculus/peer_message`, not the legacy
-   `notifications/claude/channel` method, with:
-
-```text
-params.content = [peer:<sender_agent_id> "<sender_label>" instance=<sender_instance>] <message>
-params.meta    = full bridge metadata plus trigger_turn=true
-```
-
-4. The locally patched Codex CLI consumes only
-   `notifications/homunculus/peer_message`. Its `McpServerNotificationSink`
-   decodes `params.content` and `params.meta.trigger_turn`, converts the
-   notification into Codex `InterAgentCommunication`, and sends it to
-   Codex's existing inter-agent mailbox.
-5. If the Codex session is idle, Codex starts a normal turn and the
-   model sees the peer message as mailbox input. If Codex is active, the
-   mailbox item queues through Codex's existing pending-input path.
-
-Local launch requirements:
-
-- The MCP server entry exports `HOMUNCULUS_NAME=<homunculus>` and
-  `AGENT_IDENTITY=codex`.
-- Codex sessions use a local binary or extension that consumes
-  `notifications/homunculus/peer_message`.
-- Reconnect or restart the MCP client after bridge or Codex-wake code changes so
-  the running subprocess observes the new protocol.
+Autonomous Codex sessions are launched through `spawn_session`. On dispatch,
+`drive_on_delivery` first tries the recipient's current `agent_instance_id`.
+A watch process intentionally registers under an `agi-watch-*` id, so a direct
+lookup may miss the spawn-time managed row; the delivery path then resolves by
+the exact, registration-backfilled `agent_session_id`. Exactly one match is
+required. Zero matches preserve the unmanaged/operator no-op, and multiple
+matches log and refuse to guess. Eligible `live`, `idle`, or `overdue` rows get
+the fixed driver notice; parked, spawning, terminal, or unavailable-driver rows
+do not.
 
 ## See also
 
-- `02_platform_call_surface.md` — agent calling the homunculus
+- `02_platform_call_surface.md` — agent calling the solet
   (`process_*`, `download`).
 - `05_http_reference.md` — the HTTP routes behind each MCP tool.
 - The local patched-Codex runbook — mechanism and update procedure.

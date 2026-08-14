@@ -49,7 +49,7 @@ PROBE_VERSION: Final[int] = 1
 EXIT_OK: Final[int] = 0
 EXIT_PREFLIGHT_FAILURES: Final[int] = 3
 
-_ENV_RELEASE_ID: Final[str] = "HOMUNCULUS_RELEASE_ID"
+_ENV_RELEASE_ID: Final[str] = "SOLET_RELEASE_ID"
 
 
 def build_probe_envelope(

@@ -7,7 +7,7 @@ mismatch is a startup-fatal `process_registry.edge_process_mismatch`).
 Also confirms the plugin's `entry-points` wiring resolves and that
 `genesis.py`'s public entrypoints import cleanly.
 
-Run directly: ``HOMUNCULUS_NAME=<name> .venv/bin/python3
+Run directly: ``SOLET_NAME=<name> .venv/bin/python3
 plugins/github_midwife_plugin/tests/edge_parity_smoke.py``.
 """
 
@@ -56,7 +56,7 @@ def _check_plugin_instantiates_and_is_ready_after_prepare() -> None:
 # seed_factory_plugin (covered by its own edge_parity_smoke). This plugin — the
 # birth spine — exposes exactly the one genesis verb.
 _EDGE_VERBS: dict[str, str] = {
-    "birth_homunculus": "birth_homunculus_action",
+    "birth_solet": "birth_solet_action",
 }
 
 
@@ -70,7 +70,7 @@ def _check_every_edge_verb_is_declared_and_correctly_categorized() -> None:
     plugin = GithubMidwifePlugin()
     edge_defs = plugin.get_edge_process_definitions()
     _check(
-        "get_edge_process_definitions declares exactly the EDGE verb set (birth_homunculus only, post-split)",
+        "get_edge_process_definitions declares exactly the EDGE verb set (birth_solet only, post-split)",
         set(edge_defs.keys()) == set(_EDGE_VERBS),
         str(sorted(edge_defs.keys())),
     )
@@ -104,14 +104,14 @@ def _check_return_value_schema_matches_birth_result_fields() -> None:
     actually returns, no more, no less.
     """
     plugin = GithubMidwifePlugin()
-    metadata = plugin.birth_homunculus_action._platform_process_metadata  # noqa: SLF001
+    metadata = plugin.birth_solet_action._platform_process_metadata  # noqa: SLF001
     schema_fields = set(metadata.return_value_schema.properties.keys())
 
     from ananta.interfaces.lifecycle_result_types import BirthResult, BirthStatus
 
     fake_result = BirthResult(
-        status=BirthStatus.SUCCESS, homunculus_name="x", idempotency_key="y",
-        dry_run=False, steps=(), new_homunculus_endpoint="", manifest_path="",
+        status=BirthStatus.SUCCESS, solet_name="x", idempotency_key="y",
+        dry_run=False, steps=(), new_solet_endpoint="", manifest_path="",
         iam_roles_created=(), rds_endpoint="", kms_key_arn="", message="",
     )
     returned_fields = set(GithubMidwifePlugin._birth_result_to_dict(fake_result).keys())  # noqa: SLF001
@@ -167,7 +167,7 @@ def _check_kb_process_json_reflects_existing_clone_only() -> None:
 
     kb_json_path = (
         Path(__file__).resolve().parents[1]
-        / "knowledge_base" / "processes" / "birth_homunculus.json"
+        / "knowledge_base" / "processes" / "birth_solet.json"
     )
     payload = json.loads(kb_json_path.read_text())
     full_text = (
@@ -192,7 +192,7 @@ def _check_kb_process_json_reflects_existing_clone_only() -> None:
         full_text,
     )
     _check(
-        "the JSON describes the newborn per-homunculus credential self-seed / isolation",
+        "the JSON describes the newborn per-solet credential self-seed / isolation",
         ("self-seed" in full_text) or ("credential" in full_text and "isolation" in full_text),
         full_text,
     )

@@ -4,7 +4,7 @@ Extracted from `PluginManager` during the Step 9.C decomposition
 (`workbench/2026-05-25_plugin_god_class_remediation.md` §9.C).
 
 Responsibility: walk the `ananta.plugins` entry-point group, filter by
-the homunculus's profile manifest (`allowed_plugins`), order by priority
+the solet's profile manifest (`allowed_plugins`), order by priority
 (per-plugin config first, then `SERVICE_PLUGIN_PRIORITY` for foundational
 plugins, then default), and return a `dict[str, type[PluginBase]]` of
 plugin name → class. Instantiation, validation-registry wiring, and
@@ -50,7 +50,7 @@ class PluginDiscovery:
         """Find + prioritize installed plugin entry points.
 
         ``allowed_plugins`` restricts loading to entry points whose name
-        appears in the set (the homunculus's profile manifest). ``None``
+        appears in the set (the solet's profile manifest). ``None``
         means "no gating" (legacy / dev-box behavior).
 
         Returns ``{plugin_name: plugin_class}`` in priority order. Plugin

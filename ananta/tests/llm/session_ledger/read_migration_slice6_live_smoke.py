@@ -50,7 +50,7 @@ sys.path.insert(
     0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
-from ananta.constants import HOMUNCULUS_NAME_ENV_VAR  # noqa: E402
+from ananta.constants import SOLET_NAME_ENV_VAR  # noqa: E402
 from ananta.llm.session_ledger.repository import (  # noqa: E402
     SessionLedgerRepository,
 )
@@ -122,7 +122,7 @@ class _LiveStateAdapter:
 
 
 _MARK = "__read_migration_slice6_live_smoke__"
-_SCHEMA = os.environ[HOMUNCULUS_NAME_ENV_VAR]
+_SCHEMA = os.environ[SOLET_NAME_ENV_VAR]
 _T0 = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
 
@@ -365,7 +365,7 @@ def main() -> int:
         print("=== read_migration_slice6_live_smoke ===")
         print(
             "  SKIP  set LEDGER_READ_LIVE_SMOKE=1 to run "
-            "(needs the live homunculus DB)"
+            "(needs the live solet DB)"
         )
         return 0
 

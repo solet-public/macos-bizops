@@ -1,7 +1,7 @@
 """Runtime parser for ``plugin.yaml``'s ``config:`` block.
 
 Until 2026-05-30, ``plugin.yaml``'s declared ``config:`` field defaults were
-read **only** at homunculus birth time (`initialization/src/homunculi/
+read **only** at solet birth time (`initialization/src/solets/
 plugin_discovery.py`). The platform runtime never parsed the yaml; per-plugin
 defaults effectively lived in two unrelated places — the yaml (for operator
 inspection) and hardcoded Python ``config_provider.get(key, X)`` literals

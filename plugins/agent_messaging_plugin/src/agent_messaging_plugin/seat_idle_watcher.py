@@ -287,7 +287,7 @@ def compute_idle_seconds(identity: SeatIdentity, *, now_ms: float) -> float:
 def project_dir_slug_for(project_dir: Path) -> str:
     """The transcript-directory slug Claude Code derives from an absolute
     project path -- every ``/`` becomes ``-`` (measured live, P1(b)/P4(a).1:
-    ``/Users/alice/Workspace/homunculus`` -> ``-Users-alice-Workspace-homunculus``)."""
+    ``/Users/alice/Workspace/solet`` -> ``-Users-alice-Workspace-solet``)."""
     return str(project_dir).replace("/", "-")
 
 
@@ -329,7 +329,7 @@ def cross_check_idle(
     return mtime_ms - identity.status_updated_at_ms <= agreement_tolerance_seconds * 1000.0
 
 
-def _homunculus_call(process_key: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+def _solet_call(process_key: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
     """Same subprocess-dispatch shape as ``heartbeat_report_alive.py`` and
     ``rotation_due_watch.py`` -- duplicated deliberately, matching this
     checkout's own existing precedent of each hook/script owning its own
@@ -337,19 +337,19 @@ def _homunculus_call(process_key: str, arguments: dict[str, Any]) -> dict[str, A
     importable module either)."""
     try:
         result = subprocess.run(
-            ["homunculus", "call", process_key, json.dumps(arguments)],
+            ["solet", "call", process_key, json.dumps(arguments)],
             capture_output=True, text=True, timeout=20, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        _log(f"homunculus call {process_key} failed to run: {exc}")
+        _log(f"solet call {process_key} failed to run: {exc}")
         return None
     if result.returncode != 0:
-        _log(f"homunculus call {process_key} exited {result.returncode}")
+        _log(f"solet call {process_key} exited {result.returncode}")
         return None
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        _log(f"homunculus call {process_key} returned unparseable output: {exc}")
+        _log(f"solet call {process_key} returned unparseable output: {exc}")
         return None
 
 
@@ -360,7 +360,7 @@ def resolve_pending_count(agent_session_id: str) -> int | None:
     stored. ``None`` means "couldn't determine" (call failed / malformed
     response) -- callers must treat that as 0 pending, never as a reason to
     poke on an unknown state."""
-    envelope = _homunculus_call(_PEER_INBOX_PROCESS_KEY, {"agent_session_id": agent_session_id})
+    envelope = _solet_call(_PEER_INBOX_PROCESS_KEY, {"agent_session_id": agent_session_id})
     if envelope is None or envelope.get("status") != "completed":
         return None
     data = ((envelope.get("result") or {}).get("data")) or {}

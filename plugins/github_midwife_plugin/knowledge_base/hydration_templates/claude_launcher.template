@@ -1,9 +1,9 @@
 #!/bin/zsh
-# claude-{{HOMUNCULUS_NAME}} — start a properly-named Claude Code session
-# connected to {{HOMUNCULUS_NAME}}.
+# claude-{{SOLET_NAME}} — start a properly-named Claude Code session
+# connected to {{SOLET_NAME}}.
 #
-# Usage: claude-{{HOMUNCULUS_NAME}} [label] [model] [effort]
-#   label   session name shown in Claude Code and in {{HOMUNCULUS_NAME}}'s
+# Usage: claude-{{SOLET_NAME}} [label] [model] [effort]
+#   label   session name shown in Claude Code and in {{SOLET_NAME}}'s
 #           peer registry (default: Operator)
 #   model   optional Claude model alias; empty = your settings default
 #   effort  optional effort level; empty = your settings default
@@ -35,21 +35,21 @@ typeset -a extra_flags
 # no session label, so this export is the only thing deciding where it
 # evaluates. A solo deployment DELETES this line: absence is the exemption
 # (see TEMPLATE_VARS.md). Keep it identical in this launcher and in
-# {{HOMUNCULUS_NAME}}-fleet.zsh — arming one and not the other creates a
+# {{SOLET_NAME}}-fleet.zsh — arming one and not the other creates a
 # session class that escapes the gate depending on which launcher started it.
-# Homunculus name: NOT part of the neutral AGENT_* fleet-identity family
+# Solet name: NOT part of the neutral AGENT_* fleet-identity family
 # above (that family is deliberately unprefixed per the 2026-07-28 ruling in
 # agent_messaging_plugin/env_contract.py) — this is the separate variable
-# naming which homunculus this shell talks to. Several plugins resolve it at
+# naming which solet this shell talks to. Several plugins resolve it at
 # module-import time for scoped vault keys, and quality_gates/run_smokes.py
 # (the Git-Controller gate path) fails loudly without it, so a session
 # launched without this export cannot run gate scripts without the caller
 # setting it by hand. launch.template (the daemon launcher) already exports
 # it; keep both launchers in lockstep the same way the git-controller export
 # above is kept in lockstep with the fleet script.
-HOMUNCULUS_NAME="{{HOMUNCULUS_NAME}}" \
+SOLET_NAME="{{SOLET_NAME}}" \
 AGENT_SESSION_LABEL="$label" \
 AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
-AGENT_WAKE_CLI="{{HOMUNCULUS_NAME}}" \
+AGENT_WAKE_CLI="{{SOLET_NAME}}" \
 GIT_CONTROLLER_NAME="{{GIT_CONTROLLER_NAME}}" \
 exec claude --name "$label" "${extra_flags[@]}"

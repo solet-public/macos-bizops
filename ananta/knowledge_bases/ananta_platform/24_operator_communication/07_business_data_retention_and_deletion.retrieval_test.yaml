@@ -20,7 +20,7 @@ target_queries:
 forbidden_queries:
   - "gitignore convention for business connector staging data"  # 08_business_record_classification_convention should win
   - "how do I delete a session from the ledger"                  # session_ledger deletion is a different mechanism, not covered here
-  - "what does my homunculus capture and embed from my sessions" # 01_hydration_runbook ingestion disclosure should win
+  - "what does my solet capture and embed from my sessions" # 01_hydration_runbook ingestion disclosure should win
 
 min_rank: 1
 forbidden_min_rank: 3

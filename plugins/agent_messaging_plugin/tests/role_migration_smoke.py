@@ -28,7 +28,7 @@ Covers:
     provider+empty→False.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/role_migration_smoke.py
 """
 

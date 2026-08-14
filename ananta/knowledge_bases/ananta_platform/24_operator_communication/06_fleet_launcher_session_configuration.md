@@ -6,7 +6,7 @@ Article Layer: 2
 
 Article Role: operations_reference
 
-Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-reference, domain:local-homunculus, domain:client-deployment, consumer_profile:both
+Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-reference, domain:local-solet, domain:client-deployment, consumer_profile:both
 
 Embedding Description: How to change the base model, effort level, advisor model, and declared transport (MCP vs watch) for one named role in an operator's multi-session fleet launcher — where that launcher actually lives, the CLI flags and environment variables involved, the one verified-correct way to fully disable the advisor tool for a single session, and where the fleet-wide default transport is declared and how a per-role launcher export overrides it.
 
@@ -21,14 +21,14 @@ A multi-session fleet — several concurrently-running coding-agent sessions, ea
 The shape is one shared, parameterized function plus one thin wrapper per role:
 
 ```sh
-_claude_for_<homunculus>() {
+_claude_for_<solet>() {
   local role="$1"
   local model="$2"     # optional CLI model alias; empty = the operator's ~/.claude/settings.json default
   local effort="$3"    # optional effort level (low|medium|high|xhigh|max); empty = settings.json default
   # ... exports role-identity env vars, builds --model/--effort flags, execs `claude`
 }
 
-claude-<role>() { _claude_for_<homunculus> <Role-Label> <model> <effort> }
+claude-<role>() { _claude_for_<solet> <Role-Label> <model> <effort> }
 ```
 
 A **restart variant** of the same table (kill any running session under that role label, then relaunch) is common alongside the primary launcher functions. The restart wrappers must be edited in lockstep with the primary ones — the two tables silently disagree if only one is updated, and the disagreement only surfaces the next time someone restarts a role instead of freshly launching it.
@@ -41,21 +41,21 @@ Both are ordinary per-session CLI flags on the `claude` invocation: `--model <al
 
 ## Transport per role
 
-Each session talks to the platform over one of two transports: **MCP** (a live bridge connection; requires `claude mcp add` and, on some tiers, Anthropic-direct auth — unusable on a machine whose policy blocks MCP) or **watch** (a per-session `homunculus watch` watcher plus a zero-token `Stop`-hook wake; no MCP registration needed). The fleet's charter (2026-08-06, operator, verbatim in the fleet-watch-transport-migration lane brief): corporate deployments disallow MCP, so **watch must be the fleet's primary transport**, MCP retained only as a backup and for chat-class sessions.
+Each session talks to the platform over one of two transports: **MCP** (a live bridge connection; requires `claude mcp add` and, on some tiers, Anthropic-direct auth — unusable on a machine whose policy blocks MCP) or **watch** (a per-session `solet watch` watcher plus a zero-token `Stop`-hook wake; no MCP registration needed). The fleet's charter (2026-08-06, operator, verbatim in the fleet-watch-transport-migration lane brief): corporate deployments disallow MCP, so **watch must be the fleet's primary transport**, MCP retained only as a backup and for chat-class sessions.
 
 The fleet-wide default is declared in exactly ONE place: `default_fleet_transport` in `agent_messaging_plugin`'s `plugin.yaml` (shipped `"watch"`, the charter's own value — same declared-config posture as `headless_permission_mode`, changeable with a config edit and a routine blue-green swap, no launcher edit required to move the fleet-wide default).
 
-That config value is the *source of truth for the default*; it is **not** what an individual session reads at launch. Each session reads its own `FLEET_TRANSPORT` environment variable directly (the rename skill, the spawned-worker hook guards, and the watch-arm's `wake_waiter.js` Stop hook all read it independently — declared, never probed, never silently crossed; see the rename skill for the full rule). The goal state is that **every role's launcher wrapper exports `FLEET_TRANSPORT` explicitly**, per role, rather than relying on any consumer's own unset-fallback literal:
+That config value is the *source of truth for the default*; it is **not** what an individual session reads at launch. Each session reads its own `FLEET_TRANSPORT` environment variable directly (the rename skill, the spawned-worker hook guards, and — on Claude sessions — the watch-arm's `wake_waiter.py` Stop hook all read it independently — declared, never probed, never silently crossed; see the rename skill for the full rule). Codex sessions currently have no Stop-hook reader of this variable at all: stock Codex does not execute async command hooks on any measured build, so the coordination plugin ships no `Stop` binding (codex-0147-async-hook-regression, 2026-08-13) — a Codex session's watch-arm delivery notice comes only from `drive_on_delivery` for managed workers, or a manual `peer_inbox` drain otherwise. The goal state is that **every role's launcher wrapper exports `FLEET_TRANSPORT` explicitly**, per role, rather than relying on any consumer's own unset-fallback literal:
 
 ```sh
-claude-<role>() { _claude_for_<homunculus> <Role-Label> <model> <effort> watch }
+claude-<role>() { _claude_for_<solet> <Role-Label> <model> <effort> watch }
 # a role that still needs MCP (chat-class, or not yet migrated):
-claude-<role>() { _claude_for_<homunculus> <Role-Label> <model> <effort> mcp }
+claude-<role>() { _claude_for_<solet> <Role-Label> <model> <effort> mcp }
 ```
 
 Declared beats fallback: once every role's launcher line names its transport explicitly, the various `${FLEET_TRANSPORT:-...}` fallback literals scattered across consumers become near-dead code — they only matter for a session launched outside any wrapper. Don't rely on them as the mechanism; treat an explicit per-role export as the actual configuration surface, the same way model and effort are.
 
-**Mixed fleet during a migration — explicit exports are what make a fallback flip safe.** A consumer's own unset-fallback literal (e.g. the Stop hook that decides whether to run `homunculus wake`) should only be flipped to match a new fleet-wide default AFTER every role whose launcher doesn't yet pass an explicit transport has been given one. Flipping a shared fallback first, while some standing roles still rely on it silently, risks a role that has no watcher armed exec'ing a wake command against a spool nothing feeds — a wedged turn-end, not a clean failure. Sequence it: pin explicit per-role exports first, flip shared fallbacks last, never the reverse.
+**Mixed fleet during a migration — explicit exports are what make a fallback flip safe.** A consumer's own unset-fallback literal (e.g. the Stop hook that decides whether to run `solet wake`) should only be flipped to match a new fleet-wide default AFTER every role whose launcher doesn't yet pass an explicit transport has been given one. Flipping a shared fallback first, while some standing roles still rely on it silently, risks a role that has no watcher armed exec'ing a wake command against a spool nothing feeds — a wedged turn-end, not a clean failure. Sequence it: pin explicit per-role exports first, flip shared fallbacks last, never the reverse.
 
 ## The advisor tool
 

@@ -9,9 +9,9 @@ Verifies the surfacing edit from
    means this may differ from the subprocess's stale cache).
 2. After ``_reconnect`` succeeds, the forwarder sends a JSON-RPC
    notification on ``notifications/claude/channel`` with content
-   ``Homunculus reconnected -- peer_registry restored as <label>``
+   ``Solet reconnected -- peer_registry restored as <label>``
    when a label was restored, or
-   ``Homunculus reconnected -- no prior label found`` when no stored
+   ``Solet reconnected -- no prior label found`` when no stored
    label was recovered.
 3. Failed registration (None return) suppresses the announcement —
    correctness over noise.
@@ -19,7 +19,7 @@ Verifies the surfacing edit from
    reconnect already succeeded; UX noise must not retry the network).
 
 Stubs the HTTP layer (``Forwarder._post``) and the MCP write stream so
-the smoke runs without a live homunculus or any MCP transport.
+the smoke runs without a live solet or any MCP transport.
 
 Standalone — not pytest. Run with::
 
@@ -74,7 +74,7 @@ def _build_forwarder(
     """
     forwarder = Forwarder(
         base_url="http://stub",
-        homunculus_name="example",
+        solet_name="example",
         agent_id="claude_code",
         agent_instance_id="agi-smoke-001",
         agent_session_id=agent_session_id,
@@ -130,7 +130,7 @@ async def test_announce_restored_label() -> None:
         f"announcement uses claude channel method, got {captured['method']!r}"
     )
     content = str(captured["params"]["content"])
-    assert content == "Homunculus reconnected -- peer_registry restored as Coordinator", (
+    assert content == "Solet reconnected -- peer_registry restored as Coordinator", (
         f"announcement prose: got {content!r}"
     )
     # Wire-meta shape: Claude Code accepts the canonical 5-key envelope
@@ -145,7 +145,7 @@ async def test_announce_restored_label() -> None:
         f"flow_id must be non-empty (Claude Code drops empty-flow_id events); "
         f"got {meta['flow_id']!r}"
     )
-    assert meta["source"] == "homunculus"
+    assert meta["source"] == "solet"
     assert meta["event_type"] == "post_message"
     print("  restored-label announcement carries 'restored as Coordinator'")
     print("  wire meta matches the canonical 5-key shape with non-empty flow_id")
@@ -162,7 +162,7 @@ async def test_announce_no_label_when_server_returned_empty() -> None:
     await forwarder._reconnect()  # noqa: SLF001
     assert len(stream.sent) == 1
     content = str(_channel_payload(stream.sent[0])["params"]["content"])
-    assert content == "Homunculus reconnected -- no prior label found", (
+    assert content == "Solet reconnected -- no prior label found", (
         f"announcement prose: got {content!r}"
     )
     print("  empty-label announcement carries 'no prior label found'")
@@ -264,7 +264,7 @@ async def test_current_identity_adopts_server_agent_session_id() -> None:
 def test_404_on_bridge_path_classified_as_stale() -> None:
     """2026-06-02 follow-on: 404 on /api/v1/bridge/agc-... ⇒ stale-bridge."""
     exc = BridgeHTTPError(
-        "Homunculus /api/v1/bridge/agc-stale/peer/send failed (404): bridge_not_found",
+        "Solet /api/v1/bridge/agc-stale/peer/send failed (404): bridge_not_found",
         status_code=404,
         path="/api/v1/bridge/agc-stale/peer/send",
     )
@@ -277,7 +277,7 @@ def test_404_on_bridge_path_classified_as_stale() -> None:
 def test_404_on_non_bridge_path_does_not_falsely_classify() -> None:
     """Defensive path match: 404 outside the bridge-id route MUST NOT trigger reconnect."""
     exc = BridgeHTTPError(
-        "Homunculus /api/v1/bridge/open failed (404): something else",
+        "Solet /api/v1/bridge/open failed (404): something else",
         status_code=404,
         path="/api/v1/bridge/open",
     )
@@ -290,7 +290,7 @@ def test_404_on_non_bridge_path_does_not_falsely_classify() -> None:
 def test_500_on_bridge_path_does_not_classify_as_stale() -> None:
     """Status discrimination: only 404 implies stale-bridge."""
     exc = BridgeHTTPError(
-        "Homunculus /api/v1/bridge/agc-live/peer/send failed (500): boom",
+        "Solet /api/v1/bridge/agc-live/peer/send failed (500): boom",
         status_code=500,
         path="/api/v1/bridge/agc-live/peer/send",
     )
@@ -326,7 +326,7 @@ def test_async_call_with_reconnect_triggers_on_404_bridge_path() -> None:
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise BridgeHTTPError(
-                    "Homunculus /api/v1/bridge/agc-stale/peer/send failed (404): "
+                    "Solet /api/v1/bridge/agc-stale/peer/send failed (404): "
                     "bridge_not_found",
                     status_code=404,
                     path="/api/v1/bridge/agc-stale/peer/send",
@@ -411,7 +411,7 @@ def test_peer_send_retries_with_fresh_bridge_id() -> None:
                 peer_send_count["n"] += 1
                 if peer_send_count["n"] == 1:
                     raise BridgeHTTPError(
-                        "Homunculus /api/v1/bridge/agc-old/peer/send failed (404): "
+                        "Solet /api/v1/bridge/agc-old/peer/send failed (404): "
                         "bridge_not_found",
                         status_code=404,
                         path=path,

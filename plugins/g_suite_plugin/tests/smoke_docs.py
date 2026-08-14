@@ -13,7 +13,7 @@ Exercises:
   4. export_document — default pdf mime, custom docx/txt mime, non-bytes rejected
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 plugins/g_suite_plugin/tests/smoke_docs.py
+    SOLET_NAME=<name> .venv/bin/python3 plugins/g_suite_plugin/tests/smoke_docs.py
 
 Exits 0 on success, 1 on first failure.
 """

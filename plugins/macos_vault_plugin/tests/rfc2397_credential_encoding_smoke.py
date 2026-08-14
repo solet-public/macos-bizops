@@ -20,7 +20,7 @@ Verifies the vault Keychain substrate's RFC-2397 encode/decode
 Part A exercises the pure module helpers (no Keychain). Parts B–D exercise the
 REAL ``SystemKeychain`` end-to-end (NO fake-vault — a mock would false-green the
 exact base64-vs-raw defect this encoding closes), under a hermetic throwaway
-homunculus + plugin namespace, with cleanup in ``finally``.
+solet + plugin namespace, with cleanup in ``finally``.
 
 Standalone — not pytest. Run with::
 
@@ -37,9 +37,9 @@ from collections.abc import Callable
 
 # Hermetic test namespace — the real-Keychain parts write under
 # ``rfc2397smoke.__rfc2397_smoke__`` and are deleted on the way out, so this
-# never touches a live ``homunculus.*`` / ``smoke.*`` entry. Set BEFORE importing the
-# keychain module (SystemKeychain resolves HOMUNCULUS_NAME eagerly).
-os.environ["HOMUNCULUS_NAME"] = "rfc2397smoke"
+# never touches a live ``solet.*`` / ``smoke.*`` entry. Set BEFORE importing the
+# keychain module (SystemKeychain resolves SOLET_NAME eagerly).
+os.environ["SOLET_NAME"] = "rfc2397smoke"
 
 from macos_vault_plugin.keychain import (  # noqa: E402
     SystemKeychain,

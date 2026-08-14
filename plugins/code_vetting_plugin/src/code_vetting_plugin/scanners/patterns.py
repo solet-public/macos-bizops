@@ -215,7 +215,7 @@ def _rg_matches(pattern: str, root: str) -> list[tuple[str, int, str]]:
 def _git_global_config(key: str) -> str:
     """The RUNNING operator's ambient git identity value for ``key``; "" when unset.
 
-    An unset key is a legitimate state (a fresh homunculus with no global git config),
+    An unset key is a legitimate state (a fresh solet with no global git config),
     not a masked failure. The caller turns "" into a visible coverage gap rather than
     interpolating it into a regex — an empty alternation branch matches everywhere.
     """

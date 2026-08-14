@@ -1,10 +1,10 @@
-# macos-bizops-homunculus profile — business-ops homunculus, private genesis.
+# macos-bizops-solet profile — business-ops solet, private genesis.
 #
-# Extends macos-free-homunculus.yaml (see that file's header for the shared
+# Extends macos-free-solet.yaml (see that file's header for the shared
 # foundation rationale: local LM-Server embeddings, macOS-first; the free
 # profile's VACANT-inference posture does NOT carry over — this profile binds
 # local LM-Studio inference real). This profile adds the "full functionality,
-# minus anything that lets someone clone a homunculus or run one in AWS, minus
+# minus anything that lets someone clone a solet or run one in AWS, minus
 # creative/media content" tier the operator ratified: local blue-green
 # self-deployment, local inference, the Claude-family session-ledger source
 # family (so multi-session peer-coordination work is searchable), dev tooling
@@ -14,7 +14,7 @@
 # capability_bundles.yaml's own header comment) but is expected to be REMOVED
 # from the steady-state manifest (and its source directory deleted) after
 # genesis, per the operator's explicit "don't give away the ability to create
-# homunculi" instruction — see the hydration runbook's post-genesis cleanup
+# solets" instruction — see the hydration runbook's post-genesis cleanup
 # step.
 #
 # Ratified in the bizops-seed plugin-scoping conversation
@@ -22,10 +22,10 @@
 # doc). Full plugin-by-plugin rationale:
 # knowledge_bases/ananta_platform/23_plugin_inventory/01_full_plugin_roster.md.
 
-profile_name: macos-bizops-homunculus
+profile_name: macos-bizops-solet
 description: |
-  Full-functionality local business-ops homunculus: everything
-  macos-free-homunculus.yaml ships, plus local blue-green self-deployment,
+  Full-functionality local business-ops solet: everything
+  macos-free-solet.yaml ships, plus local blue-green self-deployment,
   local LM-Studio inference (bound real, for autonomous completions with no
   live driving session), the Claude-family session-ledger source family
   (filesystem transcripts, history, tasks, cloud backfill, Claude.ai export
@@ -36,7 +36,7 @@ description: |
   session management), and six business-system connectors (Jira, Snowflake,
   Salesforce, Zuora, Marketo Engage, read-only external Postgres) plus Google
   Workspace.
-  Excludes: every homunculus-cloning/AWS-hosting plugin (macos/aws midwife,
+  Excludes: every solet-cloning/AWS-hosting plugin (macos/aws midwife,
   aws undertaker, aws self-deployment, aws account admin, and the four
   AWS-managed-alternative split-service plugins), the full audio/media/
   creative stack, all seven Codex-family session sources (no Codex usage),
@@ -59,7 +59,7 @@ plugins:
   # Vector search
   - pgvector_service_plugin
 
-  # Embeddings (local flavor — see macos-free-homunculus.yaml header)
+  # Embeddings (local flavor — see macos-free-solet.yaml header)
   - openai_embeddings_plugin
 
   # Local inference (LM Studio, bound as inference_service — NOT vacant in this
@@ -118,17 +118,17 @@ plugins:
   - external_postgres_plugin
   - g_suite_plugin
 
-  # This plugin: dual-use genesis entrypoint + birth_homunculus verb. Ships
+  # This plugin: dual-use genesis entrypoint + birth_solet verb. Ships
   # because the seed factory always includes it (fractal invariant) — REMOVE
   # from the steady-state manifest post-genesis per the operator's instruction;
   # see notes below.
   - github_midwife_plugin
 
 plugin_config_overrides:
-  # Per-homunculus role isolation (same as the free profile — see that file's
+  # Per-solet role isolation (same as the free profile — see that file's
   # comment for the full rationale).
   postgres_state_management_plugin:
-    user: ${HOMUNCULUS_NAME}
+    user: ${SOLET_NAME}
   # P1.1.E containment allow-list (KB 19_session_ledger/07): with this key
   # empty, EVERY filesystem session-source registration is denied by design
   # (secure default-deny) — populating it is what lets the three filesystem
@@ -173,7 +173,7 @@ address_book_entries:
         value: text-embedding-nomic-embed-text-v1.5-embedding
   - name: pgvector_service_db
     address_type: database
-    description: PostgreSQL/pgvector connection for this homunculus
+    description: PostgreSQL/pgvector connection for this solet
     tags: []
     entries:
       - field_type: host
@@ -184,16 +184,16 @@ address_book_entries:
         value: "5432"
       - field_type: note
         description: database
-        value: ${HOMUNCULUS_NAME}
+        value: ${SOLET_NAME}
       - field_type: note
         description: db_schema
-        value: ${HOMUNCULUS_NAME}
+        value: ${SOLET_NAME}
       - field_type: note
         description: user
-        value: ${HOMUNCULUS_NAME}
+        value: ${SOLET_NAME}
       - field_type: password
         description: password
-        value: vault::${HOMUNCULUS_NAME}.pgvector_service_plugin.password
+        value: vault::${SOLET_NAME}.pgvector_service_plugin.password
 
 # Actions auto-submitted at boot by EventOrchestrator. Each entry's
 # process_key must reference a plugin in the `plugins:` list above — orphan
@@ -219,7 +219,7 @@ starting_actions:
 # Service bindings written to profile/config/service_bindings.json.
 # inference_service is bound REAL in this profile (sheet-ratified 2026-07-21;
 # unlike the free profile's declared-VACANT INF-03 boot): default_inference
-# ships exactly so the homunculus can run autonomous completions with no live
+# ships exactly so the solet can run autonomous completions with no live
 # driving session, and that requires the binding. Local LM Studio, not a
 # cloud key — see the genesis precondition on the plugins list above.
 service_bindings:
@@ -239,7 +239,7 @@ service_bindings:
 notes:
   excluded:
     mock_inference_plugin: RETIRED platform-wide (INF-03/INF-03b).
-    macos_midwife_plugin, aws_midwife_plugin, aws_undertaker_plugin, aws_self_deployment_plugin, aws_account_admin_plugin: Homunculus-cloning / AWS-hosting capability — operator-ratified hard exclusion ("don't give anything away that would allow people to clone a homunculus or run one in AWS").
+    macos_midwife_plugin, aws_midwife_plugin, aws_undertaker_plugin, aws_self_deployment_plugin, aws_account_admin_plugin: Solet-cloning / AWS-hosting capability — operator-ratified hard exclusion ("don't give anything away that would allow people to clone a solet or run one in AWS").
     rds_postgres_state_management_plugin, rds_pgvector_service_plugin, s3_blob_storage_plugin, secrets_manager_vault_plugin, titanv2_embeddings_plugin: The AWS-hosted half of each local/cloud split-service pair — falls under the same AWS-hosting exclusion.
     demo_canary_plugin, probe_smoke_broken_plugin: Dev/test fixtures — never belong in a production manifest (the latter's own docstring says so verbatim).
     audio_processing_plugin, audio_separation_plugin, cosyvoice2_tts_plugin, comfyui_image_generation_plugin, musical_synthesis_plugin, sound_effects_plugin, voice_embeddings_plugin, whisper_asr_plugin, generative_composition_plugin, pedalboard_effects_plugin, soundcloud_artist_studio_plugin, ssml_plugin: Dropped — heavyweight audio/media/creative stack, out of scope for a business-ops deployment ("nobody's gonna be writing music at work").

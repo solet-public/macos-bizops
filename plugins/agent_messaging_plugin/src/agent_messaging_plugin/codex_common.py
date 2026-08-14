@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import sys
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -61,6 +63,30 @@ def _codex_home(explicit: Path | None) -> Path:
     return Path(configured) if configured else Path.home() / ".codex"
 
 
+def _resolve_solet_bin(
+    explicit: str | None,
+    *,
+    python_executable: str | None = None,
+) -> str:
+    """Resolve the CLI from PATH, then from the active Python environment.
+
+    Materialized blue-green releases intentionally run with a minimal PATH
+    that does not include their own ``venv/bin`` directory.  The release's
+    Python executable and ``solet`` console script are siblings, so that
+    directory is the deterministic second rung when PATH lookup is empty.
+    """
+    if explicit is not None:
+        return explicit
+    discovered = shutil.which("solet")
+    if discovered:
+        return discovered
+    executable = Path(python_executable or sys.executable)
+    sibling = executable.parent / "solet"
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
+    return ""
+
+
 def _read_codex_config(config_path: Path) -> dict[str, Any]:
     try:
         with config_path.open("rb") as handle:
@@ -83,18 +109,38 @@ def _coordination_plugin_enabled(config: Mapping[str, object]) -> bool:
 
 
 def _mcp_server_config(
-    config: Mapping[str, object], homunculus_name: str,
+    config: Mapping[str, object], solet_name: str,
 ) -> Mapping[str, object] | None:
     servers = config.get("mcp_servers")
     if not isinstance(servers, Mapping):
         return None
-    server = servers.get(homunculus_name)
+    server = servers.get(solet_name)
     return server if isinstance(server, Mapping) else None
+
+
+def _expose_worker_cli(env: dict[str, str], solet_bin: str) -> None:
+    """Expose the resolved CLI to hooks and ordinary worker shell commands."""
+    env["AGENT_WAKE_CLI"] = solet_bin or "solet"
+    if not solet_bin or not Path(solet_bin).is_absolute():
+        return
+    cli_dir = str(Path(solet_bin).parent)
+    path_entries = env.get("PATH", "").split(os.pathsep)
+    if cli_dir in path_entries:
+        return
+    env["PATH"] = os.pathsep.join(
+        [cli_dir, *[entry for entry in path_entries if entry]],
+    )
+
+
+def _worker_path(solet_bin: str) -> str:
+    env = {"PATH": os.environ.get("PATH", "")}
+    _expose_worker_cli(env, solet_bin)
+    return env["PATH"]
 
 
 def _identity_env(
     *, agent_instance_id: str, agent_session_id: str, label: str,
-    homunculus_name: str, transport: str,
+    solet_name: str, solet_bin: str, transport: str,
 ) -> dict[str, str]:
     env = dict(os.environ)
     # A managed worker is a new logical Codex session, never a continuation of
@@ -109,15 +155,15 @@ def _identity_env(
             env.pop(key)
     env.update(
         {
-            "HOMUNCULUS_NAME": homunculus_name,
+            "SOLET_NAME": solet_name,
             "AGENT_IDENTITY": _CODEX_AGENT_ID,
             "AGENT_INSTANCE_ID": agent_instance_id,
             "AGENT_SESSION_ID": agent_session_id,
             "AGENT_SESSION_LABEL": label,
-            "AGENT_WAKE_CLI": "homunculus",
             "FLEET_TRANSPORT": transport,
         },
     )
+    _expose_worker_cli(env, solet_bin)
     # role_name is intentionally absent.  spawn_session.role_name authorizes
     # a later claim; it does not itself bind a role or grant AGENT_ROLE.
     env.pop("AGENT_ROLE", None)
@@ -145,29 +191,33 @@ def _without_parent_runtime_env(argv: list[str]) -> list[str]:
 
 
 def _codex_config_overrides(
-    *, config: Mapping[str, object], homunculus_name: str, transport: str,
-    agent_instance_id: str, agent_session_id: str, label: str,
+    *, config: Mapping[str, object], solet_name: str, transport: str,
+    agent_instance_id: str, agent_session_id: str, label: str, solet_bin: str,
 ) -> list[str]:
     """Return Codex-native ``-c`` overrides for the selected transport."""
-    server = _mcp_server_config(config, homunculus_name)
+    overrides = [
+        "shell_environment_policy.set.PATH="
+        f"{_toml_string(_worker_path(solet_bin))}",
+    ]
+    server = _mcp_server_config(config, solet_name)
     if server is None:
-        return []
-    prefix = f"mcp_servers.{homunculus_name}"
+        return overrides
+    prefix = f"mcp_servers.{solet_name}"
     if transport == "watch":
-        return [f"{prefix}.enabled=false"]
+        return [*overrides, f"{prefix}.enabled=false"]
     identity = {
-        "HOMUNCULUS_NAME": homunculus_name,
+        "SOLET_NAME": solet_name,
         "AGENT_IDENTITY": _CODEX_AGENT_ID,
         "AGENT_INSTANCE_ID": agent_instance_id,
         "AGENT_SESSION_ID": agent_session_id,
         "AGENT_SESSION_LABEL": label,
-        "AGENT_WAKE_CLI": "homunculus",
+        "AGENT_WAKE_CLI": solet_bin or "solet",
         "FLEET_TRANSPORT": transport,
         # A managed-session lane label is cosmetic.  Role ownership remains a
         # model-initiated peer_claim_role action after the bootstrap turn.
         _MCP_ROLE_AUTOBIND_ENV: "0",
     }
-    overrides = [f"{prefix}.enabled=true"]
+    overrides.append(f"{prefix}.enabled=true")
     overrides.extend(
         f"{prefix}.env.{key}={_toml_string(value)}"
         for key, value in identity.items()
@@ -188,5 +238,3 @@ def _refuse_claude_provider_overlay(spec: Mapping[str, object]) -> None:
 
 def _command_succeeded(result: object) -> bool:
     return int(getattr(result, "returncode", 1)) == 0
-
-

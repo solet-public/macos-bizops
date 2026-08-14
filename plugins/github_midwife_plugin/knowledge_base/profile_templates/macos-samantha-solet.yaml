@@ -1,4 +1,4 @@
-# macos-samantha-homunculus profile - local personal finance / market-data seed.
+# macos-samantha-solet profile - local personal finance / market-data seed.
 #
 # This profile is sheet-derived from the
 # "2026-07-20_macos_samantha_<source commit identifier>" column in the
@@ -7,14 +7,14 @@
 # connector, while excluding Branch-specific Jira/Snowflake/Salesforce/Zuora
 # connectors and every AWS-hosting / creative-media capability.
 
-profile_name: macos-samantha-homunculus
+profile_name: macos-samantha-solet
 description: |
-  Local Samantha homunculus profile: foundational local services, memory,
+  Local Samantha solet profile: foundational local services, memory,
   knowledge, thinking, pgvector, local embeddings, local LM-Studio inference,
   agent messaging, scheduling, health diagnostics, local blue-green
   self-deployment, Claude-family session ledger sources, ChatGPT and Claude.ai
   export ingestion, dev tooling, Google Workspace, read-only external Postgres,
-  and Charles Schwab market data. Excludes: AWS-hosting and homunculus-cloning
+  and Charles Schwab market data. Excludes: AWS-hosting and solet-cloning
   capabilities beyond the required github_midwife_plugin birth spine,
   Branch-specific business connectors (Jira, Snowflake, Salesforce, Zuora),
   Codex-family session sources, retired messaging plugins, test fixtures, and
@@ -75,12 +75,12 @@ plugins:
   - g_suite_plugin
   - schwab_market_data_plugin
 
-  # Birth spine - genesis + birth_homunculus only; contains no seed factory.
+  # Birth spine - genesis + birth_solet only; contains no seed factory.
   - github_midwife_plugin
 
 plugin_config_overrides:
   postgres_state_management_plugin:
-    user: ${HOMUNCULUS_NAME}
+    user: ${SOLET_NAME}
   session_ledger_service:
     ledger_allowed_roots:
       - "~/.claude/projects"
@@ -101,7 +101,7 @@ address_book_entries:
         value: text-embedding-nomic-embed-text-v1.5-embedding
   - name: pgvector_service_db
     address_type: database
-    description: PostgreSQL/pgvector connection for this homunculus
+    description: PostgreSQL/pgvector connection for this solet
     tags: []
     entries:
       - field_type: host
@@ -112,16 +112,16 @@ address_book_entries:
         value: "5432"
       - field_type: note
         description: database
-        value: ${HOMUNCULUS_NAME}
+        value: ${SOLET_NAME}
       - field_type: note
         description: db_schema
-        value: ${HOMUNCULUS_NAME}
+        value: ${SOLET_NAME}
       - field_type: note
         description: user
-        value: ${HOMUNCULUS_NAME}
+        value: ${SOLET_NAME}
       - field_type: password
         description: password
-        value: vault::${HOMUNCULUS_NAME}.pgvector_service_plugin.password
+        value: vault::${SOLET_NAME}.pgvector_service_plugin.password
 
 starting_actions:
   - name: start_agent_messaging_interface
@@ -148,7 +148,7 @@ service_bindings:
 notes:
   excluded:
     mock_inference_plugin: Retired platform-wide.
-    macos_midwife_plugin, aws_midwife_plugin, aws_undertaker_plugin, aws_self_deployment_plugin, aws_account_admin_plugin: Homunculus-cloning or AWS-hosting capability outside the bornable github_midwife_plugin spine.
+    macos_midwife_plugin, aws_midwife_plugin, aws_undertaker_plugin, aws_self_deployment_plugin, aws_account_admin_plugin: Solet-cloning or AWS-hosting capability outside the bornable github_midwife_plugin spine.
     rds_postgres_state_management_plugin, rds_pgvector_service_plugin, s3_blob_storage_plugin, secrets_manager_vault_plugin, titanv2_embeddings_plugin: AWS-hosted split-service siblings excluded from this local seed.
     demo_canary_plugin, probe_smoke_broken_plugin: Dev/test fixtures; never production seed material.
     audio_processing_plugin, audio_separation_plugin, cosyvoice2_tts_plugin, comfyui_image_generation_plugin, musical_synthesis_plugin, sound_effects_plugin, voice_embeddings_plugin, whisper_asr_plugin, generative_composition_plugin, pedalboard_effects_plugin, soundcloud_artist_studio_plugin, ssml_plugin: Creative/media stack excluded from this profile.

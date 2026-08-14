@@ -157,7 +157,7 @@ def trim_wbs_execution_history(
 
     1. **Creative brief** — the first user message (original request).
     2. **Direction proposal** — the first assistant message after the
-       creative brief (the homunculus's summary of the proposed direction).
+       creative brief (the solet's summary of the proposed direction).
     3. **Go-ahead approval** — the first user message after the
        direction proposal.
 

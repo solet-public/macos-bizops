@@ -20,7 +20,7 @@ deploy-invariant: the release-copy process is spawned with the SAME
 here resolves the WORKTREE root identically in the direct-launch and
 release-copy contexts.
 
-Fail-loud when no ancestor carries BOTH markers: a cloud homunculus has no
+Fail-loud when no ancestor carries BOTH markers: a cloud solet has no
 git repo, so the typed failure is CORRECT there — this plugin simply must not
 appear in cloud manifests (local-profile only; see ``plugin.yaml``).
 """

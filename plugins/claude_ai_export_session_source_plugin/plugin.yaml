@@ -1,7 +1,7 @@
 name: claude_ai_export_session_source_plugin
 description: |
   LLM session ledger source for Claude.ai web data-export ZIPs (M9). The
-  operator hands a ZIP to the homunculus via the
+  operator hands a ZIP to the solet via the
   ``plugin::claude_ai_export_session_source_plugin::ingest_export`` EDGE
   verb (file_path OR base64 content_bytes, 100 MiB cap). The verb body
   stores the ZIP through blob_storage_service, inserts a

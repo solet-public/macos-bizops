@@ -168,9 +168,9 @@ class _Harness:
 
         def _spawn(
             app_home: Path, next_color: str, next_instance_id: str,
-            homunculus_name: str, candidate: CandidatePaths,
+            solet_name: str, candidate: CandidatePaths,
         ) -> int:
-            del app_home, next_color, homunculus_name, candidate
+            del app_home, next_color, solet_name, candidate
             self.spawn_calls.append(next_instance_id)
             raise OSError("smoke spawn seam: deliberately failing after the gate")
 
@@ -195,7 +195,7 @@ class _Harness:
             router_client=cast("RouterClient", _StatusOnlyRouter()),
             action_factory=action_factory,
             session_factory=lambda: "sess-probe-gate",
-            homunculus_name="smoke",
+            solet_name="smoke",
             release_manager=self.release_mgr,
             schema_preflight=schema_preflight,
             preflight_probe=_probe_seam,

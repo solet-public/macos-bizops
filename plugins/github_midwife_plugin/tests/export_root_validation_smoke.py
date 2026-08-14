@@ -64,7 +64,7 @@ def _make_clone(root: Path, connector_names: tuple[str, ...]) -> Path:
 
 def _check_root_equals_app_home_rejected() -> None:
     try:
-        assert_export_root_valid("/Users/op/Workspace/homunculus/profile", "/Users/op/Workspace/homunculus/profile")
+        assert_export_root_valid("/Users/op/Workspace/solet/profile", "/Users/op/Workspace/solet/profile")
     except ExportRootRejectedError as exc:
         _check("root equal to app_home rejected", "contains (or equals)" in str(exc), str(exc))
     else:
@@ -75,7 +75,7 @@ def _check_root_contains_app_home_rejected() -> None:
     # The exact hazard the ruling calls "the default case on the developer's
     # own box, not an edge case": app_home nested inside the natural answer.
     try:
-        assert_export_root_valid("/Users/op/Workspace", "/Users/op/Workspace/homunculus/profile")
+        assert_export_root_valid("/Users/op/Workspace", "/Users/op/Workspace/solet/profile")
     except ExportRootRejectedError as exc:
         _check("root-contains-app_home rejected", "contains (or equals)" in str(exc), str(exc))
     else:
@@ -84,16 +84,16 @@ def _check_root_contains_app_home_rejected() -> None:
 
 def _check_root_inside_app_home_rejected() -> None:
     try:
-        assert_export_root_valid("/Users/op/Workspace/homunculus/profile/exports", "/Users/op/Workspace/homunculus/profile")
+        assert_export_root_valid("/Users/op/Workspace/solet/profile/exports", "/Users/op/Workspace/solet/profile")
     except ExportRootRejectedError as exc:
-        _check("root-inside-app_home rejected", "INSIDE the homunculus home" in str(exc), str(exc))
+        _check("root-inside-app_home rejected", "INSIDE the solet home" in str(exc), str(exc))
     else:
         raise SmokeFailureError("root-inside-app_home: did not raise")
 
 
 def _check_relative_root_rejected() -> None:
     try:
-        assert_export_root_valid("Workspace", "/Users/op/Workspace/homunculus/profile")
+        assert_export_root_valid("Workspace", "/Users/op/Workspace/solet/profile")
     except ExportRootRejectedError as exc:
         _check("non-absolute root rejected", "ABSOLUTE" in str(exc), str(exc))
     else:
@@ -101,7 +101,7 @@ def _check_relative_root_rejected() -> None:
 
 
 def _check_disjoint_root_accepted() -> None:
-    resolved = assert_export_root_valid("/Users/op/Workspace/jobs", "/Users/op/Workspace/homunculus/profile")
+    resolved = assert_export_root_valid("/Users/op/Workspace/jobs", "/Users/op/Workspace/solet/profile")
     _check("disjoint root accepted", resolved == "/Users/op/Workspace/jobs", resolved)
 
 

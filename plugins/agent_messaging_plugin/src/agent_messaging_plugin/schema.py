@@ -9,7 +9,7 @@ plugin's ``get_schema_definitions()`` — they go through the standard
 The peer-binding schema rides the platform ``Store`` abstraction.
 ``PeerRegistry`` opens it with ``backend="postgres"`` (see
 ``workbench/2026-06-01_local_reconnect_ux_design.md`` §4) so the
-``session_label`` set via ``/rename`` survives homunculus restarts —
+``session_label`` set via ``/rename`` survives solet restarts —
 restart-as-refresh is the local model and an in-memory backend would
 wipe the label on every restart cycle.
 """
@@ -287,13 +287,18 @@ def get_peer_binding_schema() -> TableSchema:
                     "call (never probed), matching BridgeBinding.wake_capable's "
                     "own default. True when this binding's transport has a "
                     "native turn-injection wake path (Claude Code); False for a "
-                    "recipient with no such surface (stock Codex's bridge), "
-                    "which routes dispatch to tee its deliveries into the "
-                    "wake_waiter spool instead. Fixed 2026-08-08 "
-                    "(fleet-wake-integrity Task 1): this column was missing "
-                    "from the persisted schema, so every registration's "
-                    "declared value was silently dropped and every resolved "
-                    "binding read back the dataclass default (True)."
+                    "recipient with no such surface (stock Codex's bridge). "
+                    "codex-0147-dead-spool-retirement (2026-08-13): persisted "
+                    "COMPATIBILITY METADATA only — the dispatch-side spool tee "
+                    "this flag used to gate is retired (stock Codex's Stop "
+                    "hook cannot consume it), so nothing currently branches on "
+                    "a False value at dispatch time; a Codex recipient reaches "
+                    "delivery through the durable inbox / watch read path "
+                    "instead. Fixed 2026-08-08 (fleet-wake-integrity Task 1): "
+                    "this column was missing from the persisted schema, so "
+                    "every registration's declared value was silently dropped "
+                    "and every resolved binding read back the dataclass "
+                    "default (True)."
                 ),
             ),
         },
@@ -474,7 +479,7 @@ def get_role_schema() -> TableSchema:
                     "Fleet session-management Phase B (§2) taxonomy: primary | "
                     "principal | project | ephemeral | chat. Existing rows backfill "
                     "to 'project' (one-shot reconcile, role_class_backfill.py); "
-                    "validated against reserved names (<homunculus>-Main, sys:*) "
+                    "validated against reserved names (<solet>-Main, sys:*) "
                     "at claim time — class validation, not keyspace rejection."
                 ),
             ),

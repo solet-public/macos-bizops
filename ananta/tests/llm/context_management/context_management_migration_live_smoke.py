@@ -500,7 +500,7 @@ def main() -> int:
         print("=== context_management_migration_live_smoke ===")
         print(
             "  SKIP  set CONTEXT_MGMT_LIVE_SMOKE=1 to run; needs the live "
-            "homunculus DB (own throwaway schema)."
+            "solet DB (own throwaway schema)."
         )
         return 0
     print("=== context_management_migration_live_smoke ===")

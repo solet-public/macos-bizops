@@ -19,7 +19,7 @@ Exercises :func:`preflight_probe_runner.run_preflight_probe` against:
 * the probe log file: exists and carries the child output.
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 plugins/macos_self_deployment_plugin/tests/preflight_probe_harness_smoke.py
+    SOLET_NAME=<name> .venv/bin/python3 plugins/macos_self_deployment_plugin/tests/preflight_probe_harness_smoke.py
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ def _run(
     outcome = run_preflight_probe(
         candidate=_candidate_for(interpreter),
         app_home=app_home,
-        homunculus_name=os.environ["HOMUNCULUS_NAME"],
+        solet_name=os.environ["SOLET_NAME"],
         cwd=tmp,
         log_path=log_path,
         timeout_seconds=timeout_seconds,

@@ -8,12 +8,12 @@ Per L3 plan §3.6 smoke contract:
 
 Sandbox discipline (per `[[sandbox_mutating_smokes]]`):
 
-  - smoke homunculus name 'bgsmoke' → label `local.homunculus.bgsmoke.router` /
-    unit `local.homunculus.bgsmoke.router.service`. Distinct from any real install.
+  - smoke solet name 'bgsmoke' → label `local.solet.bgsmoke.router` /
+    unit `local.solet.bgsmoke.router.service`. Distinct from any real install.
   - plist/unit written to a tmp dir (not LaunchAgents/systemd user dir).
   - socket placed in a tmp runtime dir (not ~/.ananta/runtime/).
   - non-canonical public_port (free high port) so no collision with a
-    a real homunculus's router on 8100.
+    a real solet's router on 8100.
   - try/finally guarantees uninstall fires even on mid-flight failure,
     so a failed smoke can never leave a KeepAlive-respawning phantom
     agent registered in launchd.
@@ -52,7 +52,7 @@ _ROUTER_SCRIPTS_DIR = (
 _INSTALL_ROUTER = _ROUTER_SCRIPTS_DIR / "install_router.py"
 _UNINSTALL_ROUTER = _ROUTER_SCRIPTS_DIR / "uninstall_router.py"
 
-SMOKE_HOMUNCULUS_NAME = "bgsmoke"
+SMOKE_SOLET_NAME = "bgsmoke"
 LAUNCHCTL_BOOTOUT_NOT_LOADED_EXIT = 113
 
 
@@ -94,7 +94,7 @@ def _run_install(
         [
             sys.executable,
             str(_INSTALL_ROUTER),
-            SMOKE_HOMUNCULUS_NAME,
+            SMOKE_SOLET_NAME,
             "--public-port", str(public_port),
             "--plist-path", str(plist_path),
             "--unit-path", str(unit_path),
@@ -117,7 +117,7 @@ def _run_uninstall(
         [
             sys.executable,
             str(_UNINSTALL_ROUTER),
-            SMOKE_HOMUNCULUS_NAME,
+            SMOKE_SOLET_NAME,
             "--plist-path", str(plist_path),
             "--unit-path", str(unit_path),
             "--socket-path", str(socket_path),
@@ -136,7 +136,7 @@ def _belt_and_suspenders_bootout() -> None:
 
     if platform.system() != "Darwin":
         return
-    service_target = f"gui/{os.getuid()}/{launchd_label(SMOKE_HOMUNCULUS_NAME)}"
+    service_target = f"gui/{os.getuid()}/{launchd_label(SMOKE_SOLET_NAME)}"
     subprocess.run(
         ["launchctl", "bootout", service_target],
         capture_output=True,
@@ -263,15 +263,15 @@ def main() -> int:
     runtime_dir.mkdir()
     log_dir = tmpdir / "logs"
     log_dir.mkdir()
-    plist_path = plist_dir / f"{launchd_label(SMOKE_HOMUNCULUS_NAME)}.plist"
-    unit_path = unit_dir / systemd_unit_name(SMOKE_HOMUNCULUS_NAME)
-    socket_path = runtime_dir / f"{SMOKE_HOMUNCULUS_NAME}.router.sock"
+    plist_path = plist_dir / f"{launchd_label(SMOKE_SOLET_NAME)}.plist"
+    unit_path = unit_dir / systemd_unit_name(SMOKE_SOLET_NAME)
+    socket_path = runtime_dir / f"{SMOKE_SOLET_NAME}.router.sock"
     public_port = _pick_free_port()
 
     print(
         f"install_smoke: tmp={tmpdir} port={public_port} "
-        f"label={launchd_label(SMOKE_HOMUNCULUS_NAME)} "
-        f"unit={systemd_unit_name(SMOKE_HOMUNCULUS_NAME)}"
+        f"label={launchd_label(SMOKE_SOLET_NAME)} "
+        f"unit={systemd_unit_name(SMOKE_SOLET_NAME)}"
     )
 
     results: list[tuple[str, bool]] = []

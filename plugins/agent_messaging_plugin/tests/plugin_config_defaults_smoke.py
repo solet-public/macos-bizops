@@ -22,12 +22,12 @@ is never touched. Per
 ``MEMORY.md/feedback_sandbox_mutating_smokes.md``.
 
 Operator-driven integration smoke (NOT in this script — requires a running
-homunculus):
+solet):
 
   - Edit ``plugins/agent_messaging_plugin/plugin.yaml``'s
     ``process_export_deny_patterns`` field to include a new sentinel
     pattern.
-  - Restart the homunculus via ``apply_manifest`` (blue-green) or cold-start via
+  - Restart the solet via ``apply_manifest`` (blue-green) or cold-start via
     ``python -m ananta.cli`` if blue-green is unavailable.
   - Verify the new pattern is in the effective deny list (e.g. via
     ``process_call`` on a process the new pattern denies, expecting a

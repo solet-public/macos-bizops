@@ -12,7 +12,7 @@ SOLE merge of a process's ``result_processor_customizations`` /
 ``error_processor_customizations`` onto the inference base template, and the
 ``inference`` result-processor-kind route still attaches that merge.
 
-This smoke is the HERMETIC half of the B5 acceptance (offline, no live homunculus / LM
+This smoke is the HERMETIC half of the B5 acceptance (offline, no live solet / LM
 Studio — the gate_smokes.txt contract). It exercises the REAL merge method over a
 registry whose ``process_results`` / ``process_error`` base templates mirror the
 shipping shape (``ananta/knowledge_base/processes/inference_service/process_results.json``:

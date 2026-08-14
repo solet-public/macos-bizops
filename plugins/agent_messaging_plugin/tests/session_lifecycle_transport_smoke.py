@@ -13,11 +13,11 @@ back a real ``RealShapeState`` — the same technique other unit smokes in
 this suite use to reach an EDGE method's body directly. This does NOT
 exercise the platform's process registry, `process_search`, or a live
 `process_call` (no unresolved `<<FIELD>>` check) — that layer needs a
-running homunculus and a restart to pick up the new processes; NOT verified
+running solet and a restart to pick up the new processes; NOT verified
 here, and this slice's commit request must say so explicitly.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/session_lifecycle_transport_smoke.py
 """
 

@@ -1,6 +1,6 @@
-"""Slice A smoke — validate the `macos-free-homunculus` genesis profile.
+"""Slice A smoke — validate the `macos-free-solet` genesis profile.
 
-Loads `knowledge_base/profile_templates/macos-free-homunculus.yaml` and the
+Loads `knowledge_base/profile_templates/macos-free-solet.yaml` and the
 `knowledge_base/profile_baseline/*.json` per-plugin config templates with
 plain `yaml`/`json` parsing (github_midwife_plugin ships no installable
 code yet — Slice A is data-only, and the plugin must not cross-import
@@ -34,7 +34,7 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _KB_ROOT = _REPO_ROOT / "plugins" / "github_midwife_plugin" / "knowledge_base"
-_PROFILE_PATH = _KB_ROOT / "profile_templates" / "macos-free-homunculus.yaml"
+_PROFILE_PATH = _KB_ROOT / "profile_templates" / "macos-free-solet.yaml"
 _BASELINE_DIR = _KB_ROOT / "profile_baseline"
 
 _OPERATOR_PATH_PATTERN = re.compile(r"/Users/[A-Za-z0-9_.-]+")

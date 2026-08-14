@@ -1,7 +1,7 @@
 name: jira_plugin
 description: >
   Jira Cloud connector — issues, JQL search, comments, transitions, and
-  attachments (blob-bridged) for the homunculus, peers, and plans. Full
+  attachments (blob-bridged) for the solet, peers, and plans. Full
   read/write including delete_issue (ticket deletion is an acceptable-loss
   class). Headless HTTP basic-auth against a dedicated scoped Atlassian
   service account (account email + API token); the token is chain-consumed
@@ -38,7 +38,7 @@ config:
 
 # Credentials live in the address book entry "jira_site": literals (base_url,
 # email, expires_at, scope_note) plus an api_token field that stores a
-# "vault::<homunculus>.default_address_book_plugin.jira_api_token" reference.
+# "vault::<solet>.default_address_book_plugin.jira_api_token" reference.
 # The secret lives in the RESOLVER's namespace so the address book reads it
 # under its own identity (resolve_with_secrets). It is chain-consumed — this
 # plugin neither declares nor reads that vault key directly (see

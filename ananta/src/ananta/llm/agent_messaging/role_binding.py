@@ -119,7 +119,7 @@ ROLE_CLASSES = (
     ROLE_CLASS_CHAT,
 )
 
-# The reserved ``primary``-shape name suffix (design §2: "<homunculus>-Main",
+# The reserved ``primary``-shape name suffix (design §2: "<solet>-Main",
 # e.g. any name of that shape). Dawn ruling (2026-08-03, Q1): peer_claim_role is
 # enforce-by-class ONLY, never class-assignment — a fresh mint always stamps
 # ROLE_CLASS_DEFAULT ('project'), so a pre-D4 claim of a reserved-pattern name
@@ -135,7 +135,7 @@ RESERVED_PRIMARY_NAME_SUFFIX = "-Main"
 
 def is_reserved_primary_name(name: str) -> bool:
     """True iff ``name`` matches the reserved primary-seat pattern
-    (``<homunculus>-Main``). Distinct from :func:`is_system_role`: that one is
+    (``<solet>-Main``). Distinct from :func:`is_system_role`: that one is
     a DISJOINT keyspace rejected outright for ANY claim; this one only guards
     a FRESH MINT (§3.1 — "validated against class at claim time... NOT
     keyspace-rejected... claimable-with-displacement through the normal

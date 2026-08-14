@@ -21,7 +21,7 @@ Every check below names the mutation that turns it red:
 - advertised strings       → revert either literal to its identity-less form
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/peer_inbox_process_smoke.py
 """
 
@@ -948,7 +948,7 @@ def test_wake_footer_advertises_a_runnable_command() -> None:
     tmp = Path(tempfile.mkdtemp())
     packet = _compose_wake_packet(
         WakeTarget(
-            homunculus_name="testhome",
+            solet_name="testhome",
             role="Claude-B",
             spool=tmp / "spool",
             offset_file=tmp / "offset",

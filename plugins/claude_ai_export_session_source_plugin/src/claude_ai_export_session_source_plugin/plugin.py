@@ -138,8 +138,8 @@ class ClaudeAiExportSessionSourcePlugin(
             "file_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 description=(
-                    "Absolute path to a Claude.ai export ZIP on the homunculus-side "
-                    "filesystem. Use when coordinator + homunculus share a "
+                    "Absolute path to a Claude.ai export ZIP on the solet-side "
+                    "filesystem. Use when coordinator + solet share a "
                     "filesystem (LOCAL profile). XOR with content_bytes — exactly "
                     "one must be supplied."
                 ),
@@ -149,7 +149,7 @@ class ClaudeAiExportSessionSourcePlugin(
                 type=ParameterType.STRING,
                 description=(
                     "Base64-encoded ZIP bytes inline. Use when coordinator and "
-                    "homunculus do NOT share a filesystem (cloud-homunculus path). "
+                    "solet do NOT share a filesystem (cloud-solet path). "
                     "XOR with file_path. Hard cap: 100 MiB decoded."
                 ),
                 required=False,

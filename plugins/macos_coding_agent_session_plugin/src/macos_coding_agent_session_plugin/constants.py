@@ -4,7 +4,7 @@ from __future__ import annotations
 
 PLUGIN_NAME = "macos_coding_agent_session_plugin"
 
-ENV_HOMUNCULUS_NAME = "HOMUNCULUS_NAME"
+ENV_SOLET_NAME = "SOLET_NAME"
 ENV_AGENT_IDENTITY = "AGENT_IDENTITY"
 ENV_AGENT_INSTANCE_ID = "AGENT_INSTANCE_ID"
 

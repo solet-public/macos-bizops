@@ -92,7 +92,7 @@ REEMIT_BODY_HEAD_CHARS: Final[int] = 240
 
 def _log(msg: str) -> None:
     """Write to stderr; stdout is reserved for MCP JSON-RPC framing."""
-    print(f"[homunculus-bridge] {msg}", file=sys.stderr, flush=True)
+    print(f"[solet-bridge] {msg}", file=sys.stderr, flush=True)
 
 
 class OwedDeliveryTransport(Protocol):

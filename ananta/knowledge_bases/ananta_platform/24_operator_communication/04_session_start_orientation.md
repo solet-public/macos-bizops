@@ -28,22 +28,26 @@ Once session history is indexed, the same command line also reaches prior-sessio
 <the deployment's CLI> call service_interface::session_ledger_service::search_event_content '{"query": "<what happened or was decided>", "limit": 8}'
 ```
 
-There is always more than one knowledge base available to a session, and a search that comes back empty from one of them is information about that source, not about the question. The homunculus's own knowledge base is one source. A working directory a session is launched in may carry its own sources on top of that: a project `CLAUDE.md` or `AGENTS.md`, project documentation, and any project-specific knowledge bases the working directory's own tooling exposes. An empty result from the homunculus's knowledge base is a reason to check what the working directory itself carries, never a reason to conclude nothing exists and stop looking.
+There is always more than one knowledge base available to a session, and they are checked in sequence, not traded off against each other. The solet's own knowledge base comes first — it carries platform access and cross-session knowledge. The working directory the session is launched in comes next, regardless of what the first search returned: a project `CLAUDE.md` or `AGENTS.md`, project documentation, and any project-specific knowledge bases the working directory's own tooling exposes govern the task at hand, and neither source preempts the other. The sequence also settles what an empty result means: a search that comes back empty from one source is information about that source, not about the question — a reason to continue to the next source, never a reason to conclude nothing exists and stop looking.
 
 ## The four standing governance documents
 
 A fresh session anchors on four standing documents, and each settles a different class of question:
 
-- **The charter** settles what this homunculus is, its mission and cost boundary, its design values, and how decisions get made. Search the knowledge base for "charter" scoped to this homunculus, or for the template at `knowledge_bases/ananta_platform/24_operator_communication/02_homunculus_charter_template.md` if none exists yet.
+- **The charter** settles what this solet is, its mission and cost boundary, its design values, and how decisions get made. Search the knowledge base for "charter" scoped to this solet, or for the template at `ananta/knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md` if none exists yet.
 - **The standing-positions document** holds the agents' argued, dated, revisable positions on the big picture, so a fresh session inherits a point of view instead of starting blank. Positions are advocacy; operator rulings close arguments and are recorded inline.
-- **The decision-brief convention** at `knowledge_bases/ananta_platform/24_operator_communication/01_operator_decision_briefs.md` governs every request for an operator ruling. Its third rule matters at session start: settled questions do not get re-asked.
-- **The collaboration craft conventions** at `knowledge_bases/ananta_platform/24_operator_communication/03_collaboration_craft.md` govern day-to-day working style with the operator: reporting, autonomy, credential flows, and close-out hygiene.
+- **The decision-brief convention** at `ananta/knowledge_bases/ananta_platform/24_operator_communication/01_operator_decision_briefs.md` governs every request for an operator ruling. Its third rule matters at session start: settled questions do not get re-asked.
+- **The collaboration craft conventions** at `ananta/knowledge_bases/ananta_platform/24_operator_communication/03_collaboration_craft.md` govern day-to-day working style with the operator: reporting, autonomy, credential flows, and close-out hygiene.
 
 Before substantive work, a session confirms it is not about to relitigate something these documents already settle. Direction questions go to the charter and standing positions; process questions about operator communication go to the two conventions. If a genuine gap exists, the work proceeds and the gap is recorded where it belongs: a new argued position in the standing-positions document, or a decision brief if only the operator can close it.
 
 ## Messaging, role binding, and reattaching after a restart or /clear
 
 Launcher-run fleet sessions can have direct and role-addressed messages waiting at session start.
+
+**A session label is not a role claim.** A labeled session — one launched with a role name attached — holds no role binding by virtue of that label. Until the role is actually claimed, the session is addressable by nobody: a `peer_send_by_name` aimed at it fails as a vacant role, and the messages that would have reached it are simply never delivered. The label is visible and the missing claim is not, which is what makes this worth checking at session start rather than discovering when an expected message never arrives.
+
+**Do not assume something already armed the claim.** Where a deployment's session hooks would normally claim the role automatically, that automation may be absent — a managed or policy-restricted environment can block the plugin that carries it from installing at all, leaving a labeled, role-less session with nothing to signal the gap. Claiming the role by hand (the `rename` skill, with the label as the role name) is a supported path in that situation, not a workaround. Either way the thing to trust is the ownership check below, not the assumption that automation ran.
 
 In a launcher-run fleet session, with `AGENT_SESSION_ID` set in the environment, the catch-up read, on the same deployment command line, is:
 
@@ -68,7 +72,8 @@ For a session that has claimed a durable role, the read-only ownership check, on
 - `service_interface::memory_service::recall` — decisions, status, and cross-agent facts, distilled rather than searched verbatim.
 - `plugin::agent_messaging_plugin::peer_inbox` — the catch-up read for direct and role-addressed messages, in launcher-run fleet sessions.
 - `plugin::agent_messaging_plugin::peer_holds_role` — the read-only role-ownership check.
-- `knowledge_bases/ananta_platform/24_operator_communication/01_operator_decision_briefs.md` — the decision-request convention.
-- `knowledge_bases/ananta_platform/24_operator_communication/02_homunculus_charter_template.md` — the charter template with its platform-constant sections.
-- `knowledge_bases/ananta_platform/24_operator_communication/03_collaboration_craft.md` — the distilled working conventions.
-- `plugins/github_midwife_plugin/knowledge_base/04_first_days_runbook.md` — how the charter and standing positions come to exist for a new homunculus.
+- `ananta/knowledge_bases/ananta_platform/24_operator_communication/01_operator_decision_briefs.md` — the decision-request convention.
+- `ananta/knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md` — the charter template with its platform-constant sections.
+- `ananta/knowledge_bases/ananta_platform/24_operator_communication/03_collaboration_craft.md` — the distilled working conventions.
+- `plugins/github_midwife_plugin/knowledge_base/04_first_days_runbook.md` — how the charter and standing positions come to exist for a new solet.
+- `plugins/github_midwife_plugin/knowledge_base/08_deployment_report_card.md` — its compact session-start readiness table, an optional opening ritual that checks runtime, knowledge, and the role claim above in one pass before work begins. The same article's full report card is the close-out artifact, not a session-start step.

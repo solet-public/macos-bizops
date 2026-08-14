@@ -22,7 +22,7 @@ process_export_deny_patterns is empty by operator ruling; see
 workbench/2026-07-15_result_error_processing_architecture_deep_dive.md.)
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 plugins/jira_plugin/tests/smoke_config.py
+    SOLET_NAME=<name> .venv/bin/python3 plugins/jira_plugin/tests/smoke_config.py
 
 Exits 0 on success, 1 on first failure.
 """

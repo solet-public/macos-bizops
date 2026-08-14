@@ -18,7 +18,7 @@ resolves to for_external (non-operator) -> the for_operator_equivalent assertion
 fails. The default (non-operator) client resolves to for_external either way.
 
 Run from repo root:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/operator_equivalent_propagation_smoke.py
 """
 

@@ -162,7 +162,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
 
         ``ensure_encryption_keypair`` mints the identity keypair on
         first bootstrap (operator-initiated for the local profile, or
-        spawned by the bridge HTTP server during cross-homunculus
+        spawned by the bridge HTTP server during cross-solet
         sealed-box transfer setup). The plugin must load with no
         keypair row present so the bootstrap helper can mint it.
         Returns empty list per W-CLASSIFY §A.2.3 + brief §3.6.
@@ -175,8 +175,8 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         Tier 1 W-ADDRESS-BOOK-RENAME migrated the keypair constants to
         scoped form per W-CLASSIFY §A.2.3. Tier 3 W-VAULT-LOCAL-KEYCHAIN
         further migrated the plugin segment to ``macos_vault_plugin``
-        (constants at ``constants.py:92-97``: ``<homunculus>.macos_vault_plugin.identity__encryption_(private|public)_key``).
-        Legacy rows under ``<homunculus>.default_vault_plugin.identity__encryption_*``
+        (constants at ``constants.py:92-97``: ``<solet>.macos_vault_plugin.identity__encryption_(private|public)_key``).
+        Legacy rows under ``<solet>.default_vault_plugin.identity__encryption_*``
         are renamed at startup by ``_migrate_legacy_keypair_if_present``
         BEFORE ``_ensure_keypair_internal`` runs, so the W-INT Cycle 2
         static gate sees only the new scoped names in
@@ -297,7 +297,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
             self.logger.warning(
                 "Per-credential Keychain substrate INACTIVE — runtime vault "
                 "verbs will raise. Local profile requires macOS Keychain "
-                "per [[homunculus-locality]].",
+                "per [[solet-locality]].",
             )
 
     # ─────────────────────────────────────────────────────────────────────
@@ -319,7 +319,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
 
         Pre-Tier-3 vault scaffolding (``default_vault_plugin`` config
         dir, file-bootstrap ``secrets/*.enc``) is no longer read by any
-        runtime path; a non-empty presence means an old homunculus's
+        runtime path; a non-empty presence means an old solet's
         state leaked in. The vault refuses to boot rather than silently
         ignore the leak.
         """
@@ -350,7 +350,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         ``_ensure_keypair_internal``. If legacy rows are present but the
         rename fails, raises so the existing ``_ensure_keypair_internal``
         never runs — that's how we refuse to silently mint a fresh keypair
-        and rotate the homunculus's cross-homunculus sealed-box identity.
+        and rotate the solet's cross-solet sealed-box identity.
         """
         self._migrate_legacy_keypair_secret(
             _LEGACY_ENCRYPTION_KEYPAIR_PRIVATE_KEY,
@@ -412,7 +412,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         and (after crypto is unlocked) the self-owned keypair rows are
         renamed from the legacy scoped form to the new scoped form. Both
         refuse to mint fresh on failure — a silent fresh-mint would lose
-        the homunculus's encrypted state (master-key) or sealed-box
+        the solet's encrypted state (master-key) or sealed-box
         identity (keypair).
         """
         from .keychain import get_keychain  # noqa: PLC0415
@@ -497,7 +497,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
                 "passphrase": {
                     "type": "string",
                     "title": "Vault Passphrase",
-                    "description": f"Passphrase for unlocking the vault. Can also be set via the per-homunculus environment variable {passphrase_env_var()} or passphrase file at $APP_HOME/config/plugins/macos_vault_plugin/passphrase",
+                    "description": f"Passphrase for unlocking the vault. Can also be set via the per-solet environment variable {passphrase_env_var()} or passphrase file at $APP_HOME/config/plugins/macos_vault_plugin/passphrase",
                     "x-secret": True,
                     "x-group": "security",
                     "x-order": 1,
@@ -513,7 +513,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         """Get vault passphrase from environment or file.
 
         Priority:
-        1. Per-homunculus environment variable ``<HOMUNCULUS_NAME>_VAULT_PASSPHRASE``
+        1. Per-solet environment variable ``<SOLET_NAME>_VAULT_PASSPHRASE``
            (e.g. ``EXAMPLE_VAULT_PASSPHRASE``)
         2. Passphrase file at $APP_HOME/config/plugins/macos_vault_plugin/passphrase
 
@@ -1327,7 +1327,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
     # local Postgres driver per [[state-service-is-the-only-postgres-path]].
 
     def _parse_scoped_key(self, key: str) -> tuple[str, str] | None:
-        """Split a scoped vault key ``<homunculus>.<plugin>.<credential>`` into ``(plugin_name, credential)``.
+        """Split a scoped vault key ``<solet>.<plugin>.<credential>`` into ``(plugin_name, credential)``.
 
         Returns ``None`` when the key isn't in three-segment scoped form.
         Pre-Tier-2-sub-2 callers may still hold flat keys; those take the
@@ -1337,7 +1337,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         parts = key.split(".", 2)
         if len(parts) != 3:
             return None
-        _homunculus, plugin_name, credential = parts
+        _solet, plugin_name, credential = parts
         if not plugin_name or not credential:
             return None
         return plugin_name, credential
@@ -1346,7 +1346,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
     # Runtime impls (Keychain-only post-P0-A).
     #
     # The substrate is per-credential macOS Keychain entries at
-    # (service=`<homunculus>.<plugin>`, account=`<credential>`). The
+    # (service=`<solet>.<plugin>`, account=`<credential>`). The
     # dual-substrate code paths + every state-service write helper were
     # retired in P0-A Round 3 (2026-06-09). The keypair-migrator at
     # _migrate_legacy_keypair_if_present still calls _get_by_key + the
@@ -1370,7 +1370,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         if pair is None:
             raise ValueError(
                 f"{self.name}: key {key!r} is not in scoped form "
-                "'<homunculus>.<plugin>.<credential>'. The vault no longer "
+                "'<solet>.<plugin>.<credential>'. The vault no longer "
                 "accepts non-scoped keys.",
             )
         return pair
@@ -1381,12 +1381,12 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         Preserved (NOT a runtime fallback) because the startup
         keypair migration pattern at _migrate_legacy_keypair_secret needs
         to rename pre-Tier-3 legacy keypair rows from
-        ``<homunculus>.default_vault_plugin.identity__encryption_*_key`` to
-        ``<homunculus>.macos_vault_plugin.identity__encryption_*_key`` if the
-        legacy rows still exist on any homunculus. On this homunculus
+        ``<solet>.default_vault_plugin.identity__encryption_*_key`` to
+        ``<solet>.macos_vault_plugin.identity__encryption_*_key`` if the
+        legacy rows still exist on any solet. On this solet
         the rename completed via Phase 1 of the P0-A data migration —
         this method is a no-op-in-practice but stays load-bearing for
-        first-cold-boot of any future homunculus that's still on the
+        first-cold-boot of any future solet that's still on the
         legacy substrate.
         """
         if not self.state_service:
@@ -1454,7 +1454,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         })
 
     def _list_impl(self, tag: str | None) -> ActionResult:
-        """Keychain enumeration via SystemKeychain.list_credentials_under_homunculus().
+        """Keychain enumeration via SystemKeychain.list_credentials_under_solet().
 
         ``tag`` filter currently a no-op because tags+metadata are not
         persisted under the Keychain-only contract until Round 4 adds
@@ -1465,16 +1465,16 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         """
         if self._keychain is None:
             return self._error(ErrorCode.ENCRYPTION_FAILED, "Keychain unavailable")
-        homunculus = os.environ.get("HOMUNCULUS_NAME", "").strip()
-        if not homunculus:
+        solet = os.environ.get("SOLET_NAME", "").strip()
+        if not solet:
             return self._error(
                 ErrorCode.ENCRYPTION_FAILED,
-                "HOMUNCULUS_NAME env var is required for vault list",
+                "SOLET_NAME env var is required for vault list",
             )
-        pairs = self._keychain.list_credentials_under_homunculus()
+        pairs = self._keychain.list_credentials_under_solet()
         secrets: list[dict[str, Any]] = [
             {
-                "key": f"{homunculus}.{plugin}.{credential}",
+                "key": f"{solet}.{plugin}.{credential}",
                 "tags": [],
                 "metadata": {},
                 "created_at": None,
@@ -1807,7 +1807,7 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
     # process and stores it under the named key. The plaintext never
     # leaves the process; the caller only ever sees a fingerprint. Used
     # by first-boot orchestrators that need to seed tokens (admin user
-    # token, transport bootstrap tokens, etc.) into a fresh homunculus
+    # token, transport bootstrap tokens, etc.) into a fresh solet
     # without those bytes touching any orchestrator memory or log.
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -1850,9 +1850,9 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         )
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Cross-Homunculus Sealed-Box Secret Transfer
+    # Cross-Solet Sealed-Box Secret Transfer
     #
-    # libsodium anonymous-sender sealed boxes (X25519). Each homunculus owns
+    # libsodium anonymous-sender sealed boxes (X25519). Each solet owns
     # an X25519 identity keypair stored as two regular vault secrets, so the
     # private key never bypasses AES-256-GCM-at-rest. Transfer protocol:
     #

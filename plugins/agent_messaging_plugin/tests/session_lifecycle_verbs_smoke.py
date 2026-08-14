@@ -158,7 +158,7 @@ def test_spawn_errors() -> None:
 
     # headless and tmux (D2) are BOTH registered now, but fail closed
     # (host_cannot_spawn) in an unconfigured environment (no
-    # HOMUNCULUS_NAME / permission mode / .mcp.json) -- config remedies,
+    # SOLET_NAME / permission mode / .mcp.json) -- config remedies,
     # never a silent bypass-permissions default. Own lane_id each so
     # neither perturbs the operator row-count assertion below.
     headless_cannot_spawn = None
@@ -675,9 +675,12 @@ def test_resolve_lane_charter_empty_for_unknown_lane() -> None:
 
 def test_spawn_session_drives_charter_as_first_turn_byte_exact() -> None:
     """RED-FIRST (phase 2 slice 6, Finding 0's fix): before this slice,
-    spawn_session drove NO first turn at all — a watch-armed worker's
-    Stop-hook wake loop, which only arms once the first turn completes,
-    would never arm for a pristine spawn. Also pins the design-check-in
+    spawn_session drove NO first turn at all — on the CLAUDE watch path, a
+    watch-armed worker's Stop-hook wake loop, which only arms once the first
+    turn completes, would never arm for a pristine spawn (a managed CODEX
+    worker has no such loop to arm — codex-0147-dead-spool-retirement,
+    2026-08-13 — but still needs its first turn driven the same way). Also
+    pins the design-check-in
     ruling's byte-exact fidelity requirement end to end: capture -> resolve
     -> drive must never re-serialize or mangle the operator's words — now
     scoped to the charter BODY specifically, since phase 3's provenance
@@ -1199,7 +1202,7 @@ def test_terminate_session_kills_the_real_headless_process() -> None:
         for _hook_name in _WORKER_INJECTED_HOOK_FILENAMES:
             (hooks_dir / _hook_name).write_text("#!/usr/bin/env python3\n")
         real_driver = HeadlessHostDriver(
-            claude_bin=sys.executable, homunculus_name="testhom",
+            claude_bin=sys.executable, solet_name="testhom",
             permission_mode="bypassPermissions", mcp_config_path=mcp_config,
             cwd=Path(tmp), popen_fn=_real_short_lived_popen_fn,
         )

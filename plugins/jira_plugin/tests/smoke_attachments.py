@@ -16,7 +16,7 @@ Exercises:
      (the only byte source) is never invoked, so no local file is read
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 plugins/jira_plugin/tests/smoke_attachments.py
+    SOLET_NAME=<name> .venv/bin/python3 plugins/jira_plugin/tests/smoke_attachments.py
 
 Exits 0 on success, 1 on first failure.
 """

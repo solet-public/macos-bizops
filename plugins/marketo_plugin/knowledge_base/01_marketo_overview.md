@@ -459,7 +459,7 @@ existing one's Role turns out to be missing a permission `check_setup` names.
 6. **Harvest + seed the secret agent-blind**: the moment the operator says
    "copied," `pbpaste` straight into a temp file (never displayed) →
    `vault_service::store_from_file` into
-   `<homunculus>.default_address_book_plugin.marketo_client_secret` → delete
+   `<solet>.default_address_book_plugin.marketo_client_secret` → delete
    the temp file → clear the clipboard. Never a bespoke seed script.
 7. **Register the address-book entry** `marketo_instance`: literals
    `base_url` and `client_id`, plus `client_secret` = the `vault::` reference

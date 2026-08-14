@@ -53,7 +53,7 @@ Exercises:
       surviving blob-write path on this connector)
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 plugins/jira_plugin/tests/smoke_issues.py
+    SOLET_NAME=<name> .venv/bin/python3 plugins/jira_plugin/tests/smoke_issues.py
 
 Exits 0 on success, 1 on first failure.
 """

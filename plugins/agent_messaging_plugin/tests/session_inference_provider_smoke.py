@@ -19,7 +19,7 @@ letting append_event raise BridgeNotFoundError.
 
 Run:
 
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/session_inference_provider_smoke.py
 """
 
@@ -40,7 +40,7 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # AgentMessagingPlugin module-level init resolves a scoped vault key from
-# HOMUNCULUS_NAME and therefore fails closed when unset.
+# SOLET_NAME and therefore fails closed when unset.
 
 from _real_state_fake import RealShapeState  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402

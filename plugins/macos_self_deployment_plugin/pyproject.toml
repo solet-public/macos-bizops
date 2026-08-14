@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "macos_self_deployment_plugin"
 version = "1.0.0"
-description = "macOS self-deployment plugin — router-mediated blue-green swap between co-resident the homunculus instances on the same machine."
+description = "macOS self-deployment plugin — router-mediated blue-green swap between co-resident the solet instances on the same machine."
 authors = [
     {name = "Ananta Development Team", email = "dev@ananta.ai"},
 ]

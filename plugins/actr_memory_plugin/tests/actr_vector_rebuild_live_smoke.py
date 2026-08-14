@@ -357,7 +357,7 @@ def test_rebuild_drains_across_multiple_batches(
 def main() -> int:
     if os.environ.get("ACTR_VECTOR_REBUILD_LIVE_SMOKE") != "1":
         print("=== actr_vector_rebuild_live_smoke ===")
-        print("  SKIP  set ACTR_VECTOR_REBUILD_LIVE_SMOKE=1 to run; needs the live homunculus DB.")
+        print("  SKIP  set ACTR_VECTOR_REBUILD_LIVE_SMOKE=1 to run; needs the live solet DB.")
         return 0
     print("=== actr_vector_rebuild_live_smoke ===")
     schema_name = f"example_test_vecrebuild_{secrets.token_hex(3)}"

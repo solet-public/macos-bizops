@@ -3,7 +3,7 @@
 
 Pins that ``SessionLedgerSummarizeMixin`` — migrated off raw ``transactional()`` /
 ``execute_sql`` SQL onto the state-interface primitives — drives the summary
-write/read paths correctly against the running homunculus's REAL ledger schema (real
+write/read paths correctly against the running solet's REAL ledger schema (real
 ``timestamp`` (naive-UTC F1) columns, the real ``(session_id, chunk_index)``
 UNIQUE index that ignores ``is_deleted``, the real BEFORE-UPDATE triggers). The
 thin planted-rows stub cannot model the ``persist_summary`` denorm guard (its
@@ -31,7 +31,7 @@ Coverage:
 
 Writes only sentinel rows (tracked by id) and hard-deletes them in a ``finally``.
 There are NO DB-level foreign keys (FKs are repository-enforced). Env-gated behind
-``LEDGER_SUMMARIZE_LIVE_SMOKE=1`` (needs the live homunculus DB up).
+``LEDGER_SUMMARIZE_LIVE_SMOKE=1`` (needs the live solet DB up).
 
 Run::
 
@@ -55,7 +55,7 @@ sys.path.insert(
     0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
-from ananta.constants import HOMUNCULUS_NAME_ENV_VAR  # noqa: E402
+from ananta.constants import SOLET_NAME_ENV_VAR  # noqa: E402
 from ananta.llm.session_ledger.repository import (  # noqa: E402
     SessionLedgerRepository,
 )
@@ -173,7 +173,7 @@ class _LiveStateAdapter:
 
 
 _MARK = "__summarize_migration_live_smoke__"
-_SCHEMA = os.environ[HOMUNCULUS_NAME_ENV_VAR]
+_SCHEMA = os.environ[SOLET_NAME_ENV_VAR]
 _T0 = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 _NOW = datetime(2026, 6, 1, 9, 0, 0, tzinfo=UTC)
 
@@ -375,7 +375,7 @@ def main() -> int:
         print("=== summarize_migration_live_smoke ===")
         print(
             "  SKIP  set LEDGER_SUMMARIZE_LIVE_SMOKE=1 to run; "
-            "needs the live homunculus DB."
+            "needs the live solet DB."
         )
         return 0
     print("=== summarize_migration_live_smoke ===")

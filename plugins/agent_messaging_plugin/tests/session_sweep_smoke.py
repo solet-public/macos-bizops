@@ -14,7 +14,7 @@ the same technique ``direct_wake_outbox_smoke.py`` uses for REL-05 — so the
 resolve-then-append delivery path is exercised for real, not stubbed.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/session_sweep_smoke.py
 """
 
@@ -199,7 +199,7 @@ def _register_live_binding(
     """Same pattern ``test_deadline_dependency_fires_and_delivers`` uses —
     a real bridge + a real peer registry binding, no server, so the
     resolve-then-append delivery path is exercised for real, not stubbed."""
-    bridge_id = mgr.open(homunculus_name="", parent_pid=1).bridge_id
+    bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
     reg.register(
         BridgeBinding(
             bridge_id=bridge_id, agent_id="claude_code", agent_instance_id=agent_instance_id,
@@ -479,7 +479,7 @@ def test_deadline_dependency_fires_and_delivers() -> None:
         {"table": "managed_session", "filters": {"agent_instance_id": "agi-waiter"}},
         {"agent_id": "claude_code"},
     )
-    bridge_id = mgr.open(homunculus_name="", parent_pid=1).bridge_id
+    bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
     reg.register(
         BridgeBinding(
             bridge_id=bridge_id, agent_id="claude_code", agent_instance_id="agi-waiter",
@@ -736,7 +736,7 @@ def test_pruner_live_registered_session_never_pruned() -> None:
     state = _state()
     reg = _peer_registry()
     mgr = _bridge_manager()
-    bridge_id = mgr.open(homunculus_name="", parent_pid=1).bridge_id
+    bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
     reg.register(
         BridgeBinding(
             bridge_id=bridge_id, agent_id="claude_code", agent_instance_id="agi-reg",

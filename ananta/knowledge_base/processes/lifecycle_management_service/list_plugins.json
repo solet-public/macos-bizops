@@ -13,6 +13,6 @@
   "error_processor_customizations": {
     "action_context": "Read-only enumeration of plugins loaded into the live orchestrator with status, config flags, priority, and process counts",
     "error_interpretation": "ValidationError: filter was set to a value other than 'enabled', 'loaded', or 'lifecycle_managed'. OrchestratorAccessError: the orchestrator's plugin_manager attribute is missing or None (indicates startup did not complete or the service was wired before the plugin manager). StateServiceUnavailable: not raised by this verb (it is purely introspective).",
-    "recovery_guidance": "For invalid filter: re-call with one of the three accepted values or omit the parameter to get the full roster. For orchestrator access errors: do not retry — the platform is in an inconsistent startup state and the caller should escalate; restarting the homunculus is the correct recovery."
+    "recovery_guidance": "For invalid filter: re-call with one of the three accepted values or omit the parameter to get the full roster. For orchestrator access errors: do not retry — the platform is in an inconsistent startup state and the caller should escalate; restarting the solet is the correct recovery."
   }
 }

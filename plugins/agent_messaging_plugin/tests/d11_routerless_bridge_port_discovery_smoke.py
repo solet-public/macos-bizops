@@ -3,7 +3,7 @@
 
 Verifies the D11 ruling
 (``workbench/2026-07-13_d11_bridge_port_discovery_routerless_ruling.md``):
-``<name>.bridge.port`` has exactly one writer per homunculus topology —
+``<name>.bridge.port`` has exactly one writer per solet topology —
 the router when one is declared, ``agent_messaging_plugin`` itself when
 one is not. R6 scenarios:
 
@@ -28,7 +28,7 @@ Plus the R1 fail-loud contract for ``_router_is_declared``: an absent
 ``manifest.yaml`` must all raise rather than guess.
 
 Run from repo root:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/d11_routerless_bridge_port_discovery_smoke.py
 """
 
@@ -88,7 +88,7 @@ def _new_plugin(app_home: Path | None) -> AgentMessagingPlugin:
     return plugin
 
 
-def _scenario_routerless_declared_set_writes_bound_port(homunculus: str) -> None:
+def _scenario_routerless_declared_set_writes_bound_port(solet: str) -> None:
     print("Scenario (i): router-less declared set -> file written with bound port")
     with tempfile.TemporaryDirectory(prefix="d11_smoke_home_") as home:
         app_home = Path(home)
@@ -99,14 +99,14 @@ def _scenario_routerless_declared_set_writes_bound_port(homunculus: str) -> None
         _check(declared is False, "router NOT in declared set -> _router_is_declared() False")
 
         if not declared:
-            write_routerless_bridge_port_file(54321, homunculus)
+            write_routerless_bridge_port_file(54321, solet)
 
-        read_back = read_port_file("bridge", homunculus)
+        read_back = read_port_file("bridge", solet)
         _check(read_back is not None and read_back > 0, "bridge port file is non-empty")
         _check(read_back == 54321, f"bridge port file contains the bound port (got {read_back!r})")
 
 
-def _scenario_router_declared_set_never_writes(homunculus: str) -> None:
+def _scenario_router_declared_set_never_writes(solet: str) -> None:
     print("\nScenario (ii): router-declared set -> never writes, even when file absent (R4)")
     with tempfile.TemporaryDirectory(prefix="d11_smoke_home_") as home:
         app_home = Path(home)
@@ -118,41 +118,41 @@ def _scenario_router_declared_set_never_writes(homunculus: str) -> None:
         declared = plugin._router_is_declared()  # noqa: SLF001
         _check(declared is True, "router IS in declared set -> _router_is_declared() True")
 
-        pre_existing = read_port_file("bridge", homunculus)
+        pre_existing = read_port_file("bridge", solet)
         _check(pre_existing is None, "precondition: no bridge port file exists yet")
 
         if not declared:
-            write_routerless_bridge_port_file(11111, homunculus)  # pragma: no cover — must not run
+            write_routerless_bridge_port_file(11111, solet)  # pragma: no cover — must not run
 
-        post = read_port_file("bridge", homunculus)
+        post = read_port_file("bridge", solet)
         _check(post is None, "file STILL absent — the plugin never fills the router's gap")
 
 
-def _scenario_generic_guard_still_raises(homunculus: str) -> None:
+def _scenario_generic_guard_still_raises(solet: str) -> None:
     print("\nScenario (iii): generic write_port_file/remove_port_file('bridge') still raise")
     try:
-        write_port_file(8765, "bridge", homunculus)
+        write_port_file(8765, "bridge", solet)
     except ValueError as exc:
         _check("forbidden" in str(exc).lower(), f"write_port_file raises forbidden (msg={exc})")
     else:
         _check(False, "write_port_file('bridge', ...) did NOT raise")
 
     try:
-        remove_port_file("bridge", homunculus)
+        remove_port_file("bridge", solet)
     except ValueError as exc:
         _check("forbidden" in str(exc).lower(), f"remove_port_file raises forbidden (msg={exc})")
     else:
         _check(False, "remove_port_file('bridge', ...) did NOT raise")
 
 
-def _scenario_stale_file_overwritten_on_next_write(homunculus: str) -> None:
+def _scenario_stale_file_overwritten_on_next_write(solet: str) -> None:
     print("\nScenario (iv): pre-existing stale file is overwritten (R3 self-heal)")
-    write_routerless_bridge_port_file(40001, homunculus)
-    stale = read_port_file("bridge", homunculus)
+    write_routerless_bridge_port_file(40001, solet)
+    stale = read_port_file("bridge", solet)
     _check(stale == 40001, "precondition: stale port on disk")
 
-    write_routerless_bridge_port_file(40002, homunculus)
-    healed = read_port_file("bridge", homunculus)
+    write_routerless_bridge_port_file(40002, solet)
+    healed = read_port_file("bridge", solet)
     _check(healed == 40002, f"rewrite on next start self-heals to the new port (got {healed!r})")
     _check(healed != stale, "healed value differs from the stale value")
 
@@ -190,7 +190,7 @@ def _scenario_predicate_fails_loud() -> None:
 
 def main() -> int:
     print("D11 smoke: router-less bridge port discovery\n")
-    # Each scenario gets its own homunculus name — they share ONE
+    # Each scenario gets its own solet name — they share ONE
     # XDG_RUNTIME_DIR, and a shared name would let scenario (i)'s write
     # leak into scenario (ii)'s "no file exists yet" precondition.
     with tempfile.TemporaryDirectory(prefix="d11_smoke_runtime_") as runtime_dir:

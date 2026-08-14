@@ -23,7 +23,7 @@ Plus the two conditions Dawn's Q2 ruling attached to landing this gate:
       the claimant's own live ``peer_binding`` row) still produces a correct
       session_role_claim row keyed on the FILLED value — the zero-regression
       claim gets MEASURED here, not asserted.
-  (d) the §3.1 reserved-mint guard: a FRESH mint of a ``<homunculus>-Main``
+  (d) the §3.1 reserved-mint guard: a FRESH mint of a ``<solet>-Main``
       shape name is refused ``reserved_role_name``; an ALREADY-legislated one
       (a pre-existing role row) claims normally — enforce-by-class, never
       class-assignment (Dawn ruling Q1).
@@ -252,7 +252,7 @@ def test_reserved_mint_guard() -> None:
     )
     _check(
         isinstance(fresh_mint, RoleClaimFailure) and fresh_mint.code == "reserved_role_name",
-        f"(d) a fresh mint of a <homunculus>-Main shape name is refused "
+        f"(d) a fresh mint of a <solet>-Main shape name is refused "
         f"reserved_role_name (got {fresh_mint!r})",
     )
     _check(
@@ -280,7 +280,7 @@ def test_reserved_mint_guard() -> None:
     )
     _check(
         not isinstance(legislated, RoleClaimFailure),
-        f"(d) an ALREADY-legislated <homunculus>-Main name claims normally "
+        f"(d) an ALREADY-legislated <solet>-Main name claims normally "
         f"(got {legislated!r})",
     )
 

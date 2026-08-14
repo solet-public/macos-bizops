@@ -27,7 +27,7 @@ Plus the pre-existing export-containment coverage (A2, unaffected by this
 migration): workspace TSV write, path/root/suffix/parent-dir refusals.
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/external_postgres_plugin/tests/smoke_data_export.py
 
 Exits 0 on success, 1 on first failure.

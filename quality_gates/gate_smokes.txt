@@ -4,7 +4,7 @@
 # once it is listed here. This is a tracked, growing allowlist (same model as
 # god_class_allowlist.txt / radon_*_allowlist.txt): adding a smoke is an
 # explicit, reviewable act, and the gate never silently broadens to smokes that
-# need a live platform. Every entry MUST pass offline (no live homunculus / LM Studio),
+# need a live platform. Every entry MUST pass offline (no live solet / LM Studio),
 # with one ratified exception class (GTE-09, Coordinator-Day Q2): a smoke whose
 # LOAD-BEARING proof genuinely requires a live external dependency (e.g.
 # external_postgres_plugin's smoke_readonly.py/smoke_multistatement.py, a real
@@ -285,7 +285,7 @@ plugins/agent_messaging_plugin/tests/session_role_claim_store_smoke.py
 # loser's row is gone immediately (the delete fired, branch iii never ran).
 # Plus Dawn's two landing conditions: (c) REL-07(1) fill-when-empty measured
 # through the new gate; (d) the §3.1 reserved-mint guard (refuses a fresh
-# <homunculus>-Main mint, passes an already-legislated one). TRUST-MODEL
+# <solet>-Main mint, passes an already-legislated one). TRUST-MODEL
 # HONEST throughout — see module docstring.
 plugins/agent_messaging_plugin/tests/role_claim_cardinality_gate_smoke.py
 
@@ -400,7 +400,7 @@ plugins/agent_messaging_plugin/tests/session_hosts_smoke.py
 # Fleet session-management Phase B, D1 §5 — the 'headless' HostAdapter
 # itself (headless_adapter.py), the universal-floor adapter hardening WS-6's
 # driven_sessions.py prior art into production code. verify_config()'s 4
-# remedies fire independently (missing binary/HOMUNCULUS_NAME/permission
+# remedies fire independently (missing binary/SOLET_NAME/permission
 # mode/.mcp.json); spawn() refuses BEFORE ever touching the OS when
 # unconfigured or missing agent_instance_id (the identity backfill_registration
 # depends on — verified against mcp_bridge/__main__.py's real
@@ -615,7 +615,7 @@ plugins/agent_messaging_plugin/tests/real_state_fake_filter_semantics_smoke.py
 # VerbError -> _failure_result mapping, and call_context flowing into
 # directed_by on the audit trail. Does NOT exercise the platform process
 # registry, process_search, or a live process_call (no unresolved <<FIELD>>
-# check) — that layer needs a running homunculus + restart, out of this
+# check) — that layer needs a running solet + restart, out of this
 # smoke's reach by design.
 plugins/agent_messaging_plugin/tests/session_lifecycle_transport_smoke.py
 
@@ -895,14 +895,14 @@ ananta/tests/core/plans/projection_continuation_smoke.py
 # session-header-on-every-response, and the blue-green stable MCP ingress +
 # tunnel supervisor (ingress re-resolves router.port per connection; supervisor
 # restarts tunnel-client on ingress-port change). All offline; the
-# agent_messaging pair needs HOMUNCULUS_NAME set (vault-scoped constants).
+# agent_messaging pair needs SOLET_NAME set (vault-scoped constants).
 plugins/agent_messaging_plugin/tests/oauth_security_smoke.py
 plugins/agent_messaging_plugin/tests/streamable_no_auth_mount_smoke.py
 # Task #53 HMAC bearer-token verification (BearerVerifier + _issue_access_token):
 # roundtrip, tampered/wrong-key/alg-confusion/expired rejections, constant-time
 # compare, forged-sealed-claim rejection, PLUS B1 Q2 (exp scopes the issued_at
 # skew — red-first) + client_exists_check + audience-binding rejections. Offline;
-# needs HOMUNCULUS_NAME (vault-scoped constants imported at module load).
+# needs SOLET_NAME (vault-scoped constants imported at module load).
 plugins/agent_messaging_plugin/tests/hmac_bearer_token_smoke.py
 # B1 Finding-B operator-access preservation: a VERIFIED operator_equivalent OAuth
 # client keeps operator authority (for_operator_equivalent) after the no-auth
@@ -1140,7 +1140,7 @@ plugins/g_suite_plugin/tests/smoke_slides.py
 plugins/g_suite_plugin/tests/smoke_async_jobs.py
 
 # github_midwife_plugin genesis Slice A (2026-07-08) — the macos-free-
-# homunculus profile template + checked-in profile_baseline/ per-plugin
+# solet profile template + checked-in profile_baseline/ per-plugin
 # config templates. Binding-satisfaction (every service_bindings value is
 # an allowlisted plugin; inference_service/self_deployment_service
 # asserted ABSENT — the declared-vacant/opt-in shape), no orphan
@@ -1167,19 +1167,19 @@ plugins/github_midwife_plugin/tests/profile_install_faildloud_smoke.py
 # doc §6.5 rider — a post-boot vault_service::store call would deadlock
 # against state startup, which is itself waiting on this credential).
 # Key-shape verified against the live reader: postgres_state_management_plugin
-# resolves vault_service.retrieve(key=f"{homunculus}.postgres_state_management_plugin.db_password"),
+# resolves vault_service.retrieve(key=f"{solet}.postgres_state_management_plugin.db_password"),
 # which macos_vault_plugin's _parse_scoped_key splits into the exact
 # (plugin_name, credential) pair this module writes via store_credential —
 # no mismatch. Pins: fresh-seed generate+ALTER ROLE+store+round-trip-verify;
 # idempotent skip when the role already authenticates with the stored pw;
 # rotate-BOTH (never one without the other) when the stored pw is stale;
 # inconsistent-Keychain-state and round-trip-mismatch both raise;
-# HOMUNCULUS_NAME required; the generated password is proven absent from
+# SOLET_NAME required; the generated password is proven absent from
 # captured stdout/stderr; both psql-invoking helpers pass the password via
-# stdin/PGPASSWORD env, never argv (ps-visible). Needs HOMUNCULUS_NAME set
+# stdin/PGPASSWORD env, never argv (ps-visible). Needs SOLET_NAME set
 # even to import (macos_vault_plugin's package init resolves vault-scoped
 # constants eagerly — same class as hmac_bearer_token_smoke.py); the smoke
-# self-defaults it to the selected homunculus name if absent. Offline (FakeKeychain; subprocess.run
+# self-defaults it to the selected solet name if absent. Offline (FakeKeychain; subprocess.run
 # and secrets.token_urlsafe mocked; no real Postgres/Keychain touched).
 plugins/github_midwife_plugin/tests/credential_seed_smoke.py
 
@@ -1248,12 +1248,12 @@ plugins/default_knowledge_plugin/tests/kb_git_smoke.py
 # Own-copy fork of macos_self_deployment_plugin/autostart_manager.py's
 # simple form (drops the supervisor/current-release/PathState machinery —
 # genesis has no blue-green rotation). Pins every build-spec §6.2
-# load-bearing plist field: Label=local.homunculus.<name>;
-# EnvironmentVariables sets HOMUNCULUS_NAME (boot fast-fails without it);
+# load-bearing plist field: Label=local.solet.<name>;
+# EnvironmentVariables sets SOLET_NAME (boot fast-fails without it);
 # WorkingDirectory is home_dir/.ananta/runtime/<name> — deliberately NOT
 # ananta.core.runtime.get_runtime_dir() (verified 2026-07-09: that helper
 # returns one SHARED ~/.ananta/runtime dir with no per-name segment despite
-# accepting a homunculus_name param); ProgramArguments launches ananta.cli
+# accepting a solet_name param); ProgramArguments launches ananta.cli
 # directly (no supervisor) via the clone's own absolute .venv/bin/python3 +
 # absolute --app-home profile dir (never a bare "profile" string, which
 # would resolve against the runtime dir instead); RunAtLoad=true;
@@ -1279,7 +1279,7 @@ plugins/default_knowledge_plugin/tests/kb_git_smoke.py
 plugins/github_midwife_plugin/tests/autostart_render_smoke.py
 
 # github_midwife_plugin genesis Slice G (2026-07-09) — plugin.py (dual-use
-# birth_homunculus EDGE verb) + genesis.py (Layer 1 entrypoint composing
+# birth_solet EDGE verb) + genesis.py (Layer 1 entrypoint composing
 # B/C/D/F). edge_parity_smoke: entry-point resolution, EDGE-parity (the
 # create-process skill's FATAL trap — every EDGE @platform_process needs a
 # matching EdgeProcessDefinition with field_sensitivities), return_value_schema
@@ -1298,7 +1298,7 @@ plugins/github_midwife_plugin/tests/edge_parity_smoke.py
 plugins/github_midwife_plugin/tests/genesis_integration_smoke.py
 
 # github_midwife_plugin Workstream A (2026-07-20, Claude-B) — git-init of the
-# born homunculus worktree at genesis. A seed never ships `.git` (the "no
+# born solet worktree at genesis. A seed never ships `.git` (the "no
 # contaminated history travels" invariant), so a seed-born tree is a plain source
 # dir and `platform_dev_surface_plugin` readiness (`git rev-parse
 # --is-inside-work-tree`) fail-louds. The new git_init post-spine phase gives the
@@ -1325,8 +1325,8 @@ plugins/github_midwife_plugin/tests/git_init_smoke.py
 plugins/github_midwife_plugin/tests/kb_symlinks_smoke.py
 
 # root_manifest seed step (2026-07-12, Coordinator-Dawn) — the genesis spine
-# step that rewrites a seed-born clone's root_manifest.yaml homunculus_name:
-# line from the MINTING homunculus's name to the newborn's (the seed ships the
+# step that rewrites a seed-born clone's root_manifest.yaml solet_name:
+# line from the MINTING solet's name to the newborn's (the seed ships the
 # minting tree's file verbatim; without this step every seed-born newborn
 # carries the minter's identity — the exact pollution the seed factory exists
 # to prevent). Pins: byte-exact single-line rewrite (regex must not inject a
@@ -1344,17 +1344,17 @@ plugins/github_midwife_plugin/tests/root_manifest_seed_smoke.py
 # retire (birth against an absent target fails loud); the §7 provision_venv
 # birth variant (True → create_venv_and_install_seed EXPLICIT + UNCONDITIONAL
 # before genesis; False → never called, standard mode skips venv). Pins the
-# per-homunculus credential self-seed: the newborn subprocess env sets
-# HOMUNCULUS_NAME to the NEWBORN's name, nothing is piped on stdin (no
+# per-solet credential self-seed: the newborn subprocess env sets
+# SOLET_NAME to the NEWBORN's name, nothing is piped on stdin (no
 # cross-namespace credential copy), a self-seed subprocess failure surfaces
 # its (secret-free) diagnostic, and the pre-seed scram VERIFY runs before the
 # self-seed against the parent sibling db (derived from the running
-# HOMUNCULUS_NAME, not hardcoded). Offline (subprocess.run fully mocked; no
+# SOLET_NAME, not hardcoded). Offline (subprocess.run fully mocked; no
 # real git/pip/network/Keychain).
 plugins/github_midwife_plugin/tests/venv_provision_smoke.py
 
 # github_midwife_plugin name-validation regression (2026-07-19) — the shared
-# constants.is_valid_homunculus_name (fullmatch, so a $-before-newline name
+# constants.is_valid_solet_name (fullmatch, so a $-before-newline name
 # cannot slip through) and the FOUR name-derivation boundaries it now guards:
 # steps.validate_name, credential_seed + venv_provision (Layer 1), and
 # bootstrap.py (Layer 0, validated at import before any admin psql/REVOKE/
@@ -1381,8 +1381,8 @@ plugins/github_midwife_plugin/tests/name_validation_smoke.py
 plugins/github_midwife_plugin/tests/vault_passphrase_seed_smoke.py
 
 # github_midwife_plugin genesis SEED-06 router-at-birth (2026-07-18,
-# Coordinator-Dawn) — genesis installs the per-homunculus blue-green router
-# right after the main autostart LaunchAgent, so a seed-born homunculus comes
+# Coordinator-Dawn) — genesis installs the per-solet blue-green router
+# right after the main autostart LaunchAgent, so a seed-born solet comes
 # up blue-green-capable with zero operator action (design §4 D1, Q1 RULED).
 # router_install_smoke pins the helper's branches in isolation: a free-tier
 # newborn (no macos_self_deployment_plugin in the profile allowlist) SKIPS and
@@ -1398,9 +1398,9 @@ plugins/github_midwife_plugin/tests/router_install_smoke.py
 
 # github_midwife_plugin no-MCP-first command launcher (2026-07-21,
 # Coordinator-Dawn) — genesis installs `<bin_dir>/<name>` on the operator's
-# PATH as a bare symlink to the newborn venv's generic `homunculus` console
+# PATH as a bare symlink to the newborn venv's generic `solet` console
 # script (agent_messaging_plugin local_cli); identity resolves by install
-# location, so the command pins its own homunculus and reaches no sibling.
+# location, so the command pins its own solet and reaches no sibling.
 # command_launcher_smoke pins the helper contract in isolation (install /
 # idempotent re-run / stale-symlink repoint / non-symlink fail-loud refusal /
 # missing-console-script refusal / invalid-name refusal); the end-to-end wiring
@@ -1467,7 +1467,7 @@ plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter
 # driver, re-invoking this file with GATE_SMOKE_HOOK_DIR pointed at the local
 # `.claude/hooks/` twin so the two copies can never drift in what is asserted
 # about them. Same two per-copy bindings as before, direction reversed
-# (`GIT_CONTROLLER_NAME`/"controller" default here now; `HOMUNCULUS_GIT_CONTROLLER_NAME`/
+# (`GIT_CONTROLLER_NAME`/"controller" default here now; `SOLET_GIT_CONTROLLER_NAME`/
 # "Coordinator" is the driver's override) — both gate env names are still
 # scrubbed from the child env in the driver so an inherited value cannot let a
 # gate-OFF case run against a live gate and still report PASS. Both copies
@@ -1578,7 +1578,6 @@ plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/marketplace_
 # skip. Deliberately does not call preflight() itself, so it runs on exactly the
 # node-less machines it exists to protect.
 plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/preflight_skip_contract_smoke.py
-plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/wake_waiter_smoke.py
 
 # jira_plugin (Lane C of the Enterprise Connector Suite, 2026-07-09, Claude-C) —
 # hermetic connector smokes (faked address_book_service, faked JIRA client +
@@ -1945,7 +1944,7 @@ ananta/tests/llm/session_ledger/trigger_poll_offloads_drain_smoke.py
 # planted-violation negative control proving the tightened scan is non-vacuous).
 ananta/tests/services/vault_service/vault_service_proxy_smoke.py
 # w_vault_local_keychain_smoke (13 SC-* subsmokes): Keychain-native vault surface incl.
-# operator-ingest namespace disjointness (fixture-pinned HOMUNCULUS_NAME, not runner-env
+# operator-ingest namespace disjointness (fixture-pinned SOLET_NAME, not runner-env
 # floated) and the SC-16 surviving-`default_vault_plugin`-refs sweep (allowlist covers the
 # sanctioned retained SQL namespace — audit + OAuth tables — per KB 11_vault_and_address_book).
 plugins/macos_vault_plugin/tests/w_vault_local_keychain_smoke.py
@@ -1962,7 +1961,7 @@ plugins/macos_vault_plugin/tests/w_vault_local_keychain_smoke.py
 # profile_lockstep_smoke: D37' byte-equality between the operator profile
 # initialization/profiles/local.yaml and the macos_midwife plugin mirror copy
 # (the mirror was re-synced whole-file to close the drift).
-# birth_homunculus_smoke (3 cases): macos_midwife 8-step birth (postgres_schema
+# birth_solet_smoke (3 cases): macos_midwife 8-step birth (postgres_schema
 # retired 2026-06-09) — dry_run planned-steps, live success + per-step status, and
 # idempotency via the BURIED marker (constants.MANIFEST_MARKER_PATH, imported not
 # re-hardcoded; rewritten atomic tmp+rename each run — non-empty + differs across
@@ -2046,7 +2045,7 @@ ananta/tests/session_ledger_service/parse_iso_timezone_smoke.py
 ananta/tests/platform/process_registry_builder_wiring_smoke.py
 ananta/tests/platform/process_registry_merge_validator_smoke.py
 ananta/tests/platform/state_service_write_state_registration_smoke.py
-ananta/tests/platform/homunculus_name_smoke.py
+ananta/tests/platform/solet_name_smoke.py
 ananta/tests/platform/root_manifest_smoke.py
 
 # Root agent-instruction bootstrap (2026-07-27): AGENTS.md and CLAUDE.md are
@@ -2099,7 +2098,7 @@ plugins/agent_messaging_plugin/tests/role_binding_store_smoke.py
 # real git in tempdirs, injected identity — never the box's runtime identity,
 # never the shared worktree). seed_content_validator: the discriminating pair
 # (under one injected fleet/operator identity, sanctioned placeholders
-# /Users/alice + HOMUNCULUS_NAME=<name> PASS while the injected operator home
+# /Users/alice + SOLET_NAME=<name> PASS while the injected operator home
 # path + fleet-name + psql-as-operator markers
 # REFUSE) proves bounded-context matching + placeholder-passes; plus secret
 # filename denylist (incl. UPPERCASE, R4) + PEM/AWS/OpenAI/GitHub/Slack/Bearer
@@ -2114,7 +2113,7 @@ plugins/agent_messaging_plugin/tests/role_binding_store_smoke.py
 # publish procedure). The mint_seed / mint_and_birth_local authored joseki
 # cards encode the §5 rev-D ladder: seal (VERB) before any gh, gh repo create
 # WITHOUT --push then a separate git push, private-default; and the local card
-# chains assemble_seed -> birth_homunculus(provision_venv=True) — the explicit
+# chains assemble_seed -> birth_solet(provision_venv=True) — the explicit
 # §7 venv seam (acquisition-mode clone-of-pinned-upstream retired same slice).
 # github_midwife_plugin seed factory §12 LICENSING (2026-07-18, Claude-B, RISKY
 # — seal-gate on the SF-C security module). Fail-closed: a seed missing its root
@@ -2224,7 +2223,7 @@ plugins/actr_memory_plugin/tests/actr_memory_tags_param_schema_parity_smoke.py
 plugins/actr_memory_plugin/tests/config_binding_order_smoke.py
 
 # Unified-memory-passthrough Slice 2 (2026-07-16) — the Claude-only loop-prover's
-# LOCAL mechanics (hermetic, no live homunculus): PostToolUse capture + echo-break, the
+# LOCAL mechanics (hermetic, no live solet): PostToolUse capture + echo-break, the
 # drain upsert-payload (slot + provenance tags), the hydrate renderer (verbatim
 # byte-identical round-trip + MEMORY.md + hash stamping), fail-loud on invalid
 # frontmatter, the drain watermark, and the local-delete-vs-forget skip.
@@ -2233,7 +2232,7 @@ plugins/actr_memory_plugin/tests/config_binding_order_smoke.py
 # merge that assembles a local-inference (process_results / process_error) prompt
 # from the inference base template ⊕ a process's customizations survived the
 # Track-B deletions (B1 ProcessorPolicyService, B2 exposure filter, B4
-# field_sensitivities). HERMETIC (no live homunculus / LM Studio, per this register's
+# field_sensitivities). HERMETIC (no live solet / LM Studio, per this register's
 # offline contract): the real merge preserves the base output_schema (decode
 # contract), inherits base arguments, injects the customization guidance,
 # preserves the <<RESULT>> observation plumbing, and the inference kind routes
@@ -2302,7 +2301,7 @@ plugins/agent_messaging_plugin/tests/forward_vertex_redrive_smoke.py
 
 # code_vetting_plugin (W3-A, 2026-07-20, Claude-B) — the AI code-vetting suite
 # promoted from quality_gates/vetting/ into the shipping plugin. Two hermetic L1
-# smokes relocated with the tree (no live homunculus / LM Studio; verified offline from
+# smokes relocated with the tree (no live solet / LM Studio; verified offline from
 # the new plugin path). l1_scanners: pure-Python scanners emit the right F1
 # dimension/constraint on crafted fixtures + a tool-absent path records a
 # coverage gap rather than silently passing. secrets_downgrade: the gitleaks
@@ -2320,7 +2319,7 @@ plugins/code_vetting_plugin/tests/secrets_downgrade_smoke.py
 # (red-first guard against the process_registry.edge_process_mismatch startup
 # FATAL), the mandatory result-envelope shape, deploy-invariant worktree anchoring
 # (the APP_HOME walk + fail-loud off the worktree), and the bounded-report cap.
-# Pure Python — no live homunculus / LM Studio / subprocess / mocks.
+# Pure Python — no live solet / LM Studio / subprocess / mocks.
 plugins/code_vetting_plugin/tests/verb_surface_smoke.py
 
 # code_vetting_plugin dispatch security (W3-B B1, 2026-07-20, Claude-B) — the two
@@ -2329,7 +2328,7 @@ plugins/code_vetting_plugin/tests/verb_surface_smoke.py
 # from an OFF-OPERATOR forward; locus preserved; the LOCAL substrate keeps full evidence),
 # and the A0-R3 metered-key ban made STRUCTURAL (no transport/dispatcher/selector field
 # and no verb param accepts an api_key/token/secret — a red-first scan). Pure Python — no
-# live homunculus / LM Studio / subprocess / mocks.
+# live solet / LM Studio / subprocess / mocks.
 plugins/code_vetting_plugin/tests/dispatch_security_smoke.py
 
 # code_vetting_plugin live state adapter (W3-B B2, 2026-07-20, Claude-B) — the
@@ -2593,7 +2592,7 @@ plugins/code_vetting_plugin/tests/rulebook_sync_smoke.py
 # paths (report, dead_symbols.candidates[], structural_metrics.literals[]); the get_vetting_run verb
 # returns a COMPLETED envelope with the row for a known id, a typed run_not_found ERROR envelope for an
 # unknown id (fail-loud, never an empty success), and invalid_run_id for an empty id. HERMETIC (a fake
-# StateServiceProtocol; no live homunculus/DB). The report column is added to the vetting_runs schema +
+# StateServiceProtocol; no live solet/DB). The report column is added to the vetting_runs schema +
 # RunMetrics + persisted in the driver (R8-1 column pattern). Design:
 # workbench/2026-07-21_w3c_c3a_get_vetting_run_design.md.
 plugins/code_vetting_plugin/tests/get_vetting_run_smoke.py
@@ -2625,13 +2624,13 @@ plugins/code_vetting_plugin/tests/vet_persist_smoke.py
 # get_edge_process_definitions, else edge_process_mismatch FATAL); the is_regression predicate (blocker
 # OR high worsens → True; medium/low churn silent); the background body persists a row + queues the note
 # only on a worse run. HERMETIC (fake create-before-upsert StateServiceProtocol + fake memory + a stub
-# scan; no real scanners / live homunculus). Cron REGISTRATION is a post-deploy create_cron_schedule step (out
+# scan; no real scanners / live solet). Cron REGISTRATION is a post-deploy create_cron_schedule step (out
 # of this slice). Design: workbench/2026-07-21_w3c3_trigger_scheduled_self_vet_design.md.
 plugins/code_vetting_plugin/tests/scheduled_self_vet_smoke.py
 
 # local-invocation CLI (2026-07-18, v1) — the non-MCP local client over
 # the localhost bridge surface, for clients whose MCP-server allowlist blocks the
-# stdio bridge. HERMETIC (httpx.MockTransport; self-defaults HOMUNCULUS_NAME):
+# stdio bridge. HERMETIC (httpx.MockTransport; self-defaults SOLET_NAME):
 # health/search/call happy paths + JSON output; `call` polls process/result until
 # terminal; one-shot invocation NEVER registers a peer identity (no registry
 # pollution — the load-bearing design pin); exit-code mapping for
@@ -2687,8 +2686,8 @@ plugins/agent_messaging_plugin/tests/register_session_conflict_smoke.py
 # diverged missing-stamp default). All 3 now value-compare via
 # ananta.core.domain.timestamps.to_naive_utc (no lexical fallback) and fail LOUD
 # on an unparseable stamp. HERMETIC (pure predicate calls + one integrated
-# gc_terminal_rows drive against the REAL-SHAPE state fake; no live homunculus/LM
-# Studio/DB; self-defaults HOMUNCULUS_NAME). RED-FIRST: a NAIVE stored stamp
+# gc_terminal_rows drive against the REAL-SHAPE state fake; no live solet/LM
+# Studio/DB; self-defaults SOLET_NAME). RED-FIRST: a NAIVE stored stamp
 # equal to the tz-aware cutoff instant discriminates value-vs-lexical, so
 # reverting any site to the lexical compare turns its boundary + fail-loud cases
 # red. Sites: forwarded_vertex_reconcile.terminal_row_aged (GC, never-delete-on-
@@ -2767,7 +2766,7 @@ ananta/tests/core/actions/action_failure_error_typing_smoke.py
 # peer_mark_role_covered (pull-surface boundary design, R1 identity fencing) --
 # the write's security surface. Refuses a call with no registered-route
 # identity (state["inference_vertex_session_id"] absent, the one-shot
-# `homunculus call` shape) and proves the CLI's caller_attribution_* family is
+# `solet call` shape) and proves the CLI's caller_attribution_* family is
 # NEVER consulted as a fallback even when it names a valid role holder --
 # the exact instance-id-spoofing shape measured against peer_claim_role.
 # Covers the live ownership re-check (a displaced prior holder cannot advance
@@ -2871,10 +2870,10 @@ plugins/agent_messaging_plugin/tests/rotation_thresholds_smoke.py
 # run_rotation is NEVER invoked when the gate refuses), and the hard privacy
 # rule (condition 2, mutation-proven -- the injected poke text is EXACTLY the
 # fixed constant, never built from inbox content). Offline, stub iterm2-shaped
-# fixtures + a stubbed homunculus call, no real API/fleet connection.
+# fixtures + a stubbed solet call, no real API/fleet connection.
 plugins/agent_messaging_plugin/tests/seat_idle_watcher_smoke.py
 # Deaf-wake fix (2026-08-08) -- black-box smoke for the four project-
-# vendored Python ports of coordination-hooks@<homunculus>'s JS hooks under
+# vendored Python ports of coordination-hooks@<solet>'s JS hooks under
 # .claude/hooks/ (wake_waiter.py, check_messages_reminder.py,
 # step_zero_reminder.py, role_binding_reminder.py). Each invoked as a real
 # subprocess exactly as Claude Code invokes it; covers wake_waiter.py's
@@ -2883,15 +2882,15 @@ plugins/agent_messaging_plugin/tests/seat_idle_watcher_smoke.py
 # reminder.py's JSON.stringify-equivalent label quoting (mutation-proven).
 
 # R4 seed-packaging audit, Package B (2026-08-10) -- parity smoke for the
-# memory-passthrough origin-resolution ladder (env HOMUNCULUS_NAME ->
-# root_manifest.yaml homunculus_name, placeholder-skipped ->
+# memory-passthrough origin-resolution ladder (env SOLET_NAME ->
+# root_manifest.yaml solet_name, placeholder-skipped ->
 # CLAUDE_PROJECT_DIR-basename), asserting the two independent
 # implementations (.claude/hooks/memory_passthrough/_journal.py and
-# agent_messaging_plugin.plugin's _resolve_homunculus_name_for_memory_tags)
+# agent_messaging_plugin.plugin's _resolve_solet_name_for_memory_tags)
 # agree on output across an env/file/dirname matrix. Requires the venv
-# (imports agent_messaging_plugin.plugin) and HOMUNCULUS_NAME set at
+# (imports agent_messaging_plugin.plugin) and SOLET_NAME set at
 # import time (an unrelated pre-existing module-level requirement in
-# plugin.py); skips loud rather than failing if HOMUNCULUS_NAME is unset.
+# plugin.py); skips loud rather than failing if SOLET_NAME is unset.
 # Mutation-proved: breaking the placeholder-skip guard on either side reds
 # exactly that scenario's two targeted assertions, nothing else.
 

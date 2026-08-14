@@ -47,7 +47,7 @@ _AUDIT_REPORT_STEM_FORMAT = "%Y-%m-%dT%H-%M-%SZ"
 def _resolve_repo_relative(value: str, repo_root: Path) -> Path:
     """Resolve a path string against repo_root when relative, absolute as-is.
 
-    The homunculus runs from profile/, so a bare ``Path("knowledge_bases")`` resolves
+    The solet runs from profile/, so a bare ``Path("knowledge_bases")`` resolves
     against the wrong CWD; the audit's schema-documented defaults must be
     resolved against the repo root.
     """

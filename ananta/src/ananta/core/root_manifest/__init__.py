@@ -1,6 +1,6 @@
-"""Per-homunculus root-manifest drift discipline.
+"""Per-solet root-manifest drift discipline.
 
-Three consumers read ``<homunculus_root>/root_manifest.yaml``:
+Three consumers read ``<solet_root>/root_manifest.yaml``:
 
 * :mod:`ananta.core.root_manifest.pre_commit` — BLOCKING at ``git commit``.
 * :mod:`ananta.core.root_manifest.cutover` — BLOCKING at blue-green cutover.

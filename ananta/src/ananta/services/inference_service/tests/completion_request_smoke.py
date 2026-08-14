@@ -27,7 +27,7 @@ vacancy interplay:
 
 Offline: the shared REAL-SHAPE state fake (real provider envelopes,
 mutations nested under ``data.result``), fake resolver/forwarder. No live
-homunculus / LM Studio / Postgres.
+solet / LM Studio / Postgres.
 
 Run from repo root:
     .venv/bin/python3 ananta/src/ananta/services/inference_service/tests/completion_request_smoke.py

@@ -23,7 +23,7 @@ Faithful assertions on the real ``ActionQueuePoller`` methods:
   the mechanism by which dispatch-completion is decoupled from task completion.
 
 Offline: the poller is built via ``object.__new__`` with only a recording
-state-service wired (the seams under test touch nothing else). No live homunculus /
+state-service wired (the seams under test touch nothing else). No live solet /
 LM Studio / Postgres.
 
 Run:

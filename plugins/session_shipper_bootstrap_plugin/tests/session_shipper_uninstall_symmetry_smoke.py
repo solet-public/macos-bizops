@@ -66,7 +66,7 @@ def _check(condition: object, label: str) -> None:
 
 def _build_context(tmp: Path, deployment_id: str) -> dict[str, str]:
     return {
-        "HOMUNCULUS_PUBLIC_URL": "https://example.test",
+        "SOLET_PUBLIC_URL": "https://example.test",
         "DEPLOYMENT_ID": deployment_id,
         "MACHINE_ID": "machine-uninstall-symmetry",
         "INSTALL_DIR": str(tmp / "shipper-install" / deployment_id),

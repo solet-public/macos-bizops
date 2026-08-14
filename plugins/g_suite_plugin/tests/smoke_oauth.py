@@ -16,7 +16,7 @@ Exercises:
 
 Requires the Google client libraries importable (they are pulled by installing
 this plugin: `pip install -e plugins/g_suite_plugin`). Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 plugins/g_suite_plugin/tests/smoke_oauth.py
+    SOLET_NAME=<name> .venv/bin/python3 plugins/g_suite_plugin/tests/smoke_oauth.py
 
 Exits 0 on success, 1 on first failure.
 """

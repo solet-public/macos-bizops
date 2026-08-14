@@ -2,7 +2,7 @@
   "process_key": "service_interface::vault_service::store_from_kv_file",
   "display_name": "Store Secret From Key-Value File",
   "description": "Read a single named field from a key-value file (.env, JSON, or YAML) and store its value (encrypted at rest). Format auto-detected by file extension; explicit format argument overrides. Useful for ingesting one credential out of a shared config file without exposing the rest.",
-  "embedding_description": "Store secret from named field in a .env / JSON / YAML file. Extract API key from dotenv. Pluck one credential out of shared config. Agent supplies absolute path + field name + vault key; the homunculus parses, extracts only that field, encrypts, persists. Format auto-detects by extension; explicit override allowed. Top-level scalars only. Variants: store_from_env/file/keychain.",
+  "embedding_description": "Store secret from named field in a .env / JSON / YAML file. Extract API key from dotenv. Pluck one credential out of shared config. Agent supplies absolute path + field name + vault key; the solet parses, extracts only that field, encrypts, persists. Format auto-detects by extension; explicit override allowed. Top-level scalars only. Variants: store_from_env/file/keychain.",
   "result_processor_customizations": {
     "action_label": "Secret stored from KV file",
     "result_type": "secret_stored",

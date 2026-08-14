@@ -42,7 +42,7 @@ class AssembledPrompt:
 
 
 _SYSTEM_HEADER = (
-    "You are an agent participating in a homunculus-mediated thread."
+    "You are an agent participating in a solet-mediated thread."
 )
 
 

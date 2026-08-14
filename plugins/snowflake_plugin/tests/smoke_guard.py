@@ -16,7 +16,7 @@ Exercises:
   5. Empty / whitespace-only input refused with snowflake.invalid_params
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/snowflake_plugin/tests/smoke_guard.py
 
 Exits 0 on success, 1 on first failure.

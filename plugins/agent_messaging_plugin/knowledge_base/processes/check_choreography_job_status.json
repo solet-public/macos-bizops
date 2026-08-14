@@ -12,7 +12,7 @@
   },
   "error_processor_customizations": {
     "action_context": "A read of one AsyncJobManager job row by job_id, plus its terminal result/error payload if the status warrants it.",
-    "error_interpretation": "missing_argument: job_id was empty. job_not_found: no job exists for that id (typo, or the job predates this homunculus's current job table). async_job_manager_unavailable: the platform's AsyncJobManager is not bound on this homunculus.",
+    "error_interpretation": "missing_argument: job_id was empty. job_not_found: no job exists for that id (typo, or the job predates this solet's current job table). async_job_manager_unavailable: the platform's AsyncJobManager is not bound on this solet.",
     "recovery_guidance": "For job_not_found, confirm the job_id came from a real rotate_session/restart_session/generate_curation_report dispatch response, not a guessed or reconstructed value."
   }
 }

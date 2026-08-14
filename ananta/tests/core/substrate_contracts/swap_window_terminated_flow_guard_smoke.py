@@ -37,7 +37,7 @@ Cases (behavioral — a spy ``action_processor`` records ``execute_action``):
   F. Predicate + bounded-FIFO: ``_is_terminated_flow_sibling`` truth table and
      the tombstone cap eviction (memory is bounded without a TTL).
 
-Project policy: no pytest. Offline — no live homunculus / LM Studio / Postgres. Exits 0
+Project policy: no pytest. Offline — no live solet / LM Studio / Postgres. Exits 0
 on success, 1 on first-failed-check aggregate.
 
 Run from repo root:

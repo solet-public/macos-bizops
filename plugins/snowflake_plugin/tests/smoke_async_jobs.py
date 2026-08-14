@@ -38,7 +38,7 @@ Exercises:
      object, not two threads.
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/snowflake_plugin/tests/smoke_async_jobs.py
 
 Exits 0 on success, 1 on first failure.

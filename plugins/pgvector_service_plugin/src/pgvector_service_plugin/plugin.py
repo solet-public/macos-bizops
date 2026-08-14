@@ -47,7 +47,7 @@ PLUGIN_NAMESPACE: str = "pgvector_service_plugin"
 # SQL-lockdown credential wiring (2026-06-23): non-secret connection params
 # (host/port/database/db_schema/user) come from the ``pgvector_service_db``
 # address-book entry; the password comes from this plugin's OWN vault namespace
-# (``<homunculus>.pgvector_service_plugin.password``). Nothing credential-bearing
+# (``<solet>.pgvector_service_plugin.password``). Nothing credential-bearing
 # lives in plugin config. The bundled ``resolve_with_secrets`` path is NOT used:
 # caller-enforcement denies the address-book plugin reading another plugin's
 # scoped secret, so the password is fetched directly (own-namespace read passes).
@@ -172,13 +172,13 @@ class PGVectorServicePlugin(
 
     def _resolve_db_password(self, vault_service: VaultServiceInterface) -> object:
         """The DB password from this plugin's own vault namespace."""
-        homunculus = os.environ.get("HOMUNCULUS_NAME", "").strip()
-        if not homunculus:
+        solet = os.environ.get("SOLET_NAME", "").strip()
+        if not solet:
             raise RuntimeError(
-                f"{self.name}: HOMUNCULUS_NAME required to resolve the vault "
+                f"{self.name}: SOLET_NAME required to resolve the vault "
                 "key for the database password.",
             )
-        password_key = f"{homunculus}.{PLUGIN_NAMESPACE}.password"
+        password_key = f"{solet}.{PLUGIN_NAMESPACE}.password"
         secret = vault_service.retrieve(key=password_key)
         if secret.get("action_status") != "completed":
             raise RuntimeError(

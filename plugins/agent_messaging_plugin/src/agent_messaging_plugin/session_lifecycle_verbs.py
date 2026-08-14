@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -103,6 +102,8 @@ from .session_role_claim_store import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
     from .session_hosts import DriverChannel, HostDriver
@@ -119,13 +120,19 @@ _VALID_WORK_CLASSES = frozenset(
 # fleet-watch-transport-migration phase 2 slice 6 (2026-08-06) — Finding 0's
 # fix: spawn_session used to boot a worker with NO first turn at all (see
 # drive_session's own docstring, unchanged, for the pre-existing MCP-arm
-# story); a watch-armed worker's Stop-hook wake loop only arms once its
-# FIRST turn completes, so a pristine watch subject with no charter and no
-# seat dispatch yet was unreachable at zero token cost. spawn_session now
+# story); on the CLAUDE watch path, a watch-armed worker's Stop-hook wake
+# loop only arms once its FIRST turn completes, so a pristine watch subject
+# with no charter and no seat dispatch yet was unreachable at zero token
+# cost. (A managed CODEX worker is not Stop-hook governed at all — stock
+# Codex does not execute async command hooks, so its watch/tmux sidecar has
+# no Stop-hook wake loop to arm; it is reached through the durable inbox /
+# watch read path and, once managed, drive_on_delivery's driver-channel
+# nudge — codex-0147-dead-spool-retirement, 2026-08-13.) spawn_session now
 # always drives exactly one first turn immediately after a successful host
-# dispatch: the lane's captured charter if one is on file, else this fixed
-# fallback. Ordering-ruling guard (a): the fallback must be small and
-# DESIGNED TO COMPLETE in one turn — never a question, never a wait.
+# dispatch, for EVERY runtime: the lane's captured charter if one is on
+# file, else this fixed fallback. Ordering-ruling guard (a): the fallback
+# must be small and DESIGNED TO COMPLETE in one turn — never a question,
+# never a wait.
 FIRST_TURN_SOURCE_CHARTER = "charter"
 FIRST_TURN_SOURCE_FALLBACK = "fallback"
 
@@ -245,7 +252,7 @@ def legislate_role(
     ``project``/``ephemeral``/``chat`` are minted (by a claim or a spawn),
     never legislated — requesting one of those here is refused, not silently
     downgraded to a mint. A ``primary``-class target MUST match the reserved
-    ``<homunculus>-Main`` pattern the mint-refusal guard protects (§3.1) —
+    ``<solet>-Main`` pattern the mint-refusal guard protects (§3.1) —
     legislating a non-matching name as ``primary`` would create a seat the
     guard was never watching, defeating the point of the reservation.
     """
@@ -267,7 +274,7 @@ def legislate_role(
         raise VerbError(
             "reserved_primary_name_required",
             f"role_class='primary' requires a reserved-pattern name "
-            f"(<homunculus>-Main shape); {name!r} does not match.",
+            f"(<solet>-Main shape); {name!r} does not match.",
         )
     try:
         action = legislate_role_class(
@@ -631,10 +638,44 @@ def _sanitize_notice_label(label: str) -> str:
     return " ".join(label.split())
 
 
+def _resolve_delivery_managed_session(
+    state: StateManagementInterface,
+    *,
+    recipient_agent_instance_id: str,
+    recipient_agent_session_id: str,
+) -> dict[str, Any] | None:
+    """Resolve a delivery target without guessing across managed lineages."""
+    try:
+        return read_managed_session(state, recipient_agent_instance_id)
+    except SessionNotFoundError:
+        if not recipient_agent_session_id:
+            return None
+    try:
+        matches = list_managed_sessions(
+            state, {"agent_session_id": recipient_agent_session_id},
+        )
+    except Exception:  # noqa: BLE001 — optional best-effort side effect
+        logger.warning(
+            "drive_on_delivery: stable-session lookup failed for %s",
+            recipient_agent_session_id, exc_info=True,
+        )
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        logger.warning(
+            "drive_on_delivery: stable session %s matched %d managed rows; "
+            "refusing to guess",
+            recipient_agent_session_id, len(matches),
+        )
+    return None
+
+
 def drive_on_delivery(
     state: StateManagementInterface | None,
     *,
     recipient_agent_instance_id: str,
+    recipient_agent_session_id: str = "",
     sender_label: str,
 ) -> None:
     """Best-effort waker for a managed recipient's driver channel (D2-window
@@ -652,7 +693,11 @@ def drive_on_delivery(
     collaborator convention: a best-effort side-effect skips silently rather
     than hard-failing its caller's actual job); the recipient has no
     ``managed_session`` row at all (``SessionNotFoundError`` — an ordinary
-    operator-launched session, not spawned via ``spawn_session``); the row's
+    operator-launched session, not spawned via ``spawn_session``). A watcher
+    registration deliberately has a different ``agent_instance_id`` from its
+    spawn record, so a direct miss may reconcile by the exact stable
+    ``agent_session_id`` backfilled at registration; zero or multiple matches
+    still no-op rather than guessing. The row's
     ``lifecycle_state`` is not in :data:`_DRIVE_ON_DELIVERY_ELIGIBLE_STATES`;
     the row's host has no live driver channel (``VerbError`` from
     :func:`_resolve_driver_channel` — e.g. the degenerate ``operator`` host
@@ -663,9 +708,12 @@ def drive_on_delivery(
     """
     if state is None:
         return
-    try:
-        row = read_managed_session(state, recipient_agent_instance_id)
-    except SessionNotFoundError:
+    row = _resolve_delivery_managed_session(
+        state,
+        recipient_agent_instance_id=recipient_agent_instance_id,
+        recipient_agent_session_id=recipient_agent_session_id,
+    )
+    if row is None:
         return
     if str(row.get("lifecycle_state") or "") not in _DRIVE_ON_DELIVERY_ELIGIBLE_STATES:
         return
@@ -682,7 +730,7 @@ def drive_on_delivery(
         # session_sweep.py's _deliver_dependency_wake / _notify_steward_of_overdue.
         logger.warning(
             "drive_on_delivery: driver channel raised for %s",
-            recipient_agent_instance_id, exc_info=True,
+            row.get("agent_instance_id") or recipient_agent_instance_id, exc_info=True,
         )
 
 

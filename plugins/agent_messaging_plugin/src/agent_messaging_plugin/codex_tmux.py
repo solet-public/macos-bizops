@@ -28,6 +28,7 @@ from .codex_common import (
     _identity_env,
     _read_codex_config,
     _refuse_claude_provider_overlay,
+    _resolve_solet_bin,
     _toml_string,
     _without_parent_runtime_env,
 )
@@ -189,8 +190,8 @@ class CodexTmuxHostDriver:
         self,
         *, codex_bin: str | None = None,
         tmux_bin: str | None = None,
-        homunculus_bin: str | None = None,
-        homunculus_name: str | None = None,
+        solet_bin: str | None = None,
+        solet_name: str | None = None,
         codex_home: Path | None = None,
         cwd: Path | None = None,
         transport: str | None = None,
@@ -201,13 +202,10 @@ class CodexTmuxHostDriver:
     ) -> None:
         self._codex_bin = codex_bin if codex_bin is not None else shutil.which("codex") or ""
         self._tmux_bin = tmux_bin if tmux_bin is not None else shutil.which("tmux") or ""
-        self._homunculus_bin = (
-            homunculus_bin if homunculus_bin is not None
-            else shutil.which("homunculus") or ""
-        )
-        self._homunculus_name = (
-            homunculus_name if homunculus_name is not None
-            else os.environ.get("HOMUNCULUS_NAME", "")
+        self._solet_bin = _resolve_solet_bin(solet_bin)
+        self._solet_name = (
+            solet_name if solet_name is not None
+            else os.environ.get("SOLET_NAME", "")
         )
         self._codex_home = _codex_home(codex_home)
         self._cwd = cwd if cwd is not None else _resolve_default_cwd()
@@ -227,8 +225,8 @@ class CodexTmuxHostDriver:
     def verify_config(self, *, transport: str | None = None) -> list[str]:
         base = CodexAppServerHostDriver(
             codex_bin=self._codex_bin,
-            homunculus_bin=self._homunculus_bin,
-            homunculus_name=self._homunculus_name,
+            solet_bin=self._solet_bin,
+            solet_name=self._solet_name,
             codex_home=self._codex_home,
             cwd=self._cwd,
             transport=self._transport,
@@ -310,7 +308,8 @@ class CodexTmuxHostDriver:
             agent_instance_id=identity.agent_instance_id,
             agent_session_id=identity.agent_session_id,
             label=identity.label,
-            homunculus_name=self._homunculus_name,
+            solet_name=self._solet_name,
+            solet_bin=self._solet_bin,
             transport=transport,
         )
 
@@ -321,11 +320,12 @@ class CodexTmuxHostDriver:
         config = _read_codex_config(self._config_path)
         overrides = _codex_config_overrides(
             config=config,
-            homunculus_name=self._homunculus_name,
+            solet_name=self._solet_name,
             transport=transport,
             agent_instance_id=identity.agent_instance_id,
             agent_session_id=identity.agent_session_id,
             label=identity.label,
+            solet_bin=self._solet_bin,
         )
         effort = str(spec.get("effort") or "")
         if effort:
@@ -355,9 +355,9 @@ class CodexTmuxHostDriver:
         ]
         for key, value in env.items():
             if key in {
-                "HOMUNCULUS_NAME", "AGENT_IDENTITY", "AGENT_INSTANCE_ID",
+                "SOLET_NAME", "AGENT_IDENTITY", "AGENT_INSTANCE_ID",
                 "AGENT_SESSION_ID", "AGENT_SESSION_LABEL", "AGENT_WAKE_CLI",
-                "FLEET_TRANSPORT",
+                "FLEET_TRANSPORT", "PATH",
             }:
                 new_session_cmd += ["-e", f"{key}={value}"]
         new_session_cmd += ["-c", str(self._cwd), "sh", "-c", pane_command]
@@ -383,13 +383,19 @@ class CodexTmuxHostDriver:
             f"sh {shlex.quote(str(emit))} {shlex.quote(label)}; " if emit.exists() else "",
         ]
         if transport == "watch":
+            # codex-0147-dead-spool-retirement (2026-08-13): --no-spool disables
+            # this watcher's own wake-hook spool tee. Stock Codex's Stop hook
+            # cannot consume it (async command hooks do not execute on stock
+            # Codex), so an armed spool here would just accumulate an unread
+            # file for the pane's lifetime.
             watch_cmd = shlex.join(
                 _without_parent_runtime_env(
                     [
-                        self._homunculus_bin,
+                        self._solet_bin,
                         "watch",
                         "--agent-id", _CODEX_AGENT_ID,
                         "--no-claim",
+                        "--no-spool",
                     ],
                 ),
             )
@@ -453,5 +459,3 @@ class CodexTmuxHostDriver:
             session=host_ref,
             run_fn=self._run_fn,
         )
-
-

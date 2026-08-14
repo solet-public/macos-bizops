@@ -30,7 +30,7 @@ untouched by that retirement and still need this exact naive-vs-aware
 coverage.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \\
+    SOLET_NAME=<name>-test .venv/bin/python3 \\
         plugins/agent_messaging_plugin/tests/deaf_wake_naive_datetime_smoke.py
 """
 

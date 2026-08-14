@@ -1,23 +1,23 @@
-"""Name-validation regression smoke — the shared ``is_valid_homunculus_name``
+"""Name-validation regression smoke — the shared ``is_valid_solet_name``
 gate and the FOUR name-derivation boundaries it now guards, closing the
 unvalidated-name -> SQL / libpq-conninfo injection class (Codex BLOCKER +
 Reviewer-A F1/F2/F3, 2026-07-19).
 
 The seed already shipped ``NAME_PATTERN`` and applied it in ``steps.validate_name``,
 but the Layer-0 (``bootstrap.py``) and Layer-1 (``credential_seed``,
-``venv_provision``) name-derivation points interpolated the RAW ``HOMUNCULUS_NAME``
+``venv_provision``) name-derivation points interpolated the RAW ``SOLET_NAME``
 / newborn name into admin psql SQL, ``ALTER ROLE`` identifiers, and a libpq
 conninfo string BEFORE validating. This smoke pins that every boundary now
 fail-closes a name carrying a quote / semicolon / space / leading hyphen /
 embedded newline.
 
-Requires HOMUNCULUS_NAME set even to import ``credential_seed`` /
-``venv_provision`` (they resolve the role name == HOMUNCULUS_NAME at import, and
+Requires SOLET_NAME set even to import ``credential_seed`` /
+``venv_provision`` (they resolve the role name == SOLET_NAME at import, and
 ``credential_seed`` imports ``macos_vault_plugin``). Everything is validated
 offline against pure predicates and a fresh in-process module load -- no live
 Postgres, no real Keychain.
 
-Run directly: ``HOMUNCULUS_NAME=<name> .venv/bin/python3
+Run directly: ``SOLET_NAME=<name> .venv/bin/python3
 plugins/github_midwife_plugin/tests/name_validation_smoke.py``.
 """
 
@@ -32,12 +32,12 @@ from types import ModuleType
 from unittest.mock import patch
 
 from github_midwife_plugin import steps, venv_provision  # noqa: E402
-from github_midwife_plugin.constants import NAME_PATTERN, is_valid_homunculus_name  # noqa: E402
+from github_midwife_plugin.constants import NAME_PATTERN, is_valid_solet_name  # noqa: E402
 from github_midwife_plugin.credential_seed import (  # noqa: E402
     CredentialSeedError,
 )
 from github_midwife_plugin.credential_seed import (
-    _require_homunculus_name as _cs_require_name,
+    _require_solet_name as _cs_require_name,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -90,20 +90,20 @@ def _expect_raises(label: str, exc: type[Exception], thunk: Callable[[], object]
     raise SmokeFailureError(f"{label}: expected {exc.__name__}, no matching exception raised")
 
 
-# ── the shared validator (constants.is_valid_homunculus_name) ───────────
+# ── the shared validator (constants.is_valid_solet_name) ───────────
 
 
 def _check_shared_validator() -> None:
     for name in _VALID:
-        _check(f"is_valid accepts {name!r}", is_valid_homunculus_name(name), "should be valid")
+        _check(f"is_valid accepts {name!r}", is_valid_solet_name(name), "should be valid")
     for name in _INVALID:
-        _check(f"is_valid rejects {name!r}", not is_valid_homunculus_name(name), "should be invalid")
+        _check(f"is_valid rejects {name!r}", not is_valid_solet_name(name), "should be invalid")
 
 
 def _check_fullmatch_closes_the_newline_hole() -> None:
     """The exact bug the ``fullmatch`` upgrade closes: ``$`` matches just BEFORE a
     TRAILING newline, so ``NAME_PATTERN.match`` ACCEPTS ``"goodname\\n"`` while
-    ``is_valid_homunculus_name`` (fullmatch) rejects it. Documents the pre-fix
+    ``is_valid_solet_name`` (fullmatch) rejects it. Documents the pre-fix
     hole so a regression back to ``.match`` at any boundary goes red here.
     """
     _check(
@@ -112,8 +112,8 @@ def _check_fullmatch_closes_the_newline_hole() -> None:
         "match unexpectedly rejected the trailing-newline name — the documented hole changed",
     )
     _check(
-        "is_valid_homunculus_name (fullmatch) rejects the trailing-newline name",
-        not is_valid_homunculus_name("goodname\n"),
+        "is_valid_solet_name (fullmatch) rejects the trailing-newline name",
+        not is_valid_solet_name("goodname\n"),
         "fullmatch let a trailing newline through",
     )
 
@@ -123,7 +123,7 @@ def _check_fullmatch_closes_the_newline_hole() -> None:
 
 def _make_ctx(name: str) -> steps.GenesisContext:
     return steps.GenesisContext(
-        name=name, profile_name="macos-free-homunculus",
+        name=name, profile_name="macos-free-solet",
         target=Path("/nonexistent"), kb_root=Path("/nonexistent"),
     )
 
@@ -136,20 +136,20 @@ def _check_steps_validate_name_boundary() -> None:
         _check(f"steps.validate_name fails {bad!r}", record["status"] == "failed", f"got {record!r}")
 
 
-# ── boundary 2: credential_seed._require_homunculus_name (F1/F2) ─────────
+# ── boundary 2: credential_seed._require_solet_name (F1/F2) ─────────
 
 
 def _check_credential_seed_boundary() -> None:
-    with patch.dict(os.environ, {"HOMUNCULUS_NAME": "goodname"}):
+    with patch.dict(os.environ, {"SOLET_NAME": "goodname"}):
         _check(
-            "credential_seed._require_homunculus_name returns a valid name",
+            "credential_seed._require_solet_name returns a valid name",
             _cs_require_name() == "goodname",
             "valid name not returned",
         )
     for bad in _INJECTION_NAMES:
-        with patch.dict(os.environ, {"HOMUNCULUS_NAME": bad}):
+        with patch.dict(os.environ, {"SOLET_NAME": bad}):
             _expect_raises(
-                f"credential_seed._require_homunculus_name rejects {bad!r}",
+                f"credential_seed._require_solet_name rejects {bad!r}",
                 CredentialSeedError, _cs_require_name,
             )
 
@@ -168,7 +168,7 @@ def _check_venv_provision_boundary() -> None:
         )
 
 
-# ── boundary 4: bootstrap._require_homunculus_name (Layer-0, at import) ──
+# ── boundary 4: bootstrap._require_solet_name (Layer-0, at import) ──
 
 
 _fresh_counter = [0]
@@ -176,8 +176,8 @@ _fresh_counter = [0]
 
 def _load_bootstrap_fresh() -> ModuleType:
     """Load a FRESH copy of bootstrap.py (unique module name) so its import-time
-    ``_DATABASE = _require_homunculus_name()`` resolves under the CURRENT patched
-    environment. An invalid HOMUNCULUS_NAME raises during exec (before any db call).
+    ``_DATABASE = _require_solet_name()`` resolves under the CURRENT patched
+    environment. An invalid SOLET_NAME raises during exec (before any db call).
     """
     _fresh_counter[0] += 1
     module_name = f"_bootstrap_nv_{_fresh_counter[0]}"
@@ -191,13 +191,13 @@ def _load_bootstrap_fresh() -> ModuleType:
 
 
 def _check_bootstrap_boundary() -> None:
-    # bootstrap resolves _DATABASE == _require_homunculus_name() at IMPORT, so an
-    # invalid HOMUNCULUS_NAME fails the module load itself — BEFORE any admin psql
+    # bootstrap resolves _DATABASE == _require_solet_name() at IMPORT, so an
+    # invalid SOLET_NAME fails the module load itself — BEFORE any admin psql
     # / REVOKE / createuser call runs.
     for bad in ('ev"il', "ev;il", "-evil"):
-        with patch.dict(os.environ, {"HOMUNCULUS_NAME": bad}):
+        with patch.dict(os.environ, {"SOLET_NAME": bad}):
             _expect_raises(f"bootstrap load fails on {bad!r} before any db call", RuntimeError, _load_bootstrap_fresh)
-    with patch.dict(os.environ, {"HOMUNCULUS_NAME": "goodname"}):
+    with patch.dict(os.environ, {"SOLET_NAME": "goodname"}):
         mod = _load_bootstrap_fresh()
     _check(
         "bootstrap _DATABASE consumes a validated name",

@@ -15,7 +15,7 @@ Proves the in-lane §4.5 core offline:
   axes identically from a template and from a forked instance, and
   ``as_front_matter`` renders the KB-card shape.
 
-Offline: pure value objects, no live homunculus, no DB.
+Offline: pure value objects, no live solet, no DB.
 
 Run:
     .venv/bin/python3 ananta/tests/core/plans/plan_templates_smoke.py

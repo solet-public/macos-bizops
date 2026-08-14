@@ -2,7 +2,7 @@
 
 One parameterized choreography drives BOTH the forward cutover
 (``restart_with_manifest``) and the durable rollback (``rollback_release``):
-spawn the next-color homunculus from a materialized release, wait for it to register,
+spawn the next-color solet from a materialized release, wait for it to register,
 ``activate`` it on the router, swap the durable ``current``/``previous``
 symlinks, quiesce the prior color, and enqueue the durable ``complete_swap``
 finisher. The two callers differ ONLY in:
@@ -114,12 +114,12 @@ SymlinkSwapFn = Callable[[CandidatePaths], SwapResult]
 
 
 def _mint_instance_id(color: str) -> str:
-    """Mint a fresh instance id of the form ``homunculus-<color>-<uuid8>``.
+    """Mint a fresh instance id of the form ``solet-<color>-<uuid8>``.
 
     The shape matches the convention used by the cloud sibling's version
     labels while staying short enough for grep-ability in router logs.
     """
-    return f"homunculus-{color}-{uuid.uuid4().hex[:8]}"
+    return f"solet-{color}-{uuid.uuid4().hex[:8]}"
 
 
 def _mint_flow_id() -> str:
@@ -173,7 +173,7 @@ class SwapExecutor:
         router_client: RouterClient,
         action_factory: ActionFactoryProtocol,
         session_factory: Callable[[], str],
-        homunculus_name: str,
+        solet_name: str,
         runtime_dir: Path,
         set_color_active: SetColorActiveFn,
         spawn_fn: SpawnFn,
@@ -185,12 +185,12 @@ class SwapExecutor:
         self._router = router_client
         self._action_factory = action_factory
         self._session_factory = session_factory
-        self._homunculus_name = homunculus_name
+        self._solet_name = solet_name
         # B2: durable, additive post-cutover finisher record. Lives in the
         # runtime dir (NOT the release ledger), so writing/clearing it never
         # touches current/previous. Injected runtime_dir keeps smokes on a
         # scratch root.
-        self._pending_finisher_path = pending_finisher_path(runtime_dir, homunculus_name)
+        self._pending_finisher_path = pending_finisher_path(runtime_dir, solet_name)
         self._set_color_active = set_color_active
         self._spawn_fn = spawn_fn
         self._logger = logger
@@ -300,7 +300,7 @@ class SwapExecutor:
     ) -> int | RestartResult:
         try:
             pid = self._spawn_fn(
-                app_home, next_color, next_instance_id, self._homunculus_name,
+                app_home, next_color, next_instance_id, self._solet_name,
                 candidate,
             )
         except OSError as exc:

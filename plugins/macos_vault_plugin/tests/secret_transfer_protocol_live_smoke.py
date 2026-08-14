@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """End-to-end integration test for the sealed-box secret transfer protocol.
 
-Drives the four new vault processes against a running homunculus through the
+Drives the four new vault processes against a running solet through the
 agent_messaging_plugin HTTP bridge. In v1 the sender and recipient are the
-same homunculus (the homunculus talks to itself) — proves the crypto plumbing
-works without requiring two homunculi to be live. Once the abbey-NNNN dry-run
+same solet (the solet talks to itself) — proves the crypto plumbing
+works without requiring two solets to be live. Once the abbey-NNNN dry-run
 stack supports peer transfer, this same script can be pointed at two
 bridges by setting ``EXAMPLE_BRIDGE_URL`` and ``PEER_BRIDGE_URL`` separately.
 
@@ -24,7 +24,7 @@ Asserts:
      after a successful round-trip — and none of the audit columns leak
      plaintext or ciphertext.
 
-Run from the repo root with the homunculus already up:
+Run from the repo root with the solet already up:
 
     .venv/bin/python3 plugins/macos_vault_plugin/tests/secret_transfer_protocol_live_smoke.py
 """
@@ -47,7 +47,7 @@ import psycopg
 from psycopg.rows import DictRow, dict_row
 
 DEFAULT_BRIDGE_PORT_FILE = (
-    Path.home() / ".ananta" / "runtime" / f"{os.environ['HOMUNCULUS_NAME']}.bridge.port"
+    Path.home() / ".ananta" / "runtime" / f"{os.environ['SOLET_NAME']}.bridge.port"
 )
 DEFAULT_BRIDGE_HOST = "127.0.0.1"
 API_PREFIX = "/api/v1/bridge"
@@ -109,7 +109,7 @@ def _resolve_bridge_port() -> int:
     if not DEFAULT_BRIDGE_PORT_FILE.exists():
         raise SmokeError(
             f"bridge port file not found at {DEFAULT_BRIDGE_PORT_FILE}; "
-            "is the homunculus running? Try `./launch.py`."
+            "is the solet running? Try `./launch.py`."
         )
     return int(DEFAULT_BRIDGE_PORT_FILE.read_text().strip())
 
@@ -119,7 +119,7 @@ _LIVE_ENV = "SECRET_TRANSFER_LIVE_SMOKE"
 
 def _prereq_skip_reason() -> str | None:
     """SKIP-reason (None → run). Gate this live smoke so the offline suite
-    NEVER fails-red offline and NEVER silent-writes the running homunculus's
+    NEVER fails-red offline and NEVER silent-writes the running solet's
     vault keypair + Postgres audit rows: skip unless the explicit
     ``SECRET_TRANSFER_LIVE_SMOKE=1`` opt-in is set (the ``*_live_smoke``
     convention), and skip-clean when the bridge is unreachable (mirrors
@@ -127,7 +127,7 @@ def _prereq_skip_reason() -> str | None:
     if os.environ.get(_LIVE_ENV) != "1":
         return (
             f"set {_LIVE_ENV}=1 to run "
-            "(LIVE-writes vault keypair + Postgres audit rows on the running homunculus)"
+            "(LIVE-writes vault keypair + Postgres audit rows on the running solet)"
         )
     env_port = os.environ.get("EXAMPLE_BRIDGE_PORT")
     if env_port:
@@ -135,7 +135,7 @@ def _prereq_skip_reason() -> str | None:
     elif DEFAULT_BRIDGE_PORT_FILE.exists():
         port = int(DEFAULT_BRIDGE_PORT_FILE.read_text().strip())
     else:
-        return f"bridge port file not found at {DEFAULT_BRIDGE_PORT_FILE} (is the homunculus running?)"
+        return f"bridge port file not found at {DEFAULT_BRIDGE_PORT_FILE} (is the solet running?)"
     try:
         with socket.create_connection((DEFAULT_BRIDGE_HOST, port), timeout=5.0):
             pass

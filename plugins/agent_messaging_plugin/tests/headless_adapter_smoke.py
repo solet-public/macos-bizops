@@ -101,7 +101,7 @@ def _configured_driver(
     _stub_worker_hook_files(tmp_dir)
     kwargs: dict[str, Any] = {
         "claude_bin": _executable_stub(tmp_dir),
-        "homunculus_name": "testhom",
+        "solet_name": "testhom",
         "permission_mode": "bypassPermissions",
         "mcp_config_path": mcp_config,
         "cwd": tmp_dir,
@@ -213,7 +213,7 @@ def test_driver_uses_resolved_default_cwd_when_none_passed() -> None:
         try:
             driver = HeadlessHostDriver(
                 claude_bin=_executable_stub(Path(tmp)),
-                homunculus_name="testhom",
+                solet_name="testhom",
                 permission_mode="bypassPermissions",
             )
             _check(
@@ -303,7 +303,7 @@ def test_spawn_refuses_when_a_worker_hook_resolves_at_neither_rung() -> None:
         # one test that wants the ladder to find nothing at either rung.
         driver = HeadlessHostDriver(
             claude_bin=_executable_stub(tmp_dir),
-            homunculus_name="testhom",
+            solet_name="testhom",
             permission_mode="bypassPermissions",
             mcp_config_path=mcp_config,
             cwd=tmp_dir,
@@ -324,7 +324,7 @@ def test_verify_config_remedies_are_independent() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         unconfigured = HeadlessHostDriver(
-            claude_bin="/nonexistent/claude", homunculus_name="", permission_mode="",
+            claude_bin="/nonexistent/claude", solet_name="", permission_mode="",
             mcp_config_path=tmp_dir / "missing.json", cwd=tmp_dir,
         )
         # transport="mcp" is what makes the MCP-config remedy reachable at
@@ -336,7 +336,7 @@ def test_verify_config_remedies_are_independent() -> None:
         )
         _check(
             any("claude" in r for r in remedies)
-            and any("HOMUNCULUS_NAME" in r for r in remedies)
+            and any("SOLET_NAME" in r for r in remedies)
             and any("permission mode" in r for r in remedies)
             and any("MCP config" in r for r in remedies),
             "each remedy names its own specific gap",
@@ -360,7 +360,7 @@ def test_verify_config_mcp_config_required_only_for_mcp_transport() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         driver = HeadlessHostDriver(
-            claude_bin=_executable_stub(tmp_dir), homunculus_name="testhom",
+            claude_bin=_executable_stub(tmp_dir), solet_name="testhom",
             permission_mode="bypassPermissions",
             mcp_config_path=tmp_dir / "missing.mcp.json",  # never created -- born-clone shape
             cwd=tmp_dir,
@@ -394,7 +394,7 @@ def test_spawn_watch_transport_succeeds_without_mcp_json_present() -> None:
         tmp_dir = Path(tmp)
         _stub_worker_hook_files(tmp_dir)
         driver = HeadlessHostDriver(
-            claude_bin=_executable_stub(tmp_dir), homunculus_name="testhom",
+            claude_bin=_executable_stub(tmp_dir), solet_name="testhom",
             permission_mode="bypassPermissions",
             mcp_config_path=tmp_dir / "missing.mcp.json",
             cwd=tmp_dir,
@@ -420,7 +420,7 @@ def test_verify_config_accepts_a_per_spawn_permission_mode_override() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         driver = HeadlessHostDriver(
-            claude_bin=_executable_stub(tmp_dir), homunculus_name="testhom",
+            claude_bin=_executable_stub(tmp_dir), solet_name="testhom",
             permission_mode="", mcp_config_path=tmp_dir / ".mcp.json", cwd=tmp_dir,
         )
         (tmp_dir / ".mcp.json").write_text("{}")
@@ -438,7 +438,7 @@ def test_verify_config_accepts_a_per_spawn_permission_mode_override() -> None:
 def test_spawn_refuses_when_unconfigured() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         driver = HeadlessHostDriver(
-            claude_bin="/nonexistent/claude", homunculus_name="", permission_mode="",
+            claude_bin="/nonexistent/claude", solet_name="", permission_mode="",
             mcp_config_path=Path(tmp) / "missing.json", cwd=Path(tmp),
         )
         refused = False
@@ -459,7 +459,7 @@ def test_spawn_succeeds_via_per_spawn_permission_mode_with_no_env_floor() -> Non
         tmp_dir = Path(tmp)
         _stub_worker_hook_files(tmp_dir)
         driver = HeadlessHostDriver(
-            claude_bin=_executable_stub(tmp_dir), homunculus_name="testhom",
+            claude_bin=_executable_stub(tmp_dir), solet_name="testhom",
             permission_mode="", mcp_config_path=tmp_dir / ".mcp.json", cwd=tmp_dir,
             popen_fn=lambda *a, **k: _FakeProc(pid=2222),
         )
@@ -522,12 +522,12 @@ def test_spawn_env_and_command_wiring() -> None:
             "AGENT_SESSION_ID is derived from agent_instance_id",
         )
         _check(env["AGENT_SESSION_LABEL"] == "lane-x", "label prefers lane_id when given")
-        _check(env["HOMUNCULUS_NAME"] == "testhom", "HOMUNCULUS_NAME flows from driver config")
+        _check(env["SOLET_NAME"] == "testhom", "SOLET_NAME flows from driver config")
         _check(
-            env["AGENT_WAKE_CLI"] == "homunculus",
+            env["AGENT_WAKE_CLI"] == "solet",
             "AGENT_WAKE_CLI is the literal wake-CLI executable name, not the "
-            "homunculus instance name -- `which <instance-name>` cannot "
-            "resolve, so a value that tracked homunculus_name (e.g. "
+            "solet instance name -- `which <instance-name>` cannot "
+            "resolve, so a value that tracked solet_name (e.g. "
             "'testhom' here) silently broke every worker's idle-wake Stop "
             "hook; deaf-wake fix, 2026-08-08",
         )
@@ -673,7 +673,7 @@ def test_spawn_transport_constructor_floor_used_when_spec_omits_it() -> None:
         mcp_config.write_text("{}")
         _stub_worker_hook_files(Path(tmp))
         driver = HeadlessHostDriver(
-            claude_bin=_executable_stub(Path(tmp)), homunculus_name="testhom",
+            claude_bin=_executable_stub(Path(tmp)), solet_name="testhom",
             permission_mode="bypassPermissions", transport="mcp",
             mcp_config_path=mcp_config, cwd=Path(tmp), popen_fn=_capture,
         )

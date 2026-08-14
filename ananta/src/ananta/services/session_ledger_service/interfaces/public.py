@@ -1081,7 +1081,7 @@ class SessionLedgerPollingDriverAPI(ABC):
         ``service_interface::session_ledger_service::trigger_poll``.
 
         Boot-only — wired via the profile's ``starting_actions`` so a
-        fresh homunculus auto-polls the moment her services come up.
+        fresh solet auto-polls the moment her services come up.
         """
 
     @service_interface_process(
@@ -2456,7 +2456,7 @@ class SessionLedgerSummarizeAPI(ABC):
 
         Mirrors :meth:`ensure_periodic_poll_schedule` for the M6
         auto-summarize path. Boot-only — wired via the profile's
-        ``starting_actions`` so a fresh homunculus starts summarizing
+        ``starting_actions`` so a fresh solet starts summarizing
         her own sessions the moment she comes up (operator ruling
         2026-05-31 Gap 2(A): summaries auto-flow, no external caller
         required).
@@ -3313,7 +3313,7 @@ class SessionLedgerEmbeddingDrainAPI(ABC):
 
         Mirrors :meth:`ensure_periodic_summarize_schedule` for the LED-01
         event-embedding path. Boot-only — wired via the profile's
-        ``starting_actions`` so a fresh homunculus starts embedding her own
+        ``starting_actions`` so a fresh solet starts embedding her own
         event content the moment she comes up (the operator directive: the
         embedding runs automatically, the same manner as auto-summarize).
         """

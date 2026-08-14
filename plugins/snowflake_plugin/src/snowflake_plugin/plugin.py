@@ -118,7 +118,7 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         """No vault keys are required — the private key is chain-consumed.
 
         It lives in the address book RESOLVER's namespace
-        (``<homunculus>.default_address_book_plugin.snowflake_private_key``)
+        (``<solet>.default_address_book_plugin.snowflake_private_key``)
         and is read only through ``resolve_with_secrets`` under the
         resolver's identity — never a direct vault verb under this plugin.
         """

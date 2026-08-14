@@ -19,7 +19,7 @@ The enforcement is header-gated: a document with no ``ACTIVE_WBS:`` /
 ``JOSEKI_KEY:`` / ``WORK_ITEM:`` header is not a WBS-execution document, so the
 missing-RPK rule does not fire (covered here so the gate is explicit).
 
-Offline: pure parser, no live homunculus / LM Studio / Postgres.
+Offline: pure parser, no live solet / LM Studio / Postgres.
 
 Run:
     .venv/bin/python3 \\

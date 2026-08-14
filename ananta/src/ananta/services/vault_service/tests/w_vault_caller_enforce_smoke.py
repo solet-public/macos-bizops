@@ -121,7 +121,7 @@ def _make_minimal_macos_vault_plugin() -> Any:
     exercise (retrieve / get_public_key / unlock) reach for impls /
     helpers that we monkeypatch."""
     # The plugin's constants resolve scoped keys eagerly and fail closed when
-    # the caller has not supplied HOMUNCULUS_NAME.
+    # the caller has not supplied SOLET_NAME.
     from macos_vault_plugin.plugin import MacosVaultPlugin
 
     plugin = object.__new__(MacosVaultPlugin)

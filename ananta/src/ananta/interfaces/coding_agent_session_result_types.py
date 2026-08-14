@@ -74,7 +74,7 @@ class BridgeSpawnResult:
         status: Terminal status of the spawn attempt.
         agent_instance_id: Tracking key the caller supplied; echoed for
             audit correlation.
-        homunculus_name: Target homunculus the bridge connects to.
+        solet_name: Target solet the bridge connects to.
         pid: OS pid of the spawned (or already-running) bridge
             subprocess. Zero on ``FAILED`` before any subprocess was
             launched.
@@ -86,7 +86,7 @@ class BridgeSpawnResult:
 
     status: BridgeSpawnStatus
     agent_instance_id: str
-    homunculus_name: str
+    solet_name: str
     pid: int
     started_at: str
     message: str
@@ -143,7 +143,7 @@ class BridgeStatus:
 
     Attributes:
         agent_instance_id: Tracking key the bridge is registered under.
-        homunculus_name: Target homunculus the bridge connects to.
+        solet_name: Target solet the bridge connects to.
         pid: OS pid of the bridge subprocess.
         alive: ``True`` iff the subprocess is currently alive (kill -0
             probe at list time).
@@ -152,7 +152,7 @@ class BridgeStatus:
     """
 
     agent_instance_id: str
-    homunculus_name: str
+    solet_name: str
     pid: int
     alive: bool
     started_at: str

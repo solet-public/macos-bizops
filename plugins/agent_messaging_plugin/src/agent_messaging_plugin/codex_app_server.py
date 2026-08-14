@@ -24,6 +24,7 @@ from .codex_common import (
     _mcp_server_config,
     _read_codex_config,
     _refuse_claude_provider_overlay,
+    _resolve_solet_bin,
     _toml_string,
 )
 from .headless_adapter import (
@@ -56,15 +57,15 @@ def _binary_remedies(codex_bin: str) -> list[str]:
     ]
 
 
-def _homunculus_name_remedies(homunculus_name: str) -> list[str]:
-    if not homunculus_name:
+def _solet_name_remedies(solet_name: str) -> list[str]:
+    if not solet_name:
         return [
-            "HOMUNCULUS_NAME is not set — the Codex worker cannot resolve its homunculus instance.",
+            "SOLET_NAME is not set — the Codex worker cannot resolve its solet instance.",
         ]
-    if _TOML_BARE_KEY_RE.fullmatch(homunculus_name) is not None:
+    if _TOML_BARE_KEY_RE.fullmatch(solet_name) is not None:
         return []
     return [
-        f"HOMUNCULUS_NAME {homunculus_name!r} is not a TOML bare key — "
+        f"SOLET_NAME {solet_name!r} is not a TOML bare key — "
         "managed Codex overrides require only letters, digits, '_' or '-'.",
     ]
 
@@ -76,24 +77,24 @@ def _transport_remedies(transport: str) -> list[str]:
 
 
 def _installed_config_remedies(
-    *, config: Mapping[str, object], homunculus_name: str,
-    homunculus_bin: str, transport: str,
+    *, config: Mapping[str, object], solet_name: str,
+    solet_bin: str, transport: str,
 ) -> list[str]:
     remedies: list[str] = []
     if not _coordination_plugin_enabled(config):
         remedies.append(
             "coordination-hooks is not installed and enabled in Codex config — install "
-            "coordination-hooks@<homunculus-marketplace> before managed spawning.",
+            "coordination-hooks@<solet-marketplace> before managed spawning.",
         )
-    if transport == "mcp" and _mcp_server_config(config, homunculus_name) is None:
+    if transport == "mcp" and _mcp_server_config(config, solet_name) is None:
         remedies.append(
-            f"Codex config has no mcp_servers.{homunculus_name} table, required "
+            f"Codex config has no mcp_servers.{solet_name} table, required "
             "for transport='mcp'; add that Codex-native MCP server config or use watch.",
         )
-    if transport == "watch" and not (homunculus_bin and os.access(homunculus_bin, os.X_OK)):
+    if transport == "watch" and not (solet_bin and os.access(solet_bin, os.X_OK)):
         remedies.append(
-            "transport='watch' requires an executable homunculus CLI so the managed "
-            "worker can register without binding a role and arm its wake spool.",
+            "transport='watch' requires an executable solet CLI so the managed "
+            "worker can register without binding a role and arm its watcher.",
         )
     return remedies
 
@@ -105,8 +106,8 @@ class CodexAppServerHostDriver:
         self,
         *,
         codex_bin: str | None = None,
-        homunculus_bin: str | None = None,
-        homunculus_name: str | None = None,
+        solet_bin: str | None = None,
+        solet_name: str | None = None,
         codex_home: Path | None = None,
         cwd: Path | None = None,
         transport: str | None = None,
@@ -118,13 +119,10 @@ class CodexAppServerHostDriver:
             codex_bin if codex_bin is not None
             else shutil.which("codex") or str(Path.home() / ".local" / "bin" / "codex")
         )
-        self._homunculus_bin = (
-            homunculus_bin if homunculus_bin is not None
-            else shutil.which("homunculus") or ""
-        )
-        self._homunculus_name = (
-            homunculus_name if homunculus_name is not None
-            else os.environ.get("HOMUNCULUS_NAME", "")
+        self._solet_bin = _resolve_solet_bin(solet_bin)
+        self._solet_name = (
+            solet_name if solet_name is not None
+            else os.environ.get("SOLET_NAME", "")
         )
         self._codex_home = _codex_home(codex_home)
         self._cwd = cwd if cwd is not None else _resolve_default_cwd()
@@ -146,7 +144,7 @@ class CodexAppServerHostDriver:
         resolved_transport = transport if transport is not None else (self._transport or "watch")
         remedies = (
             _binary_remedies(self._codex_bin)
-            + _homunculus_name_remedies(self._homunculus_name)
+            + _solet_name_remedies(self._solet_name)
             + _transport_remedies(resolved_transport)
         )
         if not self._config_path.is_file():
@@ -157,8 +155,8 @@ class CodexAppServerHostDriver:
             return remedies
         return remedies + _installed_config_remedies(
             config=_read_codex_config(self._config_path),
-            homunculus_name=self._homunculus_name,
-            homunculus_bin=self._homunculus_bin,
+            solet_name=self._solet_name,
+            solet_bin=self._solet_bin,
             transport=resolved_transport,
         )
 
@@ -213,7 +211,8 @@ class CodexAppServerHostDriver:
             agent_instance_id=identity.agent_instance_id,
             agent_session_id=identity.agent_session_id,
             label=identity.label,
-            homunculus_name=self._homunculus_name,
+            solet_name=self._solet_name,
+            solet_bin=self._solet_bin,
             transport=transport,
         )
 
@@ -224,11 +223,12 @@ class CodexAppServerHostDriver:
         config = _read_codex_config(self._config_path)
         overrides = _codex_config_overrides(
             config=config,
-            homunculus_name=self._homunculus_name,
+            solet_name=self._solet_name,
             transport=transport,
             agent_instance_id=identity.agent_instance_id,
             agent_session_id=identity.agent_session_id,
             label=identity.label,
+            solet_bin=self._solet_bin,
         )
         effort = str(spec.get("effort") or "")
         if effort:
@@ -274,12 +274,18 @@ class CodexAppServerHostDriver:
         from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
 
         try:
+            # codex-0147-dead-spool-retirement (2026-08-13): --no-spool disables
+            # this watcher's own wake-hook spool tee. Stock Codex's Stop hook
+            # cannot consume it (async command hooks do not execute on stock
+            # Codex), so an armed spool here would just accumulate an unread
+            # file for the process's lifetime.
             watcher = self._popen_fn(
                 [
-                    self._homunculus_bin,
+                    self._solet_bin,
                     "watch",
                     "--agent-id", _CODEX_AGENT_ID,
                     "--no-claim",
+                    "--no-spool",
                     "--exit-with-parent", str(parent_pid),
                 ],
                 cwd=str(self._cwd),
@@ -347,4 +353,3 @@ class CodexAppServerHostDriver:
             refs = list(self._processes)
         for host_ref in refs:
             self.terminate(host_ref, int(self._grace_seconds))
-

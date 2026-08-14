@@ -1,4 +1,4 @@
-# Seed Update Runbook — Updating a Live Homunculus From a Re-Minted Seed
+# Seed Update Runbook — Updating a Live Solet From a Re-Minted Seed
 
 Tags: knowledge:tag:planning_reference
 
@@ -6,13 +6,13 @@ Article Layer: 2
 
 Article Role: operations_runbook
 
-Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:client-deployment, consumer_profile:both
+Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born homunculus without losing its state — why a fast-forward git pull from the same seed repo is the default update path and teardown-plus-re-birth is only the fallback, the exact sequence (health probe, pull --ff-only, restart preferring apply_manifest's zero-downtime blue-green swap over a bare LaunchAgent restart when a router is present, startup quiescence wait, automatic knowledge-base re-ingest for changed files), when the virtual environment needs attention (editable installs make pulled code live at restart; only NEW plugins or changed dependencies need a pip step), configuring the business-connector export/workspace root on an already-hydrated install when a release adds or extends connector containment (the one-time gap an existing clone never closes on its own), re-running the changed hydration steps afterward — including adding a release-added plugin to the clone's profile manifest and running its hydration guidance so it actually activates — the four stale copies a restart alone never refreshes (the installed Claude Code plugin's version-keyed CACHE copy, an already-open MCP bridge subprocess, an armed watcher, and knowledge-base chunks indexed from files the release removed — a deletion-only KB change is invisible to the startup staleness check and needs an explicit knowledge-service re-install with a negative-search verification) with the verifiable diff-based refresh check for the plugin cache, and the verification checklist including the watcher role-claim ground truth.
+Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born solet without losing its state — why a fast-forward git pull from the same seed repo is the default update path and teardown-plus-re-birth is only the fallback, the exact sequence (health probe, pull --ff-only, restart preferring apply_manifest's zero-downtime blue-green swap over a bare LaunchAgent restart when a router is present, startup quiescence wait, automatic knowledge-base re-ingest for changed files), when the virtual environment needs attention (editable installs make pulled code live at restart; only NEW plugins or changed dependencies need a pip step), configuring the business-connector export/workspace root on an already-hydrated install when a release adds or extends connector containment (the one-time gap an existing clone never closes on its own), re-running the changed hydration steps afterward — including adding a release-added plugin to the clone's profile manifest and running its hydration guidance so it actually activates — the four stale copies a restart alone never refreshes (the installed Claude Code plugin's version-keyed CACHE copy, an already-open MCP bridge subprocess, an armed watcher, and knowledge-base chunks indexed from files the release removed — a deletion-only KB change is invisible to the startup staleness check and needs an explicit knowledge-service re-install with a negative-search verification) with the verifiable diff-based refresh check for the plugin cache, the one-time `git remote set-url` re-point when the seed repository moves to a new home (taken after the pull, verified with a fetch, rolled back to the old URL if the new one is unreachable), and the verification checklist including the watcher role-claim ground truth.
 
 ## When to use this runbook
 
-Use this when a homunculus is ALREADY alive and healthy on this machine and a
+Use this when a solet is ALREADY alive and healthy on this machine and a
 newer seed release has been published. Do not use it for first-time setup
 (that is the hydration runbook) or for a broken instance that will not boot
 (that is teardown plus re-birth).
@@ -22,7 +22,7 @@ newer seed release has been published. Do not use it for first-time setup
 **Pull-update is the default.** Seed releases are append-only: a re-mint adds
 a commit to the SAME seed repository the clone was born from, fast-forward
 only, never rewriting history. The clone's `origin` remote already points
-there, so `git pull` brings the new code while everything the homunculus has
+there, so `git pull` brings the new code while everything the solet has
 become — its database, memories, knowledge, credentials, LaunchAgents —
 stays untouched.
 
@@ -54,10 +54,45 @@ the facts to the operator; the usual resolution is re-birth from the current
 seed. Never force, never rebase, never merge — a factory re-mint always
 fast-forwards.
 
+## Step 2a — re-point `origin` to the seed's new home (ONE TIME, this update only)
+
+The seed has moved. The repository this clone was born from published its
+FINAL update as the release you just pulled; every future re-mint is published
+at the new home only. Nothing about your clone's history changes — the new
+repository was seeded with the old repository's history before this release
+published there, so the two share a common ancestor and your next pull is an
+ordinary fast-forward, not a re-birth and not a divergence.
+
+Do this AFTER Step 2's pull, not before. Pulling from the old URL still works
+for this release (it published to both), so the safe order is: take the update
+from the remote you can already reach, then move the remote.
+
+```bash
+git -C <clone> remote get-url origin                        # note the old URL first
+git -C <clone> remote set-url origin <new-repository-URL>   # from this release's RELEASE_NOTES.md
+git -C <clone> remote get-url origin                        # confirm it took
+git -C <clone> fetch origin                                 # proves the new home is reachable
+```
+
+The exact new URL is in this release's `RELEASE_NOTES.md`; take it from there
+rather than from memory, and do not guess at it.
+
+**If `git fetch origin` fails with an access or not-found error, put the old
+URL back** (`git remote set-url origin <old-URL>`) and tell the operator before
+going further. Access to the new home is granted per-deployment, and a clone
+pointed at a repository it cannot read has no update path at all — that is a
+worse state than the one you started in. A failed fetch here is an access
+question for the operator, not something to work around by re-pointing
+somewhere else.
+
+Verify at the end of the update: `git -C <clone> remote -v` shows the new URL
+for both fetch and push, and `git -C <clone> status -sb` shows the branch
+tracking a branch on it.
+
 ## Step 3 — virtual environment: usually nothing
 
 The clone's `.venv` was built with EDITABLE installs (`pip install -e` per
-package), so pulled code changes are live the moment the homunculus restarts —
+package), so pulled code changes are live the moment the solet restarts —
 no reinstall for ordinary updates, including new CLI subcommands.
 
 The exception is structural: the release added a NEW plugin, or a plugin's
@@ -71,24 +106,60 @@ when it matters. Then, for each new plugin:
 If in doubt, this install form is idempotent — re-running it on an
 already-installed plugin is harmless.
 
+## Step 3a — the solet rename migration (MANDATORY when the update crosses 2026-08-13)
+
+Releases minted from 2026-08-13 onward name every live identifier `solet`:
+the CLI console script, the `SOLET_*` environment family, the `solet_name:`
+root-manifest key, launchd labels `local.solet.<name>`, and the `--solet`
+flag on the router/ingress entry points. There are NO compatibility aliases.
+An installation born before that boundary still carries the old names in its
+LaunchAgent plists, launcher shell functions, venv console script, and root
+manifest — state a code pull does not rewrite. Restarting across the boundary
+without migrating fails loud by design: the platform refuses to boot when it
+finds `HOMUNCULUS_NAME` in its environment or the old manifest key, and the
+error names this step.
+
+Run the migration BEFORE Step 4's restart. It is self-executing — dry run
+first, then apply:
+
+```bash
+<clone>/.venv/bin/python3 <clone>/deployment/scripts/migrate_to_solet.py
+<clone>/.venv/bin/python3 <clone>/deployment/scripts/migrate_to_solet.py --apply
+```
+
+The script boots out the affected LaunchAgents, rewrites their labels,
+filenames, environment keys, and arguments, flips the launcher shell
+functions, reinstalls the messaging plugin so `<clone>/.venv/bin/solet`
+replaces the old console script (the old shim is removed, not aliased), and
+bootstraps the agents back. Idempotent: re-running reports already-migrated
+pieces and changes nothing. Updates that do not cross the boundary find
+nothing to do — the dry run prints an empty plan and you move on.
+
+After the platform is back (Step 4), run the residual guard: enumerate the
+plugin-config store and fail loud on any `homunculus_name` key it still
+carries (`solet call` a config listing if the release provides one, or ask
+the solet directly to enumerate its plugin-config keys). A hit means a
+plugin carried deployment-local config this script does not know about —
+stop and repair before continuing, do not rename it ad hoc.
+
 ## Step 4 — restart and WAIT
 
 **Prefer `apply_manifest` over a bare restart whenever this profile has a router.** Check
 whether `macos_self_deployment_plugin` is in the clone's own plugin roster
 (`<name> call service_interface::lifecycle_management_service::list_plugins`). If it is,
-`apply_manifest` swaps in the pulled code through the per-homunculus blue-green router —
+`apply_manifest` swaps in the pulled code through the per-solet blue-green router —
 verifying before cutover, leaving `previous` as an intact rollback target, zero downtime for
 this no-MCP CLI path. Search the knowledge base for "picking up new code without a bare
 restart apply_manifest" via Step Zero for the exact call shape (`new_manifest` + `reason`). A
 bare LaunchAgent restart is a full stop that drops in-memory state (blob storage by default);
 it is not wrong, just the higher-cost path when a router is available.
 
-If that plugin is absent, this homunculus has no router and no blue-green path
+If that plugin is absent, this solet has no router and no blue-green path
 (single-color by design) — restart the LaunchAgent directly:
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/local.homunculus.<name>.plist
-launchctl load ~/Library/LaunchAgents/local.homunculus.<name>.plist
+launchctl unload ~/Library/LaunchAgents/local.solet.<name>.plist
+launchctl load ~/Library/LaunchAgents/local.solet.<name>.plist
 ```
 
 The blue-green router (if this profile has one) is a separate KeepAlive
@@ -142,7 +213,7 @@ user-scope `~/.claude/settings.json` hooks, the rename skill, the fleet function
 the matching hydration steps re-run once. The hydration runbook's steps are
 idempotent by design: probes first, marker-based structural merges, never
 clobber. Re-run its Step 2 (and Step 4a if the operator uses fleet roles);
-the markers replace the old homunculus-owned pieces in place and leave
+the markers replace the old solet-owned pieces in place and leave
 everything else alone.
 
 A release that ADDS a plugin needs one more route. Step 3's editable install
@@ -276,7 +347,7 @@ re-ingestion step, for every knowledge base the release notes name as
 having content removed, is a re-install:
 
 ```bash
-homunculus call service_interface::knowledge_service::install '{"name": "<kb-name>"}'
+solet call service_interface::knowledge_service::install '{"name": "<kb-name>"}'
 ```
 
 Re-install is the documented idempotent path: it drops the KB's entire
@@ -306,7 +377,7 @@ registered before the router's 30s heartbeat GC expired the outgoing one,
 so the one-shot cold-start auto-activate declined, and the GC then cleared
 the active binding. On releases carrying the steady-state re-assert fix
 (2026-07-23 and later) this heals itself within ~10 seconds — just re-probe.
-On earlier releases, bounce `local.homunculus.<name>.plist` once more (the
+On earlier releases, bounce `local.solet.<name>.plist` once more (the
 second boot sees no active binding and self-activates); leave the router
 LaunchAgent alone either way.
 - A labeled session's rename skill arms `<name> watch`; its first line is
@@ -316,10 +387,82 @@ LaunchAgent alone either way.
   peer-list entry.
 - `git -C <clone> log --oneline -1` shows the release commit the operator
   expected.
+- When this update re-pointed the remote (Step 2a): `git -C <clone> remote -v`
+  shows the new URL for fetch and push, and a plain `git -C <clone> fetch
+  origin` succeeds. Do this before declaring the update finished — a re-point
+  that silently failed looks exactly like a healthy clone until the next
+  release never arrives.
+- Any feedback items you have open upstream: check this release's
+  `RELEASE_NOTES.md` against them. Under the current feedback model an item is
+  answered when its issue closes, and the release notes cite the issue numbers
+  closed in that release — so the notes plus your own open-item list are enough
+  to tell answered from still-open without asking anyone.
 - When the release removed KB content: a search for a distinctive phrase
   from the removed material returns nothing from the affected KB. Run this
   AFTER Step 6's re-install — before it, a hit is the expected stale-copy
   signal, not evidence the update failed.
+
+## What changed in this release — the seed's new home and a new feedback channel (2026-08-13 final update at the old repository)
+
+Two adopter-facing changes ride along with this release, neither of which
+touches platform code.
+
+**1. The seed moved.** This is the last release published at the repository
+this clone was born from. **Step 2a above is the action this requires** — one
+`git remote set-url`, taken after the pull, with the new URL read from this
+release's `RELEASE_NOTES.md`. Skipping it costs you nothing today and every
+future release after that: a clone still pointed at the old URL will keep
+reporting "already up to date" forever, which is indistinguishable from "no new
+releases" and is the failure mode this step exists to prevent. If access to the
+new home is not working, that is an operator conversation, not a workaround.
+
+**2. Feedback is filed as GitHub issues now, not as a pull request carrying a
+numbered document.** The item vocabulary you already use is unchanged — rounds
+are still `Part N`, items are still `§N.M`, the four item classes are the same,
+and the evidence and content rules are the same. What changed is where an item
+goes: each item is filed through the repository's issue form for its class,
+a multi-item round gets a parent issue with the items attached as sub-issues,
+and a design proposal — an RFC-shaped document — is the one thing that still
+travels as a pull request. Answers come back as issue closures and GitHub
+releases; subscribe to the new repository's releases rather than polling it.
+The full procedure is in the upstream feedback runbook, which was rewritten in
+this release; read it before your next round rather than working from memory of
+the old convention.
+
+This one is worth a verification, because the guidance it replaces is guidance
+your solet may still be answering searches with. The feedback runbook was
+MODIFIED rather than deleted, so its file mtime moves and the startup pass
+re-indexes it normally — this is not the deletion-blind case Step 6's fourth
+stale copy describes, and no `install` call is required. Confirm rather than
+assume: after the restart, search your own knowledge base for the old
+convention (a phrase like "seed feedback pull request convention numbered
+parts"). You should get the NEW hybrid guidance back. If you get the old
+pull-request-per-round instructions instead, the re-index did not take, and
+that is when Step 6's re-install applies:
+
+```bash
+solet call service_interface::knowledge_service::install '{"name": "github_midwife_plugin"}'
+```
+
+## What changed in this release — the solet rename identifier cutover (2026-08-13 update)
+
+Every live identifier renamed from its homunculus-era form: the CLI is now
+`solet` (`solet call …`, `solet health`), the environment family is
+`SOLET_*` (`SOLET_NAME` foremost), the root manifest key is `solet_name:`,
+launchd labels are `local.solet.<name>`, the lifecycle verbs are
+`birth_solet` / `teardown_solet` / `provision_solet`, and result envelopes,
+error codes, and process JSONs follow. No aliases ship. **Step 3a is
+mandatory for this update** — run the migration before restarting, or the
+platform will refuse to boot (by design, with an error pointing back here).
+Two spellings are deliberately unchanged: the MCP wire route
+`notifications/homunculus/peer_message` and the channel `source="homunculus"`
+attribute are frozen protocol names (a rename there is a versioned protocol
+change, explicitly deferred), and history — ledgers, memories, old
+`homunculus_decommissioned:` tag rows, workbench notes — is never rewritten.
+Knowledge-base articles were renamed in place; because a rename is a
+delete-plus-add, the startup staleness check cannot see the deletions —
+Step 6's knowledge-service re-install with a negative-search verification
+applies to this update.
 
 ## What changed in this release — origin working-corpus removal from the shipped thinking KBs (2026-08-12 update)
 
@@ -342,8 +485,8 @@ still answering searches. After the restart, run the re-install pair,
 then the negative check:
 
 ```bash
-homunculus call service_interface::knowledge_service::install '{"name": "thinking_plans"}'
-homunculus call service_interface::knowledge_service::install '{"name": "plan_templates"}'
+solet call service_interface::knowledge_service::install '{"name": "thinking_plans"}'
+solet call service_interface::knowledge_service::install '{"name": "plan_templates"}'
 ```
 
 Then search for a phrase only the removed corpus contained (any
@@ -355,9 +498,9 @@ actually serving your searches.
 
 This release makes the full fleet-lifecycle stack from this seed's multi-agent
 session management (see the 2026-08-08 delta below) something an ALREADY-LIVE
-homunculus can actually operate, not just receive as dormant capability.
+solet can actually operate, not just receive as dormant capability.
 Three things this update needs beyond the base Steps 1–7, if this
-homunculus is going to spawn or manage other sessions of itself:
+solet is going to spawn or manage other sessions of itself:
 
 **1. Refresh the `coordination-hooks` Claude Code plugin and verify you
 land on `0.5.0` — that is the version this update targets, not an
@@ -400,29 +543,29 @@ check against `0.5.0` specifically, not just "a newer version than
 before," before trusting any of this update's self-management hooks —
 interactive or spawned — are actually live.
 
-**1a. Before first launch: export `HOMUNCULUS_NAME` in the environment
+**1a. Before first launch: export `SOLET_NAME` in the environment
 Claude Code is launched from.** One export does double duty for this
 release's self-management stack — set it once, in the same shell/terminal
 you launch Claude Code from (the same convention this checkout's own
-`CLAUDE.md` uses for the platform's own foreground launch: `HOMUNCULUS_NAME=<name>
+`CLAUDE.md` uses for the platform's own foreground launch: `SOLET_NAME=<name>
 python -m ananta.cli --app-home <profile>`), and both of the following
 resolve correctly without further setup:
 
 - **Memory-passthrough origin resolution, rung 1.** The origin-resolution
-  ladder that decides which homunculus a session's memory writes belong to
-  checks `HOMUNCULUS_NAME` first; without it, resolution falls through to
+  ladder that decides which solet a session's memory writes belong to
+  checks `SOLET_NAME` first; without it, resolution falls through to
   rung 2 (`root_manifest.yaml`, only valid once genesis has rewritten it)
   or rung 3 (`CLAUDE_PROJECT_DIR`'s basename) — both work, but rung 1 is
   the reliable one and doesn't depend on either.
 - **The heartbeat and rotation-due watch hooks' identity.** Both hooks
   (new in `0.4.0`/`0.4.1`) call into other platform verbs that also read
-  `HOMUNCULUS_NAME` for identity. (Separately: those two hooks additionally
+  `SOLET_NAME` for identity. (Separately: those two hooks additionally
   need `AGENT_INSTANCE_ID` exported to arm at all — without it they are
   silent no-ops, by design, not a bug; see `SECURITY.md`'s Configuration
   surface section, "Adopter setup note," for the exact arming variables
   and the full default-off/default-on table across all thirteen hooks.)
 
-`HOMUNCULUS_NAME` is a soft dependency for the origin ladder (rungs 2/3
+`SOLET_NAME` is a soft dependency for the origin ladder (rungs 2/3
 still resolve it) but the only path to a reliable heartbeat/rotation-due
 identity — export it before first launch rather than discovering the gap
 later.
@@ -436,7 +579,7 @@ below), and the memory-passthrough sync wrapper lived only as this
 checkout's own operator-scope hooks, rendered by the hydration runbook
 (`01_hydration_runbook.md`) rather than shipped in the plugin bundle. As
 of `0.4.0` they vendor into the plugin itself — Step 1 above is what
-delivers them to an existing homunculus, not a separate hydration re-run,
+delivers them to an existing solet, not a separate hydration re-run,
 though Step 5 ("re-run the hydration steps the release changed") may
 still matter if this release also changes anything on the operator-scope
 side that `0.4.0` does NOT absorb; check the final hooks manifest below
@@ -497,7 +640,7 @@ own copy will actually run.
 
 **3. The maintenance-verbs joseki cards ARE the operating manual for the
 fleet verbs below — read them before improvising a sequence.** Search this
-homunculus's own knowledge base for "maintenance verbs joseki cards"
+solet's own knowledge base for "maintenance verbs joseki cards"
 (source: `ananta_platform`, `24_operator_communication/09_maintenance_verbs_joseki_cards.md`).
 It carries the exact ordered-call sequence, verify step, and known traps
 for worker rotation, worker restart, memory-passthrough sync, memory-head
@@ -564,7 +707,7 @@ What it actually contains, in case it's relevant to you:
   sessions from your own, plus a durable per-session lifecycle record and
   automatic sweeps for sessions that go quiet. This is new *capability*,
   not a change to how a single, non-spawning session behaves. If you don't
-  spawn sessions from this homunculus, nothing here affects you.
+  spawn sessions from this solet, nothing here affects you.
 - **`default_fleet_transport` config knob, defaulting to `watch`.** This
   only governs how a *newly spawned* session receives messages going
   forward — it does not change how an already-running session you started
@@ -644,17 +787,22 @@ If this update reaches an already-hydrated install, **Step 4a above is the actio
 change requires** — an unconfigured workspace root means every affected connector read fails
 loud on first use post-update. See
 `plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md`, "What this
-homunculus ingests and embeds," for what happens to results once they do reach a session.
+solet ingests and embeds," for what happens to results once they do reach a session.
 
 ## Reference
 
 - `plugins/github_midwife_plugin/knowledge_base/06_seed_update_operator_guide.md`
-  — the same procedure written directly to the homunculus's owner, for
+  — the same procedure written directly to the solet's owner, for
   running the update at a terminal without a coding agent driving every
   step. Points back here for Step 5's hydration re-render, which does need
   an agent.
 - `plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md` —
   the hydration steps this runbook re-runs selectively after an update.
+- `plugins/github_midwife_plugin/knowledge_base/07_upstream_feedback_runbook.md`
+  — how to report what this update got wrong, ask a question about it, or
+  confirm a fix landed. Rewritten in this release to the issue-form model; it
+  is also where the "subscribe to releases" instruction lives, which is how you
+  learn a future update exists at all now that the seed has moved.
 - `plugins/seed_factory_plugin/knowledge_base/02_seed_publish_runbook.md` —
   why re-mints are append-only fast-forward commits (the property Step 2
   relies on).
@@ -664,8 +812,10 @@ homunculus ingests and embeds," for what happens to results once they do reach a
   — the `version` field Step 6's open question is about.
 - `code.claude.com/docs/en/plugin-marketplaces` — vendor documentation for the
   installed-plugin cache-copy behavior Step 6 cites.
-- `workbench/2026-08-02_b2a_plugin_source_schema_stub_finding_reviewer_d.md`
-  — the original declarative-install, hooks-execute-from-source measurement
-  Step 6's three-way invocation table reconciles.
+- The original declarative-install, hooks-execute-from-source measurement that
+  Step 6's three-way invocation table reconciles is a dated note in the
+  ORIGINATING checkout's `workbench/` directory, which is never shipped in a
+  seed. Step 6's table states every outcome it established, so a deployment
+  needs no copy of the note.
 - `RELEASE_NOTES.md` at the repo root — the full changelog for every
   release, including the ones summarized above.

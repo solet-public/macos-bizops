@@ -69,7 +69,7 @@ async def _run() -> None:
         blue, blue_port = await _start_backend("blue")
         green, green_port = await _start_backend("green")
         ingress = await start_ingress_server(
-            homunculus="example",
+            solet="example",
             listen_host="127.0.0.1",
             listen_port=0,
             router_port_file=router_port_file,

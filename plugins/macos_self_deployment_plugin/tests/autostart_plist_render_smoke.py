@@ -7,11 +7,11 @@ artifacts_design.md``):
 
 * ``ProgramArguments`` launches the colour-agnostic supervisor module
   (``-m macos_self_deployment_plugin.supervisor``), NOT ``ananta.cli``
-  directly — the launchd-managed process is never a homunculus colour.
+  directly — the launchd-managed process is never a solet colour.
 * ``KeepAlive`` is an unconditional ``<true/>`` (a bool, not a dict): the
   supervisor is an infinite loop, so any exit while loaded means restart.
   The interim ``Crashed``/``SuccessfulExit`` dict (and the earlier Slice-4
-  ``PathState`` predicate) are gone — no homunculus colour is launchd-managed, so
+  ``PathState`` predicate) are gone — no solet colour is launchd-managed, so
   the ghost-respawn class is structurally impossible. The ``.draining``
   sentinel does NOT appear in the plist (it gates the *supervisor*, not
   launchd).
@@ -75,7 +75,7 @@ def _check(condition: object, label: str) -> None:
 
 def _render() -> tuple[bytes, str]:
     mgr = AutostartManager(
-        homunculus_name="example",
+        solet_name="example",
         project_root=_FAKE_PROJECT_ROOT,
     )
     raw = mgr._render_plist()  # noqa: SLF001
@@ -92,7 +92,7 @@ def test_render_plist_xml_strings_present() -> None:
         ("<key>KeepAlive</key>\n  <dict>" not in body,
          "KeepAlive is NOT a dict (Crashed/SuccessfulExit dance is gone)"),
         ("<key>Crashed</key>" not in body,
-         "no Crashed key (no homunculus colour is launchd-managed)"),
+         "no Crashed key (no solet colour is launchd-managed)"),
         ("<key>SuccessfulExit</key>" not in body,
          "no SuccessfulExit key (exit-code dance obsolete)"),
         ("<string>macos_self_deployment_plugin.supervisor</string>" in body,
@@ -116,8 +116,8 @@ def test_render_plist_parses_as_dict() -> None:
     if not isinstance(parsed, dict):
         return
     _check(
-        parsed.get("Label") == "local.homunculus.example",
-        f"Label = 'local.homunculus.example' (got {parsed.get('Label')!r})",
+        parsed.get("Label") == "local.solet.example",
+        f"Label = 'local.solet.example' (got {parsed.get('Label')!r})",
     )
 
 
@@ -205,8 +205,8 @@ def test_environment_variables_carry_homebrew_path() -> None:
         f"PATH is the exact deterministic literal, both Homebrew prefixes first (got {path!r})",
     )
     _check(
-        env.get("HOMUNCULUS_NAME") == "example",
-        f"HOMUNCULUS_NAME still rendered alongside PATH (got {env.get('HOMUNCULUS_NAME')!r})",
+        env.get("SOLET_NAME") == "example",
+        f"SOLET_NAME still rendered alongside PATH (got {env.get('SOLET_NAME')!r})",
     )
 
 

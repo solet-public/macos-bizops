@@ -49,7 +49,7 @@ def _scenario_dry_run_plans_without_mutating() -> None:
         os.environ["XDG_RUNTIME_DIR"] = tmp
         try:
             plugin = MacosSelfDeploymentPlugin()
-            plugin._homunculus_name = "smoketest"
+            plugin._solet_name = "smoketest"
             plugin._self_color = "blue"
             plugin._self_instance_id = "smoketest-blue-dryrun"
             sentinel = drain_sentinel.sentinel_path("smoketest")

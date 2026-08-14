@@ -20,11 +20,14 @@ REMINDERS = {
     "step_zero_reminder.js": {
         "event": "SessionStart",
         "context": (
-            "For non-trivial work, checking a persistent knowledge base "
-            "available to this session (via a local CLI or a connected tool, "
-            "if any) and the current project's own instruction files before "
-            "other work is usually faster than re-deriving an answer partway "
-            "through."
+            "For non-trivial work, checking two context sources in sequence "
+            "before other work is usually faster than re-deriving an answer "
+            "partway through: first any persistent knowledge base available "
+            "to this session (via a local CLI or a connected tool, if any), "
+            "then the current project's own instruction files. The sequence "
+            "is not a substitution -- the knowledge base carries platform "
+            "and cross-session knowledge, the instruction files govern the "
+            "task at hand, and neither replaces the other."
         ),
     },
     "check_messages_reminder.js": {
@@ -192,7 +195,7 @@ def check_step_zero_async_clause_deliberately_absent(res: Results) -> None:
     """§33.1 parity ruling (Dawn, 2026-08-02): the Claude sibling hook carries an
     async-non-blocking clause because MCP's process_call is genuinely
     asynchronous; this hook omits it because the Codex-side lookup path (CLI
-    `homunculus call`, see AGENTS.md's Step Zero) blocks/polls for its result
+    `solet call`, see AGENTS.md's Step Zero) blocks/polls for its result
     before returning (agent_messaging_plugin/local_cli/cli.py's
     call_and_wait) -- a real mechanism difference, not drift. Named explicitly
     so a future parity audit does not re-flag the asymmetry.

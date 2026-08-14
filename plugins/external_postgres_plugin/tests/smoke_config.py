@@ -20,7 +20,7 @@ Exercises:
   11. list_connection_names — client-side prefix filter over substring search
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/external_postgres_plugin/tests/smoke_config.py
 
 Exits 0 on success, 1 on first failure.

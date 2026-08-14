@@ -4,8 +4,39 @@ This is the stock-Codex sibling of the Claude coordination plugin. The current
 increment contains:
 
 - fixed `SessionStart` context reminders;
-- the WS-4b.1 `PreToolUse` Bash Git-Controller gate;
-- the WS-4b.3 synchronous `Stop` wake waiter.
+- the WS-4b.1 `PreToolUse` Bash Git-Controller gate.
+
+**No `Stop` binding ships currently (codex-0147-async-hook-regression,
+2026-08-13).** Commit 906753eb7 asserted stock Codex parses async command
+hooks, "checked against 0.141.0 acceptance," and shipped an `async: true`
+`Stop` handler (`wake_waiter.js`) on that basis. That assertion is contradicted
+by a preserved 2026-07-31 probe
+(`workbench/2026-07-31_codex_phase4_probe/evidence/async_unsupported.md`),
+which already recorded 0.141.0 emitting `skipping async hook … async hooks
+are not supported yet` for the identical handler shape; 0.147.0 emits the same
+diagnostic now. Async command-hook support was never present in either
+measured version, so 906753eb7's binding never fired. The binding and its
+handler script were removed — `wake_waiter.js` and its dedicated smoke were
+deleted outright, not kept dormant — rather than left registered-but-dead,
+which is what produces the startup warning. Re-adding a `Stop` entry requires
+first confirming async command-hook support on the target build; do not
+restore the synchronous predecessor either (it blocked the turn boundary —
+see SECURITY.md's Manifest execution contract section).
+
+Codex operator delivery is therefore durable but silent: the message lands in
+the durable store and the watch process's own log (redirected there by the
+launcher, not the live terminal), but nothing surfaces it automatically. The
+operator must explicitly drain `peer_inbox` on their own next user/model turn;
+the `SessionStart` unread-coordination reminder above only fires at
+startup/resume/`clear`, not per-turn. A `spawn_session`-managed worker is
+unaffected: `drive_on_delivery`'s driver-channel notice is independent of this
+plugin's hooks entirely and provides its turn initiation regardless. With no
+`Stop` handler left to drain it, the wake-hook spool is retired end to end for
+Codex: the hydration-rendered launcher arms `<name> watch --no-spool`
+(stopping the watch process's own client-side tee), and the platform-side tee
+that wrote the same spool path on every dispatch to a `wake_capable=False`
+recipient (`_tee_spool_if_wake_incapable`,
+`agent_messaging_plugin/peer_dispatch.py`) is retired in the same landing.
 
 The sibling hydration package now renders the stock-Codex launcher-owned
 watcher, repo marketplace, and exact durable-inbox/paging instructions. Those
@@ -23,7 +54,6 @@ not rewrite Codex's private trust state behind that review boundary.
 | `SessionStart` (`startup`, `resume`, `clear`) | `step_zero_reminder.js` | fixed project-orientation reminder |
 | `SessionStart` (`startup`, `resume`, `clear`) | `check_messages_reminder.js` | fixed unread-coordination reminder |
 | `SessionStart` (`startup`, `resume`, `clear`) | `role_binding_reminder.js` | fixed label-versus-role reminder |
-| `Stop` | `wake_waiter.js` | synchronous, nudge-only idle-wake waiter |
 | `PreToolUse` (`Bash` only) | `git_controller_gate.py` | opt-in Git-Controller mistake-prevention gate |
 
 **Cadence ruling (2026-08-11):** `step_zero_reminder.js` and
@@ -60,21 +90,15 @@ Deployment-specific commands, process keys, and local tool guidance belong in
 the project's native `AGENTS.md` instruction surface, which Codex loads without
 introducing a second environment-authored prompt channel.
 
-The `Stop` waiter arms only when `AGENT_SESSION_ID` and `AGENT_WAKE_CLI` are
-non-empty and `FLEET_TRANSPORT` is unset, empty, or `watch` — a declared
-non-watch transport (e.g. `mcp`) disarms it; an unset or empty value is not
-a declaration and leaves it armed, the same rule the Claude variant pins.
-It parses Codex's `stop_hook_active` loop guard, runs exactly
-`AGENT_WAKE_CLI wake --max-wait <seconds>` without a shell — the literal
-subcommand `wake`, the literal flag `--max-wait`, and the bounded wait in
-seconds (the compiled-in default, or `AGENT_WAKE_MAX_WAIT_S` when it parses
-as a positive integer; anything else is announced on stderr and falls back,
-so raw environment text never reaches the argv) — and discards the child's
-streams unread. Exit `2` from that CLI produces one fixed factual
-continuation nudge; exit `0` (a delivery-less bounded-wait expiry included)
-produces no continuation. The manifest's 86,400-second synchronous bound is
-a backstop well above the bounded wait, so ordinary idle expiry is owned by
-the CLI's bounded wait rather than a hook-timeout cancellation.
+There is no `Stop` handler in the current manifest (see the top of this file
+for the codex-0147-async-hook-regression removal). A synchronous `Stop` hook
+is not an acceptable substitute: it would block the turn boundary and queue
+composer input behind the wait, the exact defect 906753eb7 fixed. Autonomous
+Codex workers still get turn initiation through `spawn_session`'s
+`drive_on_delivery`, which uses the host driver channel and does not depend on
+this plugin's `hooks.json` at all. An operator-launched Codex TUI currently has
+no per-turn delivery notice; it drains coordination deliveries via the
+`SessionStart` reminder above and a manual `peer_inbox` read.
 
 The Bash gate is separately opt-in through `GIT_CONTROLLER_NAME`. It authorizes
 only from `AGENT_ROLE`; labels, session IDs, hook thread IDs, and runner identity
@@ -90,8 +114,8 @@ and marketplace source are one tree.
 From this checkout, using the supported stock binary during validation:
 
 ```sh
-/opt/homebrew/bin/codex plugin marketplace add /Users/alice/Workspace/homunculus --json
-/opt/homebrew/bin/codex plugin add coordination-hooks@homunculus-development --json
+/opt/homebrew/bin/codex plugin marketplace add /Users/alice/Workspace/solet --json
+/opt/homebrew/bin/codex plugin add coordination-hooks@solet-development --json
 ```
 
 Installation and enablement do not grant hook execution. Start a fresh stock
@@ -112,15 +136,15 @@ seed integration or for the later installed-cache equality proof.
 
 ## Update/cachebuster procedure
 
-Only the live Git-Controller may mutate files in the shared homunculus checkout. For a
+Only the live Git-Controller may mutate files in the shared solet checkout. For a
 reviewed local development update, that session runs the Codex plugin-creator
 cachebuster helper against this plugin, reviews the resulting single version
 suffix, and reinstalls from the existing marketplace:
 
 ```sh
 python3 ~/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py \
-  /Users/alice/Workspace/homunculus/plugins/github_midwife_plugin/codex_plugin/coordination-hooks
-/opt/homebrew/bin/codex plugin add coordination-hooks@homunculus-development --json
+  /Users/alice/Workspace/solet/plugins/github_midwife_plugin/codex_plugin/coordination-hooks
+/opt/homebrew/bin/codex plugin add coordination-hooks@solet-development --json
 ```
 
 The helper preserves the base version and replaces, rather than stacks, one

@@ -36,7 +36,7 @@ Covers:
 Role names are OPAQUE, operator-defined strings throughout.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/role_model_v4_slice_b_smoke.py
 """
 

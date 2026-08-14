@@ -14,7 +14,7 @@ overreach either): the two STRUCTURAL fault edges where the slot is
 unconfirmable — the agent_messaging plugin unreachable, and the slot
 lookup RAISING. Deferring those would black-hole the turn.
 
-Offline: fake plugin-manager / plugin / state collaborators, no live homunculus.
+Offline: fake plugin-manager / plugin / state collaborators, no live solet.
 
 Run from repo root:
     .venv/bin/python3 ananta/src/ananta/services/inference_service/tests/autonomic_flip_smoke.py

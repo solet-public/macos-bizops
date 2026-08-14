@@ -61,7 +61,7 @@ def create_oauth_router(
                 content=_html_result(
                     "OAuth Error",
                     "Google returned an error during authorization. Check the "
-                    "homunculus logs and re-run connect_account.",
+                    "solet logs and re-run connect_account.",
                     success=False,
                 ),
                 status_code=400,
@@ -124,7 +124,7 @@ def create_oauth_router(
         return HTMLResponse(
             content=_html_result(
                 "Google Workspace Authentication Complete",
-                "Tokens stored. You can close this window and return to the homunculus.",
+                "Tokens stored. You can close this window and return to the solet.",
                 success=True,
             )
         )

@@ -6,7 +6,7 @@ Article Layer: 2
 
 Article Role: operations_runbook
 
-Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:agent-messaging, consumer_profile:both
+Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:agent-messaging, consumer_profile:both
 
 Embedding Description: Ordered-call joseki cards for six recurring fleet maintenance operations — rotate a worker, restart a dead one, sync the local memory-passthrough projection, curate the ambient MEMORY.md head at a rotation boundary, refresh a plugin's KB/process registry, check a session's context-window occupancy — each with its verify step and known traps. Follow the card, don't re-derive the sequence.
 
@@ -49,7 +49,7 @@ Syncs the local `.md`-per-fact memory projection with the canonical `memory_serv
 **Hydrate** (regenerate the local projection from canonical truth):
 1. `service_interface::memory_service::export_memories` with `tags=["agent_memory", "agent_memory:origin:<this checkout's origin tag>"]` and `file_path` inside the operator-configured `export_allowed_roots` (an out-of-root path is refused loud, not silently redirected).
 2. `python3 .claude/hooks/memory_passthrough/hydrate_render.py <that file_path>`.
-3. On homunculus-down (the export call fails): **stop, do nothing else.** The last projection stays untouched — never a partial write.
+3. On solet-down (the export call fails): **stop, do nothing else.** The last projection stays untouched — never a partial write.
 
 **Drain** (flush local edits back to canonical):
 1. `python3 .claude/hooks/memory_passthrough/drain.py` — prints `{pending, upserts, skipped_deleted}`.

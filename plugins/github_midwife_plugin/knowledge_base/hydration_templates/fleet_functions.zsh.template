@@ -1,19 +1,19 @@
-# {{HOMUNCULUS_NAME}}-fleet.zsh — OPTIONAL multi-role session functions.
-# Sourced by the deployment's client/{{HOMUNCULUS_NAME}}.zsh ONLY if the operator
+# {{SOLET_NAME}}-fleet.zsh — OPTIONAL multi-role session functions.
+# Sourced by the deployment's client/{{SOLET_NAME}}.zsh ONLY if the operator
 # accepted the Step 4a fleet-coordination offer in the hydration runbook.
 # Lives in the deployment directory, same as the single-session launcher, so it arrives
 # via `git pull`, never another ~/.zshrc replacement.
 #
-# This is a DIFFERENT trust level than claude-{{HOMUNCULUS_NAME}} (the
+# This is a DIFFERENT trust level than claude-{{SOLET_NAME}} (the
 # Step 2 single-session launcher). That launcher NEVER passes
 # --dangerously-skip-permissions (a fixed invariant) --
 # it is the safe default for one operator running one session.
 # The functions below are for an operator who has explicitly chosen to run
-# SEVERAL concurrent named sessions against {{HOMUNCULUS_NAME}} (a
+# SEVERAL concurrent named sessions against {{SOLET_NAME}} (a
 # coordinator-style fleet) and has been walked through what
 # --dangerously-skip-permissions and --remote-control actually do. Do not
 # render this file, and do not add its `source` line to
-# {{HOMUNCULUS_NAME}}.zsh, without that conversation having happened.
+# {{SOLET_NAME}}.zsh, without that conversation having happened.
 
 # One shared launcher, parameterized by role. Differences from the Step 2
 # single-session launcher:
@@ -29,18 +29,18 @@
 #                               sessions practical without an operator
 #                               babysitting each one's confirmations, but it
 #                               removes the per-action safety boundary. Set
-#                               {{HOMUNCULUS_NAME}}_FLEET_SKIP_PERMISSIONS=1
+#                               {{SOLET_NAME}}_FLEET_SKIP_PERMISSIONS=1
 #                               in the environment (or edit the line below)
 #                               only after you understand that tradeoff.
 #
 # Peer messaging, role binding, AND idle wake need NO flag here on the
 # default transport: each session's SessionStart hook invokes the rename
-# skill, which arms the `{{HOMUNCULUS_NAME}} watch` registered-presence
+# skill, which arms the `{{SOLET_NAME}} watch` registered-presence
 # watcher (register + claim + receive, zero MCP), and the user-scope Stop
-# hook runs `{{HOMUNCULUS_NAME}} wake`, which turns deliveries into session
+# hook runs `{{SOLET_NAME}} wake`, which turns deliveries into session
 # turns on any provider.
 #
-# {{HOMUNCULUS_NAME}}_FLEET_TRANSPORT declares the fleet-coordination
+# {{SOLET_NAME}}_FLEET_TRANSPORT declares the fleet-coordination
 # transport for launched sessions ("watch" default | "mcp"), exported to
 # each session as FLEET_TRANSPORT, which the rename skill and
 # the user-scope Stop hook read. "mcp" is only meaningful where the
@@ -48,8 +48,8 @@
 # hydration's explicit-request-only step) — declared-mcp with no bridge
 # attached fails loudly in the rename skill by design; nothing silently
 # falls back. The MCP wake half is the separate development-channel flag
-# ({{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS=1 adds
-# --dangerously-load-development-channels server:{{HOMUNCULUS_NAME}});
+# ({{SOLET_NAME}}_FLEET_MCP_CHANNELS=1 adds
+# --dangerously-load-development-channels server:{{SOLET_NAME}});
 # it needs BOTH halves to function: this flag AND the registered MCP
 # server — the flag alone is inert. It also requires Anthropic-direct auth
 # (DELIVER_IMMEDIATELY channels are unavailable on Bedrock), so on a
@@ -67,12 +67,12 @@
 # IS the exemption -- no session-count probe implements it, because configuration
 # already does. Both shipped copies (Claude and Codex) read an empty value as
 # unset, so a line rendered blank is disarmed rather than half-armed. Keep this
-# line identical here and in claude-{{HOMUNCULUS_NAME}}: arming one launcher and
+# line identical here and in claude-{{SOLET_NAME}}: arming one launcher and
 # not the other creates a session class that escapes the gate by which launcher
 # started it. The gate is FAIL-OPEN when unset, so "no block happened" is not
 # evidence it is armed -- prove one real block from a non-controller session
 # before believing it (runbook Step 4a).
-_claude_for_{{HOMUNCULUS_NAME}}() {
+_claude_for_{{SOLET_NAME}}() {
   local role="$1"
   local model="$2"    # optional CLI model alias; empty = settings.json default
   local effort="$3"   # optional effort level; empty = settings.json default
@@ -80,14 +80,14 @@ _claude_for_{{HOMUNCULUS_NAME}}() {
   typeset -a extra_flags
   [[ -n "$model" ]]  && extra_flags+=(--model "$model")
   [[ -n "$effort" ]] && extra_flags+=(--effort "$effort")
-  [[ "${{{HOMUNCULUS_NAME}}_FLEET_SKIP_PERMISSIONS:-0}" == "1" ]] && extra_flags+=(--dangerously-skip-permissions)
-  [[ "${{{HOMUNCULUS_NAME}}_FLEET_MCP_CHANNELS:-0}" == "1" ]] && extra_flags+=(--dangerously-load-development-channels server:{{HOMUNCULUS_NAME}})
+  [[ "${{{SOLET_NAME}}_FLEET_SKIP_PERMISSIONS:-0}" == "1" ]] && extra_flags+=(--dangerously-skip-permissions)
+  [[ "${{{SOLET_NAME}}_FLEET_MCP_CHANNELS:-0}" == "1" ]] && extra_flags+=(--dangerously-load-development-channels server:{{SOLET_NAME}})
 
-  HOMUNCULUS_NAME="{{HOMUNCULUS_NAME}}" \
-  FLEET_TRANSPORT="${{{HOMUNCULUS_NAME}}_FLEET_TRANSPORT:-watch}" \
+  SOLET_NAME="{{SOLET_NAME}}" \
+  FLEET_TRANSPORT="${{{SOLET_NAME}}_FLEET_TRANSPORT:-watch}" \
   AGENT_SESSION_LABEL="$role" \
   AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
-  AGENT_WAKE_CLI="{{HOMUNCULUS_NAME}}" \
+  AGENT_WAKE_CLI="{{SOLET_NAME}}" \
   GIT_CONTROLLER_NAME="{{GIT_CONTROLLER_NAME}}" \
   exec claude \
       --name "$role" \
@@ -100,15 +100,15 @@ _claude_for_{{HOMUNCULUS_NAME}}() {
 # per role, substituting the function name and the role label. Role names
 # are the operator's choice; do not invent additional ones unasked.
 #
-# claude-{{HOMUNCULUS_NAME}}-coordinator() { _claude_for_{{HOMUNCULUS_NAME}} Coordinator }
+# claude-{{SOLET_NAME}}-coordinator() { _claude_for_{{SOLET_NAME}} Coordinator }
 #
 # Restart variant (kill any running session under this role label first,
 # then launch fresh in the current pane -- mirrors the single-session
 # launcher's restart shape):
 #
-# claude-{{HOMUNCULUS_NAME}}-restart-coordinator() {
+# claude-{{SOLET_NAME}}-restart-coordinator() {
 #   local pids
 #   pids="$(pgrep -f "claude .*--name Coordinator( |\$)" 2>/dev/null)"
 #   [[ -n "$pids" ]] && echo "$pids" | xargs kill 2>/dev/null && sleep 1
-#   _claude_for_{{HOMUNCULUS_NAME}} Coordinator
+#   _claude_for_{{SOLET_NAME}} Coordinator
 # }

@@ -24,22 +24,22 @@ import os
 from typing import Final
 
 
-def _homunculus_or_fail() -> str:
-    """Resolve HOMUNCULUS_NAME at import-time for scoped vault keys.
+def _solet_or_fail() -> str:
+    """Resolve SOLET_NAME at import-time for scoped vault keys.
 
-    Vault keys follow the ``<homunculus>.<plugin>.<credential>`` convention.
+    Vault keys follow the ``<solet>.<plugin>.<credential>`` convention.
     Mirrors the fast-fail helper in external_postgres_plugin.constants.
     """
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "snowflake_plugin.constants: HOMUNCULUS_NAME env var is "
+            "snowflake_plugin.constants: SOLET_NAME env var is "
             "required to resolve scoped vault keys.",
         )
     return name
 
 
-_HOMUNCULUS = _homunculus_or_fail()
+_SOLET = _solet_or_fail()
 
 # ---------------------------------------------------------------------------
 # Plugin identity
@@ -70,14 +70,14 @@ def vault_key_for_private_key() -> str:
     """Scoped vault key for the connecting user's RSA private key — CHAIN-CONSUMED.
 
     Lives in the RESOLVER's namespace
-    (``<homunculus>.default_address_book_plugin.snowflake_private_key``) so the
+    (``<solet>.default_address_book_plugin.snowflake_private_key``) so the
     address book reads it under its own identity via ``resolve_with_secrets``.
     Post-2026-06-07 vault namespace enforcement requires the key's ``<plugin>``
     segment to equal the retrieving caller, so this key is declared in NEITHER
     get_required_vault_keys nor get_declared_vault_keys (canonical:
     VAULT_AND_ADDRESS_BOOK.md).
     """
-    return f"{_HOMUNCULUS}.default_address_book_plugin.snowflake_private_key"
+    return f"{_SOLET}.default_address_book_plugin.snowflake_private_key"
 
 
 # ---------------------------------------------------------------------------

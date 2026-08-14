@@ -73,7 +73,7 @@ def _resolve_postgres_password_from_vault(
     caller-bound ``VaultServiceProxy`` injected by
     ``_inject_state_vault_service`` (startup_sequence.py) BEFORE this
     foundational plugin's pool-open; its baked-in ``CallContext`` lets the
-    own-namespace retrieve of ``<homunculus>.<plugin>.db_password`` pass vault
+    own-namespace retrieve of ``<solet>.<plugin>.db_password`` pass vault
     ``enforce_namespace``. The value is an RFC-2397 ``data:text/plain,<P>``
     entry the vault substrate decodes back to the plaintext password. Fails
     loud, NO keyring fallback.
@@ -84,13 +84,13 @@ def _resolve_postgres_password_from_vault(
             "_inject_state_vault_service must run before start_state_plugin "
             "(operator mandate: interface-only credential access).",
         )
-    homunculus = os.environ.get("HOMUNCULUS_NAME", "").strip()
-    if not homunculus:
+    solet = os.environ.get("SOLET_NAME", "").strip()
+    if not solet:
         raise RuntimeError(
-            f"{plugin_name}: HOMUNCULUS_NAME env var is required to resolve the "
-            "per-homunculus vault key for the database password.",
+            f"{plugin_name}: SOLET_NAME env var is required to resolve the "
+            "per-solet vault key for the database password.",
         )
-    password_key = f"{homunculus}.{plugin_name}.{_VAULT_PASSWORD_CREDENTIAL}"
+    password_key = f"{solet}.{plugin_name}.{_VAULT_PASSWORD_CREDENTIAL}"
     secret = vault_service.retrieve(key=password_key)
     if secret.get("action_status") != "completed":
         raise RuntimeError(
@@ -471,13 +471,13 @@ class PostgresStatePlugin(
                 if isinstance(timeout_val, int | str)
                 else 30,
             }
-            # Only include pg_schema if explicitly provided - let Pydantic default to HOMUNCULUS_NAME
+            # Only include pg_schema if explicitly provided - let Pydantic default to SOLET_NAME
             if "pg_schema" in config:
                 postgres_config_dict["pg_schema"] = str(config["pg_schema"])
             elif "schema" in config:
                 postgres_config_dict["pg_schema"] = str(config["schema"])
 
-            # database: identity-defaults to HOMUNCULUS_NAME like pg_schema (old 'ananta_db' fallback retired)
+            # database: identity-defaults to SOLET_NAME like pg_schema (old 'ananta_db' fallback retired)
             if "database" in config:
                 postgres_config_dict["database"] = str(config["database"])
 
@@ -485,7 +485,7 @@ class PostgresStatePlugin(
                 "Creating PostgresConfig with: host=%s, port=%s, database=%s",
                 postgres_config_dict["host"],
                 postgres_config_dict["port"],
-                postgres_config_dict.get("database", "<default: HOMUNCULUS_NAME>"),
+                postgres_config_dict.get("database", "<default: SOLET_NAME>"),
             )
 
             # Parse and validate configuration

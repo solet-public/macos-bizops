@@ -2,7 +2,7 @@
   "process_key": "service_interface::vault_service::import_encrypted",
   "display_name": "Import Sealed Secret",
   "description": "Decrypt a sealed-box payload and store the plaintext in the local vault. Returns ok + plaintext fingerprint.",
-  "embedding_description": "Receive sealed-box ciphertext from a peer homunculus, decrypt with local X25519 private key, store plaintext in local vault via the AES-256-GCM-at-rest path. Returns ok + one-way plaintext fingerprint to verify the transfer matches sender's. Plaintext never returned to caller. Use when accepting a credential hand-off from another homunculus.",
+  "embedding_description": "Receive sealed-box ciphertext from a peer solet, decrypt with local X25519 private key, store plaintext in local vault via the AES-256-GCM-at-rest path. Returns ok + one-way plaintext fingerprint to verify the transfer matches sender's. Plaintext never returned to caller. Use when accepting a credential hand-off from another solet.",
   "result_processor_customizations": {
     "action_label": "Secret imported (unsealed)",
     "result_type": "sealed_secret_import",

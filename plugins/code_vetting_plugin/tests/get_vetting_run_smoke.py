@@ -13,7 +13,7 @@ read report + evidence by run_id from HERE):
   * VERB ENVELOPE: get_vetting_run(known) → COMPLETED data envelope carrying the row; get_vetting_run(unknown)
     → typed ``run_not_found`` ERROR envelope (fail-loud, never an empty success); empty run_id → ``invalid_run_id``.
 
-Hermetic: a fake StateServiceProtocol backs one (namespace, table) map; no live homunculus / DB. Run directly or
+Hermetic: a fake StateServiceProtocol backs one (namespace, table) map; no live solet / DB. Run directly or
 via run_smokes.py.
 """
 

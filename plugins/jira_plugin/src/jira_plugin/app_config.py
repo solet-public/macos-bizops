@@ -3,7 +3,7 @@
 The plugin's base_url / service-account email / api_token / expires_at /
 scope_note live in a single address-book entry named ``jira_site``. The
 ``api_token`` field stores a
-``vault::<homunculus>.default_address_book_plugin.jira_api_token`` reference
+``vault::<solet>.default_address_book_plugin.jira_api_token`` reference
 (the secret lives in the RESOLVER's namespace so the address book reads it under
 its own identity — see :data:`constants.VAULT_KEY_API_TOKEN`); every other field
 is a literal. ``resolve_with_secrets`` swaps the vault reference before

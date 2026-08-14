@@ -159,7 +159,7 @@ class ValidationService:
 
         Plugins implementing a typed ABC contract (e.g. ``MidwifeServiceInterface``)
         often split the verb across two methods: the typed implementation under
-        the contract name (e.g. ``birth_homunculus`` taking typed kwargs) and a
+        the contract name (e.g. ``birth_solet`` taking typed kwargs) and a
         ``@platform_process``-decorated dispatch wrapper under the convention
         ``<verb>_action`` (taking the standard ``(params, state)`` shape). The
         process_key parses to the verb name; before the exclusive

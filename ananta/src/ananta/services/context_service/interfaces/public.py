@@ -8,7 +8,7 @@ Phase 2 of the coding-agent substrate plan: a retrieval/provenance-first briefin
 API. ``assemble_agent_context`` hands a frontier agent the grounding a Qwen prompt
 would have gotten — process catalog, plan state, guidance, support articles, the
 answer contract — as STRUCTURED DATA with provenance, so the agent can request
-grounding without asking the homunculus to think for it. It NEVER calls an inference
+grounding without asking the solet to think for it. It NEVER calls an inference
 provider; no local model is required.
 """
 

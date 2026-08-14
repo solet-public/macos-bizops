@@ -10,34 +10,34 @@ BIRTH-ONLY since the 2026-07-20 split ruling: the seed FACTORY verbs
 (`assemble_seed`/`validate_and_seal_seed_bundle`/`publish_seed`) moved to the
 new origin-only `seed_factory_plugin`. This plugin is the BIRTH SPINE — it ships
 in every seed so a downloaded seed can come alive, and it exposes exactly one
-EDGE verb, `birth_homunculus`. The bootstrap handoff target
+EDGE verb, `birth_solet`. The bootstrap handoff target
 (`python -m github_midwife_plugin.genesis`) is unchanged.
 
-Dual-use (design doc §2): the SAME `birth_homunculus` verb serves two
+Dual-use (design doc §2): the SAME `birth_solet` verb serves two
 callers —
   1. `genesis.py`'s CLI entrypoint calls `run_genesis()` directly
      (no EDGE dispatch) against the CURRENT clone (`bootstrap.py`'s
      handoff case).
-  2. This EDGE verb, callable from an ALREADY-RUNNING homunculus, completes
+  2. This EDGE verb, callable from an ALREADY-RUNNING solet, completes
      genesis against an EXISTING clone at `environment_config["target"]`
      (a seed folder from `assemble_seed`, or any clone). Acquisition mode --
      cloning a pinned upstream into an absent/empty target -- was RETIRED
      2026-07-18; the Seed Factory replaces it (assemble a seed, then birth
      it). `provision_venv=True` selects the §7 birth variant that builds the
      source-only seed folder's `.venv` explicitly before genesis; the
-     `mint_and_birth_local` joseki chains `assemble_seed` -> `birth_homunculus`
+     `mint_and_birth_local` joseki chains `assemble_seed` -> `birth_solet`
      that way.
 
-Per-homunculus credential isolation (operator override, 2026-07-12): each
-homunculus has its OWN non-superuser role (name = HOMUNCULUS_NAME) and its
-OWN password; no credential ever crosses a homunculus namespace. Verb-mode
+Per-solet credential isolation (operator override, 2026-07-12): each
+solet has its OWN non-superuser role (name = SOLET_NAME) and its
+OWN password; no credential ever crosses a solet namespace. Verb-mode
 genesis runs in the PARENT's process, but the credential must land in the
 NEWBORN's own Keychain namespace, so it does NOT call
 `credential_seed.seed_db_password` in-process (that would bind the PARENT's
 namespace). Instead it builds a `credential_provisioner` closure that: (1)
 pre-seed scram-verifies the newborn's db, (2) runs
 `venv_provision.seed_newborn_credential` -- a subprocess in the newborn's OWN
-venv (HOMUNCULUS_NAME=<newborn>) that self-seeds the newborn's OWN role via
+venv (SOLET_NAME=<newborn>) that self-seeds the newborn's OWN role via
 the same `seed_db_password` path the CLI uses -- and (3) post-seed proves the
 newborn's role cannot reach the parent's db (isolation self-proof). There is
 no parent-provisions-child credential copy. Only the CLI path
@@ -95,7 +95,7 @@ _PROFILE_TEMPLATE_PARAM = ParameterMetadata(
     description=(
         "Profile template the newborn boots under (resolves against this "
         "plugin's knowledge_base/profile_templates/<name>.yaml, e.g. "
-        "'macos-free-homunculus')."
+        "'macos-free-solet')."
     ),
     required=True,
     type=ParameterType.STRING,
@@ -108,9 +108,9 @@ _ENVIRONMENT_CONFIG_PARAM = ParameterMetadata(
         "Acquisition mode (cloning a pinned upstream into an absent/empty "
         "target) was RETIRED 2026-07-18 -- the Seed Factory replaces it, so an "
         "absent/empty target raises a validation error (assemble a seed into "
-        "it first). The newborn SELF-SEEDS its own per-homunculus role's "
+        "it first). The newborn SELF-SEEDS its own per-solet role's "
         "credential in its own Keychain namespace via a subprocess in its own "
-        "venv -- no credential ever crosses a homunculus namespace (per-role "
+        "venv -- no credential ever crosses a solet namespace (per-role "
         "isolation, 2026-07-12). A non-empty target that is not a valid clone "
         "raises a validation error (refuses to guess or clobber). Standard mode "
         "requires a pre-existing <target>/.venv; pass provision_venv=True (the "
@@ -148,14 +148,14 @@ _PROVISION_VENV_PARAM = ParameterMetadata(
 def _birth_return_schema() -> ReturnValueSchema:
     return ReturnValueSchema(
         type=ParameterType.OBJECT,
-        description="birth_homunculus outcome envelope.",
+        description="birth_solet outcome envelope.",
         properties={
             "status": ParameterMetadata(type=ParameterType.STRING, description="."),
-            "homunculus_name": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "solet_name": ParameterMetadata(type=ParameterType.STRING, description="."),
             "idempotency_key": ParameterMetadata(type=ParameterType.STRING, description="."),
             "dry_run": ParameterMetadata(type=ParameterType.BOOLEAN, description="."),
             "steps": ParameterMetadata(type=ParameterType.LIST, description="."),
-            "new_homunculus_endpoint": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "new_solet_endpoint": ParameterMetadata(type=ParameterType.STRING, description="."),
             "manifest_path": ParameterMetadata(type=ParameterType.STRING, description="."),
             "iam_roles_created": ParameterMetadata(type=ParameterType.LIST, description="."),
             "rds_endpoint": ParameterMetadata(type=ParameterType.STRING, description="."),
@@ -173,7 +173,7 @@ def _compute_idempotency_key(
 
 
 class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterface):
-    """GitHub-genesis midwife — births a homunculus from a public clone."""
+    """GitHub-genesis midwife — births a solet from a public clone."""
 
     name: str = _PLUGIN_NAME
 
@@ -213,8 +213,8 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
         # (side-effecting genesis). The seed-factory verbs moved to
         # seed_factory_plugin (2026-07-20 split) -- this plugin is birth-only.
         return {
-            "birth_homunculus": EdgeProcessDefinition(
-                name="birth_homunculus",
+            "birth_solet": EdgeProcessDefinition(
+                name="birth_solet",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(
                 ),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
@@ -225,7 +225,7 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
 
     # ── Interface verb ───────────────────────────────────────────────
 
-    def birth_homunculus(
+    def birth_solet(
         self,
         *,
         name: str,
@@ -253,7 +253,7 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
         target_raw = environment_config.get("target")
         if not target_raw:
             raise ValueError(
-                "github_midwife_plugin.birth_homunculus requires "
+                "github_midwife_plugin.birth_solet requires "
                 "environment_config['target'] (an existing seed/clone directory "
                 "-- assemble a seed into it first if it does not exist yet)."
             )
@@ -263,11 +263,11 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
         if dry_run:
             return BirthResult(
                 status=BirthStatus.DRY_RUN,
-                homunculus_name=name,
+                solet_name=name,
                 idempotency_key=idempotency_key,
                 dry_run=True,
                 steps=(),
-                new_homunculus_endpoint="",
+                new_solet_endpoint="",
                 manifest_path="",
                 iam_roles_created=(),
                 rds_endpoint="",
@@ -283,11 +283,11 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
         except (GenesisError, venv_provision.VerbModeProvisionError) as exc:
             return BirthResult(
                 status=BirthStatus.FAILED,
-                homunculus_name=name,
+                solet_name=name,
                 idempotency_key=idempotency_key,
                 dry_run=False,
                 steps=(),
-                new_homunculus_endpoint="",
+                new_solet_endpoint="",
                 manifest_path="",
                 iam_roles_created=(),
                 rds_endpoint="",
@@ -299,11 +299,11 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
         manifest_step = next((s for s in steps if s.get("step_name") == "write_manifest_marker"), {})
         return BirthResult(
             status=BirthStatus.SUCCESS,
-            homunculus_name=name,
+            solet_name=name,
             idempotency_key=idempotency_key,
             dry_run=False,
             steps=steps,
-            new_homunculus_endpoint="",
+            new_solet_endpoint="",
             manifest_path=str(manifest_step.get("manifest_path", "")),
             iam_roles_created=(),
             rds_endpoint="",
@@ -326,7 +326,7 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
         """
         if venv_provision.probe_target_absent_or_empty(target):
             raise ValueError(
-                f"{target} is absent or empty -- birth_homunculus no longer "
+                f"{target} is absent or empty -- birth_solet no longer "
                 "clones a pinned upstream (acquisition mode retired 2026-07-18); "
                 "assemble a seed into it first (assemble_seed / mint_and_birth_local)."
             )
@@ -351,17 +351,17 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
             # Genesis SKIPS venv/seed here by contract.
             newborn_venv = target / ".venv"
 
-        # Per-homunculus credential isolation (operator override, 2026-07-12):
+        # Per-solet credential isolation (operator override, 2026-07-12):
         # the newborn seeds its OWN role in its OWN Keychain namespace -- no
         # credential crosses a namespace, no shared role. Verb-mode genesis runs
         # in the PARENT's process, so the seed runs as a subprocess in the
-        # newborn's OWN venv (HOMUNCULUS_NAME=<newborn>). The sibling database
+        # newborn's OWN venv (SOLET_NAME=<newborn>). The sibling database
         # the newborn must prove it is isolated FROM is the parent's own db ==
-        # the parent's HOMUNCULUS_NAME (this verb runs in the parent's process).
-        parent_db = os.environ.get("HOMUNCULUS_NAME", "").strip()
+        # the parent's SOLET_NAME (this verb runs in the parent's process).
+        parent_db = os.environ.get("SOLET_NAME", "").strip()
         if not parent_db:
             raise GenesisError(
-                "HOMUNCULUS_NAME is not set in the birthing (parent) process -- "
+                "SOLET_NAME is not set in the birthing (parent) process -- "
                 "cannot determine the sibling database the newborn must prove it "
                 "is isolated from."
             )
@@ -415,7 +415,7 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
     # ── Action-method wrapper ────────────────────────────────────────
 
     @platform_process(
-        name="birth_homunculus",
+        name="birth_solet",
         context_handling=ContextHandling.NONE,
         parameters={
             "name": _NAME_PARAM,
@@ -431,7 +431,7 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
         is_long_running=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
     )
-    def birth_homunculus_action(
+    def birth_solet_action(
         self,
         params: dict[str, Any],
         state: dict[str, Any],
@@ -443,7 +443,7 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
             return self._error_envelope(code, message)
 
         try:
-            result = self.birth_homunculus(
+            result = self.birth_solet(
                 name=str(params.get("name") or ""),
                 profile_template=str(params.get("profile_template") or ""),
                 environment_config=self._coerce_environment_config(params),
@@ -453,8 +453,8 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
         except ValueError as err:
             return self._error_envelope("invalid_environment_config", str(err))
         except Exception as err:  # noqa: BLE001 -- return structured failure
-            self.logger.exception("birth_homunculus crashed")
-            return self._error_envelope("birth_homunculus_crashed", str(err))
+            self.logger.exception("birth_solet crashed")
+            return self._error_envelope("birth_solet_crashed", str(err))
         return self._success_envelope(self._birth_result_to_dict(result))
 
     # ── Helpers ──────────────────────────────────────────────────────
@@ -462,9 +462,9 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
     @staticmethod
     def _validate_action_params(params: dict[str, Any]) -> tuple[str, str] | None:
         if not params.get("name"):
-            return "missing_name", "birth_homunculus requires 'name'."
+            return "missing_name", "birth_solet requires 'name'."
         if not params.get("profile_template"):
-            return "missing_profile_template", "birth_homunculus requires 'profile_template'."
+            return "missing_profile_template", "birth_solet requires 'profile_template'."
         return None
 
     @staticmethod
@@ -476,11 +476,11 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
     def _birth_result_to_dict(result: BirthResult) -> dict[str, Any]:
         return {
             "status": result.status.value,
-            "homunculus_name": result.homunculus_name,
+            "solet_name": result.solet_name,
             "idempotency_key": result.idempotency_key,
             "dry_run": result.dry_run,
             "steps": list(result.steps),
-            "new_homunculus_endpoint": result.new_homunculus_endpoint,
+            "new_solet_endpoint": result.new_solet_endpoint,
             "manifest_path": result.manifest_path,
             "iam_roles_created": list(result.iam_roles_created),
             "rds_endpoint": result.rds_endpoint,

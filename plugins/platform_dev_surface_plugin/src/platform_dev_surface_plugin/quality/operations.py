@@ -6,7 +6,7 @@ bounded output). No caller-supplied path/argv/flag ever reaches the shell —
 the gate/smoke NAME is the only caller input, and it is validated against the
 server-side registry / register before any subprocess runs.
 
-``HOMUNCULUS_NAME`` is passed through explicitly on every run: the god-class
+``SOLET_NAME`` is passed through explicitly on every run: the god-class
 gate imports in-scope modules whose vault-scoped constants fail loud without
 it (KB ``22_testing/03``).
 """
@@ -48,11 +48,11 @@ def _last_meaningful_line(output: str) -> str:
 
 
 class QualityOperations:
-    """Bind the quality verbs to a concrete repo root + homunculus identity."""
+    """Bind the quality verbs to a concrete repo root + solet identity."""
 
-    def __init__(self, repo_root: Path, homunculus_name: str) -> None:
+    def __init__(self, repo_root: Path, solet_name: str) -> None:
         self._repo_root = repo_root
-        self._homunculus_name = homunculus_name
+        self._solet_name = solet_name
         self._venv_python = repo_root / ".venv" / "bin" / "python3"
         if not self._venv_python.exists():
             raise FileNotFoundError(
@@ -61,7 +61,7 @@ class QualityOperations:
             )
 
     def _env(self) -> dict[str, str]:
-        return {"HOMUNCULUS_NAME": self._homunculus_name}
+        return {"SOLET_NAME": self._solet_name}
 
     def _read_smoke_register(self) -> list[str]:
         """Parse ``gate_smokes.txt`` into repo-relative smoke paths (# comments out)."""

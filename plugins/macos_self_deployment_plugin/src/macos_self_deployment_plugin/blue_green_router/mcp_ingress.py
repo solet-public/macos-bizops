@@ -1,6 +1,6 @@
-"""Stable local MCP ingress for one homunculus.
+"""Stable local MCP ingress for one solet.
 
-The local blue-green router owns ``<homunculus>.router.port`` and may be
+The local blue-green router owns ``<solet>.router.port`` and may be
 reinstalled on a different dynamic port. MCP clients should not need to know
 that. This ingress binds one stable loopback port and resolves the current
 router port from the runtime file for each new TCP connection.
@@ -17,7 +17,7 @@ import sys
 from collections.abc import Iterable
 from pathlib import Path
 
-from .service_install import RUNTIME_DIR, validate_homunculus_name
+from .service_install import RUNTIME_DIR, validate_solet_name
 
 logger = logging.getLogger("local_blue_green.mcp_ingress")
 
@@ -27,12 +27,12 @@ BUFFER_SIZE = 65536
 UPSTREAM_CONNECT_TIMEOUT_SECONDS = 3.0
 
 
-def router_port_file_path(homunculus: str, runtime_dir: Path = RUNTIME_DIR) -> Path:
-    return runtime_dir / f"{homunculus}.router.port"
+def router_port_file_path(solet: str, runtime_dir: Path = RUNTIME_DIR) -> Path:
+    return runtime_dir / f"{solet}.router.port"
 
 
-def ingress_port_file_path(homunculus: str, runtime_dir: Path = RUNTIME_DIR) -> Path:
-    return runtime_dir / f"{homunculus}.mcp_ingress.port"
+def ingress_port_file_path(solet: str, runtime_dir: Path = RUNTIME_DIR) -> Path:
+    return runtime_dir / f"{solet}.mcp_ingress.port"
 
 
 def _write_port_file(path: Path, port: int) -> None:
@@ -115,14 +115,14 @@ async def handle_connection(
 
 async def start_ingress_server(
     *,
-    homunculus: str,
+    solet: str,
     listen_host: str,
     listen_port: int,
     router_port_file: Path | None = None,
     ingress_port_file: Path | None = None,
 ) -> asyncio.AbstractServer:
-    validate_homunculus_name(homunculus)
-    port_file = router_port_file or router_port_file_path(homunculus)
+    validate_solet_name(solet)
+    port_file = router_port_file or router_port_file_path(solet)
     server = await asyncio.start_server(
         lambda reader, writer: handle_connection(
             reader,
@@ -141,24 +141,24 @@ async def start_ingress_server(
 
 async def run_ingress(
     *,
-    homunculus: str,
+    solet: str,
     listen_host: str,
     listen_port: int,
     router_port_file: Path | None = None,
     ingress_port_file: Path | None = None,
 ) -> None:
     server = await start_ingress_server(
-        homunculus=homunculus,
+        solet=solet,
         listen_host=listen_host,
         listen_port=listen_port,
         router_port_file=router_port_file,
-        ingress_port_file=ingress_port_file or ingress_port_file_path(homunculus),
+        ingress_port_file=ingress_port_file or ingress_port_file_path(solet),
     )
     sockets = server.sockets or ()
     bound = ", ".join(str(sock.getsockname()) for sock in sockets)
     logger.info(
-        "mcp ingress listening for homunculus=%s on %s",
-        homunculus,
+        "mcp ingress listening for solet=%s on %s",
+        solet,
         bound or f"{listen_host}:{listen_port}",
     )
     async with server:
@@ -183,7 +183,7 @@ async def _amain(args: argparse.Namespace) -> int:
     _install_signal_handlers(loop)
     try:
         await run_ingress(
-            homunculus=args.homunculus,
+            solet=args.solet,
             listen_host=args.listen_host,
             listen_port=args.listen_port,
             router_port_file=args.router_port_file,
@@ -199,10 +199,10 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
         prog="mcp_ingress",
         description=(
             "Bind a stable loopback MCP ingress and forward each connection "
-            "to the current <homunculus>.router.port."
+            "to the current <solet>.router.port."
         ),
     )
-    parser.add_argument("--homunculus", required=True, help="Homunculus name, e.g. iris.")
+    parser.add_argument("--solet", required=True, help="Solet name, e.g. iris.")
     parser.add_argument(
         "--listen-host",
         default=DEFAULT_LISTEN_HOST,
@@ -221,7 +221,7 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
         "--router-port-file",
         type=Path,
         default=None,
-        help="Override <homunculus>.router.port path, used by smoke tests.",
+        help="Override <solet>.router.port path, used by smoke tests.",
     )
     parser.add_argument(
         "--ingress-port-file",
@@ -229,7 +229,7 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
         default=None,
         help=(
             "Where to publish the bound ingress port "
-            "(default: ~/.ananta/runtime/<homunculus>.mcp_ingress.port)."
+            "(default: ~/.ananta/runtime/<solet>.mcp_ingress.port)."
         ),
     )
     return parser.parse_args(list(argv))

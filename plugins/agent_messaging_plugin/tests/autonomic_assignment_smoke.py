@@ -32,7 +32,7 @@ The ★ flip-assertion (vacancy→DEFER, never LOCAL) lives core-side in
 ``ananta/src/ananta/services/inference_service/tests/autonomic_flip_smoke.py``.
 
 Run from repo root:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/autonomic_assignment_smoke.py
 """
 

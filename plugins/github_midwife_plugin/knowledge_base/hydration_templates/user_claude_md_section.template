@@ -1,7 +1,7 @@
-<!-- BEGIN HOMUNCULUS {{HOMUNCULUS_NAME}} v1 -->
-When `{{HOMUNCULUS_NAME}}` is available on PATH, a knowledge-base search is the normal first step for non-trivial work:
+<!-- BEGIN SOLET {{SOLET_NAME}} v1 -->
+When `{{SOLET_NAME}}` is available on PATH, a knowledge-base search is the normal first step for non-trivial work:
 
 ```sh
-{{HOMUNCULUS_NAME}} call service_interface::knowledge_service::search '{"query": "session start orientation", "top_k": 8}'
+{{SOLET_NAME}} call service_interface::knowledge_service::search '{"query": "session start orientation", "top_k": 8}'
 ```
-<!-- END HOMUNCULUS {{HOMUNCULUS_NAME}} -->
+<!-- END SOLET {{SOLET_NAME}} -->

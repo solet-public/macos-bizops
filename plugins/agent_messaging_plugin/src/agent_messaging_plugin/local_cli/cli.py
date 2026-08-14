@@ -1,6 +1,6 @@
-"""`homunculus` — invoke a running homunculus over its localhost bridge (no MCP).
+"""`solet` — invoke a running solet over its localhost bridge (no MCP).
 
-Every command discovers THIS homunculus's bridge port from the CLI's own
+Every command discovers THIS solet's bridge port from the CLI's own
 install location (never a flag or ambient env), opens a one-shot bridge
 session, performs the operation, prints the JSON result to stdout, and closes.
 Errors go to stderr with a mapped exit code.
@@ -40,11 +40,11 @@ from .client import (
     BridgeCallError,
     BridgeClient,
     BridgeResultTimeoutError,
-    HomunculusIdentityError,
-    HomunculusNotRunningError,
     RoleClaimRejectedError,
+    SoletIdentityError,
+    SoletNotRunningError,
     resolve_base_url,
-    resolve_homunculus_name,
+    resolve_solet_name,
 )
 from .spool import (
     WATCH_SESSION_ID_ENV,
@@ -61,7 +61,7 @@ from .spool import (
 )
 from .wake import wake
 
-# watch: reconnect backoff after a transient bridge error / homunculus-down /
+# watch: reconnect backoff after a transient bridge error / solet-down /
 # bridge rotation (blue-green swap 404, idle-reap). Kept short so a swap gap is
 # a blip, not a stall; the loop is silent while waiting, so it wakes no model.
 WATCH_RECONNECT_DELAY_S: Final[float] = 2.0
@@ -138,7 +138,7 @@ def _emit(payload: dict[str, Any]) -> None:
 
 
 def _die(message: str, code: ExitCodes) -> NoReturn:
-    click.echo(f"homunculus: {message}", err=True)
+    click.echo(f"solet: {message}", err=True)
     raise SystemExit(int(code))
 
 
@@ -170,10 +170,10 @@ def _caller_agent_session_id() -> str:
 
 
 def _run(fn: Callable[[BridgeClient], dict[str, Any]]) -> dict[str, Any]:
-    """Open a bridge for THIS homunculus, run ``fn`` against it, map failures."""
+    """Open a bridge for THIS solet, run ``fn`` against it, map failures."""
     try:
         base_url = resolve_base_url()
-    except (HomunculusNotRunningError, HomunculusIdentityError) as exc:
+    except (SoletNotRunningError, SoletIdentityError) as exc:
         _die(str(exc), ExitCodes.CONNECTION_ERROR)
     try:
         with BridgeClient(
@@ -181,7 +181,7 @@ def _run(fn: Callable[[BridgeClient], dict[str, Any]]) -> dict[str, Any]:
         ) as client:
             return fn(client)
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-        _die(f"cannot reach the homunculus bridge at {base_url}: {exc}",
+        _die(f"cannot reach the solet bridge at {base_url}: {exc}",
              ExitCodes.CONNECTION_ERROR)
     except BridgeResultTimeoutError as exc:
         _die(str(exc), ExitCodes.TIMEOUT_ERROR)
@@ -190,9 +190,9 @@ def _run(fn: Callable[[BridgeClient], dict[str, Any]]) -> dict[str, Any]:
 
 
 @click.group()
-@click.version_option(__version__, prog_name="homunculus")
+@click.version_option(__version__, prog_name="solet")
 def cli() -> None:
-    """Invoke this homunculus's capabilities over its localhost bridge (no MCP)."""
+    """Invoke this solet's capabilities over its localhost bridge (no MCP)."""
 
 
 @cli.command()
@@ -267,16 +267,16 @@ def result(action_id: str, wait: bool, timeout_s: float) -> None:
 
 @cli.command()
 def health() -> None:
-    """Check whether the homunculus bridge is answering."""
+    """Check whether the solet bridge is answering."""
     try:
         base_url = resolve_base_url()
-    except (HomunculusNotRunningError, HomunculusIdentityError) as exc:
+    except (SoletNotRunningError, SoletIdentityError) as exc:
         _die(str(exc), ExitCodes.CONNECTION_ERROR)
     client = BridgeClient(base_url)
     try:
         payload = client.health()
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-        _die(f"cannot reach the homunculus bridge at {base_url}: {exc}",
+        _die(f"cannot reach the solet bridge at {base_url}: {exc}",
              ExitCodes.CONNECTION_ERROR)
     except httpx.HTTPError as exc:
         _die(str(exc), ExitCodes.EXTERNAL_ERROR)
@@ -369,13 +369,13 @@ def watch(
     """
     identity = _resolve_watch_identity(role, agent_id)
     try:
-        homunculus_name = resolve_homunculus_name()
+        solet_name = resolve_solet_name()
         # W1 (§34.3): become the session's singleton BEFORE any network traffic,
         # so a refused second arm never touches the registry. The handle is bound
         # to a module-level name for the process lifetime — letting it be garbage
         # collected would close the fd and silently release the flock.
         _acquire_watch_singleton(
-            watch_singleton_lock_path(homunculus_name, identity.agent_instance_id),
+            watch_singleton_lock_path(solet_name, identity.agent_instance_id),
         )
         # W2 (§34.1): SIGTERM must unwind rather than terminate, so the
         # `with BridgeClient(...)` below reaches close() -> /close -> unregister
@@ -385,14 +385,14 @@ def watch(
         _install_sigterm_unwind()
         spool = None if no_spool else (
             spool_path
-            or default_spool_path(homunculus_name, identity.agent_instance_id)
+            or default_spool_path(solet_name, identity.agent_instance_id)
         )
         # Census D4: publish the choice so the wake half pairs with the spool
         # this watcher ACTUALLY uses, not the one it would derive on its own.
         # Written before the first arm so a wake hook firing in the gap reads a
         # current answer rather than a stale predecessor's.
         write_watch_pairing(
-            watch_pairing_path(homunculus_name, identity.agent_instance_id),
+            watch_pairing_path(solet_name, identity.agent_instance_id),
             spool,
         )
         # Marks are keyed on SESSION identity, never on the spool path: a
@@ -407,11 +407,11 @@ def watch(
         _watch_forever(
             identity,
             spool,
-            watch_marks_path(homunculus_name, identity.agent_instance_id),
+            watch_marks_path(solet_name, identity.agent_instance_id),
             exit_with_parent,
             **watch_kwargs,
         )
-    except HomunculusIdentityError as exc:
+    except SoletIdentityError as exc:
         _die(str(exc), ExitCodes.CONNECTION_ERROR)
     except KeyboardInterrupt:
         raise SystemExit(0) from None
@@ -541,7 +541,7 @@ def _watch_forever(
     """Reconnect loop: (re)discover the bridge, re-arm, and stream until drop.
 
     The parent check sits here as well as inside the stream loop so a parent
-    that dies while the homunculus is DOWN — i.e. while this loop is doing
+    that dies while the solet is DOWN — i.e. while this loop is doing
     nothing but backing off — is still noticed.
     """
     while True:
@@ -549,7 +549,7 @@ def _watch_forever(
             raise SystemExit(0)
         try:
             base_url = resolve_base_url()
-        except HomunculusNotRunningError:
+        except SoletNotRunningError:
             time.sleep(WATCH_RECONNECT_DELAY_S)
             continue
         try:

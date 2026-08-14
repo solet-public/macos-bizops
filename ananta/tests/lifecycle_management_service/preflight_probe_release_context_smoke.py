@@ -17,7 +17,7 @@ Two divergent copies of the same fixture package exist side by side:
   GREEN — the probe cannot be reading the broken sibling.
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 ananta/tests/lifecycle_management_service/preflight_probe_release_context_smoke.py
+    SOLET_NAME=<name> .venv/bin/python3 ananta/tests/lifecycle_management_service/preflight_probe_release_context_smoke.py
 """
 
 from __future__ import annotations

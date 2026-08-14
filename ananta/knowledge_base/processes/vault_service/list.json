@@ -2,7 +2,7 @@
   "process_key": "service_interface::vault_service::list",
   "display_name": "List Secrets",
   "description": "List secret keys and metadata (NEVER values). Optionally filter by tag.",
-  "embedding_description": "Vault: list stored secrets — metadata only, NEVER values. Enumerates keys + tags + metadata + version of every credential / password / OAuth client_secret / API key / refresh+bearer token. Does NOT require unlocking (metadata is unencrypted). Optional tag filter narrows the subset. Use to inventory credentials the homunculus holds.",
+  "embedding_description": "Vault: list stored secrets — metadata only, NEVER values. Enumerates keys + tags + metadata + version of every credential / password / OAuth client_secret / API key / refresh+bearer token. Does NOT require unlocking (metadata is unencrypted). Optional tag filter narrows the subset. Use to inventory credentials the solet holds.",
   "result_processor_customizations": {
     "action_label": "Secrets listed",
     "result_type": "secrets_listed",

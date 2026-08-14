@@ -19,7 +19,7 @@ planted error (the fix). Positive control: with healthy source the
 probe is GREEN.
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 ananta/tests/lifecycle_management_service/preflight_probe_cache_poison_smoke.py
+    SOLET_NAME=<name> .venv/bin/python3 ananta/tests/lifecycle_management_service/preflight_probe_cache_poison_smoke.py
 """
 
 from __future__ import annotations

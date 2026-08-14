@@ -80,8 +80,8 @@ def _venv_python() -> Path:
     return candidate
 
 
-def _require_homunculus_name() -> str:
-    """Fail closed ONCE, here, when ``HOMUNCULUS_NAME`` is unset.
+def _require_solet_name() -> str:
+    """Fail closed ONCE, here, when ``SOLET_NAME`` is unset.
 
     Many smokes resolve the platform identity at import time and fail closed
     without it, so an unset variable turns a suite run into a wall of unrelated
@@ -95,13 +95,13 @@ def _require_homunculus_name() -> str:
     genesis (bootstrap.py), and duplicating the pattern here would be the same
     divergence in another form.
     """
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "HOMUNCULUS_NAME env var is required -- it is this homunculus's "
-            "database name (database per homunculus, named after it). The "
+            "SOLET_NAME env var is required -- it is this solet's "
+            "database name (database per solet, named after it). The "
             "driving agent must export it before running the smoke suite: "
-            "HOMUNCULUS_NAME=<name> .venv/bin/python3 quality_gates/run_smokes.py"
+            "SOLET_NAME=<name> .venv/bin/python3 quality_gates/run_smokes.py"
         )
     return name
 
@@ -228,7 +228,7 @@ def main() -> int:
     if args.list:
         print("\n".join(entries))
         return 0
-    _require_homunculus_name()
+    _require_solet_name()
     skipped, failures, missing = _run_suite(_venv_python(), entries, args.timeout)
     return _summarize(
         len(entries), skipped, failures, missing, fail_on_skip=args.fail_on_skip,

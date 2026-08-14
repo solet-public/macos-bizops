@@ -1,7 +1,7 @@
 """Newline-delimited JSON RPC server over a Unix-domain socket.
 
 The mgmt plane is the control-plane surface the deployment plugin
-and the spawned homunculus children talk to. Localhost-only by virtue of
+and the spawned solet children talk to. Localhost-only by virtue of
 being a Unix socket; the authn boundary is filesystem permissions
 (0600, owner-only).
 

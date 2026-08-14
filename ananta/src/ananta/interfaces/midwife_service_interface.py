@@ -1,10 +1,10 @@
-"""Midwife service interface — birth a new homunculus from zero-state.
+"""Midwife service interface — birth a new solet from zero-state.
 
 Lifecycle's birth verb. Implemented by environment-specific plugins:
 ``aws_midwife_plugin`` for cloud (Step 4 of the matrix design);
 ``macos_midwife_plugin`` for the operator's local box (Step 6 future
 work). The verb takes a name + a profile template + a backend-specific
-``environment_config`` bag and provisions every per-homunculus resource
+``environment_config`` bag and provisions every per-solet resource
 the newborn needs to boot + reach + serve.
 
 Per the D1 architectural mandate
@@ -48,12 +48,12 @@ from ananta.interfaces.lifecycle_result_types import BirthResult, ImageBuildResu
 
 
 class MidwifeServiceInterface(ABC):
-    """Bring a new homunculus from zero-state to live + reachable."""
+    """Bring a new solet from zero-state to live + reachable."""
 
     INTERFACE_VERSION: ClassVar[str] = "1.0.0"
 
     @abstractmethod
-    def birth_homunculus(
+    def birth_solet(
         self,
         *,
         name: str,
@@ -61,7 +61,7 @@ class MidwifeServiceInterface(ABC):
         environment_config: dict[str, Any],
         dry_run: bool = False,
     ) -> BirthResult:
-        """Provision every per-homunculus resource the newborn needs.
+        """Provision every per-solet resource the newborn needs.
 
         Contract:
 
@@ -111,7 +111,7 @@ class MidwifeServiceInterface(ABC):
             :class:`BirthResult` carrying the terminal status, the
             audit-trail manifest path, IAM role ARNs created, RDS +
             KMS identifiers (for subsequent teardown discovery), the
-            new homunculus's HTTPS endpoint, and a per-step audit
+            new solet's HTTPS endpoint, and a per-step audit
             log.
         """
 
@@ -133,7 +133,7 @@ class MidwifeServiceInterface(ABC):
           mechanism, and returns the resulting image URI/digest.
 
         - The caller passes the returned ``image_uri`` into
-          ``birth_homunculus`` via ``environment_config``. The build
+          ``birth_solet`` via ``environment_config``. The build
           verb does not birth or mutate newborn infrastructure beyond
           the image-build staging/build resources.
 
@@ -142,7 +142,7 @@ class MidwifeServiceInterface(ABC):
           image.
 
         Args:
-            newborn_name: Homunculus name whose image is being built.
+            newborn_name: Solet name whose image is being built.
             image_tag: Operator-selected version token for the build.
             profile_template: Profile template controlling source
                 filtering and build inputs. Defaults to ``"cloud"``.

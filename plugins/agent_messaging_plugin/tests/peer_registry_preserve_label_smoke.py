@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Slice A smoke: PeerRegistry preserves ``session_label`` across a homunculus restart.
+"""Slice A smoke: PeerRegistry preserves ``session_label`` across a solet restart.
 
 Verifies the read-before-delete contract from
 ``workbench/2026-06-01_local_reconnect_ux_design.md`` §4.2:
@@ -91,7 +91,7 @@ def test_preserve_label_on_empty_reregister() -> None:
     )
     print("  pre-restart: Coordinator label persisted")
 
-    # 2. Simulate a homunculus restart: drop the old registry, rebuild over the SAME
+    # 2. Simulate a solet restart: drop the old registry, rebuild over the SAME
     # store (the persistence boundary that postgres would survive across).
     del registry_before_restart
     registry_after_restart = PeerRegistry(bindings_store=store)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit smoke for v10 Control #5 drain-row serialization (no DB, no live homunculus).
+"""Unit smoke for v10 Control #5 drain-row serialization (no DB, no live solet).
 
 Pins the server-side ``/peer/drain`` projection — in particular the IMPORTANT-
 marker-strip PARITY: ``persist_role_message`` stores the ORIGINAL content (the

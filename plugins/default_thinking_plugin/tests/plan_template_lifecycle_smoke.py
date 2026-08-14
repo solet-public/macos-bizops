@@ -31,7 +31,7 @@ Covers:
 * DONE-WHEN: a transitioned card round-trips through parse_template_card with
   the new front-matter state
 
-Offline: no live homunculus, no LM Studio, no Postgres, no state table.
+Offline: no live solet, no LM Studio, no Postgres, no state table.
 
 Run:
     .venv/bin/python3 \\

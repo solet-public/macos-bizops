@@ -7,10 +7,10 @@ article_path: knowledge_bases/github_midwife_plugin/05_seed_update_runbook.md
 consumer_profile: both
 
 target_queries:
-  - "update a live homunculus from a newer seed release"
+  - "update a live solet from a newer seed release"
   - "seed update runbook git pull fast forward re-mint"
   - "do I need to rebuild the venv after pulling a seed update"
-  - "apply a new seed version without losing homunculus state"
+  - "apply a new seed version without losing solet state"
   - "seed update added a new plugin but it is not active"
   - "shipped hook fix but the installed claude code plugin still runs the old version"
   - "verify installed claude plugin cache matches the pulled deployment source"
@@ -18,12 +18,16 @@ target_queries:
   - "how to force claude code to re-copy a plugin without bumping its version"
   - "does this release fix business connectors putting records in agent context"
   - "business connector reads fail loud after updating, no workspace root configured"
-  - "configure export root on an already-hydrated homunculus"
+  - "configure export root on an already-hydrated solet"
   - "should I use apply_manifest or launchctl to restart after a seed update"
   - "seed update removed knowledge base articles but old content still shows up in search"
   - "purge indexed knowledge base chunks for files a seed release deleted"
+  - "the seed repository moved how do I point my clone at the new one"
+  - "git remote set-url origin after the seed changes home"
+  - "my clone says already up to date but new releases exist"
+  - "mandatory homunculus to solet migration before restarting"
 min_rank: 3
 
 forbidden_queries:
-  - "birth a brand new homunculus from a seed for the first time"
+  - "birth a brand new solet from a seed for the first time"
 forbidden_min_rank: 1

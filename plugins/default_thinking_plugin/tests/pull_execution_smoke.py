@@ -18,7 +18,7 @@ Proves the POR Phase 4 done-when clauses offline:
   durable stores resumes from the next unexecuted step with every prior
   observation intact.
 
-Offline: no live homunculus, no LM Studio, no Postgres. The durable substrates
+Offline: no live solet, no LM Studio, no Postgres. The durable substrates
 (knowledge store + thinking_wbs row) are in-memory doubles; the engine,
 parser, validators, and lifecycle recorder are the real production code.
 

@@ -22,7 +22,7 @@ instead of a role+direct mix:
     never claims a truncation that did not happen.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/direct_wake_delivery_smoke.py
 """
 

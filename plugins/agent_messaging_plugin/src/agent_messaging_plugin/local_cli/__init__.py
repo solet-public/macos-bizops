@@ -1,6 +1,6 @@
-"""Non-MCP local-invocation CLI for a running homunculus.
+"""Non-MCP local-invocation CLI for a running solet.
 
-`homunculus` drives a running homunculus over its localhost bridge HTTP
+`solet` drives a running solet over its localhost bridge HTTP
 surface (`/api/v1/bridge/*`) — the same zero-inference `process_call`
 contract the stdio MCP bridge forwards to, but as a one-shot command any
 local process can run. This is the invocation path for clients whose

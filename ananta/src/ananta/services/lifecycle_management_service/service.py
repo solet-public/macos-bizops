@@ -682,7 +682,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                     "plugin_name": plugin_name,
                     "message": (
                         f"Plugin '{plugin_name}' priority set to {priority}; "
-                        "takes effect on the next homunculus restart"
+                        "takes effect on the next solet restart"
                     ),
                 },
                 "actions": [],
@@ -781,7 +781,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 return self._platform_update_result(
                     scope=scope, key=key, previous_value=previous_value,
                     restart_required=True,
-                    detail="persisted; takes effect on next homunculus restart",
+                    detail="persisted; takes effect on next solet restart",
                 )
 
             applier = cast(
@@ -1534,7 +1534,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 "rejection_reasons": _probe_rejection_reasons(restart),
                 "message": (
                     f"L2 probe rejected the manifest BEFORE any restart fired; "
-                    f"{rollback_detail} The live the homunculus is untouched. See "
+                    f"{rollback_detail} The live the solet is untouched. See "
                     "rejection_reasons + probe for the failing-step detail."
                 ),
             },
@@ -1582,7 +1582,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                     "manifest changed during the probe window (a concurrent "
                     "apply_manifest committed). NOT rolling back — the on-disk "
                     "bytes are someone else's acknowledged commit. This flow's "
-                    "proposal was NOT deployed; the live the homunculus is untouched."
+                    "proposal was NOT deployed; the live the solet is untouched."
                 ),
             },
             "actions": [],
@@ -1612,7 +1612,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
         delegation-layer failures the deployment plugin never sees:
 
         - ``"unbound"`` — no plugin is bound to ``self_deployment_service`` on
-          this homunculus. The manifest is on disk but the caller will
+          this solet. The manifest is on disk but the caller will
           need a manual restart.
         - ``"plugin_protocol_error"`` — bound plugin returned a non-dict
           from ``restart_with_manifest``. Contract violation; treat as
@@ -1634,7 +1634,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 "restart_action_id": "",
                 "message": (
                     "Manifest written but no plugin is bound to "
-                    "self_deployment_service on this homunculus; restart "
+                    "self_deployment_service on this solet; restart "
                     "manually via ./launch.py to pick up the new "
                     f"manifest. Reason: {reason}"
                 ),
@@ -1765,7 +1765,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
         byte-identical.
 
         ``phase="staging_discovery"`` (entry-point genuinely not installed,
-        OR excluded by the homunculus's profile manifest allowlist) is the
+        OR excluded by the solet's profile manifest allowlist) is the
         ONLY ``restart_required=True`` case — same wording as before, so the
         card's contract does not change shape. Every other phase
         (``contract_validation``, ``wiring``) reports an error with the
@@ -1774,7 +1774,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
         The manifest check runs BEFORE the installer call: ``installer.install``
         stages discovery scoped to ``{plugin_name}`` alone (it has no notion
         of the manifest), so an entry-point that exists on disk but is
-        deliberately excluded from this homunculus's profile would otherwise
+        deliberately excluded from this solet's profile would otherwise
         load anyway and get unioned into the live allowlist — silently
         overriding the manifest's exclusion. Pre-fix, ``_rediscover_plugins``
         re-ran full discovery scoped to the real ``_allowed_plugins``, so a
@@ -1929,7 +1929,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
         ``addsitedir`` is idempotent against ``sys.path`` (CPython's
         internal ``known_paths`` set prevents duplicate appends) but does
         re-process every ``.pth`` file under each site-packages directory
-        on each call — O(N·M) work bounded by typical homunculus size
+        on each call — O(N·M) work bounded by typical solet size
         (~3 site-packages dirs × ~50 .pth files). ``sys.path`` mutation
         is not thread-safe; callers must serialize ``install_plugin_from_path``
         invocations (the platform action processor does so today).
@@ -1951,7 +1951,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
         precondition violation.
 
         For pyproject sources with multiple ``ananta.plugins`` entries,
-        returns the FIRST entry by insertion order. the homunculus-tree plugins are
+        returns the FIRST entry by insertion order. the solet-tree plugins are
         single-entry by convention today (grep across
         ``plugins/*/pyproject.toml``); this resolver does not support
         multi-entry pyprojects.

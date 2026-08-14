@@ -34,7 +34,7 @@ triggers exactly ONE re-fetch-and-retry; a second 401 classifies as
 3. **Register the address-book entry** `zuora_tenant` with the literal
    fields `base_url` (the environment selector — see below) and `client_id`,
    and a `client_secret` field holding
-   `vault::<homunculus>.default_address_book_plugin.zuora_client_secret`.
+   `vault::<solet>.default_address_book_plugin.zuora_client_secret`.
    Ingest the secret agent-blind.
 
 **`base_url` IS the environment selector** — there is no separate

@@ -117,7 +117,7 @@ def _build_plugin_post_readiness() -> MacosSelfDeploymentPlugin:
     `set_action_factory` (`init_actions` step) fires.
     """
     plugin = MacosSelfDeploymentPlugin()
-    plugin._homunculus_name = "example"
+    plugin._solet_name = "example"
     plugin._self_color = "blue"
     plugin._self_instance_id = "example-blue-task19"
     plugin._router_client = MagicMock()
@@ -210,7 +210,7 @@ def _scenario_smoke_injected_orchestrator_wins() -> None:
         router_client=plugin._router_client,  # type: ignore[arg-type]
         action_factory=factory,  # type: ignore[arg-type]
         session_factory=lambda: "sess-smoke-task19",
-        homunculus_name="smoke",
+        solet_name="smoke",
         release_manager=MagicMock(),  # type: ignore[arg-type]
         schema_preflight=lambda _c, **_kw: PreflightVerdict(is_additive=True, breaking_changes=()),
         preflight_probe=_smoke_green_probe,

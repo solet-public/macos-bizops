@@ -131,7 +131,7 @@ def _configured_driver(
     kwargs: dict[str, Any] = {
         "tmux_bin": _executable_stub(tmp_dir, "fake-tmux"),
         "claude_bin": _executable_stub(tmp_dir, "fake-claude"),
-        "homunculus_name": "testhom",
+        "solet_name": "testhom",
         "permission_mode": "bypassPermissions",
         "mcp_config_path": mcp_config,
         "cwd": tmp_dir,
@@ -198,7 +198,7 @@ def test_verify_config_remedies_are_independent() -> None:
         tmp_dir = Path(tmp)
         unconfigured = TmuxHostDriver(
             tmux_bin="/nonexistent/tmux", claude_bin="/nonexistent/claude",
-            homunculus_name="", permission_mode="",
+            solet_name="", permission_mode="",
             mcp_config_path=tmp_dir / "missing.json", cwd=tmp_dir,
         )
         # transport="mcp" is what makes the MCP-config remedy reachable at
@@ -223,7 +223,7 @@ def _check_each_remedy_names_its_own_gap(remedies: list[str]) -> None:
     one `and`-chained mega-assertion."""
     _check(any("tmux" in r and "binary" in r for r in remedies), "the tmux-binary remedy names its gap")
     _check(any("claude" in r for r in remedies), "the claude-binary remedy names its gap")
-    _check(any("HOMUNCULUS_NAME" in r for r in remedies), "the HOMUNCULUS_NAME remedy names its gap")
+    _check(any("SOLET_NAME" in r for r in remedies), "the SOLET_NAME remedy names its gap")
     _check(any("permission mode" in r for r in remedies), "the permission-mode remedy names its gap")
     _check(any("MCP config" in r for r in remedies), "the MCP-config remedy names its gap")
 
@@ -250,7 +250,7 @@ def test_verify_config_mcp_config_required_only_for_mcp_transport() -> None:
         driver = TmuxHostDriver(
             tmux_bin=_executable_stub(tmp_dir, "fake-tmux"),
             claude_bin=_executable_stub(tmp_dir, "fake-claude"),
-            homunculus_name="testhom", permission_mode="bypassPermissions",
+            solet_name="testhom", permission_mode="bypassPermissions",
             mcp_config_path=tmp_dir / "missing.mcp.json",  # never created -- born-clone shape
             cwd=tmp_dir,
             run_fn=_confirm_flow_run_fn([]),
@@ -297,7 +297,7 @@ def test_spawn_watch_transport_succeeds_without_mcp_json_present() -> None:
         driver = TmuxHostDriver(
             tmux_bin=_executable_stub(tmp_dir, "fake-tmux"),
             claude_bin=_executable_stub(tmp_dir, "fake-claude"),
-            homunculus_name="testhom", permission_mode="bypassPermissions",
+            solet_name="testhom", permission_mode="bypassPermissions",
             mcp_config_path=tmp_dir / "missing.mcp.json",  # never created
             cwd=tmp_dir,
             run_fn=_confirm_flow_run_fn(calls),
@@ -360,7 +360,7 @@ def test_spawn_refuses_when_unconfigured() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         driver = TmuxHostDriver(
             tmux_bin="/nonexistent/tmux", claude_bin="/nonexistent/claude",
-            homunculus_name="", permission_mode="",
+            solet_name="", permission_mode="",
             mcp_config_path=Path(tmp) / "missing.json", cwd=Path(tmp),
         )
         refused = False
@@ -408,12 +408,12 @@ def test_spawn_command_and_env_wiring() -> None:
             "AGENT_SESSION_ID is derived from agent_instance_id",
         )
         _check("AGENT_SESSION_LABEL=lane-x" in env_str, "label prefers lane_id when given")
-        _check("HOMUNCULUS_NAME=testhom" in env_str, "HOMUNCULUS_NAME flows from driver config")
+        _check("SOLET_NAME=testhom" in env_str, "SOLET_NAME flows from driver config")
         _check(
-            "AGENT_WAKE_CLI=homunculus" in env_str,
+            "AGENT_WAKE_CLI=solet" in env_str,
             "AGENT_WAKE_CLI is the literal wake-CLI executable name, not the "
-            "homunculus instance name -- `which <instance-name>` cannot "
-            "resolve, so a value that tracked homunculus_name (e.g. "
+            "solet instance name -- `which <instance-name>` cannot "
+            "resolve, so a value that tracked solet_name (e.g. "
             "'testhom' here) silently broke every worker's idle-wake Stop "
             "hook; deaf-wake fix, 2026-08-08",
         )
@@ -1147,7 +1147,7 @@ def test_real_tmux_spawn_alive_driver_channel_terminate() -> None:
         (tmp_dir / ".mcp.json").write_text("{}")
         _stub_worker_hook_files(tmp_dir)
         driver = TmuxHostDriver(
-            tmux_bin=tmux_bin, claude_bin=str(fake_claude), homunculus_name="testhom",
+            tmux_bin=tmux_bin, claude_bin=str(fake_claude), solet_name="testhom",
             permission_mode="default", mcp_config_path=tmp_dir / ".mcp.json", cwd=tmp_dir,
         )
         host_ref = driver.spawn({"agent_instance_id": "agi-realtmux01", "lane_id": "smoke-real"})

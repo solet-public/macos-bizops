@@ -1,17 +1,17 @@
-"""No-MCP-first launcher smoke — the per-homunculus PATH command birth step.
+"""No-MCP-first launcher smoke — the per-solet PATH command birth step.
 
 Drives `install_command_launcher_at_birth()` against tmpfs clone + bin dirs
 (no real `~/.local/bin`, no venv). Asserts the full contract:
 
 * happy path installs `<bin_dir>/<name>` as a symlink to the clone's own
-  `homunculus` console script,
+  `solet` console script,
 * re-run is idempotent (`already_installed`, symlink untouched),
 * a stale symlink (pointing elsewhere) is repointed,
 * a NON-symlink file at the launcher path is a fail-loud refusal (never
   clobber an operator file),
 * a missing console script is a fail-loud refusal (venv must be provisioned
   first),
-* an invalid homunculus name is refused (defense in depth: `bin_dir / name`
+* an invalid solet name is refused (defense in depth: `bin_dir / name`
   must never escape bin_dir).
 
 Run directly: ``.venv/bin/python3
@@ -134,8 +134,8 @@ def _check_failure_modes(root: Path) -> None:
         raise SmokeFailureError("invalid name did not raise")
     except CommandLauncherError as exc:
         _check(
-            "an invalid homunculus name is refused before touching bin_dir",
-            "invalid homunculus name" in str(exc),
+            "an invalid solet name is refused before touching bin_dir",
+            "invalid solet name" in str(exc),
             str(exc),
         )
     _check(

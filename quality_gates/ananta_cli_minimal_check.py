@@ -273,7 +273,7 @@ def _format_violations(violations: Iterable[Violation]) -> str:
     lines.append(
         "  rationale: ananta.cli must stay minimal — destructive/lifecycle ops "
         "belong in the owning plugin's lifecycle hooks; midwife ops belong in "
-        "birth_homunculus. See workbench/2026-06-16_launch_py_choice_y_design.md §5."
+        "birth_solet. See workbench/2026-06-16_launch_py_choice_y_design.md §5."
     )
     return "\n".join(lines)
 

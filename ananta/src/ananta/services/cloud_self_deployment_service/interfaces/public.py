@@ -28,7 +28,7 @@ split (workbench/2026-06-02_aws_self_deployment_plugin_design.md §3.3
 Option C). The 1-verb lifecycle base
 (``service_interface::self_deployment_service::restart_with_manifest``)
 lives at ``ananta/src/ananta/services/self_deployment_service/interfaces/public.py``;
-cloud-only verbs stay separate so macOS-bound homunculi never see them
+cloud-only verbs stay separate so macOS-bound solets never see them
 in ``process_search``.
 
 See: ``workbench/2026-05-30_self_deployment_plugin_design.md`` plus
@@ -55,7 +55,7 @@ PROVIDER = "cloud_self_deployment_service"
 _IMAGE_TAG_PARAM = ParameterMetadata(
     description=(
         "ECR image tag to deploy, e.g. 'v4'. The plugin verifies the image "
-        "exists in the homunculus repo before any AWS state changes."
+        "exists in the solet repo before any AWS state changes."
     ),
     required=True,
     type=ParameterType.STRING,

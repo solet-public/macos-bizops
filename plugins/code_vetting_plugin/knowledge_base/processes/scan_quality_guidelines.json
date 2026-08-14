@@ -13,6 +13,6 @@
   "error_processor_customizations": {
     "action_context": "Running the platform quality-gate toolchain (advisory) over the local git worktree.",
     "error_interpretation": "A RuntimeError about locating the worktree root means no ancestor of APP_HOME carries both quality_gates/ and .git — this verb is local-profile only and needs the git worktree. A code_quality gate 'usage error' means the aggregate gate script was invoked wrong (a defect, not a code finding). A missing gate script or absent vulture records a coverage gap rather than failing.",
-    "recovery_guidance": "Confirm the homunculus runs on a local profile whose APP_HOME sits under the git worktree. If the aggregate gate raised a usage error, that is a wiring defect in the gate wrapper — do not retry blindly; inspect the reported output. Coverage gaps (absent tools) are expected and non-fatal."
+    "recovery_guidance": "Confirm the solet runs on a local profile whose APP_HOME sits under the git worktree. If the aggregate gate raised a usage error, that is a wiring defect in the gate wrapper — do not retry blindly; inspect the reported output. Coverage gaps (absent tools) are expected and non-fatal."
   }
 }

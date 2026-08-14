@@ -27,7 +27,7 @@ Every check below names the mutation that turns it red:
                             holder shape R1 cites for ``peer_claim_role``)
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/peer_mark_role_covered_smoke.py
 """
 
@@ -209,7 +209,7 @@ def _mark_row(state: RealShapeState, role: str = _ROLE) -> dict[str, Any] | None
 
 def test_unregistered_route_refused() -> None:
     """No ``inference_vertex_session_id`` in ``state`` at all — the one-shot
-    ``homunculus call`` shape R1 exists to refuse."""
+    ``solet call`` shape R1 exists to refuse."""
     _, state, registry = _fresh()
     registry.register(_binding())
     _claim(state)

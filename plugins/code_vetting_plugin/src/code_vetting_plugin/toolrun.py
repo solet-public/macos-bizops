@@ -65,7 +65,7 @@ def run(
     ``ToolOutcome`` with ``timed_out=True`` instead of raising.
 
     ``env_overrides`` are layered onto the current environment (e.g. the platform
-    gates want ``HOMUNCULUS_NAME`` set).
+    gates want ``SOLET_NAME`` set).
     """
     env: dict[str, str] | None = None
     if env_overrides is not None:

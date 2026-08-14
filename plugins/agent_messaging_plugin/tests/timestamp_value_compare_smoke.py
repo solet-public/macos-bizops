@@ -35,11 +35,11 @@ re-drive is bounded + recoverable, a delete is not — 'honest and different' be
 Offline / hermetic: pure predicate calls on plain dict rows, plus one integrated
 ``ForwardedVertexReconciler.gc_terminal_rows`` drive against the shared REAL-SHAPE
 state fake to prove ``terminal_row_aged`` is actually WIRED into the reap loop. No
-live homunculus / LM Studio / DB. Needs HOMUNCULUS_NAME set (the plugin package init
+live solet / LM Studio / DB. Needs SOLET_NAME set (the plugin package init
 resolves vault-scoped constants eagerly) — no default, raises if unset.
 
 Run from repo root:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/timestamp_value_compare_smoke.py
 """
 

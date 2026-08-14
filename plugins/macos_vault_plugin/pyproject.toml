@@ -13,7 +13,7 @@ dependencies = [
     "ananta",
     "cryptography>=41.0.0",
     "keyring>=24.0.0",  # OS keychain integration (Linux secret-service, Windows Credential Manager)
-    "pynacl>=1.5.0",  # libsodium sealed boxes for cross-homunculus secret transfer
+    "pynacl>=1.5.0",  # libsodium sealed boxes for cross-solet secret transfer
     "pyyaml>=6.0.1",  # KV-file ingestion (store_from_kv_file with yaml format)
     # macOS only: direct Security framework access for iCloud Keychain (Apple Passwords)
     # which the keyring library cannot reach because it wraps the legacy `security` CLI.

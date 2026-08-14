@@ -10,8 +10,13 @@ binding round-tripped through the real store silently fell back to
 registering bridge declared. A cold-send to an idle stock-codex office
 (which correctly declares ``wake_capable=False`` at registration --
 ``mcp_bridge/__main__.py``) therefore resolved a binding that read back
-``wake_capable=True``, so the spool-tee wake path
-(``peer_dispatch.py::_tee_spool_if_wake_incapable``) silently no-opped.
+``wake_capable=True`` instead of the declared ``False`` — at the time this
+smoke was written, that silently no-opped the dispatch-side spool tee
+(``peer_dispatch.py``'s since-retired ``_tee_spool_if_wake_incapable``,
+removed codex-0147-dead-spool-retirement 2026-08-13). The persistence defect
+this smoke guards — a declared value silently dropped on the round trip —
+is independent of that consumer and remains live: ``wake_capable`` is kept
+as compatibility metadata on the schema/dataclass today.
 
 This smoke names its failing mutation directly: swap ``schema.py``'s
 ``wake_capable`` column, ``register()``'s inclusion of it in the insert

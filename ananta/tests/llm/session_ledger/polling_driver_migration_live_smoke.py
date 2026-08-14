@@ -5,7 +5,7 @@ Pins that ``SessionLedgerPollingDriverMixin`` — migrated off raw
 ``transactional()`` / ``execute_sql`` SQL onto the state-interface primitives
 (``_acquire_lease`` / ``update_state`` / ``query_ordered`` / ``delete_records``
 + the typed-txn read-then-write upserts) — drives the lease/cursor/batch loop
-correctly against the running homunculus's REAL ledger schema (the real expiry-fenced
+correctly against the running solet's REAL ledger schema (the real expiry-fenced
 ``(lease IS NULL OR lease < now)`` CAS, the real BEFORE-UPDATE trigger, the real
 ``timestamp`` (naive-UTC F1) columns, the real recency-window compare on a
 DB-stored ``started_at``). The thin planted-rows stub cannot model the CAS or
@@ -54,7 +54,7 @@ sys.path.insert(
     0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
-from ananta.constants import HOMUNCULUS_NAME_ENV_VAR  # noqa: E402
+from ananta.constants import SOLET_NAME_ENV_VAR  # noqa: E402
 from ananta.llm.session_ledger.repository import (  # noqa: E402
     PollingLeaseHandle,
     SessionLedgerRepository,
@@ -179,7 +179,7 @@ class _LiveStateAdapter:
 
 
 _MARK = "__polling_driver_migration_live_smoke__"
-_SCHEMA = os.environ[HOMUNCULUS_NAME_ENV_VAR]
+_SCHEMA = os.environ[SOLET_NAME_ENV_VAR]
 _NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
 
@@ -482,7 +482,7 @@ def main() -> int:
         print("=== polling_driver_migration_live_smoke ===")
         print(
             "  SKIP  set LEDGER_POLLING_LIVE_SMOKE=1 to run; "
-            "needs the live homunculus DB."
+            "needs the live solet DB."
         )
         return 0
     print("=== polling_driver_migration_live_smoke ===")

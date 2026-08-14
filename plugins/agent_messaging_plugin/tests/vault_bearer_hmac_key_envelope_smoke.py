@@ -20,7 +20,7 @@ is that a fake returning the IMAGINED ``{"status": "success", ...}`` shape
 would have passed a smoke that never exercised the real defect.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/vault_bearer_hmac_key_envelope_smoke.py
 """
 

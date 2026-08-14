@@ -1,6 +1,6 @@
 # Integration Test Fixtures - Completion Report
 **Date:** 2025-12-12
-**Task:** Create integration test fixtures for the homunculus (Phases 1-30)
+**Task:** Create integration test fixtures for the solet (Phases 1-30)
 
 ## Summary
 

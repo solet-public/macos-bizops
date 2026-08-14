@@ -12,9 +12,9 @@ profile does not bind `macos_self_deployment_plugin` at all).
 
 Plist requirements (build spec §6.2 — every field here is load-bearing
 on the boot path):
-  * `Label`: `local.homunculus.<name>` (mirrors the existing convention).
-  * `EnvironmentVariables`: `{HOMUNCULUS_NAME: <name>, PATH: <fixed>}`.
-    Boot FAST-FAILS without `HOMUNCULUS_NAME` (`environment_config.py`
+  * `Label`: `local.solet.<name>` (mirrors the existing convention).
+  * `EnvironmentVariables`: `{SOLET_NAME: <name>, PATH: <fixed>}`.
+    Boot FAST-FAILS without `SOLET_NAME` (`environment_config.py`
     identity/schema routing + the DB-password vault-key resolution both
     key off it). `PATH` is a deterministic Homebrew-inclusive literal
     (`_PATH_ENV`, §39.2): a launchd process with no `PATH` key gets the
@@ -26,8 +26,8 @@ on the boot path):
     would mutate the git working tree. Deliberately NOT
     `ananta.core.runtime.get_runtime_dir()` — that helper (checked
     2026-07-09) returns a single SHARED `~/.ananta/runtime` directory
-    (or `$XDG_RUNTIME_DIR/ananta`) with NO per-homunculus-name segment
-    at all, despite accepting a `homunculus_name` parameter it never
+    (or `$XDG_RUNTIME_DIR/ananta`) with NO per-solet-name segment
+    at all, despite accepting a `solet_name` parameter it never
     uses in the returned path. This module computes the exact spec'd
     path directly instead.
   * `ProgramArguments`: `[<clone>/.venv/bin/python3, -m, ananta.cli,
@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
 
-_LABEL_PREFIX = "local.homunculus"
+_LABEL_PREFIX = "local.solet"
 # PATH written into the plist's EnvironmentVariables (§39.2, reported and
 # field-verified by a seed adopter). A launchd-spawned process inherits no login
 # shell: with no PATH key it gets launchd's bare ``/usr/bin:/bin:/usr/sbin:/sbin``,
@@ -145,7 +145,7 @@ class SimpleAutostartRenderer:
     `~/Library/LaunchAgents/`, `~/.ananta/`, or `launchctl`.
     """
 
-    homunculus_name: str
+    solet_name: str
     clone_root: Path
     plist_dir: Path
     home_dir: Path
@@ -154,7 +154,7 @@ class SimpleAutostartRenderer:
     label: str = field(init=False)
 
     def __post_init__(self) -> None:
-        self.label = f"{_LABEL_PREFIX}.{self.homunculus_name}"
+        self.label = f"{_LABEL_PREFIX}.{self.solet_name}"
 
     @property
     def plist_path(self) -> Path:
@@ -162,7 +162,7 @@ class SimpleAutostartRenderer:
 
     @property
     def runtime_dir(self) -> Path:
-        return self.home_dir / ".ananta" / "runtime" / self.homunculus_name
+        return self.home_dir / ".ananta" / "runtime" / self.solet_name
 
     # ── install ──────────────────────────────────────────────────────
 
@@ -295,7 +295,7 @@ class SimpleAutostartRenderer:
             '  </array>\n'
             f'  <key>WorkingDirectory</key>\n  <string>{_xml_escape(str(self.runtime_dir))}</string>\n'
             '  <key>EnvironmentVariables</key>\n  <dict>\n'
-            f'    <key>HOMUNCULUS_NAME</key>\n    <string>{_xml_escape(self.homunculus_name)}</string>\n'
+            f'    <key>SOLET_NAME</key>\n    <string>{_xml_escape(self.solet_name)}</string>\n'
             # §39.2: without this key the daemon gets launchd's bare PATH and
             # cannot see Homebrew binaries (tmux) even when installed. See
             # _PATH_ENV for why it is a fixed literal.

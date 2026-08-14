@@ -77,4 +77,4 @@ remaining open thread — it's a documentation question, not a policy one.
 - `24_operator_communication/08_business_record_classification_convention.md` — the
   companion disclosure on what values end up committed vs. staged.
 - `plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md`, "What this
-  homunculus ingests and embeds" — the sibling disclosure on session-content ingestion.
+  solet ingests and embeds" — the sibling disclosure on session-content ingestion.

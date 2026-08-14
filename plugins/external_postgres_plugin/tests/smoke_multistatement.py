@@ -24,7 +24,7 @@ made this fail loud instead — that gap is closed, so the workaround is
 too). A failure once checks are already RUNNING stays a genuine FAIL.
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/external_postgres_plugin/tests/smoke_multistatement.py
 
 Exits 0 when the live proof ran and passed; 77 when the fixture was
