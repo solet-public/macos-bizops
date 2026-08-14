@@ -193,9 +193,32 @@ Did NOT hand-copy plugin bytes into the cache directory to force a fake
 `gitCommitSha` provenance field and circumvent a security control that isn't
 this session's call to override.
 
-## Remaining
+## Task #8 — ported coordination-hooks 0.5.5 into bizops-claude-code-plugin
 
-Task #8: port the coordination-hooks 0.5.5 changes into
-`BranchMetrics/bizops-claude-code-plugin` — now more than a nice-to-have,
-since it's the operator's actual allowlisted path back to a refreshable
-install.
+Done. `rsync`'d the seed's `plugins/github_midwife_plugin/claude_plugin/
+coordination-hooks/` tree onto `~/Workspace/bizops-claude-code-plugin/
+coordination-hooks/` (excluding `.DS_Store`/`__pycache__`), 0.5.1 → 0.5.5.
+Diffstat matched exactly what a straight version-sync should touch (15
+files: plugin.json, README/SECURITY, 7 hook modules, 4 test modules) — no
+structural drift between the two trees. Ran the repo's own
+`tests/run_all.py` standalone: all 4 smokes green, 724/724 checks. Committed
+directly to `main` (`c49fff6`) — matching this repo's own established
+convention (both prior commits are also direct-to-main, no PR flow for this
+single-purpose plugin repo) — and pushed.
+
+Then proved the fix end to end, since this marketplace IS on the enterprise
+allowlist (unlike `dax`'s local directory): `claude plugin marketplace
+update bizops-claude-code-plugin` (refreshes the marketplace's own GitHub
+clone — the step the `dax` cache-refresh attempt never got to try) →
+uninstall → install → `installed_plugins.json` now shows version `0.5.5`,
+`gitCommitSha c49fff6`. Byte-diffed the installed cache's `hooks/` against
+the repo source: empty diff, confirmed live.
+
+**Restored `enabledPlugins["coordination-hooks@bizops-claude-code-plugin"]`
+to `false`** after verifying (it flipped to `true` as a side effect of the
+install command) — leaving it enabled alongside `coordination-hooks@dax`
+would double-fire every hook for this and every future session on this
+machine (both plugins now ship the same hook set). The repo and cache are
+ready; switching it to the standing default is the operator's call, not
+mine to make silently — see the two options in the enterprise-policy
+section above.
