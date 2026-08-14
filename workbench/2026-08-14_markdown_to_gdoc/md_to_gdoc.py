@@ -2,8 +2,13 @@
 """Convert a markdown file to a Google Doc via dax's g_suite_plugin.
 
 Scope/limitations (read before extending):
-- Handles: H1/H2/H3 headings, paragraphs, **bold** and `code` inline spans,
-  and GFM pipe tables.
+- Handles: H1/H3 headings, paragraphs, bullet lists (incl. one level of
+  nesting), numbered lists, **bold**, *italic*, `code` inline spans, bare
+  URL auto-linking, and GFM pipe tables.
+- Broken/placeholder image references (a bare "!Caption.png" line with no
+  markdown image syntax around it -- common in Notion-exported markdown that
+  lost its `![]()` wrapper) render as a small italic placeholder note, since
+  there's no actual image file to embed.
 - Tables are NOT rendered as native Docs grid tables. g_suite_plugin's
   `docs_get` only returns flattened plain text (no structural JSON with
   character indices), and there is no raw `documents().get()` passthrough
@@ -24,8 +29,11 @@ Prints the created document's URL on success.
 """
 import json, re, subprocess, sys, time
 
-BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 CODE_RE = re.compile(r"`([^`]+)`")
+BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+ITALIC_RE = re.compile(r"(?<!\*)\*([^*]+)\*(?!\*)")
+URL_RE = re.compile(r"https?://\S+")
+IMAGE_PLACEHOLDER_RE = re.compile(r"^!\s*(.+\.(?:png|jpe?g|gif|webp))\s*$", re.IGNORECASE)
 
 
 def dax_call(process_key, args):
@@ -52,31 +60,45 @@ def poll_job(job_id, timeout_s=60, interval_s=2):
 
 
 def parse_inline_spans(text):
-    """Split text on **bold** and `code` markers into (text, kind) segments.
-    kind is one of 'plain', 'bold', 'code'. Markers are stripped from output.
-    """
-    segments = []
-    pos = 0
-    # Interleave bold/code matches in order of appearance.
+    """Split text into (text, kind) segments. kind: plain, bold, italic, code, link.
+    Markers are stripped from output (except link, which keeps the URL as
+    both the visible text and the target)."""
     matches = sorted(
-        list(BOLD_RE.finditer(text)) + list(CODE_RE.finditer(text)),
+        list(CODE_RE.finditer(text))
+        + list(BOLD_RE.finditer(text))
+        + list(ITALIC_RE.finditer(text))
+        + list(URL_RE.finditer(text)),
         key=lambda m: m.start(),
     )
+    segments = []
+    pos = 0
     for m in matches:
         if m.start() < pos:
-            continue  # overlapping match (nested), skip -- rare in this doc
+            continue  # overlapping match (e.g. a URL inside already-claimed bold span), skip
         if m.start() > pos:
-            segments.append((text[pos:m.start()], "plain"))
-        kind = "bold" if m.group(0).startswith("**") else "code"
-        segments.append((m.group(1), kind))
+            segments.append((text[pos:m.start()], "plain", None))
+        whole = m.group(0)
+        if whole.startswith("**"):
+            segments.append((m.group(1), "bold", None))
+        elif whole.startswith("`"):
+            segments.append((m.group(1), "code", None))
+        elif whole.startswith("http"):
+            segments.append((whole, "link", whole))
+        else:
+            segments.append((m.group(1), "italic", None))
         pos = m.end()
     if pos < len(text):
-        segments.append((text[pos:], "plain"))
-    return segments or [("", "plain")]
+        segments.append((text[pos:], "plain", None))
+    return segments or [("", "plain", None)]
+
+
+LIST_ITEM_RE = re.compile(r"^(\s*)([-*]|\d+\.)\s+(.*)$")
 
 
 def parse_markdown(md_text):
-    """Very small parser scoped to this doc's shape: H1-3, paragraphs, GFM tables."""
+    """Small parser: H1-6 headings, paragraphs, bullet/numbered lists (one
+    nesting level, by leading-whitespace amount), GFM pipe tables, and
+    broken image-reference placeholder lines."""
     blocks = []
     lines = md_text.split("\n")
     i = 0
@@ -85,34 +107,59 @@ def parse_markdown(md_text):
         if not line.strip():
             i += 1
             continue
-        heading_match = re.match(r"^(#{1,3})\s+(.*)$", line)
+
+        heading_match = re.match(r"^(#{1,6})\s+(.*)$", line)
         if heading_match:
             blocks.append({"type": "heading", "level": len(heading_match.group(1)), "text": heading_match.group(2)})
             i += 1
             continue
+
+        image_match = IMAGE_PLACEHOLDER_RE.match(line.strip())
+        if image_match:
+            blocks.append({"type": "image_placeholder", "caption": image_match.group(1)})
+            i += 1
+            continue
+
         if line.strip().startswith("|"):
-            # table: header row, separator row, data rows
             header = [c.strip() for c in line.strip().strip("|").split("|")]
             i += 1
             if i < len(lines) and re.match(r"^\s*\|?[\s:|-]+\|?\s*$", lines[i]):
-                i += 1  # skip separator row
+                i += 1
             rows = []
             while i < len(lines) and lines[i].strip().startswith("|"):
                 rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
                 i += 1
             blocks.append({"type": "table", "header": header, "rows": rows})
             continue
-        # paragraph: accumulate until blank line or next structural line
+
+        list_match = LIST_ITEM_RE.match(line)
+        if list_match:
+            indent, marker, text = list_match.groups()
+            level = 1 if len(indent) >= 4 else 0
+            ordered = marker != "-" and marker != "*"
+            blocks.append({"type": "list_item", "ordered": ordered, "level": level, "text": text})
+            i += 1
+            continue
+
         para_lines = [line]
         i += 1
-        while i < len(lines) and lines[i].strip() and not lines[i].strip().startswith("|") and not re.match(r"^#{1,3}\s", lines[i]):
+        while (
+            i < len(lines) and lines[i].strip()
+            and not lines[i].strip().startswith("|")
+            and not re.match(r"^#{1,6}\s", lines[i])
+            and not LIST_ITEM_RE.match(lines[i])
+            and not IMAGE_PLACEHOLDER_RE.match(lines[i].strip())
+        ):
             para_lines.append(lines[i])
             i += 1
         blocks.append({"type": "paragraph", "text": " ".join(para_lines)})
     return blocks
 
 
-HEADING_STYLE = {1: "HEADING_1", 2: "HEADING_2", 3: "HEADING_3"}
+HEADING_STYLE = {1: "HEADING_1", 2: "HEADING_2", 3: "HEADING_3", 4: "HEADING_4", 5: "HEADING_5", 6: "HEADING_6"}
+BULLET_PRESET = "BULLET_DISC_CIRCLE_SQUARE"
+NUMBERED_PRESET = "NUMBERED_DECIMAL_ALPHA_ROMAN"
+INDENT_PER_LEVEL_PT = 18  # magnitude in points; Docs infers nesting depth from indentStart
 
 
 def build_requests(blocks):
@@ -127,25 +174,41 @@ def build_requests(blocks):
     requests = []
     cursor = 1  # Docs body content starts at index 1
 
-    def insert_paragraph(text, style_name=None, code_only=False):
+    def insert_paragraph(text, style_name=None, list_meta=None, italic_whole=False):
         nonlocal cursor
-        segments = parse_inline_spans(text) if not code_only else [(text, "plain")]
-        full_text = "".join(seg for seg, _ in segments) + "\n"
+        segments = parse_inline_spans(text)
+        full_text = "".join(seg for seg, _, _ in segments) + "\n"
         start = cursor
         requests.append({"insertText": {"location": {"index": start}, "text": full_text}})
+        para_range = {"startIndex": start, "endIndex": start + len(full_text)}
         if style_name:
             requests.append({"updateParagraphStyle": {
-                "range": {"startIndex": start, "endIndex": start + len(full_text)},
+                "range": para_range,
                 "paragraphStyle": {"namedStyleType": style_name},
                 "fields": "namedStyleType",
             }})
+        if list_meta:
+            preset = NUMBERED_PRESET if list_meta["ordered"] else BULLET_PRESET
+            requests.append({"createParagraphBullets": {"range": para_range, "bulletPreset": preset}})
+            if list_meta["level"] > 0:
+                requests.append({"updateParagraphStyle": {
+                    "range": para_range,
+                    "paragraphStyle": {"indentStart": {"magnitude": INDENT_PER_LEVEL_PT * (list_meta["level"] + 1), "unit": "PT"},
+                                       "indentFirstLine": {"magnitude": INDENT_PER_LEVEL_PT * list_meta["level"], "unit": "PT"}},
+                    "fields": "indentStart,indentFirstLine",
+                }})
         seg_pos = start
-        for seg_text, kind in segments:
+        for seg_text, kind, link_target in segments:
             seg_start, seg_end = seg_pos, seg_pos + len(seg_text)
             if kind == "bold":
                 requests.append({"updateTextStyle": {
                     "range": {"startIndex": seg_start, "endIndex": seg_end},
                     "textStyle": {"bold": True}, "fields": "bold",
+                }})
+            elif kind == "italic":
+                requests.append({"updateTextStyle": {
+                    "range": {"startIndex": seg_start, "endIndex": seg_end},
+                    "textStyle": {"italic": True}, "fields": "italic",
                 }})
             elif kind == "code":
                 requests.append({"updateTextStyle": {
@@ -153,18 +216,31 @@ def build_requests(blocks):
                     "textStyle": {"weightedFontFamily": {"fontFamily": "Courier New"}},
                     "fields": "weightedFontFamily",
                 }})
+            elif kind == "link":
+                requests.append({"updateTextStyle": {
+                    "range": {"startIndex": seg_start, "endIndex": seg_end},
+                    "textStyle": {"link": {"url": link_target}}, "fields": "link",
+                }})
             seg_pos = seg_end
+        if italic_whole:
+            requests.append({"updateTextStyle": {
+                "range": {"startIndex": start, "endIndex": start + len(full_text) - 1},
+                "textStyle": {"italic": True}, "fields": "italic",
+            }})
         cursor = start + len(full_text)
 
     for block in blocks:
         if block["type"] == "heading":
-            insert_paragraph(block["text"], HEADING_STYLE.get(block["level"], "HEADING_3"))
+            insert_paragraph(block["text"], HEADING_STYLE.get(block["level"], "HEADING_6"))
         elif block["type"] == "paragraph":
             insert_paragraph(block["text"])
+        elif block["type"] == "list_item":
+            insert_paragraph(block["text"], list_meta={"ordered": block["ordered"], "level": block["level"]})
+        elif block["type"] == "image_placeholder":
+            insert_paragraph(f"[Image: {block['caption']}]", italic_whole=True)
         elif block["type"] == "table":
             header = block["header"]
             for row in block["rows"]:
-                cells = dict(zip(header, row))
                 label = row[0] if row else ""
                 rest = " — ".join(c for c in row[1:] if c)
                 insert_paragraph(f"{label} — {rest}")
@@ -191,7 +267,6 @@ def main():
     doc_id = payload["id"]
     print(f"Created empty doc: https://docs.google.com/document/d/{doc_id}/edit", file=sys.stderr)
 
-    # batchUpdate has a request-count/size ceiling in practice; chunk defensively.
     CHUNK = 300
     for start in range(0, len(requests), CHUNK):
         chunk = requests[start:start + CHUNK]
