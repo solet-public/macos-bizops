@@ -26,7 +26,7 @@ these call ``claim_role_for_session`` directly to "simplify", it silently re-ope
 hole this file exists to close.
 
 Run:
-    HOMUNCULUS_NAME=examplehom .venv/bin/python3 \
+    SOLET_NAME=examplehom .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/takeover_route_reachability_smoke.py
 """
 
@@ -456,7 +456,7 @@ def test_watch_command_forwards_the_operator_takeover_flag() -> None:
         raise KeyboardInterrupt
 
     with (
-        patch.object(cli_module, "resolve_homunculus_name", return_value="examplehom"),
+        patch.object(cli_module, "resolve_solet_name", return_value="examplehom"),
         patch.object(cli_module, "_acquire_watch_singleton", return_value=None),
         patch.object(cli_module, "_install_sigterm_unwind", return_value=None),
         patch.object(cli_module, "write_watch_pairing", return_value=None),

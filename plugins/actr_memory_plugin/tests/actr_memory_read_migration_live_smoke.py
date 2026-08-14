@@ -262,7 +262,7 @@ def test_namespace_breakdown_group_count(provider: PostgresProvider, schema: str
 def main() -> int:
     if os.environ.get("ACTR_READ_MIGRATION_LIVE_SMOKE") != "1":
         print("=== actr_memory_read_migration_live_smoke ===")
-        print("  SKIP  set ACTR_READ_MIGRATION_LIVE_SMOKE=1 to run; needs the live homunculus DB.")
+        print("  SKIP  set ACTR_READ_MIGRATION_LIVE_SMOKE=1 to run; needs the live solet DB.")
         return 0
     print("=== actr_memory_read_migration_live_smoke ===")
     schema_name = f"example_test_actrread_{secrets.token_hex(3)}"

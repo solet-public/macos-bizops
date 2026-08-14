@@ -141,7 +141,7 @@ def make_manager(
     unknown`` — which never refuses.
     """
     return ReleaseManager(
-        homunculus_name="smoke",
+        solet_name="smoke",
         source_root=source_root,
         releases_root=releases_root,
         keep_releases=keep_releases,

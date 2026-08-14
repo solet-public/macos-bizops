@@ -1,16 +1,16 @@
 """Genesis-spine smoke — `root_manifest_seed.seed_for_newborn`: the step that
-rewrites a seed-born clone's `root_manifest.yaml` `homunculus_name:` line from
-the MINTING homunculus's name to the newborn's.
+rewrites a seed-born clone's `root_manifest.yaml` `solet_name:` line from
+the MINTING solet's name to the newborn's.
 
 Covers: the happy-path rename (minting name gone, newborn name present, every
 other line byte-verbatim), idempotency (second run is a no-op rewrite to the
 same value), the fail-loud missing-file refusal, the fail-loud
-no-`homunculus_name:`-line refusal (and that a refused file is left untouched),
+no-`solet_name:`-line refusal (and that a refused file is left untouched),
 and first-line-only semantics on a pathological double-line file.
 
 Offline: pure filesystem ops under a tmp tree; no live Postgres, no MCP.
 
-Run directly: ``HOMUNCULUS_NAME=<name> .venv/bin/python3
+Run directly: ``SOLET_NAME=<name> .venv/bin/python3
 plugins/github_midwife_plugin/tests/root_manifest_seed_smoke.py``.
 """
 
@@ -30,7 +30,7 @@ _CHECKS_RUN: list[str] = []
 
 _FIXTURE_MANIFEST = (
     "schema_version: 1\n"
-    "homunculus_name: mintersaurus\n"
+    "solet_name: mintersaurus\n"
     "universal:\n"
     "  files:\n"
     "    - bootstrap.py\n"
@@ -63,13 +63,13 @@ def _check_happy_path_rename(root: Path) -> None:
     )
     _check(
         "newborn name present, minting name gone",
-        "homunculus_name: newbornia\n" in text and "mintersaurus" not in text,
+        "solet_name: newbornia\n" in text and "mintersaurus" not in text,
         text,
     )
     _check(
         "every non-name line rides through byte-verbatim",
         text == _FIXTURE_MANIFEST.replace(
-            "homunculus_name: mintersaurus", "homunculus_name: newbornia"
+            "solet_name: mintersaurus", "solet_name: newbornia"
         ),
         text,
     )
@@ -106,8 +106,8 @@ def _check_missing_name_line_fail_loud(root: Path) -> None:
         seed_for_newborn(clone, "newbornia")
     except RootManifestSeedError as exc:
         _check(
-            "manifest without a homunculus_name line raises a schema-violation error",
-            "homunculus_name" in str(exc),
+            "manifest without a solet_name line raises a schema-violation error",
+            "solet_name" in str(exc),
             str(exc),
         )
         after = (clone / ROOT_MANIFEST_FILENAME).read_text()
@@ -124,12 +124,12 @@ def _check_first_line_only_on_double_name(root: Path) -> None:
     clone = root / "double"
     clone.mkdir()
     (clone / ROOT_MANIFEST_FILENAME).write_text(
-        "homunculus_name: mintersaurus\nhomunculus_name: mintersaurus\n"
+        "solet_name: mintersaurus\nsolet_name: mintersaurus\n"
     )
     text = seed_for_newborn(clone, "newbornia").read_text()
     _check(
-        "only the FIRST homunculus_name line is rewritten (count=1 semantics)",
-        text == "homunculus_name: newbornia\nhomunculus_name: mintersaurus\n",
+        "only the FIRST solet_name line is rewritten (count=1 semantics)",
+        text == "solet_name: newbornia\nsolet_name: mintersaurus\n",
         text,
     )
 

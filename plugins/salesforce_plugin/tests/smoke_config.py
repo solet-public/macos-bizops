@@ -30,7 +30,7 @@ Exercises:
  13. EDGE parity: validate_edge_process_provider raises nothing, 9 verbs
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/salesforce_plugin/tests/smoke_config.py
 
 Exits 0 on success, 1 on first failure.

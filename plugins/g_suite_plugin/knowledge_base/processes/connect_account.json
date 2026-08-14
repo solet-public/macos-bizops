@@ -1,7 +1,7 @@
 {
   "process_key": "plugin::g_suite_plugin::connect_account",
   "display_name": "Connect Google Workspace Account",
-  "description": "Generate the Google consent URL (OAuth 2.0 with PKCE S256) the operator opens in their browser to grant this homunculus access to the Workspace account. Returns authorize_url + a fresh state nonce + the redirect_uri. After the operator approves, the plugin's callback handler (start_interface) stores the refresh + access tokens in vault automatically. Requires the callback server running and the 'google_oauth_app' address-book entry to exist.",
+  "description": "Generate the Google consent URL (OAuth 2.0 with PKCE S256) the operator opens in their browser to grant this solet access to the Workspace account. Returns authorize_url + a fresh state nonce + the redirect_uri. After the operator approves, the plugin's callback handler (start_interface) stores the refresh + access tokens in vault automatically. Requires the callback server running and the 'google_oauth_app' address-book entry to exist.",
   "embedding_description": "Start Google Workspace OAuth linking by generating a PKCE consent URL with offline access. The operator approves Gmail, Drive, Docs, Sheets, and Slides scopes, then the callback stores a durable refresh token. Use this account-connection step before invoking Workspace data operations.",
   "result_processor_customizations": {
     "action_label": "Google consent URL generated",

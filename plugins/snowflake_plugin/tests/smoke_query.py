@@ -45,7 +45,7 @@ a named, disclosed gap, not a silent omission: see this batch's commit
 message.
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/snowflake_plugin/tests/smoke_query.py
 
 Exits 0 on success, 1 on first failure.

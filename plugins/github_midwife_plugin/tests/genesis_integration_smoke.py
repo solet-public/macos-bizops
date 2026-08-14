@@ -1,7 +1,7 @@
 """Slice G smoke — genesis.py end-to-end, fully sandboxed (build spec §8).
 
 Drives `run_genesis()` -- the same function `main()`'s CLI entrypoint and
-the `birth_homunculus` EDGE verb both call -- against a tmp clone, a
+the `birth_solet` EDGE verb both call -- against a tmp clone, a
 FakeKeychain, a tmpfs plist_dir + home_dir, and a fake launchctl. Asserts
 the newborn's materialized config is coherent AND that no plaintext
 credential ever appears in captured stdout/stderr across the whole run.
@@ -16,7 +16,7 @@ fresh-machine path (credential_provisioner=None -> in-process
 seed_db_password); the verb-mode self-seed subprocess is exercised by
 venv_provision_smoke.
 
-Run directly: ``HOMUNCULUS_NAME=<name> .venv/bin/python3
+Run directly: ``SOLET_NAME=<name> .venv/bin/python3
 plugins/github_midwife_plugin/tests/genesis_integration_smoke.py``.
 """
 
@@ -66,17 +66,17 @@ def _make_fixture_clone(root: Path) -> Path:
     clone = root / "clone"
     (clone / "ananta").mkdir(parents=True)
     (clone / "ananta" / "pyproject.toml").write_text("[project]\nname='ananta'\n")
-    # The seed ships the MINTING homunculus's root_manifest.yaml verbatim;
-    # the seed_root_manifest spine step must rewrite `homunculus_name:` to
+    # The seed ships the MINTING solet's root_manifest.yaml verbatim;
+    # the seed_root_manifest spine step must rewrite `solet_name:` to
     # the newborn's name and leave every other line untouched.
     (clone / "root_manifest.yaml").write_text(
-        "schema_version: 1\nhomunculus_name: mintersaurus\nuniversal:\n  files: []\n"
+        "schema_version: 1\nsolet_name: mintersaurus\nuniversal:\n  files: []\n"
     )
     (clone / ".venv" / "bin").mkdir(parents=True)
     (clone / ".venv" / "bin" / "python3").write_text("#!/bin/sh\n")
-    # The `homunculus` console script the command-launcher birth step symlinks
+    # The `solet` console script the command-launcher birth step symlinks
     # to (installed by `pip install -e` of agent_messaging_plugin in a real venv).
-    (clone / ".venv" / "bin" / "homunculus").write_text("#!/bin/sh\n")
+    (clone / ".venv" / "bin" / "solet").write_text("#!/bin/sh\n")
 
     plugin_dir = clone / "plugins" / "github_midwife_plugin"
     plugin_dir.mkdir(parents=True)
@@ -103,7 +103,7 @@ def _check_profile_resolution_from_provenance(root: Path) -> None:
     clone = _make_fixture_clone(root)
     _check(
         "provenance-less seeds keep the legacy free-profile default",
-        _resolve_profile_name(clone) == "macos-free-homunculus",
+        _resolve_profile_name(clone) == "macos-free-solet",
     )
 
     (clone / "PROVENANCE.json").write_text(json.dumps({
@@ -111,12 +111,12 @@ def _check_profile_resolution_from_provenance(root: Path) -> None:
     }))
     _check(
         "bizops_standard provenance selects the bizops profile",
-        _resolve_profile_name(clone) == "macos-bizops-homunculus",
+        _resolve_profile_name(clone) == "macos-bizops-solet",
     )
 
-    with patch.dict(os.environ, {"HOMUNCULUS_PROFILE": "fixture-profile"}):
+    with patch.dict(os.environ, {"SOLET_PROFILE": "fixture-profile"}):
         _check(
-            "HOMUNCULUS_PROFILE overrides provenance profile selection",
+            "SOLET_PROFILE overrides provenance profile selection",
             _resolve_profile_name(clone) == "fixture-profile",
         )
 
@@ -128,7 +128,7 @@ def _check_profile_resolution_from_provenance(root: Path) -> None:
     except GenesisError as exc:
         _check(
             "unknown provenance bundle fails loud instead of falling back to free",
-            "unknown_bundle" in str(exc) and "HOMUNCULUS_PROFILE" in str(exc),
+            "unknown_bundle" in str(exc) and "SOLET_PROFILE" in str(exc),
             str(exc),
         )
     else:
@@ -221,7 +221,7 @@ def _check_end_to_end_happy_path(root: Path) -> None:
     root_manifest_text = (clone / "root_manifest.yaml").read_text()
     _check(
         "seed_root_manifest renamed the newborn (minting name gone, newborn name present)",
-        "homunculus_name: testhum\n" in root_manifest_text
+        "solet_name: testhum\n" in root_manifest_text
         and "mintersaurus" not in root_manifest_text,
         root_manifest_text,
     )
@@ -281,7 +281,7 @@ def _check_end_to_end_happy_path(root: Path) -> None:
         any(c[1] == "load" for c in fake_launchctl.calls),
         str(fake_launchctl.calls),
     )
-    plist_path = root / "LaunchAgents" / "local.homunculus.testhum.plist"
+    plist_path = root / "LaunchAgents" / "local.solet.testhum.plist"
     _check("the plist was rendered to the tmpfs plist_dir", plist_path.is_file(), str(plist_path))
     plist_text = plist_path.read_text()
     _check(
@@ -309,10 +309,10 @@ def _check_end_to_end_happy_path(root: Path) -> None:
     # symlink to the fixture clone's own console script (sandboxed bin_dir).
     launcher_link = root / "bin" / "testhum"
     _check(
-        "the command-launcher phase installed the per-homunculus PATH symlink",
+        "the command-launcher phase installed the per-solet PATH symlink",
         result["command_launcher"]["status"] == "installed"  # type: ignore[index]
         and launcher_link.is_symlink()
-        and launcher_link.readlink() == clone / ".venv" / "bin" / "homunculus",
+        and launcher_link.readlink() == clone / ".venv" / "bin" / "solet",
         f"{result.get('command_launcher')} link={launcher_link}",
     )
 
@@ -359,8 +359,8 @@ def _assert_final_marker_complete(result: dict[str, object]) -> None:
     _check("the genesis attempt marker was written", marker_path.is_file(), str(marker_path))
     marker = json.loads(marker_path.read_text())
     _check(
-        "the attempt marker records the homunculus name and success status",
-        marker.get("homunculus_name") == "testhum" and marker.get("status") == "success",
+        "the attempt marker records the solet name and success status",
+        marker.get("solet_name") == "testhum" and marker.get("status") == "success",
         str(marker),
     )
     marker_step_names = [s.get("step_name") for s in marker.get("steps", [])]

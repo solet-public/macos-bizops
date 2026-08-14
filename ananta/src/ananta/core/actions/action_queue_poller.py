@@ -320,8 +320,8 @@ class ActionQueuePoller:
         # Per-container deploy lineage marker used by the self-deployment
         # plugin's complete_deploy targeting (addendum §K). Defaults to
         # 'local' for non-cloud births; cloud task definitions set
-        # HOMUNCULUS_VERSION=v<N> per the per-birth + blue-green deploys.
-        self._homunculus_version = os.environ.get("HOMUNCULUS_VERSION") or "local"
+        # SOLET_VERSION=v<N> per the per-birth + blue-green deploys.
+        self._solet_version = os.environ.get("SOLET_VERSION") or "local"
         self.inference_model_name = inference_model_name  # For error routing model config
         self._max_flow_errors: int = 3  # Safety net for unrecoverable errors only
         self._max_recoverable_retries: int = 3  # Per-process consecutive retry bound
@@ -1011,7 +1011,7 @@ class ActionQueuePoller:
             return []
 
     def _version_excluded(self, raw: object) -> bool:
-        """True if THIS poller's ``HOMUNCULUS_VERSION`` is in the action's
+        """True if THIS poller's ``SOLET_VERSION`` is in the action's
         ``excluded_versions`` list — the self-deployment ``complete_deploy``
         targeting filter (only that one producer ever sets it). The JSONB column
         reads back as a Python list (or, defensively, a JSON string); ``NULL`` /
@@ -1027,7 +1027,7 @@ class ActionQueuePoller:
                 return False
         if not isinstance(versions, list):
             return False
-        return self._homunculus_version in versions
+        return self._solet_version in versions
 
     def _warn_if_dispatch_starved(self, rows_read: int, dispatched: int) -> None:
         """Fail-loud tripwire (Q2 ground-truth guard). The over-read hit the cap

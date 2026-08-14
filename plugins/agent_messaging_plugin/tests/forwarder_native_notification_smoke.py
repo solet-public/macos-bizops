@@ -5,7 +5,7 @@ Verifies the Phase 1 Codex-native peer wake bridge contract:
 
 1. Codex ``peer_message`` events emit ``notifications/homunculus/peer_message``.
 2. Codex native peer notifications preserve full bridge-event metadata.
-3. Codex ``post_message`` events use the same homunculus peer-message method.
+3. Codex ``post_message`` events use the same solet peer-message method.
 4. Non-peer events still use the legacy Claude channel method.
 5. Claude sessions still receive the legacy ``notifications/claude/channel``
    method and the canonical 5-key metadata shape.
@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src")
 
 from agent_messaging_plugin.mcp_bridge.forwarder import (  # noqa: E402
     CLAUDE_CHANNEL_NOTIFICATION_METHOD,
-    HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD,
+    SOLET_PEER_MESSAGE_NOTIFICATION_METHOD,
     Forwarder,
 )
 
@@ -98,12 +98,12 @@ async def _emit(agent_id: str, event: dict[str, Any]) -> Any:
     return stream.messages[0].message.root
 
 
-async def case_codex_peer_message_uses_homunculus_method() -> None:
+async def case_codex_peer_message_uses_solet_method() -> None:
     notification = await _emit("codex", PEER_EVENT)
-    if notification.method != HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD:
+    if notification.method != SOLET_PEER_MESSAGE_NOTIFICATION_METHOD:
         _fail(
             "codex peer_message method",
-            f"expected {HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD}, got {notification.method}",
+            f"expected {SOLET_PEER_MESSAGE_NOTIFICATION_METHOD}, got {notification.method}",
         )
     params = notification.params
     if params["content"] != (
@@ -155,22 +155,22 @@ async def case_codex_peer_message_preserves_metadata() -> None:
     _ok("codex peer_message preserves full bridge metadata + wake fields")
 
 
-async def case_codex_post_message_uses_homunculus_method() -> None:
+async def case_codex_post_message_uses_solet_method() -> None:
     notification = await _emit(
         "codex",
         {
             "cursor": 8,
             "event_type": "post_message",
-            "content": "Homunculus says hi",
+            "content": "Solet says hi",
             "meta": {"flow_id": "flow-meta"},
         },
     )
-    if notification.method != HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD:
+    if notification.method != SOLET_PEER_MESSAGE_NOTIFICATION_METHOD:
         _fail(
             "codex post_message method",
-            f"expected {HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD}, got {notification.method}",
+            f"expected {SOLET_PEER_MESSAGE_NOTIFICATION_METHOD}, got {notification.method}",
         )
-    if notification.params["content"] != "Homunculus says hi":
+    if notification.params["content"] != "Solet says hi":
         _fail("codex post_message content", repr(notification.params["content"]))
     _ok("codex post_message emits notifications/homunculus/peer_message")
 
@@ -218,9 +218,9 @@ async def case_claude_peer_message_keeps_legacy_shape() -> None:
 
 async def main() -> int:
     print("=== Forwarder native notification smoke ===")
-    await case_codex_peer_message_uses_homunculus_method()
+    await case_codex_peer_message_uses_solet_method()
     await case_codex_peer_message_preserves_metadata()
-    await case_codex_post_message_uses_homunculus_method()
+    await case_codex_post_message_uses_solet_method()
     await case_codex_non_peer_event_keeps_legacy_channel()
     await case_claude_peer_message_keeps_legacy_shape()
     print()

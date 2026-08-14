@@ -68,7 +68,7 @@ class _FakeUnregisterClient:
 
 def _build_plugin() -> MacosSelfDeploymentPlugin:
     plugin = MacosSelfDeploymentPlugin()
-    plugin._homunculus_name = "smoketest"
+    plugin._solet_name = "smoketest"
     plugin._self_color = "blue"
     plugin._self_instance_id = "smoketest-blue-test0001"
     plugin._router_client = _FakeUnregisterClient()  # type: ignore[assignment]
@@ -182,12 +182,12 @@ def _scenario_sentinel_filename_is_cross_color() -> None:
         "sentinel filename carries NO color suffix (Architect's amendment)",
     )
 
-    # Different homunculus names produce distinct sentinels — multi-homunculus
+    # Different solet names produce distinct sentinels — multi-solet
     # cohabitation on the same Mac doesn't collide.
     bayda_sentinel = drain_sentinel.sentinel_path("bayda")
     _expect(
         bayda_sentinel.name == "bayda.draining" and bayda_sentinel != sentinel,
-        f"distinct homunculus -> distinct sentinel (example={sentinel.name}, "
+        f"distinct solet -> distinct sentinel (example={sentinel.name}, "
         f"bayda={bayda_sentinel.name})",
     )
 

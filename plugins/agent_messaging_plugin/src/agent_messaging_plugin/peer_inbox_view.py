@@ -3,7 +3,7 @@
 Three surfaces render the SAME ``PeerInbox`` dataclass for a caller:
 
 - the localhost bridge route ``GET .../peer/inbox`` (``http_routes``) — what
-  the no-MCP ``homunculus watch`` drain reads;
+  the no-MCP ``solet watch`` drain reads;
 - the Streamable-HTTP MCP tool dispatch (``mcp_streamable.dispatch``);
 - the ``plugin::agent_messaging_plugin::peer_inbox`` platform process
   (``plugin.peer_inbox_process``) — the pull path for sessions with no MCP

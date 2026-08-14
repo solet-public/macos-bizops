@@ -119,7 +119,7 @@ def _client(
 
 
 def _open_bridge(manager: BridgeSessionManager) -> str:
-    return manager.open(homunculus_name="", parent_pid=123).bridge_id
+    return manager.open(solet_name="", parent_pid=123).bridge_id
 
 
 def _register(

@@ -238,7 +238,7 @@ def case_identity_routing() -> None:
 def case_gate_disabled_allows_everything() -> None:
     """Opt-in default-OFF: with the controller env unset, EVERY session may
     run mutating git AND spawn subagents — the safe single-session default
-    (a fresh seed-born homunculus wires no gate at all)."""
+    (a fresh seed-born solet wires no gate at all)."""
     saved = os.environ.pop(gate.GIT_CONTROLLER_ENV, None)
     try:
         _expect_allow(gate.check_bash, ({"command": "git stash"}, SOME), "gate-off: git stash allowed")

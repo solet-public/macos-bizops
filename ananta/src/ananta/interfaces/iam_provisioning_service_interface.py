@@ -2,8 +2,8 @@
 
 The fourth AWS lifecycle plugin's contract per Step 1 v2 §11 + Step 7 design.
 Provisions the per-birther IAM lifecycle role quartet's create-able members
-(``<birther>-midwife`` + ``<birther>-undertaker``). The ``<homunculus>-self-
-deployment`` role is midwife scope (created per-homunculus at birth time);
+(``<birther>-midwife`` + ``<birther>-undertaker``). The ``<solet>-self-
+deployment`` role is midwife scope (created per-solet at birth time);
 the ``<birther>-admin`` role itself is operator-manual (chicken-and-egg).
 
 Per the D1 architectural mandate
@@ -80,7 +80,7 @@ class IamProvisioningServiceInterface(ABC):
           surfaced in the dry-run output — no divergence allowed.
 
         Args:
-            birther_name: The birther homunculus whose midwife/undertaker
+            birther_name: The birther solet whose midwife/undertaker
                 roles are being provisioned. Validated against
                 ``[a-z][a-z0-9_-]{1,62}``. Used to compose role names:
                 ``<birther_name>-midwife``, ``<birther_name>-undertaker``.
@@ -129,7 +129,7 @@ class IamProvisioningServiceInterface(ABC):
         of any kind, no resource tags written.
 
         Args:
-            birther_name: The birther homunculus whose role quartet is
+            birther_name: The birther solet whose role quartet is
                 inspected. Same validation as
                 :meth:`provision_lifecycle_roles`.
 

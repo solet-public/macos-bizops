@@ -204,7 +204,7 @@ def _check_session_ledger_guidance(path: Path, content: str) -> None:
     )
     _check(
         f"{name}: restart after ledger_allowed_roots edit",
-        "restart the homunculus before registering sources" in content,
+        "restart the solet before registering sources" in content,
         "missing restart boundary",
     )
 
@@ -255,13 +255,13 @@ def _check_hydration_runbook_seed_neutral_and_no_mcp_primary() -> None:
     _check(
         "hydration runbook: existing CLAUDE.md gets managed block merge guidance",
         "insert or update only that managed block" in content
-        and "<!-- BEGIN HOMUNCULUS HYDRATION -->" in content
-        and "<!-- END HOMUNCULUS HYDRATION -->" in content,
+        and "<!-- BEGIN SOLET HYDRATION -->" in content
+        and "<!-- END SOLET HYDRATION -->" in content,
         "missing managed-block guidance for existing CLAUDE.md",
     )
     _check(
         "hydration runbook: managed block carries implementation KB-first and router guidance",
-        "implementation/debugging requirement to search the homunculus's own knowledge base first" in content
+        "implementation/debugging requirement to search the solet's own knowledge base first" in content
         and "router-vs-bridge distinction" in content,
         "missing implementation/debugging or router-vs-bridge managed-block guidance",
     )
@@ -274,7 +274,7 @@ def _check_hydration_runbook_seed_neutral_and_no_mcp_primary() -> None:
     )
     _check(
         "hydration runbook: settings merge markers are documented",
-        "HOMUNCULUS_STEP_ZERO_HOOK=<name>" in content and "HOMUNCULUS_ROLE_RECLAIM_HOOK=<name>" in content,
+        "SOLET_STEP_ZERO_HOOK=<name>" in content and "SOLET_ROLE_RECLAIM_HOOK=<name>" in content,
         "missing hook merge marker guidance",
     )
 

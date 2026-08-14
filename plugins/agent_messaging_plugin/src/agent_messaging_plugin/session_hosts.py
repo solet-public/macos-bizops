@@ -17,7 +17,7 @@ the identifiers and prose inside them moved).
 Selection is DECLARED, never probed (C3): ``FLEET_SESSION_HOST`` env var (or
 a per-spawn override), default ``headless`` per §5. Every registered driver
 is still config-gated fail-closed — an unconfigured environment (missing
-binary, no ``HOMUNCULUS_NAME``, no permission mode, no ``.mcp.json``, or for
+binary, no ``SOLET_NAME``, no permission mode, no ``.mcp.json``, or for
 ``tmux`` an unsupported tmux version) gets ``host_cannot_spawn`` with the
 exact remedies from that driver's ``verify_config``, never
 ``host_mechanism_missing`` (that token now means ONLY "no driver registered
@@ -146,7 +146,7 @@ class OperatorHostDriver:
         del spec
         raise HostCannotSpawnError(
             "the operator host driver cannot spawn; launch manually: "
-            "HOMUNCULUS_NAME=<name> python -m ananta.cli --app-home <profile>",
+            "SOLET_NAME=<name> python -m ananta.cli --app-home <profile>",
         )
 
     def alive(self, host_ref: str) -> bool:

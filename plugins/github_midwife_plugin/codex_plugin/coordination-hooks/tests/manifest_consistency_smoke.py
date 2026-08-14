@@ -25,12 +25,21 @@ from _harness import HOOKS_DIR, PLUGIN_ROOT, Results, preflight  # noqa: E402
 # check_step_zero_fires_everywhere. RED MUTATION for this Counter: re-adding
 # either reminder to any UserPromptSubmit entry, or dropping either from the
 # SessionStart(startup|resume|clear) group.
+#
+# codex-0147-async-hook-regression (2026-08-13): the Stop/wake_waiter.js entry
+# is deliberately ABSENT. Stock Codex 0.147.0 does not accept async command
+# hooks ("skipping async hook ... async hooks are not supported yet") — the
+# handler registered under 906753eb7 never fired. wake_waiter.js and its
+# dedicated smoke were deleted rather than kept dormant; the 0.141.0
+# acceptance evidence that motivated the async binding is preserved as
+# historical record in SECURITY.md and git history. RED MUTATION for this
+# Counter: re-adding a Stop entry without first proving async command-hook
+# support on the target stock Codex build.
 EXPECTED = Counter(
     {
         ("SessionStart", "startup|resume|clear", "step_zero_reminder.js"): 1,
         ("SessionStart", "startup|resume|clear", "check_messages_reminder.js"): 1,
         ("SessionStart", "startup|resume|clear", "role_binding_reminder.js"): 1,
-        ("Stop", "", "wake_waiter.js"): 1,
         ("PreToolUse", "^Bash$", "git_controller_gate.py"): 1,
     }
 )
@@ -41,7 +50,6 @@ HOOK_KEYWORDS = {
     "step_zero_reminder.js": ("project-orientation", "step-zero"),
     "check_messages_reminder.js": ("coordination reminder", "unread-message"),
     "role_binding_reminder.js": ("role-binding", "role binding"),
-    "wake_waiter.js": ("wake waiter", "idle-wake"),
     "git_controller_gate.py": ("git-controller", "git controller"),
 }
 DOCUMENTS = (
@@ -102,9 +110,8 @@ def _python_imports(tree: ast.AST) -> set[str]:
 
 def _check_javascript_source(res: Results, path: Path, source: str) -> None:
     requires = set(re.findall(r"require\(\s*['\"]([^'\"]+)['\"]\s*\)", source))
-    allowed_requires = {"fs", "child_process"} if path.name == "wake_waiter.js" else {"fs"}
     res.check(
-        requires <= allowed_requires,
+        requires <= {"fs"},
         f"{path.name} requires only reviewed built-ins",
         repr(requires),
     )
@@ -113,33 +120,11 @@ def _check_javascript_source(res: Results, path: Path, source: str) -> None:
         f"{path.name} has no file-write primitive",
     )
     process_tokens = [token for token in NODE_PROCESS_TOKENS if token in source]
-    if path.name == "wake_waiter.js":
-        res.check(
-            requires == {"fs", "child_process"},
-            "wake_waiter.js requires exactly stdin and child-process built-ins",
-            repr(requires),
-        )
-        res.check(bool(process_tokens), "wake_waiter.js owns the sole child-process primitive")
-        res.check(
-            not any(token in source for token in ("execFile", "execSync", "spawnSync")),
-            "wake_waiter.js does not use an exec-family or synchronous process call",
-            repr(process_tokens),
-        )
-        res.check(
-            'spawn(cli, ["wake", "--max-wait", String(resolveMaxWaitS())]' in source,
-            "wake_waiter.js argv is fixed (bounded wait included)",
-        )
-        res.check("shell: false" in source, "wake_waiter.js explicitly disables shell execution")
-        res.check(
-            'stdio: ["ignore", "ignore", "ignore"]' in source,
-            "wake_waiter.js discards every child stream unread",
-        )
-    else:
-        res.check(
-            not process_tokens,
-            f"{path.name} has no child-process primitive",
-            repr(process_tokens),
-        )
+    res.check(
+        not process_tokens,
+        f"{path.name} has no child-process primitive",
+        repr(process_tokens),
+    )
 
 
 def _check_python_source(res: Results, path: Path, source: str) -> None:
@@ -312,21 +297,12 @@ def _check_security_claim(res: Results) -> None:
     )
 
 
-def _check_waiter_manifest(res: Results, hooks: dict[object, object]) -> None:
-    stop_groups = hooks.get("Stop")
-    res.check(isinstance(stop_groups, list) and len(stop_groups) == 1, "Stop has one matcher group")
-    if not isinstance(stop_groups, list) or len(stop_groups) != 1:
-        return
-    group = stop_groups[0]
-    if not isinstance(group, dict):
-        return
-    entries = group.get("hooks")
-    res.check(isinstance(entries, list) and len(entries) == 1, "Stop has one command handler")
-    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
-        return
-    entry = entries[0]
-    res.check(entry.get("timeout") == 86400, "Stop hook timeout is the reviewed 24-hour bound")
-    res.check("async" not in entry, "Stop hook remains synchronous on stock Codex")
+def _check_no_stop_binding(res: Results, hooks: dict[object, object]) -> None:
+    """codex-0147-async-hook-regression: no Stop entry may exist until a stock
+    Codex build with confirmed async command-hook support motivates re-adding
+    one. A bound-but-unsupported Stop entry is what produced the 0.147.0
+    startup warning this smoke exists to prevent regressing to."""
+    res.check("Stop" not in hooks, "manifest carries no Stop binding", repr(sorted(hooks)))
 
 
 def main() -> int:
@@ -345,7 +321,7 @@ def main() -> int:
     actual, referenced = _collect_inventory(res, hooks)
 
     res.check(actual == EXPECTED, "registered event/matcher/script inventory is exact", repr(actual))
-    _check_waiter_manifest(res, hooks)
+    _check_no_stop_binding(res, hooks)
     _check_documentation(res, referenced)
     _check_gate_routing(res, actual)
     _check_source_contract(res)

@@ -8,7 +8,7 @@ Embedding Description: The orientation article for the AI code-vetting suite —
 
 **When you need this**: orienting on the vetting suite before touching any one part; deciding whether a new check belongs at L1, L2, or L3; understanding why self-vet and foreign-vet share one engine; learning how a scanner that could not run is reported; finding which L1 evidence payload an AI lens consumes as targeting input.
 
-The suite answers one question for a codebase, self or foreign: what should a careful reviewer flag, and how confident are we. It is the install-a-quality-tool-not-a-homunculus adoption wedge — local, zero-marginal-cost because it orchestrates the operator's already-paid coding-agent subscriptions and free open-source scanners rather than a metered API key, and honest about its own coverage.
+The suite answers one question for a codebase, self or foreign: what should a careful reviewer flag, and how confident are we. It is the install-a-quality-tool-not-a-solet adoption wedge — local, zero-marginal-cost because it orchestrates the operator's already-paid coding-agent subscriptions and free open-source scanners rather than a metered API key, and honest about its own coverage.
 
 ## The three layers
 

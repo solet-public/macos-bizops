@@ -29,8 +29,8 @@ PLUGIN_CLI_PATTERN: Final[str] = r"^--plugin\.([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)$"
 ENV_PREFIX: Final[str] = "ANANTA_"
 ENV_VAR_FORMAT: Final[str] = "PLUGIN_{0}_{1}"
 
-# Homunculus Identity
-HOMUNCULUS_NAME_ENV_VAR: Final[str] = "HOMUNCULUS_NAME"
+# Solet Identity
+SOLET_NAME_ENV_VAR: Final[str] = "SOLET_NAME"
 
 DATA_DIRECTORY_NAME: Final[str] = "data"
 PROMPTS_DIRECTORY_NAME: Final[str] = "prompts"

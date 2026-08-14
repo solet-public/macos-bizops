@@ -26,12 +26,12 @@ this simpler shape is the v1 cut.
 
 No interactive prompting anywhere in this module: this process is
 invoked via a captured-output subprocess (`bootstrap.py`'s handoff), so
-stdin is not usable for free-text input. `HOMUNCULUS_NAME` is read from
+stdin is not usable for free-text input. `SOLET_NAME` is read from
 the environment -- the driving agent obtains the name from the user in
 conversation (build spec §10.1, Layer -1) BEFORE ever invoking
-`bootstrap.py`, and sets `HOMUNCULUS_NAME` for the whole
+`bootstrap.py`, and sets `SOLET_NAME` for the whole
 `bootstrap.py` -> `genesis.py` chain, mirroring the platform's own
-canonical invocation shape (`HOMUNCULUS_NAME=<name> python -m ananta.cli ...`).
+canonical invocation shape (`SOLET_NAME=<name> python -m ananta.cli ...`).
 """
 
 from __future__ import annotations
@@ -61,13 +61,13 @@ from .router_install import RouterInstallError, RouterInstallResult, install_rou
 from .steps import GenesisContext, run_steps
 from .vault_passphrase_seed import seed_vault_passphrase
 
-_DEFAULT_PROFILE_NAME = "macos-free-homunculus"
-_PROFILE_ENV_VAR = "HOMUNCULUS_PROFILE"
+_DEFAULT_PROFILE_NAME = "macos-free-solet"
+_PROFILE_ENV_VAR = "SOLET_PROFILE"
 _PROVENANCE_FILENAME = "PROVENANCE.json"
 _PROFILE_TEMPLATE_BY_BUNDLE = {
-    "macos_free_minimal": "macos-free-homunculus",
-    "bizops_standard": "macos-bizops-homunculus",
-    "macos_samantha": "macos-samantha-homunculus",
+    "macos_free_minimal": "macos-free-solet",
+    "bizops_standard": "macos-bizops-solet",
+    "macos_samantha": "macos-samantha-solet",
 }
 
 
@@ -158,7 +158,7 @@ def run_genesis(
 
     Shared by the CLI entrypoint (`main()`, always operates on the
     current clone with every override left at its real default) and
-    the `birth_homunculus` EDGE verb (`plugin.py`), which always passes
+    the `birth_solet` EDGE verb (`plugin.py`), which always passes
     an existing clone. Genesis never clones a target itself -- the caller
     provides one (acquisition-mode clone-of-pinned-upstream was retired
     2026-07-18; the Seed Factory assembles the clone first).
@@ -172,7 +172,7 @@ def run_genesis(
     (`venv_provision.seed_newborn_credential`: pre-seed scram-verify -> the
     newborn self-seeds its OWN role via the same `seed_db_password` path the
     CLI uses -> post-seed isolation self-proof). No credential ever crosses a
-    homunculus namespace; there is no parent-provisions-child copy. When
+    solet namespace; there is no parent-provisions-child copy. When
     `None` (the CLI/fresh-machine entrypoint, running in the newborn's OWN
     process), `keychain`/`alter_role_password`/`role_authenticates`/
     `role_exists` pass straight through to `credential_seed.seed_db_password`.
@@ -289,11 +289,11 @@ def run_genesis(
         "router_status": router_result.status, "reason": router_result.reason,
     })
 
-    # SEED — install the per-homunculus command launcher on the operator's PATH:
+    # SEED — install the per-solet command launcher on the operator's PATH:
     # the no-MCP-first primary interface (`<name> search/call`). UNCONDITIONAL
-    # (every profile ships agent_messaging_plugin's `homunculus` console script);
+    # (every profile ships agent_messaging_plugin's `solet` console script);
     # a bare symlink `<bin_dir>/<name>` -> the newborn's console script, whose
-    # identity resolves by install location so it reaches only its own homunculus.
+    # identity resolves by install location so it reaches only its own solet.
     # Fail-loud if the console script is missing or a real file blocks the path.
     launcher_result = _run_command_launcher_phase(
         name, clone_root, command_launcher_bin_dir, phases, _finalize_marker,
@@ -309,7 +309,7 @@ def run_genesis(
     # history (never the source tree's .git — the "no contaminated history travels" invariant
     # is why .git is never-copied; this starts a clean local one, it does not
     # import). Unblocks platform_dev_surface_plugin readiness in seed-born
-    # homunculi (a plain source tree fail-louds `git rev-parse --is-inside-work-tree`).
+    # solets (a plain source tree fail-louds `git rev-parse --is-inside-work-tree`).
     git_init_record = _run_git_init_phase(name, clone_root, git_init_run, phases, _finalize_marker)
     phases.append(git_init_record)
 
@@ -337,7 +337,7 @@ def _install_autostart(
     launchctl_run: Runner | None,
 ) -> AutostartResult:
     renderer = SimpleAutostartRenderer(
-        homunculus_name=name,
+        solet_name=name,
         clone_root=clone_root,
         plist_dir=plist_dir if plist_dir is not None else Path.home() / "Library" / "LaunchAgents",
         home_dir=home_dir if home_dir is not None else Path.home(),
@@ -440,7 +440,7 @@ def _check_for_stale_vault_master(
 ) -> dict[str, Any]:
     """Refuse a fresh clone paired with an old macOS Keychain vault master key.
 
-    Re-birthing the same homunculus name after deleting only the clone/database
+    Re-birthing the same solet name after deleting only the clone/database
     leaves service ``<name>-vault`` account ``master-key`` behind. If genesis just
     wrote a new passphrase file, that old wrapped master key cannot be unwrapped
     and launchd will crash-loop. Detect the mismatch before autostart.
@@ -468,7 +468,7 @@ def _check_for_stale_vault_master(
 
     if master_exists:
         raise GenesisError(
-            f"stale macOS Keychain vault state for homunculus {name!r}: "
+            f"stale macOS Keychain vault state for solet {name!r}: "
             f"service {name}-vault account {MASTER_KEY_ACCOUNT!r} already exists "
             "but genesis just created a fresh vault passphrase file. Use a real "
             "teardown path or delete that Keychain item before re-birthing this name."
@@ -481,11 +481,11 @@ def _check_for_stale_vault_master(
 
 
 def main() -> int:
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         print(
-            "FATAL: HOMUNCULUS_NAME env var is required. The driving agent "
-            "must obtain the homunculus name from the user and set it "
+            "FATAL: SOLET_NAME env var is required. The driving agent "
+            "must obtain the solet name from the user and set it "
             "before invoking bootstrap.py.",
             file=sys.stderr,
         )
@@ -525,7 +525,7 @@ def _mcp_register_suggestion(name: str, clone_root: Path) -> str:
         "\nNext step (run this yourself, or your driving agent will run it "
         "for you -- see README.md \"Registering the MCP bridge\" for the "
         "full probe/verify ladder):\n"
-        f"  claude mcp add --scope user -e HOMUNCULUS_NAME={name} "
+        f"  claude mcp add --scope user -e SOLET_NAME={name} "
         "-e AGENT_IDENTITY=claude_code "
         f"{name} -- {venv_python} -m agent_messaging_plugin.mcp_bridge"
     )

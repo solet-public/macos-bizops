@@ -37,6 +37,7 @@ from .headless_adapter import (
     _resolve_default_cwd,
     _sigterm_then_kill,
 )
+from .solet_cli import resolve_solet_bin as _resolve_solet_bin
 from .tmux_adapter import (
     DEFAULT_PANE_HEIGHT,
     DEFAULT_PANE_WIDTH,
@@ -78,7 +79,14 @@ class _CodexTmuxDriverChannel:
     def send(self, text: str) -> None:
         from .session_hosts import DriverChannelSendError  # noqa: PLC0415
 
-        self._wait_until_ready()
+        # _wait_until_ready's return value is the idle prompt it observed
+        # right before the literal send -- the genuine pre-send baseline,
+        # reused rather than re-captured (driver-channel strand fix,
+        # 2026-08-14, mirrored from the tmux twin's own fix: see
+        # tmux_adapter.py's _TmuxSendKeysDriverChannel.send/
+        # _wait_for_paste_stable docstrings for the shared defect and fix
+        # shape, hermetically reproduced against each class independently).
+        baseline = self._wait_until_ready()
         literal = self._run(
             [self._tmux_bin, "send-keys", "-t", self._session, "-l", "--", text],
         )
@@ -86,7 +94,7 @@ class _CodexTmuxDriverChannel:
             raise DriverChannelSendError(
                 f"tmux literal send failed for Codex session {self._session!r}",
             )
-        composed = self._wait_until_stable()
+        composed = self._wait_until_stable(baseline)
         if self._submit_and_observe_change(composed):
             return
         # A same-burst Enter can be absorbed by the TUI.  One separately
@@ -142,13 +150,31 @@ class _CodexTmuxDriverChannel:
             "text was not pasted.",
         )
 
-    def _wait_until_stable(self) -> str:
+    def _wait_until_stable(self, baseline: str | None) -> str:
+        """Poll until the styled pane is IDENTICAL across ``stable_samples``
+        consecutive captures AND differs from ``baseline`` (the idle prompt
+        :meth:`_wait_until_ready` observed right before the literal send).
+        Without the baseline gate, a slow-rendering composer can hold that
+        same idle screen across every sample in the window, and N identical
+        PRE-paste samples satisfy "stable" exactly as well as N identical
+        POST-render ones -- Enter then fires against a composer that still
+        visibly shows nothing but the idle prompt, and
+        :meth:`_submit_and_observe_change`'s own post-Enter check can be
+        fooled into a false "delivered" signal by that same paste finally
+        rendering on its own schedule (driver-channel strand fix, 2026-08-14,
+        hermetically reproduced -- workbench/2026-08-14_driver_channel_
+        strand_fix_report_lane_d.md). Still fails CLOSED on timeout (raises,
+        never sends Enter for un-confirmed composed text) -- this class's own
+        established contract, unchanged by this fix; a composer whose full
+        render genuinely never differs from the pre-send idle screen raises
+        here exactly as before, rather than silently proceeding with a stale
+        ``composed`` value."""
         deadline = self._now_fn() + self._verify_timeout_seconds
         previous: str | None = None
         count = 0
         while self._now_fn() <= deadline:
             current = self._capture_styled()
-            if current is not None and current == previous:
+            if current is not None and current == previous and current != baseline:
                 count += 1
                 if count >= self._stable_samples:
                     return current
@@ -189,8 +215,8 @@ class CodexTmuxHostDriver:
         self,
         *, codex_bin: str | None = None,
         tmux_bin: str | None = None,
-        homunculus_bin: str | None = None,
-        homunculus_name: str | None = None,
+        solet_bin: str | None = None,
+        solet_name: str | None = None,
         codex_home: Path | None = None,
         cwd: Path | None = None,
         transport: str | None = None,
@@ -201,13 +227,10 @@ class CodexTmuxHostDriver:
     ) -> None:
         self._codex_bin = codex_bin if codex_bin is not None else shutil.which("codex") or ""
         self._tmux_bin = tmux_bin if tmux_bin is not None else shutil.which("tmux") or ""
-        self._homunculus_bin = (
-            homunculus_bin if homunculus_bin is not None
-            else shutil.which("homunculus") or ""
-        )
-        self._homunculus_name = (
-            homunculus_name if homunculus_name is not None
-            else os.environ.get("HOMUNCULUS_NAME", "")
+        self._solet_bin = _resolve_solet_bin(solet_bin)
+        self._solet_name = (
+            solet_name if solet_name is not None
+            else os.environ.get("SOLET_NAME", "")
         )
         self._codex_home = _codex_home(codex_home)
         self._cwd = cwd if cwd is not None else _resolve_default_cwd()
@@ -227,8 +250,8 @@ class CodexTmuxHostDriver:
     def verify_config(self, *, transport: str | None = None) -> list[str]:
         base = CodexAppServerHostDriver(
             codex_bin=self._codex_bin,
-            homunculus_bin=self._homunculus_bin,
-            homunculus_name=self._homunculus_name,
+            solet_bin=self._solet_bin,
+            solet_name=self._solet_name,
             codex_home=self._codex_home,
             cwd=self._cwd,
             transport=self._transport,
@@ -310,7 +333,8 @@ class CodexTmuxHostDriver:
             agent_instance_id=identity.agent_instance_id,
             agent_session_id=identity.agent_session_id,
             label=identity.label,
-            homunculus_name=self._homunculus_name,
+            solet_name=self._solet_name,
+            solet_bin=self._solet_bin,
             transport=transport,
         )
 
@@ -321,11 +345,12 @@ class CodexTmuxHostDriver:
         config = _read_codex_config(self._config_path)
         overrides = _codex_config_overrides(
             config=config,
-            homunculus_name=self._homunculus_name,
+            solet_name=self._solet_name,
             transport=transport,
             agent_instance_id=identity.agent_instance_id,
             agent_session_id=identity.agent_session_id,
             label=identity.label,
+            solet_bin=self._solet_bin,
         )
         effort = str(spec.get("effort") or "")
         if effort:
@@ -355,9 +380,9 @@ class CodexTmuxHostDriver:
         ]
         for key, value in env.items():
             if key in {
-                "HOMUNCULUS_NAME", "AGENT_IDENTITY", "AGENT_INSTANCE_ID",
+                "SOLET_NAME", "AGENT_IDENTITY", "AGENT_INSTANCE_ID",
                 "AGENT_SESSION_ID", "AGENT_SESSION_LABEL", "AGENT_WAKE_CLI",
-                "FLEET_TRANSPORT",
+                "FLEET_TRANSPORT", "PATH",
             }:
                 new_session_cmd += ["-e", f"{key}={value}"]
         new_session_cmd += ["-c", str(self._cwd), "sh", "-c", pane_command]
@@ -383,13 +408,19 @@ class CodexTmuxHostDriver:
             f"sh {shlex.quote(str(emit))} {shlex.quote(label)}; " if emit.exists() else "",
         ]
         if transport == "watch":
+            # codex-0147-dead-spool-retirement (2026-08-13): --no-spool disables
+            # this watcher's own wake-hook spool tee. Stock Codex's Stop hook
+            # cannot consume it (async command hooks do not execute on stock
+            # Codex), so an armed spool here would just accumulate an unread
+            # file for the pane's lifetime.
             watch_cmd = shlex.join(
                 _without_parent_runtime_env(
                     [
-                        self._homunculus_bin,
+                        self._solet_bin,
                         "watch",
                         "--agent-id", _CODEX_AGENT_ID,
                         "--no-claim",
+                        "--no-spool",
                     ],
                 ),
             )
@@ -453,5 +484,3 @@ class CodexTmuxHostDriver:
             session=host_ref,
             run_fn=self._run_fn,
         )
-
-

@@ -12,7 +12,7 @@ proves three things end-to-end:
    ``site.addsitedir`` step, refreshes ``sys.path`` so ``import
    tabulate`` finds the freshly-installed package).
 3. The fixture survives blue-green pickup: when ``apply_manifest`` is
-followed by ``restart_with_manifest``, the green homunculus spawns from the
+followed by ``restart_with_manifest``, the green solet spawns from the
    working tree with the fixture in its manifest and ``tabulate``
    still resolvable in the green venv (which is the same venv blue
    ran in).
@@ -125,7 +125,7 @@ class FreshInstallWithPipDepSmokePlugin(PluginBase, EdgeProcessProvider):
         Reading ``tabulate_rendered`` and finding a non-empty rendered
         table is empirical proof that the new-pip-dep resolution +
         in-process import works post-install (and, when the verb is
-called against the green homunculus, that blue-green pickup also handled
+called against the green solet, that blue-green pickup also handled
         the new-pip-dep).
         """
         del params, state

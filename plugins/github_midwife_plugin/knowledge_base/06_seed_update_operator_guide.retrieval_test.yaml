@@ -7,15 +7,15 @@ article_path: knowledge_bases/github_midwife_plugin/06_seed_update_operator_guid
 consumer_profile: both
 
 target_queries:
-  - "how do I update my homunculus myself, step by step"
-  - "someone told me a new version of my homunculus is available, what do I do"
-  - "plain language guide to updating my homunculus without a coding agent"
-  - "update guide for the homunculus owner, not the coding agent"
-  - "my homunculus plugin still seems old after pulling an update"
+  - "how do I update my solet myself, step by step"
+  - "someone told me a new version of my solet is available, what do I do"
+  - "plain language guide to updating my solet without a coding agent"
+  - "update guide for the solet owner, not the coding agent"
+  - "my solet plugin still seems old after pulling an update"
   - "claude plugin uninstall install scope local commands to refresh"
   - "why does typing claude break the plugin refresh command"
   - "how do I know if a newly activated plugin's knowledge is actually searchable"
-  - "no active color error right after restarting my homunculus"
+  - "no active color error right after restarting my solet"
   - "how do I check my CLAUDE.md instructions actually got updated"
   - "configure a workspace root for business connector results after an update"
   - "how do I verify marketo or zuora reads are working correctly after an update"
@@ -23,7 +23,7 @@ target_queries:
 min_rank: 3
 
 forbidden_queries:
-  - "birth a brand new homunculus from a seed for the first time"
+  - "birth a brand new solet from a seed for the first time"
   - "why does assemble_seed read policy from the deployed release instead of the ref"
   - "manifest_hash equal to predecessor manifest_sha256 tell for stale policy"
 forbidden_min_rank: 1

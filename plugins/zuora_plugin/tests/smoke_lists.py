@@ -39,7 +39,7 @@ Exercises:
       no file written, no vendor call made
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/zuora_plugin/tests/smoke_lists.py
 
 Exits 0 on success, 1 on first failure.

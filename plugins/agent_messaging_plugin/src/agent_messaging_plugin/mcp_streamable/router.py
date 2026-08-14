@@ -21,7 +21,7 @@ return HTTP 404 per the spec, prompting the client to re-initialize.
 
 Auth: every request (POST, GET, DELETE) carries
 ``Authorization: Bearer <sealed_box_token>``.  The token must
-decrypt against the homunculus's vault identity keypair AND match
+decrypt against the solet's vault identity keypair AND match
 the session's bound ``agent_instance_id`` after initialize.  The
 ``initialize`` exchange itself binds the session to the claim's
 ``agent_instance_id``.
@@ -103,7 +103,7 @@ def build_streamable_router(
     resource_metadata_url: str = "",
     cors_origins: tuple[str, ...] = (),
     path_aliases: tuple[str, ...] = (),
-    homunculus_name: str = "",
+    solet_name: str = "",
 ) -> APIRouter:
     """Build the FastAPI router carrying the Streamable HTTP MCP endpoint.
 
@@ -129,7 +129,7 @@ def build_streamable_router(
         platform_surface=platform_surface,
         agent_messaging_service=agent_messaging_service,
         state_service=state_service,
-        homunculus_name=homunculus_name,
+        solet_name=solet_name,
     )
     router = APIRouter()
     mount_paths = (STREAMABLE_PATH, *path_aliases)
@@ -176,7 +176,7 @@ def _mount_streamable_handlers(
             dispatch_ctx=dispatch_ctx,
             allowed_origins=allowed_origins,
             resource_metadata_url=resource_metadata_url,
-            homunculus_name=dispatch_ctx.homunculus_name,
+            solet_name=dispatch_ctx.solet_name,
         )
         _apply_cors_headers(response, request, cors_origins)
         return response
@@ -190,7 +190,7 @@ def _mount_streamable_handlers(
             bridge_manager=bridge_manager,
             allowed_origins=allowed_origins,
             resource_metadata_url=resource_metadata_url,
-            homunculus_name=dispatch_ctx.homunculus_name,
+            solet_name=dispatch_ctx.solet_name,
         )
         _apply_cors_headers(response, request, cors_origins)
         return response
@@ -203,7 +203,7 @@ def _mount_streamable_handlers(
             bearer_verifier=bearer_verifier,
             allowed_origins=allowed_origins,
             resource_metadata_url=resource_metadata_url,
-            homunculus_name=dispatch_ctx.homunculus_name,
+            solet_name=dispatch_ctx.solet_name,
         )
         _apply_cors_headers(response, request, cors_origins)
         return response
@@ -242,14 +242,14 @@ async def _handle_post(
     dispatch_ctx: DispatchContext,
     allowed_origins: tuple[str, ...],
     resource_metadata_url: str = "",
-    homunculus_name: str = "",
+    solet_name: str = "",
 ) -> Response:
     pre = await _validate_post_preconditions(
         request,
         bearer_verifier=bearer_verifier,
         allowed_origins=allowed_origins,
         resource_metadata_url=resource_metadata_url,
-        homunculus_name=homunculus_name,
+        solet_name=solet_name,
     )
     if isinstance(pre, Response):
         return pre
@@ -270,7 +270,7 @@ async def _validate_post_preconditions(
     bearer_verifier: BearerVerifier,
     allowed_origins: tuple[str, ...],
     resource_metadata_url: str,
-    homunculus_name: str,
+    solet_name: str,
 ) -> tuple[Any, JsonRpcRequest] | Response:
     """Run origin + auth + body checks and parse the JSON-RPC envelope.
 
@@ -284,7 +284,7 @@ async def _validate_post_preconditions(
         request,
         bearer_verifier,
         resource_metadata_url=resource_metadata_url,
-        homunculus_name=homunculus_name,
+        solet_name=solet_name,
     )
     if isinstance(auth_err, Response):
         return auth_err
@@ -403,7 +403,7 @@ async def _handle_get(
     bridge_manager: BridgeSessionManager,
     allowed_origins: tuple[str, ...],
     resource_metadata_url: str = "",
-    homunculus_name: str = "",
+    solet_name: str = "",
 ) -> Response:
     origin_err = _check_origin(request, allowed_origins)
     if origin_err is not None:
@@ -412,7 +412,7 @@ async def _handle_get(
         request,
         bearer_verifier,
         resource_metadata_url=resource_metadata_url,
-        homunculus_name=homunculus_name,
+        solet_name=solet_name,
     )
     if isinstance(auth_err, Response):
         return auth_err
@@ -454,7 +454,7 @@ async def _handle_delete(
     bearer_verifier: BearerVerifier,
     allowed_origins: tuple[str, ...],
     resource_metadata_url: str = "",
-    homunculus_name: str = "",
+    solet_name: str = "",
 ) -> Response:
     origin_err = _check_origin(request, allowed_origins)
     if origin_err is not None:
@@ -463,7 +463,7 @@ async def _handle_delete(
         request,
         bearer_verifier,
         resource_metadata_url=resource_metadata_url,
-        homunculus_name=homunculus_name,
+        solet_name=solet_name,
     )
     if isinstance(auth_err, Response):
         return auth_err
@@ -522,7 +522,7 @@ def _authorize_or_response(
     bearer_verifier: BearerVerifier,
     *,
     resource_metadata_url: str = "",
-    homunculus_name: str = "",
+    solet_name: str = "",
 ) -> Any:
     """Verify ``Authorization: Bearer <token>``; return claim or Response.
 
@@ -534,7 +534,7 @@ def _authorize_or_response(
     credentials at ``/oauth/token``.  The MCP spec (2025-06-18
     §authorization) requires this parameter.
 
-    The ``realm`` parameter carries the homunculus identity so MCP
+    The ``realm`` parameter carries the solet identity so MCP
     clients prompting the user for credentials surface the actual
     deployment name rather than a generic streamable-server label.
     """
@@ -544,7 +544,7 @@ def _authorize_or_response(
     try:
         return bearer_verifier.verify(header)
     except BearerAuthError as exc:
-        realm = build_server_name(homunculus_name)
+        realm = build_server_name(solet_name)
         challenge_error = _oauth_bearer_challenge_error(exc.code)
         challenge = f'Bearer realm="{_quote_auth_param(realm)}"'
         if challenge_error:

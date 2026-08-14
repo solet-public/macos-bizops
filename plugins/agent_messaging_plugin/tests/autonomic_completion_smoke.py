@@ -32,10 +32,10 @@ event:
 
 Offline: the shared REAL-SHAPE state fake (schema-enforced for the NEW
 table — the slice-D phantom-column class), in-memory collaborators. No
-live homunculus / Postgres.
+live solet / Postgres.
 
 Run from repo root:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/autonomic_completion_smoke.py
 """
 

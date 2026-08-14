@@ -14,7 +14,7 @@ sys.dont_write_bytecode = True
 from _harness import PLUGIN_ROOT, Results, preflight  # noqa: E402
 
 PLUGIN_NAME = "coordination-hooks"
-# The marketplace name is per-homunculus (derived from HOMUNCULUS_NAME at
+# The marketplace name is per-solet (derived from SOLET_NAME at
 # hydration time, TEMPLATE_VARS.md {{MARKETPLACE_NAME}}) — never a fixed
 # literal a shipped smoke can pin, so this checks shape, not a specific value.
 MARKETPLACE_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")

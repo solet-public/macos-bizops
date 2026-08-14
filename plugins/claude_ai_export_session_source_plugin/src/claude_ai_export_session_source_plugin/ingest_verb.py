@@ -7,7 +7,7 @@ claude_ai vendor seam triple. Replaces the retired HTTP route at
 
 Two input shapes (XOR — exactly one MUST be set):
 
-* ``file_path`` — absolute path on the homunculus-side filesystem.
+* ``file_path`` — absolute path on the solet-side filesystem.
 * ``content_bytes`` — base64-encoded ZIP bytes inline (100 MiB decoded cap).
 
 Internal seams reused from the retired ``routes.py`` ``_persist_and_register``:

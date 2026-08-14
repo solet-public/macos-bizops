@@ -5,7 +5,7 @@ Background: a recurring schedule whose DB/metadata row was hard-deleted while it
 in-memory APScheduler job stayed alive was UNKILLABLE by any verb —
 `clear_scheduled_action` gated `remove_job` behind `schedule_id in
 _load_schedules()`, so once the row was gone the live job kept firing until a
-homunculus restart (draining tokens by waking dead sessions; the operator's "scheduled alerts
+solet restart (draining tokens by waking dead sessions; the operator's "scheduled alerts
 we cannot turn off"). The fix makes the verb ALWAYS attempt `remove_job`
 (exception-safe) and report `cancelled` if EITHER the DB row was deleted OR a live
 job was removed — so an orphan is now killable by id without a restart.

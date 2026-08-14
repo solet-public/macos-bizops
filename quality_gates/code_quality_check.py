@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Code Quality Pre-Commit Check for the homunculus platform
+Code Quality Pre-Commit Check for the solet platform
 Runs pyright (strict), ruff, and the three coherence-aware gates
 (god-class, radon cyclomatic complexity, radon maintainability index)
 with their tracked-debt allowlists.
@@ -121,7 +121,7 @@ _PER_FILE_GATE_TOP_LEVEL = (
 # `_check_ruff` (both occurrences — the invocation and the `--fix` hint),
 # `[tool.pyright] include` in pyproject.toml, and the git-controller-commit
 # SKILL.md Step 1 SCOPE regex. `initialization/` ships its own
-# `pyproject.toml` (own [tool.ruff]/[tool.mypy], package `homunculi`,
+# `pyproject.toml` (own [tool.ruff]/[tool.mypy], package `solets`,
 # never installed into this repo's shared `.venv`) — the root config
 # governs this gate regardless (ruling arm-07c73c73 §3); its local config
 # stays untouched as that package's own dev surface, not ours to silence.
@@ -898,7 +898,7 @@ def _check_gate_toolchain(project_root: Path) -> bool:
         print(
             f"FAIL: the gate-toolchain preflight script itself is missing: {script}\n"
             "This platform ships it at deployment/scripts/check_gate_toolchain.sh, so "
-            "this homunculus cannot verify ruff/pyright/radon are installed before "
+            "this solet cannot verify ruff/pyright/radon are installed before "
             "running the gate. Pull an update that carries this file (born-clone-gate-"
             "toolchain fix) rather than proceeding without a toolchain check.",
         )

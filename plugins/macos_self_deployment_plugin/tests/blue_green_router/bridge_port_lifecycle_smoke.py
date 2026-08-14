@@ -18,7 +18,7 @@ What this smoke verifies:
   router that left the canonical pointing at a dead port), launch.py's
   ``_cleanup_stale_runtime_files`` removes it. ``<name>.sock`` and
   ``<name>.rest.port`` (the pre-existing scrub set) are removed in the
-  same call. Files for unrelated homunculi are untouched.
+  same call. Files for unrelated solets are untouched.
 * **Case 3 (Slice 1.5 repair — live router restores canonical):** when a
   live router management socket answers status() and ``<name>.router.port``
   is valid, launch.py re-materializes the router-owned
@@ -26,8 +26,8 @@ What this smoke verifies:
 
 Sandbox discipline (per ``[[sandbox_mutating_smokes]]``):
 
-* Smoke homunculus name 'bgportlife' — distinct from any real install
-  (the live homunculus's real name, 'bgsmoke', etc.).
+* Smoke solet name 'bgportlife' — distinct from any real install
+  (the live solet's real name, 'bgsmoke', etc.).
 * ``HOME`` env override on every subprocess redirects ``Path.home()`` to
   a tmp dir; never touches ``~/.ananta/runtime/``.
 * launchd / systemd paths overridden via the install_router flags so no
@@ -70,8 +70,8 @@ _ROUTER_SCRIPTS_DIR = _PLUGIN_SRC / "macos_self_deployment_plugin" / "blue_green
 _INSTALL_ROUTER = _ROUTER_SCRIPTS_DIR / "install_router.py"
 _UNINSTALL_ROUTER = _ROUTER_SCRIPTS_DIR / "uninstall_router.py"
 
-SMOKE_HOMUNCULUS_NAME = "bgportlife"
-OTHER_HOMUNCULUS_NAME = "bgportlife-other"
+SMOKE_SOLET_NAME = "bgportlife"
+OTHER_SOLET_NAME = "bgportlife-other"
 
 
 def _stamp(label: str, ok: bool, detail: str = "") -> bool:
@@ -93,7 +93,7 @@ def _belt_and_suspenders_bootout() -> None:
 
     if platform.system() != "Darwin":
         return
-    service_target = f"gui/{os.getuid()}/{launchd_label(SMOKE_HOMUNCULUS_NAME)}"
+    service_target = f"gui/{os.getuid()}/{launchd_label(SMOKE_SOLET_NAME)}"
     subprocess.run(
         ["launchctl", "bootout", service_target],
         capture_output=True,
@@ -117,7 +117,7 @@ def _run_install(
         [
             sys.executable,
             str(_INSTALL_ROUTER),
-            SMOKE_HOMUNCULUS_NAME,
+            SMOKE_SOLET_NAME,
             "--public-port", str(public_port),
             "--plist-path", str(plist_path),
             "--unit-path", str(unit_path),
@@ -144,7 +144,7 @@ def _run_uninstall(
         [
             sys.executable,
             str(_UNINSTALL_ROUTER),
-            SMOKE_HOMUNCULUS_NAME,
+            SMOKE_SOLET_NAME,
             "--plist-path", str(plist_path),
             "--unit-path", str(unit_path),
             "--socket-path", str(socket_path),
@@ -225,14 +225,14 @@ def _case_slice1_router_writes_both_files(
     unit_dir.mkdir()
     log_dir = tmpdir / "logs"
     log_dir.mkdir()
-    plist_path = plist_dir / f"{launchd_label(SMOKE_HOMUNCULUS_NAME)}.plist"
-    unit_path = unit_dir / systemd_unit_name(SMOKE_HOMUNCULUS_NAME)
+    plist_path = plist_dir / f"{launchd_label(SMOKE_SOLET_NAME)}.plist"
+    unit_path = unit_dir / systemd_unit_name(SMOKE_SOLET_NAME)
     runtime_dir = home_dir / ".ananta" / "runtime"
     runtime_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     # Socket path goes under a short tmp dir, not inside HOME, because
     # macOS AF_UNIX paths are capped at ~104 chars and the HOME-sandboxed
     # path is well above that limit.
-    socket_path = socket_dir / f"{SMOKE_HOMUNCULUS_NAME}.router.sock"
+    socket_path = socket_dir / f"{SMOKE_SOLET_NAME}.router.sock"
     public_port = _pick_free_port()
 
     proc = _run_install(
@@ -249,8 +249,8 @@ def _case_slice1_router_writes_both_files(
     if not install_ok:
         return False
 
-    router_port_file = runtime_dir / f"{SMOKE_HOMUNCULUS_NAME}.router.port"
-    bridge_port_file = runtime_dir / f"{SMOKE_HOMUNCULUS_NAME}.bridge.port"
+    router_port_file = runtime_dir / f"{SMOKE_SOLET_NAME}.router.port"
+    bridge_port_file = runtime_dir / f"{SMOKE_SOLET_NAME}.bridge.port"
 
     router_exists = router_port_file.exists()
     bridge_exists = bridge_port_file.exists()
@@ -306,14 +306,14 @@ def _case_slice15_cleanup_removes_stale_bridge_port(home_dir: Path) -> bool:
     print(
         "\n[case_slice15] launch._cleanup_stale_runtime_files scrubs "
         "<name>.bridge.port + <name>.sock + <name>.rest.port; leaves "
-        "other homunculi untouched"
+        "other solets untouched"
     )
     runtime_dir = home_dir / ".ananta" / "runtime"
     runtime_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-    stale_bridge = runtime_dir / f"{SMOKE_HOMUNCULUS_NAME}.bridge.port"
-    stale_sock = runtime_dir / f"{SMOKE_HOMUNCULUS_NAME}.sock"
-    stale_rest = runtime_dir / f"{SMOKE_HOMUNCULUS_NAME}.rest.port"
-    other_bridge = runtime_dir / f"{OTHER_HOMUNCULUS_NAME}.bridge.port"
+    stale_bridge = runtime_dir / f"{SMOKE_SOLET_NAME}.bridge.port"
+    stale_sock = runtime_dir / f"{SMOKE_SOLET_NAME}.sock"
+    stale_rest = runtime_dir / f"{SMOKE_SOLET_NAME}.rest.port"
+    other_bridge = runtime_dir / f"{OTHER_SOLET_NAME}.bridge.port"
     stale_bridge.write_text("8101")
     stale_sock.write_text("")
     stale_rest.write_text("8001")
@@ -330,7 +330,7 @@ def _case_slice15_cleanup_removes_stale_bridge_port(home_dir: Path) -> bool:
         "import sys\n"
         f"sys.path.insert(0, {str(_PLUGIN_SRC)!r})\n"
         "from macos_self_deployment_plugin import stale_runtime_cleanup\n"
-        f"stale_runtime_cleanup.cleanup_stale_runtime_files({SMOKE_HOMUNCULUS_NAME!r})\n"
+        f"stale_runtime_cleanup.cleanup_stale_runtime_files({SMOKE_SOLET_NAME!r})\n"
     )
     proc = subprocess.run(
         [sys.executable, "-c", code],
@@ -357,7 +357,7 @@ def _case_slice15_cleanup_removes_stale_bridge_port(home_dir: Path) -> bool:
     _stamp("stale sock removed", sock_gone, str(stale_sock))
     _stamp("stale rest.port removed", rest_gone, str(stale_rest))
     _stamp(
-        "other homunculus's bridge.port preserved",
+        "other solet's bridge.port preserved",
         other_preserved,
         str(other_bridge),
     )
@@ -389,9 +389,9 @@ def _case_slice15_repair_restores_bridge_port_from_live_router() -> bool:
         home_dir = Path(short_home)
         runtime_dir = home_dir / ".ananta" / "runtime"
         runtime_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-        bridge_port = runtime_dir / f"{SMOKE_HOMUNCULUS_NAME}.bridge.port"
-        router_port = runtime_dir / f"{SMOKE_HOMUNCULUS_NAME}.router.port"
-        router_socket = runtime_dir / f"{SMOKE_HOMUNCULUS_NAME}.router.sock"
+        bridge_port = runtime_dir / f"{SMOKE_SOLET_NAME}.bridge.port"
+        router_port = runtime_dir / f"{SMOKE_SOLET_NAME}.router.port"
+        router_socket = runtime_dir / f"{SMOKE_SOLET_NAME}.router.sock"
         bridge_port.write_text("8101")
         router_port.write_text("7777")
         server = _serve_one_router_status(router_socket)
@@ -402,9 +402,9 @@ def _case_slice15_repair_restores_bridge_port_from_live_router() -> bool:
             "import sys\n"
             f"sys.path.insert(0, {str(_PLUGIN_SRC)!r})\n"
             "from macos_self_deployment_plugin import stale_runtime_cleanup\n"
-            f"stale_runtime_cleanup.cleanup_stale_runtime_files({SMOKE_HOMUNCULUS_NAME!r})\n"
+            f"stale_runtime_cleanup.cleanup_stale_runtime_files({SMOKE_SOLET_NAME!r})\n"
             "restored = stale_runtime_cleanup."
-            f"restore_router_owned_bridge_port_file_if_router_live({SMOKE_HOMUNCULUS_NAME!r})\n"
+            f"restore_router_owned_bridge_port_file_if_router_live({SMOKE_SOLET_NAME!r})\n"
             "raise SystemExit(0 if restored else 1)\n"
         )
         proc = subprocess.run(
@@ -453,7 +453,7 @@ def main() -> int:
     socket_dir = Path(tempfile.mkdtemp(prefix="bg-sock-"))
     print(
         f"bridge_port_lifecycle_smoke: tmp={tmpdir} home={home_dir} "
-        f"socket_dir={socket_dir} name={SMOKE_HOMUNCULUS_NAME!r}"
+        f"socket_dir={socket_dir} name={SMOKE_SOLET_NAME!r}"
     )
 
     results: list[tuple[str, bool]] = []
@@ -471,9 +471,9 @@ def main() -> int:
             _case_slice15_repair_restores_bridge_port_from_live_router(),
         ))
     finally:
-        plist_path = tmpdir / "LaunchAgents" / f"{launchd_label(SMOKE_HOMUNCULUS_NAME)}.plist"
-        unit_path = tmpdir / "systemd" / systemd_unit_name(SMOKE_HOMUNCULUS_NAME)
-        socket_path = socket_dir / f"{SMOKE_HOMUNCULUS_NAME}.router.sock"
+        plist_path = tmpdir / "LaunchAgents" / f"{launchd_label(SMOKE_SOLET_NAME)}.plist"
+        unit_path = tmpdir / "systemd" / systemd_unit_name(SMOKE_SOLET_NAME)
+        socket_path = socket_dir / f"{SMOKE_SOLET_NAME}.router.sock"
         _run_uninstall(
             home_dir=home_dir, plist_path=plist_path,
             unit_path=unit_path, socket_path=socket_path,

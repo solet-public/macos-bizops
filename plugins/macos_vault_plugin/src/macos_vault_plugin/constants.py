@@ -18,32 +18,32 @@ NONCE_SIZE = 12  # bytes (GCM standard)
 KEY_SIZE = 32  # bytes (256 bits)
 TAG_SIZE = 16  # bytes (GCM auth tag)
 
-# Environment variables. Per-homunculus: each homunculus owns its own
-# env vars (e.g. ``EXAMPLE_VAULT_PASSPHRASE`` for a homunculus named 'example'), so
-# multiple homunculi can coexist in the same shell without ambiguity.
-# Both helpers fast-fail when ``HOMUNCULUS_NAME`` is unset — vault
-# unlock without an owning homunculus would silently look at the wrong
+# Environment variables. Per-solet: each solet owns its own
+# env vars (e.g. ``EXAMPLE_VAULT_PASSPHRASE`` for a solet named 'example'), so
+# multiple solets can coexist in the same shell without ambiguity.
+# Both helpers fast-fail when ``SOLET_NAME`` is unset — vault
+# unlock without an owning solet would silently look at the wrong
 # entry.
 
 
 def passphrase_env_var() -> str:
-    """Per-homunculus passphrase env var name (e.g. ``EXAMPLE_VAULT_PASSPHRASE``)."""
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    """Per-solet passphrase env var name (e.g. ``EXAMPLE_VAULT_PASSPHRASE``)."""
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "macos_vault_plugin.constants: HOMUNCULUS_NAME env var is "
-            "required to resolve the per-homunculus passphrase env var name.",
+            "macos_vault_plugin.constants: SOLET_NAME env var is "
+            "required to resolve the per-solet passphrase env var name.",
         )
     return f"{name.upper()}_VAULT_PASSPHRASE"
 
 
 def master_key_env_var() -> str:
-    """Per-homunculus legacy master-key env var name (e.g. ``EXAMPLE_VAULT_MASTER_KEY``)."""
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    """Per-solet legacy master-key env var name (e.g. ``EXAMPLE_VAULT_MASTER_KEY``)."""
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "macos_vault_plugin.constants: HOMUNCULUS_NAME env var is "
-            "required to resolve the per-homunculus master-key env var name.",
+            "macos_vault_plugin.constants: SOLET_NAME env var is "
+            "required to resolve the per-solet master-key env var name.",
         )
     return f"{name.upper()}_VAULT_MASTER_KEY"
 
@@ -64,44 +64,44 @@ KEYCHAIN_NOT_FOUND_DARWIN_DETAIL = (
     "No entry matches service={service!r} account={account!r}."
 )
 
-# Sealed-box secret transfer (cross-homunculus).
+# Sealed-box secret transfer (cross-solet).
 # X25519 identity keypair is stored as two secrets via the same AES-256-GCM-at-rest path
 # used for every other vault secret. Values are base64-encoded 32-byte X25519 keys.
 #
-# Keys are scoped per master plan §3.3.1: <homunculus>.<plugin>.<credential>.
-# Built at module import time from HOMUNCULUS_NAME; fast-fails if unset, matching
+# Keys are scoped per master plan §3.3.1: <solet>.<plugin>.<credential>.
+# Built at module import time from SOLET_NAME; fast-fails if unset, matching
 # the same discipline as passphrase_env_var()/master_key_env_var() above.
-def _homunculus_or_fail() -> str:
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+def _solet_or_fail() -> str:
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "macos_vault_plugin.constants: HOMUNCULUS_NAME env var is "
+            "macos_vault_plugin.constants: SOLET_NAME env var is "
             "required to resolve scoped vault keys for the encryption keypair.",
         )
     return name
 
 
-_ENCRYPTION_KEYPAIR_HOMUNCULUS = _homunculus_or_fail()
-# Scoped per master plan §3.3.1: <homunculus>.<plugin>.<credential>.
+_ENCRYPTION_KEYPAIR_SOLET = _solet_or_fail()
+# Scoped per master plan §3.3.1: <solet>.<plugin>.<credential>.
 # Renamed plugin segment from ``default_vault_plugin`` to ``macos_vault_plugin``
 # per Tier 3 W-VAULT-LOCAL-KEYCHAIN brief §7 + §2. The renamed plugin's
 # ``_migrate_legacy_keypair_if_present`` (called at readiness BEFORE
 # ``_ensure_keypair_internal``) detects rows under the OLD scoped name
-# and atomically renames them to the NEW scoped name so the homunculus's
+# and atomically renames them to the NEW scoped name so the solet's
 # sealed-box identity is preserved across the rename.
 ENCRYPTION_KEYPAIR_PRIVATE_KEY = (
-    f"{_ENCRYPTION_KEYPAIR_HOMUNCULUS}.macos_vault_plugin.identity__encryption_private_key"
+    f"{_ENCRYPTION_KEYPAIR_SOLET}.macos_vault_plugin.identity__encryption_private_key"
 )
 ENCRYPTION_KEYPAIR_PUBLIC_KEY = (
-    f"{_ENCRYPTION_KEYPAIR_HOMUNCULUS}.macos_vault_plugin.identity__encryption_public_key"
+    f"{_ENCRYPTION_KEYPAIR_SOLET}.macos_vault_plugin.identity__encryption_public_key"
 )
 # Legacy scoped form (used only by ``_migrate_legacy_keypair_if_present``
 # at startup to detect pre-rename keypair rows).
 _LEGACY_ENCRYPTION_KEYPAIR_PRIVATE_KEY = (
-    f"{_ENCRYPTION_KEYPAIR_HOMUNCULUS}.default_vault_plugin.identity__encryption_private_key"
+    f"{_ENCRYPTION_KEYPAIR_SOLET}.default_vault_plugin.identity__encryption_private_key"
 )
 _LEGACY_ENCRYPTION_KEYPAIR_PUBLIC_KEY = (
-    f"{_ENCRYPTION_KEYPAIR_HOMUNCULUS}.default_vault_plugin.identity__encryption_public_key"
+    f"{_ENCRYPTION_KEYPAIR_SOLET}.default_vault_plugin.identity__encryption_public_key"
 )
 X25519_KEY_LENGTH_BYTES = 32
 
@@ -154,7 +154,7 @@ class ErrorCode:
     KEYCHAIN_UNAVAILABLE = "vault.keychain_unavailable"
     KEYCHAIN_SELECTION_UNSUPPORTED = "vault.keychain_selection_unsupported"
 
-    # Cross-homunculus sealed-box secret transfer
+    # Cross-solet sealed-box secret transfer
     KEYPAIR_NOT_INITIALIZED = "vault.keypair_not_initialized"
     INVALID_PUBKEY = "vault.invalid_pubkey"
     INVALID_CIPHERTEXT = "vault.invalid_ciphertext"

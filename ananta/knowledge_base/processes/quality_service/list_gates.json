@@ -13,6 +13,6 @@
   "error_processor_customizations": {
     "action_context": "Enumerating the server-side quality-gate registry and reading the tracked smoke register (quality_gates/gate_smokes.txt).",
     "error_interpretation": "FileNotFoundError: the repo venv or the smoke register is missing — the plugin is not running from a complete platform repo tree. RuntimeError: repo root could not be located (no ancestor carries both quality_gates/ and .git).",
-    "recovery_guidance": "Confirm the homunculus is running from a checked-out platform repo (quality_gates/ and .git present) with a populated .venv. This verb takes no arguments; a failure indicates an environment problem, not a bad input."
+    "recovery_guidance": "Confirm the solet is running from a checked-out platform repo (quality_gates/ and .git present) with a populated .venv. This verb takes no arguments; a failure indicates an environment problem, not a bad input."
   }
 }

@@ -37,7 +37,7 @@ DEFAULT_HEARTBEAT_TIMEOUT_SECONDS: Final[int] = 30
 
 @dataclass
 class ColorBinding:
-    """A registered homunculus child currently routable by the router."""
+    """A registered solet child currently routable by the router."""
 
     color: str
     port: int

@@ -174,9 +174,9 @@ def _part1_flip_before_enqueue() -> None:
 
     def fake_spawn(
         app_home: Path, next_color: str, next_instance_id: str,
-        homunculus_name: str, candidate: CandidatePaths,
+        solet_name: str, candidate: CandidatePaths,
     ) -> int:
-        del app_home, homunculus_name, candidate
+        del app_home, solet_name, candidate
         stub.register_color(_GREEN_PORT, next_color, next_instance_id)
         return 4242
 
@@ -190,7 +190,7 @@ def _part1_flip_before_enqueue() -> None:
             router_client=cast("RouterClient", stub),
             action_factory=action_factory,
             session_factory=lambda: "sess",
-            homunculus_name="smoke",
+            solet_name="smoke",
             release_manager=_SuccessReleaseManager(),
             schema_preflight=_additive,
             preflight_probe=_smoke_green_probe,

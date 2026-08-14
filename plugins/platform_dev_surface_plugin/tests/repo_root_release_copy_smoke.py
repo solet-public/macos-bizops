@@ -104,7 +104,7 @@ def main() -> int:
         "the release-copy location is NOT the anchor (would gate a frozen snapshot)",
     )
 
-    # Fail-loud on a no-repo app_home (the cloud-homunculus path): typed RuntimeError.
+    # Fail-loud on a no-repo app_home (the cloud-solet path): typed RuntimeError.
     norepo = Path(tempfile.mkdtemp(prefix="no_repo_apphome_"))
     try:
         mod.locate_repo_root(norepo)

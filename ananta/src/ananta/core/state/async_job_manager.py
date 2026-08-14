@@ -16,6 +16,11 @@ from ananta.core.domain.enums import ActionStatus
 from ananta.core.domain.status import is_status_match
 from ananta.core.domain.types import ActionResult
 from ananta.core.state.execution_token_context import get_current_flow_token_id
+from ananta.core.state.job_completion_reach import record_completion_reach
+from ananta.core.state.job_completion_route import (
+    build_delivery_action,
+    resolve_route,
+)
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
 
 if TYPE_CHECKING:
@@ -23,6 +28,12 @@ if TYPE_CHECKING:
     from ananta.core.state.flow_runtime_graph import FlowRuntimeGraph
 
 logger = logging.getLogger(__name__)
+
+
+def _optional_str(source: dict[str, object], key: str) -> str | None:
+    """A non-empty string field, or None — "" and a wrong type read the same."""
+    value = source.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 class AsyncJobManager:
@@ -469,12 +480,36 @@ class AsyncJobManager:
 
             new_status = updates.get("status")
             if new_status in ("completed", "error", "cancelled"):
-                self._handle_completion_actions(
+                # Stamped BEFORE the continuation is submitted, deliberately:
+                # _handle_completion_actions can raise (a missing flow_id in
+                # metadata is the concrete case), and a job whose continuation
+                # never ran is exactly the one a reader most needs to find.
+                #
+                # Lane W: this pre-stamp is ALSO the push path's failure
+                # fallback. It says "unreached" until the delivery verb
+                # measures a successful hand-off and upgrades it, so a push
+                # that never lands leaves the drain marker exactly where a
+                # reader will find it. Losing both the push and the marker is
+                # the one outcome that must be impossible.
+                record_completion_reach(
+                    self.state_service,
+                    self._namespace,
+                    self._table,
                     job_id,
-                    str(new_status),
-                    result_payload,
-                    error_payload,
+                    self._fetch_job_metadata(job_id),
                 )
+                if not self._route_completion_to_role(
+                    job_id, str(new_status), result_payload, error_payload
+                ):
+                    self._handle_completion_actions(
+                        job_id,
+                        str(new_status),
+                        result_payload,
+                        error_payload,
+                    )
+                # PRESERVED unconditionally across BOTH paths: routing changes
+                # who hears about the job, never whether its flow closes. A
+                # routed completion still resolves its FRG token.
                 self._resolve_job_token(job_id, success=(new_status == "completed"))
 
             return {"action_status": "completed", "data": {"job_id": job_id, "updated": True}}
@@ -625,6 +660,23 @@ class AsyncJobManager:
             return {}
 
         return self._decode_metadata(record.get("metadata"))
+
+    def _fetch_job_provider_name(self, job_id: str) -> str:
+        """The job's ``provider_name`` (``plugin.verb``), or "" when unreadable.
+
+        Envelope provenance only — it names what produced the result in the
+        delivered message. Never load-bearing for routing, so an unreadable row
+        degrades to "" instead of suppressing a delivery.
+        """
+        result = self.state_service.read_state(
+            namespace=self._namespace,
+            query={"table": self._table, "filters": {"id": job_id}, "limit": 1},
+        )
+        record = self._extract_first_record(result)
+        if record is None:
+            return ""
+        provider_name = record.get("provider_name")
+        return provider_name if isinstance(provider_name, str) else ""
 
     def _get_completion_handler(
         self, job_id: str, status: str
@@ -838,6 +890,67 @@ class AsyncJobManager:
                 exc,
                 exc_info=True,
             )
+
+    def _route_completion_to_role(
+        self,
+        job_id: str,
+        status: str,
+        result_payload: dict[str, object] | None,
+        error_payload: dict[str, object] | None,
+    ) -> bool:
+        """Push this completion to its durable role, REPLACING the continuation.
+
+        True means the delivery action was submitted and the caller must NOT
+        also submit the plugin's continuation. False means no push route
+        applied and today's behaviour stands unchanged.
+
+        Replace, not duplicate, and only for a bridge-origin flow that carries a
+        routing role. For such a flow the continuation does not reach the
+        originator at all: with no inference-vertex binding it resolves DEFAULT,
+        forwards to the ``sys:autonomic`` frontier holder, and — when that slot
+        is vacant — DEFERS into the shared durable no-loss queue. Duplicating
+        would therefore hand every routed completion to a future ``sys:autonomic``
+        claimant's first drain as well, re-driving work whose owner was already
+        told. Channel flows and role-less bridge flows are untouched.
+
+        ERRORS route exactly like results: an owner wants a failure at least as
+        much as a success, and the status travels in the envelope.
+        """
+        if not self._action_factory:
+            return False
+        metadata = self._fetch_job_metadata(job_id)
+        route = resolve_route(self.state_service, self._namespace, metadata, status)
+        if route is None:
+            return False
+        role, flow_id = route
+        action_def = build_delivery_action(
+            role=role,
+            job_id=job_id,
+            provider_name=self._fetch_job_provider_name(job_id),
+            status=status,
+            payload=result_payload if status == "completed" else error_payload,
+            flow_id=flow_id,
+            session_id=_optional_str(metadata, "session_id"),
+        )
+        try:
+            self._action_factory.submit_action_definition(action_def)
+        except Exception:  # noqa: BLE001 — fall back to the continuation, never drop
+            logger.error(
+                "AsyncJobManager: failed to submit role delivery for job %s to "
+                "role %s; falling back to the completion continuation and "
+                "leaving the unreached stamp in place",
+                job_id,
+                role,
+                exc_info=True,
+            )
+            return False
+        logger.info(
+            "AsyncJobManager: job %s completion routed to role %s "
+            "(continuation replaced)",
+            job_id,
+            role,
+        )
+        return True
 
     def _handle_completion_actions(
         self,

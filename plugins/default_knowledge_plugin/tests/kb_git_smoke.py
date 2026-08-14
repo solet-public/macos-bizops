@@ -84,11 +84,11 @@ def _tip(path: Path, ref: str) -> str:
 def _check_branch_constant_is_managed() -> None:
     """RED-FIRST (operator-identity parameterization, 2026-07-11): the internal
     KB-management branch label must be the operator-identity-free 'managed', not
-    a name derived from this homunculus's own identity.
+    a name derived from this solet's own identity.
     """
     observed_branch: str = _GIT_BRANCH  # widen off the inferred Literal so the check reads as str==str
     _check(
-        "_GIT_BRANCH is 'managed' (operator-identity-free, not derived from the homunculus's name)",
+        "_GIT_BRANCH is 'managed' (operator-identity-free, not derived from the solet's name)",
         observed_branch == "managed",
         f"got {observed_branch!r}",
     )

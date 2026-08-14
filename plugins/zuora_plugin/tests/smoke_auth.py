@@ -17,7 +17,7 @@ Exercises:
   7. EDGE parity: validate_edge_process_provider raises nothing, 9 verbs
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/zuora_plugin/tests/smoke_auth.py
 
 Exits 0 on success, 1 on first failure.

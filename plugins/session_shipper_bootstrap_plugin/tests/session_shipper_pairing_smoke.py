@@ -23,7 +23,7 @@ Covers spec §13.5 end-to-end:
 7. Wrong-state on poll (pending) returns {status: pending}.
 
 The smoke uses TestClient over a fresh FastAPI app + in-memory stores
-for the deployment table + vault. No real homunculus, no state_service.
+for the deployment table + vault. No real solet, no state_service.
 """
 
 from __future__ import annotations

@@ -90,7 +90,7 @@ class _CodexAppServerClient:
             "initialize",
             {
                 "clientInfo": {
-                    "name": "homunculus_managed_sessions",
+                    "name": "solet_managed_sessions",
                     "title": "Managed sessions",
                     "version": "1.0.0",
                 },

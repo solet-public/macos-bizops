@@ -23,7 +23,7 @@ from typing import Any, Final
 # ---------------------------------------------------------------------
 
 _PROCESS_CALL_DESCRIPTION: Final[str] = (
-    "Direct invocation of a homunculus process by process_key.  Zero "
+    "Direct invocation of a solet process by process_key.  Zero "
     "inference, deterministic, fast.  THE PREFERRED entry point for any "
     "known process — knowledge base searches "
     "(service_interface::knowledge_service::search), memory recall "
@@ -83,7 +83,7 @@ _PEER_SEND_DESCRIPTION: Final[str] = "\n".join(
 
 _PEER_SEND_BY_NAME_DESCRIPTION: Final[str] = "\n".join(
     [
-        "Send a peer message to the current holder of a durable homunculus role.",
+        "Send a peer message to the current holder of a durable solet role.",
         "",
         "Use this for ChatGPT/operator fleet management. The role binding is",
         "resolved at send time, so reconnects and bridge churn do not require",
@@ -91,7 +91,7 @@ _PEER_SEND_BY_NAME_DESCRIPTION: Final[str] = "\n".join(
         "",
         "Examples of role names are Coordinator, Coordinator-Dusk, Architect,",
         "Git-Controller, and Codex-Reviewer, depending on which roles are",
-        "currently claimed in the homunculus.",
+        "currently claimed in the solet.",
         "",
         "Delivery contract:",
         "  Every send is persisted to the role's durable inbox AND",
@@ -164,7 +164,7 @@ TOOLS: Final[list[dict[str, Any]]] = [
         "name": "current_identity",
         "description": (
             "Return identity and routing metadata for the current MCP session, "
-            "including transport, homunculus_name, agent_id, "
+            "including transport, solet_name, agent_id, "
             "agent_instance_id, agent_session_id, session_label, bridge_id, "
             "mcp_session_id, roles_held, and identity_trust. Use this to "
             "answer 'who am I?' or verify routing before peer_register, "
@@ -179,7 +179,7 @@ TOOLS: Final[list[dict[str, Any]]] = [
     },
     {
         "name": "download",
-        "description": "Download a blob from homunculus storage to a local file path.",
+        "description": "Download a blob from solet storage to a local file path.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -199,7 +199,7 @@ TOOLS: Final[list[dict[str, Any]]] = [
     {
         "name": "process_search",
         "description": (
-            "Search the homunculus process registry for processes matching a "
+            "Search the solet process registry for processes matching a "
             "natural-language query."
         ),
         "inputSchema": {
@@ -215,7 +215,7 @@ TOOLS: Final[list[dict[str, Any]]] = [
     {
         "name": "process_schema",
         "description": (
-            "Retrieve the invocation schema for a single homunculus process by "
+            "Retrieve the invocation schema for a single solet process by "
             "its process_key."
         ),
         "inputSchema": {
@@ -349,7 +349,7 @@ TOOLS: Final[list[dict[str, Any]]] = [
                 "name": {
                     "type": "string",
                     "description": (
-                        "Durable role name registered in the homunculus role binding "
+                        "Durable role name registered in the solet role binding "
                         "table, such as Coordinator-Dusk or Architect."
                     ),
                 },
@@ -401,31 +401,31 @@ TOOLS: Final[list[dict[str, Any]]] = [
 SERVER_VERSION: Final[str] = "1.0.0"
 SUPPORTED_PROTOCOL_VERSION: Final[str] = "2025-03-26"
 
-# Fallback used when the homunculus name is empty / unset (laptop dev
+# Fallback used when the solet name is empty / unset (laptop dev
 # mode, unit tests).  Never reaches a production phone client — the
-# plugin reads $HOMUNCULUS_NAME at start_interface time and threads it
+# plugin reads $SOLET_NAME at start_interface time and threads it
 # through to every layer that emits server identity.
-FALLBACK_HOMUNCULUS_NAME: Final[str] = "homunculus"
+FALLBACK_SOLET_NAME: Final[str] = "solet"
 
 
-def build_server_name(homunculus_name: str) -> str:
+def build_server_name(solet_name: str) -> str:
     """Render the ``serverInfo.name`` advertised in the initialize response.
 
-    Format: ``"<homunculus>-streamable"`` so the MCP client surfaces
-    the actual homunculus identity rather than a generic platform
-    label.  Empty input falls back to ``FALLBACK_HOMUNCULUS_NAME``.
+    Format: ``"<solet>-streamable"`` so the MCP client surfaces
+    the actual solet identity rather than a generic platform
+    label.  Empty input falls back to ``FALLBACK_SOLET_NAME``.
     """
-    return f"{homunculus_name or FALLBACK_HOMUNCULUS_NAME}-streamable"
+    return f"{solet_name or FALLBACK_SOLET_NAME}-streamable"
 
 
-def build_server_instructions(homunculus_name: str) -> str:
+def build_server_instructions(solet_name: str) -> str:
     """Render the ``instructions`` block returned by ``initialize``.
 
-    Embeds the homunculus name into the lead sentence so a Claude
-    Desktop / claude.ai client doesn't refer to a remote homunculus
+    Embeds the solet name into the lead sentence so a Claude
+    Desktop / claude.ai client doesn't refer to a remote solet
     by a generic label.
     """
-    name = homunculus_name or FALLBACK_HOMUNCULUS_NAME
+    name = solet_name or FALLBACK_SOLET_NAME
     return "\n".join(
         [
             f"{name} platform bridge (Streamable HTTP transport).",
@@ -453,7 +453,7 @@ def build_server_instructions(homunculus_name: str) -> str:
 
 
 __all__ = [
-    "FALLBACK_HOMUNCULUS_NAME",
+    "FALLBACK_SOLET_NAME",
     "SERVER_VERSION",
     "SUPPORTED_PROTOCOL_VERSION",
     "TOOLS",

@@ -34,7 +34,7 @@ the roleless lane + the 40+ zombie-row class). Cases:
      this case now asserts survives a raising INF-02 sweep.)
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/bridge_lifecycle_sweep_smoke.py
 """
 
@@ -149,8 +149,8 @@ def _sweeper_cases() -> None:
     print("B — sweeper over a real BridgeSessionManager:")
 
     manager = _manager(idle_timeout_s=3600)
-    fresh = manager.open(homunculus_name="example-test")
-    stale = manager.open(homunculus_name="example-test")
+    fresh = manager.open(solet_name="example-test")
+    stale = manager.open(solet_name="example-test")
     stale.last_seen_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
     cleaned: list[str] = []
     sweeper = BridgeLifecycleSweeper(
@@ -167,7 +167,7 @@ def _sweeper_cases() -> None:
     )
 
     manager2 = _manager(idle_timeout_s=0)
-    manager2.open(homunculus_name="example-test").last_seen_at = (
+    manager2.open(solet_name="example-test").last_seen_at = (
         datetime.now(UTC) - timedelta(seconds=5)
     ).isoformat()
     ticked = threading.Event()

@@ -77,7 +77,7 @@ def enforce_namespace(key: str, ctx: CallContext | None) -> None:
     parts = key.split(".", 2)
     if len(parts) < 3:
         raise VaultKeyMalformedError(
-            f"key {key!r} not in <homunculus>.<plugin>.<credential> form",
+            f"key {key!r} not in <solet>.<plugin>.<credential> form",
         )
     if parts[1] != ctx.calling_plugin:
         raise VaultAccessDeniedError(

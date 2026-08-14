@@ -62,7 +62,7 @@ def _pythonpath_for_tree(code_root: Path) -> str:
 
 
 def build_schema_snapshot_fn(
-    *, homunculus_name: str, app_home: Path, source_root: Path,
+    *, solet_name: str, app_home: Path, source_root: Path,
 ) -> Callable[[Path], dict[str, object]]:
     """Return a ``(code_root) -> snapshot`` collector closure (candidate + derive)."""
     venv_python = source_root / _SOURCE_VENV_DIRNAME / "bin" / "python3"
@@ -70,7 +70,7 @@ def build_schema_snapshot_fn(
 
     def _snapshot(code_root: Path) -> dict[str, object]:
         env = dict(os.environ)
-        env["HOMUNCULUS_NAME"] = homunculus_name
+        env["SOLET_NAME"] = solet_name
         env["APP_HOME"] = str(app_home)
         env["EXPECT_ROOT"] = str(code_root.resolve())
         env["PYTHONPATH"] = _pythonpath_for_tree(code_root)

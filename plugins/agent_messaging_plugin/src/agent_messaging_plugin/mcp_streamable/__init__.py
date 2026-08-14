@@ -2,7 +2,7 @@
 
 Sibling of :mod:`agent_messaging_plugin.mcp_bridge` (which is the stdio
 transport launched as a CLI subprocess).  Where ``mcp_bridge`` is an
-out-of-process client of the homunculus bridge HTTP surface, ``mcp_streamable``
+out-of-process client of the solet bridge HTTP surface, ``mcp_streamable``
 is an **in-process** MCP server: it mounts a FastAPI router on the
 same app that already serves ``/api/v1/bridge/*`` and dispatches each
 JSON-RPC tool call directly against :class:`PlatformSurface`,

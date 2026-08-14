@@ -33,7 +33,7 @@ class Manifest:
     """Parsed manifest payload (post-schema-validation)."""
 
     schema_version: int
-    homunculus_name: str
+    solet_name: str
     universal_files: tuple[str, ...]
     universal_directories: tuple[str, ...]
     platform_managed_directories: tuple[str, ...]
@@ -53,7 +53,7 @@ class Classification:
 
     manifest_path: Path
     repo_root: Path
-    homunculus_name: str | None
+    solet_name: str | None
     unknown_entries: tuple[str, ...] = field(default_factory=tuple)
     missing_universal: tuple[str, ...] = field(default_factory=tuple)
     missing_sanctioned: tuple[str, ...] = field(default_factory=tuple)

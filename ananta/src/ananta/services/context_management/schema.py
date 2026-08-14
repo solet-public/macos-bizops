@@ -36,7 +36,7 @@ class ContextManagementSchemas:
                             type=ColumnType.TEXT,
                             not_null=True,
                             check="context_type IN ('homunculus', 'workflow', 'task', 'system')",
-                            description="Type of context: homunculus (main), workflow, task, or system",
+                            description="Type of context: solet (main), workflow, task, or system",
                         ),
                         "label": ColumnDefinition(
                             type=ColumnType.TEXT,

@@ -35,7 +35,7 @@ hold service injection, or know anything about the router, drain windows,
 or process spawning. Per design §4.8 this component "lives plugin-side,
 no DB access." Phase-2 integration (NOT this file) wires
 ``build_candidate`` / ``cutover`` / ``rollback`` into
-``SwapOrchestrator`` + the autostart plist + ``HOMUNCULUS_RELEASE_ID``
+``SwapOrchestrator`` + the autostart plist + ``SOLET_RELEASE_ID``
 env. This lands standalone, tested-but-unwired; Phase 2 is its named
 consumer.
 
@@ -1374,7 +1374,7 @@ class ReleaseManager:
     ``swap_orchestrator.py`` / ``autostart_manager.py``.
 
     Args:
-        homunculus_name: Names the per-homunculus releases sub-directory
+        solet_name: Names the per-solet releases sub-directory
             (``~/.ananta/releases/<name>/``).
         source_root: The working-tree repo root to snapshot.
         releases_root: Override for the releases directory. Defaults to
@@ -1407,7 +1407,7 @@ class ReleaseManager:
     def __init__(
         self,
         *,
-        homunculus_name: str,
+        solet_name: str,
         source_root: Path,
         releases_root: Path | None = None,
         keep_releases: int = DEFAULT_KEEP_RELEASES,
@@ -1426,7 +1426,7 @@ class ReleaseManager:
         self._releases_root = (
             releases_root.expanduser()
             if releases_root is not None
-            else Path(RELEASES_ROOT_DEFAULT).expanduser() / homunculus_name
+            else Path(RELEASES_ROOT_DEFAULT).expanduser() / solet_name
         )
         self._keep_releases = keep_releases
         self._logger = logger or logging.getLogger(PLUGIN_NAME)

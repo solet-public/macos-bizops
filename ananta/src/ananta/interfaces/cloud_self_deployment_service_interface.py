@@ -1,14 +1,14 @@
 """Cloud Self-Deployment Service Interface — blue-green ECS swap verbs.
 
 Extension of :class:`SelfDeploymentServiceInterface` carrying the four
-cloud-specific operational verbs. A cloud homunculus owns her own deploy
+cloud-specific operational verbs. A cloud solet owns her own deploy
 lifecycle: the operator pushes a new image to ECR via CodeBuild
-(operator-side build), then sends one MCP message to the homunculus:
+(operator-side build), then sends one MCP message to the solet:
 
     service_interface::cloud_self_deployment_service::deploy_self(image_tag="v4")
 
-The homunculus's own process registry orchestrates the blue-green swap
-using her own IAM task role. the homunculus (the operator's homunculus) is not in
+The solet's own process registry orchestrates the blue-green swap
+using her own IAM task role. the solet (the operator's solet) is not in
 the chain except as an MCP client transport.
 
 Four verbs are exposed:

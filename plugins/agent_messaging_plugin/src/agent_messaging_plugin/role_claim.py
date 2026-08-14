@@ -188,7 +188,7 @@ def new_holder_prose(name: str) -> str:
     lives outside the instruction a reader actually receives gets followed
     unsafely. The transport caveat is equally explicit and load-bearing: a
     ``watch``-transport session's own outbound calls are a bare
-    ``homunculus call`` subprocess, which the platform stamps with
+    ``solet call`` subprocess, which the platform stamps with
     ``caller_attribution_*`` rather than ``inference_vertex_session_id`` — the
     field ``peer_mark_role_covered`` requires. Such a session CANNOT attest,
     ever, no matter how it tries; the prose says so plainly rather than
@@ -213,7 +213,7 @@ def new_holder_prose(name: str) -> str:
         f"boundary, and never the newest message in the whole backlog if your "
         f"last read did not return it. This requires a call dispatched through "
         f"your own registered bridge (a live MCP tool call) — a bare "
-        f"homunculus call subprocess cannot attest and is refused loud. If "
+        f"solet call subprocess cannot attest and is refused loud. If "
         f"your session has no registered bridge (e.g. watch transport with no "
         f"MCP route), you cannot perform this step; that is expected, not an "
         f"error — this role's covered mark will simply stay behind your reads, "
@@ -607,7 +607,7 @@ def _role_entity_exists(state_service: Any, name: str) -> bool:
 
 
 def _reserved_mint_refusal(state_service: Any, name: str) -> RoleClaimFailure | None:
-    """Refuse a FRESH MINT of a reserved primary-seat name (``<homunculus>-Main``
+    """Refuse a FRESH MINT of a reserved primary-seat name (``<solet>-Main``
     shape) — the ONE D1-scoped claim-path guard from §3.1 (Dawn ruling Q1).
     ``sys:*`` names are already keyspace-rejected upstream by
     ``evaluate_system_slot_claim``; this guards the DIFFERENT ``-Main`` pattern,
@@ -623,7 +623,7 @@ def _reserved_mint_refusal(state_service: Any, name: str) -> RoleClaimFailure | 
         code="reserved_role_name",
         message=(
             f"role {name!r} matches the reserved primary-seat pattern "
-            "(<homunculus>-Main) and has no legislated role row yet — minting "
+            "(<solet>-Main) and has no legislated role row yet — minting "
             "it via an ordinary claim is refused. Primary-seat legislation is "
             "a governance act (this plugin's legislate_role verb), not a "
             "session claim."
@@ -763,7 +763,7 @@ def claim_role_for_session(
     if state_service is None:
         return RoleClaimFailure(
             code="state_service_unavailable",
-            message="state_service is not bound on this homunculus.",
+            message="state_service is not bound on this solet.",
         )
     # REL-07(1): source the claimant's stable session id from its OWN live
     # peer_binding row when the claim args omit it (they always do). An empty

@@ -72,7 +72,7 @@ class PassphraseMismatchError(VaultError):
 
 # W-VAULT-LOCAL-KEYCHAIN Tier 3 startup-compat migrations (2026-06-07).
 # Refusing fresh-mint on migration failure is load-bearing: a silent
-# fresh-mint would rotate the homunculus's cross-homunculus sealed-box
+# fresh-mint would rotate the solet's cross-solet sealed-box
 # identity (keypair) or re-initialize the vault with a new master key
 # (losing access to every encrypted secret in the state-service substrate).
 
@@ -81,7 +81,7 @@ class VaultKeypairMigrationError(VaultError):
     """Legacy keypair row(s) detected but migration to the new scoped name failed.
 
     Refusing to mint a fresh keypair so the operator can investigate
-    without losing the homunculus's cross-homunculus identity.
+    without losing the solet's cross-solet identity.
     """
 
     pass

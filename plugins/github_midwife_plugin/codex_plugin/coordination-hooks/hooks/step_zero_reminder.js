@@ -4,7 +4,7 @@
 // SessionStart hook. ALWAYS ARMED: installed means armed, with no
 // environment condition of any kind.
 //
-// The homunculus is a system-wide resource, so awareness of it is not
+// The solet is a system-wide resource, so awareness of it is not
 // fleet-only. This hook previously no-op'd unless AGENT_SESSION_LABEL was set;
 // that gate was removed deliberately (operator ruling 2026-08-01), and the
 // FAILURE DIRECTION INVERTED WITH IT: a silently disarmed awareness reminder
@@ -31,7 +31,7 @@
 // message, a lookup result, or an environment value.
 //
 // No async-non-blocking clause here, unlike the Claude sibling hook: this
-// platform's Codex-side lookup path is the CLI `homunculus call` form (see
+// platform's Codex-side lookup path is the CLI `solet call` form (see
 // AGENTS.md's Step Zero), which blocks/polls for its result before
 // returning (agent_messaging_plugin/local_cli/cli.py's call_and_wait) — a
 // genuinely synchronous mechanism, not drift from the Claude wording.
@@ -61,11 +61,14 @@ const output = {
   hookSpecificOutput: {
     hookEventName: eventName,
     additionalContext:
-      "For non-trivial work, checking a persistent knowledge base " +
-      "available to this session (via a local CLI or a connected tool, " +
-      "if any) and the current project's own instruction files before " +
-      "other work is usually faster than re-deriving an answer partway " +
-      "through.",
+      "For non-trivial work, checking two context sources in sequence " +
+      "before other work is usually faster than re-deriving an answer " +
+      "partway through: first any persistent knowledge base available " +
+      "to this session (via a local CLI or a connected tool, if any), " +
+      "then the current project's own instruction files. The sequence " +
+      "is not a substitution -- the knowledge base carries platform " +
+      "and cross-session knowledge, the instruction files govern the " +
+      "task at hand, and neither replaces the other.",
   },
 };
 

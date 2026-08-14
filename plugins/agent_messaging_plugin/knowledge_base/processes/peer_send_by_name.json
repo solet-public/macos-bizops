@@ -12,7 +12,7 @@
   },
   "error_processor_customizations": {
     "action_context": "Resolves a role name via the agent_role_binding state table (resolve_role_binding) and dispatches a persist-first peer_send to the currently-bound (agent_id, agent_instance_id) pair.",
-    "error_interpretation": "peer_role_vacant: no agent_role_binding row exists for the given name — either it was never claimed or it was released (rejected BEFORE any persist, Scope-decision C). peer_role_malformed: the binding exists but is missing agent_instance_id (corrupted state; re-claim via peer_claim_role). bridge.not_running: start_interface has not been called yet. state_service_unavailable: the state_service is not bound on this homunculus. (An offline holder is NOT an error — it returns delivery='queued_for_replay'.)",
+    "error_interpretation": "peer_role_vacant: no agent_role_binding row exists for the given name — either it was never claimed or it was released (rejected BEFORE any persist, Scope-decision C). peer_role_malformed: the binding exists but is missing agent_instance_id (corrupted state; re-claim via peer_claim_role). bridge.not_running: start_interface has not been called yet. state_service_unavailable: the state_service is not bound on this solet. (An offline holder is NOT an error — it returns delivery='queued_for_replay'.)",
     "recovery_guidance": "peer_role_vacant: have the intended role-holder run peer_claim_role with their (agent_id, agent_instance_id). peer_role_malformed: same — re-claim from the role-holder's session. bridge.not_running: wait for start_interface to complete. state_service_unavailable: bind the state_service (postgres_state_management_plugin) in service_bindings.json."
   }
 }

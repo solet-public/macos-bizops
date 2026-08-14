@@ -1,7 +1,7 @@
 """Session dispatch bridge plugin (W4 hook bridge, M1).
 
 A background-plumbing ``ServicePlugin`` that drains the Claude Code dispatch hook
-spool (``~/.ananta/_session/spool/dispatch/``) into this homunculus's
+spool (``~/.ananta/_session/spool/dispatch/``) into this solet's
 ``memory_service`` on a periodic tick, so peers (coordinator, watchdog, Codex)
 see live ``Task`` dispatch state via tag-scoped recall. Pure plumbing — it
 surfaces NO inference-facing EDGE process.
@@ -31,9 +31,9 @@ from .drainer import SpoolDrainer
 PLUGIN_NAME = "session_bridge_plugin"
 DRAIN_INTERVAL_SECONDS = 5.0  # OQ-4 default; tunable, not architectural
 _SPOOL_SUBPATH = ("_session", "spool", "dispatch")
-_CURSOR_SUBDIR = "cursors"  # design line 88: cursors/<homunculus>.cursor
+_CURSOR_SUBDIR = "cursors"  # design line 88: cursors/<solet>.cursor
 _JANITOR_LOCK_NAME = ".janitor.lock"  # brief D4: sibling of dispatch/ under spool/
-_HOMUNCULUS_NAME_ENV = "HOMUNCULUS_NAME"  # the drainer id (design D1; one drainer per homunculus)
+_SOLET_NAME_ENV = "SOLET_NAME"  # the drainer id (design D1; one drainer per solet)
 _JOIN_TIMEOUT_SECONDS = 30.0
 
 
@@ -43,17 +43,17 @@ def _default_spool_dir() -> Path:
 
 
 def _require_drainer_id() -> str:
-    """The drainer id is this homunculus's name (design §3 D2.2 / D1).
+    """The drainer id is this solet's name (design §3 D2.2 / D1).
 
-    ``HOMUNCULUS_NAME`` is a required runtime invariant (``launch.py`` sets it);
+    ``SOLET_NAME`` is a required runtime invariant (``launch.py`` sets it);
     a drainer with no stable id cannot own a cursor, so a missing value is a fatal
     misconfiguration — fail fast and loud, never invent a default (KB
     "Critical Development Guidelines v2")."""
-    drainer_id = os.environ.get(_HOMUNCULUS_NAME_ENV)
+    drainer_id = os.environ.get(_SOLET_NAME_ENV)
     if not drainer_id:
         raise RuntimeError(
-            f"{PLUGIN_NAME}: {_HOMUNCULUS_NAME_ENV} is unset; the drainer cannot own a "
-            "cursor without a stable homunculus id (launch.py must set it)."
+            f"{PLUGIN_NAME}: {_SOLET_NAME_ENV} is unset; the drainer cannot own a "
+            "cursor without a stable solet id (launch.py must set it)."
         )
     return drainer_id
 

@@ -49,8 +49,8 @@ _PRIOR: tuple[_PriorFinding, ...] = (
         Dimension.SECURITY,
         Severity.BLOCKER,
         "codex:genesis_sql_injection",
-        "unvalidated HOMUNCULUS_NAME interpolated into admin SQL before Layer-1 validation (first code a stranger runs)",
-        "Validate HOMUNCULUS_NAME against NAME_PATTERN before Layer-0 Postgres access; centralize safe SQL literal rendering.",
+        "unvalidated SOLET_NAME interpolated into admin SQL before Layer-1 validation (first code a stranger runs)",
+        "Validate SOLET_NAME against NAME_PATTERN before Layer-0 Postgres access; centralize safe SQL literal rendering.",
     ),
     _PriorFinding(
         "plugins/agent_messaging_plugin/pyproject.toml",
@@ -67,7 +67,7 @@ _PRIOR: tuple[_PriorFinding, ...] = (
         Dimension.IDENTITY_LEAK,
         Severity.HIGH,
         "codex:identity_bleed",
-        "internal identity/context bleed not zero: root_manifest homunculus_name <origin>, role labels in shipped src+KB",
+        "internal identity/context bleed not zero: root_manifest solet_name <origin>, role labels in shipped src+KB",
         "Rewrite shipped code/KB to neutral examples; add a seed-surface scanner for the blocked identity list.",
     ),
     _PriorFinding(

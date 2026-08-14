@@ -58,5 +58,5 @@ def _append_sunset_section(lines: list[str], entries: tuple[SunsetOverdue, ...])
 def _append_footer(lines: list[str], classification: Classification) -> None:
     lines.append("")
     lines.append(f"Manifest: {classification.manifest_path} @ schema_version 1")
-    name = classification.homunculus_name or "<unknown>"
-    lines.append(f"Homunculus: {name}")
+    name = classification.solet_name or "<unknown>"
+    lines.append(f"Solet: {name}")

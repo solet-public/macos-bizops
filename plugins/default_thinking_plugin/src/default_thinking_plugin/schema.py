@@ -205,7 +205,7 @@ def get_thinking_schema() -> SchemaDefinition:
                     "composer-pass artifact between the Work Manifest and "
                     "the Pipeline Spec / Composition Sketch. It commits "
                     "musical material, development grammar, formal "
-                    "architecture, hypnotic function architecture, and "
+                    "architecture, functional architecture, and "
                     "revision criteria as pure musical thought (no "
                     "process keys, arguments, or filenames)."
                 ),

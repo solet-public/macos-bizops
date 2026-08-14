@@ -1,7 +1,7 @@
 """Vault-backed token store for Google OAuth credentials.
 
 Single-account model: one refresh token and one access token per plugin
-install. Vault keys are scoped (``<homunculus>.g_suite_plugin.*``).
+install. Vault keys are scoped (``<solet>.g_suite_plugin.*``).
 
 Google token semantics differ from Schwab's in one important way: Google
 refresh tokens are DURABLE and are not rotated on every refresh. A plain

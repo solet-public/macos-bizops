@@ -30,7 +30,7 @@ AUDIT_ID_PREFIX = "sta"
 
 
 def get_audit_schema() -> TableSchema:
-    """Append-only audit log for cross-homunculus sealed-box secret transfer.
+    """Append-only audit log for cross-solet sealed-box secret transfer.
 
     One row per ``export_encrypted`` / ``import_encrypted`` call, success or
     failure. Each vault plugin owns its own table instance under its own
@@ -41,7 +41,7 @@ def get_audit_schema() -> TableSchema:
     """
     return TableSchema(
         table_name=AUDIT_TABLE_NAME,
-        description="Audit log of cross-homunculus sealed-box secret transfers",
+        description="Audit log of cross-solet sealed-box secret transfers",
         id_prefix=AUDIT_ID_PREFIX,
         data_sensitivity=0.3,
         columns={

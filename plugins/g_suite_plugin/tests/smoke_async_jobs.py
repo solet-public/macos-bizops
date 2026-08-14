@@ -23,7 +23,7 @@ Exercises:
      start_services calls produce the same worker thread object, not two.
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/g_suite_plugin/tests/smoke_async_jobs.py
 
 Exits 0 on success, 1 on first failure.

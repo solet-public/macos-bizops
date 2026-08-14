@@ -16,7 +16,7 @@ again, and nothing is left running to keep stamping on its behalf.
 Throttled to at most once per :data:`_THROTTLE_SECONDS` via a per-worker
 local marker file's mtime (cheap -- a stat(), no CLI/network round trip on
 most firings) rather than checking the platform on every single tool call.
-When the throttle allows a stamp, shells out to ``homunculus call
+When the throttle allows a stamp, shells out to ``solet call
 plugin::agent_messaging_plugin::report_alive`` (PATH-resolved, same
 convention this repo's other hooks already rely on for ``python3`` --
 report_alive takes ``agent_instance_id`` as an explicit argument, so the
@@ -95,7 +95,7 @@ def _call_report_alive(agent_instance_id: str) -> bool:
     })
     try:
         result = subprocess.run(
-            ["homunculus", "call", _REPORT_ALIVE_PROCESS_KEY, payload],
+            ["solet", "call", _REPORT_ALIVE_PROCESS_KEY, payload],
             capture_output=True, text=True, timeout=20, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

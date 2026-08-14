@@ -40,11 +40,11 @@ _TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "knowledge_base" / "hydra
 _TEMPLATE_VARS = _TEMPLATES_DIR / "TEMPLATE_VARS.md"
 
 _RENDER_TOKENS = {
-    "{{HOMUNCULUS_NAME}}": "iris",
+    "{{SOLET_NAME}}": "iris",
     "{{CLONE_DIR}}": "/Users/example/Workspace/iris",
     "{{HYDRATION_DATE}}": "2026-07-13",
     "{{BACKUP_PATH}}": "/Users/example/.zshrc.pre-iris-hydration-20260713",
-    # DERIVED from {{HOMUNCULUS_NAME}} by the documented `_` -> `-` transform, not a
+    # DERIVED from {{SOLET_NAME}} by the documented `_` -> `-` transform, not a
     # free-standing value: "iris" has no underscore, so it renders through unchanged.
     # Deliberately NOT a literal unrelated to the name above — a fixture that let the
     # two drift would stop modelling the derivation the ruling requires.
@@ -58,7 +58,7 @@ _RENDER_TOKENS = {
 
 _ZSH_SHAPED = {
     "zshrc.template",
-    "homunculus.zsh.template",
+    "solet.zsh.template",
     "claude_launcher.template",
     "codex_launcher.template",
     "launch.template",
@@ -206,8 +206,8 @@ def _check_generated_agent_instruction_files() -> None:
         '"top_k": 8',
         "iris call service_interface::session_ledger_service::search_event_content",
         '"limit": 8',
-        "<!-- BEGIN HOMUNCULUS HYDRATION -->",
-        "<!-- END HOMUNCULUS HYDRATION -->",
+        "<!-- BEGIN SOLET HYDRATION -->",
+        "<!-- END SOLET HYDRATION -->",
         "MCP is optional and exists only for the operator who explicitly asks for it",
         "the default.",
         "There is no offline query script shipped in",
@@ -221,7 +221,7 @@ def _check_generated_agent_instruction_files() -> None:
         "Once the bridge is up",
         "skip everything in this section",
         "plugins/default_knowledge_plugin/tools/query_knowledge_base.py",
-        "Codex homunculus wake runbook",
+        "Codex solet wake runbook",
     )
     for name, content in rendered.items():
         for snippet in shared_snippets:
@@ -271,7 +271,7 @@ def _check_generated_hook_surfaces() -> None:
     _check_settings_hook_kb_guidance(settings)
     _check_marketplace_matches_settings(settings)
     _check_git_controller_export()
-    _check_homunculus_name_export()
+    _check_solet_name_export()
 
 
 _SETTINGS_HOOK_CHECKS: tuple[tuple[str, tuple[str, ...], tuple[str, ...], str], ...] = (
@@ -297,9 +297,9 @@ _SETTINGS_HOOK_CHECKS: tuple[tuple[str, tuple[str, ...], tuple[str, ...], str], 
         "settings: ships NO inline hooks — the plugin owns all three",
         (),
         (
-            "HOMUNCULUS_STEP_ZERO_HOOK",
-            "HOMUNCULUS_ROLE_RECLAIM_HOOK",
-            "HOMUNCULUS_WAKE_HOOK",
+            "SOLET_STEP_ZERO_HOOK",
+            "SOLET_ROLE_RECLAIM_HOOK",
+            "SOLET_WAKE_HOOK",
             '"hooks"',
         ),
         "the three inline hooks moved into the coordination-hooks plugin; leaving "
@@ -522,14 +522,14 @@ def _check_git_controller_export() -> None:
         )
 
 
-def _check_homunculus_name_export() -> None:
-    """Every launcher must export HOMUNCULUS_NAME, or in-session gate scripts
+def _check_solet_name_export() -> None:
+    """Every launcher must export SOLET_NAME, or in-session gate scripts
     and vault-scoped plugin code fail loudly depending on which launcher
     started the shell — §31.1: the daemon launcher (launch.template) always
     exported it; the session launchers (claude/codex/fleet-functions) did
     not, until the 2026-08-02 fix this check pins in place. Unlike
     GIT_CONTROLLER_NAME there is no solo-exemption deletion path for this
-    var — it names which homunculus the shell talks to, not an optional
+    var — it names which solet the shell talks to, not an optional
     fleet-safety control, so every launcher must carry it unconditionally.
     """
     launchers = {
@@ -542,12 +542,12 @@ def _check_homunculus_name_export() -> None:
         )
     }
     armed = {
-        name: f'HOMUNCULUS_NAME="{_RENDER_TOKENS["{{HOMUNCULUS_NAME}}"]}"' in body
-        or f'HOMUNCULUS_NAME={_RENDER_TOKENS["{{HOMUNCULUS_NAME}}"]}' in body
+        name: f'SOLET_NAME="{_RENDER_TOKENS["{{SOLET_NAME}}"]}"' in body
+        or f'SOLET_NAME={_RENDER_TOKENS["{{SOLET_NAME}}"]}' in body
         for name, body in launchers.items()
     }
     _check(
-        "homunculus name: ALL launchers export HOMUNCULUS_NAME, or run_smokes.py "
+        "solet name: ALL launchers export SOLET_NAME, or run_smokes.py "
         "and vault-scoped plugin code fail loudly depending on which launcher "
         "started the session",
         all(armed.values()),

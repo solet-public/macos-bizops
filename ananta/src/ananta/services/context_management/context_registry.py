@@ -74,7 +74,7 @@ class ContextRegistryService:
             )
 
         context_id = self.create_context(
-            context_type=ContextType.HOMUNCULUS,
+            context_type=ContextType.SOLET,
             label=f"Plugin Root Context: {plugin_namespace}",
         )
 

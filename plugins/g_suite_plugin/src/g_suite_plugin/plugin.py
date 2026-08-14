@@ -729,7 +729,7 @@ class GSuitePlugin(ServicePlugin, EdgeProcessProvider):
         display_name="Connect Google Workspace Account",
         description=(
             "Generate the Google consent URL (PKCE) the operator opens in their browser to "
-            "grant this homunculus access to the Workspace account. Returns authorize_url + a "
+            "grant this solet access to the Workspace account. Returns authorize_url + a "
             "fresh state nonce. After the operator approves, the plugin's callback handler stores "
             "the refresh/access tokens in vault automatically. Requires the callback server "
             "(start_interface) to be running and the 'google_oauth_app' address-book entry to exist."
@@ -778,7 +778,7 @@ class GSuitePlugin(ServicePlugin, EdgeProcessProvider):
                 type=ParameterType.STRING,
                 required=False,
                 description=(
-                    "Bind host (default: 127.0.0.1 for a local homunculus). "
+                    "Bind host (default: 127.0.0.1 for a local solet). "
                     "ALB-fronted cloud deployments must pass or configure "
                     "0.0.0.0 explicitly."
                 ),

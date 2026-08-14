@@ -131,7 +131,7 @@ class VaultKeyManager:
 
         Passphrase resolution order (wrap-mode only):
             1. Explicit passphrase argument
-            2. ``<HOMUNCULUS_NAME>_VAULT_PASSPHRASE`` environment variable
+            2. ``<SOLET_NAME>_VAULT_PASSPHRASE`` environment variable
                (e.g. ``EXAMPLE_VAULT_PASSPHRASE``)
             3. File: $APP_HOME/config/plugins/macos_vault_plugin/passphrase
 

@@ -42,7 +42,7 @@ in ``SessionLedgerRepository``. This smoke verifies:
 The stub state-service records every executed SQL + params tuple;
 each assertion inspects those tuples to confirm the params reaching
 the store contain zero ``\\x00`` bytes (no Postgres needed; no
-running homunculus needed).
+running solet needed).
 """
 
 from __future__ import annotations

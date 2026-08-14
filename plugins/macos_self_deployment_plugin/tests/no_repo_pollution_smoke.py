@@ -17,7 +17,7 @@ in-tree but gitignored). The earlier version of this smoke used a SYNTHETIC
 scratch ``app_home`` and so could not observe that real in-tree write at all.
 
 This exercises the two real writers with PRODUCTION-shaped inputs (a faked
-``Popen`` — no real homunculus launched):
+``Popen`` — no real solet launched):
 
 * ``ReleaseManager`` build + cutover → materializes the release OUTSIDE the
   repo (under ``~/.ananta``);
@@ -57,7 +57,7 @@ from _release_manager_smoke_support import (  # noqa: E402
 from ananta.core.runtime import get_runtime_dir  # noqa: E402
 from macos_self_deployment_plugin import swap_orchestrator  # noqa: E402
 
-_HOMUNCULUS = "example"
+_SOLET = "example"
 _SPAWN_LOG_REL = Path("profile") / "data" / "logs" / "green_spawn_green_example-green-test.log"
 
 
@@ -119,12 +119,12 @@ def run_smoke() -> int:
         # ---- Writer 2: default_spawn with PRODUCTION app_home = <repo>/profile ----
         subprocess.Popen = _FakePopen  # type: ignore[assignment,misc]
         pid = swap_orchestrator.default_spawn(
-            app_home, "green", "example-green-test", _HOMUNCULUS, candidate,
+            app_home, "green", "example-green-test", _SOLET, candidate,
         )
         subprocess.Popen = original_popen  # type: ignore[misc]
         rec.check(pid == 4242, "default_spawn returned the (faked) child pid")
         rec.check(
-            _FakePopen.last_cwd == str(get_runtime_dir(_HOMUNCULUS))
+            _FakePopen.last_cwd == str(get_runtime_dir(_SOLET))
             and str(_REPO_ROOT) not in (_FakePopen.last_cwd or ""),
             f"default_spawn CWD is the out-of-tree runtime dir (got {_FakePopen.last_cwd!r})",
         )

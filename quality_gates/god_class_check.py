@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""God-class detector for the homunculus codebase, coherence-aware edition.
+"""God-class detector for the solet codebase, coherence-aware edition.
 
 Runs Python AST analysis against the files passed on the command line and
 reports classes that violate Single-Responsibility-Principle heuristics

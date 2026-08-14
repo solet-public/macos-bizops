@@ -13,7 +13,7 @@ security-review riders + A0 R3), as durable build-time guards:
   token / secret. RED-FIRST: adding such a field fails the scan. Enforcement by absence,
   the durable guard (mirrors the A2.1 deploy-invariant assertion).
 
-Pure Python — no live homunculus / LM Studio / subprocess / network / mocks. Run via the
+Pure Python — no live solet / LM Studio / subprocess / network / mocks. Run via the
 gate-smoke runner or directly; the ``code_vetting_plugin`` package must be installed.
 """
 

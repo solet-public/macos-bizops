@@ -53,7 +53,7 @@ def _gate_paths(root: Path) -> _GatePaths:
     sql_access gapped out on the deployed color while only vulture, a bare-PATH tool, ran).
     ``root`` is the SAME anchor as the scanned target (``tree.root``); the worktree HAS
     ``quality_gates/`` + ``.venv``, so this resolves correctly from both the direct-launch
-    and the release-copy contexts. A seeded / foreign homunculus with no ``quality_gates/``
+    and the release-copy contexts. A seeded / foreign solet with no ``quality_gates/``
     gaps out HONESTLY — these wrappers are platform-self-vet-specific (Phase-2 foreign targets
     use language-native gates).
     """
@@ -67,7 +67,7 @@ def _gate_paths(root: Path) -> _GatePaths:
 
 
 _USAGE_ERROR_EXIT = 64
-_HOMUNCULUS_ENV = {"HOMUNCULUS_NAME": "self"}
+_SOLET_ENV = {"SOLET_NAME": "self"}
 _BLOCKING_MARKER = "❌ BLOCKING:"
 
 
@@ -104,7 +104,7 @@ def scan_code_quality(tree: TargetTree, run_id: str) -> ScannerResult:
     outcome = run(
         [str(paths.venv_python), str(paths.aggregate)],
         cwd=str(tree.root),
-        env_overrides=_HOMUNCULUS_ENV,
+        env_overrides=_SOLET_ENV,
         timeout_s=600,
     )
     if outcome.returncode == _USAGE_ERROR_EXIT:
@@ -166,7 +166,7 @@ def scan_sql_access(tree: TargetTree, run_id: str) -> ScannerResult:
     outcome = run(
         [str(paths.venv_python), str(paths.sql_gate), "--allowlist", str(paths.sql_allowlist)],
         cwd=str(tree.root),
-        env_overrides=_HOMUNCULUS_ENV,
+        env_overrides=_SOLET_ENV,
     )
     examined = len(tree.quality_surface_python())
     if outcome.returncode == 0:

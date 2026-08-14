@@ -481,7 +481,7 @@ def _case_mid_clone_edit_refuses(rec: support.SmokeRecorder, root: Path) -> None
         return () if len(calls) == 1 else (" M plugins/foo_plugin/src/foo_plugin/__init__.py",)
 
     mgr = rm_module.ReleaseManager(
-        homunculus_name="smoke",
+        solet_name="smoke",
         source_root=source,
         releases_root=releases,
         clock=lambda: datetime(2026, 8, 1, 20, 41, tzinfo=UTC),
@@ -530,7 +530,7 @@ def _case_override_attests_the_post_clone_truth(
         return () if len(calls) == 1 else (appeared_line,)
 
     mgr = rm_module.ReleaseManager(
-        homunculus_name="smoke",
+        solet_name="smoke",
         source_root=source,
         releases_root=releases,
         clock=lambda: datetime(2026, 8, 1, 20, 42, tzinfo=UTC),
@@ -573,7 +573,7 @@ def _case_post_clone_unmeasurable_downgrades(
         return () if len(calls) == 1 else None
 
     mgr = rm_module.ReleaseManager(
-        homunculus_name="smoke",
+        solet_name="smoke",
         source_root=source,
         releases_root=releases,
         clock=lambda: datetime(2026, 8, 1, 20, 43, tzinfo=UTC),
@@ -615,7 +615,7 @@ def _case_pre_clone_unmeasurable_survives_a_later_success(
         return None if len(calls) == 1 else ()
 
     mgr = rm_module.ReleaseManager(
-        homunculus_name="smoke",
+        solet_name="smoke",
         source_root=source,
         releases_root=releases,
         clock=lambda: datetime(2026, 8, 1, 20, 44, tzinfo=UTC),

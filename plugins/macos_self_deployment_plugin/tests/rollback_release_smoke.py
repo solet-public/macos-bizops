@@ -36,7 +36,7 @@ Covers the full FAILED-vs-NEEDS_INTERVENTION partition:
 Drives the REAL ``SwapOrchestrator.rollback_release`` with a recording stub
 router + a fake ReleaseManager whose ``rollback`` is configurable; the
 candidate is a real ``sleep`` child so kill-vs-alive is directly observable.
-The TCP probe is stubbed; no real homunculus is launched.
+The TCP probe is stubbed; no real solet is launched.
 
 Run:
     .venv/bin/python3 plugins/macos_self_deployment_plugin/tests/rollback_release_smoke.py
@@ -259,9 +259,9 @@ def _run_case(
 
     def fake_spawn(
         app_home: Path, next_color: str, next_instance_id: str,
-        homunculus_name: str, candidate: CandidatePaths,
+        solet_name: str, candidate: CandidatePaths,
     ) -> int:
-        del app_home, homunculus_name, candidate
+        del app_home, solet_name, candidate
         if spawn_raises:
             # Models default_spawn's Popen raising on a missing/non-exec
             # <previous>/venv/bin/python3 (candidate_for passed dir+VERSION but
@@ -284,7 +284,7 @@ def _run_case(
             router_client=cast("RouterClient", stub),
             action_factory=action_factory,
             session_factory=lambda: "sess-rollback",
-            homunculus_name="smoke",
+            solet_name="smoke",
             release_manager=release_mgr,
             schema_preflight=_additive,
             preflight_probe=_smoke_green_probe,
@@ -305,8 +305,8 @@ def _run_case(
     finally:
         green_candidate._probe_port_reachable = original_probe  # noqa: SLF001
         # B2: the rollback drives the shared executor spine, which writes a
-        # pending-finisher record under the runtime dir (homunculus "smoke", not
-        # the live homunculus's real name). Clear the smoke-scoped record so nothing lingers in ~/.ananta.
+        # pending-finisher record under the runtime dir (solet "smoke", not
+        # the live solet's real name). Clear the smoke-scoped record so nothing lingers in ~/.ananta.
         (Path.home() / ".ananta" / "runtime" / "smoke.pending_finisher.json").unlink(
             missing_ok=True,
         )
@@ -347,7 +347,7 @@ def _happy_path() -> None:
     )
     _check(
         len(obs["spawn_calls"]) == 1
-        and obs["spawn_calls"][0].startswith("homunculus-green-"),
+        and obs["spawn_calls"][0].startswith("solet-green-"),
         f"happy: spawned previous as the OPPOSITE color green (got {obs['spawn_calls']})",
     )
     _check(
@@ -504,7 +504,7 @@ def _target_unbootable_unhealthy() -> None:
         len(obs["spawn_calls"]) == 1
         and not obs["candidate_alive"]
         and len(obs["unregister_calls"]) == 1
-        and obs["unregister_calls"][0].startswith("homunculus-green-"),
+        and obs["unregister_calls"][0].startswith("solet-green-"),
         "unbootable(unhealthy): spawned + registered, then SIGKILLed AND "
         f"unregistered (no stale binding) (unreg={obs['unregister_calls']})",
     )

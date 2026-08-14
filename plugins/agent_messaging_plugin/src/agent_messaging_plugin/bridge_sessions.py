@@ -138,11 +138,11 @@ class BridgeSessionManager:
 
     def open(
         self,
-        homunculus_name: str,
+        solet_name: str,
         parent_pid: int | None = None,
     ) -> BridgeSessionState:
         bridge_id = BRIDGE_ID_PREFIX + uuid.uuid4().hex[:_BRIDGE_ID_HEX_LEN]
-        session_id = self._session_id_factory(homunculus_name)
+        session_id = self._session_id_factory(solet_name)
         bridge = BridgeSessionState(
             bridge_id=bridge_id,
             session_id=session_id,
@@ -169,7 +169,7 @@ class BridgeSessionManager:
         (they default to ``client_id=""`` and ``allowlist=()`` — pure
         bridge identity, no policy enforcement).
         """
-        bridge = self.open(homunculus_name="", parent_pid=parent_pid)
+        bridge = self.open(solet_name="", parent_pid=parent_pid)
         bridge.agent_instance_id = claim.agent_instance_id
         bridge.session_label = claim.session_label
         bridge.client_id = claim.client_id

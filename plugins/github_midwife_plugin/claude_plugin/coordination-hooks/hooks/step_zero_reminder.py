@@ -2,7 +2,7 @@
 """SessionStart hook. ALWAYS ARMED: installed means armed, with no
 environment condition of any kind.
 
-The homunculus is a system-wide resource, so awareness of it is not
+The solet is a system-wide resource, so awareness of it is not
 fleet-only. This hook previously no-op'd unless AGENT_SESSION_LABEL was set;
 that gate was removed deliberately (operator ruling 2026-08-01), and the
 FAILURE DIRECTION INVERTED WITH IT: a silently disarmed awareness reminder
@@ -39,11 +39,15 @@ import json
 import sys
 
 _CONTEXT = (
-    "For non-trivial work, checking a persistent knowledge base "
-    "available to this session (via a local CLI or a connected MCP "
-    "tool, if any) or the current project's own docs (e.g. "
-    "CLAUDE.md/AGENTS.md, if present) before other work is usually "
-    "faster than re-deriving an answer partway through. Such a lookup "
+    "For non-trivial work, checking two context sources in sequence "
+    "before other work is usually faster than re-deriving an answer "
+    "partway through: first any persistent knowledge base available "
+    "to this session (via a local CLI or a connected MCP tool, if "
+    "any), then the current working directory's own docs (e.g. "
+    "CLAUDE.md/AGENTS.md, if present). The sequence is not a "
+    "substitution -- the knowledge base carries platform and "
+    "cross-session knowledge, the working directory's docs govern "
+    "the task at hand, and neither replaces the other. Such a lookup "
     "may run asynchronously -- its result can arrive after other work "
     "has already started, so there is no need to block on it once it "
     "is under way."

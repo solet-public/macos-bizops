@@ -1,4 +1,4 @@
-# Platform Call Surface — Agent Calling The Homunculus
+# Platform Call Surface — Agent Calling The Solet
 
 Article Layer: 1
 
@@ -8,14 +8,14 @@ Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:t
 
 Article Tags: planning-stage:agent-onboarding, planning-stage:tool-discovery, evidence-category:mcp-tool-contracts, domain:agent-messaging, domain:bridge, domain:platform-surface
 
-Embedding Description: How an external agent (Claude Code, Codex, ChatGPT over the tunnel) talks to the homunculus through the merged bridge — the four direct process tools (process_search / process_schema / process_call / process_result) for zero-inference invocation, download for blobs, and the MCP notification shapes the homunculus returns.
+Embedding Description: How an external agent (Claude Code, Codex, ChatGPT over the tunnel) talks to the solet through the merged bridge — the four direct process tools (process_search / process_schema / process_call / process_result) for zero-inference invocation, download for blobs, and the MCP notification shapes the solet returns.
 
 ## Purpose
 
 Document the agent-facing tools that let an external MCP client
-(Claude Code session, Codex CLI session) drive the homunculus directly. These
+(Claude Code session, Codex CLI session) drive the solet directly. These
 are the inbound half of the bridge — the platform surface. For the
-outbound assistant-message half (the homunculus → agent), see `post_message` in
+outbound assistant-message half (the solet → agent), see `post_message` in
 `processes/post_message.json` and the channel-event shapes below.
 
 All of these tools live on the `<server-name>` MCP server with the
@@ -43,12 +43,12 @@ retrieval surface for results that reference blobs by id.
 
 ## Operating assumptions
 
-- Ask the homunculus first about active work — through the knowledge, memory,
+- Ask the solet first about active work — through the knowledge, memory,
   and session-ledger search processes (`process_call`), or
   `peer_send` to a live peer session — before dropping to raw
   inspection. Channel notifications are authoritative platform
   messages.
-- If the homunculus asks a clarification question (delivered as a `<channel>`
+- If the solet asks a clarification question (delivered as a `<channel>`
   event), answer through `peer_send` to the asking session.
 - Keep unrelated work in separate sessions when possible — every
   bridge session has its own bridge_id and its own event queue.
@@ -64,7 +64,7 @@ retrieval surface for results that reference blobs by id.
 ## The four direct process tools
 
 `process_search`, `process_schema`, `process_call`, and
-`process_result` together let an agent invoke a registered homunculus
+`process_result` together let an agent invoke a registered solet
 process without going through inference. This is the right path
 when the agent already knows which process it wants.
 
@@ -126,7 +126,7 @@ delivery event.
 
 ## MCP notification shapes
 
-The homunculus returns most work to the agent as `notifications/claude/channel`
+The solet returns most work to the agent as `notifications/claude/channel`
 events on the MCP transport. The MCP client uses `meta.event_type`
 to route:
 
@@ -135,7 +135,7 @@ notifications/claude/channel
   params.content      = stringified payload
                         (JSON for bridge_delivery_*,
                          free text for channel_message)
-  params.meta.source           = "homunculus"
+  params.meta.source           = "solet"
   params.meta.event_type       = "channel_message"          // post_message
                                | "bridge_delivery_result"   // deliver_result
                                | "bridge_delivery_error"    // deliver_error
@@ -162,14 +162,14 @@ recipient bridge is registered as `agent_id="codex"` and the queued
 event is `peer_message` or `post_message`, the Python bridge emits:
 
 ```text
-notifications/homunculus/peer_message
+notifications/solet/peer_message
   params.content      = readable peer envelope + message prose
   params.meta         = full bridge metadata, including thread_id,
                         message_id, sender ids, recipient ids, cursor,
                         and trigger_turn=true
 ```
 
-The local patched Codex CLI consumes only this narrow homunculus method, turns
+The local patched Codex CLI consumes only this narrow solet method, turns
 it into Codex `InterAgentCommunication`, and reuses Codex's mailbox
 queue. Bridge-delivery results, errors, and non-peer Codex events still
 use the regular `notifications/claude/channel` shape.

@@ -4,15 +4,15 @@ Article Layer: 1
 
 Article Role: plugin_reference
 
-Article Tags: planning-stage:execution, evidence-category:capability-reference, domain:google-workspace, domain:local-homunculus, domain:cloud-homunculus
+Article Tags: planning-stage:execution, evidence-category:capability-reference, domain:google-workspace, domain:local-solet, domain:cloud-solet
 
-Embedding Description: Google Workspace plugin reference — the one-time operator setup for connecting Gmail, Drive, Sheets, Docs, and Slides to a Workspace account (Desktop-app loopback flow for local homunculi, Web-application redirect flow for cloud), where the client ID, client secret, and account tokens live (address book vs vault), the 26 verbs with argument shapes, typed gsuite.* errors, recovery for a failed Google token exchange, where created sheets, docs, and slides land in Drive (My Drive root of the connected account) with how to build their URLs from returned ids, and how to create multi-tab spreadsheets from csv/tsv files and apply tab renames or cell formatting via the Sheets batch-update verb.
+Embedding Description: Google Workspace plugin reference — the one-time operator setup for connecting Gmail, Drive, Sheets, Docs, and Slides to a Workspace account (Desktop-app loopback flow for local solets, Web-application redirect flow for cloud), where the client ID, client secret, and account tokens live (address book vs vault), the 26 verbs with argument shapes, typed gsuite.* errors, recovery for a failed Google token exchange, where created sheets, docs, and slides land in Drive (My Drive root of the connected account) with how to build their URLs from returned ids, and how to create multi-tab spreadsheets from csv/tsv files and apply tab renames or cell formatting via the Sheets batch-update verb.
 
-Homunculus-native access to Google Workspace — **Gmail, Drive, Sheets, Docs,
-Slides** — for the homunculus, peers, and plans. It is the platform
+Solet-native access to Google Workspace — **Gmail, Drive, Sheets, Docs,
+Slides** — for the solet, peers, and plans. It is the platform
 capability, distinct from the operator's claude.ai-side
 `mcp__claude_ai_Gmail`/`Drive`/`Calendar` connectors: this one lets the
-homunculus itself act on Workspace, including on cloud homunculi.
+solet itself act on Workspace, including on cloud solets.
 
 ## Security posture (why these libraries)
 
@@ -39,7 +39,7 @@ homunculus itself act on Workspace, including on cloud homunculi.
   unverified-app consent screen, no test-user cap). Personal-Gmail support is
   out of scope.
 - Per-account refresh/access tokens live in **vault** (scoped keys
-  `<homunculus>.g_suite_plugin.refresh_token` / `.access_token`). Google refresh
+  `<solet>.g_suite_plugin.refresh_token` / `.access_token`). Google refresh
   tokens are durable and are **not** rotated on each refresh (unlike Schwab), so
   the refresh path updates only the access token.
 - App identity (client_id, redirect_uri, and a `vault::` client-secret
@@ -52,12 +52,12 @@ homunculus itself act on Workspace, including on cloud homunculi.
 **This is not the flow for personal Google accounts.** The OAuth app is
 Internal-only, which requires a Google Workspace org (see "Auth model" above).
 
-The whole flow hands the homunculus two things from one Google Cloud OAuth
+The whole flow hands the solet two things from one Google Cloud OAuth
 app: a **client ID** (public — it appears in every consent URL; lives in the
 address book) and a **client secret** (confidential — moves by file into the
 vault, never through an agent conversation). A one-time browser approval then
-vaults the durable account tokens. Local homunculi use a Desktop-app client
-with a loopback redirect (proven live 2026-07-13, origin); cloud homunculi use a
+vaults the durable account tokens. Local solets use a Desktop-app client
+with a loopback redirect (proven live 2026-07-13, origin); cloud solets use a
 Web-application client behind the ALB.
 
 ### Stage 1 — Google Cloud console (browser)
@@ -86,11 +86,11 @@ OAuth client.
    Workspace admin may need to allow them even for an Internal app)
 6. Go to: https://console.cloud.google.com/auth/clients → **Create client** →
    pick the type by deployment:
-   - **Local homunculus:** type **Desktop app** → **Create**. No redirect URI
+   - **Local solet:** type **Desktop app** → **Create**. No redirect URI
      registration — Google accepts loopback redirects from Desktop clients on
      any port.
-   - **Cloud homunculus:** type **Web application** → redirect URI exactly
-     `https://<homunculus-fqdn>/oauth/google/callback` (the ALB path-routes
+   - **Cloud solet:** type **Web application** → redirect URI exactly
+     `https://<solet-fqdn>/oauth/google/callback` (the ALB path-routes
      `/oauth/google/*` to the callback port).
 
 ### Stage 2 — hand over the app identity
@@ -102,7 +102,7 @@ never enters model context.
 7. Copy **Client ID** → paste it to the agent (it goes in the address book)
 8. Copy **Client secret** → in Terminal: `pbpaste > ~/.gsuite_client_secret.txt`
 9. Store it: vault `store_from_file` with
-   `key=<homunculus>.default_address_book_plugin.google_client_secret`,
+   `key=<solet>.default_address_book_plugin.google_client_secret`,
    `file_path=/Users/<user>/.gsuite_client_secret.txt` → then delete the file.
    Sanity-check the file BEFORE storing (35 chars, `GOCSPX-` prefix; check via
    `wc -c` / `grep -c '^GOCSPX-'`, never by printing it) — a stale clipboard is
@@ -111,7 +111,7 @@ never enters model context.
     (`address_book_service::register`, address_type `api`) with three
     field_type/value entries:
     - `client_id` = the literal ID
-    - `client_secret` = `vault::<homunculus>.default_address_book_plugin.google_client_secret`
+    - `client_secret` = `vault::<solet>.default_address_book_plugin.google_client_secret`
     - `redirect_uri` — local: `http://127.0.0.1:<port>/oauth/google/callback`
       (any free port; it only has to match what `start_interface` binds —
       nothing is registered with Google) · cloud: the exact HTTPS URI from
@@ -128,12 +128,12 @@ tokens are durable (no rotation), so this never needs re-running.
 12. Dispatch `connect_account` → open the returned `authorize_url` → approve
 13. Verify: `gmail_list_messages` with `{"max": 3}` returns real message ids
     (not `gsuite.not_connected`), and the token keys
-    `<homunculus>.g_suite_plugin.refresh_token` / `.access_token` exist
+    `<solet>.g_suite_plugin.refresh_token` / `.access_token` exist
     (existence-check only)
 
 Note for agent-driven setup: the connector verbs are export-denied on bridge
 surfaces (RATIFY-3), so a bridge session cannot `process_call` them directly —
-route dispatches through the homunculus (`submit`) or ask the current `sys:autonomic`
+route dispatches through the solet (`submit`) or ask the current `sys:autonomic`
 holder session to dispatch and report the action id.
 
 ### Recovery — failures seen in the field
@@ -186,6 +186,44 @@ Errors are typed with the `gsuite.*` prefix: `gsuite.not_connected`,
 `gsuite.auth_expired`, `gsuite.permission_denied`, `gsuite.rate_limited`,
 `gsuite.not_found`, `gsuite.invalid_params`, `gsuite.result_too_large`
 (`sheets_get_values` only, see below).
+
+## Retrieving a background job's result without a live listener
+
+Every mutating or long-running verb here is born-async (the D0.3
+deferred-completion shape): the dispatch call returns
+`{"job_id": ..., "status": "queued"}` in milliseconds, the work runs on the
+plugin's background thread, and the finished result is delivered as a message
+to a live listening session. A session that invoked the verb through a plain
+`<name> call` holds no listener, so the completion has nowhere to land — the
+job still finishes; only the delivery is skipped.
+
+From such a session, fetch the finished payload directly (measured 2026-08-14):
+
+```bash
+<name> call service_interface::job_service::get_latest_job '{"plugin_name": "g_suite_plugin", "action_name": "sheets_create_from_files"}'
+```
+
+- `status: completed` → the job's `result` field carries the verb's payload
+  (for a sheet creation, the spreadsheet id/URL).
+- `status: pending`/`processing` → poll again; the job has not finished.
+- `status: failed` → the job's `error` field carries the failure.
+- `job: null` → nothing matched the filters (no such job has been created —
+  check `plugin_name`/`action_name` spelling; this is a normal empty answer,
+  not an error).
+
+One limit worth knowing: the verb returns the LATEST matching job only, so
+two dispatches of the same verb from a no-listener session leave the earlier
+job unreachable by THIS route. When the `job_id` from the dispatch envelope
+is still in hand, fetch that exact job instead — it cannot be displaced by a
+later dispatch:
+
+```bash
+<name> call service_interface::job_service::get_job '{"job_id": "<the dispatched job_id>"}'
+```
+
+Both verbs attach the job's stored `result` and `error` payloads to the row
+they return (measured 2026-08-14 — the ledger row itself has no such
+columns; the payloads live in a companion store and are read back for you).
 
 ## Business-data limits migration (2026-08-02) — g_suite is LIMITS-ONLY
 
@@ -246,7 +284,7 @@ the product-specific service) regardless of which API created the file.
 Files minted by the create verbs land in the **root of "My Drive" of the
 connected account** — the Workspace account that approved consent — owned by
 that account, in no folder, shared with nobody. Set these expectations with
-the operator whenever the homunculus creates a Workspace doc:
+the operator whenever the solet creates a Workspace doc:
 
 - **Look in the connected account.** A browser signed into a different Google
   account sees nothing in Drive, and the file's link shows "Request access"

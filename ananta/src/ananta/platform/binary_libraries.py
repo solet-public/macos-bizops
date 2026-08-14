@@ -4,7 +4,7 @@ Per the storage architecture design §1.3, binary libraries are
 content-addressable, shared, immutable assets fetched at install time
 (``asset_manager`` / ``plugin.yaml`` ``assets:`` block locally; AWS
 Mountpoint for S3 in the cloud). They live under ``<repo>/binary_libraries/``
-on disk, or ``/app/binary_libraries/`` inside the homunculus container
+on disk, or ``/app/binary_libraries/`` inside the solet container
 where the Mountpoint S3 bind-mount lands. Pre-Task-#57 plugin code
 chained ``Path(__file__).parent.parent.parent`` from per-plugin source
 files to reach the historical in-plugin paths (``instruments/``,

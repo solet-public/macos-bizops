@@ -35,7 +35,7 @@ Exercises:
   16. A non-2xx response raises ZuoraResponseError carrying is_query correctly
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/zuora_plugin/tests/smoke_data_query.py
 
 Exits 0 on success, 1 on first failure.

@@ -255,7 +255,7 @@ class SelfDeploymentServicePublicAPI(ABC):
         reason: str,
         dry_run: bool = False,
     ) -> RestartResult:
-        """Restart this homunculus with the manifest just written to disk.
+        """Restart this solet with the manifest just written to disk.
 
         Cloud profile binds this to ``aws_self_deployment_plugin`` (blue-green
         ECS swap with the new manifest fetched from S3 at the new color's
@@ -294,16 +294,16 @@ class SelfDeploymentServicePublicAPI(ABC):
         reason: str,
         dry_run: bool = False,
     ) -> StopSelfResult:
-        """Stop this homunculus without tearing down its infrastructure.
+        """Stop this solet without tearing down its infrastructure.
 
         Cloud profile binds this to ``aws_self_deployment_plugin`` (ECS
         ``UpdateService(DesiredCount=0)`` + polling). macOS profile
         binds it to ``macos_self_deployment_plugin`` (drain sentinel
         write + detached SIGTERM watchdog). Distinct from
-        ``aws_undertaker_plugin::teardown_homunculus`` which DESTROYS
+        ``aws_undertaker_plugin::teardown_solet`` which DESTROYS
         infra; stop_self leaves all infra in place so the operator can
         re-set ``DesiredCount=1`` (cloud) or run ``./launch.py``
-        (macOS) to bring the homunculus back.
+        (macOS) to bring the solet back.
 
         Per Slice 4.5 of the bridge-port-routing design.
         """

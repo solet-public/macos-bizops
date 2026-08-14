@@ -29,8 +29,8 @@ REAL ``os.kill`` (no stubbed terminate), so the test cannot false-green:
   record: the loop tick reaps nothing, a control subprocess survives.
 
 Scratch lives under ``~/.ananta`` (operator NO-/tmp rule), cleaned in ``finally``;
-the homunculus names are throwaways + the subprocesses are inert sleepers, so
-nothing touches the live homunculus's state.
+the solet names are throwaways + the subprocesses are inert sleepers, so
+nothing touches the live solet's state.
 
 Standalone — not pytest::
 

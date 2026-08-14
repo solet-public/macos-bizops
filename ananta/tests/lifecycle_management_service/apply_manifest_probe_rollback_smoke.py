@@ -24,7 +24,7 @@ Pins:
   the applied envelope as ``data.probe``.
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 ananta/tests/lifecycle_management_service/apply_manifest_probe_rollback_smoke.py
+    SOLET_NAME=<name> .venv/bin/python3 ananta/tests/lifecycle_management_service/apply_manifest_probe_rollback_smoke.py
 """
 
 from __future__ import annotations

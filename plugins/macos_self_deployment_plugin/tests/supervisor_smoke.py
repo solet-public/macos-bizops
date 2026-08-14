@@ -89,7 +89,7 @@ class _Harness:
         self.next_spawn_exited = False
         self.spawn_raises = False
         self.supervisor = Supervisor(
-            homunculus_name="supsmoke",
+            solet_name="supsmoke",
             app_home=Path("/nonexistent/profile"),
             releases_root=Path("/nonexistent/releases"),
             seams=SupervisorSeams(

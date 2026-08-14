@@ -4,7 +4,7 @@
 Companion to ``workbench/2026-06-19_v10_live_smoke_runbook.md`` §3-§4. This
 encodes the T0 + T1 acceptance cases as an **executable, self-validating,
 deterministic choreography** the agent-driver runs against the LIVE green
-homunculus through the MCP bridge.
+solet through the MCP bridge.
 
 WHY THIS IS A CHOREOGRAPHY HARNESS, NOT A STANDALONE REAL-CALL SCRIPT
 --------------------------------------------------------------------
@@ -63,7 +63,7 @@ from pathlib import Path
 
 # Plugin src trees are editable-installed but importing the agent_messaging
 # package runs a module-load-time scoped-vault-name resolution that needs
-# HOMUNCULUS_NAME (the canonical launch env in both root bootstraps) — no
+# SOLET_NAME (the canonical launch env in both root bootstraps) — no
 # default; raises if unset.
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 for _src_rel in (
@@ -99,7 +99,7 @@ SENTINEL_PREFIX = "__v10_smoke__"
 # bridge detach/reattach (that real-reconnect survival is the manual T2 tier).
 OFFLINE_INSTANCE_PREFIX = "agi-v10smoke-offline-"
 
-# Public verb keys the agent dispatches via `homunculus call <process_key>`
+# Public verb keys the agent dispatches via `solet call <process_key>`
 # (MCP-first addressing is retired; the local CLI is the default path).
 # peer_inbox is its own dedicated call; role-addressed sends go through the
 # peer_send_by_name VERB (process_call), NOT the instance-addressed peer_send
@@ -766,12 +766,12 @@ def _validate_mcp(case: Case, step: McpCall, defects: list[str]) -> None:
 
 def emit(cases: tuple[Case, ...]) -> None:
     """Print the deterministic agent-run choreography."""
-    homunculus_name = os.environ["HOMUNCULUS_NAME"]
+    solet_name = os.environ["SOLET_NAME"]
     for case in cases:
         print(f"\n=== {case.case_id} [{case.tier.value}] {case.title} ===")
         for idx, step in enumerate(case.steps, start=1):
             if isinstance(step, McpCall):
-                print(f"  {idx}. MCP mcp__{homunculus_name}__{step.tool}  {step.payload}")
+                print(f"  {idx}. MCP mcp__{solet_name}__{step.tool}  {step.payload}")
                 print(f"      → {step.note}")
             else:
                 print(f"  {idx}. ASSERT  {step.description}")

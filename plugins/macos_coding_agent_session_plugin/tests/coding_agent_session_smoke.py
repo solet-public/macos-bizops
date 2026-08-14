@@ -31,7 +31,7 @@ from macos_coding_agent_session_plugin.fsevents_watcher import (
 )
 
 
-def _sleep_spawn(agent_instance_id: str, homunculus_name: str) -> subprocess.Popen[bytes]:
+def _sleep_spawn(agent_instance_id: str, solet_name: str) -> subprocess.Popen[bytes]:
     """Smoke-only spawn_fn: launch a ``sleep 60`` stand-in instead of the real bridge.
 
     The stand-in is a benign long-running subprocess we can SIGTERM, poll
@@ -39,7 +39,7 @@ def _sleep_spawn(agent_instance_id: str, homunculus_name: str) -> subprocess.Pop
     real ``agent_messaging_plugin.mcp_bridge`` module + its runtime
     dependencies.
     """
-    del agent_instance_id, homunculus_name
+    del agent_instance_id, solet_name
     return subprocess.Popen(
         ["sleep", "60"],
         stdin=subprocess.DEVNULL,
@@ -76,7 +76,7 @@ def _scenario_spawn_terminate(logger: logging.Logger) -> None:
     )
     try:
         status, row, msg = tracker.spawn(
-            agent_instance_id="test-001", homunculus_name="example",
+            agent_instance_id="test-001", solet_name="example",
         )
         _check("spawn returns success", status == "success", msg)
         _check("spawn returns a row", row is not None)
@@ -87,7 +87,7 @@ def _scenario_spawn_terminate(logger: logging.Logger) -> None:
         _check("list returns one row", len(listing) == 1)
         # Idempotency: second spawn returns already_running with same pid.
         status, row2, msg2 = tracker.spawn(
-            agent_instance_id="test-001", homunculus_name="example",
+            agent_instance_id="test-001", solet_name="example",
         )
         _check("idempotent spawn returns already_running", status == "already_running", msg2)
         assert row2 is not None
@@ -113,7 +113,7 @@ def _scenario_restart(logger: logging.Logger) -> None:
     )
     try:
         _, row, _ = tracker.spawn(
-            agent_instance_id="test-002", homunculus_name="example",
+            agent_instance_id="test-002", solet_name="example",
         )
         assert row is not None
         original_pid = row.pid
@@ -136,10 +136,10 @@ def _scenario_selective_terminate(logger: logging.Logger) -> None:
     )
     try:
         _, row_a, _ = tracker.spawn(
-            agent_instance_id="test-001", homunculus_name="example",
+            agent_instance_id="test-001", solet_name="example",
         )
         _, row_b, _ = tracker.spawn(
-            agent_instance_id="test-002", homunculus_name="example",
+            agent_instance_id="test-002", solet_name="example",
         )
         assert row_a is not None
         assert row_b is not None
@@ -173,7 +173,7 @@ def _scenario_fsevents_restart(logger: logging.Logger) -> None:
         )
         try:
             _, row, _ = tracker.spawn(
-                agent_instance_id="test-fsevents", homunculus_name="example",
+                agent_instance_id="test-fsevents", solet_name="example",
             )
             assert row is not None
             original_pid = row.pid
@@ -236,10 +236,10 @@ def _scenario_shutdown(logger: logging.Logger) -> None:
         logger=logger, spawn_fn=_sleep_spawn, grace_seconds=2.0,
     )
     _, row_a, _ = tracker.spawn(
-        agent_instance_id="test-001", homunculus_name="example",
+        agent_instance_id="test-001", solet_name="example",
     )
     _, row_b, _ = tracker.spawn(
-        agent_instance_id="test-002", homunculus_name="example",
+        agent_instance_id="test-002", solet_name="example",
     )
     assert row_a is not None
     assert row_b is not None

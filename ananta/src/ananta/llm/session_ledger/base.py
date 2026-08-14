@@ -117,7 +117,7 @@ class SessionLedgerRepositoryBase:
 
         Per 2026-05-31 Architect ruling §4: each table is counted with
         ``is_deleted = 0`` (live rows only). Tables that haven't been
-        created yet (fresh homunculus pre-schema-init) return 0; the verb
+        created yet (fresh solet pre-schema-init) return 0; the verb
         stays valid in that case too.
 
         SQL-lockdown migration: the per-table raw ``SELECT count(*) ...
@@ -148,7 +148,7 @@ class SessionLedgerRepositoryBase:
         """Extract the ``data.result.value`` scalar from a ``count`` envelope.
 
         A non-success envelope — e.g. the table is absent on a fresh
-        pre-schema-init homunculus, which ``run_aggregate`` surfaces as a
+        pre-schema-init solet, which ``run_aggregate`` surfaces as a
         ``state.count_failed`` error result rather than a raise — yields 0,
         keeping the documented pre-schema-init tolerance. This is in fact
         MORE robust than the retired raw-SQL path: that ran all tables in ONE

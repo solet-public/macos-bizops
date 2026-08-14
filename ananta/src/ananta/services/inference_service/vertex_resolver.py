@@ -160,7 +160,7 @@ class InferenceProviderResolver:
         if plugin is None:
             # The bridge layer is unreachable — cannot route to a session at
             # all. Degrade to the default provider rather than deferring into
-            # a hole; a missing messaging plugin is a whole-homunculus fault.
+            # a hole; a missing messaging plugin is a whole-solet fault.
             logger.warning(
                 "vertex resolver: agent_messaging_plugin unavailable; "
                 "flow=%s falls back to default provider", flow_id,
@@ -257,7 +257,7 @@ class InferenceProviderResolver:
         ``SessionInferenceProvider`` forwarder as-built.
 
         Self-guards the §D.3 HARD EDGE: resolving the slot needs the SAME
-        messaging plugin, so a plugin-unreachable homunculus fault → DEFAULT
+        messaging plugin, so a plugin-unreachable solet fault → DEFAULT
         (stays LOCAL) here too — it structurally cannot reach the holder. A
         lookup FAULT (the accessor raises) also degrades to DEFAULT (loud) —
         the fault-edge's safe floor, symmetric with

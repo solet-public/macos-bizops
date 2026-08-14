@@ -19,7 +19,7 @@ Exercises:
   11. export_media_to_blob / resolve_export_mime — shared helper contract
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 plugins/g_suite_plugin/tests/smoke_drive.py
+    SOLET_NAME=<name> .venv/bin/python3 plugins/g_suite_plugin/tests/smoke_drive.py
 
 Exits 0 on success, 1 on first failure.
 """

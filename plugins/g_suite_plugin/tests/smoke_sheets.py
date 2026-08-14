@@ -19,7 +19,7 @@ Exercises:
      empty); a create response missing a tab's sheetId raises RuntimeError
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 plugins/g_suite_plugin/tests/smoke_sheets.py
+    SOLET_NAME=<name> .venv/bin/python3 plugins/g_suite_plugin/tests/smoke_sheets.py
 
 Exits 0 on success, 1 on first failure.
 """

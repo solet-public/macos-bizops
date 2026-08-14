@@ -7,7 +7,7 @@ introduces a single on-disk sentinel file ``~/.ananta/runtime/<name>.draining``
 that the LaunchAgent's ``PathState`` predicate gates on. While the
 sentinel exists, the ``KeepAlive`` predicate evaluates false; launchd
 suppresses respawn. The sentinel is held only for the SIGTERM + unregister
-window of an intentional drain — so a homunculus child that genuinely crashes
+window of an intentional drain — so a solet child that genuinely crashes
 independently still triggers a launchd respawn.
 
 Architect's 2026-06-06 verdict: ONE cross-color sentinel, not per-color.
@@ -37,25 +37,25 @@ from macos_self_deployment_plugin.constants import PLUGIN_NAME
 _logger = logging.getLogger(PLUGIN_NAME)
 
 
-def sentinel_path(homunculus_name: str) -> Path:
-    """Resolve the drain-sentinel file path for ``homunculus_name``.
+def sentinel_path(solet_name: str) -> Path:
+    """Resolve the drain-sentinel file path for ``solet_name``.
 
     Delegates to the core single-source resolver
     (:func:`ananta.core.runtime.draining_sentinel_path`) so this WRITE side
-    (``write`` / ``held``) and the core READ side (``is_draining`` in this homunculus's
+    (``write`` / ``held``) and the core READ side (``is_draining`` in this solet's
     SIGTERM handler) provably resolve the SAME file — a divergence would
     silently defeat respawn-suppression. Cross-color (the name is in the
     filename, no ``-blue`` / ``-green`` suffix).
     """
-    return draining_sentinel_path(homunculus_name)
+    return draining_sentinel_path(solet_name)
 
 
-def write(homunculus_name: str) -> Path:
+def write(solet_name: str) -> Path:
     """Write the sentinel and leave it on disk for the caller's lifetime.
 
     Used by ``stop_self`` (Slice 4.5) where the sentinel must persist
     beyond the verb's return so the LaunchAgent's PathState predicate
-    keeps respawn suppressed until the operator re-launches the homunculus
+    keeps respawn suppressed until the operator re-launches the solet
     via ``python -m ananta.cli``. The cleanup path is
     :func:`stale_runtime_cleanup.cleanup_and_restore` on the next
     cold restart, invoked from the plugin's ``prepare_for_readiness``
@@ -63,10 +63,10 @@ def write(homunculus_name: str) -> Path:
 
     Distinct from :func:`held`: the context manager removes the
     sentinel in finally (correct for blue-green drain where the
-    homunculus continues serving). ``write`` is the explicit
+    solet continues serving). ``write`` is the explicit
     no-auto-cleanup form for the "stop and stay stopped" case.
     """
-    path = sentinel_path(homunculus_name)
+    path = sentinel_path(solet_name)
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     path.touch()
     _logger.info(
@@ -78,7 +78,7 @@ def write(homunculus_name: str) -> Path:
 
 
 @contextlib.contextmanager
-def held(homunculus_name: str) -> Generator[Path]:
+def held(solet_name: str) -> Generator[Path]:
     """Context manager that writes the sentinel on entry, removes on exit.
 
     Use to wrap the drain-kill SIGTERM + unregister window in
@@ -87,10 +87,10 @@ def held(homunculus_name: str) -> Generator[Path]:
     a crash mid-drain does not leave a stale sentinel that suppresses
     future LaunchAgent respawns. The cold-restart safety net in
     ``stale_runtime_cleanup.cleanup_and_restore``'s ``_cleanup_stale_runtime_files`` covers the harder
-    case where the whole homunculus process dies mid-drain before reaching
+    case where the whole solet process dies mid-drain before reaching
     the ``finally``.
     """
-    path = sentinel_path(homunculus_name)
+    path = sentinel_path(solet_name)
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     path.touch()
     _logger.info(

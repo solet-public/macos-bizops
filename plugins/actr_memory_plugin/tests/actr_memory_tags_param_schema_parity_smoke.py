@@ -8,7 +8,7 @@ no-op: the param must appear in the ``@service_interface_process`` decorator
 metadata, which is exactly what ``process_schema`` / the registry build from
 (``to_process_dict()['parameters']`` -> invocation_schema). This smoke asserts the
 param is exposed on the callable surface — hermetically, by introspecting the
-decorated interface class (no live homunculus, no restart needed).
+decorated interface class (no live solet, no restart needed).
 
 Run::
 

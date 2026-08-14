@@ -21,7 +21,7 @@ BOTH the wrapper (``ThinkingService`` — what registry dispatch hits) and
 the bound plugin class (``DefaultThinkingPlugin`` — what the wrapper
 delegates to).
 
-Offline: pure introspection, no live homunculus / LM Studio / Postgres.
+Offline: pure introspection, no live solet / LM Studio / Postgres.
 
 Run:
     .venv/bin/python3 ananta/tests/core/thinking_service/wrapper_parity_smoke.py

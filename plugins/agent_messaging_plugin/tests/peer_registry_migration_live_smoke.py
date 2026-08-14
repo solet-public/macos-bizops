@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Smoke verification of the :class:`PeerRegistry` -> :class:`Store` migration.
 
-Drives the live homunculus's bridge HTTP API.  Verifies:
+Drives the live solet's bridge HTTP API.  Verifies:
 
 1. ``peer_list`` response now surfaces ``created_at`` AND ``updated_at``
    alongside the deprecated-alias ``registered_at``.
@@ -13,11 +13,11 @@ Drives the live homunculus's bridge HTTP API.  Verifies:
    dispatch touches both endpoints).
 5. ``close`` for either bridge cleans its binding out of the registry.
 
-Requires the homunculus to be running with the bridge interface up; reads the
+Requires the solet to be running with the bridge interface up; reads the
 bridge port from ``~/.ananta/runtime/<name>.bridge.port`` (the same
 discovery path the MCP bridge subprocess uses).
 
-NOTE: Run this AFTER restarting the homunculus with the post-migration code.  The
+NOTE: Run this AFTER restarting the solet with the post-migration code.  The
 running bridge before restart still ships the pre-migration in-memory
 ``threading.Lock``-based registry, which never sets ``updated_at``.
 
@@ -45,12 +45,12 @@ SMOKE_AGENT_ID = f"store_smoke_{uuid4().hex[:6]}"
 
 
 def _read_bridge_port() -> int:
-    homunculus = os.environ["HOMUNCULUS_NAME"]
-    port = read_port_file(service_name="bridge", homunculus_name=homunculus)
+    solet = os.environ["SOLET_NAME"]
+    port = read_port_file(service_name="bridge", solet_name=solet)
     if port is None:
         raise RuntimeError(
-            f"bridge port file not found for homunculus {homunculus!r}; "
-            "is the homunculus running?",
+            f"bridge port file not found for solet {solet!r}; "
+            "is the solet running?",
         )
     return port
 
@@ -60,16 +60,16 @@ _LIVE_ENV = "PEER_REGISTRY_MIGRATION_LIVE_SMOKE"
 
 def _prereq_skip_reason() -> str | None:
     """SKIP-reason (None → run). Gate this live smoke so the offline suite
-    NEVER fails-red offline and NEVER silent-writes the running homunculus's
+    NEVER fails-red offline and NEVER silent-writes the running solet's
     peer registry: skip unless the explicit ``PEER_REGISTRY_MIGRATION_LIVE_SMOKE=1``
     opt-in is set (the ``*_live_smoke`` convention), and skip-clean when the
     bridge is unreachable (mirrors ``cross_host_kara_ledger``'s reachability model)."""
     if os.environ.get(_LIVE_ENV) != "1":
-        return f"set {_LIVE_ENV}=1 to run (LIVE-writes the running homunculus's peer registry)"
-    homunculus = os.environ["HOMUNCULUS_NAME"]
-    port = read_port_file(service_name="bridge", homunculus_name=homunculus)
+        return f"set {_LIVE_ENV}=1 to run (LIVE-writes the running solet's peer registry)"
+    solet = os.environ["SOLET_NAME"]
+    port = read_port_file(service_name="bridge", solet_name=solet)
     if port is None:
-        return f"bridge port file not found for homunculus {homunculus!r} (is the homunculus running?)"
+        return f"bridge port file not found for solet {solet!r} (is the solet running?)"
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=5.0):
             pass

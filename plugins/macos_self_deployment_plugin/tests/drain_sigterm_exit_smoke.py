@@ -22,7 +22,7 @@ ghost respawn):
 
 Standalone — not pytest. Run with::
 
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/macos_self_deployment_plugin/tests/drain_sigterm_exit_smoke.py
 """
 
@@ -36,9 +36,9 @@ import time
 import traceback
 from collections.abc import Callable
 
-# Use the caller-supplied homunculus name before importing modules that resolve
-# HOMUNCULUS_NAME. Every sentinel created by this smoke is removed on the way out.
-NAME = os.environ["HOMUNCULUS_NAME"]
+# Use the caller-supplied solet name before importing modules that resolve
+# SOLET_NAME. Every sentinel created by this smoke is removed on the way out.
+NAME = os.environ["SOLET_NAME"]
 
 from ananta.core.runtime import (  # noqa: E402
     draining_sentinel_path,
@@ -139,7 +139,7 @@ def _run_sigterm_subprocess(*, draining: bool) -> tuple[int, float]:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        env={**os.environ, "HOMUNCULUS_NAME": NAME},
+        env={**os.environ, "SOLET_NAME": NAME},
     )
     try:
         # Wait for the handler to be installed (READY) before signalling.

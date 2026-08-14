@@ -15,21 +15,21 @@ import os
 from typing import Final
 
 
-def _homunculus_or_fail() -> str:
-    """Resolve HOMUNCULUS_NAME at import-time for the scoped vault key.
+def _solet_or_fail() -> str:
+    """Resolve SOLET_NAME at import-time for the scoped vault key.
 
     Mirrors the fast-fail helper in salesforce_plugin.constants / jira_plugin.constants.
     """
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "zuora_plugin.constants: HOMUNCULUS_NAME env var is "
+            "zuora_plugin.constants: SOLET_NAME env var is "
             "required to resolve the scoped client_secret vault key.",
         )
     return name
 
 
-_HOMUNCULUS: Final[str] = _homunculus_or_fail()
+_SOLET: Final[str] = _solet_or_fail()
 
 # ---------------------------------------------------------------------------
 # Plugin identity
@@ -41,14 +41,14 @@ PLUGIN_VERSION: Final[str] = "1.1.0"
 # Chain-consumed vault key — the OAuth client_secret.
 # ---------------------------------------------------------------------------
 # The "zuora_tenant" address-book entry's ``client_secret`` field stores a
-# ``vault::<homunculus>.default_address_book_plugin.zuora_client_secret``
+# ``vault::<solet>.default_address_book_plugin.zuora_client_secret``
 # reference. CHAIN-CONSUMED via ``resolve_with_secrets`` (never read directly
 # under this plugin's identity), so it lives in the RESOLVER's namespace —
 # post-2026-06-07 vault namespace enforcement requires the key's ``<plugin>``
 # segment to equal the retrieving caller. Therefore NOT declared in
 # get_required_vault_keys / get_declared_vault_keys (both return []).
 VAULT_KEY_CLIENT_SECRET: Final[str] = (
-    f"{_HOMUNCULUS}.default_address_book_plugin.zuora_client_secret"
+    f"{_SOLET}.default_address_book_plugin.zuora_client_secret"
 )
 
 # ---------------------------------------------------------------------------

@@ -52,7 +52,7 @@ class LayerConfig:
     """Piece-level configuration for a layer type.
 
     ``properties`` holds layer-type-specific values (e.g.,
-    ``carrier_hz`` for entrainment, ``program`` for harmonic_bed).
+    ``carrier_hz`` for rhythmic_pulse, ``program`` for harmonic_bed).
     The schema defines what properties each layer type expects.
     """
 
@@ -161,8 +161,8 @@ class Segment:
 
     ``layer_overrides`` holds per-section parameter overrides for
     specific layers. The thinking model uses these when a layer's
-    parameter genuinely varies per section (e.g., entrainment beat_hz
-    changes from theta to alpha across sections, or a layer's stagger
+    parameter genuinely varies per section (e.g., rhythmic_pulse beat_hz
+    changes across sections, or a layer's stagger
     timing differs per section).
 
     ``layers`` is populated by the resolver — not by the thinking

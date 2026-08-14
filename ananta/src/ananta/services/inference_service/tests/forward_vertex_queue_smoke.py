@@ -26,7 +26,7 @@ Architect §6-bis fresh-decode-not-blind property:
       mint failure to a durable DEFER (source-order pin — never fire-and-forget).
 
 Offline: the shared REAL-SHAPE state fake (no schema enforcement on this table;
-``fail_next`` injects provider-error envelopes). No live homunculus / LM Studio / Postgres.
+``fail_next`` injects provider-error envelopes). No live solet / LM Studio / Postgres.
 
 Run from repo root:
     .venv/bin/python3 \
@@ -41,7 +41,7 @@ from typing import Any
 
 # RealShapeState's schema-enforcement pulls in agent_messaging_plugin, whose
 # package init resolves vault-scoped constants eagerly (same class as
-# hmac_bearer_token_smoke). HOMUNCULUS_NAME must already be set in the
+# hmac_bearer_token_smoke). SOLET_NAME must already be set in the
 # environment (platform contract: no silent default) for this import chain
 # to succeed.
 

@@ -10,7 +10,7 @@ send/turn semantics).
 EPHEMERAL BY DESIGN, NOT PERSISTED (mirrors
 ``macos_coding_agent_session_plugin.bridge_tracker``'s proven "no persistence
 across plugin restarts" posture): the ``host_ref -> Popen`` map lives in this
-driver INSTANCE's memory only. A homunculus restart loses that map even
+driver INSTANCE's memory only. A solet restart loses that map even
 though the OS process may survive as an orphan (``start_new_session=True``
 detaches it from the parent's process group on purpose — see ``shutdown()``).
 So ``driver_channel()`` correctly returns ``None`` for any host_ref this
@@ -77,6 +77,7 @@ from typing import TYPE_CHECKING, Any
 
 from .authority_contract import render_authority_delegation_contract
 from .schema import CAPTURE_SOURCE_INIT_EVENT
+from .solet_cli import expose_worker_cli, resolve_solet_bin, watch_sidecar_argv
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -92,7 +93,7 @@ def _resolve_default_cwd() -> Path:
 
     Prefers ``APP_HOME``'s parent (the shared ``<clone>/profile`` every
     colour is launched with -- ``cli.py`` bakes ``--app-home`` into the env
-    var) over a bare ``Path.cwd()``: the running homunculus process's own OS
+    var) over a bare ``Path.cwd()``: the running solet process's own OS
     working directory has no guaranteed relationship to the checkout at all
     (observed live: a deployed colour's cwd was ``~/.ananta/runtime``, a pure
     state/spool directory with no ``.mcp.json`` or source in it). Mirrors
@@ -458,10 +459,75 @@ def _sigterm_then_kill(
     _reap(proc)
 
 
+def _arm_watcher(
+    popen_fn: Callable[..., subprocess.Popen[str]],
+    solet_bin: str,
+    cwd: Path,
+    parent_pid: int,
+    env: Mapping[str, str],
+    transport: str,
+) -> subprocess.Popen[str] | None:
+    """Arm the registered-presence sidecar for a ``watch``-transport worker —
+    what actually puts it in ``peer_list``.
+
+    Mirrors ``codex_app_server.CodexAppServerHostDriver._start_watcher``, per
+    the ruling to mirror rather than innovate, with the one ratified
+    divergence: NO ``--no-spool``. Claude Code runs a real async Stop hook
+    (``wake_waiter.py``) whose entire job is consuming that spool.
+
+    Non-fatal on failure, unlike the Codex path's ``HostCannotSpawnError``:
+    the worker process is already up by this point, and an unregistered worker
+    — the status quo this fix improves on — still beats killing a live one.
+    Logged at WARNING so it is never silent, which is precisely the failure
+    mode this lane exists to eliminate.
+    """
+    if transport != "watch" or not solet_bin:
+        return None
+    argv = [
+        *watch_sidecar_argv(solet_bin, agent_id="claude_code", spool=True),
+        "--exit-with-parent", str(parent_pid),
+    ]
+    try:
+        return popen_fn(
+            argv, cwd=str(cwd), env=dict(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1, start_new_session=True,
+        )
+    except OSError as exc:
+        logger.warning(
+            "presence watcher failed to arm for headless worker pid=%d (%s) — "
+            "the worker will run UNREGISTERED: not in peer_list, unreachable "
+            "by peer_send, contributing no liveness",
+            parent_pid, exc,
+        )
+        return None
+
+
+def _stop_watcher(watcher: subprocess.Popen[str] | None, grace_seconds: float) -> None:
+    """Tear the presence sidecar down explicitly.
+
+    ``--exit-with-parent`` already covers the ordinary case, but that is a
+    POLL: the watcher would linger for up to one poll interval still holding
+    a registry row, which dispatch reads as a live binding and sends into.
+    SIGTERM is also what ``local_cli.cli._install_sigterm_unwind`` is built
+    for — it unwinds so ``/close`` runs and the row is evicted SYNCHRONOUSLY,
+    rather than being left behind as false liveness.
+    """
+    if watcher is None or watcher.poll() is not None:
+        return
+    _sigterm_then_kill(watcher.pid, watcher, grace_seconds)
+
+
 @dataclass(slots=True)
 class _TrackedHeadlessProcess:
     agent_instance_id: str
     proc: subprocess.Popen[str]
+    # Registration-loss fix (2026-08-14): the registered-presence sidecar for
+    # a ``watch``-transport worker, mirroring codex_app_server's own
+    # ``_TrackedCodexProcess.watcher``. ``None`` on the ``mcp`` transport
+    # (the bridge registers there) or when no CLI resolved.
+    watcher: subprocess.Popen[str] | None = None
 
 
 @dataclass(slots=True)
@@ -501,7 +567,8 @@ class HeadlessHostDriver:
         self,
         *,
         claude_bin: str | None = None,
-        homunculus_name: str | None = None,
+        solet_name: str | None = None,
+        solet_bin: str | None = None,
         permission_mode: str | None = None,
         transport: str | None = None,
         mcp_config_path: Path | None = None,
@@ -519,10 +586,13 @@ class HeadlessHostDriver:
             claude_bin if claude_bin is not None
             else shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
         )
-        self._homunculus_name = (
-            homunculus_name if homunculus_name is not None
-            else os.environ.get("HOMUNCULUS_NAME") or ""
+        self._solet_name = (
+            solet_name if solet_name is not None
+            else os.environ.get("SOLET_NAME") or ""
         )
+        # Wake CLI BINARY (never solet_name). Unresolvable is non-fatal here
+        # -- see _arm_watcher / _spawn_env for why it degrades, not refuses.
+        self._solet_bin = resolve_solet_bin(solet_bin)
         self._permission_mode = (
             permission_mode if permission_mode is not None
             else os.environ.get(_ENV_PERMISSION_MODE) or ""
@@ -581,9 +651,9 @@ class HeadlessHostDriver:
                 f"shutil.which, then {self._claude_bin!r}) — install Claude "
                 "Code or pass claude_bin explicitly.",
             )
-        if not self._homunculus_name:
+        if not self._solet_name:
             remedies.append(
-                "HOMUNCULUS_NAME is not set — the spawned process cannot "
+                "SOLET_NAME is not set — the spawned process cannot "
                 "discover its bridge port without it.",
             )
         if not (permission_mode or self._permission_mode):
@@ -620,19 +690,23 @@ class HeadlessHostDriver:
     ) -> dict[str, str]:
         env = dict(os.environ)
         _apply_provider_env(env, provider_env)
-        env["HOMUNCULUS_NAME"] = self._homunculus_name
+        env["SOLET_NAME"] = self._solet_name
         env["AGENT_IDENTITY"] = "claude_code"
         env["AGENT_INSTANCE_ID"] = agent_instance_id
         env["AGENT_SESSION_ID"] = agent_session_id
         env["AGENT_SESSION_LABEL"] = label
-        # Deaf-wake fix (2026-08-08): MUST be the wake CLI's own binary name
-        # ("homunculus"), never self._homunculus_name (the homunculus
-        # INSTANCE name, e.g. "myhomunculus") -- same defect, same fix, as
-        # tmux_adapter.py's identical _env_pairs bug (measured together:
-        # `which <instance-name>` fails, `which homunculus` resolves). wake_waiter.py
-        # runs `subprocess.run([$AGENT_WAKE_CLI, "wake"])`; the instance
-        # name is not a resolvable command.
-        env["AGENT_WAKE_CLI"] = "homunculus"
+        # Deaf-wake fix (2026-08-08): MUST be the wake CLI's own binary,
+        # never self._solet_name (the solet INSTANCE name, e.g. "mysolet") --
+        # `which <instance-name>` fails, `which solet` resolves.
+        # Registration-loss fix (2026-08-14): the 2026-08-08 fix used the
+        # bare command NAME, which only works when PATH can resolve it. A
+        # materialized blue-green release runs with a minimal PATH excluding
+        # its own venv/bin, so wake_waiter.py's
+        # `subprocess.run([$AGENT_WAKE_CLI, "wake"])` and
+        # heartbeat_report_alive.py's bare `["solet", "call", ...]` both died
+        # with FileNotFoundError and, being non-fatal by design, died
+        # SILENTLY. Absolute binary + PATH prepend closes both halves.
+        expose_worker_cli(env, self._solet_bin)
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
         # caller-resolved (spec's policy-filled value, or this driver's
         # constructor/charter-default floor -- see spawn()) -- never
@@ -681,7 +755,7 @@ class HeadlessHostDriver:
         step_zero_reminder.py hooks -- all scoped to THIS spawned worker
         only, never the shared ``.claude/settings.json`` (that would
         double-fire the wake hook for the seat, which already gets the
-        equivalent JS hooks via the user-scope coordination-hooks@<homunculus>
+        equivalent JS hooks via the user-scope coordination-hooks@<solet>
         plugin). Merges with (does not replace) whatever
         ``--setting-sources project`` loads (e.g. the git-controller
         gate), per the standing "--settings MERGES" trap note.
@@ -713,7 +787,7 @@ class HeadlessHostDriver:
         heartbeat_hook_path = resolved_hooks["heartbeat_report_alive.py"]
         rotation_due_hook_path = resolved_hooks["rotation_due_watch.py"]
         # Deaf-wake fix (2026-08-08): project-vendored Python ports of
-        # coordination-hooks@<homunculus>'s four JS hooks, wired here (this
+        # coordination-hooks@<solet>'s four JS hooks, wired here (this
         # adapter's own generated --settings blob) rather than the shared
         # project-scope .claude/settings.json, specifically so this does
         # not double-fire the wake for the seat -- the seat already gets
@@ -737,7 +811,7 @@ class HeadlessHostDriver:
                 "SessionStart": [
                     {"hooks": [{"type": "command", "command": f"python3 {capture_hook_path}"}]},
                     {
-                        # Matches coordination-hooks@<homunculus>'s own hooks.json
+                        # Matches coordination-hooks@<solet>'s own hooks.json
                         # matcher for this event exactly (fidelity, not a
                         # new choice) -- check_messages_reminder.py also
                         # fires here (in addition to UserPromptSubmit
@@ -841,7 +915,7 @@ class HeadlessHostDriver:
         # this stays as-is until a measurement or an adopter report says
         # otherwise. If that arrives, import the tmux predicate rather than
         # writing a second one.
-        cmd += ["--dangerously-load-development-channels", f"server:{self._homunculus_name}"]
+        cmd += ["--dangerously-load-development-channels", f"server:{self._solet_name}"]
         model = str(spec.get("model") or "")
         if model:
             cmd += ["--model", model]
@@ -915,9 +989,12 @@ class HeadlessHostDriver:
             raise HostCannotSpawnError(f"subprocess.Popen raised: {exc}") from exc
 
         host_ref = str(proc.pid)
+        watcher = _arm_watcher(
+            self._popen_fn, self._solet_bin, self._cwd, proc.pid, env, transport,
+        )
         with self._lock:
             self._processes[host_ref] = _TrackedHeadlessProcess(
-                agent_instance_id=agent_instance_id, proc=proc,
+                agent_instance_id=agent_instance_id, proc=proc, watcher=watcher,
             )
         _drain_stdout_with_init_capture(proc.stdout, agent_instance_id=agent_instance_id)
         _drain_pipe(proc.stderr)
@@ -950,6 +1027,8 @@ class HeadlessHostDriver:
                 tracked.proc.stdin.close()
         grace = grace_seconds if grace_seconds > 0 else self._grace_seconds
         _sigterm_then_kill(pid, tracked.proc if tracked is not None else None, grace)
+        if tracked is not None:
+            _stop_watcher(tracked.watcher, grace)
 
     def driver_channel(self, host_ref: str) -> _StreamJsonDriverChannel | None:
         """Returns a live :class:`_StreamJsonDriverChannel` when this
@@ -975,6 +1054,7 @@ class HeadlessHostDriver:
             items = list(self._processes.items())
             self._processes.clear()
         for host_ref, tracked in items:
+            _stop_watcher(tracked.watcher, self._grace_seconds)
             try:
                 pid = int(host_ref)
             except ValueError:

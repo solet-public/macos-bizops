@@ -1,5 +1,5 @@
 [Unit]
-Description=Homunculus session ledger shipper (deployment ${DEPLOYMENT_ID})
+Description=Solet session ledger shipper (deployment ${DEPLOYMENT_ID})
 After=network-online.target
 Wants=network-online.target
 

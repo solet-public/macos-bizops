@@ -151,7 +151,7 @@ class ActionEventRecorder(IActionEventRecorder):
             action_data["job_result_ref"] = action["job_result_ref"]
 
         # Version-targeted dispatch (self-deployment plugin, addendum §K).
-        # ``excluded_versions`` is a JSON list of HOMUNCULUS_VERSION values
+        # ``excluded_versions`` is a JSON list of SOLET_VERSION values
         # whose action queue pollers must skip the row. NULL/absent on every
         # action that doesn't need version targeting (backward compatible).
         excluded_versions = action.get("excluded_versions")

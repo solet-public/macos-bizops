@@ -82,7 +82,7 @@ entries (no DSN/URL parameter on any verb). On top of that, `assert_foreign_targ
 refuses the platform's own DB **instance** — keyed on `(host, port, dbname)`,
 **role-independently**:
 
-- refused: `dbname == HOMUNCULUS_NAME` **AND** host ∈ {`localhost`, `127.0.0.1`, `::1`,
+- refused: `dbname == SOLET_NAME` **AND** host ∈ {`localhost`, `127.0.0.1`, `::1`,
   the unix socket} **AND** `port == platform_pg_port`. This catches every role
   bound to the platform database — the refusal keys on the instance, not the role.
 - allowed: a dev DB on `localhost` with a different dbname, or a same-named DB
@@ -130,7 +130,7 @@ Each connection is one address-book entry `external_pg::<name>` with literal
 `host`/`port`/`dbname`/`user`/`sslmode` fields plus a `vault::` password
 reference. The password goes into vault **agent-blind** under the address-book
 resolver's own namespace
-(`<homunculus>.default_address_book_plugin.external_pg_<name>_password`) and is
+(`<solet>.default_address_book_plugin.external_pg_<name>_password`) and is
 chain-consumed via `resolve_with_secrets` — this plugin owns no vault keys and
 needs no vault binding.
 
@@ -145,7 +145,7 @@ process_call service_interface::address_book_service::register {
     {"field_type": "dbname",   "value": "analytics"},
     {"field_type": "user",     "value": "analytics_readonly"},
     {"field_type": "sslmode",  "value": "require"},
-    {"field_type": "password", "value": "vault::<homunculus>.default_address_book_plugin.external_pg_analytics_password"}
+    {"field_type": "password", "value": "vault::<solet>.default_address_book_plugin.external_pg_analytics_password"}
   ]
 }
 ```

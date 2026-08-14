@@ -2,8 +2,8 @@
 
 Replaces the two Node `server.mjs` bridges with a single Python
 subprocess. Launched by MCP clients as `python -m
-agent_messaging_plugin.mcp_bridge`. Discovers the homunculus HTTP API via the
-runtime port file (`{homunculus}.bridge.port`) and forwards every MCP
+agent_messaging_plugin.mcp_bridge`. Discovers the solet HTTP API via the
+runtime port file (`{solet}.bridge.port`) and forwards every MCP
 tool call to the consolidated `/api/v1/bridge/*` route table.
 """
 

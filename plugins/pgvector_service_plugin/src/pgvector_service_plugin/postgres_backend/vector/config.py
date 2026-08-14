@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 def _get_default_schema() -> str:
     from ananta.core.config.environment_config import EnvironmentConfig
 
-    return EnvironmentConfig.homunculus_name()
+    return EnvironmentConfig.solet_name()
 
 
 class PGVectorConfig(BaseModel):
@@ -20,7 +20,7 @@ class PGVectorConfig(BaseModel):
         database: Database name
         user: Database user
         password: Database password
-        db_schema: PostgreSQL schema for vector tables (defaults to HOMUNCULUS_NAME)
+        db_schema: PostgreSQL schema for vector tables (defaults to SOLET_NAME)
         pool_size: Connection pool size
         hnsw_m: HNSW index parameter - max number of connections per layer
         hnsw_ef_construction: HNSW index parameter - size of dynamic candidate list
@@ -33,7 +33,7 @@ class PGVectorConfig(BaseModel):
     password: str = Field(default="change_me", description="Database password")
     db_schema: str | None = Field(
         default=None,
-        description="Schema for vector tables (defaults to HOMUNCULUS_NAME)",
+        description="Schema for vector tables (defaults to SOLET_NAME)",
     )
 
     @property
@@ -50,8 +50,8 @@ class PGVectorConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def set_schema_from_homunculus_name(self) -> Self:
-        """Default db_schema to homunculus name if not explicitly set."""
+    def set_schema_from_solet_name(self) -> Self:
+        """Default db_schema to solet name if not explicitly set."""
         if self.db_schema is None:
             self.db_schema = _get_default_schema()
         return self

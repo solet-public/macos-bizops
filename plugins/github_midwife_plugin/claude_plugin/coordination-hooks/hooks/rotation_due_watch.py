@@ -53,7 +53,7 @@ identity (names route, content binds).
 
 Non-fatal by design, same contract as this checkout's other hooks: any
 failure (missing env var, unreadable transcript, unparseable JSON,
-``homunculus`` subprocess failure) warns on stderr and exits 0 -- this
+``solet`` subprocess failure) warns on stderr and exits 0 -- this
 hook must never cost a session its tool call.
 
 Stdlib-only for I/O and subprocess dispatch, EXCEPT the one direct import
@@ -228,22 +228,22 @@ def _import_rotation_thresholds() -> Any | None:
     return rotation_thresholds
 
 
-def _homunculus_call(process_key: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+def _solet_call(process_key: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
     try:
         result = subprocess.run(
-            ["homunculus", "call", process_key, json.dumps(arguments)],
+            ["solet", "call", process_key, json.dumps(arguments)],
             capture_output=True, text=True, timeout=20, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        _warn(f"homunculus call {process_key} failed to run: {exc}")
+        _warn(f"solet call {process_key} failed to run: {exc}")
         return None
     if result.returncode != 0:
-        _warn(f"homunculus call {process_key} exited {result.returncode}: {result.stderr.strip()[:200]}")
+        _warn(f"solet call {process_key} exited {result.returncode}: {result.stderr.strip()[:200]}")
         return None
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        _warn(f"homunculus call {process_key} returned unparseable output: {exc}")
+        _warn(f"solet call {process_key} returned unparseable output: {exc}")
         return None
 
 
@@ -252,7 +252,7 @@ def _resolve_steward_role(agent_instance_id: str) -> str | None:
     row doesn't exist (host=operator, e.g. the seat) or carries no
     steward -- callers fall back to local self-notification, they don't
     treat this as an error."""
-    envelope = _homunculus_call(
+    envelope = _solet_call(
         _SESSION_STATUS_PROCESS_KEY, {"agent_instance_id": agent_instance_id},
     )
     if envelope is None or envelope.get("status") != "completed":
@@ -271,7 +271,7 @@ def _deliver_notification(*, agent_instance_id: str, claude_session_id: str, con
     latched-but-never-delivered."""
     steward_role = _resolve_steward_role(agent_instance_id)
     if steward_role is not None:
-        envelope = _homunculus_call(_PEER_SEND_PROCESS_KEY, {"name": steward_role, "content": content})
+        envelope = _solet_call(_PEER_SEND_PROCESS_KEY, {"name": steward_role, "content": content})
         if envelope is not None and envelope.get("status") == "completed":
             return True
         _warn(f"peer_send_by_name to steward role {steward_role!r} failed; falling back to local marker")
@@ -394,7 +394,7 @@ def _report_context_status(
     non-fatal by this hook's own standing contract: a failed report here
     must never cost the notify path below, so failures warn to stderr and
     the caller does not branch on the return."""
-    envelope = _homunculus_call(
+    envelope = _solet_call(
         _REPORT_CONTEXT_STATUS_PROCESS_KEY,
         {
             "agent_instance_id": agent_instance_id,

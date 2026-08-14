@@ -1,14 +1,14 @@
-# Deployment Report Card — Measuring a Homunculus's Functionality Against Its Own Active Roster
+# Deployment Report Card — Measuring a Solet's Functionality Against Its Own Active Roster
 
-Tags: knowledge:tag:homunculus_lifecycle, knowledge:tag:deployment_report_card
+Tags: knowledge:tag:solet_lifecycle, knowledge:tag:deployment_report_card
 
 Article Layer: 2
 
 Article Role: operations_runbook
 
-Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:client-deployment, consumer_profile:both
+Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: The canonical definition of a fully-functioning homunculus and the report card a driving agent produces against it for the operator — eight functional sections (exception-based setup, launch environment, memory, session ledger, peer communications, knowledge base, session management, and one row per active plugin), each derived from the deployment's OWN active plugin roster rather than a fixed tier list, the evidence command that proves each item actually works, the scoring and presentation rules for telling an operator how much of their deployment is functioning and what remains, and the rule that consent-gated core capabilities are measured and re-offered rather than silently treated as optional.
+Embedding Description: The canonical definition of a fully-functioning solet and the report card a driving agent produces against it for the operator — eight functional sections (exception-based setup, launch environment, memory, session ledger, peer communications, knowledge base, session management, and one row per active plugin), each derived from the deployment's OWN active plugin roster rather than a fixed tier list, the evidence command that proves each item actually works, the scoring and presentation rules for telling an operator how much of their deployment is functioning and what remains, the rule that consent-gated core capabilities — session-ledger ingestion above all — are core rather than optional extras for a new solet, and are measured and re-offered rather than silently dropped when declined, and a compact four-row session-start readiness table — an optional opening ritual that checks runtime, knowledge, role claim, and workspace before work begins without running the full close-out card.
 
 **When you need this**: hydration just finished and you are closing out with the operator; the operator asks "is everything set up?", "what am I missing?", or "are all the cool features actually working?"; a seed update landed and you want to confirm nothing regressed; you are about to tell an operator their deployment is "done" and need the checkable definition of done; deciding whether a declined capability should be re-offered.
 
@@ -16,7 +16,7 @@ Embedding Description: The canonical definition of a fully-functioning homunculu
 
 ## Why a report card
 
-A homunculus degrades gracefully — almost everything works partially. The launch works without the launcher, sessions run without the ledger, one session runs without the fleet hooks. That grace is a trap: a deployment can sit for weeks at half its value with nothing visibly broken, and the operator never learns what they are missing. Field experience with real deployments shows exactly this failure: **newborn deployments treating core capabilities — session-ledger ingestion, tmux worker hosting — as optional extras**, because nothing ever told them those were load-bearing.
+A solet degrades gracefully — almost everything works partially. The launch works without the launcher, sessions run without the ledger, one session runs without the fleet hooks. That grace is a trap: a deployment can sit for weeks at half its value with nothing visibly broken, and the operator never learns what they are missing. Field experience with real deployments shows exactly this failure: **newborn deployments treating core capabilities — session-ledger ingestion, tmux worker hosting — as optional extras**, because nothing ever told them those were load-bearing.
 
 The report card is the correction. It defines **fully functioning** as a checkable set of capabilities grounded in what this specific deployment actually runs, measures the live deployment against it with real commands, and gives the operator a plain-words score: what works, what remains, and what each remaining item would give them. The goal is a deployment that reaches 100% because the operator can always see the distance to it — not because anything was configured behind their back.
 
@@ -29,7 +29,7 @@ Two rules keep it honest:
 
 This article ships identically to every deployment, but no two deployments run the same plugin set — one runs local Postgres and LM Studio, another runs RDS and a cloud embedding endpoint; one spawns fleet workers under tmux, another runs solo. A card built from a hardcoded component list either nags an operator about something they were never going to run, or misses something their own roster actually requires. **Every section below is a derivation method, not a fixed roster** — read this deployment's own active plugin list, then apply the method to find out what this deployment specifically needs to check.
 
-The concrete source for "what is active": the deployment's live plugin manifest (the `apply_manifest`-maintained list a running homunculus was actually started with). Cross-reference each entry against the platform's own plugin-purpose reference to learn what external dependency, if any, that plugin implies. A plugin not in the active manifest contributes no row to the card, even if the underlying technology (an app, a service) happens to be in everyday human use on the machine for unrelated reasons — the plugin's load state is the derivation key, not habit or memory.
+The concrete source for "what is active": the deployment's live plugin manifest (the `apply_manifest`-maintained list a running solet was actually started with). Cross-reference each entry against the platform's own plugin-purpose reference to learn what external dependency, if any, that plugin implies. A plugin not in the active manifest contributes no row to the card, even if the underlying technology (an app, a service) happens to be in everyday human use on the machine for unrelated reasons — the plugin's load state is the derivation key, not habit or memory.
 
 The operator's own framing for why this matters: *"we want to make sure that all the cool features are accounted for"* — a roster-derived card is how a growing feature set stays visible instead of some of it quietly falling off the operator's radar as new plugins ship.
 
@@ -141,6 +141,61 @@ Run the evidence commands, then present — in the operator's language, not the 
 
 Plain-words discipline from the first-days runbook applies: "session memory", not "ledger ingestion"; "update-proof worker sessions", not "tmux host driver swap-durability". Surface internal names only for operators who want them.
 
+## The compact variant — a quick readiness check at the start of a session
+
+### When a session starts: the quick check, not the full card
+
+The full card is a close-out artifact: eight sections, real evidence commands,
+delivered to an operator who is deciding what to configure next. Running it at
+the top of every working session would be a tax, and the card would stop being
+read. But the questions "is the platform actually up?", "can I reach its
+knowledge?", and "does this session hold the role it thinks it holds?" are worth
+answering BEFORE work starts, not after something silently fails — a session
+that never checks tends to discover the answer by working blind for an hour and
+re-deriving context that was one query away.
+
+So an optional opening ritual: a four-row table, no scoring, no percentage, no
+recommended-next-step ceremony.
+
+| Component | Status | Notes |
+|---|---|---|
+| Platform runtime | ✅ / ❌ | Health probe answered; startup-manager entry stable |
+| Knowledge base | ✅ / ❌ | A real search returned results |
+| Session messaging | held / unlabeled | Whether this session actually holds a role, checked as §5 says |
+| Workspace, if this session has one | ✅ / ❌ / ➖ | Whatever this working directory's own checks are |
+
+Then **one sentence** on anything degraded and the single next action to fix
+it. If that action will take minutes, say how many — a real estimate, not
+"shortly".
+
+Four rules make this honest rather than decorative:
+
+- **Never declare readiness on a failed check.** A ❌ in row one means the
+  report says the platform is down and names the actual error; it does not mean
+  three green rows and a footnote. The ritual's only value is that its ✅ is
+  trustworthy.
+- **The messaging row is a claim check, not a presence check.** §5's rule
+  applies unchanged and is not restated here: a session label is not a role
+  binding, and an entry in a peer listing is not proof of a claim. Use the
+  direct ownership check. This row exists because that distinction is easiest
+  to get wrong at session start, when a label is visible and a claim has not
+  been made yet.
+- **Do not assume the session's hooks armed the role.** Where a deployment's
+  fleet hooks would normally claim the role automatically, a managed or
+  policy-restricted environment may block that plugin from installing at all,
+  leaving the session labeled and role-less with nothing to signal it. Treat a
+  hand-armed claim as a supported path, not a workaround, and check the
+  ownership either way rather than trusting that automation ran.
+- **The workspace row is the deployment's own, not this article's.** Whatever
+  checks a given working directory needs — a credential probe, an environment
+  check, an entrypoint read — belong to that directory's own guidance. This
+  article does not name them, and a card that hardcodes one deployment's paths
+  stops being portable the moment it ships to a second one.
+
+This variant does not replace the full card and does not satisfy the
+hydration close-out. It is an opening ritual for a working session; the
+close-out card below is the artifact the operator keeps.
+
 ## When to run it
 
 - **At hydration close-out — mandatory.** The card is the last act of the hydration runbook: it converts Step 6's verification into something the operator sees and keeps. A hydration that ends without delivering a card has not finished.
@@ -159,6 +214,6 @@ Keep the produced card as a dated memory or workbench note in the deployment, so
 - `plugins/github_midwife_plugin/knowledge_base/05_seed_update_runbook.md` — the update flow after which the card is re-run.
 - `plugins/github_midwife_plugin/knowledge_base/07_upstream_feedback_runbook.md` — where a gap the deployment cannot close locally (a defect, a missing capability) gets reported.
 - `plugins/claude_code_filesystem_session_source_plugin/knowledge_base/hydration_guidance.md` and `plugins/codex_filesystem_session_source_plugin/knowledge_base/hydration_guidance.md` — the session-ledger section's per-agent setup procedures.
-- `ananta/knowledge_bases/ananta_platform/23_plugin_inventory/01_full_plugin_roster.md` — the platform-wide plugin-purpose reference the Setup and Plugins sections' derivation method reads against.
-- `workbench/2026-07-16_unified_memory_passthrough_design_v2.md` — the Memory section's canonical/local architecture.
-- `ananta/knowledge_bases/ananta_platform/19_session_ledger/03_summary_text_origins.md` — the Session ledger section's summary-origin discriminators.
+- The platform-wide plugin-purpose reference the Setup and Plugins sections' derivation method reads against. **This lives in a knowledge-base section that a seed clone does not receive** (only the operator-communication section of the platform KB ships), so do not expect to find it on disk in a deployment. Reach it the way everything else is reached — a knowledge search for the plugin roster or for the specific plugin's purpose — and if the search comes back empty, derive the plugin's implied dependency from the plugin's own knowledge base and say in the card that the roster reference was unavailable. Never treat its absence as "this plugin implies no dependency".
+- The Memory section's canonical/local architecture is recorded in a dated design note in the ORIGINATING checkout's `workbench/` directory. `workbench/` is never shipped in a seed, so a deployment has no copy — the Memory rows above are self-contained and do not depend on reading it.
+- The Session ledger section's summary-origin discriminators. Same caveat as the plugin roster above: this is in a platform knowledge-base section a seed clone does not receive — reach it by knowledge search, and if it is unavailable, check the summary-origin field on real ledger rows directly rather than assuming which path produced them.

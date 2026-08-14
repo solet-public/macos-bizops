@@ -86,7 +86,7 @@ CHECK_ID = "D1.2"
 
 # Sentinel inserted into a resolved string when an f-string
 # interpolation slot cannot be evaluated statically (e.g.
-# ``f"{_HOMUNCULUS}.X.Y"`` where ``_HOMUNCULUS`` derives from a
+# ``f"{_SOLET}.X.Y"`` where ``_SOLET`` derives from a
 # runtime env-var lookup). Both the call-site arg and the declared-key
 # resolution paths run through the same resolver, so the sentinel
 # appears symmetrically on both sides and exact-match still succeeds
@@ -262,14 +262,14 @@ def _collect_module_constants(module: ast.Module) -> dict[str, str | None]:
     intentionally NOT followed (the call-site keys we care about are
     module-level constants by convention).
 
-    The HOMUNCULUS-segment substitution (per master plan §3.3.1) is
+    The SOLET-segment substitution (per master plan §3.3.1) is
     handled by replacing unresolvable f-string interpolation slots with
     the sentinel ``_UNRESOLVED_PART``. The call-site scanner and the
     declared-key gatherer both walk through ``_collect_module_constants``,
     so both sides produce symmetric sentinel-substituted forms and match
-    exactly when the only unresolvable part is the runtime homunculus
+    exactly when the only unresolvable part is the runtime solet
     name (the common Tier-1-migrated idiom
-    ``f"{_HOMUNCULUS}.{plugin}.{credential}"``).
+    ``f"{_SOLET}.{plugin}.{credential}"``).
     """
     out: dict[str, str | None] = {}
 

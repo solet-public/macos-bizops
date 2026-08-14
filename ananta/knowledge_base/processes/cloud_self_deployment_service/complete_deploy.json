@@ -10,8 +10,8 @@
     "presentation_guidance": "If status='cancelled', note that deploy_rollback fired. If status='completed', confirm the prior version was torn down and surface schema_actions_enqueued."
   },
   "error_processor_customizations": {
-    "action_context": "Tearing down the previous version of this homunculus after a successful cutover.",
+    "action_context": "Tearing down the previous version of this solet after a successful cutover.",
     "error_interpretation": "teardown_failed: the old ECS service or target group could not be deleted. Often a transient AWS error or a partial state from an aborted prior deploy.",
-    "recovery_guidance": "Inspect the old service and TG via deploy_status; clean up genuinely orphaned AWS state via direct AWS CLI calls (the legacy deploy_homunculus.py bootstrap shim was deleted 2026-06-04)."
+    "recovery_guidance": "Inspect the old service and TG via deploy_status; clean up genuinely orphaned AWS state via direct AWS CLI calls (the legacy deploy_solet.py bootstrap shim was deleted 2026-06-04)."
   }
 }

@@ -923,7 +923,7 @@ class CoreSchemaDefinitions:
                         "excluded_versions": ColumnDefinition(
                             type=ColumnType.JSON,
                             description=(
-                                "Optional JSON list of HOMUNCULUS_VERSION values whose action "
+                                "Optional JSON list of SOLET_VERSION values whose action "
                                 "queue pollers must NOT claim this row. Used by the self-deployment "
                                 "plugin to ensure the v(N)-side deploy_self enqueues complete_deploy "
                                 "exclusively for v(N+1)'s poller; the v(N) container's poller filters "

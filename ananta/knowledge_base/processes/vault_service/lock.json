@@ -2,7 +2,7 @@
   "process_key": "service_interface::vault_service::lock",
   "display_name": "Lock Vault",
   "description": "Lock the vault - clears master key from memory. Secrets cannot be accessed until unlocked again.",
-  "embedding_description": "Vault: lock. Clear the master encryption key from process memory so stored secrets (passwords, credentials, OAuth client_secrets, API keys, refresh tokens, bearer tokens) become unreadable until unlock is called again with the passphrase. Use when handing the homunculus off, stepping away, or as a security boundary between trusted and untrusted execution contexts.",
+  "embedding_description": "Vault: lock. Clear the master encryption key from process memory so stored secrets (passwords, credentials, OAuth client_secrets, API keys, refresh tokens, bearer tokens) become unreadable until unlock is called again with the passphrase. Use when handing the solet off, stepping away, or as a security boundary between trusted and untrusted execution contexts.",
   "result_processor_customizations": {
     "action_label": "Vault locked",
     "result_type": "vault_locked",

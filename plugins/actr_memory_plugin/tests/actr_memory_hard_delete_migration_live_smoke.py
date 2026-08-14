@@ -255,7 +255,7 @@ def test_get_memory_no_is_deleted_filter(provider: PostgresProvider, schema: str
 def main() -> int:
     if os.environ.get("ACTR_HARD_DELETE_MIGRATION_LIVE_SMOKE") != "1":
         print("=== actr_memory_hard_delete_migration_live_smoke ===")
-        print("  SKIP  set ACTR_HARD_DELETE_MIGRATION_LIVE_SMOKE=1 to run; needs the live homunculus DB.")
+        print("  SKIP  set ACTR_HARD_DELETE_MIGRATION_LIVE_SMOKE=1 to run; needs the live solet DB.")
         return 0
     print("=== actr_memory_hard_delete_migration_live_smoke ===")
     schema_name = f"example_test_actrhd_{secrets.token_hex(3)}"

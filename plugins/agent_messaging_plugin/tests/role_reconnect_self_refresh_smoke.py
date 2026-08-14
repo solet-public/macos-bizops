@@ -13,7 +13,7 @@ reconnect, which is exactly the fix. RED before S1–S3 (the route called the AB
 refresh, never the state CAS); GREEN after.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/role_reconnect_self_refresh_smoke.py
 """
 
@@ -169,7 +169,7 @@ def _register(
 
 
 def _open_bridge(manager: BridgeSessionManager) -> str:
-    return manager.open(homunculus_name="", parent_pid=123).bridge_id
+    return manager.open(solet_name="", parent_pid=123).bridge_id
 
 
 def test_register_response_carries_no_rehome_tokens() -> None:

@@ -5,7 +5,7 @@ Mirrors the boot-time check in
 (``startup_sequence.py:191-203``): every bound plugin name must appear in the
 loaded plugin set, or ``StartupError`` is raised. ``apply_manifest`` runs the
 same check as a pre-flight gate before writing the new manifest, so an
-operator-readable rejection happens before the homunculus restarts into a
+operator-readable rejection happens before the solet restarts into a
 broken state.
 
 The helper is pure — no I/O, no platform-state access. The caller passes the
@@ -89,7 +89,7 @@ def validate_bindings_satisfied(
        :attr:`ValidationResult.missing_bindings`. This is the gate that
        prevents operators from silently unbinding ``self_deployment_service``
        (without which ``apply_manifest`` itself becomes un-callable on the
-       restarted homunculus — see Architect §4.3).
+       restarted solet — see Architect §4.3).
 
     2. **Every bound provider is in the new plugins list.** For each
        ``(service, provider)`` entry in

@@ -230,7 +230,7 @@ def case_env_var_divergence_is_preserved_not_unified() -> None:
     """A DELIBERATE PRESERVED DIVERGENCE, asserted so nobody 'tidies' it away.
 
     The shipped copies read ``GIT_CONTROLLER_NAME``; the origin-repo-only copy
-    alone reads ``HOMUNCULUS_GIT_CONTROLLER_NAME``. The A5 commit changes
+    alone reads ``SOLET_GIT_CONTROLLER_NAME``. The A5 commit changes
     NOTHING here — unifying by deletion is the standing tested-copy-is-not-
     shipped-copy failure, and the gate is fail-OPEN when its var is unset, so a
     copy silently reading the wrong name arms nothing while believed armed.
@@ -243,8 +243,8 @@ def case_env_var_divergence_is_preserved_not_unified() -> None:
     if _ORIGIN_GATE_COPY.is_file():
         origin = _load(_ORIGIN_GATE_COPY)
         _check(
-            getattr(origin, "GIT_CONTROLLER_ENV", None) == "HOMUNCULUS_GIT_CONTROLLER_NAME",
-            "origin .claude/ copy still reads HOMUNCULUS_GIT_CONTROLLER_NAME",
+            getattr(origin, "GIT_CONTROLLER_ENV", None) == "SOLET_GIT_CONTROLLER_NAME",
+            "origin .claude/ copy still reads SOLET_GIT_CONTROLLER_NAME",
         )
     shipped_gate = (
         _PLUGIN_ROOT / "claude_plugin" / "coordination-hooks" / "hooks" / "git_controller_gate.py"

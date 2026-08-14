@@ -18,7 +18,7 @@ thinking-model push path onto the authored-by-value contract:
 * the six WBS push verbs are retired from every layer while the
   authored-by-value / deterministic survivors remain.
 
-Offline: no live homunculus, no LM Studio, no Postgres. Storage collaborators
+Offline: no live solet, no LM Studio, no Postgres. Storage collaborators
 are recording stubs; the service and plugin delegate are the real
 production code path.
 

@@ -1,7 +1,7 @@
 """In-process spool drainer for the session dispatch bridge (W4 M1.5).
 
 Reads the session-singleton dispatch spool and writes each event into one
-homunculus's ``memory_service`` via the canonical in-process service. M1.5
+solet's ``memory_service`` via the canonical in-process service. M1.5
 replaces M1's delete-after-drain with **cursor-based ack** (design §3 D2.2):
 once a second reader can exist, a deleting reader would starve the others, so
 each drainer instead advances its own ``cursors/<drainer_id>.cursor`` and the

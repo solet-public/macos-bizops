@@ -54,7 +54,7 @@ def run_bounded(
     """Run ``argv`` under ``cwd`` with a hard ``timeout``; return a bounded result.
 
     ``extra_env`` is overlaid on the inherited environment (used to pass
-    ``HOMUNCULUS_NAME`` through explicitly for the gate runs). On timeout the
+    ``SOLET_NAME`` through explicitly for the gate runs). On timeout the
     child is killed and a ``timed_out`` result with ``TIMEOUT_EXIT_CODE`` is
     returned — never a partial verdict masquerading as a pass.
     """

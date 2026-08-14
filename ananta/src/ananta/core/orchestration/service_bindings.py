@@ -59,9 +59,9 @@ class ServiceName(StrEnum):
     # NOTE: midwife + undertaker are NOT exclusive service interfaces.
     # The plugins (macos/aws_midwife_plugin, aws_undertaker_plugin) are
     # callable directly via plugin-namespace verbs, e.g.
-    # plugin::aws_midwife_plugin::birth_homunculus. Caller picks the
+    # plugin::aws_midwife_plugin::birth_solet. Caller picks the
     # substrate; multiple birther/undertaker plugins can coexist in one
-    # homunculus. The interface contracts (the ABCs at
+    # solet. The interface contracts (the ABCs at
     # ananta/interfaces/{midwife,undertaker}_service_interface.py) still
     # exist as TYPING + STRUCTURAL contracts plugins implement; what was
     # retired is the singleton service-binding plumbing.

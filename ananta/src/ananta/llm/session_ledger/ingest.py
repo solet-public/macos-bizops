@@ -115,7 +115,7 @@ RELOAD_SAFE = True
 # explicit ``external_id: unique=False`` override, opting out of the
 # standardizer's standalone constraint; the standalone
 # ``session_ledger__event_external_id_key`` this module was catching drops
-# automatically at the next homunculus boot after that fix lands (the
+# automatically at the next solet boot after that fix lands (the
 # platform's own schema-diff reconciliation, no separate migration step —
 # see workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md).
 # This catch REMAINS regardless, as defence for pre-migration databases (a
@@ -464,7 +464,7 @@ def _insert_session_with_canonical_dispatch(
 # ``append_event``'s ``last_event_at`` bump is additionally row-lock-safe (its
 # ``increment_and_return`` takes the session row lock first in the same txn);
 # ``inverted_bounds_repair`` is operator-gated + quiescent. The DB is
-# per-homunculus. So no two writers overlap on a session.
+# per-solet. So no two writers overlap on a session.
 #
 # ⚠ LOAD-BEARING: this safety holds ONLY while ``ingest_raw_chunk`` stays a
 # SYNCHRONOUS service-interface process whose persist runs INLINE before it

@@ -11,9 +11,9 @@ open one — it will not be reviewed or merged.
 
 ## Fork and grow your own
 
-This is a sealed, public-safe homunculus seed — a snapshot, not a shared
-development tree. A homunculus is meant to be *grown*, not
-collaboratively edited: **fork this seed and grow your own** homunculus from it.
+This is a sealed, public-safe solet seed — a snapshot, not a shared
+development tree. A solet is meant to be *grown*, not
+collaboratively edited: **fork this seed and grow your own** solet from it.
 Your instance evolves on your own machine, as its own entity.
 
 ## Updates
@@ -25,5 +25,5 @@ merges of external contributions.
 
 The code in this repository is licensed under the Apache License, Version 2.0
 (see `LICENSE` and `NOTICE`). You are free to use, modify, and redistribute it
-under those terms — including forking it to grow your own homunculus. That grant
+under those terms — including forking it to grow your own solet. That grant
 of rights is not a channel for contributing changes back to this repository.

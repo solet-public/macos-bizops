@@ -25,23 +25,23 @@ import os
 from typing import Final
 
 
-def _homunculus_or_fail() -> str:
-    """Resolve HOMUNCULUS_NAME at import-time for scoped vault keys.
+def _solet_or_fail() -> str:
+    """Resolve SOLET_NAME at import-time for scoped vault keys.
 
-    Vault keys follow the ``<homunculus>.<plugin>.<credential>`` convention.
+    Vault keys follow the ``<solet>.<plugin>.<credential>`` convention.
     Mirrors the fast-fail helper in g_suite_plugin.constants +
     schwab_market_data_plugin.constants.
     """
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "external_postgres_plugin.constants: HOMUNCULUS_NAME env var is "
+            "external_postgres_plugin.constants: SOLET_NAME env var is "
             "required to resolve scoped vault keys.",
         )
     return name
 
 
-_HOMUNCULUS = _homunculus_or_fail()
+_SOLET = _solet_or_fail()
 
 # ---------------------------------------------------------------------------
 # Plugin identity
@@ -76,21 +76,21 @@ def vault_key_for_password(name: str) -> str:
     """Scoped vault key for a connection's password — CHAIN-CONSUMED.
 
     The password lives in the RESOLVER's namespace
-    (``<homunculus>.default_address_book_plugin.external_pg_<name>_password``)
+    (``<solet>.default_address_book_plugin.external_pg_<name>_password``)
     so the address book reads it under its own identity via
     ``resolve_with_secrets``. Post-2026-06-07 vault namespace enforcement
     requires the key's ``<plugin>`` segment to equal the retrieving caller, so
     this key is declared in NEITHER get_required_vault_keys nor
     get_declared_vault_keys (canonical: VAULT_AND_ADDRESS_BOOK.md).
     """
-    return f"{_HOMUNCULUS}.default_address_book_plugin.external_pg_{name}_password"
+    return f"{_SOLET}.default_address_book_plugin.external_pg_{name}_password"
 
 
 # ---------------------------------------------------------------------------
 # §8.4 platform-DB containment markers — refuse the platform's OWN instance
 # ``(host, port, dbname)``, ROLE-INDEPENDENTLY.
 # ---------------------------------------------------------------------------
-PLATFORM_DBNAME: Final[str] = _HOMUNCULUS
+PLATFORM_DBNAME: Final[str] = _SOLET
 # The socket sentinel: a blank host and any absolute-path (unix-socket dir)
 # host both canonicalize to "" via connection._normalize_host, so "" in this
 # set matches every unix-socket spelling.

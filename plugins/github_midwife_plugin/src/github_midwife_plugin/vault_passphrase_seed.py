@@ -7,7 +7,7 @@ with "vault not initialized and no passphrase available" (runbook §11 F10).
 The vault's own unattended-first-boot path (`macos_vault_plugin.plugin`
 around lines 434-444; `macos_vault_plugin.key_manager` line 136) resolves a
 passphrase from, in order: an explicit argument, the
-`<HOMUNCULUS_NAME>_VAULT_PASSPHRASE` env var, or the FILE
+`<SOLET_NAME>_VAULT_PASSPHRASE` env var, or the FILE
 `<app_home>/config/plugins/macos_vault_plugin/passphrase`. When the vault is
 not yet initialized and a passphrase is resolvable, `key_manager.initialize`
 runs unattended. Genesis therefore generates a high-entropy passphrase and
@@ -15,7 +15,7 @@ writes it to that file (resolution source #3) so the newborn boots with zero
 passphrase intake.
 
 This also moots the F10-rider: the env-var route
-(`<HOMUNCULUS_NAME>_VAULT_PASSPHRASE`) is unusable for any HYPHENATED newborn
+(`<SOLET_NAME>_VAULT_PASSPHRASE`) is unusable for any HYPHENATED newborn
 name — `export FERN-FRESH-FORGE_VAULT_PASSPHRASE=...` fails ("not a valid
 identifier"). The FILE route has no such constraint, so it is the only
 universally-correct mechanism and the one genesis uses.

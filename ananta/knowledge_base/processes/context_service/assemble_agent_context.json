@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::context_service::assemble_agent_context",
   "display_name": "Assemble Agent Context Briefing",
-  "description": "Assemble a read-only, retrieval/provenance-first grounding briefing for an agent: named bundles (process catalog, plan state, guidance, frame, conversation), the answer contract, available process contracts, and per-block provenance. Never calls an inference provider — no local model required. Use to get grounding before acting without asking the homunculus to reason for you.",
+  "description": "Assemble a read-only, retrieval/provenance-first grounding briefing for an agent: named bundles (process catalog, plan state, guidance, frame, conversation), the answer contract, available process contracts, and per-block provenance. Never calls an inference provider — no local model required. Use to get grounding before acting without asking the solet to reason for you.",
   "embedding_description": "Assemble a structured, provenance-tagged context briefing for a coding agent — process catalog, plan state, guidance, and answer contract as data — without running any language model.",
   "result_processor_customizations": {
     "action_label": "Agent-context briefing assembled",

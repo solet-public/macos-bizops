@@ -13,7 +13,7 @@ error (an over-broad guard that refuses legitimate localhost dev DBs).
 
 Exercises (``dbname=<platform>`` means the LIVE platform DB name, derived from
 ``PLATFORM_DBNAME`` at runtime — never hardcoded, so the refusal is proven
-against whatever homunculus actually runs this smoke):
+against whatever solet actually runs this smoke):
   1. user=ananta, dbname=<platform>, platform host:port  -> REFUSED
   2. user=trustuser, dbname=<platform>, platform host:port  -> REFUSED (F-D1 role-independent)
   3. host="" (unix socket),  dbname=<platform>, port     -> REFUSED (blank-host socket)
@@ -25,7 +25,7 @@ against whatever homunculus actually runs this smoke):
   9. _normalize_host canonicalization sanity
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/external_postgres_plugin/tests/smoke_containment.py
 
 Exits 0 on success, 1 on first failure.

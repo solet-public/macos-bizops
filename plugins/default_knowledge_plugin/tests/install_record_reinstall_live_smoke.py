@@ -29,7 +29,7 @@ Negative controls make the positive assertions non-vacuous:
 * is_active=2 must RAISE (proves CHECK(is_active IN (0,1)) is real, so is_active=1
   being accepted is meaningful).
 
-Run (needs the live homunculus DB)::
+Run (needs the live solet DB)::
     KB_REINSTALL_LIVE_SMOKE=1 .venv/bin/python3 \\
       plugins/default_knowledge_plugin/tests/install_record_reinstall_live_smoke.py
 """
@@ -235,7 +235,7 @@ def test_check_is_real(provider: PostgresProvider) -> None:
 def main() -> int:
     if os.environ.get("KB_REINSTALL_LIVE_SMOKE") != "1":
         print("=== install_record_reinstall_live_smoke ===")
-        print("  SKIP  set KB_REINSTALL_LIVE_SMOKE=1 to run; needs the live homunculus DB.")
+        print("  SKIP  set KB_REINSTALL_LIVE_SMOKE=1 to run; needs the live solet DB.")
         return 0
     print("=== install_record_reinstall_live_smoke ===")
     schema_name = f"example_test_kb_reinstall_{secrets.token_hex(3)}"

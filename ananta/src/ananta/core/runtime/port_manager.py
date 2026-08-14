@@ -19,14 +19,14 @@ OS ephemeral range; the spawn-path guarantee from invariant I2 ensures
 no two children try to register the same instance_id, so band
 partitioning is unnecessary.
 
-``<name>.bridge.port`` names the homunculus's bridge front door and has
+``<name>.bridge.port`` names the solet's bridge front door and has
 exactly ONE writer — whatever component owns that front door (D11 ruling,
 ``workbench/2026-07-13_d11_bridge_port_discovery_routerless_ruling.md``).
 
 In router topology, the router owns it:
 ``plugins/macos_self_deployment_plugin/src/macos_self_deployment_plugin/blue_green_router/install_router.py``
 writes ``<name>.bridge.port`` directly (via ``Path.write_text``) at
-install time. the homunculus children do NOT maintain a bridge port file — the
+install time. the solet children do NOT maintain a bridge port file — the
 bridge HTTP server's bound port lives in-process on the
 ``agent_messaging_plugin``'s ``bridge_port`` property, and the
 ``macos_self_deployment_plugin`` heartbeat reads it via cross-plugin
@@ -34,13 +34,13 @@ lookup. To prevent regression, ``write_port_file`` and
 ``remove_port_file`` raise ``ValueError`` when called with
 ``service_name='bridge'``.
 
-In router-less topology (minimal-bundle homunculi that never install the
+In router-less topology (minimal-bundle solets that never install the
 router), ``agent_messaging_plugin`` IS the front door, so it is the
 sanctioned writer of its own bridge port file — via
 ``write_routerless_bridge_port_file``, the one narrow, explicitly-named
 exception to the guard above. Its sole caller is
 ``agent_messaging_plugin.start_interface``, gated on a manifest-declared
-"is the router in this homunculus's topology" predicate (R1 of the D11
+"is the router in this solet's topology" predicate (R1 of the D11
 ruling): never runtime-probed, so both colors of a router topology agree
 and neither writes. Callers must never use this function when a router
 is present.
@@ -64,21 +64,21 @@ ROUTER_PORT_FILENAME_SUFFIX: Final[str] = ".router.port"
 _FORBIDDEN_PORT_FILE_SERVICE_NAMES: Final[frozenset[str]] = frozenset({"bridge"})
 
 
-def get_runtime_dir(homunculus_name: str | None = None) -> Path:
-    """Get the runtime directory for a homunculus.
+def get_runtime_dir(solet_name: str | None = None) -> Path:
+    """Get the runtime directory for a solet.
 
     Uses XDG_RUNTIME_DIR if available, otherwise ~/.ananta/runtime.
 
     Args:
-        homunculus_name: Optional homunculus name. If not provided,
-            resolved via EnvironmentConfig.homunculus_name() (hard-errors
-            if HOMUNCULUS_NAME is unset).
+        solet_name: Optional solet name. If not provided,
+            resolved via EnvironmentConfig.solet_name() (hard-errors
+            if SOLET_NAME is unset).
 
     Returns:
         Path to the runtime directory (created if it doesn't exist)
     """
-    if homunculus_name is None:
-        homunculus_name = EnvironmentConfig.homunculus_name()
+    if solet_name is None:
+        solet_name = EnvironmentConfig.solet_name()
 
     # Prefer XDG_RUNTIME_DIR (standard on Linux)
     xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
@@ -135,32 +135,32 @@ def _is_port_available(port: int, host: str = "0.0.0.0") -> bool:
 
 
 def _port_file_path(
-    runtime_dir: Path, homunculus_name: str, service_name: str
+    runtime_dir: Path, solet_name: str, service_name: str
 ) -> Path:
     """Resolve the on-disk port file path for a non-bridge service.
 
-    Returns ``<runtime_dir>/<homunculus_name>.<service_name>.port``.
+    Returns ``<runtime_dir>/<solet_name>.<service_name>.port``.
     The bridge service is router-owned (see module docstring); the
     write/remove paths refuse ``service_name='bridge'`` so a
     regression cannot reintroduce per-color or per-child bridge port
     files that would race with ``install_router.py``'s canonical
     write.
     """
-    filename = f"{homunculus_name}.{service_name}.port"
+    filename = f"{solet_name}.{service_name}.port"
     return runtime_dir / filename
 
 
 def write_port_file(
-    port: int, service_name: str = "rest", homunculus_name: str | None = None
+    port: int, service_name: str = "rest", solet_name: str | None = None
 ) -> Path:
     """Write a port number to a runtime file for service discovery.
 
-    Creates a file at: ``{runtime_dir}/{homunculus_name}.{service_name}.port``.
+    Creates a file at: ``{runtime_dir}/{solet_name}.{service_name}.port``.
 
     The bridge service file ``<name>.bridge.port`` is router-owned —
     ``install_router.py`` writes it directly via ``Path.write_text`` at
     install time. Calling this function with ``service_name='bridge'``
-    raises ``ValueError`` to prevent a regression where a homunculus-side
+    raises ``ValueError`` to prevent a regression where a solet-side
     component overwrites the router's canonical file (the historical
     split-brain root cause documented in §1 of the bridge-port-routing
     design).
@@ -168,8 +168,8 @@ def write_port_file(
     Args:
         port: Port number to write
         service_name: Name of the service (default: 'rest')
-        homunculus_name: Homunculus name (resolved via
-            EnvironmentConfig.homunculus_name() if not provided)
+        solet_name: Solet name (resolved via
+            EnvironmentConfig.solet_name() if not provided)
 
     Returns:
         Path to the created port file
@@ -186,11 +186,11 @@ def write_port_file(
             f"topology. This generic path is never that writer (D11 ruling)."
         )
         raise ValueError(msg)
-    if homunculus_name is None:
-        homunculus_name = EnvironmentConfig.homunculus_name()
+    if solet_name is None:
+        solet_name = EnvironmentConfig.solet_name()
 
-    runtime_dir = get_runtime_dir(homunculus_name)
-    port_file = _port_file_path(runtime_dir, homunculus_name, service_name)
+    runtime_dir = get_runtime_dir(solet_name)
+    port_file = _port_file_path(runtime_dir, solet_name, service_name)
 
     # Write atomically (write to temp, then rename)
     temp_file = port_file.with_suffix(".port.tmp")
@@ -203,12 +203,12 @@ def write_port_file(
     return port_file
 
 
-def write_routerless_bridge_port_file(port: int, homunculus_name: str | None = None) -> Path:
-    """Write ``<name>.bridge.port`` when this homunculus has no router (D11).
+def write_routerless_bridge_port_file(port: int, solet_name: str | None = None) -> Path:
+    """Write ``<name>.bridge.port`` when this solet has no router (D11).
 
     The one narrow, explicitly-named exception to the ``write_port_file``
     bridge guard above. ``<name>.bridge.port`` has exactly one writer per
-    homunculus topology; in router-less topology ``agent_messaging_plugin``
+    solet topology; in router-less topology ``agent_messaging_plugin``
     IS the front door, so it is that writer (D11 ruling,
     ``workbench/2026-07-13_d11_bridge_port_discovery_routerless_ruling.md``).
 
@@ -230,17 +230,17 @@ def write_routerless_bridge_port_file(port: int, homunculus_name: str | None = N
 
     Args:
         port: The already-bound bridge server port.
-        homunculus_name: Homunculus name (resolved via
-            EnvironmentConfig.homunculus_name() if not provided).
+        solet_name: Solet name (resolved via
+            EnvironmentConfig.solet_name() if not provided).
 
     Returns:
         Path to the written port file.
     """
-    if homunculus_name is None:
-        homunculus_name = EnvironmentConfig.homunculus_name()
+    if solet_name is None:
+        solet_name = EnvironmentConfig.solet_name()
 
-    runtime_dir = get_runtime_dir(homunculus_name)
-    port_file = _port_file_path(runtime_dir, homunculus_name, "bridge")
+    runtime_dir = get_runtime_dir(solet_name)
+    port_file = _port_file_path(runtime_dir, solet_name, "bridge")
 
     # Write atomically (write to temp, then rename) — same shape as
     # write_port_file, deliberately duplicated rather than shared so the
@@ -256,10 +256,10 @@ def write_routerless_bridge_port_file(port: int, homunculus_name: str | None = N
     return port_file
 
 
-def read_port_file(service_name: str = "rest", homunculus_name: str | None = None) -> int | None:
+def read_port_file(service_name: str = "rest", solet_name: str | None = None) -> int | None:
     """Read a port number from a runtime file.
 
-    Looks for file at: ``{runtime_dir}/{homunculus_name}.{service_name}.port``.
+    Looks for file at: ``{runtime_dir}/{solet_name}.{service_name}.port``.
 
     Reading the bridge port file IS allowed and returns the front door's
     canonical port — written by ``install_router.py`` in router topology,
@@ -269,17 +269,17 @@ def read_port_file(service_name: str = "rest", homunculus_name: str | None = Non
 
     Args:
         service_name: Name of the service (default: 'rest')
-        homunculus_name: Homunculus name (resolved via
-            EnvironmentConfig.homunculus_name() if not provided)
+        solet_name: Solet name (resolved via
+            EnvironmentConfig.solet_name() if not provided)
 
     Returns:
         Port number if file exists and is valid, None otherwise
     """
-    if homunculus_name is None:
-        homunculus_name = EnvironmentConfig.homunculus_name()
+    if solet_name is None:
+        solet_name = EnvironmentConfig.solet_name()
 
-    runtime_dir = get_runtime_dir(homunculus_name)
-    port_file = _port_file_path(runtime_dir, homunculus_name, service_name)
+    runtime_dir = get_runtime_dir(solet_name)
+    port_file = _port_file_path(runtime_dir, solet_name, service_name)
 
     if not port_file.exists():
         return None
@@ -291,7 +291,7 @@ def read_port_file(service_name: str = "rest", homunculus_name: str | None = Non
         return None
 
 
-def remove_port_file(service_name: str = "rest", homunculus_name: str | None = None) -> bool:
+def remove_port_file(service_name: str = "rest", solet_name: str | None = None) -> bool:
     """Remove a port file (typically on shutdown).
 
     Same fail-fast guard as ``write_port_file`` — refusing
@@ -300,8 +300,8 @@ def remove_port_file(service_name: str = "rest", homunculus_name: str | None = N
 
     Args:
         service_name: Name of the service (default: 'rest')
-        homunculus_name: Homunculus name (resolved via
-            EnvironmentConfig.homunculus_name() if not provided)
+        solet_name: Solet name (resolved via
+            EnvironmentConfig.solet_name() if not provided)
 
     Returns:
         True if file was removed, False if it didn't exist
@@ -317,11 +317,11 @@ def remove_port_file(service_name: str = "rest", homunculus_name: str | None = N
             f"than racing a restart for zero benefit."
         )
         raise ValueError(msg)
-    if homunculus_name is None:
-        homunculus_name = EnvironmentConfig.homunculus_name()
+    if solet_name is None:
+        solet_name = EnvironmentConfig.solet_name()
 
-    runtime_dir = get_runtime_dir(homunculus_name)
-    port_file = _port_file_path(runtime_dir, homunculus_name, service_name)
+    runtime_dir = get_runtime_dir(solet_name)
+    port_file = _port_file_path(runtime_dir, solet_name, service_name)
 
     if port_file.exists():
         port_file.unlink()
@@ -344,16 +344,16 @@ class PortManager:
     skip the file-write entirely.
     """
 
-    def __init__(self, service_name: str = "rest", homunculus_name: str | None = None) -> None:
+    def __init__(self, service_name: str = "rest", solet_name: str | None = None) -> None:
         """Initialize port manager.
 
         Args:
             service_name: Name of the service (e.g., 'rest', 'jsonrpc')
-            homunculus_name: Homunculus name (resolved via
-            EnvironmentConfig.homunculus_name() if not provided)
+            solet_name: Solet name (resolved via
+            EnvironmentConfig.solet_name() if not provided)
         """
         self.service_name = service_name
-        self.homunculus_name = homunculus_name or EnvironmentConfig.homunculus_name()
+        self.solet_name = solet_name or EnvironmentConfig.solet_name()
         self._allocated_port: int | None = None
         self._port_file: Path | None = None
 
@@ -368,7 +368,7 @@ class PortManager:
             The allocated port number
         """
         port = find_available_port(preferred=preferred_port)
-        self._port_file = write_port_file(port, self.service_name, self.homunculus_name)
+        self._port_file = write_port_file(port, self.service_name, self.solet_name)
         self._allocated_port = port
         return port
 
@@ -385,15 +385,15 @@ class PortManager:
         return self._allocated_port
 
     @staticmethod
-    def discover(service_name: str = "rest", homunculus_name: str | None = None) -> int | None:
+    def discover(service_name: str = "rest", solet_name: str | None = None) -> int | None:
         """Discover a service's port from its port file.
 
         Args:
             service_name: Name of the service
-            homunculus_name: Homunculus name (resolved via
-            EnvironmentConfig.homunculus_name() if not provided)
+            solet_name: Solet name (resolved via
+            EnvironmentConfig.solet_name() if not provided)
 
         Returns:
             Port number if found, None otherwise
         """
-        return read_port_file(service_name, homunculus_name)
+        return read_port_file(service_name, solet_name)

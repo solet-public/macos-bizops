@@ -18,7 +18,7 @@ Coverage:
 4. A non-string embedding_description still raises FrameworkError immediately
    (unchanged fail-loud behavior for a genuinely malformed value).
 
-Offline: no live homunculus, no DB. Run:
+Offline: no live solet, no DB. Run:
     .venv/bin/python3 ananta/tests/core/process_registry/embedding_description_summary_smoke.py
 """
 

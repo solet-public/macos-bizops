@@ -20,7 +20,7 @@ exercised in their own smokes (peer_registry_*, oauth_*, etc.).
 
 Run:
 
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/bridge_health_readiness_probe_smoke.py
 
 Exits 0 on success, 1 on first failure with a labeled message.

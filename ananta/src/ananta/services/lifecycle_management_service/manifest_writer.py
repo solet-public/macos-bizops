@@ -127,7 +127,7 @@ class ManifestWriteOutcome:
 def read_current_manifest_state(app_home: Path) -> CurrentManifestState:
     """Read the current on-disk manifest + service bindings + their etag.
 
-    Either file may be absent on a freshly-birthed homunculus that has
+    Either file may be absent on a freshly-birthed solet that has
     never run ``apply_manifest`` — in that case the corresponding
     collection is empty and the etag still hashes the absent-file
     sentinel (``b""``). Subsequent ``apply_manifest`` calls observing the
@@ -171,7 +171,7 @@ def restore_previous_manifest(
     on-disk state never observes a half-restored shape.
 
     Empty bytes indicate the file did not exist in the prior state
-    (freshly-birthed homunculus); in that case the corresponding file
+    (freshly-birthed solet); in that case the corresponding file
     is removed rather than written. Per Architect's local blue/green
     design Coordinator review Finding 3.
     """
@@ -240,7 +240,7 @@ def write_new_manifest(
     that any rollback of this write must restore (GTE-06 T4).
 
     Args:
-        app_home: Homunculus's ``APP_HOME`` (``<profile_dir>``).
+        app_home: Solet's ``APP_HOME`` (``<profile_dir>``).
         new_manifest: Validated manifest dict carrying ``plugins`` and
             ``service_bindings`` keys.
         expected_etag: Etag the caller observed when they last read the

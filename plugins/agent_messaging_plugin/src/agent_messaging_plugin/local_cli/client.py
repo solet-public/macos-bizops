@@ -1,4 +1,4 @@
-"""Minimal synchronous client for a homunculus's localhost bridge surface.
+"""Minimal synchronous client for a solet's localhost bridge surface.
 
 Speaks the `/api/v1/bridge/*` contract the stdio MCP bridge forwards to,
 but as one-shot request/response rather than a persistent MCP session.
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final
@@ -32,10 +33,22 @@ DEFAULT_REQUEST_TIMEOUT_S: Final[float] = 30.0
 DEFAULT_POLL_TIMEOUT_S: Final[float] = 120.0
 POLL_INTERVAL_S: Final[float] = 0.5
 
-# A genesis-born clone rewrites root_manifest.yaml's homunculus_name to its own
+# Born-async job awaiting (second hop). A job's real work is external — a
+# Google API round trip, an export — so it is polled far more slowly than the
+# ms-scale action dispatch above; 0.5s here would be pure noise against the
+# platform.
+JOB_POLL_INTERVAL_S: Final[float] = 2.0
+DEFAULT_JOB_TIMEOUT_S: Final[float] = 300.0
+GET_JOB_PROCESS_KEY: Final[str] = "service_interface::job_service::get_job"
+
+# Job statuses that mean "still working" (AsyncJobManager's ledger vocabulary;
+# its terminal set is completed / error / cancelled).
+NON_TERMINAL_JOB_STATUSES: Final[frozenset[str]] = frozenset({"queued", "processing"})
+
+# A genesis-born clone rewrites root_manifest.yaml's solet_name to its own
 # name, but an unmaterialized source tree still carries this literal
 # placeholder -- so it is the signal to use the clone-dir basename.
-_NAME_PLACEHOLDER: Final[str] = "homunculus"
+_NAME_PLACEHOLDER: Final[str] = "solet"
 
 # Action statuses that mean "still working". A completed action is also still
 # settling until process/result carries the separately persisted result row.
@@ -44,12 +57,64 @@ NON_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
 )
 
 
-class HomunculusNotRunningError(RuntimeError):
-    """The homunculus bridge is not reachable (no port file present)."""
+def _envelope_data_sections(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """The places a verb's own return value can sit in a CLI result payload.
+
+    There is no universal ``data`` key across producers (measured 2026-08-14):
+    a plugin verb's envelope puts its return directly under ``result.data``
+    (g_suite's ``_success``), while a service-interface verb nests it one
+    deeper under ``result.data.result`` (JobService's KEY_DATA/KEY_RESULT).
+    Both measured shapes are checked and NOTHING else — an unrecognized shape
+    yields no sections, so the caller falls through to its normal behavior
+    rather than acting on a guess.
+    """
+    sections: list[dict[str, Any]] = []
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return sections
+    data = result.get("data")
+    if isinstance(data, dict):
+        sections.append(data)
+        inner = data.get("result")
+        if isinstance(inner, dict):
+            sections.append(inner)
+    return sections
 
 
-class HomunculusIdentityError(RuntimeError):
-    """The CLI could not determine WHICH homunculus it is installed under — its
+def queued_job_id(payload: dict[str, Any]) -> str | None:
+    """The job id of a ``{job_id, status: queued}`` dispatch, else None.
+
+    BOTH keys are required. A payload carrying a ``job_id`` without
+    ``status == "queued"`` is something else — ``get_job``'s own answer, for
+    one — and treating it as a fresh dispatch would start an await loop on a
+    job that already finished.
+    """
+    for section in _envelope_data_sections(payload):
+        job_id = section.get("job_id")
+        if (
+            isinstance(job_id, str)
+            and job_id
+            and str(section.get("status", "")) == "queued"
+        ):
+            return job_id
+    return None
+
+
+def _extract_job_record(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """The job record from a ``get_job`` result payload, or None."""
+    for section in _envelope_data_sections(payload):
+        job = section.get("job")
+        if isinstance(job, dict):
+            return job
+    return None
+
+
+class SoletNotRunningError(RuntimeError):
+    """The solet bridge is not reachable (no port file present)."""
+
+
+class SoletIdentityError(RuntimeError):
+    """The CLI could not determine WHICH solet it is installed under — its
     clone's ``root_manifest.yaml`` is present but unreadable, so falling back to
     the clone-dir basename could silently retarget a corrupt/mis-seeded clone.
     """
@@ -86,7 +151,7 @@ class BridgeResultTimeoutError(RuntimeError):
 
 
 def _clone_root() -> Path | None:
-    """The homunculus clone root: the nearest ancestor of this module carrying
+    """The solet clone root: the nearest ancestor of this module carrying
     ``root_manifest.yaml``. ``None`` when the CLI runs outside a clone.
     """
     for parent in Path(__file__).resolve().parents:
@@ -95,66 +160,66 @@ def _clone_root() -> Path | None:
     return None
 
 
-def resolve_homunculus_name() -> str:
-    """The homunculus this CLI is installed under — derived from the CLI's OWN
+def resolve_solet_name() -> str:
+    """The solet this CLI is installed under — derived from the CLI's OWN
     resolved install location, never a caller flag or ambient env, so a bare
-    per-homunculus symlink (``~/.local/bin/<name>`` -> ``<clone>/.venv/bin/...``)
-    pins its own homunculus and reaches no sibling.
+    per-solet symlink (``~/.local/bin/<name>`` -> ``<clone>/.venv/bin/...``)
+    pins its own solet and reaches no sibling.
 
     Precedence: the clone's genesis-rewritten ``root_manifest.yaml`` name; else
     the clone-dir basename (the birth/clone convention is ``~/Workspace/<name>/``);
-    else ``$HOMUNCULUS_NAME`` (when run outside any clone). A root_manifest that
+    else ``$SOLET_NAME`` (when run outside any clone). A root_manifest that
     is PRESENT but unreadable (malformed / schema-invalid) fails loud rather than
     silently retargeting a corrupt clone by its directory name.
     """
     root = _clone_root()
     if root is None:
-        return EnvironmentConfig.homunculus_name()
+        return EnvironmentConfig.solet_name()
     manifest_path = root / MANIFEST_FILENAME
     manifest, error = load_manifest(manifest_path)
     if manifest is not None:
         # Genesis rewrites this to the newborn's name; an unmaterialized source
         # tree keeps the literal placeholder -> use the clone-dir basename.
-        if manifest.homunculus_name != _NAME_PLACEHOLDER:
-            return manifest.homunculus_name
+        if manifest.solet_name != _NAME_PLACEHOLDER:
+            return manifest.solet_name
         return root.name
     if manifest_path.is_file():
-        raise HomunculusIdentityError(
+        raise SoletIdentityError(
             f"root_manifest at {manifest_path} is present but unreadable ({error}) "
-            "— refusing to guess the homunculus identity by clone-dir basename."
+            "— refusing to guess the solet identity by clone-dir basename."
         )
     # ABSENT root_manifest -> the clone-dir basename is the name.
     return root.name
 
 
-def resolve_base_url(homunculus_name: str | None = None) -> str:
-    """Discover the running homunculus's bridge base URL from its port file.
+def resolve_base_url(solet_name: str | None = None) -> str:
+    """Discover the running solet's bridge base URL from its port file.
 
     Args:
-        homunculus_name: Test-only override. Production resolves identity from
-            the CLI's install location (:func:`resolve_homunculus_name`) — no
+        solet_name: Test-only override. Production resolves identity from
+            the CLI's install location (:func:`resolve_solet_name`) — no
             ``-H`` flag, no ambient env — so each installed command (and any
-            symlink to it) reaches ONLY its own homunculus.
+            symlink to it) reaches ONLY its own solet.
 
     Returns:
         ``http://127.0.0.1:<port>`` for the discovered bridge port.
 
     Raises:
-        HomunculusNotRunningError: No bridge port file exists for the homunculus.
+        SoletNotRunningError: No bridge port file exists for the solet.
     """
-    name = homunculus_name or resolve_homunculus_name()
+    name = solet_name or resolve_solet_name()
     port = read_port_file(BRIDGE_SERVICE_NAME, name)
     if port is None:
-        raise HomunculusNotRunningError(
-            f"no bridge port file for homunculus '{name}' "
+        raise SoletNotRunningError(
+            f"no bridge port file for solet '{name}' "
             f"(~/.ananta/runtime/{name}.{BRIDGE_SERVICE_NAME}.port). "
-            "Is the homunculus running?",
+            "Is the solet running?",
         )
     return f"http://127.0.0.1:{port}"
 
 
 class BridgeClient:
-    """One-shot synchronous client over a homunculus's bridge HTTP surface."""
+    """One-shot synchronous client over a solet's bridge HTTP surface."""
 
     def __init__(
         self,
@@ -250,7 +315,7 @@ class BridgeClient:
         The action-event row is marked completed immediately before the result
         row is written. A snapshot in that narrow window has
         ``status=completed`` but no ``result`` key; treating it as terminal
-        makes ``homunculus call`` nondeterministically omit successful output.
+        makes ``solet call`` nondeterministically omit successful output.
         """
         deadline = time.monotonic() + poll_timeout_s
         while True:
@@ -270,6 +335,51 @@ class BridgeClient:
                     f"after {poll_timeout_s:.0f}s",
                 )
             time.sleep(POLL_INTERVAL_S)
+
+    def await_job(
+        self,
+        job_id: str,
+        *,
+        job_timeout_s: float = DEFAULT_JOB_TIMEOUT_S,
+        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
+        on_poll: Callable[[str, float], None] | None = None,
+    ) -> dict[str, Any]:
+        """Poll a born-async job by id until it reaches a terminal status.
+
+        The SECOND hop. ``call_and_wait`` above waits for the DISPATCH to
+        return, which for a born-async verb is only the ``{job_id, status:
+        queued}`` handle — the real work has not started. This polls
+        ``get_job`` until the job itself is terminal, and returns the job
+        record (result and error payloads already attached by the verb).
+
+        ``on_poll`` receives ``(status, elapsed_s)`` per poll so the caller can
+        show progress without this module deciding where progress belongs.
+
+        Raises ``BridgeResultTimeoutError`` when the job is still non-terminal
+        at the deadline — the job keeps running; only the waiting stops.
+        """
+        deadline = time.monotonic() + job_timeout_s
+        started = time.monotonic()
+        status = "unknown"
+        while True:
+            payload = self.call_and_wait(
+                GET_JOB_PROCESS_KEY,
+                {"job_id": job_id},
+                reason=f"await job {job_id}",
+                poll_timeout_s=poll_timeout_s,
+            )
+            job = _extract_job_record(payload)
+            if job is not None:
+                status = str(job.get("status", "unknown"))
+                if status not in NON_TERMINAL_JOB_STATUSES:
+                    return job
+            if on_poll is not None:
+                on_poll(status, time.monotonic() - started)
+            if time.monotonic() >= deadline:
+                raise BridgeResultTimeoutError(
+                    f"job {job_id} still '{status}' after {job_timeout_s:.0f}s",
+                )
+            time.sleep(JOB_POLL_INTERVAL_S)
 
     def process_call(
         self,

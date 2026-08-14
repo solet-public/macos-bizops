@@ -1,7 +1,7 @@
-"""Colour-agnostic launchd crash-supervisor for blue-green homunculus (Option B).
+"""Colour-agnostic launchd crash-supervisor for blue-green solet (Option B).
 
 Under the prior model the LaunchAgent ran ``ananta.cli`` *directly*, so the
-launchd-managed process WAS a homunculus colour. That had two defects: (1) a
+launchd-managed process WAS a solet colour. That had two defects: (1) a
 blue-green cutover drains+SIGTERMs the launchd-managed colour, and launchd's
 ``KeepAlive`` ghost-respawned it (the F2 Choice Y respawn-suppression relied
 on a graceful SIGTERM→exit-0 handler that did not exist until Q1); (2) after
@@ -13,13 +13,13 @@ Option B replaces the direct-launch with THIS module. The LaunchAgent runs
 ``<current>/venv/bin/python3 -m macos_self_deployment_plugin.supervisor
 --app-home <profile>``: a thin, colour-agnostic supervisor that
 
-* spawns the active homunculus from ``current`` on cold-start,
+* spawns the active solet from ``current`` on cold-start,
 * re-spawns it after a crash,
 * and survives blue-green cutovers untouched.
 
 Two structural consequences:
 
-* **The ghost class is impossible.** No homunculus colour is ever launchd-managed,
+* **The ghost class is impossible.** No solet colour is ever launchd-managed,
   so a drained/SIGTERM'd colour is never respawned by launchd. Q1's graceful
   SIGTERM→teardown is kept for clean-shutdown hygiene (pool close), but its
   *respawn-suppression* role is subsumed here — the supervisor decides spawns
@@ -43,7 +43,7 @@ resume than the old cold-restart requirement.)
 Deliberately lightweight: imports only stdlib + ``constants`` + ``router_client``
 + ``child_spawn`` + the core runtime-dir / drain-sentinel seams. It must NOT
 drag in the plugin-class graph (the package ``__init__`` is lazy for exactly
-this reason) — this is the process keeping the homunculus alive.
+this reason) — this is the process keeping the solet alive.
 """
 
 from __future__ import annotations
@@ -65,13 +65,13 @@ from typing import Any, Final
 
 from ananta.core.runtime import get_runtime_dir, is_draining
 
-from macos_self_deployment_plugin.child_spawn import spawn_homunculus_child
+from macos_self_deployment_plugin.child_spawn import spawn_solet_child
 from macos_self_deployment_plugin.constants import (
     DEFAULT_SUPERVISOR_POLL_INTERVAL_SECONDS,
     DEFAULT_SUPERVISOR_SPAWN_BACKOFF_BASE_SECONDS,
     DEFAULT_SUPERVISOR_SPAWN_BACKOFF_CAP_SECONDS,
-    ENV_HOMUNCULUS_NAME,
-    ENV_HOMUNCULUS_RELEASE_ID,
+    ENV_SOLET_NAME,
+    ENV_SOLET_RELEASE_ID,
     PLUGIN_NAME,
     ROUTER_SOCKET_SUFFIX,
 )
@@ -98,7 +98,7 @@ class TickOutcome(StrEnum):
     """The action a single supervisor poll took — observable for tests/logs."""
 
     HEALTHY = "healthy"          # router reports a live active colour; no-op
-    SPAWNED = "spawned"          # spawned a replacement homunculus from ``current``
+    SPAWNED = "spawned"          # spawned a replacement solet from ``current``
     PENDING = "pending"          # a prior spawn is still booting toward active
     ROUTER_DOWN = "router_down"  # router unreachable; wait (don't blind-spawn)
     DRAINING = "draining"        # operator stop_self in effect; respawn suppressed
@@ -123,12 +123,12 @@ class SupervisorSeams:
 
 
 class Supervisor:
-    """Poll-based, never-kills crash-supervisor for the active homunculus colour."""
+    """Poll-based, never-kills crash-supervisor for the active solet colour."""
 
     def __init__(
         self,
         *,
-        homunculus_name: str,
+        solet_name: str,
         app_home: Path,
         releases_root: Path,
         seams: SupervisorSeams,
@@ -137,7 +137,7 @@ class Supervisor:
         backoff_cap_seconds: float = DEFAULT_SUPERVISOR_SPAWN_BACKOFF_CAP_SECONDS,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._homunculus_name = homunculus_name
+        self._solet_name = solet_name
         self._app_home = app_home
         self._releases_root = releases_root
         self._seams = seams
@@ -159,8 +159,8 @@ class Supervisor:
         """Poll → decide → sleep, until SIGTERM/SIGINT. Never dies on a tick."""
         self._install_signal_handlers()
         self._logger.info(
-            "%s: starting (homunculus=%s releases_root=%s poll=%.1fs)",
-            _LOG_TAG, self._homunculus_name, self._releases_root, self._poll_interval,
+            "%s: starting (solet=%s releases_root=%s poll=%.1fs)",
+            _LOG_TAG, self._solet_name, self._releases_root, self._poll_interval,
         )
         while not self._stop:
             try:
@@ -237,7 +237,7 @@ class Supervisor:
         self._pending = proc
         self._children.append(proc)
         self._logger.info(
-            "%s: spawned homunculus from current pid=%s (consecutive_boot_attempts=%d)",
+            "%s: spawned solet from current pid=%s (consecutive_boot_attempts=%d)",
             _LOG_TAG, proc.pid, self._boot_failures,
         )
         return TickOutcome.SPAWNED
@@ -301,11 +301,11 @@ def _resolve_current_release_id(releases_root: Path) -> str:
 
 
 def _make_spawn(
-    *, homunculus_name: str, app_home: Path, releases_root: Path
+    *, solet_name: str, app_home: Path, releases_root: Path
 ) -> Callable[[], subprocess.Popen[bytes]]:
     """Production spawn seam: launch the ``current`` release; the child self-defaults.
 
-    Sets neither ``HOMUNCULUS_COLOR`` nor ``HOMUNCULUS_INSTANCE_ID`` — the homunculus
+    Sets neither ``SOLET_COLOR`` nor ``SOLET_INSTANCE_ID`` — the solet
     defaults colour=blue and mints its own instance-id (mirroring the
     historical direct-launch cold-start), so the child self-activates whenever
     the router has no active colour. Colour ⊥ release: a blue replacement
@@ -317,20 +317,20 @@ def _make_spawn(
         log_path = (
             app_home / "data" / "logs" / f"supervisor_spawn_{uuid.uuid4().hex[:8]}.log"
         )
-        return spawn_homunculus_child(
+        return spawn_solet_child(
             interpreter=_resolve_current_interpreter(releases_root),
             app_home=app_home,
-            homunculus_name=homunculus_name,
+            solet_name=solet_name,
             log_path=log_path,
-            extra_env={ENV_HOMUNCULUS_RELEASE_ID: _resolve_current_release_id(releases_root)},
+            extra_env={ENV_SOLET_RELEASE_ID: _resolve_current_release_id(releases_root)},
         )
 
     return _spawn
 
 
-def _make_router_status(homunculus_name: str) -> Callable[[], dict[str, Any] | None]:
+def _make_router_status(solet_name: str) -> Callable[[], dict[str, Any] | None]:
     """Production liveness seam: router ``status`` over the mgmt unix socket."""
-    socket_path = get_runtime_dir(homunculus_name) / f"{homunculus_name}{ROUTER_SOCKET_SUFFIX}"
+    socket_path = get_runtime_dir(solet_name) / f"{solet_name}{ROUTER_SOCKET_SUFFIX}"
     client = RouterClient(socket_path)
 
     def _status() -> dict[str, Any] | None:
@@ -344,7 +344,7 @@ def _make_router_status(homunculus_name: str) -> Callable[[], dict[str, Any] | N
 
 def build_supervisor(
     *,
-    homunculus_name: str,
+    solet_name: str,
     app_home: Path,
     releases_root: Path | None = None,
     logger: logging.Logger | None = None,
@@ -353,17 +353,17 @@ def build_supervisor(
     root = (
         releases_root
         if releases_root is not None
-        else Path(RELEASES_ROOT_DEFAULT).expanduser() / homunculus_name
+        else Path(RELEASES_ROOT_DEFAULT).expanduser() / solet_name
     )
     seams = SupervisorSeams(
-        router_status=_make_router_status(homunculus_name),
-        spawn=_make_spawn(homunculus_name=homunculus_name, app_home=app_home, releases_root=root),
-        is_draining=lambda: is_draining(homunculus_name),
+        router_status=_make_router_status(solet_name),
+        spawn=_make_spawn(solet_name=solet_name, app_home=app_home, releases_root=root),
+        is_draining=lambda: is_draining(solet_name),
         sleep=time.sleep,
         monotonic=time.monotonic,
     )
     return Supervisor(
-        homunculus_name=homunculus_name,
+        solet_name=solet_name,
         app_home=app_home,
         releases_root=root,
         seams=seams,
@@ -374,10 +374,10 @@ def build_supervisor(
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog=f"{PLUGIN_NAME}.supervisor",
-        description="Colour-agnostic launchd crash-supervisor for blue-green homunculus.",
+        description="Colour-agnostic launchd crash-supervisor for blue-green solet.",
     )
     parser.add_argument("--app-home", required=True, type=Path)
-    parser.add_argument("--homunculus-name", default=os.environ.get(ENV_HOMUNCULUS_NAME, ""))
+    parser.add_argument("--solet-name", default=os.environ.get(ENV_SOLET_NAME, ""))
     return parser.parse_args(argv)
 
 
@@ -387,14 +387,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    name = str(args.homunculus_name).strip()
+    name = str(args.solet_name).strip()
     if not name:
         print(
-            f"{_LOG_TAG}: {ENV_HOMUNCULUS_NAME} unset and --homunculus-name not given",
+            f"{_LOG_TAG}: {ENV_SOLET_NAME} unset and --solet-name not given",
             file=sys.stderr,
         )
         return 2
-    supervisor = build_supervisor(homunculus_name=name, app_home=args.app_home)
+    supervisor = build_supervisor(solet_name=name, app_home=args.app_home)
     supervisor.run_forever()
     return 0
 

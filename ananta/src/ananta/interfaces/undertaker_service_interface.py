@@ -1,4 +1,4 @@
-"""Undertaker service interface — single verb to tear a homunculus down.
+"""Undertaker service interface — single verb to tear a solet down.
 
 The lifecycle matrix's teardown surface. Implemented by environment-specific
 plugins; only ``aws_undertaker_plugin`` exists today. Per operator constraint
@@ -10,7 +10,7 @@ Per the D1 architectural mandate
 ``@service_interface_process`` registration surface lives at
 ``ananta/src/ananta/services/undertaker_service/interfaces/public.py``
 with a matching JSON at
-``ananta/knowledge_base/processes/undertaker_service/teardown_homunculus.json``.
+``ananta/knowledge_base/processes/undertaker_service/teardown_solet.json``.
 
 Per D17' closure (operator decision 2026-06-02 PM per
 ``[[biological-organic-system-framing]]``) the interface is single-verb:
@@ -33,12 +33,12 @@ from ananta.interfaces.lifecycle_result_types import TeardownResult
 
 
 class UndertakerServiceInterface(ABC):
-    """Tear down a homunculus: live → decommissioned with recovery windows."""
+    """Tear down a solet: live → decommissioned with recovery windows."""
 
     INTERFACE_VERSION: ClassVar[str] = "1.0.0"
 
     @abstractmethod
-    def teardown_homunculus(
+    def teardown_solet(
         self,
         *,
         name: str,
@@ -47,7 +47,7 @@ class UndertakerServiceInterface(ABC):
         secret_recovery_days: int = 7,
         dry_run: bool = False,
     ) -> TeardownResult:
-        """Tear the named homunculus down.
+        """Tear the named solet down.
 
         Contract:
 
@@ -71,7 +71,7 @@ class UndertakerServiceInterface(ABC):
           divergence allowed.
 
         Args:
-            name: Target homunculus name. Validated against the
+            name: Target solet name. Validated against the
                 ``[a-z][a-z0-9_-]{1,62}`` regex midwife uses at
                 provisioning time. The implementation discovers
                 resources by tag (``HomunculusName == name``); an
@@ -86,7 +86,7 @@ class UndertakerServiceInterface(ABC):
                 platform scheduling service.
             secret_recovery_days: Passed straight to
                 ``secretsmanager:DeleteSecret(RecoveryWindowInDays=N)``
-                for each homunculus secret. AWS allows 7–30; default 7
+                for each solet secret. AWS allows 7–30; default 7
                 is the minimum window.
             dry_run: Plan-only mode (see contract above).
 

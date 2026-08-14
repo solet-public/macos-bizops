@@ -1,7 +1,7 @@
 """Cursor read/write/advance helpers for the session dispatch bridge (W4 M1.5).
 
 A *cursor* is one drainer's durable read position into the singleton spool
-(design §3 D2.2). Each connected homunculus has exactly one cursor file at
+(design §3 D2.2). Each connected solet has exactly one cursor file at
 ``<spool>/cursors/<drainer_id>.cursor``. These are pure, side-effect-scoped
 helpers: read, advance, retire, and atomic-versioned write. The janitor
 (``janitor.py``) consumes them; the drainer (``drainer.py``) writes its own.

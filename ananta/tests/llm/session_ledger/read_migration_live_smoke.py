@@ -3,7 +3,7 @@
 
 Pins that the five ``read.py`` reads migrated off raw ``execute_sql`` onto the
 ``query_state`` / ``query_ordered`` state primitives return results IDENTICAL to
-the raw SQL they replaced — exercised against the running homunculus's **real** ledger schema
+the raw SQL they replaced — exercised against the running solet's **real** ledger schema
 with **real** production rows (no hand-rolled fixture table; no seeding; fully
 read-only / non-destructive).
 
@@ -22,7 +22,7 @@ real ``= ANY`` / ordering / ``is_deleted`` SQL composition is exercised), then
 compares against a ground-truth raw query over the same rows. Real fixtures are
 discovered at runtime so the smoke adapts to whatever the live corpus holds.
 
-Env-gated behind ``LEDGER_READ_LIVE_SMOKE=1`` — it needs the live homunculus DB up.
+Env-gated behind ``LEDGER_READ_LIVE_SMOKE=1`` — it needs the live solet DB up.
 It writes nothing, so it is safe to run any time the DB is reachable.
 
 Run::
@@ -45,7 +45,7 @@ sys.path.insert(
     0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
-from ananta.constants import HOMUNCULUS_NAME_ENV_VAR  # noqa: E402
+from ananta.constants import SOLET_NAME_ENV_VAR  # noqa: E402
 from ananta.llm.session_ledger.repository import (  # noqa: E402
     SessionLedgerRepository,
 )
@@ -59,7 +59,7 @@ from postgres_state_management_plugin.postgres_backend.provider import (  # noqa
     PostgresProvider,
 )
 
-_SCHEMA = os.environ[HOMUNCULUS_NAME_ENV_VAR]
+_SCHEMA = os.environ[SOLET_NAME_ENV_VAR]
 
 _passed = 0
 _failed: list[str] = []
@@ -295,7 +295,7 @@ def main() -> int:
         print("=== read_migration_live_smoke ===")
         print(
             "  SKIP  set LEDGER_READ_LIVE_SMOKE=1 to run; "
-            "needs the live homunculus DB "
+            "needs the live solet DB "
             "(read-only, non-destructive).",
         )
         return 0

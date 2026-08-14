@@ -19,12 +19,12 @@ re-point the WRONG session's roles. Hence:
 Contract (per Coordinator-Day fold 2026-07-16, Codex Finding 1):
 1. codex + both carriers      -> CODEX_THREAD_ID wins;
 2. codex + CODEX_THREAD_ID    → resolves it;
-3. codex + homunculus carrier → resolves it;
+3. codex + solet carrier → resolves it;
 4. codex + neither           → "" (degraded);
 5. claude_code + leaked CODEX_THREAD_ID only → "" NOT adopted  (reverse-nesting
    pin — the load-bearing case);
-6. claude_code + homunculus carrier → resolves it;
-7. claude_code + both        → homunculus carrier (CODEX_THREAD_ID ignored);
+6. claude_code + solet carrier → resolves it;
+7. claude_code + both        → solet carrier (CODEX_THREAD_ID ignored);
 8. claude_code + neither     → "";
 9. unknown kind + CODEX_THREAD_ID only → "" (default chain refuses the codex
    carrier);
@@ -32,7 +32,7 @@ Contract (per Coordinator-Day fold 2026-07-16, Codex Finding 1):
 
 Run:
 
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/session_id_carrier_chain_smoke.py
 """
 
@@ -116,7 +116,7 @@ def test_codex_prefers_thread_id_over_export() -> None:
         resolved = _resolve_agent_session_id(CODEX_AGENT_ID)
     _check(
         resolved == "thread-authoritative",
-        f"codex: CODEX_THREAD_ID wins over an inherited homunculus session id "
+        f"codex: CODEX_THREAD_ID wins over an inherited solet session id "
         f"(got {resolved!r})",
     )
 
@@ -131,7 +131,7 @@ def test_codex_thread_id_only() -> None:
     )
 
 
-def test_codex_uses_homunculus_carrier_when_no_thread_id() -> None:
+def test_codex_uses_solet_carrier_when_no_thread_id() -> None:
     with _isolated_session_env(AGENT_SESSION_ID="sess-exported"):
         resolved = _resolve_agent_session_id(CODEX_AGENT_ID)
     _check(
@@ -239,7 +239,7 @@ def main() -> int:
     )
     test_codex_prefers_thread_id_over_export()
     test_codex_thread_id_only()
-    test_codex_uses_homunculus_carrier_when_no_thread_id()
+    test_codex_uses_solet_carrier_when_no_thread_id()
     test_codex_neither_degraded()
     test_claude_code_refuses_leaked_codex_thread_id()
     test_claude_code_exported_resolves()

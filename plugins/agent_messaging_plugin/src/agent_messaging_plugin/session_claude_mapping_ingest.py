@@ -78,7 +78,7 @@ def _resolve_spool_dir() -> Path | None:
     exporting the var to spawned workers (``headless_adapter.
     _resolve_session_mapping_spool_dir``). The fallback is load-bearing on the
     platform's own process: the sweep tick and the on-demand verb run inside
-    the homunculus, whose environment carries ``APP_HOME`` but NOT the worker
+    the solet, whose environment carries ``APP_HOME`` but NOT the worker
     env var — 2026-08-05 live acceptance caught the env-var-only read
     no-opping every drain while spool files accumulated silently. ``None``
     only when neither is set."""

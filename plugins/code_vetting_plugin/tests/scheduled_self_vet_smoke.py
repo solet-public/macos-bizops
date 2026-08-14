@@ -16,7 +16,7 @@ vetting_runs row per run (the R9-3 trend baseline), with a regression-only queue
     regression memory note (tag code_vetting:self_vet_regression) ONLY on a worse run; a clean run is silent.
 
 Hermetic: fake StateServiceProtocol (create-before-upsert) + fake memory + a stub scan; no real scanners, no
-live homunculus. Run directly or via run_smokes.py.
+live solet. Run directly or via run_smokes.py.
 """
 
 from __future__ import annotations

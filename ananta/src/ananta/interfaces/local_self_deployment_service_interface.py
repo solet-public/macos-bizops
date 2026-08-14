@@ -3,7 +3,7 @@
 Extension of :class:`SelfDeploymentServiceInterface` carrying the three
 local-blue-green-specific operational verbs. The local-blue-green
 plugin (``plugins/macos_self_deployment_plugin/``) orchestrates a
-router-mediated swap between two co-resident the homunculus instances on the same
+router-mediated swap between two co-resident the solet instances on the same
 machine, using the standalone router process under
 ``plugins/macos_self_deployment_plugin/src/macos_self_deployment_plugin/blue_green_router/router.py``.
 
@@ -88,7 +88,7 @@ class LocalSelfDeploymentServiceInterface(SelfDeploymentServiceInterface):
         returns success without error.
 
         Args:
-            prior_pid: OS pid of the previously-active homunculus process,
+            prior_pid: OS pid of the previously-active solet process,
                 recorded at enqueue time inside the prior color.
             prior_instance_id: Router-side instance id of the prior
                 color, recorded at enqueue time and unregistered at

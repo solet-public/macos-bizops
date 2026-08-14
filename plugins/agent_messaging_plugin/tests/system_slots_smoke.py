@@ -30,7 +30,7 @@ Covers:
     * peer_release_role(normal role) → NOT denied (passes the guard).
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/system_slots_smoke.py
 """
 

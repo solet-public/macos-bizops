@@ -122,10 +122,6 @@ _APPROVAL_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
         _KB_IMPLEMENTATION_HINTS,
         "Defer exact layer recipes, parameter ranges, and effect chains until after the direction is approved.",
     ),
-    (
-        ("self-hypnosis", "hypnotic", "stage-to-track"),
-        "Decide whether this should follow a staged self-hypnosis-bed architecture or a simpler long-form ambient structure.",
-    ),
 )
 
 _CATEGORY_VALUE_FIELD: dict[str, str] = {

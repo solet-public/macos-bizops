@@ -6,7 +6,7 @@ Two conditions from the Coordinator-Dawn D4 dispatch, driven as SEPARATE legs
 so a passing green does not let one mechanism silently cover for the other:
 
   (a) the act creates the row: a fresh ``legislate_role`` call on a reserved
-      ``<homunculus>-Main`` name stamps ``role_class='primary'`` at birth; a
+      ``<solet>-Main`` name stamps ``role_class='primary'`` at birth; a
       same-class re-run is an idempotent no-op; a DIFFERENT-class re-run is
       refused loud (``role_class_conflict``), never silently reassigned.
   (b) the ordinary claim path's reserved-pattern fresh-mint refusal stays
@@ -199,7 +199,7 @@ def test_verb_layer_validation() -> None:
             name="Not-Reserved-Shape", role_class=ROLE_CLASS_PRIMARY, brief_ref="x",
         ),
         "reserved_primary_name_required",
-        "role_class='primary' on a non-<homunculus>-Main-shaped name is refused",
+        "role_class='primary' on a non-<solet>-Main-shaped name is refused",
     )
     _expect_verb_error(
         LegislateRoleRequest(name="", role_class=ROLE_CLASS_PRIMARY, brief_ref="x"),
@@ -240,7 +240,7 @@ def test_reserved_mint_refusal_still_intact() -> None:
     )
     _check(
         isinstance(fresh_mint, RoleClaimFailure) and fresh_mint.code == "reserved_role_name",
-        f"(b) a fresh mint of an UNLEGISLATED <homunculus>-Main shape name is "
+        f"(b) a fresh mint of an UNLEGISLATED <solet>-Main shape name is "
         f"still refused reserved_role_name (got {fresh_mint!r})",
     )
     _check(

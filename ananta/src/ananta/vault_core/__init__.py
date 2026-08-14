@@ -14,7 +14,7 @@ Exported helpers:
 * :func:`scrypt_hash_secret` / :func:`scrypt_verify_secret` — OAuth
   client_secret hashing.
 * :func:`encrypt_sealed_box` / :func:`decrypt_sealed_box` —
-  cross-homunculus sealed-box transfer of secret values.
+  cross-solet sealed-box transfer of secret values.
 * :func:`generate_encryption_keypair` — fresh X25519 identity
   keypair material.
 * :func:`fingerprint_public_key` / :func:`fingerprint_plaintext` —

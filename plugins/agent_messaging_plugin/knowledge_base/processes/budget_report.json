@@ -12,7 +12,7 @@
   },
   "error_processor_customizations": {
     "action_context": "A read-only join across this plugin's own managed_session/session_claude_mapping tables and session_ledger_service's session/event tables via StateManagementInterface; no state mutation, no host interaction.",
-    "error_interpretation": "state_service_unavailable: the state service is not bound on this homunculus.",
+    "error_interpretation": "state_service_unavailable: the state service is not bound on this solet.",
     "recovery_guidance": "state_service_unavailable indicates a platform binding problem, not a caller error -- report it rather than retrying with different filters."
   }
 }

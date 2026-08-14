@@ -37,7 +37,7 @@ worker, not the dispatch call — covered by smoke_async_jobs.py's worker tests,
 not duplicated here.
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/external_postgres_plugin/tests/smoke_query.py
 
 Exits 0 on success, 1 on first failure.

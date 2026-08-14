@@ -24,7 +24,7 @@ Implements §2 of `2026-06-01_local_blue_green_L3_implementation_plan.md`:
 Run foreground for development:
 
     python3 -m macos_self_deployment_plugin.blue_green_router.router \\
-        --homunculus iris --public-port 8100
+        --solet iris --public-port 8100
 
 The launchd/systemd install (Slice H) wraps this exact invocation.
 """
@@ -84,11 +84,11 @@ def _runtime_dir() -> Path:
     return Path.home() / ".ananta" / "runtime"
 
 
-def mgmt_socket_path(homunculus: str) -> Path:
-    return _runtime_dir() / f"{homunculus}.router.sock"
+def mgmt_socket_path(solet: str) -> Path:
+    return _runtime_dir() / f"{solet}.router.sock"
 
 
-def _write_port_discovery_files(homunculus: str, port: int) -> None:
+def _write_port_discovery_files(solet: str, port: int) -> None:
     """Write ``<name>.router.port`` and ``<name>.bridge.port`` to runtime dir.
 
     Called once at router bind-time so the discovery files exist immediately
@@ -102,7 +102,7 @@ def _write_port_discovery_files(homunculus: str, port: int) -> None:
     """
     runtime = _runtime_dir()
     runtime.mkdir(parents=True, mode=0o700, exist_ok=True)
-    for name in (f"{homunculus}.router.port", f"{homunculus}.bridge.port"):
+    for name in (f"{solet}.router.port", f"{solet}.bridge.port"):
         path = runtime / name
         path.write_text(str(port), encoding="utf-8")
         path.chmod(0o600)
@@ -314,7 +314,7 @@ async def _wait_for_route(
 async def _write_503(writer: asyncio.StreamWriter, reason: str) -> None:
     body = (
         f"local_blue_green_router: no active color available "
-        f"({reason}). The router is up but no homunculus child is currently "
+        f"({reason}). The router is up but no solet child is currently "
         "active. The platform itself may be healthy on its own ephemeral "
         "port (probe /api/v1/bridge/health there); if so, the platform's "
         "steady-state heartbeat re-asserts activation within ~10s on "
@@ -516,7 +516,7 @@ async def _heartbeat_gc(
 
 
 async def _bridge_port_watchdog(
-    homunculus: str,
+    solet: str,
     public_port: int,
     *,
     interval: float = DEFAULT_BRIDGE_PORT_WATCHDOG_INTERVAL_SECONDS,
@@ -544,7 +544,7 @@ async def _bridge_port_watchdog(
     while True:
         await asyncio.sleep(interval)
         try:
-            _write_port_discovery_files(homunculus, public_port)
+            _write_port_discovery_files(solet, public_port)
         except OSError as exc:
             logger.warning(
                 "bridge-port-watchdog: re-write failed (will retry next tick): %s",
@@ -663,7 +663,7 @@ def _dispatch_status(state: RouterState) -> dict[str, object]:
 
 async def run_router(
     *,
-    homunculus: str,
+    solet: str,
     public_port: int = DEFAULT_PUBLIC_PORT,
     public_host: str = "127.0.0.1",
     socket_path: Path | None = None,
@@ -684,7 +684,7 @@ async def run_router(
         drain_window_seconds=drain_window_seconds,
         heartbeat_timeout_seconds=heartbeat_timeout_seconds,
     )
-    sock = socket_path or mgmt_socket_path(homunculus)
+    sock = socket_path or mgmt_socket_path(solet)
 
     async def _public_client(
         reader: asyncio.StreamReader,
@@ -704,12 +704,12 @@ async def run_router(
     public_server = await asyncio.start_server(
         _public_client, host=public_host, port=public_port
     )
-    _write_port_discovery_files(homunculus, public_port)
+    _write_port_discovery_files(solet, public_port)
     logger.info(
-        "public: listening on %s:%d (homunculus=%s)",
+        "public: listening on %s:%d (solet=%s)",
         public_host,
         public_port,
-        homunculus,
+        solet,
     )
     mgmt = MgmtServer(sock, _make_dispatch(state))
     await mgmt.start()
@@ -721,7 +721,7 @@ async def run_router(
     hb_task = asyncio.create_task(_heartbeat_gc(state), name="heartbeat_gc")
     bridge_port_task = asyncio.create_task(
         _bridge_port_watchdog(
-            homunculus, public_port, interval=bridge_port_watchdog_interval,
+            solet, public_port, interval=bridge_port_watchdog_interval,
         ),
         name="bridge_port_watchdog",
     )
@@ -760,9 +760,9 @@ class _SuppressCancel:
 def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="local_blue_green.router",
-        description="Local blue-green router for the homunculus (Slice C).",
+        description="Local blue-green router for the solet (Slice C).",
     )
-    parser.add_argument("--homunculus", required=True, help="Homunculus name (e.g. 'iris').")
+    parser.add_argument("--solet", required=True, help="Solet name (e.g. 'iris').")
     parser.add_argument(
         "--public-port", type=int, default=DEFAULT_PUBLIC_PORT,
         help=f"Public bridge port (default {DEFAULT_PUBLIC_PORT}).",
@@ -775,7 +775,7 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
         "--socket-path", default=None,
         help=(
             "Override mgmt socket path "
-            "(default ~/.ananta/runtime/<homunculus>.router.sock)."
+            "(default ~/.ananta/runtime/<solet>.router.sock)."
         ),
     )
     parser.add_argument(
@@ -813,7 +813,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 pass
         run_task = asyncio.create_task(
             run_router(
-                homunculus=args.homunculus,
+                solet=args.solet,
                 public_port=args.public_port,
                 public_host=args.public_host,
                 socket_path=socket_path,

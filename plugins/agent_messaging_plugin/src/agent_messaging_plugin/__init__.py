@@ -2,10 +2,10 @@
 
 The server plugin is re-exported LAZILY (PEP 562): importing the bare package
 must not pull in `.plugin`, which resolves a scoped vault name (and so requires
-``HOMUNCULUS_NAME``) at import time. The platform loader is unaffected — the
+``SOLET_NAME``) at import time. The platform loader is unaffected — the
 ``ananta.plugins`` entry point is module-qualified
 (``agent_messaging_plugin.plugin:AgentMessagingPlugin``) — but the
-``homunculus`` console script lives under this package (``local_cli/``) and
+``solet`` console script lives under this package (``local_cli/``) and
 must work bare on the operator's PATH with no ambient env (the no-MCP-first
 install-location-identity contract, design 2026-07-21 §3.A).
 """

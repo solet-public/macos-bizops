@@ -35,7 +35,7 @@ import click
 from ananta.constants import ExitCodes
 
 from ..env_contract import enforce_no_legacy_agent_env
-from .client import HomunculusIdentityError, resolve_homunculus_name
+from .client import SoletIdentityError, resolve_solet_name
 from .spool import (
     WATCH_SESSION_ID_ENV,
     WATCH_SESSION_LABEL_ENV,
@@ -65,7 +65,7 @@ class WakeTarget:
     """The per-session spool trio the wake hook operates on."""
 
     role: str
-    homunculus_name: str
+    solet_name: str
     spool: Path
     offset_file: Path
     lock_file: Path
@@ -136,7 +136,7 @@ def _resolve_target(spool_override: Path | None) -> WakeTarget | None:
     try:
         enforce_no_legacy_agent_env()
     except RuntimeError as exc:
-        click.echo(f"homunculus wake: {exc}", err=True)
+        click.echo(f"solet wake: {exc}", err=True)
         # Same contract as the identity failure below: a plain non-blocking
         # hook error exit, never the wake/block signal.
         raise SystemExit(int(ExitCodes.UNKNOWN_ERROR)) from exc
@@ -154,16 +154,16 @@ def _resolve_target(spool_override: Path | None) -> WakeTarget | None:
         missing = WATCH_SESSION_LABEL_ENV if not role else WATCH_SESSION_ID_ENV
         present = WATCH_SESSION_ID_ENV if not role else WATCH_SESSION_LABEL_ENV
         click.echo(
-            f"homunculus wake: ${present} is set but ${missing} is not, so this "
+            f"solet wake: ${present} is set but ${missing} is not, so this "
             "session cannot be paired with its watcher and will never be woken. "
             "A launcher that exports one must export both.",
             err=True,
         )
         raise SystemExit(int(ExitCodes.UNKNOWN_ERROR))
     try:
-        name = resolve_homunculus_name()
-    except HomunculusIdentityError as exc:
-        click.echo(f"homunculus wake: {exc}", err=True)
+        name = resolve_solet_name()
+    except SoletIdentityError as exc:
+        click.echo(f"solet wake: {exc}", err=True)
         # Deliberately NOT ExitCodes.CONNECTION_ERROR: that is 2, the hook
         # wake/block signal — an identity failure must surface as a plain
         # non-blocking hook error, never impersonate a wake.
@@ -172,7 +172,7 @@ def _resolve_target(spool_override: Path | None) -> WakeTarget | None:
     spool = spool_override or _paired_spool(name, instance_id)
     return WakeTarget(
         role=role,
-        homunculus_name=name,
+        solet_name=name,
         spool=spool,
         offset_file=spool_offset_path(spool),
         lock_file=spool_lock_path(spool),
@@ -195,7 +195,7 @@ def _paired_spool(name: str, instance_id: str) -> Path:
     found, spool = read_watch_pairing(watch_pairing_path(name, instance_id))
     if found and spool is None:
         click.echo(
-            "homunculus wake: this session's watcher armed with --no-spool, so "
+            "solet wake: this session's watcher armed with --no-spool, so "
             "no delivery can ever reach the wake hook. Re-arm `watch` without "
             "--no-spool to restore waking.",
             err=True,
@@ -297,7 +297,7 @@ def _read_offset(offset_file: Path) -> int:
         value = int(raw)
     except ValueError as exc:
         raise SystemExit(
-            f"homunculus wake: offset sidecar {offset_file} is corrupt "
+            f"solet wake: offset sidecar {offset_file} is corrupt "
             f"({raw!r}) — delete it to resurface the spool from the start.",
         ) from exc
     return max(value, 0)
@@ -311,7 +311,7 @@ def _compose_wake_packet(target: WakeTarget, lines: list[str]) -> str:
     """The stderr wake packet — shown to the model as its reason to act.
 
     The durable-copies command carries ``agent_session_id`` because the process
-    resolves the reader's identity from that argument alone: ``homunculus call``
+    resolves the reader's identity from that argument alone: ``solet call``
     opens a fresh, unregistered bridge, so unlike the ``/peer/inbox`` route
     there is no calling session for the server to recognise. This footer used to
     advertise the same key with no identity at all — which 500'd before Part 24
@@ -322,7 +322,7 @@ def _compose_wake_packet(target: WakeTarget, lines: list[str]) -> str:
     surfaced = lines[:WAKE_MAX_SURFACED_LINES]
     overflow = len(lines) - len(surfaced)
     header = (
-        f"HOMUNCULUS WAKE — {target.homunculus_name} watch delivered "
+        f"SOLET WAKE — {target.solet_name} watch delivered "
         f"{len(lines)} new event(s) for role '{target.role}':"
     )
     body = list(surfaced)
@@ -331,7 +331,7 @@ def _compose_wake_packet(target: WakeTarget, lines: list[str]) -> str:
     footer = (
         "Act on these now — they are real peer/role messages, already "
         "delivered and consumed server-side. Durable copies: "
-        f"`{target.homunculus_name} call "
+        f"`{target.solet_name} call "
         "plugin::agent_messaging_plugin::peer_inbox "
         '\'{"agent_session_id": "\'"$AGENT_SESSION_ID"\'"}\'`. '
         "Do not reply with bare acknowledgements."

@@ -65,7 +65,7 @@ class ContextIdSource(StrEnum):
     EXPLICIT = "explicit"
     ADDRESS_BOOK = "address_book"
     PLUGIN_ROOT = "plugin_root"
-    # REMOVED: ROOT - was an antipattern (shared homunculus context)
+    # REMOVED: ROOT - was an antipattern (shared solet context)
     # Use PLUGIN_ROOT instead - each plugin owns its context
 
 
@@ -94,7 +94,7 @@ TABLE_CONTEXT_EVENTS = "context_events"
 TABLE_CONTEXT_SESSIONS = "context_sessions"
 TABLE_CONTEXT_SNAPSHOTS = "context_snapshots"
 
-# REMOVED: KV_HOMUNCULUS_CONTEXT_ID - homunculus root context was an antipattern
+# REMOVED: KV_SOLET_CONTEXT_ID - solet root context was an antipattern
 # Contexts are plugin-specific. Use get_or_create_plugin_root_context() instead.
 
 # Content storage subdirectories under plugin data

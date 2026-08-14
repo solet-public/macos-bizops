@@ -2,7 +2,7 @@
 """Unit smoke for v10 Control #5 client side — OwedDeliveryCoordinator (no DB).
 
 Drives the extracted bridge-side role-delivery coordinator against a fake
-transport (no httpx, no running homunculus) to prove the at-least-once contract:
+transport (no httpx, no running solet) to prove the at-least-once contract:
 
   * **settle** emits a role message at most once and ALWAYS confirms delivery
     (POST /peer/delivered) — even when emission is dedup-suppressed (M7);

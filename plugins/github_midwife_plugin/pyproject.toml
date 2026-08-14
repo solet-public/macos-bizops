@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "github_midwife_plugin"
 version = "1.0.0"
-description = "GitHub-sourced genesis midwife — births a homunculus from a public clone with no parent homunculus present."
+description = "GitHub-sourced genesis midwife — births a solet from a public clone with no parent solet present."
 authors = [
     {name = "Ananta Development Team", email = "dev@ananta.ai"},
 ]
@@ -15,7 +15,7 @@ dependencies = [
     "ananta",
     "pyyaml>=6.0",
     # macos_vault_plugin is already a first-class declared dependency of this
-    # profile (bound as vault_service in macos-free-homunculus.yaml, installed
+    # profile (bound as vault_service in macos-free-solet.yaml, installed
     # by profile_install.py's allowlist pass) — credential_seed.py constructs
     # its SystemKeychain DIRECTLY (design doc §6.5 rider), not a fork, because
     # duplicating the RFC-2397 encode/decode logic risks the exact key-shape

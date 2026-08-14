@@ -35,7 +35,7 @@ direction (a)-(d)):
 
 Sandbox discipline (per ``[[sandbox_mutating_smokes]]``):
 
-* Smoke homunculus name ``c3wdog`` — distinct from any real install.
+* Smoke solet name ``c3wdog`` — distinct from any real install.
 * ``HOME`` env override redirects ``Path.home()`` for the in-process
   router; runtime dir lives under a tmp dir; the operator's
   ``~/.ananta/runtime/`` is never touched.
@@ -67,7 +67,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from macos_self_deployment_plugin import constants, stale_runtime_cleanup  # noqa: E402
 from macos_self_deployment_plugin.blue_green_router import router as router_mod  # noqa: E402
 
-SMOKE_HOMUNCULUS_NAME = "c3wdog"
+SMOKE_SOLET_NAME = "c3wdog"
 _FAST_TICK_SECONDS: float = 0.2
 
 
@@ -88,11 +88,11 @@ def _runtime_dir_for(home_dir: Path) -> Path:
 
 
 def _bridge_port_file(home_dir: Path) -> Path:
-    return _runtime_dir_for(home_dir) / f"{SMOKE_HOMUNCULUS_NAME}.bridge.port"
+    return _runtime_dir_for(home_dir) / f"{SMOKE_SOLET_NAME}.bridge.port"
 
 
 def _router_port_file(home_dir: Path) -> Path:
-    return _runtime_dir_for(home_dir) / f"{SMOKE_HOMUNCULUS_NAME}.router.port"
+    return _runtime_dir_for(home_dir) / f"{SMOKE_SOLET_NAME}.router.port"
 
 
 async def _spawn_router_under_home(
@@ -115,7 +115,7 @@ async def _spawn_router_under_home(
     ready = asyncio.Event()
     task = asyncio.create_task(
         router_mod.run_router(
-            homunculus=SMOKE_HOMUNCULUS_NAME,
+            solet=SMOKE_SOLET_NAME,
             public_port=public_port,
             public_host="127.0.0.1",
             socket_path=socket_path,
@@ -260,7 +260,7 @@ async def _case_c_f2_phase_0c_integration_unperturbed(
     public_port = _pick_free_port()
     bridge_file = _bridge_port_file(home_dir)
     runtime_dir = _runtime_dir_for(home_dir)
-    f2_socket = runtime_dir / f"{SMOKE_HOMUNCULUS_NAME}.router.mgmt"
+    f2_socket = runtime_dir / f"{SMOKE_SOLET_NAME}.router.mgmt"
 
     task: asyncio.Task[None] | None = None
     try:
@@ -281,13 +281,13 @@ async def _case_c_f2_phase_0c_integration_unperturbed(
         # drift it returns False (router_port absent) and leaves the
         # file deleted; the smoke does not fail on that.
         restored_via_f2 = stale_runtime_cleanup.restore_router_owned_bridge_port_file_if_router_live(
-            SMOKE_HOMUNCULUS_NAME,
+            SMOKE_SOLET_NAME,
         )
         # Before C3 watchdog: file would now be empty/absent indefinitely.
         # F2 stage 1 (scrub) DID happen because we directly called the
         # restore (the smoke wraps the scrub in cleanup_and_restore
         # below to validate the full wiring).
-        stale_runtime_cleanup.cleanup_and_restore(SMOKE_HOMUNCULUS_NAME)
+        stale_runtime_cleanup.cleanup_and_restore(SMOKE_SOLET_NAME)
 
         # Surface the F2 drift symptom (silently; for the operator log)
         # — restored_via_f2 SHOULD be True after a real F2 fix to the
@@ -426,7 +426,7 @@ def main() -> int:
         return 0
 
     print(
-        f"bridge_port_watchdog_smoke: name={SMOKE_HOMUNCULUS_NAME!r} "
+        f"bridge_port_watchdog_smoke: name={SMOKE_SOLET_NAME!r} "
         f"(in-process router; cases a–d)"
     )
     original_home = os.environ.get("HOME")

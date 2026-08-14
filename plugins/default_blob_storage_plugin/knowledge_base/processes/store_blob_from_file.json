@@ -2,7 +2,7 @@
   "process_key": "plugin::default_blob_storage_plugin::store_blob_from_file",
   "display_name": "Store Blob From File",
   "description": "Read a local file at an absolute path and store its bytes as a blob. The agent supplies only the path; the platform reads, derives metadata (filename, mime_type, source_path, byte_count, artifact_type), and persists the blob. Returns the blob_id.",
-  "embedding_description": "Store blob from file. Ingest finished render, upload audio file, persist binary artifact, load image from disk. Agent supplies absolute file_path; The homunculus reads bytes, infers MIME, persists. Use for FLAC/M4A/MP3/WAV renders, JPEG/PNG/WebP cover art, MP4/MOV video, PDFs. Returns blob_id for downstream upload_track / etc. Path must be absolute.",
+  "embedding_description": "Store blob from file. Ingest finished render, upload audio file, persist binary artifact, load image from disk. Agent supplies absolute file_path; The solet reads bytes, infers MIME, persists. Use for FLAC/M4A/MP3/WAV renders, JPEG/PNG/WebP cover art, MP4/MOV video, PDFs. Returns blob_id for downstream upload_track / etc. Path must be absolute.",
   "result_processor_customizations": {
     "action_label": "Blob ingested from file",
     "result_type": "blob_stored",

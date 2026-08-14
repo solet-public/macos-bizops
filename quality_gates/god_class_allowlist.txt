@@ -3,7 +3,7 @@
 # 64 distinct class names covering the remaining platform-owned god classes
 # after the D1 gate reform (2026-05-28) cleared 5 entries via the new
 # @service_lifecycle + abstract-implementation strips. Operator decision (2026-05-25): defer to the
-# post-AWS-homunculus cycle. Tracking: Task #74.
+# post-AWS-solet cycle. Tracking: Task #74.
 #
 # Per `workbench/2026-05-25_plugin_god_class_remediation.md`
 # §9.D–§9.Z each entry has a documented decomposition recipe (concrete
@@ -163,7 +163,7 @@ VaultServiceProxy
 # internal cohesion axis remains to split on. Non-process loc=809
 # (god_class_check, 2026-06-30, after the dev-only `hard_reset` method
 # + its `hard_reset_runner` delegator were removed). Allowlist captures
-# the trajectory; revisit during the post-AWS-homunculus cycle per the
+# the trajectory; revisit during the post-AWS-solet cycle per the
 # Task #74 convention.
 
 MacosSelfDeploymentPlugin
@@ -175,7 +175,7 @@ MacosSelfDeploymentPlugin
 ConfigProvider
 EnvironmentConfig
 OrchestrationFeatureFlags
-HomunculusProvisioner
+SoletProvisioner
 ProvisioningConfig
 
 # ============================================================

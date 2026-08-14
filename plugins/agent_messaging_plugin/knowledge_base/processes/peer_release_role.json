@@ -12,7 +12,7 @@
   },
   "error_processor_customizations": {
     "action_context": "Hard-deletes the agent_role_binding state-table row (keyed on external_id='role:{name}', soft_delete=False) that backs peer_send_by_name resolution. Deletes via the StateManagementInterface (delete_records); no address book.",
-    "error_interpretation": "missing_name: name was empty. state_service_unavailable: the state_service is not bound on this homunculus.",
+    "error_interpretation": "missing_name: name was empty. state_service_unavailable: the state_service is not bound on this solet.",
     "recovery_guidance": "missing_name: supply a non-empty role name. state_service_unavailable: bind the state_service (postgres_state_management_plugin) in service_bindings.json and restart."
   }
 }

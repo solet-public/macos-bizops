@@ -10,7 +10,7 @@ the property the SQL lockdown needs and that neither local nor cloud has
 today.
 
 THROWAWAY-PROXY, NOT a live swap (HARD constraint from the Phase-2
-brief). It deliberately does NOT swap the running homunculus the fleet is
+brief). It deliberately does NOT swap the running solet the fleet is
 messaging through. It drives the **real** ``ReleaseManager`` (real
 ``cp -c`` clone + real ``current``/``previous`` symlinks + real
 ``state.json`` ledger) against a **synthetic** source tree under

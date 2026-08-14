@@ -49,11 +49,11 @@ Cases:
      PluginConfig, ValidationResult) FAILS CLOSED on the plugin path and
      stays allowed on the service path.
 
-Project policy: no pytest. Offline — no live homunculus / LM Studio / Postgres.
+Project policy: no pytest. Offline — no live solet / LM Studio / Postgres.
 Exits 0 on success, 1 on first-failed-check aggregate.
 
 Run from repo root:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 ananta/tests/core/substrate_contracts/memory_get_focused_dispatch_contract_smoke.py
+    SOLET_NAME=<name> .venv/bin/python3 ananta/tests/core/substrate_contracts/memory_get_focused_dispatch_contract_smoke.py
 """
 
 from __future__ import annotations

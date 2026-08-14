@@ -9,7 +9,7 @@ failure class that produced the 2026-06-06/07 vault `write_state` P0
 divergence at call-sites, and the `result_processor_kind` propagation
 gap in scheduling submissions.
 
-Scope (Cycle 1, structural mode only — no live homunculus needed):
+Scope (Cycle 1, structural mode only — no live solet needed):
   C1.* — service-interface decorator/JSON/ABC consistency
          (walks ananta/src/ananta/services/*/interfaces/public.py +
           ananta/src/ananta/interfaces/*_service_interface.py +
@@ -804,7 +804,7 @@ def check_root_manifest_drift(repo_root: Path) -> list[Finding]:
     """Detect drift between ``root_manifest.yaml`` and the working tree.
 
     No-op when the manifest is absent (per D-W-INT-C6-RUNMODE = always-on:
-    F1 IMPL may not have landed at every homunculus).  All C6.\\* findings
+    F1 IMPL may not have landed at every solet).  All C6.\\* findings
     are BLOCKING by default; INFO-only surfaces (C6.3 missing sanctioned,
     cleanup-overdue) are emitted by the dedicated pre-commit consumer at
     ``ananta.core.root_manifest.pre_commit`` and the diagnostic consumer

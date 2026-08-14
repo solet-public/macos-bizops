@@ -2,7 +2,7 @@
   "process_key": "service_interface::iam_provisioning_service::audit_lifecycle_roles",
   "display_name": "Audit lifecycle IAM roles for a birther",
   "description": "Read-only inventory of the per-birther IAM lifecycle quartet's create-able members. Reports on each role's existence, trust policy hash, inline policy hash, attached managed policies, and tag set. Detects drift between the expected shape (per the plugin's pinned policy template versions) and live AWS state. Detects orphaned roles (e.g., <birther>-midwife exists but trust policy doesn't permit the birther's task role anymore). Returns the same per-step drift-detection fields that provision_lifecycle_roles(dry_run=true) would surface — operators have a clean 'audit then provision' workflow without duplicate state machines. ZERO IAM mutations of any kind. Plugin is herky-jerky-loaded — verb present in registry only during operator-initiated apply_manifest cycles.",
-  "embedding_description": "Read-only audit of the IAM lifecycle quartet's create-able roles (midwife + undertaker) for a birther homunculus. Reports per-role existence / trust policy hash / inline policy hash / tag set / drift status. Use before provision_lifecycle_roles to confirm what would change.",
+  "embedding_description": "Read-only audit of the IAM lifecycle quartet's create-able roles (midwife + undertaker) for a birther solet. Reports per-role existence / trust policy hash / inline policy hash / tag set / drift status. Use before provision_lifecycle_roles to confirm what would change.",
   "result_processor_customizations": {
     "action_label": "IAM lifecycle roles audit",
     "result_type": "admin_audit_lifecycle_roles_result",

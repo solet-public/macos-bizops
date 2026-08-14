@@ -3,7 +3,7 @@
 Own-copy (minimal) of `macos_midwife_plugin/manifest_writer.py`'s
 pattern: an audit-trail JSON recording what genesis did and when, at
 `<target>/profile/data/github_midwife/attempt.json` (the
-`profile/data/` root, not the homunculus root, so the boot-time
+`profile/data/` root, not the solet root, so the boot-time
 root-strictness check does not trip on a stray top-level file — same
 reasoning as the macos_midwife precedent).
 """
@@ -28,7 +28,7 @@ def build_marker_payload(
     """Assemble the JSON payload that lands in the marker file."""
     return {
         "schema_version": 1,
-        "homunculus_name": name,
+        "solet_name": name,
         "profile_name": profile_name,
         "status": status,
         "steps": [dict(step) for step in steps],

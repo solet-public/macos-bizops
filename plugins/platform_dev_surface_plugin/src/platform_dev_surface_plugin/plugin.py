@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from ananta.types.schema_types import SchemaDefinition
 
 PLUGIN_NAME = "platform_dev_surface_plugin"
-_ENV_HOMUNCULUS_NAME = "HOMUNCULUS_NAME"
+_ENV_SOLET_NAME = "SOLET_NAME"
 
 
 def _principal_label(call_context: CallContext | None) -> str:
@@ -72,10 +72,10 @@ class PlatformDevSurfacePlugin(PluginBase, QualityServiceInterface, RepoServiceI
 
     def prepare_for_readiness(self) -> None:
         """Locate the worktree root (via APP_HOME), capture identity, build ops."""
-        homunculus_name = os.environ.get(_ENV_HOMUNCULUS_NAME)
-        if not homunculus_name:
+        solet_name = os.environ.get(_ENV_SOLET_NAME)
+        if not solet_name:
             raise RuntimeError(
-                f"{PLUGIN_NAME}: {_ENV_HOMUNCULUS_NAME} env var is required "
+                f"{PLUGIN_NAME}: {_ENV_SOLET_NAME} env var is required "
                 "(set by the launching script)."
             )
         if self.orchestrator_ref is None:
@@ -86,7 +86,7 @@ class PlatformDevSurfacePlugin(PluginBase, QualityServiceInterface, RepoServiceI
         state_service = self.orchestrator_ref.get_service("state_service")
         if state_service is None:
             raise RuntimeError(f"{PLUGIN_NAME}: state_service not available (required for propose_patch)")
-        self._quality = QualityOperations(repo_root, homunculus_name)
+        self._quality = QualityOperations(repo_root, solet_name)
         self._repo = RepoOperations(repo_root, PatchStore(state_service))  # type: ignore[arg-type]
         self.logger.info("%s ready — worktree root %s", PLUGIN_NAME, repo_root)
         self.set_ready()

@@ -360,11 +360,11 @@ def _register_bridge_lifecycle_routes(
     async def open_bridge(
         body: OpenBridgeBody = Body(default_factory=OpenBridgeBody),  # noqa: B008
     ) -> JSONResponse:
-        # Bridge open is the one operation that needs the homunculus
+        # Bridge open is the one operation that needs the solet
         # name — the session_id_factory bound onto the manager closes
         # over it, so the handler doesn't need it explicitly.
         bridge = bridge_manager.open(
-            homunculus_name="", parent_pid=body.parent_pid,
+            solet_name="", parent_pid=body.parent_pid,
         )
         # §34.6 sender attribution: park the caller's opaque session key on the
         # in-memory bridge state ONLY. No registry write, no agent_instance_id,
@@ -914,7 +914,7 @@ def _register_peer_routes(
         return JSONResponse(
             content={
                 "transport": "bridge_http",
-                "homunculus_name": "",
+                "solet_name": "",
                 "agent_id": binding.agent_id,
                 "agent_instance_id": binding.agent_instance_id,
                 "agent_session_id": binding.agent_session_id,

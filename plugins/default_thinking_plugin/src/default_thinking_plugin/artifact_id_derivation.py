@@ -72,7 +72,7 @@ def parse_composition_metadata(text: str) -> tuple[int, str]:
     if genre_match is None:
         raise ArtifactIdDerivationError(
             "Missing required field 'genre' "
-            "(expected line like 'genre: neuro-ambient')"
+            "(expected line like 'genre: <genre-name>')"
         )
     return int(cn_match.group(1)), genre_match.group(1).lower()
 

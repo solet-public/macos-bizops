@@ -33,7 +33,7 @@ the REL-05 apparatus it insured. Pruned to the surviving role-only paths;
 see the architect memo, Amendment 4.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/watcher_ack_consumption_smoke.py
 """
 
@@ -307,8 +307,8 @@ def test_labelling() -> None:
     ):
         mgr = _bridge_manager()
         reg = _peer_registry()
-        watcher_bridge = mgr.open(homunculus_name="", parent_pid=77).bridge_id
-        live_bridge = mgr.open(homunculus_name="", parent_pid=88).bridge_id
+        watcher_bridge = mgr.open(solet_name="", parent_pid=77).bridge_id
+        live_bridge = mgr.open(solet_name="", parent_pid=88).bridge_id
         _register_binding(
             reg,
             bridge_id=watcher_bridge,
@@ -394,7 +394,7 @@ def test_events_ack_consumption() -> None:
     svc = _service(state, clock)
     mgr = _bridge_manager()
     reg = _peer_registry()
-    watcher_bridge = mgr.open(homunculus_name="", parent_pid=77).bridge_id
+    watcher_bridge = mgr.open(solet_name="", parent_pid=77).bridge_id
     _register_binding(
         reg,
         bridge_id=watcher_bridge,
@@ -454,7 +454,7 @@ def test_events_ack_is_watcher_only() -> None:
     svc = _service(state, clock)
     mgr = _bridge_manager()
     reg = _peer_registry()
-    live_bridge = mgr.open(homunculus_name="", parent_pid=88).bridge_id
+    live_bridge = mgr.open(solet_name="", parent_pid=88).bridge_id
     _register_binding(
         reg,
         bridge_id=live_bridge,
@@ -520,7 +520,7 @@ def test_inbox_catchup_consumption() -> None:
     svc = _service(state, clock)
     mgr = _bridge_manager()
     reg = _peer_registry()
-    watcher_bridge = mgr.open(homunculus_name="", parent_pid=77).bridge_id
+    watcher_bridge = mgr.open(solet_name="", parent_pid=77).bridge_id
     _register_binding(
         reg,
         bridge_id=watcher_bridge,
@@ -580,7 +580,7 @@ def test_inbox_default_catchup_returns_direct_important() -> None:
     svc = _service(state, clock)
     mgr = _bridge_manager()
     reg = _peer_registry()
-    watcher_bridge = mgr.open(homunculus_name="", parent_pid=77).bridge_id
+    watcher_bridge = mgr.open(solet_name="", parent_pid=77).bridge_id
     _register_binding(
         reg,
         bridge_id=watcher_bridge,
@@ -716,7 +716,7 @@ def test_inbox_is_watcher_only() -> None:
     svc = _service(state, clock)
     mgr = _bridge_manager()
     reg = _peer_registry()
-    live_bridge = mgr.open(homunculus_name="", parent_pid=88).bridge_id
+    live_bridge = mgr.open(solet_name="", parent_pid=88).bridge_id
     _register_binding(
         reg,
         bridge_id=live_bridge,
@@ -753,8 +753,8 @@ def test_peer_send_by_name_route_dispatches_from_bridge_identity() -> None:
     svc = _service(state, clock)
     mgr = _bridge_manager()
     reg = _peer_registry()
-    sender_bridge = mgr.open(homunculus_name="", parent_pid=66).bridge_id
-    watcher_bridge = mgr.open(homunculus_name="", parent_pid=77).bridge_id
+    sender_bridge = mgr.open(solet_name="", parent_pid=66).bridge_id
+    watcher_bridge = mgr.open(solet_name="", parent_pid=77).bridge_id
     _register_binding(
         reg,
         bridge_id=sender_bridge,

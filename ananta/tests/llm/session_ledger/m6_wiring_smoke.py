@@ -7,7 +7,7 @@ Run:
 
 Covers operator ruling 2026-05-31 (Gap 1 + Gap 2) end-to-end **plus** the
 2026-06-01 D8 ruling (hybrid extraction with inference fallback) without
-needing a running homunculus or LM Studio:
+needing a running solet or LM Studio:
 
 1. Schema for ``session_ledger_summary__embeddings`` is declared by
    ``get_session_ledger_summary_embeddings_schema`` AND registered

@@ -59,7 +59,7 @@ def get_plugin_config_schema() -> dict[str, object]:
             "pg_schema": {
                 "type": "string",
                 "title": "Schema Name",
-                "description": "PostgreSQL schema name (namespace for this homunculus)",
+                "description": "PostgreSQL schema name (namespace for this solet)",
                 "default": "ananta",
                 "pattern": "^[a-z][a-z0-9_]*$",
                 "x-group": "connection",

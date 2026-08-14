@@ -1,16 +1,16 @@
-# Cloud-Connector Setup — claude.ai + ChatGPT against a Cloud Homunculus
+# Cloud-Connector Setup — claude.ai + ChatGPT against a Cloud Solet
 
 ## When to use this
 
-The operator wants to reach a cloud homunculus from an external MCP client
+The operator wants to reach a cloud solet from an external MCP client
 that uses OAuth 2.1: claude.ai web custom-connectors, Claude Desktop, and
 (in development) ChatGPT custom-connectors. The transport is Streamable HTTP
 MCP over HTTPS, authenticated by an OAuth-2.1-minted sealed-box bearer token.
 
-Cloud homunculi sit behind an Application Load Balancer with an ACM-issued
+Cloud solets sit behind an Application Load Balancer with an ACM-issued
 public cert — TLS is ALB-native, no Caddy or mkcert involved. The OAuth 2.1
 surface served by `agent_messaging_plugin/mcp_streamable/` is the
-authentication layer. Local homunculi reachable from external MCP clients
+authentication layer. Local solets reachable from external MCP clients
 need a tunnel (OpenAI secure tunnel or equivalent) on top — that's a
 separate workstream, not this article.
 
@@ -18,7 +18,7 @@ For the daily Claude Code CLI + Codex CLI use case, this article does not
 apply: those use the stdio MCP bridge (`python -m
 agent_messaging_plugin.mcp_bridge`), not the Streamable HTTP transport.
 
-## OAuth 2.1 endpoints exposed by the homunculus
+## OAuth 2.1 endpoints exposed by the solet
 
 | Method + path | Purpose |
 |---|---|
@@ -148,11 +148,11 @@ notification.
 - **Stdio MCP bridge** for local Claude Code CLI + Codex CLI — uses
   `python -m agent_messaging_plugin.mcp_bridge`, not Streamable HTTP. See
   `02_platform_call_surface.md`.
-- **Tunnel-based local-homunculus access** — OpenAI secure tunnel for
+- **Tunnel-based local-solet access** — OpenAI secure tunnel for
   ChatGPT and (eventually) Anthropic equivalent for claude.ai reaching a
-  *local* homunculus. Separate workstream; verbs TBD.
+  *local* solet. Separate workstream; verbs TBD.
 - **Direct phone-on-Wi-Fi access via Caddy + mkcert + iOS trust profile** —
   retired 2026-06-15. That paradigm is superseded by Claude Code's `/rc`
   remote-control and Codex's mobile session-share, both of which route
   through Anthropic/OpenAI infrastructure without exposing the local
-  homunculus to direct external HTTPS.
+  solet to direct external HTTPS.

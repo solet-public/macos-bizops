@@ -11,6 +11,16 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+# Hoisted to the runner-neutral module (2026-08-14, registration-loss RCA):
+# these were never Codex-specific, and every spawned CLAUDE worker needed the
+# identical treatment -- that asymmetry is what left Claude workers
+# unregistered. Aliased to the established private names so no Codex call site
+# moves; `resolve_solet_bin` is now imported from `solet_cli` directly by the
+# drivers that need it, since a re-export through here reads as ownership it
+# no longer has.
+from .solet_cli import expose_worker_cli as _expose_worker_cli
+from .solet_cli import worker_path as _worker_path
+
 _CODEX_AGENT_ID = "codex"
 _COORDINATION_PLUGIN_PREFIX = "coordination-hooks@"
 _DEFAULT_RPC_TIMEOUT_SECONDS = 30.0
@@ -83,18 +93,18 @@ def _coordination_plugin_enabled(config: Mapping[str, object]) -> bool:
 
 
 def _mcp_server_config(
-    config: Mapping[str, object], homunculus_name: str,
+    config: Mapping[str, object], solet_name: str,
 ) -> Mapping[str, object] | None:
     servers = config.get("mcp_servers")
     if not isinstance(servers, Mapping):
         return None
-    server = servers.get(homunculus_name)
+    server = servers.get(solet_name)
     return server if isinstance(server, Mapping) else None
 
 
 def _identity_env(
     *, agent_instance_id: str, agent_session_id: str, label: str,
-    homunculus_name: str, transport: str,
+    solet_name: str, solet_bin: str, transport: str,
 ) -> dict[str, str]:
     env = dict(os.environ)
     # A managed worker is a new logical Codex session, never a continuation of
@@ -109,15 +119,15 @@ def _identity_env(
             env.pop(key)
     env.update(
         {
-            "HOMUNCULUS_NAME": homunculus_name,
+            "SOLET_NAME": solet_name,
             "AGENT_IDENTITY": _CODEX_AGENT_ID,
             "AGENT_INSTANCE_ID": agent_instance_id,
             "AGENT_SESSION_ID": agent_session_id,
             "AGENT_SESSION_LABEL": label,
-            "AGENT_WAKE_CLI": "homunculus",
             "FLEET_TRANSPORT": transport,
         },
     )
+    _expose_worker_cli(env, solet_bin)
     # role_name is intentionally absent.  spawn_session.role_name authorizes
     # a later claim; it does not itself bind a role or grant AGENT_ROLE.
     env.pop("AGENT_ROLE", None)
@@ -145,29 +155,33 @@ def _without_parent_runtime_env(argv: list[str]) -> list[str]:
 
 
 def _codex_config_overrides(
-    *, config: Mapping[str, object], homunculus_name: str, transport: str,
-    agent_instance_id: str, agent_session_id: str, label: str,
+    *, config: Mapping[str, object], solet_name: str, transport: str,
+    agent_instance_id: str, agent_session_id: str, label: str, solet_bin: str,
 ) -> list[str]:
     """Return Codex-native ``-c`` overrides for the selected transport."""
-    server = _mcp_server_config(config, homunculus_name)
+    overrides = [
+        "shell_environment_policy.set.PATH="
+        f"{_toml_string(_worker_path(solet_bin))}",
+    ]
+    server = _mcp_server_config(config, solet_name)
     if server is None:
-        return []
-    prefix = f"mcp_servers.{homunculus_name}"
+        return overrides
+    prefix = f"mcp_servers.{solet_name}"
     if transport == "watch":
-        return [f"{prefix}.enabled=false"]
+        return [*overrides, f"{prefix}.enabled=false"]
     identity = {
-        "HOMUNCULUS_NAME": homunculus_name,
+        "SOLET_NAME": solet_name,
         "AGENT_IDENTITY": _CODEX_AGENT_ID,
         "AGENT_INSTANCE_ID": agent_instance_id,
         "AGENT_SESSION_ID": agent_session_id,
         "AGENT_SESSION_LABEL": label,
-        "AGENT_WAKE_CLI": "homunculus",
+        "AGENT_WAKE_CLI": solet_bin or "solet",
         "FLEET_TRANSPORT": transport,
         # A managed-session lane label is cosmetic.  Role ownership remains a
         # model-initiated peer_claim_role action after the bootstrap turn.
         _MCP_ROLE_AUTOBIND_ENV: "0",
     }
-    overrides = [f"{prefix}.enabled=true"]
+    overrides.append(f"{prefix}.enabled=true")
     overrides.extend(
         f"{prefix}.env.{key}={_toml_string(value)}"
         for key, value in identity.items()
@@ -188,5 +202,3 @@ def _refuse_claude_provider_overlay(spec: Mapping[str, object]) -> None:
 
 def _command_succeeded(result: object) -> bool:
     return int(getattr(result, "returncode", 1)) == 0
-
-

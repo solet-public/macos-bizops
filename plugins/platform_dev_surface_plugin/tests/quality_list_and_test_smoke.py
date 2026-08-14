@@ -63,7 +63,7 @@ def _real_register_entries(repo_root: Path) -> list[str]:
 
 
 def _test_list_gates_maps_real_registry() -> None:
-    ops = QualityOperations(locate_repo_root(_APP_HOME), os.environ["HOMUNCULUS_NAME"])
+    ops = QualityOperations(locate_repo_root(_APP_HOME), os.environ["SOLET_NAME"])
     listing = ops.list_gates()
     names = {g["name"] for g in listing["gates"]}
     _check(
@@ -84,7 +84,7 @@ def _test_list_gates_maps_real_registry() -> None:
 
 def _test_list_gates_maps_real_register() -> None:
     repo_root = locate_repo_root(_APP_HOME)
-    ops = QualityOperations(repo_root, os.environ["HOMUNCULUS_NAME"])
+    ops = QualityOperations(repo_root, os.environ["SOLET_NAME"])
     listing = ops.list_gates()
     real = _real_register_entries(repo_root)
     _check(
@@ -99,7 +99,7 @@ def _test_list_gates_maps_real_register() -> None:
 
 
 def _test_run_test_rejects_unregistered() -> None:
-    ops = QualityOperations(locate_repo_root(_APP_HOME), os.environ["HOMUNCULUS_NAME"])
+    ops = QualityOperations(locate_repo_root(_APP_HOME), os.environ["SOLET_NAME"])
     try:
         ops.run_test(smoke="plugins/platform_dev_surface_plugin/tests/___not_registered___.py")
     except QualityGateError:
@@ -110,7 +110,7 @@ def _test_run_test_rejects_unregistered() -> None:
 
 def _test_run_test_runs_registered_smoke() -> None:
     """Integration: run one registered smoke end-to-end through run_test."""
-    ops = QualityOperations(locate_repo_root(_APP_HOME), os.environ["HOMUNCULUS_NAME"])
+    ops = QualityOperations(locate_repo_root(_APP_HOME), os.environ["SOLET_NAME"])
     result = ops.run_test(smoke=_SELF_REGISTERED_SMOKE)
     expected_keys = {
         "target",

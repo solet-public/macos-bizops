@@ -70,7 +70,7 @@ ALLOWLIST_ENV = "FLEET_HEADLESS_TOOL_ALLOWLIST"
 
 def _parse_allowlist(raw: str) -> frozenset[str]:
     """Comma-or-whitespace-separated tool names, e.g.
-    ``"mcp__<homunculus>__peer_register,mcp__<homunculus>__process_call"``.
+    ``"mcp__<solet>__peer_register,mcp__<solet>__process_call"``.
     An empty string parses to an empty frozenset (nothing extra allowed),
     never ``None``."""
     tokens: list[str] = []

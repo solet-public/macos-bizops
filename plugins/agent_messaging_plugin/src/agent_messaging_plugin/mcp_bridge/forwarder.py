@@ -1,7 +1,7 @@
 """HTTP forwarder for the Python MCP stdio bridge.
 
 The `Forwarder` owns the lifecycle of a single bridge session against
-the homunculus's consolidated `/api/v1/bridge/*` surface:
+the solet's consolidated `/api/v1/bridge/*` surface:
 
   - opens a bridge session at startup and remembers `bridge_id`
   - long-polls `/events` and emits each event as an MCP notification
@@ -10,7 +10,7 @@ the homunculus's consolidated `/api/v1/bridge/*` surface:
 
 The Node bridges this replaces hardcoded their port; this Forwarder
 takes a `base_url` discovered from `port_manager.read_port_file` so
-multi-homunculus operation works.
+multi-solet operation works.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ EVENTS_POLL_TIMEOUT_S: Final[float] = 25.0
 # Backoff after a transient HTTP failure before retrying the poll.
 POLL_RETRY_DELAY_S: Final[float] = 2.0
 
-# Backoff between bridge open/reconnect attempts when the homunculus is unreachable.
+# Backoff between bridge open/reconnect attempts when the solet is unreachable.
 BRIDGE_CONNECT_RETRY_S: Final[float] = 3.0
 
 # Consecutive poll failures tolerated before we attempt to reopen the bridge.
@@ -80,7 +80,7 @@ DEFAULT_REQUEST_TIMEOUT_S: Final[float] = 30.0
 UNCLAIMED_AGENT_SESSION_ID: Final[str] = "__unclaimed__"
 
 CLAUDE_CHANNEL_NOTIFICATION_METHOD: Final[str] = "notifications/claude/channel"
-HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD: Final[str] = "notifications/homunculus/peer_message"
+SOLET_PEER_MESSAGE_NOTIFICATION_METHOD: Final[str] = "notifications/homunculus/peer_message"
 CODEX_NATIVE_PEER_EVENT_TYPES: Final[frozenset[str]] = frozenset(
     {"peer_message", "post_message"},
 )
@@ -88,13 +88,13 @@ CODEX_NATIVE_PEER_EVENT_TYPES: Final[frozenset[str]] = frozenset(
 
 def _log(msg: str) -> None:
     """Write to stderr; stdout is reserved for MCP JSON-RPC framing."""
-    print(f"[homunculus-bridge] {msg}", file=sys.stderr, flush=True)
+    print(f"[solet-bridge] {msg}", file=sys.stderr, flush=True)
 
 
 # Path pattern for a route addressed at a specific bridge_id (Bridge id
 # prefix is ``agc-`` per agent_messaging_plugin/01_bridge_overview.md). A
-# 404 against such a path means the homunculus doesn't know this bridge anymore —
-# typically because the homunculus restarted and minted a fresh bridge_id pool, so
+# 404 against such a path means the solet doesn't know this bridge anymore —
+# typically because the solet restarted and minted a fresh bridge_id pool, so
 # the subprocess's cached id is stale. Anything matching this regex with
 # status 404 should trigger a reconnect.
 _BRIDGE_ID_ROUTE_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -157,7 +157,7 @@ def _role_claim_succeeded(payload: dict[str, Any]) -> bool:
 
 
 class BridgeHTTPError(RuntimeError):
-    """HTTP call to the homunculus bridge surface failed.
+    """HTTP call to the solet bridge surface failed.
 
     Carries optional ``status_code`` and ``path`` so :func:`_is_bridge_gone`
     can discriminate stale-bridge 404s (a 404 on a route addressed to a
@@ -177,12 +177,12 @@ class BridgeHTTPError(RuntimeError):
 
 
 class Forwarder:
-    """Owns the bridge session and forwards MCP tool calls to homunculus HTTP."""
+    """Owns the bridge session and forwards MCP tool calls to solet HTTP."""
 
     def __init__(
         self,
         base_url: str,
-        homunculus_name: str,
+        solet_name: str,
         *,
         agent_id: str,
         agent_instance_id: str,
@@ -195,7 +195,7 @@ class Forwarder:
         monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._homunculus_name = homunculus_name
+        self._solet_name = solet_name
         self._agent_id = agent_id
         self._agent_instance_id = agent_instance_id
         # v10 Control #2.D: the stable logical-session key, forwarded on every
@@ -289,7 +289,7 @@ class Forwarder:
     # ------------------------------------------------------------------
 
     async def _open_with_retry(self) -> None:
-        """Retry POST /api/v1/bridge/open until the homunculus accepts the connection."""
+        """Retry POST /api/v1/bridge/open until the solet accepts the connection."""
         attempt = 0
         while True:
             attempt += 1
@@ -307,7 +307,7 @@ class Forwarder:
                 _log(f"bridge opened (parent_pid={self._parent_pid}): {bridge_id}")
                 return
             except Exception as exc:  # noqa: BLE001
-                _log(f"waiting for homunculus bridge API (attempt {attempt}): {exc}")
+                _log(f"waiting for solet bridge API (attempt {attempt}): {exc}")
                 await asyncio.sleep(BRIDGE_CONNECT_RETRY_S)
 
     async def _register_identity(self) -> str | None:
@@ -494,7 +494,7 @@ class Forwarder:
         """Reopen the bridge, re-register identity, announce reconnect.
 
         After a successful re-register, emit a channel_message so the
-        operator sees ``Homunculus reconnected -- peer_registry restored as
+        operator sees ``Solet reconnected -- peer_registry restored as
         <label>`` (2026-06-01 reconnect-UX design §5.1). Slice A's
         server-side preserve-on-empty contract makes ``<label>`` the
         operator's last ``/rename`` value automatically; the prose
@@ -527,7 +527,7 @@ class Forwarder:
             if effective_label
             else "no prior label found"
         )
-        content = f"Homunculus reconnected -- {suffix}"
+        content = f"Solet reconnected -- {suffix}"
         # Wire-meta shape MUST match the 5-key contract Claude Code accepts
         # (see ``_claude_channel_meta`` — empty ``flow_id`` is silently
         # rejected at the client renderer). The announcement is locally
@@ -662,8 +662,8 @@ class Forwarder:
             content = f"[{source_event_type}] {content}"
         method = self._notification_method_for(source_event_type)
         meta = self._notification_meta_for(event, source_event_type, method)
-        if method == HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD:
-            content = self._homunculus_peer_message_content(
+        if method == SOLET_PEER_MESSAGE_NOTIFICATION_METHOD:
+            content = self._solet_peer_message_content(
                 content,
                 source_event_type,
                 meta,
@@ -687,7 +687,7 @@ class Forwarder:
             self._agent_id == "codex"
             and source_event_type in CODEX_NATIVE_PEER_EVENT_TYPES
         ):
-            return HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD
+            return SOLET_PEER_MESSAGE_NOTIFICATION_METHOD
         return CLAUDE_CHANNEL_NOTIFICATION_METHOD
 
     def _notification_meta_for(
@@ -699,8 +699,8 @@ class Forwarder:
         """Build wire meta for the selected notification method."""
         raw_meta = event.get("meta")
         event_meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
-        if method == HOMUNCULUS_PEER_MESSAGE_NOTIFICATION_METHOD:
-            return self._homunculus_peer_message_meta(event, source_event_type, event_meta)
+        if method == SOLET_PEER_MESSAGE_NOTIFICATION_METHOD:
+            return self._solet_peer_message_meta(event, source_event_type, event_meta)
         return self._claude_channel_meta(event, source_event_type, event_meta)
 
     def _claude_channel_meta(
@@ -732,7 +732,7 @@ class Forwarder:
             "cursor": str(event.get("cursor", "")),
         }
 
-    def _homunculus_peer_message_meta(
+    def _solet_peer_message_meta(
         self,
         event: dict[str, Any],
         source_event_type: str,
@@ -766,7 +766,7 @@ class Forwarder:
         return "" if flow_id_raw is None else str(flow_id_raw)
 
     @staticmethod
-    def _homunculus_peer_message_content(
+    def _solet_peer_message_content(
         content: str,
         source_event_type: str,
         meta: dict[str, Any],
@@ -813,7 +813,7 @@ class Forwarder:
                 message = str(parsed.get("message") or "")
             if not message:
                 message = response.text or response.reason_phrase
-            msg = f"Homunculus {path} failed ({response.status_code}): {message}"
+            msg = f"Solet {path} failed ({response.status_code}): {message}"
             raise BridgeHTTPError(
                 msg, status_code=response.status_code, path=path,
             )
@@ -824,7 +824,7 @@ class Forwarder:
     def _require_bridge(self) -> str:
         """Return current bridge_id or raise a clear error."""
         if self._bridge_id is None:
-            msg = "Bridge not ready yet -- waiting for homunculus bridge API to come online."
+            msg = "Bridge not ready yet -- waiting for solet bridge API to come online."
             raise BridgeHTTPError(msg)
         return self._bridge_id
 
@@ -902,7 +902,7 @@ class Forwarder:
         payload.update(
             {
                 "transport": "stdio",
-                "homunculus_name": self._homunculus_name,
+                "solet_name": self._solet_name,
                 "agent_session_id": self._agent_session_id,
                 "mcp_session_id": "",
                 "identity_trust": "stdio_bridge",

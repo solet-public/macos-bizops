@@ -27,10 +27,10 @@ gate that fetched its own old side, so it hid the round-2 gaps. This proves:
    has none, and FAILS CLOSED (raises) when the old tree can't be introspected;
    it never calls the collector when the current snapshot is already present.
 
-Requires ``HOMUNCULUS_NAME`` + ``APP_HOME`` (the collector gates discovery by the
+Requires ``SOLET_NAME`` + ``APP_HOME`` (the collector gates discovery by the
 profile manifest). Runs against a throwaway ``~/.ananta`` scratch root — NEVER
 the live ledger. Run:
-    HOMUNCULUS_NAME=<name> APP_HOME=<repo>/profile .venv/bin/python3 \\
+    SOLET_NAME=<name> APP_HOME=<repo>/profile .venv/bin/python3 \\
         plugins/macos_self_deployment_plugin/tests/schema_preflight_realsnapshot_smoke.py
 """
 
@@ -113,7 +113,7 @@ def _drop_one_column(snapshot: _Snapshot) -> tuple[_Snapshot, str]:
 
 def _make_plugin() -> MacosSelfDeploymentPlugin:
     plugin = MacosSelfDeploymentPlugin()
-    plugin._homunculus_name = "smoke"  # noqa: SLF001
+    plugin._solet_name = "smoke"  # noqa: SLF001
     return plugin
 
 
@@ -210,7 +210,7 @@ def test_real_producer_round_trip(rec: SmokeRecorder, scratch: Path) -> _Snapsho
     releases_root = scratch / "releases"
     rm = make_manager(_REPO_ROOT, releases_root)
     snapshot_fn = build_schema_snapshot_fn(
-        homunculus_name=os.environ["HOMUNCULUS_NAME"],
+        solet_name=os.environ["SOLET_NAME"],
         app_home=Path(os.environ["APP_HOME"]),
         source_root=_REPO_ROOT,
     )
@@ -277,7 +277,7 @@ def test_pure_gate(rec: SmokeRecorder, real: _Snapshot) -> _Snapshot:
 def test_baseline_derive(rec: SmokeRecorder, real: _Snapshot) -> None:
     print("5: baseline derive (B1·1) — derive old snapshot from current/code; fail-closed")
     snapshot_fn = build_schema_snapshot_fn(
-        homunculus_name=os.environ["HOMUNCULUS_NAME"],
+        solet_name=os.environ["SOLET_NAME"],
         app_home=Path(os.environ["APP_HOME"]),
         source_root=_REPO_ROOT,
     )

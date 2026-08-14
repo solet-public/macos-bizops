@@ -25,7 +25,7 @@ The root defect is that written state fails to declare its audience and its fres
 
 ## Scope
 
-This convention is platform-wide and governs the operator relationship of every homunculus. It was adopted by operator ruling on 2026-07-18 and ships in the platform knowledge base so newborn homunculi apply it with their own operators from day one.
+This convention is platform-wide and governs the operator relationship of every solet. It was adopted by operator ruling on 2026-07-18 and ships in the platform knowledge base so newborn solets apply it with their own operators from day one.
 
 It applies to every communication that asks the operator to decide, approve, or rule: peer messages addressed to the operator, coordinator reports with a section that needs the operator's eyes, morning summaries that end in questions, and written proposals awaiting ratification.
 
@@ -77,7 +77,7 @@ A generic example in the format, sized the way a real brief should be:
 
 ## Reference
 
-- `knowledge_bases/ananta_platform/24_operator_communication/02_homunculus_charter_template.md` — the charter template whose governance section this convention operationalizes.
+- `knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md` — the charter template whose governance section this convention operationalizes.
 - `knowledge_bases/ananta_platform/24_operator_communication/03_collaboration_craft.md` — the broader operator-collaboration craft this convention is one part of.
 - `ananta/knowledge_base/coordinator_dispatch_discipline.md` — the agent-to-agent counterpart of this operator-facing convention.
 - `service_interface::knowledge_service::search` — the search surface CHECKED FIRST evidence comes from.

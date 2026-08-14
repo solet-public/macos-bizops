@@ -2,7 +2,7 @@
 
 The plugin's client_id / client_secret / redirect_uri live in a single address
 book entry named ``google_oauth_app``. The ``client_secret`` field stores a
-``vault::<homunculus>.default_address_book_plugin.google_client_secret``
+``vault::<solet>.default_address_book_plugin.google_client_secret``
 reference (the secret lives in the RESOLVER's namespace so the address book can
 read it under its own identity — see :data:`constants.VAULT_KEY_CLIENT_SECRET`);
 every other field is a literal value. ``resolve_with_secrets`` swaps the vault
@@ -136,7 +136,7 @@ def _missing_entry_message() -> str:
         f'      {{"field_type": "{ADDRESS_BOOK_FIELD_CLIENT_SECRET}", '
         f'"value": "{secret_reference}"}},\n'
         f'      {{"field_type": "{ADDRESS_BOOK_FIELD_REDIRECT_URI}", '
-        '"value": "https://<homunculus-fqdn>/oauth/google/callback"}}\n'
+        '"value": "https://<solet-fqdn>/oauth/google/callback"}}\n'
         '    ]\n'
         '  }'
     )

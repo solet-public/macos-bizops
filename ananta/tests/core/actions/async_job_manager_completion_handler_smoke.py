@@ -63,6 +63,7 @@ Run:
 from __future__ import annotations
 
 import inspect
+import json
 import sys
 from pathlib import Path
 
@@ -71,6 +72,11 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
 from ananta.core.actions.action_factory import ActionFactory  # noqa: E402
 from ananta.core.state.async_job_manager import AsyncJobManager  # noqa: E402
+from ananta.core.state.job_completion_reach import (  # noqa: E402
+    COMPLETION_REACH_KEY,
+    REACH_BRIDGE_DISPATCH_NO_RETURN_PATH,
+    REACH_CHANNEL_FLOW,
+)
 from ananta.interfaces.state_service_protocol import StateServiceProtocol  # noqa: E402
 
 _RESULT_HANDLER_KEY = "plugin::_smoke_only::noop_result"  # wint:negative-fixture
@@ -121,8 +127,13 @@ class _FakeStateService:
     to swallow, so it raises rather than returning an empty result.
     """
 
-    def __init__(self, metadata: dict[str, object] | None) -> None:
+    def __init__(
+        self,
+        metadata: dict[str, object] | None,
+        trigger_type: str | None = "operator_message",
+    ) -> None:
         self._metadata = metadata
+        self._trigger_type = trigger_type
         self.update_state_calls: list[dict[str, object]] = []
         self.write_state_calls: list[dict[str, object]] = []
 
@@ -130,6 +141,21 @@ class _FakeStateService:
         table = query.get("table")
         if table == "job_payload":
             return {"action_status": "completed", "data": {"records": []}}
+        if table == "flows":
+            # Carried since _record_completion_reach (2026-08-14) classifies a
+            # job's origin from its flow's trigger_type. trigger_type=None
+            # stands for an unreadable flow row — the case that must leave the
+            # stamp ABSENT rather than guessing a value.
+            if self._trigger_type is None:
+                return {"action_status": "completed", "data": {"records": []}}
+            filters = query.get("filters")
+            flow_id = filters.get("id") if isinstance(filters, dict) else None
+            return {
+                "action_status": "completed",
+                "data": {
+                    "records": [{"id": flow_id, "trigger_type": self._trigger_type}]
+                },
+            }
         if table == "job":
             if self._metadata is None:
                 return {"action_status": "completed", "data": {"records": []}}
@@ -175,8 +201,9 @@ def _completion_handlers_metadata(
 
 def _make_manager(
     metadata: dict[str, object] | None,
+    trigger_type: str | None = "operator_message",
 ) -> tuple[AsyncJobManager, _FakeStateService, _FakeActionFactory, _FakeFlowRuntimeGraph]:
-    state = _FakeStateService(metadata=metadata)
+    state = _FakeStateService(metadata=metadata, trigger_type=trigger_type)
     factory = _FakeActionFactory()
     frg = _FakeFlowRuntimeGraph()
     manager = AsyncJobManager(state_service=state, flow_runtime_graph=frg)  # type: ignore[arg-type]
@@ -257,6 +284,125 @@ def test_missing_flow_id_fails_loud_not_silent() -> None:
     )
 
 
+def _stamped_reach(state: _FakeStateService) -> object | None:
+    """The completion_reach value written to the job's metadata, if any."""
+    for updates in state.update_state_calls:
+        raw = updates.get("metadata")
+        if not isinstance(raw, str):
+            continue
+        decoded = json.loads(raw)
+        if isinstance(decoded, dict) and COMPLETION_REACH_KEY in decoded:
+            return decoded[COMPLETION_REACH_KEY]
+    return None
+
+
+def test_bridge_dispatch_is_stamped_unreached() -> None:
+    """Case 5: a job dispatched by a bridge is stamped as having no return path.
+
+    Measured 2026-08-14: a completion never returns over the dispatching
+    bridge — the continuation posts into an IO channel a bridge flow does not
+    have — so the job row is the only place its result can be found. The
+    stamp is what makes that row findable.
+
+    (Mutation: drop the `self._record_completion_reach(job_id)` call from
+    `update_job`'s terminal branch -> this case goes from PASS to FAIL.)
+    """
+    manager, state, _factory, _frg = _make_manager(
+        _completion_handlers_metadata(), trigger_type="bridge_process_call"
+    )
+    manager.update_job("job-smoke-5", {"status": "completed", "result": {"ok": True}})
+    _check(
+        _stamped_reach(state) == REACH_BRIDGE_DISPATCH_NO_RETURN_PATH,
+        "a bridge_process_call flow stamps completion_reach="
+        f"{REACH_BRIDGE_DISPATCH_NO_RETURN_PATH}",
+    )
+
+
+def test_channel_flow_is_not_stamped_unreached() -> None:
+    """Case 6: a job from a channel flow is stamped as reachable, not unreached.
+
+    The negative control for case 5: without it, a stamp hardcoded to the
+    unreached value would pass case 5 while making the drain verb list every
+    finished job in the system.
+
+    (Mutation: make `_record_completion_reach` always stamp
+    REACH_BRIDGE_DISPATCH_NO_RETURN_PATH -> this case goes from PASS to FAIL.)
+    """
+    manager, state, _factory, _frg = _make_manager(
+        _completion_handlers_metadata(), trigger_type="operator_message"
+    )
+    manager.update_job("job-smoke-6", {"status": "completed", "result": {"ok": True}})
+    _check(
+        _stamped_reach(state) == REACH_CHANNEL_FLOW,
+        f"a non-bridge flow stamps completion_reach={REACH_CHANNEL_FLOW}",
+    )
+
+
+def test_unreadable_flow_leaves_stamp_absent() -> None:
+    """Case 7: an unreadable flow row leaves the stamp ABSENT, never guessed.
+
+    Absent means unmeasured. Writing a default here would let the drain verb
+    report a measurement nobody took.
+
+    (Mutation: make `_record_completion_reach` fall back to
+    REACH_CHANNEL_FLOW when `_read_flow_trigger_type` returns None -> this
+    case goes from PASS to FAIL.)
+    """
+    manager, state, _factory, _frg = _make_manager(
+        _completion_handlers_metadata(), trigger_type=None
+    )
+    result = manager.update_job("job-smoke-7", {"status": "completed", "result": {"ok": True}})
+    _check(
+        _stamped_reach(state) is None,
+        "an unreadable flow row writes no completion_reach value at all",
+    )
+    _check(
+        result.get("action_status") == "completed",
+        "a stamp that cannot be written does not fail the completion it describes",
+    )
+
+
+def test_stamp_survives_a_raising_completion_handler() -> None:
+    """Case 8: the stamp lands even when the continuation then fails loudly.
+
+    This is the doctrine's second ledger gap (a terminal row whose handler
+    raised, so nothing was submitted and no token resolved — a row that does
+    not LOOK stuck). Stamping BEFORE `_handle_completion_actions` is what
+    keeps such a row findable.
+
+    The fixture raises INSIDE the handler while flow_id is present: a
+    malformed process_key trips `_parse_process_key`'s ValueError during
+    `_build_action_definition`. Forcing the raise by removing flow_id instead
+    would prove nothing — with no flow to classify, the stamp is legitimately
+    skipped, so that fixture measures the wrong thing.
+
+    (Mutation: move the `record_completion_reach(...)` call to AFTER the
+    `_handle_completion_actions` call -> this case goes from PASS to FAIL.)
+    """
+    metadata = _completion_handlers_metadata()
+    handlers = metadata["completion_handlers"]
+    assert isinstance(handlers, dict)
+    result_handler = handlers["result"]
+    assert isinstance(result_handler, dict)
+    result_handler["process_key"] = "not_a_three_part_key"  # wint:negative-fixture
+    manager, state, factory, _frg = _make_manager(
+        metadata, trigger_type="bridge_process_call"
+    )
+    result = manager.update_job("job-smoke-8", {"status": "completed", "result": {"ok": True}})
+    _check(
+        result.get("action_status") == "error",
+        "the malformed-process_key failure surfaces loudly, not as a false completion",
+    )
+    _check(
+        len(factory.calls) == 0,
+        "no continuation was submitted for this job",
+    )
+    _check(
+        _stamped_reach(state) == REACH_BRIDGE_DISPATCH_NO_RETURN_PATH,
+        "the job is still stamped, so a row whose continuation never ran stays findable",
+    )
+
+
 def test_fakes_track_real_signatures() -> None:
     """Rail (coordinator seat, arm-6363cec0...): protocol drift must red this smoke."""
     real_submit = list(inspect.signature(ActionFactory.submit_action_definition).parameters)
@@ -289,6 +435,14 @@ def main() -> int:
     test_non_terminal_status_does_not_fire()
     print("\nCase 4: missing flow_id -> loud structured failure, not swallowed")
     test_missing_flow_id_fails_loud_not_silent()
+    print("\nCase 5: a bridge dispatch is stamped as having no return path")
+    test_bridge_dispatch_is_stamped_unreached()
+    print("\nCase 6: a channel flow is stamped reachable (negative control)")
+    test_channel_flow_is_not_stamped_unreached()
+    print("\nCase 7: an unreadable flow leaves the stamp absent, never guessed")
+    test_unreadable_flow_leaves_stamp_absent()
+    print("\nCase 8: the stamp lands even when the continuation then fails")
+    test_stamp_survives_a_raising_completion_handler()
     print("\nRail: fakes track the real protocol/implementation signatures")
     test_fakes_track_real_signatures()
 

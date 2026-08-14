@@ -304,7 +304,7 @@ def main() -> int:
         print("=== list_threads_live_smoke ===")
         print(
             "  SKIP  set AGENT_MESSAGING_LIST_THREADS_LIVE_SMOKE=1 to run; "
-            "needs the live homunculus DB."
+            "needs the live solet DB."
         )
         return 0
     print("=== list_threads_live_smoke ===")

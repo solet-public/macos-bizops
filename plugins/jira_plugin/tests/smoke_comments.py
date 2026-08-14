@@ -36,7 +36,7 @@ Exercises:
   11. transition_issue — missing transition_id raises ValueError
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 plugins/jira_plugin/tests/smoke_comments.py
+    SOLET_NAME=<name> .venv/bin/python3 plugins/jira_plugin/tests/smoke_comments.py
 
 Exits 0 on success, 1 on first failure.
 """

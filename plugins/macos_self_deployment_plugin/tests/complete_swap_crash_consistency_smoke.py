@@ -12,7 +12,7 @@ four deeper gaps, each pinned here:
   (a tick in the ``{record-write → swap}`` window, or after an aborted swap,
   never acts): ``SKIPPED_NOT_DURABLE``.
 * B2·2 — only the router-ACTIVE instance finishes a swap; any other
-  same-homunculus heartbeat is fenced off: ``SKIPPED_NOT_ACTIVE``.
+  same-solet heartbeat is fenced off: ``SKIPPED_NOT_ACTIVE``.
 * B2·3 — a recycled pid is unmasked by a start-time identity token and
   unregistered-without-signalling, NEVER killed (``UNREGISTERED_PID_REUSED``);
   and a raising ``os.kill`` / ``unregister`` cannot crash the heartbeat thread.
@@ -22,8 +22,8 @@ four deeper gaps, each pinned here:
 
 Real ``ps`` start-time tokens + real throwaway subprocesses exercise the genuine
 identity mechanism (not just stubs). Scratch lives under ``~/.ananta`` (operator
-NO-/tmp rule), cleaned in ``finally``; the homunculus names are throwaways, so
-nothing touches the live homunculus's state.
+NO-/tmp rule), cleaned in ``finally``; the solet names are throwaways, so
+nothing touches the live solet's state.
 
 Standalone — not pytest::
 
@@ -189,12 +189,12 @@ def _spawn_sleeper() -> subprocess.Popen[bytes]:
     return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])  # noqa: S603
 
 
-def _make_executor(runtime_dir: Path, homunculus_name: str) -> SwapExecutor:
+def _make_executor(runtime_dir: Path, solet_name: str) -> SwapExecutor:
     return SwapExecutor(
         router_client=cast("RouterClient", _StubRouter()),
         action_factory=_RaisingActionFactory(),
         session_factory=lambda: "sess-b2-smoke",
-        homunculus_name=homunculus_name,
+        solet_name=solet_name,
         runtime_dir=runtime_dir,
         set_color_active=cast("SetColorActiveFn", lambda _active: None),
         spawn_fn=cast("SpawnFn", lambda *_a: 0),
@@ -501,10 +501,10 @@ def test_executor_enqueue_failure_is_non_fatal(tmp: Path) -> None:
 
 def test_complete_swap_normal_path() -> None:
     print("scenario 7: complete_swap normal path is record-driven + identity-guarded (B2·3)")
-    homunculus = "b2completeswap"
-    path = pending_finisher_path(_runtime_dir(), homunculus)
+    solet = "b2completeswap"
+    path = pending_finisher_path(_runtime_dir(), solet)
     plugin = MacosSelfDeploymentPlugin()
-    plugin._homunculus_name = homunculus  # noqa: SLF001
+    plugin._solet_name = solet  # noqa: SLF001
     plugin._router_client = None  # noqa: SLF001 — unregister becomes a skip, identity is the focus
     try:
         # (a) record ABSENT → idempotent no-op (the backstop already converged).

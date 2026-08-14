@@ -25,7 +25,7 @@ The stubs replace only the DB seams (`_update_action_status_to_failed`,
 template/dispatch hop; the method under test is the shipped one.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         ananta/tests/core/actions/action_failure_error_typing_smoke.py
 """
 

@@ -61,7 +61,7 @@ def _baked_interpreter_path(releases_root: Path) -> Path:
 def _make_autostart(source: Path, releases_root: Path, scratch: Path) -> AutostartManager:
     """Real AutostartManager pointed at scratch; launchctl stubbed with /usr/bin/true."""
     return AutostartManager(
-        homunculus_name="smoke",
+        solet_name="smoke",
         project_root=source,
         plist_dir=scratch / "agents",
         releases_root=releases_root,
@@ -72,7 +72,7 @@ def _make_autostart(source: Path, releases_root: Path, scratch: Path) -> Autosta
 
 def _make_plugin(rm: ReleaseManager, am: AutostartManager) -> MacosSelfDeploymentPlugin:
     plugin = MacosSelfDeploymentPlugin()
-    plugin._homunculus_name = "smoke"  # noqa: SLF001
+    plugin._solet_name = "smoke"  # noqa: SLF001
     plugin.set_release_manager(rm)
     plugin.set_autostart_manager(am)
     return plugin

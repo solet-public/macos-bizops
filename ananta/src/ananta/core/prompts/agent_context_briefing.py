@@ -5,7 +5,7 @@ Phase 2 of the coding-agent substrate plan (§3.3/§3.4): ``assemble_agent_conte
 gives a frontier agent the grounding a Qwen prompt would have gotten — process
 catalog, plan state, guidance, support articles, the answer contract — as
 STRUCTURED DATA with provenance, so the agent can request grounding without
-asking the homunculus to think. It is a briefing service, not a prompt shrinker: by default
+asking the solet to think. It is a briefing service, not a prompt shrinker: by default
 every block is included (no destructive window-fitting unless the caller supplies
 a budget).
 

@@ -147,12 +147,20 @@ class BridgeBinding:
     # (stock Codex's bridge, which has no equivalent surface once the patched
     # build retires). Default true: every existing/non-declaring registration
     # path — Claude Code, GC, seat, every watcher binding above all — reads
-    # as no-tee, which is both operationally correct (a watcher is already
-    # its own spool feeder; tee-ing it too would double-write) and
-    # semantically honest (a watcher-fed session IS wakeable). Read at
-    # dispatch time by peer_dispatch.py's spool-tee sibling to
-    # drive_on_delivery, never at registration time — this is a persisted
-    # capability, not a one-shot side-effect trigger like provides_inference.
+    # as the common case.
+    #
+    # codex-0147-dead-spool-retirement (2026-08-13): this field is now
+    # PERSISTED COMPATIBILITY METADATA only — the dispatch-side spool tee
+    # that once read it (peer_dispatch.py's former
+    # ``_tee_spool_if_wake_incapable``) is retired, since stock Codex's Stop
+    # hook cannot consume it (async command hooks do not execute on stock
+    # Codex — codex-0147-async-hook-regression, 2026-08-13). A Codex
+    # recipient still reaches its delivery through the durable inbox /
+    # watch-transport read path and, for a spawn_session-managed worker,
+    # drive_on_delivery's driver-channel nudge — both independent of this
+    # flag's value. Kept on the schema/dataclass so a future native wake
+    # path can flip it without a migration; nothing currently branches on it
+    # at dispatch time.
     wake_capable: bool = True
 
     @property

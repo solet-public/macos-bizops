@@ -6,15 +6,18 @@ consumer_profile: both
 
 target_queries:
   - "how do I report a platform bug to the seed maintainers"
-  - "request a feature upstream from a deployed homunculus"
-  - "seed feedback pull request convention numbered parts"
+  - "request a feature upstream from a deployed solet"
+  - "file a seed feedback item as a github issue form"
+  - "should feedback be an issue or a pull request design document"
+  - "group a multi item feedback round under a parent issue"
   - "what is safe to include in an outbound feedback report"
   - "carrying a local fix should we upstream it"
+  - "how do I find out that my reported item was fixed"
   - "our seed feedback got no response is it deprioritized or overlooked"
 
 forbidden_queries:
   - "seed hydration environment setup postgres launchers"     # 01_hydration_runbook owns this
-  - "updating a live homunculus from a re-minted seed"        # 05_seed_update_runbook owns this
+  - "updating a live solet from a re-minted seed"        # 05_seed_update_runbook owns this
   - "deployment report card what remains to configure"        # 08_deployment_report_card owns this
 
 min_rank: 3

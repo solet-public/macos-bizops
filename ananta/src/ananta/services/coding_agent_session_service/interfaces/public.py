@@ -43,10 +43,10 @@ _AGENT_INSTANCE_ID_PARAM = ParameterMetadata(
     required=True,
     type=ParameterType.STRING,
 )
-_HOMUNCULUS_NAME_PARAM = ParameterMetadata(
+_SOLET_NAME_PARAM = ParameterMetadata(
     description=(
-        "Target homunculus the bridge connects to. E.g. 'example' "
-        "for a locally-run homunculus."
+        "Target solet the bridge connects to. E.g. 'example' "
+        "for a locally-run solet."
     ),
     required=True,
     type=ParameterType.STRING,
@@ -61,7 +61,7 @@ def _spawn_return_schema() -> ReturnValueSchema:
         properties={
             "status": ParameterMetadata(type=ParameterType.STRING, description="Terminal status."),
             "agent_instance_id": ParameterMetadata(type=ParameterType.STRING, description="Tracking key."),
-            "homunculus_name": ParameterMetadata(type=ParameterType.STRING, description="Target homunculus."),
+            "solet_name": ParameterMetadata(type=ParameterType.STRING, description="Target solet."),
             "pid": ParameterMetadata(type=ParameterType.INTEGER, description="Spawned bridge pid."),
             "started_at": ParameterMetadata(type=ParameterType.STRING, description="ISO-8601 UTC."),
             "message": ParameterMetadata(type=ParameterType.STRING, description="Human detail."),
@@ -118,7 +118,7 @@ class CodingAgentSessionServicePublicAPI(ABC):
         is_discoverable=True,
         parameters={
             "agent_instance_id": _AGENT_INSTANCE_ID_PARAM,
-            "homunculus_name": _HOMUNCULUS_NAME_PARAM,
+            "solet_name": _SOLET_NAME_PARAM,
         },
         return_value_schema=_spawn_return_schema(),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
@@ -132,7 +132,7 @@ class CodingAgentSessionServicePublicAPI(ABC):
         self,
         *,
         agent_instance_id: str,
-        homunculus_name: str,
+        solet_name: str,
     ) -> BridgeSpawnResult:
         """Spawn an MCP bridge subprocess for a coding-agent tab."""
 

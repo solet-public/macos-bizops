@@ -18,7 +18,7 @@ coerced; the entity upsert round-trips + is idempotent; the ingest is best-effor
 (never gates); role names are OPAQUE throughout.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/role_model_v4_slice_a_smoke.py
 """
 

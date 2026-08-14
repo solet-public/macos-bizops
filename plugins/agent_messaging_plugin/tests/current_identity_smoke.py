@@ -2,7 +2,7 @@
 """Smoke coverage for native MCP ``current_identity``.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/current_identity_smoke.py
 """
 
@@ -131,7 +131,7 @@ def _claim_role(
 
 def test_http_identity_uses_role_binding_not_label() -> None:
     manager = _bridge_manager()
-    bridge = manager.open(homunculus_name="", parent_pid=123)
+    bridge = manager.open(solet_name="", parent_pid=123)
     registry = _fresh_peer_registry()
     registry.register(
         _binding(
@@ -169,7 +169,7 @@ class _ForwarderProbe(Forwarder):
     def __init__(self) -> None:
         super().__init__(
             base_url="http://127.0.0.1:1",
-            homunculus_name="example-test",
+            solet_name="example-test",
             agent_id="codex",
             agent_instance_id="agi-stdio",
             agent_session_id="ags-stdio",
@@ -188,7 +188,7 @@ class _ForwarderProbe(Forwarder):
         self.requested_path = path
         return {
             "transport": "bridge_http",
-            "homunculus_name": "",
+            "solet_name": "",
             "agent_id": "codex",
             "agent_instance_id": "agi-stdio",
             "agent_session_id": "",
@@ -221,8 +221,8 @@ def test_stdio_current_identity_merges_transport_fields() -> None:
     )
     _check(payload.get("transport") == "stdio", "stdio transport is reported")
     _check(
-        payload.get("homunculus_name") == "example-test",
-        "stdio homunculus_name comes from forwarder",
+        payload.get("solet_name") == "example-test",
+        "stdio solet_name comes from forwarder",
     )
     _check(
         payload.get("agent_session_id") == "ags-stdio",
@@ -266,7 +266,7 @@ def _call_streamable_current_identity(
         platform_surface=cast(Any, object()),
         agent_messaging_service=cast(Any, object()),
         state_service=state,
-        homunculus_name="example-test",
+        solet_name="example-test",
     )
     response = dispatch_request(
         JsonRpcRequest(

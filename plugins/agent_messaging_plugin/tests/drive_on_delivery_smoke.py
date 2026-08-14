@@ -12,7 +12,8 @@ subprocess machinery.
 
 Covers the brief's slice-1 legs (a)-(d) plus (e), a regression guard added
 during seat sign-off (position 2: drive-on-delivery must never re-arm
-``report_by`` — that stays ``drive_session``'s own edge):
+``report_by`` — that stays ``drive_session``'s own edge), and the watcher
+identity reconciliation added for managed Codex delivery:
 
   (a) an eligible managed recipient's channel receives the notice, ALONGSIDE
       the existing notify (never instead of it — ruling 1 on the append_event
@@ -27,6 +28,8 @@ during seat sign-off (position 2: drive-on-delivery must never re-arm
   (d) a non-managed recipient (no managed_session row at all) is byte-
       identical to pre-lane behaviour — no driver lookup even attempted.
   (e) report_by is unchanged after a drive-on-delivery notice.
+  (f) a watcher registration resolves its managed spawn row by exact stable
+      ``agent_session_id``; ambiguous stable ids are never guessed.
 
 Run:
     .venv/bin/python3 plugins/agent_messaging_plugin/tests/drive_on_delivery_smoke.py
@@ -34,7 +37,6 @@ Run:
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from datetime import UTC, datetime
@@ -52,9 +54,7 @@ if TYPE_CHECKING:
 from _real_state_fake import RealShapeState  # noqa: E402
 from ananta.llm.agent_messaging.models import RoleMessagePersisted, TextPart  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
-from click.testing import CliRunner  # noqa: E402
 
-import agent_messaging_plugin.local_cli.wake as wake_mod  # noqa: E402
 import agent_messaging_plugin.session_hosts as session_hosts  # noqa: E402
 from agent_messaging_plugin.bridge_sessions import (  # noqa: E402
     DEFAULT_BINDING_LIVENESS_WINDOW_S,
@@ -184,13 +184,18 @@ class _FakeMessagingService:
         return _Result()
 
 
-def _binding() -> BridgeBinding:
+def _binding(
+    *,
+    agent_instance_id: str = _RECIPIENT_AGI,
+    agent_session_id: str = "",
+) -> BridgeBinding:
     return BridgeBinding(
         bridge_id="agc-recipient",
         agent_id="claude_code",
-        agent_instance_id=_RECIPIENT_AGI,
+        agent_instance_id=agent_instance_id,
         session_label="Recipient",
         parent_pid=4242,
+        agent_session_id=agent_session_id,
     )
 
 
@@ -198,9 +203,12 @@ class _FakePeerRegistry:
     """No native adapter registered — forces the append_event (channel-event)
     notify branch, orthogonal to the drive-on-delivery seam under test."""
 
+    def __init__(self, binding: BridgeBinding | None = None) -> None:
+        self._binding = binding or _binding()
+
     def resolve(self, agent_id: str, agent_instance_id: str | None) -> BridgeBinding:
         del agent_id, agent_instance_id
-        return _binding()
+        return self._binding
 
     def wake_adapter_for(self, agent_id: str) -> None:
         del agent_id
@@ -249,12 +257,18 @@ class _FakeMultiPeerRegistry:
         return self._by_instance.get(agent_instance_id)
 
 
-# --- wake_capable spool-tee fixtures (codex-watch-migration, 2026-08-06) ---
-# Sibling coverage to drive_on_delivery above, through the SAME dispatch_peer_send
-# seam -- see peer_dispatch.py's _tee_spool_if_wake_incapable.
+# --- dead-spool retirement fixtures (codex-0147, 2026-08-13) ---
+# peer_dispatch.py's dispatch-side spool tee (formerly named
+# _tee_spool_if_wake_incapable) is retired: stock Codex's Stop hook cannot
+# consume a spool file (async command hooks do not execute on stock Codex --
+# codex-0147-async-hook-regression, 2026-08-13), so the tee was writing an
+# unconsumed file on every wake_capable=false delivery. These legs prove
+# dispatch_peer_send / dispatch_role_send now write NOTHING to the path the
+# retired tee used to derive, through the SAME dispatch_peer_send /
+# dispatch_role_send seam drive_on_delivery above is proven through.
 
 _WC_SESSION_ID = "ases-wc-test-101-22222"
-_WC_HOMUNCULUS_NAME = "wc-testling"
+_WC_SOLET_NAME = "wc-testling"
 
 
 def _wc_binding(*, wake_capable: bool) -> BridgeBinding:
@@ -271,8 +285,9 @@ def _wc_binding(*, wake_capable: bool) -> BridgeBinding:
 
 class _FakeSingleBindingRegistry:
     """Resolves to exactly one pre-built binding, ignoring the
-    peer_id/instance hint -- these legs test the tee's OWN guard, not
-    resolution, which the existing _FakePeerRegistry already covers."""
+    peer_id/instance hint -- these legs prove the retired tee stays gone
+    (no spool file at the path it used to derive), not resolution, which
+    the existing _FakePeerRegistry already covers."""
 
     def __init__(self, binding: BridgeBinding) -> None:
         self._binding = binding
@@ -317,30 +332,26 @@ def _send_wc(
 
 def _wc_expected_spool_path() -> Path:
     instance_id = f"agi-watch-{watch_instance_digest(_WC_SESSION_ID)}"
-    return default_spool_path(_WC_HOMUNCULUS_NAME, instance_id)
+    return default_spool_path(_WC_SOLET_NAME, instance_id)
 
 
-def _wc_invoke_wake(spool: Path, *, max_wait: float = 0.2) -> Any:
-    with patch.object(wake_mod, "resolve_homunculus_name", lambda: _WC_HOMUNCULUS_NAME):
-        return CliRunner().invoke(
-            wake_mod.wake,
-            ["--spool", str(spool), "--max-wait", str(max_wait)],
-            env={"AGENT_SESSION_LABEL": "WC-Recipient", "AGENT_SESSION_ID": _WC_SESSION_ID},
-            obj={},
-        )
+class _FakeRoleMessagingService:
+    """Minimal persist_role_message stand-in, same shape as role_dispatch_smoke.py's
+    own _FakeService -- dispatch_role_send's persist/notify logic is not under
+    test here, only the (now-absent) spool tee that used to ride after it."""
+
+    def persist_role_message(self, **kwargs: Any) -> RoleMessagePersisted:
+        return RoleMessagePersisted(message_id=str(kwargs["message_id"]), created_at="")
 
 
-def test_wake_capable_recipient_never_tees() -> None:
-    """Leg 1 -- claude-office no-op. Must NOT touch the existing native-wake/
-    append_event assertions above (it doesn't -- this is a new, independent
-    test using its own fixtures). Named failing mutation: removing the
-    ``if recipient.wake_capable: return`` guard at the top of
-    ``_tee_spool_if_wake_incapable`` -- must red (a spool file appears where
-    none should, since this binding's wake_capable=True is the ONLY thing
-    stopping the write)."""
+def test_wake_capable_recipient_writes_no_spool() -> None:
+    """wake_capable=True recipient: no spool file. Unchanged behaviour from
+    before the retirement (this class never triggered the old tee's guard
+    either), kept as a regression guard against a future re-introduction
+    that gates on the wrong condition."""
     spool = _wc_expected_spool_path()
     spool.unlink(missing_ok=True)
-    with patch.dict(os.environ, {"HOMUNCULUS_NAME": _WC_HOMUNCULUS_NAME}):
+    with patch.dict(os.environ, {"SOLET_NAME": _WC_SOLET_NAME}):
         state = _state()
         outcome, manager = _send_wc(
             state, _wc_binding(wake_capable=True), content="IMPORTANT: wc capable ping",
@@ -352,115 +363,48 @@ def test_wake_capable_recipient_never_tees() -> None:
     )
     _check(
         outcome.delivery == DELIVERY_QUEUED_NOTIFICATION,
-        "wake_capable=true: delivery_kind untouched by the (no-op) tee",
+        "wake_capable=true: delivery_kind untouched",
     )
 
 
-def test_watcher_recipient_no_second_tee() -> None:
-    """Leg 2 -- bridge-less-worker unchanged. A watch-registered binding
-    (``is_watcher`` True via the ``agi-watch-`` prefix; ``wake_capable``
-    defaults True since nothing sets it False for a real watcher
-    registration) must get NO write from this new mechanism -- its own live
-    watch process is already its spool feeder, and a tee here would be a
-    SECOND, colliding writer. Named failing mutation: same guard removal as
-    leg 1 -- proves this recipient class is protected by the same guard, not
-    by some other coincidental gate."""
-    watcher_instance_id = f"agi-watch-{watch_instance_digest('ases-watcher-session')}"
-    binding = BridgeBinding(
-        bridge_id="agc-wc-watcher",
-        agent_id="claude_code",
-        agent_instance_id=watcher_instance_id,
-        session_label="Watcher",
-        parent_pid=4242,
-        agent_session_id="ases-watcher-session",
-    )
-    _check(binding.is_watcher, "fixture sanity: this binding IS a watcher binding")
-    _check(binding.wake_capable, "fixture sanity: wake_capable defaults True, unset by this binding")
-    spool = default_spool_path(_WC_HOMUNCULUS_NAME, watcher_instance_id)
-    spool.unlink(missing_ok=True)
-    with patch.dict(os.environ, {"HOMUNCULUS_NAME": _WC_HOMUNCULUS_NAME}):
-        state = _state()
-        outcome, manager = _send_wc(state, binding, content="IMPORTANT: wc watcher ping")
-    _check(
-        not spool.exists(),
-        "watcher recipient: this dispatch-side mechanism writes NOTHING (a real live "
-        "watch process would tee this delivery itself -- not simulated here, and this "
-        "mechanism must never duplicate it)",
-    )
-    _check(
-        outcome.delivery == DELIVERY_QUEUED_WATCHER,
-        "watcher recipient: existing delivery_kind (queued_watcher) untouched",
-    )
-    _check(len(manager.events) == 1, "watcher recipient: existing notify still fires unchanged")
-
-
-def test_wake_incapable_recipient_tees_and_real_wake_consumes() -> None:
-    """Leg 3 -- codex-class tee. Proves the write and read sides actually
-    COMPOSE against the REAL ``wake.py`` entry point, not a re-implemented
-    reader. Named failing mutation: removing the
-    ``_tee_spool_if_wake_incapable(recipient, delivered_prose)`` call site in
-    ``dispatch_peer_send`` -- must red on both the spool-file assertion and
-    the real ``wake()`` invocation's exit code."""
+def test_wake_incapable_dispatch_writes_no_spool() -> None:
+    """The central dead-spool-retirement leg (codex-0147, 2026-08-13). Before
+    this lane, a wake_capable=False (Codex) recipient got a dispatch-side
+    spool tee here that stock Codex's Stop hook could never consume; now it
+    must get NOTHING. Named failing mutation: restoring a
+    ``_tee_spool_if_wake_incapable``-shaped call site inside
+    ``dispatch_peer_send`` must red this (a spool file would appear where
+    none should, at the exact path the retired tee used to derive)."""
     spool = _wc_expected_spool_path()
     spool.unlink(missing_ok=True)
     spool_offset_path(spool).unlink(missing_ok=True)
-    with patch.dict(os.environ, {"HOMUNCULUS_NAME": _WC_HOMUNCULUS_NAME}):
+    with patch.dict(os.environ, {"SOLET_NAME": _WC_SOLET_NAME}):
         state = _state()
         outcome, manager = _send_wc(
             state, _wc_binding(wake_capable=False), content="IMPORTANT: codex wc ping",
         )
     _check(
-        spool.exists(),
-        "wake_capable=false: a spool file appears at the DERIVED default path -- proving "
-        "dispatch and wake.py agree on the path with zero handshake",
+        not spool.exists(),
+        "wake_capable=false: dispatch writes nothing at the path the retired tee "
+        "used to derive -- no dead spool left behind",
     )
-    if spool.exists():
-        line = spool.read_text(encoding="utf-8").strip()
-        _check(bool(line), "the spool line is non-empty")
-        try:
-            parsed: Any = json.loads(line)
-        except json.JSONDecodeError:
-            parsed = None
-        _check(
-            isinstance(parsed, dict) and "codex wc ping" in json.dumps(parsed),
-            f"the tee'd line carries the delivered prose (got {line!r})",
-        )
     _check(
         outcome.delivery == DELIVERY_QUEUED_NOTIFICATION,
-        "wake_capable=false: existing delivery_kind untouched by the tee",
+        "wake_capable=false: existing delivery_kind untouched by the retirement",
     )
     _check(
         len(manager.events) == 1,
-        "wake_capable=false: existing channel-event notify STILL fires ALONGSIDE the tee",
+        "wake_capable=false: existing channel-event notify still fires unchanged",
     )
-    result = _wc_invoke_wake(spool)
-    _check(
-        result.exit_code == wake_mod.WAKE_EXIT_SIGNAL,
-        f"the REAL wake.py entry point unblocks on the dispatch-written spool "
-        f"(exit {result.exit_code}, output {result.output!r})",
-    )
-    _check("codex wc ping" in result.stderr, "the real wake packet surfaces the tee'd content")
 
 
-class _FakeRoleMessagingService:
-    """Minimal persist_role_message stand-in, same shape as role_dispatch_smoke.py's
-    own _FakeService -- dispatch_role_send's persist/notify logic is not under
-    test here, only the wake_capable tee riding after it."""
-
-    def persist_role_message(self, **kwargs: Any) -> RoleMessagePersisted:
-        return RoleMessagePersisted(message_id=str(kwargs["message_id"]), created_at="")
-
-
-def test_wake_incapable_role_send_also_tees() -> None:
-    """dispatch_role_send parity leg. Role-addressed sends
-    (``peer_send_by_name``) are the PRIMARY way an office is reached -- this
-    proves the tee fires on that call site independently, not merely by
-    resemblance to the dispatch_peer_send legs above. Named failing
-    mutation: removing the ``_tee_spool_if_wake_incapable(recipient,
-    delivered_prose)`` call site INSIDE ``dispatch_role_send`` (not the
-    ``dispatch_peer_send`` one already proven by legs 3-4) must red EXACTLY
-    this leg and nothing else -- that exactness is what proves the two call
-    sites are independently covered rather than one shadowing the other."""
+def test_wake_incapable_role_send_writes_no_spool() -> None:
+    """dispatch_role_send parity leg -- proves the tee's role-addressed call
+    site is ALSO gone, independent of the dispatch_peer_send leg above
+    (role-addressed sends are the primary way a Codex office is reached).
+    Named failing mutation: restoring a ``_tee_spool_if_wake_incapable``-
+    shaped call site INSIDE ``dispatch_role_send`` must red EXACTLY this
+    leg and nothing else."""
     spool = _wc_expected_spool_path()
     spool.unlink(missing_ok=True)
     spool_offset_path(spool).unlink(missing_ok=True)
@@ -471,7 +415,7 @@ def test_wake_incapable_role_send_also_tees() -> None:
         agent_instance_id=binding.agent_instance_id,
         session_label=binding.session_label,
     )
-    with patch.dict(os.environ, {"HOMUNCULUS_NAME": _WC_HOMUNCULUS_NAME}):
+    with patch.dict(os.environ, {"SOLET_NAME": _WC_SOLET_NAME}):
         state = _state()
         manager = _FakeBridgeManager()
         registry = _FakeSingleBindingRegistry(binding)
@@ -491,64 +435,17 @@ def test_wake_incapable_role_send_also_tees() -> None:
             message_id="arm-wc-role-test",
         )
     _check(
-        spool.exists(),
-        "role-send to wake_capable=false recipient: spool file appears at the "
-        "derived default path",
+        not spool.exists(),
+        "role-send to wake_capable=false recipient: no spool file appears at the "
+        "path the retired tee used to derive",
     )
-    if spool.exists():
-        line = spool.read_text(encoding="utf-8").strip()
-        _check(
-            "role wc ping" in line,
-            f"the tee'd line carries the role-send prose (got {line!r})",
-        )
     _check(
         outcome.delivery == DELIVERY_QUEUED_NOTIFICATION,
-        "role-send: existing delivery_kind untouched by the tee",
+        "role-send: existing delivery_kind untouched by the retirement",
     )
     _check(
         len(manager.events) == 1,
-        "role-send: the existing channel-event notify still fires ALONGSIDE the tee",
-    )
-    result = _wc_invoke_wake(spool)
-    _check(
-        result.exit_code == wake_mod.WAKE_EXIT_SIGNAL,
-        f"the REAL wake.py entry point unblocks on the role-send-written spool "
-        f"(exit {result.exit_code}, output {result.output!r})",
-    )
-    _check("role wc ping" in result.stderr, "the real wake packet surfaces the role-send content")
-
-
-def test_wake_incapable_recipient_second_delivery_also_consumable() -> None:
-    """Leg 4 -- lifecycle-advancing leg
-    ([[feedback_a_lifecycle_claim_needs_a_fixture_that_advances]]). A SECOND
-    delivery to the same wake_capable=false recipient, after the FIRST has
-    already been consumed by a real ``wake()`` call, must also tee and be
-    independently consumable -- proves this is a live, repeatable mechanism,
-    not a one-shot fixture artifact that happens to pass once. Named failing
-    mutation: an emit/commit ordering bug on the reader side that only
-    manifests against a SECOND producer write would pass leg 3 alone but
-    fail here."""
-    spool = _wc_expected_spool_path()
-    spool.unlink(missing_ok=True)
-    spool_offset_path(spool).unlink(missing_ok=True)
-    with patch.dict(os.environ, {"HOMUNCULUS_NAME": _WC_HOMUNCULUS_NAME}):
-        state = _state()
-        _send_wc(state, _wc_binding(wake_capable=False), content="IMPORTANT: first wc ping")
-        first = _wc_invoke_wake(spool)
-        _check(
-            first.exit_code == wake_mod.WAKE_EXIT_SIGNAL,
-            "leg 4 setup: the first delivery's real wake() consumes cleanly",
-        )
-        _send_wc(state, _wc_binding(wake_capable=False), content="IMPORTANT: second wc ping")
-    second = _wc_invoke_wake(spool)
-    _check(
-        second.exit_code == wake_mod.WAKE_EXIT_SIGNAL,
-        f"a SECOND independent delivery also tees and wakes (exit {second.exit_code})",
-    )
-    _check("second wc ping" in second.stderr, "the second wake surfaces the NEW content")
-    _check(
-        "first wc ping" not in second.stderr,
-        "the second wake does not re-surface already-consumed content",
+        "role-send: the existing channel-event notify still fires unchanged",
     )
 
 
@@ -584,9 +481,13 @@ class _FakeBridgeManager:
         self.events.append((bridge_id, event, prose, meta))
 
 
-def _send(state: StateManagementInterface) -> tuple[Any, _FakeBridgeManager]:
+def _send(
+    state: StateManagementInterface,
+    *,
+    binding: BridgeBinding | None = None,
+) -> tuple[Any, _FakeBridgeManager]:
     manager = _FakeBridgeManager()
-    registry = _FakePeerRegistry()
+    registry = _FakePeerRegistry(binding)
     outcome = dispatch_peer_send(
         bridge_manager=manager,  # type: ignore[arg-type]
         peer_registry=registry,  # type: ignore[arg-type]
@@ -726,7 +627,10 @@ def test_raising_channel_never_fails_the_send() -> None:
             outcome is not None and outcome.delivery == DELIVERY_QUEUED_NOTIFICATION,
             "the caller's own delivery outcome is untouched by the channel fault",
         )
-        _check(driver.channel.sent == [], "nothing recorded as sent (the raise happened inside send)")
+        _check(
+            driver.channel.sent == [],
+            "nothing recorded as sent (the raise happened inside send)",
+        )
     finally:
         _remove_fake_host()
 
@@ -766,6 +670,95 @@ def test_report_by_unchanged_after_drive_on_delivery() -> None:
             report_by_before == report_by_after,
             "report_by is byte-identical before/after a drive-on-delivery notice "
             f"(before={report_by_before!r}, after={report_by_after!r})",
+        )
+    finally:
+        _remove_fake_host()
+
+
+def test_watcher_identity_resolves_exact_managed_session() -> None:
+    """(f) A managed watch worker registers under ``agi-watch-*`` while its
+    managed row retains the spawn-time instance id. The stable session id is
+    the exact, backfilled join key; dispatch must carry it into the driver
+    lookup so a delivery still starts the managed worker's next turn."""
+    driver = _install_fake_host()
+    try:
+        state = _state()
+        spawned_instance_id = "agi-spawned-codex-worker"
+        stable_session_id = "ases-agi-spawned-codex-worker"
+        watcher_instance_id = f"agi-watch-{watch_instance_digest(stable_session_id)}"
+        _insert(state, agent_instance_id=spawned_instance_id)
+        state.update_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {
+                "table": "managed_session",
+                "filters": {"agent_instance_id": spawned_instance_id, "is_deleted": 0},
+            },
+            {"agent_session_id": stable_session_id},
+        )
+        transition_lifecycle_state(
+            state, agent_instance_id=spawned_instance_id,
+            from_state=LIFECYCLE_SPAWNING, to_state=LIFECYCLE_LIVE,
+            directed_by="test:none",
+        )
+        outcome, manager = _send(
+            state,
+            binding=_binding(
+                agent_instance_id=watcher_instance_id,
+                agent_session_id=stable_session_id,
+            ),
+        )
+        _check(
+            len(driver.channel.sent) == 1 and "drain peer_inbox" in driver.channel.sent[0],
+            "watcher stable session id resolves the managed spawn driver's channel",
+        )
+        _check(len(manager.events) == 1, "watcher delivery still queues its ordinary event")
+        _check(
+            outcome.delivery == DELIVERY_QUEUED_WATCHER,
+            "watcher identity reconciliation does not relabel the delivery outcome",
+        )
+    finally:
+        _remove_fake_host()
+
+
+def test_watcher_identity_ambiguity_never_drives() -> None:
+    """A corrupt duplicate stable id must fail closed: no arbitrary managed
+    row receives the notice, while the ordinary durable delivery proceeds."""
+    driver = _install_fake_host()
+    try:
+        state = _state()
+        stable_session_id = "ases-duplicate-managed-lineage"
+        watcher_instance_id = f"agi-watch-{watch_instance_digest(stable_session_id)}"
+        for index in (1, 2):
+            spawned_instance_id = f"agi-duplicate-{index}"
+            _insert(state, agent_instance_id=spawned_instance_id)
+            state.update_state(
+                AGENT_ROLE_BINDING_NAMESPACE,
+                {
+                    "table": "managed_session",
+                    "filters": {
+                        "agent_instance_id": spawned_instance_id,
+                        "is_deleted": 0,
+                    },
+                },
+                {"agent_session_id": stable_session_id},
+            )
+            transition_lifecycle_state(
+                state, agent_instance_id=spawned_instance_id,
+                from_state=LIFECYCLE_SPAWNING, to_state=LIFECYCLE_LIVE,
+                directed_by="test:none",
+            )
+        outcome, manager = _send(
+            state,
+            binding=_binding(
+                agent_instance_id=watcher_instance_id,
+                agent_session_id=stable_session_id,
+            ),
+        )
+        _check(driver.channel.sent == [], "ambiguous stable session id drives no managed row")
+        _check(len(manager.events) == 1, "ambiguous mapping does not suppress ordinary delivery")
+        _check(
+            outcome.delivery == DELIVERY_QUEUED_WATCHER,
+            "ambiguous mapping does not change the delivery outcome",
         )
     finally:
         _remove_fake_host()
@@ -842,7 +835,8 @@ def test_sweep_deadline_edge_drives_a_live_managed_waiter() -> None:
         _check(fired == 1, f"sweep_deadline_dependencies fired exactly 1 edge (got {fired})")
         _check(
             len(manager.events) == 1 and manager.events[0][1] == EVENT_SESSION_DEPENDENCY_WAKE,
-            "the existing session_dependency_wake append_event STILL fires (ALONGSIDE, not replaced)",
+            "the existing session_dependency_wake append_event STILL fires "
+            "(ALONGSIDE, not replaced)",
         )
         _check(
             len(driver.channel.sent) == 1 and "drain peer_inbox" in driver.channel.sent[0],
@@ -936,15 +930,15 @@ def main() -> int:
     test_raising_channel_never_fails_the_send()
     test_non_managed_recipient_unaffected()
     test_report_by_unchanged_after_drive_on_delivery()
+    test_watcher_identity_resolves_exact_managed_session()
+    test_watcher_identity_ambiguity_never_drives()
     test_state_service_none_never_raises()
     test_sweep_deadline_edge_drives_a_live_managed_waiter()
     test_sweep_overdue_steward_notice_unmanaged_steward_byte_unchanged()
     test_sweep_overdue_steward_notice_drives_a_managed_steward()
-    test_wake_capable_recipient_never_tees()
-    test_watcher_recipient_no_second_tee()
-    test_wake_incapable_recipient_tees_and_real_wake_consumes()
-    test_wake_incapable_role_send_also_tees()
-    test_wake_incapable_recipient_second_delivery_also_consumable()
+    test_wake_capable_recipient_writes_no_spool()
+    test_wake_incapable_dispatch_writes_no_spool()
+    test_wake_incapable_role_send_writes_no_spool()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

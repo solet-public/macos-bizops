@@ -22,7 +22,7 @@ Cases:
    ACTUAL local ``FilesystemProvider`` (not the stub): proves the real
    ``retrieve_blob`` envelope (``data["content"]`` = ``content.hex()``) decodes
    byte-exact, so the offloaded backfill key matches a live re-ingest's. Local
-   homunculi use this filesystem provider; S3 is AWS-only.
+   solets use this filesystem provider; S3 is AWS-only.
 
 Reuses ``_LiveStateAdapter`` / ``_make_event`` / ``_load_pg_config`` / ``_row``
 from ``ingest_migration_live_smoke``. Env-gated behind ``LEDGER_BACKFILL_LIVE_SMOKE=1``.
@@ -318,7 +318,7 @@ def test_real_blob_fetch_round_trip(provider: PostgresProvider) -> None:
     metadata to Postgres, ``fetch_event_text`` does the real ``retrieve_blob`` →
     ``data["content"]`` (``content.hex()``) → decode. Proves the real envelope
     shape (no actr-style nesting surprise) end-to-end: an oversized UTF-8 payload
-    round-trips byte-exact. Local homunculi use this filesystem provider; S3 is
+    round-trips byte-exact. Local solets use this filesystem provider; S3 is
     AWS-only.
     """
     with tempfile.TemporaryDirectory() as app_home:
@@ -345,7 +345,7 @@ def main() -> int:
         print("=== event_external_id_backfill_live_smoke ===")
         print(
             "  SKIP  set LEDGER_BACKFILL_LIVE_SMOKE=1 to run; "
-            "needs the live homunculus DB."
+            "needs the live solet DB."
         )
         return 0
     print("=== event_external_id_backfill_live_smoke ===")

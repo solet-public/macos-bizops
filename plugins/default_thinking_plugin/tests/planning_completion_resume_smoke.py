@@ -27,7 +27,7 @@ and excluded):
       (one post-completion path, no drift).
 
 Offline: recording fakes over the real plugin seam code + static ast over
-the real source. No live homunculus / LM Studio / Postgres.
+the real source. No live solet / LM Studio / Postgres.
 
 Run from repo root:
     .venv/bin/python3 plugins/default_thinking_plugin/tests/planning_completion_resume_smoke.py

@@ -12,7 +12,7 @@ NOW, independent of D0.3 (coordinator-seat ruling, M0 review, 2026-08-09).
 
 Every failure contract the two wrapped scripts already earned is preserved
 VERBATIM, not redesigned:
-  * homunculus unreachable on export -> hydrate is skipped entirely, non-zero exit,
+  * solet unreachable on export -> hydrate is skipped entirely, non-zero exit,
     the last projection stays untouched (never a partial write).
   * A record with no slot tag, an unresolvable slot path, or invalid
     frontmatter -> the whole render aborts non-zero (never a half-written
@@ -50,22 +50,22 @@ import drain as _drain
 import hydrate_render as _hydrate
 
 EXPORT_PROCESS_KEY = "service_interface::memory_service::export_memories"
-_HOMUNCULUS_TIMEOUT_SECONDS = 60
+_SOLET_TIMEOUT_SECONDS = 60
 
 
-def _homunculus_call(process_key: str, arguments: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
-    """Shell out to the ``homunculus`` CLI (this script has no MCP bridge of
+def _solet_call(process_key: str, arguments: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Shell out to the ``solet`` CLI (this script has no MCP bridge of
     its own, same reason ``drain``/``hydrate_render`` are agent-mediated
     rather than server-side). Returns ``(envelope, None)`` on a parseable
     response, or ``(None, <error text>)`` -- never raises, so callers decide
     fail-loud-and-stop vs. fail-loud-and-report per their own contract."""
     try:
         result = subprocess.run(
-            ["homunculus", "call", process_key, json.dumps(arguments)],
-            capture_output=True, text=True, timeout=_HOMUNCULUS_TIMEOUT_SECONDS, check=False,
+            ["solet", "call", process_key, json.dumps(arguments)],
+            capture_output=True, text=True, timeout=_SOLET_TIMEOUT_SECONDS, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return None, f"homunculus call {process_key} failed to run: {exc}"
+        return None, f"solet call {process_key} failed to run: {exc}"
     if result.returncode != 0:
         # The CLI writes its JSON error envelope to STDOUT even on a non-zero
         # exit (measured live 2026-08-09 against export_memories' own
@@ -73,11 +73,11 @@ def _homunculus_call(process_key: str, arguments: dict[str, Any]) -> tuple[dict[
         # surfacing only stderr here would silently swallow the actual
         # error_message every time.
         detail = result.stdout.strip() or result.stderr.strip()
-        return None, f"homunculus call {process_key} exited {result.returncode}: {detail[:400]}"
+        return None, f"solet call {process_key} exited {result.returncode}: {detail[:400]}"
     try:
         return json.loads(result.stdout), None
     except json.JSONDecodeError as exc:
-        return None, f"homunculus call {process_key} returned unparseable output: {exc}"
+        return None, f"solet call {process_key} returned unparseable output: {exc}"
 
 
 def _default_spool_path() -> Path:
@@ -93,12 +93,12 @@ def _default_spool_path() -> Path:
 def cmd_hydrate(spool_arg: str | None) -> int:
     spool_path = Path(spool_arg) if spool_arg else _default_spool_path()
     spool_path.parent.mkdir(parents=True, exist_ok=True)
-    envelope, err = _homunculus_call(
+    envelope, err = _solet_call(
         EXPORT_PROCESS_KEY,
         {"tags": [_journal.UMBRELLA_TAG, _journal.origin_tag()], "file_path": str(spool_path)},
     )
     if err is not None or envelope is None:
-        print(f"HYDRATE SKIPPED (homunculus unreachable, last projection untouched): {err}", file=sys.stderr)
+        print(f"HYDRATE SKIPPED (solet unreachable, last projection untouched): {err}", file=sys.stderr)
         return 1
     result_block = envelope.get("result")
     if envelope.get("status") != "completed" or not isinstance(result_block, dict) or not result_block.get("success", True):
@@ -136,7 +136,7 @@ def cmd_drain() -> int:
     submitted = 0
     failures: list[dict[str, str]] = []
     for entry in upserts:
-        envelope, err = _homunculus_call(entry["process_key"], entry["arguments"])
+        envelope, err = _solet_call(entry["process_key"], entry["arguments"])
         if err is not None or not isinstance(envelope, dict) or envelope.get("status") != "completed":
             failures.append({"path": entry["path"], "error": err or json.dumps(envelope)[:300]})
             continue

@@ -2,8 +2,8 @@
 
 A shared library function — NOT a separate process — invoked under a host-level
 ``flock`` by whichever drainer is currently cycling. The flock serialises
-concurrent janitor runs across every local drainer (in-process local-homunculus drainer
-plus, from M1.5b, the client-deployed cloud-homunculus drainers), so it runs
+concurrent janitor runs across every local drainer (in-process local-solet drainer
+plus, from M1.5b, the client-deployed cloud-solet drainers), so it runs
 correctly in local-only, cloud-only, and mixed topologies with no daemon to
 supervise.
 

@@ -168,12 +168,12 @@ SUBPROCESS_CAPABLE_HOOKS = frozenset(
 )
 # The fixed process_key each hook's subprocess.run call must carry verbatim --
 # same shape-fixity property as the wake waiter's argv check below, applied to
-# the homunculus-CLI callers. sync.py legitimately calls more than one
+# the solet-CLI callers. sync.py legitimately calls more than one
 # process_key (export once, upsert per pending entry); its own named
 # constant EXPORT_PROCESS_KEY is checked as the representative fixed value --
 # proving the fixed-shape/no-shell/subprocess.run-only properties hold, the
-# same bar every other homunculus-calling hook here is held to.
-HOMUNCULUS_CALLER_PROCESS_KEYS = {
+# same bar every other solet-calling hook here is held to.
+SOLET_CALLER_PROCESS_KEYS = {
     "heartbeat_report_alive.py": "plugin::agent_messaging_plugin::report_alive",
     "rotation_due_watch.py": "plugin::agent_messaging_plugin::session_status",
     "sync.py": "service_interface::memory_service::export_memories",
@@ -525,7 +525,7 @@ def check_subprocess_capable_hooks(res: Results, hooks: list[str], siblings: lis
         f"expected {sorted(SUBPROCESS_CAPABLE_HOOKS)}, found {sorted(owners)}",
     )
 
-    for name, process_key in HOMUNCULUS_CALLER_PROCESS_KEYS.items():
+    for name, process_key in SOLET_CALLER_PROCESS_KEYS.items():
         source = (HOOKS_DIR / name).read_text(encoding="utf-8")
         res.check(
             re.search(r"\bshell\s*=\s*True", source) is None,
@@ -540,13 +540,13 @@ def check_subprocess_capable_hooks(res: Results, hooks: list[str], siblings: lis
         )
         res.check(
             process_key in source,
-            f"{name}'s homunculus-call argv carries its fixed process_key",
+            f"{name}'s solet-call argv carries its fixed process_key",
             f"expected {process_key!r} to appear in the source as a named constant",
         )
         res.check(
-            re.search(r'\["homunculus",\s*"call",', source) is not None,
-            f"{name} invokes homunculus via a fixed argv prefix",
-            'expected the literal ["homunculus", "call", ...] argument vector',
+            re.search(r'\["solet",\s*"call",', source) is not None,
+            f"{name} invokes solet via a fixed argv prefix",
+            'expected the literal ["solet", "call", ...] argument vector',
         )
 
     waiter = (HOOKS_DIR / SUBPROCESS_OWNER).read_text(encoding="utf-8")

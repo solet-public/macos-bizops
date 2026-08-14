@@ -2,13 +2,13 @@
 """Shared journal library for the memory-passthrough loop (Slice 2).
 
 Unified-memory-passthrough (workbench/2026-07-16_unified_memory_passthrough_design_v2.md
-§4.4-4.6). The local memory dir is a DISPOSABLE PROJECTION of the homunculus's memory_service:
+§4.4-4.6). The local memory dir is a DISPOSABLE PROJECTION of the solet's memory_service:
 the agent keeps writing per-fact `.md` files natively, a PostToolUse capture hook
 journals each write, an agent-mediated drain flushes the journal to
 `upsert_memory_by_tag`, and a SessionStart hydrate regenerates the dir from an
 origin-filtered export.
 
-This library is the local-filesystem half only — it NEVER touches the homunculus (a hook
+This library is the local-filesystem half only — it NEVER touches the solet (a hook
 subprocess has no MCP bridge; that is exactly why drain/hydrate are agent-mediated,
 design §4.4 item 5). Pure stdlib: capture fires outside the venv.
 
@@ -90,19 +90,19 @@ def memory_dir() -> Path:
 # ladder, so this checkout's own memory tags and an adopter's stay portable
 # across a rename, never coupled to the accident of what a clone directory
 # happens to be named. The midwife rewrites root_manifest.yaml's own
-# `homunculus_name:` field ONLY at genesis -- a raw/pre-genesis checkout
+# `solet_name:` field ONLY at genesis -- a raw/pre-genesis checkout
 # keeps its unwritten placeholder, so rung 2 must skip that exact literal
 # rather than treat it as a real name.
-_ROOT_MANIFEST_PLACEHOLDER = "homunculus"
-_ROOT_MANIFEST_NAME_RE = re.compile(r"^homunculus_name:\s*(\S+)\s*$", re.MULTILINE)
+_ROOT_MANIFEST_PLACEHOLDER = "solet"
+_ROOT_MANIFEST_NAME_RE = re.compile(r"^solet_name:\s*(\S+)\s*$", re.MULTILINE)
 
 
-def homunculus_name() -> str:
-    """Three-rung resolution ladder for this checkout's own homunculus name.
+def solet_name() -> str:
+    """Three-rung resolution ladder for this checkout's own solet name.
 
-    1. ``HOMUNCULUS_NAME`` env var, if set -- the platform's own single
+    1. ``SOLET_NAME`` env var, if set -- the platform's own single
        source of truth when the launching environment carries it.
-    2. ``root_manifest.yaml``'s own ``homunculus_name:`` field, read via a
+    2. ``root_manifest.yaml``'s own ``solet_name:`` field, read via a
        minimal regex line-scan -- never a real YAML parse: PyYAML is a
        venv-only dependency on this platform (measured 2026-08-10) and
        every file in this module runs outside the venv, so a YAML parse
@@ -114,12 +114,12 @@ def homunculus_name() -> str:
        checkout where neither rung above resolves.
 
     Fails fast (same contract :func:`project_dir` already has) only when
-    ``CLAUDE_PROJECT_DIR`` itself is unset AND ``HOMUNCULUS_NAME`` is
+    ``CLAUDE_PROJECT_DIR`` itself is unset AND ``SOLET_NAME`` is
     unset -- there is nothing left to derive a name from at all. On THIS
     checkout, at the time this ladder was added, every rung already
     yields the same value, so adding it here changes no existing tag.
     """
-    env_name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    env_name = os.environ.get("SOLET_NAME", "").strip()
     if env_name:
         return env_name
     root = project_dir()  # raises RuntimeError if CLAUDE_PROJECT_DIR unset
@@ -137,11 +137,11 @@ def homunculus_name() -> str:
 def origin() -> str:
     """Stable origin tag value for THIS agent's projection records.
 
-    ``claude_code.<homunculus_name>`` (see :func:`homunculus_name` for the
+    ``claude_code.<solet_name>`` (see :func:`solet_name` for the
     resolution ladder) — stable across sessions of the same repo, so
     hydrate pulls exactly this agent's records and never another origin's.
     """
-    return f"claude_code.{homunculus_name()}"
+    return f"claude_code.{solet_name()}"
 
 
 # --- Tag scheme (design §4.2) ----------------------------------------------

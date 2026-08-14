@@ -45,7 +45,7 @@ sys.path.insert(
     0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
-from ananta.constants import HOMUNCULUS_NAME_ENV_VAR  # noqa: E402
+from ananta.constants import SOLET_NAME_ENV_VAR  # noqa: E402
 from ananta.llm.session_ledger.repository import (  # noqa: E402
     SessionLedgerRepository,
 )
@@ -66,7 +66,7 @@ from postgres_state_management_plugin.postgres_backend.provider import (  # noqa
     PostgresProvider,
 )
 
-_SCHEMA = os.environ[HOMUNCULUS_NAME_ENV_VAR]
+_SCHEMA = os.environ[SOLET_NAME_ENV_VAR]
 
 _passed = 0
 _failed: list[str] = []
@@ -255,7 +255,7 @@ def main() -> int:
         print("=== list_sessions_migration_live_smoke ===")
         print(
             "  SKIP  set LEDGER_READ_LIVE_SMOKE=1 to run "
-            "(needs the live homunculus DB with the session_source_kind junction adopted)"
+            "(needs the live solet DB with the session_source_kind junction adopted)"
         )
         return 0
 

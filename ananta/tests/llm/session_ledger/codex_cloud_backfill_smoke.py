@@ -20,7 +20,7 @@ Covers the dispatch's acceptance gate 2 list:
       CODEX_STATE under SourceVendor.CODEX so a shared ``task_id``
       external_session_id collapses at the (vendor='codex',
       external_session_id) dedupe key (W5.B canonical-pointer pattern).
-* (h) Cloud-homunculus credential transfer gap is documented in the
+* (h) Cloud-solet credential transfer gap is documented in the
       plugin docstring (locks the dispatch's acceptance gate 4).
 
 The walker mechanics use an in-process httpx.MockTransport so the smoke is
@@ -398,10 +398,10 @@ def test_g_cross_source_dedupe_with_codex_state() -> None:
     )
 
 
-# ─── (h) cloud-homunculus credential transfer gap documented ──────────────
+# ─── (h) cloud-solet credential transfer gap documented ──────────────
 
 
-def test_h_cloud_homunculus_credential_gap_documented_in_docstring() -> None:
+def test_h_cloud_solet_credential_gap_documented_in_docstring() -> None:
     src = inspect.getsource(plugin_module)
     _check(
         "sealed-box" in src.lower() or "secret transfer protocol" in src.lower(),
@@ -412,8 +412,8 @@ def test_h_cloud_homunculus_credential_gap_documented_in_docstring() -> None:
         "(h) plugin docstring references macos_vault_plugin",
     )
     _check(
-        "cloud homunculus" in src.lower() or "CLOUD homunculus" in src,
-        "(h) plugin docstring explains the cloud-homunculus gap",
+        "cloud solet" in src.lower() or "CLOUD solet" in src,
+        "(h) plugin docstring explains the cloud-solet gap",
     )
 
 
@@ -429,7 +429,7 @@ def main() -> int:
     test_e_429_backoff_then_success()
     test_f_401_on_list_raises_auth_expired()
     test_g_cross_source_dedupe_with_codex_state()
-    test_h_cloud_homunculus_credential_gap_documented_in_docstring()
+    test_h_cloud_solet_credential_gap_documented_in_docstring()
     print(
         f"\n{_passed} passed, {len(_failed)} failed"
         + ("" if not _failed else "\n  failures:\n    " + "\n    ".join(_failed)),

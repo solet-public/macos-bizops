@@ -1,7 +1,7 @@
 {
   "name": "coordination-hooks",
-  "version": "0.1.0+codex.20260812132631",
-  "description": "An unconditional project-orientation reminder, opt-in unread-message and role-binding reminders, an idle-wake Stop waiter, and a Git-Controller mistake-prevention gate for coordinated multi-session work.",
+  "version": "0.1.0+codex.20260814002958",
+  "description": "An unconditional project-orientation reminder, opt-in unread-message and role-binding reminders, and a Git-Controller mistake-prevention gate for coordinated multi-session work.",
   "author": {
     "name": "seed-factory"
   },
@@ -13,7 +13,7 @@
   "interface": {
     "displayName": "Coordination Hooks",
     "shortDescription": "Reviewable hooks for coordinated Codex sessions.",
-    "longDescription": "Adds an unconditional project-orientation reminder plus opt-in unread-message and role-binding reminders, a synchronous nudge-only idle-wake Stop waiter, and a Git-Controller mistake-prevention gate. Deployment-specific guidance stays in the project's native AGENTS.md instructions; launcher-owned watcher, inbox, and cutover integration ship in later reviewed units. Hook revocation remains an explicit operator action in Codex's supported /hooks surface.",
+    "longDescription": "Adds an unconditional project-orientation reminder plus opt-in unread-message and role-binding reminders, and a Git-Controller mistake-prevention gate. No Stop-bound delivery watcher ships currently: stock Codex does not execute async command hooks, so a bound one never fires (codex-0147-async-hook-regression). Autonomous turns belong to managed-session driver channels (spawn_session's drive_on_delivery), unaffected by this. Deployment-specific guidance stays in the project's native AGENTS.md instructions, and hook revocation remains an explicit operator action in Codex's supported /hooks surface.",
     "developerName": "seed-factory",
     "category": "Productivity",
     "capabilities": [

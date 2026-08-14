@@ -17,7 +17,7 @@ TEMPLATE_DIR = PLUGIN_DIR / "knowledge_base" / "hydration_templates"
 LAUNCHER_TEMPLATE = TEMPLATE_DIR / "codex_launcher.template"
 MARKETPLACE_TEMPLATE = TEMPLATE_DIR / "codex_marketplace_json.template"
 TOKENS = {
-    "{{HOMUNCULUS_NAME}}": "iris",
+    "{{SOLET_NAME}}": "iris",
     "{{MARKETPLACE_NAME}}": "iris",
     "{{GIT_CONTROLLER_NAME}}": "Git-Controller",
 }
@@ -134,14 +134,21 @@ def check_source_contract(res: Results) -> None:
         'export AGENT_IDENTITY="codex"',
         'export AGENT_SESSION_LABEL="$role"',
         'export AGENT_ROLE="$role"',
-        'export AGENT_WAKE_CLI="{{HOMUNCULUS_NAME}}"',
+        'export AGENT_WAKE_CLI="{{SOLET_NAME}}"',
         '--agent-id codex',
         '--role "$AGENT_ROLE"',
         '--exit-with-parent "$$"',
+        '--no-spool',
         '"watch": "armed"',
         'exec "$codex_bin" "$@"',
     ):
         res.check(required in source, f"launcher carries {required}")
+    res.check(
+        source.count("--no-spool") == 1,
+        "--no-spool is passed exactly once (codex-0147-async-hook-regression: "
+        "no Stop handler remains to drain the wake-hook spool this disables)",
+        str(source.count("--no-spool")),
+    )
     for forbidden in ("nohup", "disown", "setsid", "--dangerously-", "mcp_servers"):
         occurrences = source.count(forbidden)
         allowed_comment_only = forbidden in {"nohup", "disown", "setsid"} and occurrences == 1
@@ -165,12 +172,19 @@ def check_watch_launch(res: Results, work: Path) -> None:
         return
     watch = watch_marker.read_text(encoding="utf-8")
     codex = codex_marker.read_text(encoding="utf-8")
+    watch_argv_line = watch.splitlines()[0]
     res.check(
-        watch.splitlines()[0].startswith("watch --agent-id codex --role Coordinator-Codex"),
+        watch_argv_line.startswith("watch --agent-id codex --role Coordinator-Codex"),
         "watcher receives the stock identity and durable role",
         watch,
     )
-    res.check("--exit-with-parent " in watch.splitlines()[0], "watcher is parent-bound", watch)
+    res.check("--exit-with-parent " in watch_argv_line, "watcher is parent-bound", watch)
+    res.check(
+        watch_argv_line.split().count("--no-spool") == 1,
+        "watcher receives --no-spool so the wake-hook spool tee is disabled "
+        "(codex-0147-async-hook-regression: no Stop handler drains it)",
+        watch_argv_line,
+    )
     res.check(_line_value(codex, "identity=") == "codex", "Codex inherits stock identity")
     res.check(_line_value(codex, "label=") == "Coordinator-Codex", "Codex inherits label")
     res.check(_line_value(codex, "role=") == "Coordinator-Codex", "Codex inherits role")

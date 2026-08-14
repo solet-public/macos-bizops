@@ -5,18 +5,18 @@ Article Layer: 1
 Article Role: operations_reference
 Tags: knowledge:tag:platform_operations, knowledge:tag:in_session_reload
 
-Embedding Description: How to pick up a knowledge-base edit, a process JSON edit, or a Python source edit live without restarting the homunculus or losing blob storage.
+Embedding Description: How to pick up a knowledge-base edit, a process JSON edit, or a Python source edit live without restarting the solet or losing blob storage.
 
 ## Why This Article Exists
 
-Mid-session edits used to mean restarting the homunculus (which wipes blob storage by default) or running `plugins/default_knowledge_plugin/tools/reload_knowledge_bases.py` (which requires the homunculus stopped). Neither is necessary anymore. The platform ships four reload/refresh verbs, each targeting a different kind of edit. Pick the one that matches the file you just changed.
+Mid-session edits used to mean restarting the solet (which wipes blob storage by default) or running `plugins/default_knowledge_plugin/tools/reload_knowledge_bases.py` (which requires the solet stopped). Neither is necessary anymore. The platform ships four reload/refresh verbs, each targeting a different kind of edit. Pick the one that matches the file you just changed.
 
 Use this article when:
 
 - You edited a `.md` file under any `knowledge_base/` directory.
 - You edited a process-definition JSON under any `processes/` directory.
 - You edited a Python source file in a plugin or service.
-- You are about to suggest a full homunculus restart and want to confirm that is actually the minimum-disruption path.
+- You are about to suggest a full solet restart and want to confirm that is actually the minimum-disruption path.
 
 ## What To Call For Which Edit
 
@@ -161,7 +161,7 @@ Scenario: you are tuning a new audio-processing function and the surrounding doc
 
 7. Run a `knowledge_service::search` query that should hit the new content and confirm it appears in the top-3.
 
-Total: three reload/refresh calls, no homunculus restart, no blob storage wiped, no LM Studio dependency, no interruption to whatever else the session is doing.
+Total: three reload/refresh calls, no solet restart, no blob storage wiped, no LM Studio dependency, no interruption to whatever else the session is doing.
 
 ## When Restart Is Still Required
 
@@ -180,8 +180,8 @@ If you find yourself wanting any of the above without a restart, prefer `apply_m
 - **Calling `update` to refresh process JSONs.** `update` is the article-reindex verb, NOT the process-registry refresh verb. Process JSONs are merged into the registry, not embedded in pgvector — they have a different refresh path.
 - **Calling `refresh_plugin_process(es)` after a `.md` edit.** That edit only changed an article's embedding, not the process registry; you need `update`.
 - **Marking a stateful module `RELOAD_SAFE`.** The gate exists for a reason; bypassing it leaves the platform in a partial-reload state that is not recoverable in-process. If a module has any module-level state, factor the pure helpers into a sibling module and mark only that sibling.
-- **Reaching for `plugins/default_knowledge_plugin/tools/reload_knowledge_bases.py` while the homunculus is running.** That tool is the offline fallback for when the homunculus is stopped; it does not coordinate with the live process and can leave the registry inconsistent with the on-disk JSONs. Always prefer the four service verbs while the homunculus is up.
-- **Restarting the homunculus when one of the four verbs would have sufficed.** Restart wipes blob storage by default and disrupts every in-flight action; prefer the narrowest matching verb.
+- **Reaching for `plugins/default_knowledge_plugin/tools/reload_knowledge_bases.py` while the solet is running.** That tool is the offline fallback for when the solet is stopped; it does not coordinate with the live process and can leave the registry inconsistent with the on-disk JSONs. Always prefer the four service verbs while the solet is up.
+- **Restarting the solet when one of the four verbs would have sufficed.** Restart wipes blob storage by default and disrupts every in-flight action; prefer the narrowest matching verb.
 
 ## Plugin lifecycle introspection — list_plugins
 
@@ -237,13 +237,13 @@ Call shape:
 
 On disable, the verb stops services on the plugin if it is `LifecycleManaged` and removes the plugin from `orchestrator.plugin_manager.plugins` — dispatch resolves a process key to a live instance by roster lookup, so this removal is what makes the plugin's action keys undispatchable. It also refreshes the process registry via `knowledge_service::refresh_plugin_processes`, but that call only re-syncs the plugin's on-disk process-JSON metadata against the knowledge base; it does not itself deregister anything from the runtime dispatch table (that belongs to the atomic installer's remove primitive, which the disable path does not call). The plugin's Python module stays in `sys.modules`; re-enabling reuses already-loaded code where possible.
 
-On enable, if the plugin is already in the live roster the verb only starts its services (no-op when already running). If the plugin is not in the live roster, the verb stages a fresh instance, wires it (injecting `orchestrator_ref` and `event_bus` before `prepare_for_readiness`, the same boot order `install_plugin_from_path` uses), and commits it into the live roster with one atomic dict store via the plugin manager's single-plugin installer — every other already-loaded plugin's instance is left untouched, and a failure at any staging phase (contract validation, wiring) leaves the whole roster, allowlist, and every pre-existing instance byte-identical. If the entry-point is genuinely not installed, the response returns `restart_required=true` with a message naming the missing entry-point so the caller can install it (typically via `install_plugin_from_path`). The same envelope is returned when the entry-point is installed on disk but excluded from this homunculus's profile manifest allowlist — the staged install checks the manifest before staging, so it never bypasses an operator-set exclusion to load an unlisted plugin; `install_plugin_from_path` will not help in that case, the manifest itself needs editing. These two are the only cases where `restart_required` is true.
+On enable, if the plugin is already in the live roster the verb only starts its services (no-op when already running). If the plugin is not in the live roster, the verb stages a fresh instance, wires it (injecting `orchestrator_ref` and `event_bus` before `prepare_for_readiness`, the same boot order `install_plugin_from_path` uses), and commits it into the live roster with one atomic dict store via the plugin manager's single-plugin installer — every other already-loaded plugin's instance is left untouched, and a failure at any staging phase (contract validation, wiring) leaves the whole roster, allowlist, and every pre-existing instance byte-identical. If the entry-point is genuinely not installed, the response returns `restart_required=true` with a message naming the missing entry-point so the caller can install it (typically via `install_plugin_from_path`). The same envelope is returned when the entry-point is installed on disk but excluded from this solet's profile manifest allowlist — the staged install checks the manifest before staging, so it never bypasses an operator-set exclusion to load an unlisted plugin; `install_plugin_from_path` will not help in that case, the manifest itself needs editing. These two are the only cases where `restart_required` is true.
 
 The response carries `applied` (true when the runtime state changed this session), `restart_required` (true when the entry-point is missing or manifest-excluded), `plugin_name`, and `message`.
 
 ## Plugin priority — set_plugin_priority
 
-`set_plugin_priority` writes the `priority` integer into the per-plugin config. The plugin manager re-reads the file when it discovers entry-points (sorted by `_get_plugin_priority` with the persisted value taking precedence over hardcoded defaults), so the new priority controls load order on the next homunculus start.
+`set_plugin_priority` writes the `priority` integer into the per-plugin config. The plugin manager re-reads the file when it discovers entry-points (sorted by `_get_plugin_priority` with the persisted value taking precedence over hardcoded defaults), so the new priority controls load order on the next solet start.
 
 Call shape:
 
@@ -254,7 +254,7 @@ Call shape:
 }
 ```
 
-v1 deliberately does not perform an in-session reorder — the orchestrator's plugin manager and service bindings are stable once startup completes. The response carries `applied=true` (the file write succeeded), `takes_effect="next_restart"`, `plugin_name`, and a message confirming the new value. Verify the new priority is honoured by restarting the homunculus and re-running `list_plugins`; in the current session `list_plugins` still reflects the cached load order from boot.
+v1 deliberately does not perform an in-session reorder — the orchestrator's plugin manager and service bindings are stable once startup completes. The response carries `applied=true` (the file write succeeded), `takes_effect="next_restart"`, `plugin_name`, and a message confirming the new value. Verify the new priority is honoured by restarting the solet and re-running `list_plugins`; in the current session `list_plugins` still reflects the cached load order from boot.
 
 Lower values load earlier. Foundational service plugins (state, blob storage, address book) conventionally live below 50; ordinary plugins use 100. Pick a value in the gap when you need a custom plugin to load between two foundational ones.
 
@@ -298,7 +298,7 @@ The response carries `applied` (true on a successful write), `prev_value` (the p
 
 ## Runtime plugin install — install_plugin_from_path
 
-`install_plugin_from_path` brings a plugin online from a local source directory without restarting the homunculus. It runs `pip install -e <path>` against the active Python interpreter via subprocess, then stages, wires (`orchestrator_ref` and `event_bus` injected before `prepare_for_readiness`, then `initialize` and `start_services`), and commits the new plugin into the live roster with a single atomic dict store via the plugin manager's single-plugin installer — the new plugin is the only roster entry touched, and a failure at any staging phase (contract validation, wiring) leaves every pre-existing plugin instance byte-identical. It also registers the new plugin's process keys via `knowledge_service::refresh_plugin_processes`.
+`install_plugin_from_path` brings a plugin online from a local source directory without restarting the solet. It runs `pip install -e <path>` against the active Python interpreter via subprocess, then stages, wires (`orchestrator_ref` and `event_bus` injected before `prepare_for_readiness`, then `initialize` and `start_services`), and commits the new plugin into the live roster with a single atomic dict store via the plugin manager's single-plugin installer — the new plugin is the only roster entry touched, and a failure at any staging phase (contract validation, wiring) leaves every pre-existing plugin instance byte-identical. It also registers the new plugin's process keys via `knowledge_service::refresh_plugin_processes`.
 
 Call shape:
 

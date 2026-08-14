@@ -40,7 +40,7 @@ Proves:
      — the access-control guard genuinely never runs here, live
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/external_postgres_plugin/tests/smoke_write.py
 
 Exits 0 only when the live proof actually ran and passed; exits 1 on a real

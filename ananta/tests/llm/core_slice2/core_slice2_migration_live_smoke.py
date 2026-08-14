@@ -160,6 +160,19 @@ _DDL: tuple[tuple[str, str], ...] = (
         "is_deleted integer NOT NULL DEFAULT 0, "
         "created_at timestamp NOT NULL, updated_at timestamp NOT NULL",
     ),
+    # Required since JobService attaches stored payloads to every job it
+    # returns (2026-08-14): the ledger row has no result/error column, so
+    # _query_latest_job now reads this companion table too. Without it the
+    # sandbox is a fake that no longer carries the shape it stands in for,
+    # and the job tests below fail on a missing relation rather than on
+    # anything they mean to assert.
+    (
+        "core__job_payload",
+        "id text PRIMARY KEY, job_id text NOT NULL, payload_type text NOT NULL, "
+        "payload_data text, sequence integer, "
+        "is_deleted integer NOT NULL DEFAULT 0, "
+        "created_at timestamp NOT NULL, updated_at timestamp NOT NULL",
+    ),
 )
 
 _SEED_AT = "2026-06-01T00:00:00"
@@ -371,7 +384,7 @@ def main() -> int:
         print("=== core_slice2_migration_live_smoke ===")
         print(
             "  SKIP  set CORE_SLICE2_LIVE_SMOKE=1 to run; needs the live "
-            "homunculus DB (own throwaway schema)."
+            "solet DB (own throwaway schema)."
         )
         return 0
     print("=== core_slice2_migration_live_smoke ===")

@@ -17,9 +17,9 @@ Genesis's 6-step sequence — `validate_name` -> `resolve_target` ->
 adjudicated 2026-07-09 (the KB-symlink step added 2026-07-12; the
 root-manifest step added 2026-07-12):
   * `seed_root_manifest` IS a step (2026-07-12) — the seed ships the
-    MINTING homunculus's `root_manifest.yaml` verbatim (it is in the
+    MINTING solet's `root_manifest.yaml` verbatim (it is in the
     assemble `copy:` allowlist), so without a rewrite a seed-born
-    newborn's `homunculus_name:` still names the minting homunculus —
+    newborn's `solet_name:` still names the minting solet —
     exactly the identity pollution the seed factory exists to prevent.
     Mirrors `macos_midwife_plugin`'s birth-time `seed_for_newborn`
     (which fires inside its `clone_and_copy`); genesis has no copy step,
@@ -54,7 +54,7 @@ from .constants import (
     MANIFEST_MARKER_PATH,
     NAME_PATTERN,
     REQUIRED_CLONE_MARKERS,
-    is_valid_homunculus_name,
+    is_valid_solet_name,
 )
 from .kb_symlinks import KbSymlinkError, materialize_kb_symlinks
 from .manifest_marker import build_marker_payload, write_marker
@@ -82,14 +82,14 @@ _StepRunner = Callable[[GenesisContext], dict[str, Any]]
 
 
 def _run_validate_name(ctx: GenesisContext) -> dict[str, Any]:
-    # `is_valid_homunculus_name` uses `fullmatch` (see constants) -- `NAME_PATTERN.match`
+    # `is_valid_solet_name` uses `fullmatch` (see constants) -- `NAME_PATTERN.match`
     # would let a trailing-newline name slip past `$`, and this name flows on to
     # every downstream SQL/path derivation.
-    if not is_valid_homunculus_name(ctx.name):
+    if not is_valid_solet_name(ctx.name):
         return {
             "step_name": "validate_name", "status": "failed",
             "error": (
-                f"invalid homunculus name {ctx.name!r}: must match "
+                f"invalid solet name {ctx.name!r}: must match "
                 f"{NAME_PATTERN.pattern} (lowercase letter start, 1-62 "
                 "trailing chars from [a-z0-9_-])"
             ),

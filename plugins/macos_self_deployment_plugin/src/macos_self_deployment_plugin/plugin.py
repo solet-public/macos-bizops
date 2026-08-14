@@ -87,9 +87,9 @@ from macos_self_deployment_plugin.constants import (
     DEFAULT_PRIOR_TERM_POLL_INTERVAL_SECONDS,
     DEFAULT_ROUTER_SOCKET_POLL_INTERVAL_SECONDS,
     DEFAULT_ROUTER_SOCKET_WAIT_SECONDS,
-    ENV_HOMUNCULUS_COLOR,
-    ENV_HOMUNCULUS_INSTANCE_ID,
-    ENV_HOMUNCULUS_NAME,
+    ENV_SOLET_COLOR,
+    ENV_SOLET_INSTANCE_ID,
+    ENV_SOLET_NAME,
     PLUGIN_NAME,
     RESULT_TYPE_AUTOSTART_INSTALL,
     RESULT_TYPE_AUTOSTART_STATUS,
@@ -339,7 +339,7 @@ def _autostart_return_schema() -> ReturnValueSchema:
         properties={
             "status": ParameterMetadata(type=ParameterType.STRING, description="."),
             "verb": ParameterMetadata(type=ParameterType.STRING, description="."),
-            "homunculus_name": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "solet_name": ParameterMetadata(type=ParameterType.STRING, description="."),
             "label": ParameterMetadata(type=ParameterType.STRING, description="."),
             "plist_path": ParameterMetadata(type=ParameterType.STRING, description="."),
             "prior_state": ParameterMetadata(type=ParameterType.STRING, description="."),
@@ -362,15 +362,15 @@ def _runtime_dir() -> Path:
     return Path.home() / ".ananta" / "runtime"
 
 
-def _router_socket_path(homunculus_name: str) -> Path:
-    return _runtime_dir() / f"{homunculus_name}{ROUTER_SOCKET_SUFFIX}"
+def _router_socket_path(solet_name: str) -> Path:
+    return _runtime_dir() / f"{solet_name}{ROUTER_SOCKET_SUFFIX}"
 
 
 def _wait_for_router_socket(socket_path: Path) -> None:
     """Bounded wait for the router's unix socket, then fail loudly if absent.
 
     The router is a SEPARATE KeepAlive LaunchAgent that comes up independently
-    of the homunculus; at a fresh BIRTH both agents load ~simultaneously (RunAtLoad), so
+    of the solet; at a fresh BIRTH both agents load ~simultaneously (RunAtLoad), so
     the main boot can reach the readiness router-socket check a beat before the
     router has created its socket. Poll a bounded window rather than failing
     one-shot on that benign race (the FATAL first-boot + LaunchAgent-restart
@@ -419,7 +419,7 @@ def _autostart_envelope(result: AutostartResult) -> dict[str, Any]:
     return {
         "status": result.status.value,
         "verb": result.verb,
-        "homunculus_name": result.homunculus_name,
+        "solet_name": result.solet_name,
         "label": result.label,
         "plist_path": result.plist_path,
         "prior_state": result.prior_state,
@@ -458,7 +458,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         super().__init__()
         self.name = PLUGIN_NAME
         self.logger: logging.Logger = logging.getLogger(self.name)
-        self._homunculus_name: str = ""
+        self._solet_name: str = ""
         self._self_color: str = ""
         self._self_instance_id: str = ""
         self._router_client: RouterClient | None = None
@@ -524,22 +524,22 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         the main boot. Do NOT silently fall back to L0 — that violates fast-fail
         discipline and hides install gaps.
         """
-        homunculus_name = os.environ.get(ENV_HOMUNCULUS_NAME)
-        if not homunculus_name:
+        solet_name = os.environ.get(ENV_SOLET_NAME)
+        if not solet_name:
             msg = (
-                f"{PLUGIN_NAME}: {ENV_HOMUNCULUS_NAME} env var is required "
+                f"{PLUGIN_NAME}: {ENV_SOLET_NAME} env var is required "
                 "(set by the launching script)."
             )
             raise RuntimeError(msg)
-        self._homunculus_name = homunculus_name
+        self._solet_name = solet_name
 
         # F2 Phase 0c: scrub stale runtime files (left by a crashed prior
-        # the homunculus or router) BEFORE the router-socket check or any port-
+        # the solet or router) BEFORE the router-socket check or any port-
         # binding fires. Per the two-phase platform startup contract,
         # prepare_for_readiness runs before any plugin's start_services
         # (where port-binding happens), so this is the canonical cold-
         # start safety net for the crash-mid-drain window per Slice 1.5.
-        stale_runtime_cleanup.cleanup_and_restore(homunculus_name)
+        stale_runtime_cleanup.cleanup_and_restore(solet_name)
 
         # §4.6 startup reconcile: if a prior cutover/rollback died mid-swap,
         # forward-complete the durable current/previous symlinks to the
@@ -549,20 +549,20 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         # dependency, so it is safe this early in readiness.
         self._reconcile_releases()
 
-        socket_path = _router_socket_path(homunculus_name)
+        socket_path = _router_socket_path(solet_name)
         _wait_for_router_socket(socket_path)
         self._router_client = RouterClient(socket_path)
 
-        self._self_color = os.environ.get(ENV_HOMUNCULUS_COLOR, "") or COLOR_BLUE
+        self._self_color = os.environ.get(ENV_SOLET_COLOR, "") or COLOR_BLUE
         if not is_valid_color(self._self_color):
             msg = (
-                f"{PLUGIN_NAME}: {ENV_HOMUNCULUS_COLOR}={self._self_color!r} "
+                f"{PLUGIN_NAME}: {ENV_SOLET_COLOR}={self._self_color!r} "
                 "is not a recognized color (expected blue/green)."
             )
             raise RuntimeError(msg)
         self._self_instance_id = (
-            os.environ.get(ENV_HOMUNCULUS_INSTANCE_ID, "").strip()
-            or f"homunculus-{self._self_color}-{uuid.uuid4().hex[:8]}"
+            os.environ.get(ENV_SOLET_INSTANCE_ID, "").strip()
+            or f"solet-{self._self_color}-{uuid.uuid4().hex[:8]}"
         )
 
         # SwapOrchestrator is lazily constructed by _require_orchestrator on
@@ -621,7 +621,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         # current-release lookup gates the backstop on durability (B2·1): it
         # only acts once ``current`` names the candidate the record describes.
         pending_finisher_file = pending_finisher_path(
-            _runtime_dir(), self._homunculus_name,
+            _runtime_dir(), self._solet_name,
         )
         current_release_lookup = self._lookup_current_release
 
@@ -868,7 +868,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         body lives there to keep the class under the god-class threshold.
         """
         return stop_self_runner.run(
-            homunculus_name=self._homunculus_name,
+            solet_name=self._solet_name,
             reason=reason,
             dry_run=dry_run,
             watchdog_spawner=self._smoke_overrides.get(
@@ -903,8 +903,8 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         authoritative.
         """
         steps_completed: list[str] = []
-        finisher_path = pending_finisher_path(_runtime_dir(), self._homunculus_name)
-        with drain_sentinel.held(self._homunculus_name):
+        finisher_path = pending_finisher_path(_runtime_dir(), self._solet_name)
+        with drain_sentinel.held(self._solet_name):
             record = read_pending_finisher(finisher_path)
             if record is None:
                 steps_completed.append("pending_finisher_absent_noop")
@@ -1268,7 +1268,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         """Seed release-0 when no ``current`` exists (§4.5 role-1 guarantee).
 
         Pure filesystem (``cp -c`` clone + ``.pth`` rewrite + symlink/ledger
-        via the passive :class:`ReleaseManager`) — no running the homunculus needed, so
+        via the passive :class:`ReleaseManager`) — no running the solet needed, so
         it is safe at install time. A no-op once a release has been
         materialized (a real deploy, or a prior seed).
         """
@@ -1283,12 +1283,12 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         )
 
     def uninstall_autostart(self, *, dry_run: bool = False) -> AutostartResult:
-        """Unload + remove the per-homunculus LaunchAgent.
+        """Unload + remove the per-solet LaunchAgent.
 
         Idempotent: an already-absent LaunchAgent returns success with
-        ``prior_state='absent'``. After this verb, the homunculus no
+        ``prior_state='absent'``. After this verb, the solet no
         longer auto-starts at operator login; only manual
-        ``HOMUNCULUS_NAME=<name> ./launch.py`` or blue-green
+        ``SOLET_NAME=<name> ./launch.py`` or blue-green
         ``restart_with_manifest`` brings it up.
         """
         return self._get_autostart_manager().uninstall(dry_run=dry_run)
@@ -1298,7 +1298,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
 
         Read-only. The expected steady state under ``KeepAlive=false``
         is ``status=INSTALLED_LOADED`` with no live PID — the
-        LaunchAgent ran once at login, booted the homunculus, and
+        LaunchAgent ran once at login, booted the solet, and
         exited cleanly. Operators should NOT panic at the absent PID.
         """
         return self._get_autostart_manager().status()
@@ -1422,7 +1422,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
             router_client=self._router_client,
             action_factory=self.action_factory,
             session_factory=self._create_swap_session,
-            homunculus_name=self._homunculus_name,
+            solet_name=self._solet_name,
             release_manager=self._get_release_manager(),
             schema_preflight=self._schema_preflight,
             preflight_probe=self._run_preflight_probe,
@@ -1438,7 +1438,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
 
         Spawns the release-side probe entrypoint under the CANDIDATE's
         own interpreter, mirroring the green spawn env/cwd contract
-        (inherited env + ``HOMUNCULUS_NAME``; out-of-tree runtime-dir
+        (inherited env + ``SOLET_NAME``; out-of-tree runtime-dir
         cwd). NEVER raises — the runner classifies every failure mode.
         """
         log_path = (
@@ -1448,7 +1448,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         return run_preflight_probe(
             candidate=candidate,
             app_home=app_home,
-            homunculus_name=self._homunculus_name,
+            solet_name=self._solet_name,
             cwd=_runtime_dir(),
             log_path=log_path,
             timeout_seconds=self._preflight_probe_timeout_seconds(),
@@ -1501,8 +1501,8 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         if self._release_manager is not None:
             return self._release_manager
         self._release_manager = ReleaseManager(
-            homunculus_name=self._homunculus_name
-            or os.environ.get(ENV_HOMUNCULUS_NAME, ""),
+            solet_name=self._solet_name
+            or os.environ.get(ENV_SOLET_NAME, ""),
             source_root=_resolve_project_root_for_autostart(),
             logger=self.logger,
         )
@@ -1514,7 +1514,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         Forward-completes an interrupted cutover/rollback to the ledger's
         recorded end state. No-ops cleanly when the releases root does not
         yet exist (pre-materialized-release state). Errors are logged, not
-        raised — a reconcile failure must not block the homunculus from
+        raised — a reconcile failure must not block the solet from
         booting on its existing ``current`` (the swap path re-attempts on
         the next deploy).
         """
@@ -1682,7 +1682,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
             return self._autostart_manager
         project_root = _resolve_project_root_for_autostart()
         self._autostart_manager = AutostartManager(
-            homunculus_name=self._homunculus_name or os.environ.get(ENV_HOMUNCULUS_NAME, ""),
+            solet_name=self._solet_name or os.environ.get(ENV_SOLET_NAME, ""),
             project_root=project_root,
             logger=self.logger,
         )

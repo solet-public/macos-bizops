@@ -114,7 +114,7 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
             msg = error.get("message", "Unknown error") if isinstance(error, dict) else str(error)
             raise RuntimeError(
                 f"{self.name}: Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' not found. "
-                f"Create the entry before starting the homunculus. Error: {msg}"
+                f"Create the entry before starting the solet. Error: {msg}"
             )
 
         data = result.get("data", {})

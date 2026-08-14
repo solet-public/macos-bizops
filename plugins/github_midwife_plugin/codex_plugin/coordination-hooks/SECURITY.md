@@ -1,12 +1,30 @@
 # Security notes — stock-Codex coordination-hooks
 
 This page describes the complete WS-4b.3 package. The plugin currently
-registers six handler entries backed by five entry-point scripts: the fixed
+registers four handler entries backed by four entry-point scripts: the fixed
 `step_zero_reminder.js`, `check_messages_reminder.js`, and
-`role_binding_reminder.js` scripts, the WS-4b.1 Git-Controller gate, and the
-WS-4b.3 synchronous `wake_waiter.js`. The sibling hydration package renders the
-launcher-owned watcher and exact durable-inbox instructions; those deployment-
-specific surfaces are intentionally outside the byte-identical plugin bundle.
+`role_binding_reminder.js` scripts, and the WS-4b.1 Git-Controller gate. The
+sibling hydration package renders the launcher-owned watcher and exact
+durable-inbox instructions; those deployment-specific surfaces are
+intentionally outside the byte-identical plugin bundle.
+
+**codex-0147-async-hook-regression (2026-08-13): no background `Stop` handler
+ships.** Commit 906753eb7 asserted stock Codex parses async command hooks,
+"checked against 0.141.0 acceptance," and added a `wake_waiter.js` `Stop`
+handler registered `async: true` on that basis. That assertion is contradicted
+by a preserved 2026-07-31 probe
+(`workbench/2026-07-31_codex_phase4_probe/evidence/async_unsupported.md`),
+which already recorded 0.141.0 emitting `skipping async hook … async hooks
+are not supported yet` for the identical handler shape; 0.147.0 emits the same
+diagnostic now. Async command-hook support was never present in either
+measured version, so the binding never fired. The binding and `wake_waiter.js`
+itself were removed — not left registered-but-dead, and not kept as a dormant
+file — rather than reverted to the synchronous predecessor design, which
+blocked the turn boundary. The removed handler's reviewed behavior (arming
+matrix, loop guard, one-bit output, POSIX process-group cancellation) remains
+historical record in this document's prior revisions and in git history;
+re-introducing a `Stop` binding requires first confirming async command-hook
+support on the target stock Codex build.
 
 ## Trust boundary
 
@@ -27,8 +45,7 @@ Inputs, exhaustively:
 - hook JSON on stdin;
 - `AGENT_SESSION_ID`, which arms `check_messages_reminder.js` (a functional
   precondition, not a protection — the inbox it points at is keyed on
-  identity) and, together with `AGENT_WAKE_CLI` and `FLEET_TRANSPORT`, arms
-  the synchronous wake waiter;
+  identity);
 - `AGENT_SESSION_LABEL`, which arms `role_binding_reminder.js` only — the
   reminder that names the label as its content. `step_zero_reminder.js` is
   unconditionally armed and reads no environment variable at all (§7 re-key,
@@ -47,28 +64,18 @@ Outputs, exhaustively:
   `hookSpecificOutput.hookEventName` and fixed
   `hookSpecificOutput.additionalContext`;
 - gate allow/no-op: no output, exit `0`;
-- gate block: a fixed-format stderr explanation and exit `2`;
-- waiter no-op/idle expiry: empty Stop JSON and exit `0`;
-- waiter wake: fixed `{"decision":"block","reason":"..."}` JSON and exit `0`;
-- waiter fault: empty Stop JSON, one bounded fixed-format diagnostic, and exit
-  `0` so broken wake plumbing cannot trap the turn.
+- gate block: a fixed-format stderr explanation and exit `2`.
 
-No handler writes a file, accesses the network, reads credentials, or relays
-peer-message content. Two of the four Node hooks (`check_messages_reminder.js`,
-`wake_waiter.js`) use built-in `fs` to read stdin; the other two
+No handler writes a file, accesses the network, reads credentials, spawns a
+child process, or relays peer-message content. One of the three Node hooks
+(`check_messages_reminder.js`) uses built-in `fs` to read stdin; the other two
 (`step_zero_reminder.js`, `role_binding_reminder.js`) never touch stdin —
 `step_zero_reminder.js` reads no environment variable at all, and
-`role_binding_reminder.js` reads only `AGENT_SESSION_LABEL`. Only
-`wake_waiter.js` additionally
-uses `child_process.spawn`, exactly once, to run the configured executable with
-the fixed argv `["wake", "--max-wait", <seconds>]` — the bounded wait is the
-compiled-in default or `AGENT_WAKE_MAX_WAIT_S` when it parses as a positive
-integer (anything else is announced on stderr and falls back, so raw
-environment text never reaches the argv) — `shell: false`, and all three
-child streams set to `ignore`. The Python gate is standard-library-only
-and imports byte-identical materialized policy modules from its plugin
-directory. CPython may create `__pycache__` files unless the launcher sets
-`PYTHONDONTWRITEBYTECODE=1`; the plugin never reads them.
+`role_binding_reminder.js` reads only `AGENT_SESSION_LABEL`. The Python gate
+is standard-library-only and imports byte-identical materialized policy
+modules from its plugin directory. CPython may create `__pycache__` files
+unless the launcher sets `PYTHONDONTWRITEBYTECODE=1`; the plugin never reads
+them.
 
 ## No dynamic hook-text channel
 
@@ -97,13 +104,15 @@ check: even when `AGENT_IDENTITY`, `AGENT_INSTANCE_ID`, `AGENT_SESSION_LABEL`,
 `Git-Controller`, a missing or non-controller `AGENT_ROLE` still blocks a
 detected mutation. `AGENT_ROLE` is the only authority input.
 
-The `Stop` handler is deliberately synchronous because stock Codex parses but
-does not support async command hooks. Its explicit timeout is 86,400 seconds;
-the current `homunculus wake` default is 86,100 seconds, leaving a five-minute
-cleanup margin. `FLEET_TRANSPORT` must be exactly `watch`; unset, empty, `mcp`,
-and unknown values all disarm it to prevent two receive paths from waking the
-same session. When Codex invokes the continued turn's second Stop with
-`stop_hook_active: true`, the handler returns immediately without spawning.
+No `Stop` handler is registered (codex-0147-async-hook-regression, see the
+top of this document). A synchronous command hook on `Stop` blocks the
+triggering operation, holding the turn boundary and queuing composer input
+behind the next tool/hook completion — that defect is why an async handler
+was attempted in the first place, and it is why the fix removes the binding
+rather than reverting to a synchronous one. `"async": true` is not a
+substitute: no measured stock Codex build (0.141.0, 0.147.0) executes an
+async command hook at all, so a bound one neither blocks the turn boundary
+nor ever runs.
 
 ## Failure modes
 
@@ -114,47 +123,38 @@ same session. When Codex invokes the continued turn's second Stop with
   no-op.
 - Malformed reminder stdin: fixed reminders still exit `0`; the shared reminder
   uses its harmless prompt-event default.
-- Missing waiter input or any incomplete watch configuration: empty Stop JSON,
-  no child process, exit `0`.
-- Malformed Stop stdin: one fixed diagnostic, empty Stop JSON, exit `0`.
-- Wake CLI exit `0` (idle expiry or competing waiter): empty Stop JSON, exit
-  `0`.
-- Wake CLI spawn failure, signal death, or unexpected status: one bounded
-  diagnostic, empty Stop JSON, exit `0`.
-- Hook cancellation: forward the signal to the child, escalate to `SIGKILL`
-  after one second if required, and exit `0` after child teardown.
 - Gate disabled (`GIT_CONTROLLER_NAME` missing): allow.
 - Gate enabled with missing `AGENT_ROLE`: read-only Bash remains allowed, but a
   detected git mutation is blocked and reports role `<unknown>`.
 - Unexpected gate parse/runtime error: allow, consistent with its explicitly
   documented same-user mistake-prevention scope.
 
-Context hooks never exit `2`. Blocking outcomes are the fixed Stop
-continuation JSON and an affirmative Bash policy match in the gate.
+Context hooks never exit `2` or request continuation. The only blocking
+outcome is an affirmative Bash policy match in the gate.
 
 ## Trust revocation
 
 Stock Codex's supported `/hooks` browser is the execution-revocation surface
 for non-managed definitions. A disabled definition retains its reviewed hash
 but gains disabled state; this is intentional because re-enabling is a separate
-reviewed UI action. In the stock 0.141.0 acceptance, disabling only the Stop
-definition changed the event summary from `Installed 1 / Active 1` to
-`Installed 1 / Active 0`; PreToolUse remained `1 / 1`, SessionStart `2 / 2`,
-and UserPromptSubmit `2 / 2`.
+reviewed UI action. Historical evidence (stock 0.141.0, while a `Stop`
+definition still shipped): disabling only the Stop definition changed it from
+active to inactive while unrelated definitions remained active. Counts are
+version-specific evidence, not a manifest contract; inspect the live `/hooks`
+inventory after each reinstall.
 
-Uninstall alone is not revocation. An identical reinstall reactivated all six
-definitions when their residual state was enabled. Repeating the cycle after
-disabling Stop preserved `Stop 1 / 0` and left the other five definitions
-active. The operator can therefore disable one definition before removal and
-know an identical reinstall will not silently re-enable it. Direct edits to
-`hooks.state` are not part of this package's supported procedure.
+Uninstall alone is not revocation. An identical reinstall reactivated all
+definitions whose residual state was enabled. Repeating the cycle after
+disabling a definition preserved that disabled state and left unrelated
+definitions active. The operator can therefore disable one definition before
+removal and know an identical reinstall will not silently re-enable it. Direct
+edits to `hooks.state` are not part of this package's supported procedure.
 
 ## Transport asymmetries (MCP vs. non-MCP/watch)
 
-This plugin's own behavior does not depend on transport — every handler above
-runs identically regardless of which transport the session's coordination
-layer uses. Three capabilities belong to the coordination layer itself, not
-to this plugin, and are disclosed here so a review of this deployment does
+The reminders and Git gate do not depend on transport. Capabilities belonging
+to the coordination layer are disclosed here so a review of this deployment
+does
 not discover any of them as a gap instead of reading it on this page. An
 entry only earns a place here once the two transports are actually shown to
 diverge; a capability that behaves the same on both is not listed — this
@@ -178,7 +178,7 @@ retirement does not touch.
 Peer enumeration is confirmed as an MCP-only capability. Discovering which
 peer sessions are currently registered works only over the MCP transport. A
 session on a non-MCP transport reaches the platform solely through
-`homunculus call <process_key>`, and no registered process returns the peer
+`solet call <process_key>`, and no registered process returns the peer
 registry: the CLI exposes no `peers` subcommand, semantic discovery over the
 knowledge base surfaces no peer-registry verb, and `peer_list` exists only
 as an MCP tool. Sending is unaffected — `peer_send_by_name` resolves and
@@ -189,24 +189,30 @@ is currently live. One adjacent verb, `list_bridges`, returns a
 well-formed, successful, and incorrect result (`0 bridge(s) tracked`
 against a live multi-session fleet) rather than an error; treat it as
 unreliable for this purpose, not as a substitute for peer enumeration. A
-fix is scoped but not built: three thin CLI subcommands (`homunculus
-inbox`, `homunculus peers`, `homunculus whoami`) over routes that already
+fix is scoped but not built: three thin CLI subcommands (`solet
+inbox`, `solet peers`, `solet whoami`) over routes that already
 exist would close this gap; none of the three exist today.
 
-Idle-session wake is confirmed as an MCP-only gap. A session on the MCP
-transport that goes idle with nothing pending does not wake on its own —
-there is no waker for that transport, so a truly idle MCP session never
-turns again without something external driving it back open. A non-MCP
-(`watch`) session's Stop-hook waiter (`wake_waiter.js`, this plugin)
-reopens the session on delivery instead. The asymmetry is in waking, not
-delivery: a message sent to an idle session is durably received on either
-transport; what differs is whether receiving it also resumes the
-session's turn. Measured 2026-08-02 (a live coordination walk): negative
-control (idle, nothing pending) run first on both arms — clean on both;
-an IMPORTANT delivery addressed directly to the MCP arm's own instance
-produced no unsolicited turn within 60s, while the same delivery to the
-non-MCP arm woke the session at 55.6s. No fix is scoped for this entry; it
-is disclosed, not remediated.
+Idle-session auto-drive is a managed-session capability, not a background-hook
+capability, and this plugin currently carries no automatic delivery-triggered
+notice on either transport (codex-0147-async-hook-regression: no `Stop`
+binding ships). An operator-launched Codex session on `watch` gets durable
+delivery: the message lands in the durable store and the watch process's own
+log (redirected there by the launcher, not the live terminal), and the
+operator must drain `peer_inbox` itself on its own next user/model turn; the
+`SessionStart` unread-coordination reminder fires only at
+startup/resume/`clear`, not per turn. With no `Stop` handler left to drain it,
+the wake-hook spool is retired end to end for Codex: the hydration-rendered
+launcher arms `<name> watch --no-spool` (stopping the watch process's own
+client-side tee), and the platform-side tee that wrote the same spool path on
+every dispatch to a `wake_capable=False` recipient
+(`_tee_spool_if_wake_incapable`, `agent_messaging_plugin/peer_dispatch.py`) is
+retired in the same landing. A managed `spawn_session` worker is unaffected by
+any of this — it receives a driver-channel notice from `drive_on_delivery`,
+which can start its next turn independent of this plugin's hooks entirely. An
+unmanaged session on either transport must be driven externally. Delivery
+durability is unchanged: the peer message is persisted before any of these
+best-effort notifications.
 
 Delivery durability across a coordination-service cutover is checked,
 confirmed equivalent on both transports. A message sent to a session
@@ -262,7 +268,7 @@ script output, or self-addressed send is not evidence for them.
 | conservative manifest handlers match the shipped entry points and Bash routing | `tests/manifest_consistency_smoke.py` |
 | repo marketplace resolves to this plugin and manifest metadata is consistent | `tests/marketplace_consistency_smoke.py` |
 | Bash allow/block and AGENT_ROLE-only authority | `tests/git_controller_gate_smoke.py` |
-| waiter arming, loop guard, one-bit output, failure paths, and cancellation cleanup | `tests/wake_waiter_smoke.py` |
+| no `Stop` binding is registered | `tests/manifest_consistency_smoke.py`'s `_check_no_stop_binding` |
 
 Run all five with `python3 tests/run_all.py`. These are offline source and
 behavioral checks. The live untrusted/trusted stock-process sentinel is a

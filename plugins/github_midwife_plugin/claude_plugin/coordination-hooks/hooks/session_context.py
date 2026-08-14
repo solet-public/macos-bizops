@@ -69,7 +69,7 @@ def _checkout_copy_owns_emission() -> bool:
 
 def _hydrate_instructions(pending: int, origin_tag: str, spool: str) -> str:
     return (
-        "MEMORY PASSTHROUGH (this local memory dir is a disposable projection of the homunculus's "
+        "MEMORY PASSTHROUGH (this local memory dir is a disposable projection of the solet's "
         "memory_service; see workbench/2026-07-16_unified_memory_passthrough_design_v2.md).\n"
         "\n"
         "HYDRATE (run once, early, before editing memory files) — regenerate the local "
@@ -80,7 +80,7 @@ def _hydrate_instructions(pending: int, origin_tag: str, spool: str) -> str:
         f"  2. Bash: {_ENV} python3 {_HOOKS_DIR}/hydrate_render.py {spool}  "
         "(writes per-fact files + MEMORY.md, VERBATIM, and stamps hydrated hashes BEFORE any "
         "capture can fire so it does not echo back).\n"
-        "  If the homunculus is DOWN (export fails): SKIP hydrate entirely — the last projection stays "
+        "  If the solet is DOWN (export fails): SKIP hydrate entirely — the last projection stays "
         "untouched; do not delete or half-write anything.\n"
         "\n"
         + _drain_instructions(pending)
@@ -89,7 +89,7 @@ def _hydrate_instructions(pending: int, origin_tag: str, spool: str) -> str:
 
 def _drain_instructions(pending: int) -> str:
     return (
-        f"DRAIN ({pending} local memory edit(s) pending write-through to the homunculus) — flush the "
+        f"DRAIN ({pending} local memory edit(s) pending write-through to the solet) — flush the "
         "capture journal to the canonical store:\n"
         f"  1. Bash: {_ENV} python3 {_HOOKS_DIR}/drain.py  -> prints {{\"pending\", \"upserts\":[{{path, "
         'process_key, arguments}}], "skipped_deleted"}}.\n'

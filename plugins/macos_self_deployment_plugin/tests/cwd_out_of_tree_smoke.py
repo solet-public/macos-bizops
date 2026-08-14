@@ -44,7 +44,7 @@ from macos_self_deployment_plugin.blue_green_router import (  # noqa: E402
 )
 from macos_self_deployment_plugin.release_manager import CandidatePaths  # noqa: E402
 
-_HOMUNCULUS = "example"
+_SOLET = "example"
 _passed = 0
 _failed: list[str] = []
 
@@ -73,7 +73,7 @@ class _FakePopen:
 
 def test_default_spawn_cwd_is_runtime_dir() -> None:
     """Site 2: the green child's CWD is the out-of-tree runtime dir."""
-    # ~/.ananta exists (the homunculus uses it); scratch app_home lives under it, NOT /tmp.
+    # ~/.ananta exists (the solet uses it); scratch app_home lives under it, NOT /tmp.
     ananta_root = Path.home() / ".ananta"
     ananta_root.mkdir(exist_ok=True)
     original_popen = subprocess.Popen
@@ -97,16 +97,16 @@ def test_default_spawn_cwd_is_runtime_dir() -> None:
                 schema_snapshot=None,
             )
             pid = swap_orchestrator.default_spawn(
-                app_home, "green", "example-green-test", _HOMUNCULUS, candidate,
+                app_home, "green", "example-green-test", _SOLET, candidate,
             )
     finally:
         subprocess.Popen = original_popen  # type: ignore[misc]
 
-    expected = str(get_runtime_dir(_HOMUNCULUS))
+    expected = str(get_runtime_dir(_SOLET))
     _check(pid == 4242, "default_spawn returned the (faked) child pid")
     _check(
         _FakePopen.last_cwd == expected,
-        f"default_spawn cwd == get_runtime_dir('{_HOMUNCULUS}') "
+        f"default_spawn cwd == get_runtime_dir('{_SOLET}') "
         f"(expected {expected!r}, got {_FakePopen.last_cwd!r})",
     )
     _check(
@@ -119,12 +119,12 @@ def test_default_spawn_cwd_is_runtime_dir() -> None:
 def _router_context() -> dict[str, str]:
     runtime_dir = service_install.RUNTIME_DIR
     return {
-        "LAUNCHD_LABEL": service_install.launchd_label(_HOMUNCULUS),
+        "LAUNCHD_LABEL": service_install.launchd_label(_SOLET),
         "PYTHON_BIN": "/usr/bin/python3",
         "WORKING_DIR": str(runtime_dir),
-        "HOMUNCULUS_NAME": _HOMUNCULUS,
+        "SOLET_NAME": _SOLET,
         "PUBLIC_PORT": "8800",
-        "SOCKET_PATH": str(service_install.default_socket_path(_HOMUNCULUS)),
+        "SOCKET_PATH": str(service_install.default_socket_path(_SOLET)),
         "LOG_DIR": str(service_install.LOG_DIR),
     }
 
@@ -170,7 +170,7 @@ def test_install_router_build_context_wires_out_of_tree() -> None:
     repo-root WorkingDirectory (the old ``REPO_ROOT`` key) is caught.
     """
     args = argparse.Namespace(
-        homunculus_name=_HOMUNCULUS,
+        solet_name=_SOLET,
         public_port=8800,
         socket_path=None,
         log_dir=None,

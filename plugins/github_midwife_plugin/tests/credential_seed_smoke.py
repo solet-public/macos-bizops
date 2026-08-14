@@ -1,27 +1,27 @@
-"""Slice C smoke — per-homunculus scram DB-password seed: generate/store/
+"""Slice C smoke — per-solet scram DB-password seed: generate/store/
 retrieve round-trip, idempotent skip, dual-key backfill, rotate-both, the
 two-state guard + role-absent fail-loud, the post-seed isolation self-proof
 classifier, the "never printed" guarantee, and the 2026-07-09 Codex must-fix
 pins (store-first ordering, no secret-bearing stderr in exceptions).
 
-Per-homunculus role isolation (operator override, 2026-07-12): each homunculus
-seeds its OWN role (name == HOMUNCULUS_NAME); the shared-`ananta` model and its
+Per-solet role isolation (operator override, 2026-07-12): each solet
+seeds its OWN role (name == SOLET_NAME); the shared-`ananta` model and its
 parent-provisions-child credential copy are retired, so this smoke no longer
 exercises `provision_db_password` / `--provision-from-stdin` / the pg_authid
-"already seeded by another homunculus" refusal (all deleted). The tri-state
+"already seeded by another solet" refusal (all deleted). The tri-state
 ownership guard is now a TWO-state guard (skip / rotate / fresh) plus a
 role-absent fail-loud, and the newborn proves isolation from a sibling db.
 
-Requires HOMUNCULUS_NAME to be set even to IMPORT
+Requires SOLET_NAME to be set even to IMPORT
 `github_midwife_plugin.credential_seed` (it imports `macos_vault_plugin`, whose
 package `__init__.py` resolves vault-scoped constants eagerly, and it resolves
-its own role name == HOMUNCULUS_NAME at import) -- same class of precondition as
+its own role name == SOLET_NAME at import) -- same class of precondition as
 `hmac_bearer_token_smoke.py` in the gate register. `subprocess.run` and
 `secrets.token_urlsafe` are mocked throughout: no real Postgres, no real
 Keychain, and the generated password is a known sentinel so the "never printed"
 check has something concrete to search for.
 
-Run directly: ``HOMUNCULUS_NAME=<name> .venv/bin/python3
+Run directly: ``SOLET_NAME=<name> .venv/bin/python3
 plugins/github_midwife_plugin/tests/credential_seed_smoke.py``.
 """
 
@@ -124,7 +124,7 @@ def _check_role_absent_fails_loud() -> None:
     """Two-state guard, role-absent case (§5.6): own key absent AND the role
     does NOT exist (wizard step 1's createuser was not run) -> fail loud naming
     the role and wizard step 1, never ALTER, never store. Replaces the retired
-    pg_authid "seeded by another homunculus" refusal.
+    pg_authid "seeded by another solet" refusal.
     """
     kc = FakeKeychain()
     alter_calls: list[str] = []
@@ -180,7 +180,7 @@ def _check_idempotent_skip_when_both_keys_present_and_authenticate() -> None:
 def _check_backfill_pgvector_key_when_postgres_valid_but_pgvector_absent() -> None:
     """Dual-key backfill branch (F11, Architect 2026-07-11): the postgres key is
     valid and the role authenticates, but the pgvector key is ABSENT (a resumed
-    partial birth, or a homunculus seeded before the dual-key change). The seed
+    partial birth, or a solet seeded before the dual-key change). The seed
     must NOT ALTER ROLE and must NOT touch the postgres key -- but it MUST
     backfill the pgvector key from the SAME value, or pgvector boots without its
     password and crash-loops. Deterministic completion of a definitional
@@ -282,21 +282,21 @@ def _check_roundtrip_mismatch_raises() -> None:
             raise SmokeFailureError("round-trip-mismatch: did not raise")
 
 
-def _check_homunculus_name_required() -> None:
+def _check_solet_name_required() -> None:
     kc = FakeKeychain()
-    saved = os.environ.pop("HOMUNCULUS_NAME", None)
+    saved = os.environ.pop("SOLET_NAME", None)
     try:
         try:
             seed_db_password(
                 keychain=kc, alter_role_password=lambda _pw: None, role_authenticates=lambda _pw: True,
             )
         except CredentialSeedError as exc:
-            _check("HOMUNCULUS_NAME-required raises", "HOMUNCULUS_NAME" in str(exc), str(exc))
+            _check("SOLET_NAME-required raises", "SOLET_NAME" in str(exc), str(exc))
         else:
-            raise SmokeFailureError("homunculus-name-required: did not raise")
+            raise SmokeFailureError("solet-name-required: did not raise")
     finally:
         if saved is not None:
-            os.environ["HOMUNCULUS_NAME"] = saved
+            os.environ["SOLET_NAME"] = saved
 
 
 def _check_nothing_printed() -> None:
@@ -386,7 +386,7 @@ def _check_default_role_authenticates_passes_pw_via_env_not_argv() -> None:
 
 def _check_default_role_exists_parses_psql_output() -> None:
     """The role-existence probe replaces the retired pg_authid ownership probe:
-    it queries `pg_roles` for this homunculus's own role and returns a plain
+    it queries `pg_roles` for this solet's own role and returns a plain
     bool (row present -> True, absent -> False)."""
     with patch("subprocess.run", return_value=_fake_completed(0, stdout="1\n")):
         _check("pg_roles row '1' -> role exists True", _default_role_exists() is True)
@@ -634,17 +634,17 @@ def _check_parse_seed_argv() -> None:
 # ── import-time discipline + admin-role identity ────────────────────────
 
 
-def _check_bare_package_import_survives_missing_homunculus_name() -> None:
+def _check_bare_package_import_survives_missing_solet_name() -> None:
     """RIDER (Codex, non-blocking): `credential_seed` must stay OUT of
     `github_midwife_plugin/__init__.py` -- a bare `import github_midwife_plugin`
-    must succeed with no HOMUNCULUS_NAME set; only importing the
+    must succeed with no SOLET_NAME set; only importing the
     `credential_seed` submodule specifically should fast-fail. Runs in a
     subprocess (this process already imported credential_seed at module load
-    with HOMUNCULUS_NAME set -- sys.modules caching would mask it in-process).
+    with SOLET_NAME set -- sys.modules caching would mask it in-process).
     """
     script = (
         "import os\n"
-        "os.environ.pop('HOMUNCULUS_NAME', None)\n"
+        "os.environ.pop('SOLET_NAME', None)\n"
         "import github_midwife_plugin\n"
         "print('bare-import-ok')\n"
         "try:\n"
@@ -658,12 +658,12 @@ def _check_bare_package_import_survives_missing_homunculus_name() -> None:
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=15,
     )
     _check(
-        "bare `import github_midwife_plugin` succeeds without HOMUNCULUS_NAME",
+        "bare `import github_midwife_plugin` succeeds without SOLET_NAME",
         "bare-import-ok" in result.stdout,
         f"stdout={result.stdout!r} stderr={result.stderr!r}",
     )
     _check(
-        "`import github_midwife_plugin.credential_seed` is the one thing that fast-fails without HOMUNCULUS_NAME",
+        "`import github_midwife_plugin.credential_seed` is the one thing that fast-fails without SOLET_NAME",
         "credential-seed-import-failed-as-expected" in result.stdout,
         f"stdout={result.stdout!r} stderr={result.stderr!r}",
     )
@@ -684,7 +684,7 @@ def _check_admin_role_dynamic_and_identical_across_layers() -> None:
     sentinel = "SENTINEL_ADMIN_ROLE_not_a_real_user"
     script = (
         "import os\n"
-        "os.environ.setdefault('HOMUNCULUS_NAME', 'example')\n"
+        "os.environ.setdefault('SOLET_NAME', 'example')\n"
         "import getpass\n"
         f"getpass.getuser = lambda: {sentinel!r}\n"
         "import importlib.util, sys\n"
@@ -734,7 +734,7 @@ def main() -> int:
         _check_rotate_both_when_stored_pw_is_stale()
         _check_inconsistent_keychain_state_raises()
         _check_roundtrip_mismatch_raises()
-        _check_homunculus_name_required()
+        _check_solet_name_required()
         _check_nothing_printed()
         _check_default_alter_role_password_passes_pw_via_stdin_not_argv()
         _check_default_alter_role_password_raises_on_failure()
@@ -749,7 +749,7 @@ def main() -> int:
         _check_isolation_breach_when_connect_succeeds()
         _check_default_sibling_connect_probe_passes_pw_via_env_not_argv()
         _check_parse_seed_argv()
-        _check_bare_package_import_survives_missing_homunculus_name()
+        _check_bare_package_import_survives_missing_solet_name()
     except SmokeFailureError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         print(f"  ({len(_CHECKS_RUN)} checks attempted before failure)", file=sys.stderr)

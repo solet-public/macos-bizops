@@ -283,7 +283,7 @@ Watchdogs are for **dispatches that the coordinator is on the hook to complete**
 
 - **Ack of a peer's completion report.** The dispatch is one-way; nothing to track.
 - **FYI peer_send.** No completion is expected.
-- **Operator-driven cycles** (e.g., a homunculus re-birth). The operator paces; the coordinator responds. Schedule a watchdog only if the coordinator is the one driving a sub-step inside the cycle.
+- **Operator-driven cycles** (e.g., a solet re-birth). The operator paces; the coordinator responds. Schedule a watchdog only if the coordinator is the one driving a sub-step inside the cycle.
 - **Long-running operator-paused dispatches.** If the operator says "wait on me before continuing," don't schedule a watchdog that will ping the operator (the operator isn't in `peer_list`).
 
 The discipline scopes to **coordinator-issued, peer-bound dispatches with a deliverable**. That is where F1 bit and that is where the watchdog earns its cost.

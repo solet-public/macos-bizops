@@ -3,7 +3,7 @@
 A full `git clone` of the platform ships the git-tracked `knowledge_bases/`
 symlinks, so genesis historically treated them as N/A. But the MINT seed's
 `assemble` step BANS symlinks from the published seed (they do not survive
-`git archive` + the export-ignore/prune), so a SEED-BORN homunculus's clone has
+`git archive` + the export-ignore/prune), so a SEED-BORN solet's clone has
 NONE -- and `default_knowledge_plugin`'s auto-installer, which registers every
 `knowledge_bases/<dir>` that carries a `manifest.yaml`, finds an empty tree: a
 dead knowledge base. This step mechanically DERIVES and idempotently REPAIRS

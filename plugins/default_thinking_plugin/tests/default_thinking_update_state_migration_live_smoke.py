@@ -183,7 +183,7 @@ def test_set_plan_id(provider: PostgresProvider, schema: str) -> None:
 def main() -> int:
     if os.environ.get("DEFAULT_THINKING_MIGRATION_LIVE_SMOKE") != "1":
         print("=== default_thinking_update_state_migration_live_smoke ===")
-        print("  SKIP  set DEFAULT_THINKING_MIGRATION_LIVE_SMOKE=1 to run; needs the live homunculus DB.")
+        print("  SKIP  set DEFAULT_THINKING_MIGRATION_LIVE_SMOKE=1 to run; needs the live solet DB.")
         return 0
     print("=== default_thinking_update_state_migration_live_smoke ===")
     schema_name = f"example_test_dthink_{secrets.token_hex(3)}"

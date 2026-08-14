@@ -26,7 +26,7 @@ from macos_self_deployment_plugin import drain_sentinel, stop_self_watchdog
 
 def run(
     *,
-    homunculus_name: str,
+    solet_name: str,
     reason: str,
     dry_run: bool,
     watchdog_spawner: stop_self_watchdog.WatchdogSpawner,
@@ -40,7 +40,7 @@ def run(
     later.
     """
     timestamp = datetime.now(UTC).isoformat()
-    sentinel = drain_sentinel.sentinel_path(homunculus_name)
+    sentinel = drain_sentinel.sentinel_path(solet_name)
     if dry_run:
         return StopSelfResult(
             status=StopSelfStatus.DRY_RUN,
@@ -67,7 +67,7 @@ def run(
                 "no-op idempotent return"
             ),
         )
-    drain_sentinel.write(homunculus_name)
+    drain_sentinel.write(solet_name)
     watchdog_pid = watchdog_spawner(os.getpid())
     return StopSelfResult(
         status=StopSelfStatus.SUCCESS,

@@ -1,8 +1,8 @@
-# Sealed-box secret transfer between homunculi
+# Sealed-box secret transfer between solets
 
 ## Goal
 
-Move a secret value from one homunculus's vault to another's vault. The
+Move a secret value from one solet's vault to another's vault. The
 plaintext must never enter the LLM context. The transfer must be
 auditable.
 
@@ -16,13 +16,13 @@ alone — that's the "anonymous-sender" property.
 
 ## Keypair lifecycle
 
-Each homunculus, on first boot, generates an X25519 keypair and stores
+Each solet, on first boot, generates an X25519 keypair and stores
 both halves in its own vault under:
 
 - `vault://identity/encryption_keypair/private` (32 bytes, NEVER leaves the vault)
 - `vault://identity/encryption_keypair/public` (32 bytes, durable identity)
 
-The public key is the durable identity of the homunculus. If it changes,
+The public key is the durable identity of the solet. If it changes,
 every sender who has the old key needs the new one before they can send
 again. So treat key rotation as a rare, deliberate event with explicit
 notification to peers.
@@ -81,7 +81,7 @@ transcript.
 
 - **Sender impersonation.** Sealed boxes are anonymous-sender by
   design. Anyone with kepler's public key can encrypt something. If the
-  agent says "kepler, import this ciphertext I claim is from the origin homunculus,"
+  agent says "kepler, import this ciphertext I claim is from the origin solet,"
   kepler accepts it. To fix, add a separate Ed25519 identity-signing
   keypair on the sender side and a `sender_signature` field in
   `export_encrypted` / `import_encrypted`. Recipient verifies the
@@ -131,7 +131,7 @@ MCP session are the trust boundary.
 
 **v2** (planned): add Ed25519 sender signatures. Recipient verifies
 the sender's identity before importing. Required if we ever federate
-beyond a single trust domain (e.g., a homunculus owned by a different
+beyond a single trust domain (e.g., a solet owned by a different
 operator).
 
 **v3** (speculative): post-quantum migration. Hybrid X25519 + ML-KEM.

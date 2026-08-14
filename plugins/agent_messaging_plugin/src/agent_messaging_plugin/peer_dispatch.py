@@ -32,9 +32,7 @@ and the raised exceptions into their own response types.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,7 +50,6 @@ from ananta.llm.agent_messaging.schema import (
 from ananta.llm.agent_messaging.service import role_message_external_id
 
 from .bridge_sessions import BridgeNotFoundError, BridgeQueueFullError
-from .local_cli.spool import default_spool_path, spool_append, watch_instance_digest
 from .peer_registry import PeerAmbiguousError, PeerUnreachableError
 from .session_lifecycle_verbs import drive_on_delivery
 
@@ -163,59 +160,6 @@ class NativeWakeError(Exception):
     def __init__(self, message: str, *, peer_agent_id: str) -> None:
         super().__init__(message)
         self.peer_agent_id: str = peer_agent_id
-
-
-def _tee_spool_if_wake_incapable(
-    recipient: BridgeBinding, delivered_prose: str,
-) -> None:
-    """Best-effort spool tee for a recipient with no native wake path
-    (codex-watch-migration wake_capable design, 2026-08-06). Called
-    ALONGSIDE :func:`drive_on_delivery` — a SIBLING, not a shared branch:
-    the two conditions (``wake_capable`` and managed-session-ness) are
-    orthogonal, a recipient can be both or neither, and unifying them would
-    hide two independent capabilities under one name.
-
-    A ``wake_capable=False`` binding (declared by its own bridge at
-    registration — see ``models.py``'s ``BridgeBinding.wake_capable``) has no
-    live turn-injection surface, so the platform feeds the SAME spool file
-    ``local_cli/wake.py``'s Stop-hook waiter already knows how to block on and
-    read — ``local_cli/wake.py`` itself needs no change: its own
-    ``read_watch_pairing`` fallback already documents "no watcher has
-    published a choice ... correct when no watcher ever armed," which is
-    exactly this recipient's steady state. Uses the SAME writer
-    (``local_cli.spool.spool_append``) a real ``watch`` process already uses,
-    not a second implementation.
-
-    Silently no-ops (never raises, never touches the caller's already-
-    computed delivery outcome) when: the recipient IS wake-capable (the
-    overwhelmingly common case — a single boolean check, the cheapest
-    possible no-op); the recipient has no ``agent_session_id`` (nothing to
-    derive a spool path from — an unregistered or legacy caller, the same
-    class ``drive_on_delivery`` already tolerates via its own optional-
-    collaborator convention); or the spool write itself raises (disk full,
-    permissions) — degrades to "no local nudge," same containment class as
-    ``drive_on_delivery``'s own driver-channel send.
-    """
-    if recipient.wake_capable:
-        return
-    if not recipient.agent_session_id:
-        return
-    homunculus_name = os.environ.get("HOMUNCULUS_NAME", "").strip()
-    if not homunculus_name:
-        return
-    instance_id = f"agi-watch-{watch_instance_digest(recipient.agent_session_id)}"
-    spool = default_spool_path(homunculus_name, instance_id)
-    line = json.dumps(
-        {"watch": "event", "event": {"content": delivered_prose}}, sort_keys=True,
-    )
-    try:
-        spool_append(spool, line)
-    except Exception:  # noqa: BLE001 — best-effort tee, same containment as
-        # drive_on_delivery's own driver-channel send.
-        logger.warning(
-            "_tee_spool_if_wake_incapable: spool write failed for %s",
-            recipient.agent_instance_id, exc_info=True,
-        )
 
 
 def dispatch_peer_send(
@@ -389,12 +333,9 @@ def dispatch_peer_send(
     drive_on_delivery(
         state_service,
         recipient_agent_instance_id=recipient.agent_instance_id,
+        recipient_agent_session_id=recipient.agent_session_id,
         sender_label=sender_session_label,
     )
-    # codex-watch-migration wake_capable design (2026-08-06): SIBLING to
-    # drive_on_delivery above, not unified — see _tee_spool_if_wake_incapable's
-    # own docstring for why the two conditions are orthogonal.
-    _tee_spool_if_wake_incapable(recipient, delivered_prose)
     return PeerSendOutcome(
         thread_id=str(result.thread_id),
         message_id=str(result.message_id),
@@ -749,12 +690,9 @@ def dispatch_role_send(
     drive_on_delivery(
         state_service,
         recipient_agent_instance_id=recipient.agent_instance_id,
+        recipient_agent_session_id=recipient.agent_session_id,
         sender_label=sender_session_label,
     )
-    # codex-watch-migration wake_capable design (2026-08-06): SIBLING to
-    # drive_on_delivery above, not unified — role-addressed sends (the primary
-    # way a Codex office is reached) get the same tee as direct sends.
-    _tee_spool_if_wake_incapable(recipient, delivered_prose)
     return RoleSendOutcome(
         thread_id=thread_id,
         message_id=message_id,

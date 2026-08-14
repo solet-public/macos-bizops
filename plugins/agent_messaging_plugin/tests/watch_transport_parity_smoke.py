@@ -126,7 +126,7 @@ def test_markerless_send_reaches_the_watch_spool() -> None:
     # the REAL ASGI-mounted /events route via TestClient -- no mocked HTTP
     # layer, the same pattern watcher_ack_consumption_smoke.py already
     # exercises for this exact route.
-    watcher_bridge_id = manager.open(homunculus_name="", parent_pid=None).bridge_id
+    watcher_bridge_id = manager.open(solet_name="", parent_pid=None).bridge_id
     watcher_instance_id = f"{WATCH_AGENT_INSTANCE_PREFIX}parity00000000000000000"
     registry.register(
         BridgeBinding(

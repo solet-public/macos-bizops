@@ -4,7 +4,7 @@
 Pins that ``SessionLedgerDeploymentMixin`` — migrated off raw ``transactional()``
 SQL onto ``write_state`` / ``update_state`` / ``query_state`` (SQL-lockdown #0,
 deployment slice) — drives the full M5 shipper pairing lifecycle correctly
-against the running homunculus's REAL ledger schema:
+against the running solet's REAL ledger schema:
 
 * ``insert_pending_deployment`` → row lands PENDING with the JSONB
   ``authorized_source_kinds`` list round-tripping (no caller cast) + a ``dep-`` id.
@@ -17,7 +17,7 @@ against the running homunculus's REAL ledger schema:
 
 Writes ONE sentinel deployment row and hard-deletes it in a ``finally`` — no
 durable state, no impact on real rows. Env-gated behind
-``LEDGER_DEPLOYMENT_LIVE_SMOKE=1`` (needs the live homunculus DB up).
+``LEDGER_DEPLOYMENT_LIVE_SMOKE=1`` (needs the live solet DB up).
 
 Run::
 
@@ -40,7 +40,7 @@ sys.path.insert(
     0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
-from ananta.constants import HOMUNCULUS_NAME_ENV_VAR  # noqa: E402
+from ananta.constants import SOLET_NAME_ENV_VAR  # noqa: E402
 from ananta.llm.session_ledger.repository import (  # noqa: E402
     SessionLedgerRepository,
 )
@@ -52,7 +52,7 @@ from postgres_state_management_plugin.postgres_backend.provider import (  # noqa
     PostgresProvider,
 )
 
-_SCHEMA = os.environ[HOMUNCULUS_NAME_ENV_VAR]
+_SCHEMA = os.environ[SOLET_NAME_ENV_VAR]
 
 _passed = 0
 _failed: list[str] = []
@@ -259,7 +259,7 @@ def main() -> int:
         print("=== deployment_migration_live_smoke ===")
         print(
             "  SKIP  set LEDGER_DEPLOYMENT_LIVE_SMOKE=1 to run; "
-            "needs the live homunculus DB."
+            "needs the live solet DB."
         )
         return 0
     print("=== deployment_migration_live_smoke ===")

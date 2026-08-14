@@ -13,7 +13,7 @@ This smoke is the red-first pin for the rename:
   * the two role-send process JSONs carry the new values, not the old.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/rel06_relabel_smoke.py
 """
 

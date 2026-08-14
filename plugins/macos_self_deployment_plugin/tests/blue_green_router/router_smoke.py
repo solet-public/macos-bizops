@@ -1,4 +1,4 @@
-"""Slice C router smoke — standalone, no pytest, no homunculus needed.
+"""Slice C router smoke — standalone, no pytest, no solet needed.
 
 Spawns the router as an asyncio task within this process plus two
 mock-color HTTP servers (blue on 8101, green on 8150). Drives the
@@ -19,7 +19,7 @@ Covers the §3.1 deliverable checklist from
 
 Drain window is overridden to 3 seconds; public port is moved off
 the canonical 8100 to a free high port to avoid colliding with any
-running homunculus.
+running solet.
 
 Run: .venv/bin/python3 plugins/macos_self_deployment_plugin/tests/blue_green_router/router_smoke.py
 """
@@ -83,7 +83,7 @@ class _Mgmt:
 
 
 class _MockColor:
-    """Asyncio TCP server pretending to be a homunculus's bridge.
+    """Asyncio TCP server pretending to be a solet's bridge.
 
     Responds to GET /probe with a fixed JSON body and a fresh
     Mcp-Session-Id when the incoming request did NOT carry one. If
@@ -184,7 +184,7 @@ async def _router_running(socket_path: Path, public_port: int):
     ready = asyncio.Event()
     task = asyncio.create_task(
         run_router(
-            homunculus="smoke",
+            solet="smoke",
             public_port=public_port,
             public_host="127.0.0.1",
             socket_path=socket_path,

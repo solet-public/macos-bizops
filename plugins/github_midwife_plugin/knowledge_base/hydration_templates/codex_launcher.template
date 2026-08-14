@@ -1,8 +1,8 @@
 #!/bin/zsh
-# codex-{{HOMUNCULUS_NAME}} — start stock Codex with {{HOMUNCULUS_NAME}}'s
+# codex-{{SOLET_NAME}} — start stock Codex with {{SOLET_NAME}}'s
 # durable no-MCP receive path armed.
 #
-# Usage: codex-{{HOMUNCULUS_NAME}} [role] [codex arguments ...]
+# Usage: codex-{{SOLET_NAME}} [role] [codex arguments ...]
 #   role   durable coordination role and human-facing label (default: Operator)
 #
 # CODEX_BIN may name an explicit stock Codex executable. It defaults to the
@@ -19,28 +19,28 @@ cd "{{CLONE_DIR}}" || exit 1
 
 codex_bin="${CODEX_BIN:-codex}"
 if ! command -v "$codex_bin" >/dev/null 2>&1; then
-  print -u2 -- "codex-{{HOMUNCULUS_NAME}}: stock Codex executable not found: $codex_bin"
+  print -u2 -- "codex-{{SOLET_NAME}}: stock Codex executable not found: $codex_bin"
   exit 1
 fi
 
-# Homunculus name: NOT part of the neutral AGENT_* fleet-identity family
+# Solet name: NOT part of the neutral AGENT_* fleet-identity family
 # below (that family is deliberately unprefixed per the 2026-07-28 ruling in
 # agent_messaging_plugin/env_contract.py) — this is the separate variable
-# naming which homunculus this shell talks to. Several plugins resolve it at
+# naming which solet this shell talks to. Several plugins resolve it at
 # module-import time for scoped vault keys, and quality_gates/run_smokes.py
 # (the Git-Controller gate path) fails loudly without it. launch.template
 # (the daemon launcher) already exports it; keep both launchers in lockstep.
-export HOMUNCULUS_NAME="{{HOMUNCULUS_NAME}}"
+export SOLET_NAME="{{SOLET_NAME}}"
 
-# The session id is computed exactly once. The watcher, wake hook, durable
-# inbox, and Codex process must all inherit this same value or their per-session
+# The session id is computed exactly once. The watcher, durable inbox, and
+# Codex process must all inherit this same value or their per-session
 # routing keys diverge silently.
 export AGENT_IDENTITY="codex"
 export AGENT_SESSION_LABEL="$role"
 export AGENT_ROLE="$role"
 export AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}"
-export AGENT_WAKE_CLI="{{HOMUNCULUS_NAME}}"
-export FLEET_TRANSPORT="${{{HOMUNCULUS_NAME}}_FLEET_TRANSPORT:-watch}"
+export AGENT_WAKE_CLI="{{SOLET_NAME}}"
+export FLEET_TRANSPORT="${{{SOLET_NAME}}_FLEET_TRANSPORT:-watch}"
 export GIT_CONTROLLER_NAME="{{GIT_CONTROLLER_NAME}}"
 
 if [[ "$FLEET_TRANSPORT" == "watch" ]]; then
@@ -49,15 +49,24 @@ if [[ "$FLEET_TRANSPORT" == "watch" ]]; then
   else
     runtime_dir="$HOME/.ananta/runtime"
   fi
-  watch_log="$runtime_dir/{{HOMUNCULUS_NAME}}.${AGENT_SESSION_ID}.watch.log"
+  watch_log="$runtime_dir/{{SOLET_NAME}}.${AGENT_SESSION_ID}.watch.log"
 
   if mkdir -p "$runtime_dir" 2>/dev/null && chmod 700 "$runtime_dir" 2>/dev/null; then
     # Plain background child only: no nohup, disown, or setsid. `exec` below
     # preserves this shell's pid, so --exit-with-parent names the Codex process.
+    #
+    # codex-0147-async-hook-regression (2026-08-13): the coordination-hooks
+    # Codex plugin ships no `Stop` handler, so no `solet wake` invocation
+    # ever drains the wake-hook spool this watcher would otherwise tee
+    # message-bearing deliveries into -- it would grow unbounded,
+    # unconsumed, so the flag below disables that tee. Delivery itself is
+    # unaffected: the durable inbox and this watcher's own stdout/log
+    # stream are unconditional and independent of the spool tee.
     "$AGENT_WAKE_CLI" watch \
       --agent-id codex \
       --role "$AGENT_ROLE" \
       --exit-with-parent "$$" \
+      --no-spool \
       >>"$watch_log" 2>&1 &
     watcher_pid=$!
 
@@ -74,7 +83,7 @@ if [[ "$FLEET_TRANSPORT" == "watch" ]]; then
     done
 
     if ! grep -Fq '"watch": "armed"' "$watch_log" 2>/dev/null; then
-      print -u2 -- "codex-{{HOMUNCULUS_NAME}}: watcher did not arm; see $watch_log"
+      print -u2 -- "codex-{{SOLET_NAME}}: watcher did not arm; see $watch_log"
       tail -n 20 "$watch_log" >&2 2>/dev/null || true
       if kill -0 "$watcher_pid" 2>/dev/null; then
         kill -TERM "$watcher_pid" 2>/dev/null || true
@@ -82,7 +91,7 @@ if [[ "$FLEET_TRANSPORT" == "watch" ]]; then
       wait "$watcher_pid" 2>/dev/null || true
     fi
   else
-    print -u2 -- "codex-{{HOMUNCULUS_NAME}}: cannot prepare watcher runtime directory: $runtime_dir"
+    print -u2 -- "codex-{{SOLET_NAME}}: cannot prepare watcher runtime directory: $runtime_dir"
   fi
 fi
 

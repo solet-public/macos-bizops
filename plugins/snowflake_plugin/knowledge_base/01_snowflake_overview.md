@@ -4,7 +4,7 @@ A query (and, per the operator's 2026-08-09 posture reversal + Amendment 1,
 write) connector over the operator's Snowflake warehouse account.
 Executor: `snowflake-connector-python`. Auth: key-pair (RSA JWT) as the
 operator's own Snowflake user — no PAT, no browser flow, no callback server
-(the platform's durable-non-interactive-auth principle: a homunculus runs
+(the platform's durable-non-interactive-auth principle: a solet runs
 headless and unattended, so no connector should ever need a human to click
 through a login). Most operators already query Snowflake exactly this way
 from local scripts — same user, same key pair, same read-only role — and the
@@ -140,7 +140,7 @@ collapse to "point the address-book entry at what you already have."
 5. **Register the address-book entry** `snowflake_account` with the literal
    fields (`account`, `user=<you>`, `warehouse`, `database`, `schema`,
    `role=<readonly_role>`, `auth_method=key_pair`) and a `private_key` field
-   holding `vault::<homunculus>.default_address_book_plugin.snowflake_private_key`.
+   holding `vault::<solet>.default_address_book_plugin.snowflake_private_key`.
    Ingest the PEM contents of `rsa_key.p8` into that vault key agent-blind
    via `vault_service::store_from_file` (the exact multi-line PEM text — a
    flattened key fails loud at config resolution, not at first connect; see

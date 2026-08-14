@@ -68,7 +68,7 @@ _CREDENTIAL_MARKERS: Final[tuple[str, ...]] = (
 # `macos_self_deployment_plugin` service_install.launchd_label). The
 # bundled test fixtures use `local.session-shipper.<deployment_id>`.
 REQUIRED_CONTEXT_KEYS: Final[frozenset[str]] = frozenset({
-    "HOMUNCULUS_PUBLIC_URL",
+    "SOLET_PUBLIC_URL",
     "DEPLOYMENT_ID",
     "MACHINE_ID",
     "INSTALL_DIR",

@@ -3,7 +3,7 @@
 
 This is the REAL Phase-2 startup entry condition: Phase 2 calls
 ``reconcile()`` on every boot — including the very first boot of a
-freshly-birthed homunculus, when ``~/.ananta/releases/<name>/`` does not
+freshly-birthed solet, when ``~/.ananta/releases/<name>/`` does not
 exist yet and no release has ever been built. Every other ReleaseManager
 smoke seeds at least one release first, so this virgin path had zero
 assertion coverage (Reviewer-B's N1).

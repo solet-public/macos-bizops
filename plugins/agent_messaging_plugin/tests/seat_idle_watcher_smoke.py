@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit smoke for ``seat_idle_watcher.py`` (rotation-systematization P4(b),
 P4(a) ratification 2026-08-07, six bound conditions). Offline, stub-driven --
-no real iTerm2 connection, no real ``homunculus``/fleet call (matching this
+no real iTerm2 connection, no real ``solet``/fleet call (matching this
 repo's existing ``seat_rotation_helper_smoke.py`` convention).
 
 Proves: idle-seconds computation is 0 whenever status != "idle" and never
@@ -16,7 +16,7 @@ ACT-time gate (condition 5) refuses on both a non-empty composer and a
 never-stabilizing screen, and NEVER lets ``run_rotation`` fire when it
 refuses; and the hard privacy rule (condition 2) -- the poke text sent is
 EXACTLY the fixed constant, byte-for-byte, even when the underlying
-``homunculus`` envelope carries a distinctive marker string in a message
+``solet`` envelope carries a distinctive marker string in a message
 body, proving the pending-count extraction never lets body content reach
 the injected text.
 
@@ -245,15 +245,15 @@ def test_compute_idle_seconds_never_negative() -> None:
 
 def test_project_dir_slug_matches_measured_convention() -> None:
     _check(
-        watcher.project_dir_slug_for(Path("/Users/alice/Workspace/homunculus")) == "-Users-alice-Workspace-homunculus",
+        watcher.project_dir_slug_for(Path("/Users/alice/Workspace/solet")) == "-Users-alice-Workspace-solet",
         "project_dir_slug_for matches the live-measured Claude Code transcript-dir convention",
     )
 
 
 def test_transcript_path_for_builds_expected_path() -> None:
-    expected = Path.home() / ".claude" / "projects" / "-Users-alice-Workspace-homunculus" / "abc123.jsonl"
+    expected = Path.home() / ".claude" / "projects" / "-Users-alice-Workspace-solet" / "abc123.jsonl"
     _check(
-        watcher.transcript_path_for("-Users-alice-Workspace-homunculus", "abc123") == expected,
+        watcher.transcript_path_for("-Users-alice-Workspace-solet", "abc123") == expected,
         "transcript_path_for builds the expected transcript path",
     )
 
@@ -409,10 +409,10 @@ def test_is_poke_on_cooldown_exact_boundary_is_false() -> None:
 
 
 def test_resolve_pending_count_extracts_only_the_length() -> None:
-    original = watcher._homunculus_call
+    original = watcher._solet_call
     marker = "SECRET_INBOX_BODY_MARKER_ALPHA"
     try:
-        watcher._homunculus_call = lambda *_a, **_k: {  # type: ignore[assignment]
+        watcher._solet_call = lambda *_a, **_k: {  # type: ignore[assignment]
             "status": "completed",
             "result": {"data": {"role_entries": [
                 {"message": {"content": [{"text": marker}]}},
@@ -423,19 +423,19 @@ def test_resolve_pending_count_extracts_only_the_length() -> None:
         _check(count == 2, "resolve_pending_count returns the entry count")
         _check(isinstance(count, int), "resolve_pending_count's return type is a bare int")
     finally:
-        watcher._homunculus_call = original
+        watcher._solet_call = original
 
 
 def test_resolve_pending_count_none_on_call_failure() -> None:
-    original = watcher._homunculus_call
+    original = watcher._solet_call
     try:
-        watcher._homunculus_call = lambda *_a, **_k: None  # type: ignore[assignment]
+        watcher._solet_call = lambda *_a, **_k: None  # type: ignore[assignment]
         _check(
             watcher.resolve_pending_count("ases-x") is None,
-            "resolve_pending_count returns None on a failed homunculus call, never a guess",
+            "resolve_pending_count returns None on a failed solet call, never a guess",
         )
     finally:
-        watcher._homunculus_call = original
+        watcher._solet_call = original
 
 
 # ─── _confirm_pane_ready_for_action — condition 5's ACT-time gate ────────────
@@ -578,7 +578,7 @@ def test_run_tick_refuses_when_act_time_gate_fails_and_never_injects() -> None:
 def test_run_tick_pokes_with_the_fixed_constant_and_records_cooldown_state() -> None:
     """The condition-2 privacy smoke: the text actually handed to
     run_rotation is EXACTLY the fixed constant, even though the pending
-    count came from a stubbed homunculus response -- proving the poke path
+    count came from a stubbed solet response -- proving the poke path
     never threads inbox content into the injected text. Also proves the
     cooldown state persists: a second tick immediately after must NOT
     poke again."""

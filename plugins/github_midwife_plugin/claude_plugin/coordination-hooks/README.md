@@ -96,7 +96,7 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   library for `hydrate_render.py`, plus its own standalone entry point);
   `sync.py` wraps hydrate/drain into one Bash call per direction and is
   the one CLI utility in this group that shells out, via the same
-  PATH-resolved `homunculus` convention as the heartbeat/rotation-due
+  PATH-resolved `solet` convention as the heartbeat/rotation-due
   watch hooks. See `SECURITY.md` for the full per-file contract.
 - **Spawn-injected worker hooks** (`headless_tool_allowlist_gate.py`,
   `capture_session_mapping.py`) — NOT wired into this plugin's own
@@ -219,11 +219,11 @@ empty value must not silently kill wakes on a watch deployment.
   local command (`$AGENT_WAKE_CLI wake --max-wait <seconds>`, fixed
   argv, no shell), discards its output, and emits only its own
   compiled-in text; the heartbeat and rotation-due watch hooks each
-  invoke the local `homunculus` CLI with a fixed `["homunculus", "call",
+  invoke the local `solet` CLI with a fixed `["solet", "call",
   "<fixed process_key>", <JSON payload>]` argv (no shell) and write only
   a small, secret-free timestamp marker file for throttling; `sync.py`
   (memory-passthrough, agent-invoked, never auto-fired) invokes the same
-  `homunculus` CLI convention once per export and once per pending
+  `solet` CLI convention once per export and once per pending
   journal entry on drain. Four memory-passthrough files write more than
   a marker by design — `capture.py` appends one journal record,
   `hydrate_render.py`/`index_render.py` write this agent's own per-fact

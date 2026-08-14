@@ -12,7 +12,7 @@
   },
   "error_processor_customizations": {
     "action_context": "All three required-field checks (missing_lane_id, missing_charter_text, missing_captured_at) run BEFORE the state write, so a refused call never touches state.",
-    "error_interpretation": "missing_lane_id: lane_id was empty or whitespace-only. missing_charter_text: charter_text was empty or whitespace-only — an empty charter is refused rather than stored as a valid 'no charter' row (spawn_session's own resolve already treats a genuinely absent row as 'no charter', so an empty-string row would be a confusing second way to express the same thing). missing_captured_at: captured_at was empty or whitespace-only. state_service_unavailable: state_service is not bound on this homunculus.",
+    "error_interpretation": "missing_lane_id: lane_id was empty or whitespace-only. missing_charter_text: charter_text was empty or whitespace-only — an empty charter is refused rather than stored as a valid 'no charter' row (spawn_session's own resolve already treats a genuinely absent row as 'no charter', so an empty-string row would be a confusing second way to express the same thing). missing_captured_at: captured_at was empty or whitespace-only. state_service_unavailable: state_service is not bound on this solet.",
     "recovery_guidance": "Supply all three required fields (lane_id, charter_text, captured_at) and retry — none of these errors touch state, so a retry with corrected arguments is always safe. If the goal is to correct a PRIOR charter's wording, call this verb again with the corrected text rather than looking for an edit path: the new row supersedes by recency and the old row's text is left untouched (immutability by design, not a gap)."
   }
 }

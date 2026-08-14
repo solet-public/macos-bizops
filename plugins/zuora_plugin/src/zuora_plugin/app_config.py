@@ -4,7 +4,7 @@ The plugin's base_url / client_id / client_secret live in a single
 address-book entry named ``zuora_tenant``. ``base_url`` IS the environment
 selector (US prod ``rest.zuora.com``, EU prod ``rest.eu.zuora.com``, sandbox
 ``rest.apisandbox.zuora.com``). The ``client_secret`` field stores a
-``vault::<homunculus>.default_address_book_plugin.zuora_client_secret``
+``vault::<solet>.default_address_book_plugin.zuora_client_secret``
 reference (chain-consumed — see :data:`constants.VAULT_KEY_CLIENT_SECRET`);
 every other field is a literal.
 """

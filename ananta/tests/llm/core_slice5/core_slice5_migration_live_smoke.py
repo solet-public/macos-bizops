@@ -190,12 +190,12 @@ def _poller(
     adapter: object | None = None,
 ) -> ActionQueuePoller:
     """Partial-construct the poller with only the attributes the migrated methods
-    touch (``state_service`` for all; ``max_actions_per_poll`` + ``_homunculus_version``
+    touch (``state_service`` for all; ``max_actions_per_poll`` + ``_solet_version``
     for the dispatch read). ``adapter`` overrides the default live adapter."""
     poller = object.__new__(ActionQueuePoller)
     poller.state_service = cast("Any", adapter if adapter is not None else _LiveStateAdapter(provider))
     poller.max_actions_per_poll = max_per_poll
-    poller._homunculus_version = version  # noqa: SLF001
+    poller._solet_version = version  # noqa: SLF001
     return poller
 
 
@@ -614,7 +614,7 @@ def main() -> int:
         print("=== core_slice5_migration_live_smoke ===")
         print(
             "  SKIP  set CORE_SLICE5_LIVE_SMOKE=1 to run; needs the live "
-            "homunculus DB (own throwaway schema)."
+            "solet DB (own throwaway schema)."
         )
         return 0
     print("=== core_slice5_migration_live_smoke ===")

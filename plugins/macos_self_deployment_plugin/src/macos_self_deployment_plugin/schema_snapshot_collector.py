@@ -31,7 +31,7 @@ WRONG tree silently defeats the gate):
   plugin, which would otherwise shrink the snapshot).
 
 Either assert raises → non-zero exit → the producer raises ``ReleaseManagerError``
-→ the deploy is refused. Requires ``HOMUNCULUS_NAME`` + ``APP_HOME`` (profile
+→ the deploy is refused. Requires ``SOLET_NAME`` + ``APP_HOME`` (profile
 manifest gating) + ``EXPECT_ROOT`` (provenance root); the producer sets all three.
 
 Namespace merge: multiple ``SchemaDefinition`` objects can share one namespace

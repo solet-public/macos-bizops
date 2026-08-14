@@ -6,7 +6,7 @@ Validates the contract from
 SelfDeploymentServiceInterface, paired with the cloud sibling):
 
 * **Live path:** writes the cross-color drain sentinel at
-  ``~/.ananta/runtime/<homunculus>.draining`` and invokes the watchdog
+  ``~/.ananta/runtime/<solet>.draining`` and invokes the watchdog
   spawner with the current pid. The spawner is patched via
   ``set_watchdog_spawner_for_smoke`` so the smoke records the call
   without actually killing the test runner. The sentinel PERSISTS
@@ -14,7 +14,7 @@ SelfDeploymentServiceInterface, paired with the cloud sibling):
   Slice 4 which auto-cleans on context exit).
 
 * **Idempotent ALREADY_STOPPED:** a second stop_self call against the
-  same homunculus name finds the sentinel already on disk and returns
+  same solet name finds the sentinel already on disk and returns
   ALREADY_STOPPED without re-invoking the spawner.
 
 * **Return envelope:** StopSelfResult fields populated as the dispatch
@@ -50,7 +50,7 @@ from macos_self_deployment_plugin.plugin import (  # noqa: E402
 
 def _build_plugin() -> MacosSelfDeploymentPlugin:
     plugin = MacosSelfDeploymentPlugin()
-    plugin._homunculus_name = "smoketest"
+    plugin._solet_name = "smoketest"
     plugin._self_color = "blue"
     plugin._self_instance_id = "smoketest-blue-test0001"
     return plugin

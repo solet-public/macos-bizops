@@ -1,8 +1,8 @@
 """Genesis-time helper for the root ``root_manifest.yaml``.
 
-The MINT seed ships the minting homunculus's ``root_manifest.yaml``
+The MINT seed ships the minting solet's ``root_manifest.yaml``
 verbatim (``assemble`` copies it from the committed ref), so a seed-born
-clone's ``homunculus_name:`` field still names the MINTING homunculus,
+clone's ``solet_name:`` field still names the MINTING solet,
 not the newborn. This module's :func:`seed_for_newborn` rewrites that
 single line at genesis so the newborn's manifest accurately identifies
 itself — the seed axis's counterpart to ``macos_midwife_plugin``'s
@@ -31,8 +31,8 @@ ROOT_MANIFEST_FILENAME: Final[str] = "root_manifest.yaml"
 # the one line (the macOS original's \s* + appended-\n shape injected a blank
 # line after the name; caught by this plugin's smoke, fixed in both copies
 # 2026-07-12).
-_HOMUNCULUS_NAME_RE: Final[re.Pattern[str]] = re.compile(
-    r"^(homunculus_name:[ \t]*)\S+[ \t]*$", re.MULTILINE,
+_SOLET_NAME_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(solet_name:[ \t]*)\S+[ \t]*$", re.MULTILINE,
 )
 
 
@@ -40,11 +40,11 @@ class RootManifestSeedError(RuntimeError):
     """Raised when the newborn manifest cannot be seeded."""
 
 
-def seed_for_newborn(newborn_root: Path, homunculus_name: str) -> Path:
+def seed_for_newborn(newborn_root: Path, solet_name: str) -> Path:
     """Rewrite ``<newborn_root>/root_manifest.yaml`` to name the newborn.
 
     Returns the manifest path.  Raises :class:`RootManifestSeedError`
-    when the file is missing or carries no ``homunculus_name:`` line —
+    when the file is missing or carries no ``solet_name:`` line —
     both are fail-loud states: every seed ships the file (it is in the
     seed_manifest ``copy:`` allowlist) and the schema requires the line.
     Idempotent: a second run rewrites the line to the same value.
@@ -57,13 +57,13 @@ def seed_for_newborn(newborn_root: Path, homunculus_name: str) -> Path:
             "clone is not a complete seed tree."
         )
     text = manifest_path.read_text(encoding="utf-8")
-    rewritten, count = _HOMUNCULUS_NAME_RE.subn(
-        lambda m: f"{m.group(1)}{homunculus_name}", text, count=1,
+    rewritten, count = _SOLET_NAME_RE.subn(
+        lambda m: f"{m.group(1)}{solet_name}", text, count=1,
     )
     if count != 1:
         raise RootManifestSeedError(
             f"root_manifest.yaml at {manifest_path} carries no "
-            "`homunculus_name:` line; manifest schema violation."
+            "`solet_name:` line; manifest schema violation."
         )
     manifest_path.write_text(rewritten, encoding="utf-8")
     return manifest_path

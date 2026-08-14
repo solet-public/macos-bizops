@@ -13,7 +13,7 @@ located from ``APP_HOME`` (NOT ``__file__``, which points at a materialized
 release copy with no ``.git`` in a blue-green deploy). The gate SCRIPTS still
 come from the code root via the engine's ``platform_gates`` wrappers (which run
 ``cwd=<worktree>`` with the shipped ``quality_gates/`` snapshot), so the worktree
-is what gets scanned. Local-profile only: a cloud homunculus has no git worktree,
+is what gets scanned. Local-profile only: a cloud solet has no git worktree,
 so ``locate_worktree_root`` fail-louds there — exclude from cloud manifests.
 """
 
@@ -151,7 +151,7 @@ def locate_worktree_root(app_home: Path) -> Path:
     spawned with the SAME app_home, so ``APP_HOME`` resolves the worktree
     identically in the direct-launch and release-copy contexts. Returns the first
     ancestor carrying BOTH ``quality_gates/`` and ``.git``; fail-loud otherwise (a
-    cloud homunculus has no git worktree — this plugin is local-profile only).
+    cloud solet has no git worktree — this plugin is local-profile only).
     """
     anchor = Path(app_home).resolve()
     for candidate in (anchor, *anchor.parents):

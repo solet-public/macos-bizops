@@ -14,7 +14,7 @@ Proves the two Tier-2 primitives offline:
   enumerating what was walked + an ``unscanned`` note naming the live DB
   instances it cannot see).
 
-Offline: no live homunculus, no DB. Part B builds a throwaway KB tree in a temp dir.
+Offline: no live solet, no DB. Part B builds a throwaway KB tree in a temp dir.
 
 Run:
     .venv/bin/python3 ananta/tests/core/process_registry/retire_process_smoke.py

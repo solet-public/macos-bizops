@@ -18,24 +18,24 @@ import os
 from typing import Final
 
 
-def _homunculus_or_fail() -> str:
-    """Resolve HOMUNCULUS_NAME at import-time for the scoped vault key.
+def _solet_or_fail() -> str:
+    """Resolve SOLET_NAME at import-time for the scoped vault key.
 
     The chain-consumed api_token vault key follows the
-    ``<homunculus>.<plugin>.<credential>`` convention. Mirrors the fast-fail
+    ``<solet>.<plugin>.<credential>`` convention. Mirrors the fast-fail
     helper in g_suite_plugin.constants / schwab_market_data_plugin.constants /
     soundcloud_artist_studio_plugin.constants.
     """
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "jira_plugin.constants: HOMUNCULUS_NAME env var is required to "
+            "jira_plugin.constants: SOLET_NAME env var is required to "
             "resolve the scoped api_token vault key.",
         )
     return name
 
 
-_HOMUNCULUS: Final[str] = _homunculus_or_fail()
+_SOLET: Final[str] = _solet_or_fail()
 
 # ---------------------------------------------------------------------------
 # Plugin identity
@@ -64,7 +64,7 @@ DEFAULT_TOKEN_EXPIRY_WARN_DAYS: Final[int] = 14
 # Chain-consumed vault key — the api_token secret.
 # ---------------------------------------------------------------------------
 # The "jira_site" address-book entry's ``api_token`` field stores a
-# ``vault::<homunculus>.default_address_book_plugin.jira_api_token`` reference.
+# ``vault::<solet>.default_address_book_plugin.jira_api_token`` reference.
 # CHAIN-CONSUMED via ``resolve_with_secrets`` (never read directly under this
 # plugin's identity), so it lives in the RESOLVER's namespace
 # (``default_address_book_plugin``) — post-2026-06-07 vault namespace
@@ -74,7 +74,7 @@ DEFAULT_TOKEN_EXPIRY_WARN_DAYS: Final[int] = 14
 # runtime vault keys. Canonical convention: VAULT_AND_ADDRESS_BOOK.md
 # §"Pattern: Plugin Configuration via Address Book + Vault".
 VAULT_KEY_API_TOKEN: Final[str] = (
-    f"{_HOMUNCULUS}.default_address_book_plugin.jira_api_token"
+    f"{_SOLET}.default_address_book_plugin.jira_api_token"
 )
 
 # ---------------------------------------------------------------------------

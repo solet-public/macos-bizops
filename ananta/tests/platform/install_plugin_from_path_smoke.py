@@ -15,10 +15,10 @@ Assertions (per design memo §5 (iv)):
        cycle is multi-process integration territory, matching the
        precedent at ``root_manifest_smoke.py:13`` ("§7.3 sub-asserts
        (b/c/d) ... are integration-test territory beyond the ~250 LOC
-       scope and deferred to a follow-on smoke against a live homunculus"). The
+       scope and deferred to a follow-on smoke against a live solet"). The
        in-session A1/A2/A3 cover the bug fixes; A4 covers the platform
        contract that the in-memory state is also persisted via
-       operator-driven apply_manifest. The live-homunculus follow-on owns it.
+       operator-driven apply_manifest. The live-solet follow-on owns it.
 
 ER-6 intersection (per design memo §5 (v)):
   C1 - install of a contract-invalid plugin returns an error envelope
@@ -28,7 +28,7 @@ ER-6 intersection (per design memo §5 (v)):
 Operator-cited repro:
   Conceptually covered by A1+A2+A3 against the synthetic fixture (which
   intentionally mirrors a ``dependencies = []`` plugin shape). The two operator-cited plugins are
-  currently installed in the running homunculus roster (merged in commit
+  currently installed in the running solet roster (merged in commit
   ``8bb685e82`` 2026-06-15); re-running install_plugin_from_path
   against them in-process would not exercise the fresh-install code
   path. The synthetic fixture exists precisely so the smoke can
@@ -57,7 +57,7 @@ times per run, so it is deliberately NOT registered in
 install-smoke precedent + GTE-09 "no dead live-DB smokes in the gate").
 It MUST be run by hand in build-verify before any land that touches
 install_plugin_from_path / the PluginInstaller primitive:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \\
+    SOLET_NAME=<name> .venv/bin/python3 \\
         ananta/tests/platform/install_plugin_from_path_smoke.py
 
 Project policy: no pytest. Exits 0 on success, 1 on first failure.
@@ -327,7 +327,7 @@ class _MinimalOrchestrator:
     additionally reaches ``self._process_registry_manager`` (through the
     service's deregister callback). A minimal stand-in keeps the smoke
     library-level (matching the ``root_manifest_smoke.py`` precedent) without
-    a full homunculus bring-up.
+    a full solet bring-up.
     """
 
     def __init__(
@@ -360,7 +360,7 @@ def _fresh_state(
     Pre-state: assert fixture plugin is NOT in entry_points (uninstall to
     enforce). Post-state: uninstall fixture(s), invalidate caches. A stuck
     fixture in the test runner's venv would be a tomorrow-problem for
-    the next session that loads the homunculus, so the cleanup is wrapped in a
+    the next session that loads the solet, so the cleanup is wrapped in a
     try/finally that runs even on assertion failure. ``extra_uninstall``
     names additional fixtures (the probe/clone materialised in tempdirs)
     to pip-uninstall on both setup and teardown (R-B teardown hygiene).

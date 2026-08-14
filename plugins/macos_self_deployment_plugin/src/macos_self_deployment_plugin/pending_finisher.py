@@ -17,7 +17,7 @@ enqueuing process crashed right after the cutover.
 **ADDITIVE — it never touches the release ledger.** This is a SEPARATE file from
 the :class:`ReleaseManager` symlink ledger; it neither reads nor mutates
 ``current`` / ``previous``. Writing or clearing it cannot affect the durable
-release pointers — so adding it is safe on a live homunculus.
+release pointers — so adding it is safe on a live solet.
 
 Durability mirrors the ledger's pattern: write to a temp sibling, ``fsync`` the
 file, ``os.replace`` (atomic rename), then ``fsync`` the directory so the rename
@@ -104,9 +104,9 @@ class PendingFinisher:
         )
 
 
-def pending_finisher_path(runtime_dir: Path, homunculus_name: str) -> Path:
-    """The per-homunculus pending-finisher file under the runtime dir."""
-    return runtime_dir / f"{homunculus_name}{PENDING_FINISHER_SUFFIX}"
+def pending_finisher_path(runtime_dir: Path, solet_name: str) -> Path:
+    """The per-solet pending-finisher file under the runtime dir."""
+    return runtime_dir / f"{solet_name}{PENDING_FINISHER_SUFFIX}"
 
 
 def write_pending_finisher(path: Path, record: PendingFinisher) -> None:

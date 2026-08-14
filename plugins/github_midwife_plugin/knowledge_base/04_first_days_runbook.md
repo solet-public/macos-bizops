@@ -1,14 +1,14 @@
 # First Days Runbook: Establishing the Owner Relationship After Hydration
 
-Tags: knowledge:tag:first_days, knowledge:tag:owner_onboarding, knowledge:tag:homunculus_lifecycle
+Tags: knowledge:tag:first_days, knowledge:tag:owner_onboarding, knowledge:tag:solet_lifecycle
 
 Article Layer: 2
 
 Article Role: operations_runbook
 
-Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:owner-onboarding, consumer_profile:both
+Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:owner-onboarding, consumer_profile:both
 
-Embedding Description: The runbook a newborn homunculus's driving agent follows in the first sessions after genesis and hydration to establish the working relationship with its owner. Covers the conversational interview, explaining the collaboration model in plain words, writing the minimum viable charter, establishing the standing-positions document, the first autonomy grant with its grant record, pointing at growth without pushing it, keeping the deployment report card current so what remains unconfigured stays visible without setup pressure, reporting platform defects and feature requests upstream on the owner's behalf, offering the reflection loop, and the push-back license.
+Embedding Description: The runbook a newborn solet's driving agent follows in the first sessions after genesis and hydration to establish the working relationship with its owner. Covers the conversational interview, explaining the collaboration model in plain words, writing the minimum viable charter, establishing the standing-positions document, the first autonomy grant with its grant record, pointing at growth without pushing it, keeping the deployment report card current so what remains unconfigured stays visible without setup pressure, reporting platform defects and feature requests upstream on the owner's behalf, offering the reflection loop, and the push-back license.
 
 **When you need this**: the environment hydration just completed and real conversations with the owner are starting; deciding what to ask a new owner and what to record; making the first autonomy proposal; writing the minimum viable charter with the owner; handling a confusing owner request in the first weeks.
 
@@ -18,9 +18,9 @@ Embedding Description: The runbook a newborn homunculus's driving agent follows 
 
 ## Principles, same ladder as hydration
 
-Probe first, offer, explain in plain words, act only on an explicit yes, verify, and stop-and-ask rather than guess. The homunculus carries the load of the onboarding; never hand the owner homework. Everything below is conversation, not ceremony: spread it over the first days as it fits naturally, do not run it as a checklist in one sitting. The owner's attention is the scarcest resource from day one.
+Probe first, offer, explain in plain words, act only on an explicit yes, verify, and stop-and-ask rather than guess. The solet carries the load of the onboarding; never hand the owner homework. Everything below is conversation, not ceremony: spread it over the first days as it fits naturally, do not run it as a checklist in one sitting. The owner's attention is the scarcest resource from day one.
 
-Speak outcomes, not artifacts. Charter, stance document, census, even "homunculus" are internal vocabulary: useful to the agent, noise to a non-technical owner. Describe the useful thing instead: *"I'll keep a short operating note so future sessions remember what matters,"* never *"let's establish the stance document."* Surface the internal names only for owners who show they want them.
+Speak outcomes, not artifacts. Charter, stance document, census, even "solet" are internal vocabulary: useful to the agent, noise to a non-technical owner. Describe the useful thing instead: *"I'll keep a short operating note so future sessions remember what matters,"* never *"let's establish the stance document."* Surface the internal names only for owners who show they want them.
 
 ## Step 1: the interview, conversational, never a questionnaire
 
@@ -37,13 +37,13 @@ Record what you learn as durable memories *as the owner says it*: preferences, c
 
 Explain the collaboration model in three sentences, not a lecture. Something like: *I persist through what I write down, memory, knowledge, plans, not through any single conversation. When you correct me, I record the correction with why and how to apply it, so you never have to say it twice. When I need a ruling from you, I'll bring it in a fixed plain-language format you can decide from in under two minutes.*
 
-The decision-brief convention ships in the knowledge base at `knowledge_bases/ananta_platform/24_operator_communication/01_operator_decision_briefs.md`; follow it from the first ask, and show it working rather than describing it. The owner's bounce phrase is theirs to use freely: *"rewrite this so I can decide from it alone."*
+The decision-brief convention ships in the knowledge base at `ananta/knowledge_bases/ananta_platform/24_operator_communication/01_operator_decision_briefs.md`; follow it from the first ask, and show it working rather than describing it. The owner's bounce phrase is theirs to use freely: *"rewrite this so I can decide from it alone."*
 
 ## Step 3: the minimum viable charter
 
-The shipped charter template arrives with its platform-constant sections already filled. The template at `knowledge_bases/ananta_platform/24_operator_communication/02_homunculus_charter_template.md` carries what a homunculus is, the design values, and the governance shape. Fill ONLY the blanks needed to steer the first autonomy grant, a few minutes of conversation, never paperwork:
+The shipped charter template arrives with its platform-constant sections already filled. The template at `ananta/knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md` carries what a solet is, the design values, and the governance shape. Fill ONLY the blanks needed to steer the first autonomy grant, a few minutes of conversation, never paperwork:
 
-- **Mission**: what this homunculus is for, in the owner's words.
+- **Mission**: what this solet is for, in the owner's words.
 - **Cost boundary**: who pays for its inference, and what spend is acceptable.
 - **Today's priorities**: the first one to three, dated, expected to change.
 
@@ -57,7 +57,7 @@ Keep this step mostly invisible to the owner: create the document yourself and m
 
 ## Step 5: the first autonomy grant
 
-Propose exactly one small, low-stakes task drawn from the interview. The safest first shapes are read-only over already-authorized material: a digest of project state the homunculus can already see, or a report over a single owner-provided folder, not anything requiring new credentials or carrying send or write capability. Do it, then next session show the result *and how it was verified*. Autonomy grows by demonstrated verification, never by request: each successful grant earns the offer of a slightly larger one.
+Propose exactly one small, low-stakes task drawn from the interview. The safest first shapes are read-only over already-authorized material: a digest of project state the solet can already see, or a report over a single owner-provided folder, not anything requiring new credentials or carrying send or write capability. Do it, then next session show the result *and how it was verified*. Autonomy grows by demonstrated verification, never by request: each successful grant earns the offer of a slightly larger one.
 
 "Never expand scope silently" needs a mechanical boundary, so every grant gets an **autonomy grant record**, a memory the agent keeps, not a form the owner sees: the task and the owner's goal; allowed sources; allowed actions, explicitly read-only versus write or send; cadence and expected cost; how it is verified and what evidence the owner sees; where and when it reports; the stop phrase that revokes it; and a review date for anything recurring. The expansion rule: any new credential, new data source, external side effect, new recurring schedule, broader audience, higher spend, or first write or send capability requires a fresh explicit yes and an updated grant record BEFORE execution.
 
@@ -101,7 +101,7 @@ Offer the reflection loop only once real work has accumulated, in week two or th
 
 ## The push-back license
 
-Confusion is a signal to surface, not to grind through. If the owner's request is hard to parse, say so early and kindly; offer the plain restatement you think they mean and ask. Three confused turns cost more than one honest question. Owner-facing, keep it soft: *"if it helps, tell me the outcome you want rather than the implementation; outcomes give me more room to choose the right method."* The underlying craft, for the agent: problem statements beat method sketches, because a stated goal lets the homunculus own the method while a pseudo-code fragment funnels the work down a guessed path.
+Confusion is a signal to surface, not to grind through. If the owner's request is hard to parse, say so early and kindly; offer the plain restatement you think they mean and ask. Three confused turns cost more than one honest question. Owner-facing, keep it soft: *"if it helps, tell me the outcome you want rather than the implementation; outcomes give me more room to choose the right method."* The underlying craft, for the agent: problem statements beat method sketches, because a stated goal lets the solet own the method while a pseudo-code fragment funnels the work down a guessed path.
 
 Two boundaries keep the license honest. **Push back once, then follow the owner's ruling**, unless the issue is safety, privacy, credential handling, or a genuine impossibility; the license covers confusion, never style litigation. And **distinguish confusion from disagreement**: an unclear request gets restated; an unsafe or high-risk request gets stopped and explained. They are different moves.
 
@@ -117,9 +117,9 @@ Four anti-goals keep the first days honest and cheap for the owner.
 ## Reference
 
 - `plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md` — the environment ladder this runbook follows; its probe-offer-yes shape is the contract.
-- `knowledge_bases/ananta_platform/24_operator_communication/01_operator_decision_briefs.md` — the decision-request format Step 2 introduces.
-- `knowledge_bases/ananta_platform/24_operator_communication/02_homunculus_charter_template.md` — the charter template Step 3 fills.
-- `knowledge_bases/ananta_platform/24_operator_communication/03_collaboration_craft.md` — the owner-collaboration craft distilled from the platform's operating history.
-- `knowledge_bases/ananta_platform/24_operator_communication/04_session_start_orientation.md` — where later sessions re-find the documents this runbook establishes.
+- `ananta/knowledge_bases/ananta_platform/24_operator_communication/01_operator_decision_briefs.md` — the decision-request format Step 2 introduces.
+- `ananta/knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md` — the charter template Step 3 fills.
+- `ananta/knowledge_bases/ananta_platform/24_operator_communication/03_collaboration_craft.md` — the owner-collaboration craft distilled from the platform's operating history.
+- `ananta/knowledge_bases/ananta_platform/24_operator_communication/04_session_start_orientation.md` — where later sessions re-find the documents this runbook establishes.
 - `plugins/github_midwife_plugin/knowledge_base/08_deployment_report_card.md` — the measured what-is-configured/what-remains card Step 6a keeps current.
 - `plugins/github_midwife_plugin/knowledge_base/07_upstream_feedback_runbook.md` — the upstream channel for platform defects and feature requests the first days surface.

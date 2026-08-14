@@ -3,7 +3,7 @@
 
 Run LOCALLY by the agent AFTER it has done the origin-filtered export process_call
 (``export_memories(tags=["agent_memory","agent_memory:origin:<this agent>"],
-file_path=<allowed spool>)``). The renderer never touches the homunculus — it reads the
+file_path=<allowed spool>)``). The renderer never touches the solet — it reads the
 exported JSON snapshot and regenerates the local projection:
 
   1. For each record: reconstruct its per-fact ``.md`` file from the slot tag
@@ -19,7 +19,7 @@ exported JSON snapshot and regenerates the local projection:
 
 Fail-loud (Q6): a record with no slot tag, an unresolvable slot path, or missing/
 invalid frontmatter (no ``name``) aborts the whole render non-zero — a corrupt
-projection is never silently half-written. Homunculus-down is handled by the AGENT (it
+projection is never silently half-written. Solet-down is handled by the AGENT (it
 skips the export step and never invokes this renderer), so the last projection
 stays untouched.
 

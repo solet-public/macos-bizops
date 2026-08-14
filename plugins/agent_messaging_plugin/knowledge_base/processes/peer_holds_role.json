@@ -13,7 +13,7 @@
   },
   "error_processor_customizations": {
     "action_context": "Read-only §5.0 act-time ownership re-check. Sources the caller's stable agent_session_id from its own peer_binding row (by agent_instance_id), then compares it to the live role_binding holder via the store-level holds_role. No writes, no address book.",
-    "error_interpretation": "missing_argument: 'name' or 'agent_instance_id' was empty. state_service_unavailable: the state_service is not bound on this homunculus.",
+    "error_interpretation": "missing_argument: 'name' or 'agent_instance_id' was empty. state_service_unavailable: the state_service is not bound on this solet.",
     "recovery_guidance": "missing_argument: pass a non-empty role name and the caller's own agent_instance_id (from its peer_register response). state_service_unavailable: bind the state_service (postgres_state_management_plugin) in service_bindings.json and restart."
   }
 }

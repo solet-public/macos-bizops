@@ -2,7 +2,7 @@
 """Bridge peer-identity registration retry smoke — the half-alive-session defect.
 
 `Forwarder.open_bridge()` opens the bridge and then registers the peer identity.
-`_open_with_retry` loops UNBOUNDED until the homunculus accepts the open, but
+`_open_with_retry` loops UNBOUNDED until the solet accepts the open, but
 `_register_identity` used to get exactly ONE attempt and swallow any exception
 into a log line, returning None.
 
@@ -20,7 +20,7 @@ RED-FIRST design: every case below fails if `_register_identity` is reverted to
 a single attempt.
 
   R1  transient-then-success -- the exact startup race. Registration fails twice
-      (homunculus HTTP not ready to serve /peer/register yet) then succeeds.
+      (solet HTTP not ready to serve /peer/register yet) then succeeds.
       Single-attempt code returns None here; the retry returns the label.
   R2  attempt budget is bounded and honoured -- a permanently failing endpoint
       makes exactly REGISTER_IDENTITY_ATTEMPTS attempts, then gives up. Guards
@@ -113,7 +113,7 @@ async def _no_sleep(*_args: float) -> None:
 
 
 def test_transient_failure_then_success_registers() -> None:
-    # R1 — the startup race: the bridge opens before the homunculus is ready to
+    # R1 — the startup race: the bridge opens before the solet is ready to
     # serve /peer/register. Two transient failures then success.
     fw = _make_forwarder()
     post = _ScriptedPost(failures=2)

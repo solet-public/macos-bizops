@@ -1,7 +1,7 @@
 {
   "name": "{{MARKETPLACE_NAME}}",
   "interface": {
-    "displayName": "{{HOMUNCULUS_NAME}} Coordination"
+    "displayName": "{{SOLET_NAME}} Coordination"
   },
   "plugins": [
     {

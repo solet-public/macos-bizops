@@ -1,7 +1,7 @@
 # Radon cyclomatic-complexity tracked-debt register.
 #
 # Per-function entries whose C/D/E/F cyclomatic complexity the operator
-# has explicitly deferred to the post-AWS-homunculus cycle. Tracking:
+# has explicitly deferred to the post-AWS-solet cycle. Tracking:
 # Task #74. Per
 # `workbench/2026-05-25_plugin_god_class_remediation.md` §9.D–§9.Z.
 #

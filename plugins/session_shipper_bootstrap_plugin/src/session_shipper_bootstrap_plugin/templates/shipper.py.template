@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Session shipper — operator-side daemon.
 
-Rendered from shipper.py.template at install time by the homunculus's
+Rendered from shipper.py.template at install time by the solet's
 session_shipper_bootstrap_plugin renderer (spec §17.5 / KB
 client-deployment-plugin-pattern).
 
-Pairs once against the homunculus's pairing routes
+Pairs once against the solet's pairing routes
 (POST /api/v1/ledger/pairing/initiate, POST /api/v1/ledger/pairing/poll),
 then tails ~/.codex and ~/.claude session spools, POSTing each chunk to
 service_interface::session_ledger_service::ingest_raw_chunk over an
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 # ── Render-time substitutions (paths/URLs/ids only — no secrets) ──
-HOMUNCULUS_PUBLIC_URL = "${HOMUNCULUS_PUBLIC_URL}"
+SOLET_PUBLIC_URL = "${SOLET_PUBLIC_URL}"
 DEPLOYMENT_ID = "${DEPLOYMENT_ID}"
 MACHINE_ID = "${MACHINE_ID}"
 
@@ -65,7 +65,7 @@ def run_pairing_poll(pairing_token: str) -> dict[str, Any]:
     import urllib.request  # noqa: PLC0415
     body = json.dumps({"deployment_id": DEPLOYMENT_ID, "pairing_token": pairing_token}).encode()
     req = urllib.request.Request(  # noqa: S310
-        f"{HOMUNCULUS_PUBLIC_URL.rstrip('/')}/api/v1/ledger/pairing/poll",
+        f"{SOLET_PUBLIC_URL.rstrip('/')}/api/v1/ledger/pairing/poll",
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",

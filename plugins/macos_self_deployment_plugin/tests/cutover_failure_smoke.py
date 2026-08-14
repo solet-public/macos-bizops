@@ -28,7 +28,7 @@ rollback F1 cases carry status ``FAILED`` + reason_code
 Drives the real ``SwapOrchestrator.restart`` with a recording stub router
 and a fake ``ReleaseManager`` whose ``cutover`` raises; the candidate is a
 real ``sleep`` child so its kill-vs-alive is directly observable. The TCP
-probe is stubbed; no real homunculus is launched.
+probe is stubbed; no real solet is launched.
 
 Run:
     .venv/bin/python3 plugins/macos_self_deployment_plugin/tests/cutover_failure_smoke.py
@@ -217,9 +217,9 @@ def _run_case(*, cutover_exc: Exception, rollback_mode: str) -> dict[str, Any]:
 
     def fake_spawn(
         app_home: Path, next_color: str, next_instance_id: str,
-        homunculus_name: str, candidate: CandidatePaths,
+        solet_name: str, candidate: CandidatePaths,
     ) -> int:
-        del app_home, homunculus_name, candidate
+        del app_home, solet_name, candidate
         stub.register_color(50055, next_color, next_instance_id)
         return child.pid
 
@@ -233,7 +233,7 @@ def _run_case(*, cutover_exc: Exception, rollback_mode: str) -> dict[str, Any]:
             router_client=cast("RouterClient", stub),
             action_factory=action_factory,
             session_factory=lambda: "sess",
-            homunculus_name="smoke",
+            solet_name="smoke",
             release_manager=release_mgr,
             schema_preflight=_additive,
             preflight_probe=_smoke_green_probe,
@@ -292,7 +292,7 @@ def _f1_cases() -> None:
             and obs["rollback_calls"] == [COLOR_BLUE]
             and obs["candidate_alive"] is False
             and len(unreg) == 1
-            and unreg[0].startswith("homunculus-green-"),
+            and unreg[0].startswith("solet-green-"),
             f"F1 {label}: compensation ran (rollback→blue + candidate killed "
             "+ unregistered + FAILED[cutover_compensated])",
         )

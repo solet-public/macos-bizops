@@ -36,7 +36,7 @@ The rendered files always advertise the no-MCP local command as the universal de
 |---|---|
 | The normal case in any hydrated clone; no explicit machine policy selects another route | **No-MCP local-command profile** |
 | The operator or project instructions explicitly select a registered MCP server for knowledge/process access | **MCP profile** |
-| The homunculus is unhealthy or both configured live routes fail | **Source-artifact recovery** |
+| The solet is unhealthy or both configured live routes fail | **Source-artifact recovery** |
 
 The first two are live access profiles. Source-artifact recovery is degraded evidence collection, not a live profile and not a preference between equals. A worker that lacks MCP still uses the local command if the local bridge is reachable; lack of MCP alone does not force degraded recovery.
 
@@ -46,7 +46,7 @@ The first two are live access profiles. Source-artifact recovery is degraded evi
 ```bash
 <name> call service_interface::knowledge_service::search '{"query": "<plain-English description>", "top_k": 8}'
 ```
-Talks to the homunculus over its local host bridge and blocks until the result is ready. Registering, debugging, or reaching for an MCP server is never the prerequisite here — the client-deployment pattern this profile belongs to is built to need none.
+Talks to the solet over its local host bridge and blocks until the result is ready. Registering, debugging, or reaching for an MCP server is never the prerequisite here — the client-deployment pattern this profile belongs to is built to need none.
 
 For prior-session recall after history ingestion:
 ```bash
@@ -108,7 +108,7 @@ Volatile architecture descriptions, inventories, quality-gate internals, deploym
 | Quality-gate commands, scope, and tracked-debt rules | `Peer Pre-Completion Gate Procedure`, `Gate Allowlist Conventions`, and `quality_gates/` | Full platform development checkout; selected executable gates ship in seeds |
 | Session-ledger recall discipline | `Recall Before Work` plus the exact local command in both root templates | Command ships in every hydrated clone; the broader article is development-checkout-only |
 | Messaging, role binding, delegation, and runner-specific wake behavior | The active messaging plugin's `Inter-Agent Messaging` material and runner-specific runbook, when that runbook is actually shipped | Capability-dependent; report a missing contract instead of guessing |
-| Homunculus birth, teardown, deployment, and topology details | `13_homunculus_setup/`, the selected midwife/undertaker plugin runbook, and the applicable deployment skill | Capability- and environment-dependent |
+| Solet birth, teardown, deployment, and topology details | `13_solet_setup/`, the selected midwife/undertaker plugin runbook, and the applicable deployment skill | Capability- and environment-dependent |
 | Shared-worktree git coordination | The root file's minimal pre-retrieval safety rule, `Peer Pre-Completion Gate Procedure`, and the repository's Git-Controller skill | Repository-specific |
 | Historical rationale and one-time design analysis | The relevant versioned Workbench record | Development checkout only; never a runtime bootstrap dependency |
 
@@ -138,7 +138,7 @@ root safety boundary.
 
 ## The content boundary this section is held to
 
-`24_operator_communication/` ships in every seed, and nothing operator-personal may ever be placed in it. This article, its siblings, and any future addition here describe platform mechanics generic to any homunculus — no operator name, credential, or homunculus-specific path belongs here, including in examples.
+`24_operator_communication/` ships in every seed, and nothing operator-personal may ever be placed in it. This article, its siblings, and any future addition here describe platform mechanics generic to any solet — no operator name, credential, or solet-specific path belongs here, including in examples.
 
 ## Managed-block upgrade rules
 
@@ -146,13 +146,13 @@ Two merge mechanisms exist for the files a hydration or re-hydration pass touche
 
 Both rendered templates carry the same HTML-comment-bounded block:
 ```markdown
-<!-- BEGIN HOMUNCULUS HYDRATION -->
+<!-- BEGIN SOLET HYDRATION -->
 ...
-<!-- END HOMUNCULUS HYDRATION -->
+<!-- END SOLET HYDRATION -->
 ```
 Apply the rule independently to `AGENTS.md` and `CLAUDE.md`. On a first merge, preserve project-specific instructions and insert the rendered block after the first top-level heading if one exists, otherwise at the top. On a re-run, replace that file's existing block exactly and leave everything outside it untouched. Never overwrite one file with the other, and never skip an existing file because it looks "probably fine": the managed block is what keeps the shared bootstrap contract synchronized while preserving runner-specific and repository-specific instructions.
 
-**`~/.claude/settings.json`** — no text markers; a structural JSON merge keyed by marker strings embedded in each hook's rendered command (for example `HOMUNCULUS_STEP_ZERO_HOOK=<name>`). For each hook event, remove any existing command containing that homunculus's marker, then append the freshly rendered one. Unrelated top-level settings, unrelated hook events, and other homunculi's marker-bearing hooks are left in place, because this file governs every session on the machine, not just one homunculus's work. Back the file up before writing, and validate the written result as JSON before moving on.
+**`~/.claude/settings.json`** — no text markers; a structural JSON merge keyed by marker strings embedded in each hook's rendered command (for example `SOLET_STEP_ZERO_HOOK=<name>`). For each hook event, remove any existing command containing that solet's marker, then append the freshly rendered one. Unrelated top-level settings, unrelated hook events, and other solets' marker-bearing hooks are left in place, because this file governs every session on the machine, not just one solet's work. Back the file up before writing, and validate the written result as JSON before moving on.
 
 Both mechanisms share the same intent despite the different syntax: idempotent on re-run, additive rather than replacing, and never silent about what changed.
 

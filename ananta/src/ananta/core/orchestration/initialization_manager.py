@@ -24,7 +24,7 @@ from ananta.core.orchestration.startup_sequence import (
     StartupSequenceRunner,
 )
 
-_PROBE_MODE_ENV_VAR = "HOMUNCULUS_PROBE_MODE"
+_PROBE_MODE_ENV_VAR = "SOLET_PROBE_MODE"
 _PROBE_FAILURE_FILENAME = "probe_failure.json"
 
 if TYPE_CHECKING:
@@ -96,7 +96,7 @@ class InitializationManager:
     def _run_startup_sequence(self, orchestrator: "EventOrchestrator") -> None:
         """Execute the startup sequence, raising StartupError on failure.
 
-        When running as an L2 probe (``HOMUNCULUS_PROBE_MODE=1``), a startup
+        When running as an L2 probe (``SOLET_PROBE_MODE=1``), a startup
         failure is additionally captured to
         ``<APP_HOME>/probe_failure.json`` so the parent
         ``macos_self_deployment_plugin`` swap orchestrator can surface

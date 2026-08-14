@@ -19,7 +19,7 @@ Two production surfaces:
   composed / runtime / slot / result-field source is refused (the deterministic
   path validates before it submits the next action).
 
-Offline: pure validators + constructed inputs; no live homunculus / LM Studio / Postgres.
+Offline: pure validators + constructed inputs; no live solet / LM Studio / Postgres.
 
 Run:
     .venv/bin/python3 \\

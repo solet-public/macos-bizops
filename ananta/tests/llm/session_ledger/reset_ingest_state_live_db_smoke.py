@@ -25,7 +25,7 @@ source file and re-derive the ids). The dedup property exercised is identical â€
 the real ``append_event`` ON CONFLICT path â€” but the source-re-read is not in scope.
 
 Runs in a disposable schema (``example_test_reset_<hex>``), so it NEVER touches
-live homunculus data; env-gated behind ``LEDGER_RESET_LIVE_SMOKE=1``.
+live solet data; env-gated behind ``LEDGER_RESET_LIVE_SMOKE=1``.
 
     LEDGER_RESET_LIVE_SMOKE=1 \\
       .venv/bin/python3 ananta/tests/llm/session_ledger/reset_ingest_state_live_db_smoke.py
@@ -373,7 +373,7 @@ def main() -> int:
         print("=== reset_ingest_state_live_db_smoke ===")
         print(
             "  SKIP  set LEDGER_RESET_LIVE_SMOKE=1 to run; "
-            "needs the live homunculus DB."
+            "needs the live solet DB."
         )
         return 0
     print("=== reset_ingest_state_live_db_smoke ===")

@@ -4,7 +4,7 @@
 Pins that ``SessionLedgerIngestMixin`` + ``base._increment_batch_counters`` —
 migrated off raw ``transactional()`` SQL onto the state-interface primitives
 (SQL-lockdown #0, Slice 5) — drive the ingest write path correctly against the
-running homunculus's REAL ledger schema (real JSONB columns, real BEFORE-UPDATE
+running solet's REAL ledger schema (real JSONB columns, real BEFORE-UPDATE
 triggers, real unique indexes, real ``timestamp`` (naive-UTC F1) columns). The thin planted-rows
 stub cannot model any of those, which is exactly the migration's real-schema test
 mandate.
@@ -39,7 +39,7 @@ Coverage:
 Writes only sentinel rows (tracked by id) and hard-deletes them in a ``finally``.
 There are NO DB-level foreign keys (FKs are repository-enforced), so delete order
 is irrelevant. Env-gated behind ``LEDGER_INGEST_LIVE_SMOKE=1`` (needs the live
-homunculus DB up).
+solet DB up).
 
 Run::
 
@@ -63,7 +63,7 @@ sys.path.insert(
     0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
-from ananta.constants import HOMUNCULUS_NAME_ENV_VAR  # noqa: E402
+from ananta.constants import SOLET_NAME_ENV_VAR  # noqa: E402
 from ananta.llm.session_ledger.repository import (  # noqa: E402
     SessionLedgerRepository,
 )
@@ -201,7 +201,7 @@ class _LiveStateAdapter:
 
 
 _MARK = "__ingest_migration_live_smoke__"
-_SCHEMA = os.environ[HOMUNCULUS_NAME_ENV_VAR]
+_SCHEMA = os.environ[SOLET_NAME_ENV_VAR]
 
 # Fixed clock so the COALESCE / LEAST / GREATEST assertions are deterministic.
 _T1 = datetime(2026, 6, 1, 10, 0, 0, tzinfo=UTC)  # earliest
@@ -481,7 +481,7 @@ def main() -> int:
         print("=== ingest_migration_live_smoke ===")
         print(
             "  SKIP  set LEDGER_INGEST_LIVE_SMOKE=1 to run; "
-            "needs the live homunculus DB."
+            "needs the live solet DB."
         )
         return 0
     print("=== ingest_migration_live_smoke ===")

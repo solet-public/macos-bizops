@@ -6,7 +6,7 @@ Marketo REST endpoint (e.g. ``https://123-ABC-456.mktorest.com`` — found in
 Admin > Integration > Web Services); the identity/token endpoint lives under
 the same host, so no separate identity_url field is needed. The
 ``client_secret`` field stores a
-``vault::<homunculus>.default_address_book_plugin.marketo_client_secret``
+``vault::<solet>.default_address_book_plugin.marketo_client_secret``
 reference (chain-consumed — see :data:`constants.VAULT_KEY_CLIENT_SECRET`);
 every other field is a literal.
 """

@@ -127,20 +127,20 @@ def _check_admin_role_is_dynamic_getuser() -> None:
     )
 
 
-def _check_database_consumes_homunculus_name() -> None:
-    """RED-FIRST (per-homunculus-db, 2026-07-11): _DATABASE must resolve to
-    HOMUNCULUS_NAME at import (each homunculus's database is named after it), NOT
-    a hardcoded literal name. Loading bootstrap fresh with HOMUNCULUS_NAME patched
+def _check_database_consumes_solet_name() -> None:
+    """RED-FIRST (per-solet-db, 2026-07-11): _DATABASE must resolve to
+    SOLET_NAME at import (each solet's database is named after it), NOT
+    a hardcoded literal name. Loading bootstrap fresh with SOLET_NAME patched
     to a sentinel: a name-consuming constant picks it up; the pre-fix hardcoded
     _DATABASE literal would ignore it (RED). Also proves the scram lines are the
     ALL-DATABASES form (decoupled from the db name) -- a per-db line would leave
-    the NEXT homunculus's db un-gated.
+    the NEXT solet's db un-gated.
     """
-    sentinel = "smoke_homunculus_db_sentinel"
-    with patch.dict(os.environ, {"HOMUNCULUS_NAME": sentinel}):
+    sentinel = "smoke_solet_db_sentinel"
+    with patch.dict(os.environ, {"SOLET_NAME": sentinel}):
         mod = _load_bootstrap_module_fresh()
     _check(
-        "bootstrap _DATABASE consumes HOMUNCULUS_NAME (not a hardcoded db name)",
+        "bootstrap _DATABASE consumes SOLET_NAME (not a hardcoded db name)",
         mod._DATABASE == sentinel,  # noqa: SLF001
         f"got {mod._DATABASE!r}",  # noqa: SLF001
     )
@@ -152,26 +152,26 @@ def _check_database_consumes_homunculus_name() -> None:
     )
 
 
-def _check_missing_homunculus_name_fails_loud() -> None:
-    """bootstrap CONSUMES HOMUNCULUS_NAME fail-loud (2026-07-11): loading it with
-    HOMUNCULUS_NAME unset must raise -- a silent default would create a mis-named
+def _check_missing_solet_name_fails_loud() -> None:
+    """bootstrap CONSUMES SOLET_NAME fail-loud (2026-07-11): loading it with
+    SOLET_NAME unset must raise -- a silent default would create a mis-named
     database the newborn's state plugin never connects to.
     """
-    saved = os.environ.pop("HOMUNCULUS_NAME", None)
+    saved = os.environ.pop("SOLET_NAME", None)
     try:
         try:
             _load_bootstrap_module_fresh()
         except RuntimeError as exc:
             _check(
-                "loading bootstrap without HOMUNCULUS_NAME fails loud",
-                "HOMUNCULUS_NAME" in str(exc),
+                "loading bootstrap without SOLET_NAME fails loud",
+                "SOLET_NAME" in str(exc),
                 str(exc),
             )
         else:
-            raise SmokeFailureError("missing-homunculus-name: bootstrap did not fail loud")
+            raise SmokeFailureError("missing-solet-name: bootstrap did not fail loud")
     finally:
         if saved is not None:
-            os.environ["HOMUNCULUS_NAME"] = saved
+            os.environ["SOLET_NAME"] = saved
 
 
 _AST_SCAN_SCRIPT = """
@@ -598,15 +598,15 @@ def _check_confirm_interactive_eof_is_decline() -> None:
 
 def _check_confirm_interactive_assume_yes_env() -> None:
     """Agent-driven bootstrap needs a declared non-interactive approval path.
-    HOMUNCULUS_ASSUME_YES=1 should approve without reading stdin, unlike blind
+    SOLET_ASSUME_YES=1 should approve without reading stdin, unlike blind
     `yes |` piping which does not leave intent in the environment.
     """
     module = _load_bootstrap_module()
-    with patch.dict(os.environ, {"HOMUNCULUS_ASSUME_YES": "1"}), \
+    with patch.dict(os.environ, {"SOLET_ASSUME_YES": "1"}), \
          patch("builtins.input", side_effect=SmokeFailureError("input should not be read")):
         accepted = module.confirm_interactive("fixture message")
     _check(
-        "HOMUNCULUS_ASSUME_YES=1 approves without reading stdin",
+        "SOLET_ASSUME_YES=1 approves without reading stdin",
         accepted is True,
         f"got {accepted!r}",
     )
@@ -633,8 +633,8 @@ def _check_failed_step_summary_surfaces_error() -> None:
 def _check_role_db_inconsistent_state_needs_user_action(root: Path) -> None:
     """Per-role isolation (2026-07-12): a role-present/db-absent (or vice-versa)
     state is a genuinely INCONSISTENT partial state, NOT the expected
-    second-homunculus case any more. Under per-role isolation both the role AND
-    the database are named after the homunculus, so a clean second homunculus on
+    second-solet case any more. Under per-role isolation both the role AND
+    the database are named after the solet, so a clean second solet on
     an already-provisioned machine is fully ABSENT (the normal create path) — a
     half-present state is an inconsistency. The detail must surface as
     needs_user_action naming the inconsistency and the RE-RUN instruction.
@@ -749,7 +749,7 @@ def _check_reconciled_db_missing_vector_extension_applies_d12(root: Path) -> Non
     )
     creates = [c for c in recorded if any("CREATE EXTENSION IF NOT EXISTS vector" in part for part in c)]
     _check(
-        "the D12 CREATE EXTENSION is executed against this homunculus's own database",
+        "the D12 CREATE EXTENSION is executed against this solet's own database",
         len(creates) == 1 and any(module._DATABASE in part for part in creates[0]),  # noqa: SLF001
         f"recorded psql/create commands: {recorded!r}",
     )
@@ -828,8 +828,8 @@ def main() -> int:
     try:
         _check_bootstrap_is_stdlib_only()
         _check_admin_role_is_dynamic_getuser()
-        _check_database_consumes_homunculus_name()
-        _check_missing_homunculus_name_fails_loud()
+        _check_database_consumes_solet_name()
+        _check_missing_solet_name_fails_loud()
         with tempfile.TemporaryDirectory() as tmp:
             _check_ast_scan_catches_a_real_third_party_import(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:

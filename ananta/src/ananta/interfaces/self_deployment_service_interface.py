@@ -67,7 +67,7 @@ class SelfDeploymentServiceInterface(ABC):
         reason: str,
         dry_run: bool = False,
     ) -> RestartResult:
-        """Trigger a restart of this homunculus with the new manifest active.
+        """Trigger a restart of this solet with the new manifest active.
 
         Contract:
 
@@ -118,15 +118,15 @@ class SelfDeploymentServiceInterface(ABC):
         reason: str,
         dry_run: bool = False,
     ) -> StopSelfResult:
-        """Stop this homunculus without tearing down its infrastructure.
+        """Stop this solet without tearing down its infrastructure.
 
         Per Slice 4.5 of
         ``workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md``.
-        Distinct from ``aws_undertaker_plugin::teardown_homunculus``:
+        Distinct from ``aws_undertaker_plugin::teardown_solet``:
         teardown DESTROYS infra (RDS, ALB, ACM, KMS, S3, ECS service
         definitions); stop_self leaves ALL of that in place and only
         sets the live serving capacity to zero. Operators bring the
-        homunculus back later without re-provisioning.
+        solet back later without re-provisioning.
 
         Contract:
 
@@ -134,7 +134,7 @@ class SelfDeploymentServiceInterface(ABC):
           stop (caller does NOT auto-clean it; ``launch.py``'s
           ``_cleanup_stale_runtime_files`` scrubs it on the next cold
           start). Then spawns a detached watchdog subprocess that
-          SIGTERMs the homunculus child shortly after the verb returns
+          SIGTERMs the solet child shortly after the verb returns
           (delay long enough for the verb's response to flush to the
           caller). The watchdog escalates to SIGKILL after a bounded
           window if SIGTERM is ignored. The verb returns

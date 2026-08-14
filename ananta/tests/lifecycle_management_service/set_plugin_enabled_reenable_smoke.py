@@ -35,7 +35,7 @@ Assertions (per the design's "Proof" section):
            name absent from ``ananta.plugins``), unchanged card semantics.
   Case 4 - manifest-exclusion guard: ``PluginInstaller.install`` scopes
            discovery to ``{plugin_name}`` alone and has no notion of the
-           homunculus's profile-manifest allowlist, so without an explicit
+           solet's profile-manifest allowlist, so without an explicit
            pre-check a manifest-excluded-but-pip-installed plugin would
            load anyway on re-enable and get silently unioned into the live
            allowlist. A plugin removed from ``_allowed_plugins`` before
@@ -54,7 +54,7 @@ times per run (one per fixture plugin), matching the pre-existing
 smokes stay out of `quality_gates/gate_smokes.txt`; GTE-09 "no dead
 live-DB smokes in the gate"). Run by hand in build-verify before any land
 that touches ``_apply_plugin_enable`` / the ``PluginInstaller`` primitive:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \\
+    SOLET_NAME=<name> .venv/bin/python3 \\
         ananta/tests/lifecycle_management_service/set_plugin_enabled_reenable_smoke.py
 
 Project policy: no pytest. Exits 0 on success, 1 on first failure.

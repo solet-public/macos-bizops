@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """F1 root_manifest.yaml end-to-end smoke.
 
-Builds synthetic-fixture homunculus roots via ``tempfile`` and exercises
+Builds synthetic-fixture solet roots via ``tempfile`` and exercises
 the three consumer surfaces (pre-commit, cutover, diagnostic) directly,
 plus the W-INT C6.\\* check.  Pattern follows
 ``ananta/tests/platform/whole_tree_integration_gate_smoke.py`` — synthetic
-trees rather than spinning up a live homunculus.
+trees rather than spinning up a live solet.
 
 Covers the 7 positive-outcome assertions in design memo §7.1-§7.7.
 §7.3 sub-asserts (b/c/d) — process registry + KB search + health probe
-under a live homunculus — are integration-test territory beyond the
-~250 LOC F1-A8 scope and deferred to a follow-on live-homunculus smoke.
+under a live solet — are integration-test territory beyond the
+~250 LOC F1-A8 scope and deferred to a follow-on live-solet smoke.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from ananta.core.root_manifest.types import ENV_EXTRA_IGNORE_PATTERNS
 
 _BASE_MANIFEST = """
 schema_version: 1
-homunculus_name: smokebot
+solet_name: smokebot
 
 universal:
   files:

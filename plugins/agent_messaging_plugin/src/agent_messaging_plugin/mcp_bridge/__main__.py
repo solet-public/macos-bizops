@@ -8,10 +8,10 @@ Launched by MCP clients via:
     args    = ["-m", "agent_messaging_plugin.mcp_bridge"]
 
     [mcp_servers.<name>.env]
-    HOMUNCULUS_NAME = "<homunculus>"
+    SOLET_NAME = "<solet>"
 
-Discovers the homunculus HTTP API via the runtime port file
-(`~/.ananta/runtime/{homunculus_name}.bridge.port`), opens a bridge
+Discovers the solet HTTP API via the runtime port file
+(`~/.ananta/runtime/{solet_name}.bridge.port`), opens a bridge
 session, registers peer identity, and runs the MCP stdio server loop.
 The poll loop forwards bridge events as `notifications/claude/channel`.
 """
@@ -46,7 +46,7 @@ from .forwarder import Forwarder
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-SERVER_NAME: Final[str] = "homunculus"
+SERVER_NAME: Final[str] = "solet"
 SERVER_VERSION: Final[str] = "1.0.0"
 BRIDGE_SERVICE_NAME: Final[str] = "bridge"
 DEFAULT_AGENT_ID: Final[str] = "claude_code"
@@ -81,22 +81,22 @@ DEFAULT_SESSION_ID_ENV_VARS: Final[tuple[str, ...]] = (
 
 SERVER_INSTRUCTIONS: Final[str] = "\n".join(
     [
-        "Homunculus platform bridge. Use the homunculus as the primary collaborator for active work.",
+        "Solet platform bridge. Use the solet as the primary collaborator for active work.",
         "",
         "Two surfaces are exposed:",
         "",
         "== Platform-call surface ==",
         "",
-        "The homunculus sends messages back as channel notifications tagged with",
+        "The solet sends messages back as channel notifications tagged with",
         '   source "homunculus". These appear as <channel> elements.',
         "",
-        "Ask the homunculus first for questions about current work, status, blockers,",
+        "Ask the solet first for questions about current work, status, blockers,",
         "decisions, plan changes, or what happened in the active session.",
         "Use raw DB/log/file inspection for debugging,",
         "evidence gathering, or discrepancy verification.",
         "",
         "Direct process tools (process_search/_schema/_call/_result) let you",
-        "invoke registered homunculus processes without going through inference. Use",
+        "invoke registered solet processes without going through inference. Use",
         "them when you already know which process you want.",
         "",
         "== Peer messaging (peer_send / peer_inbox) ==",
@@ -129,7 +129,7 @@ TOOLS: Final[list[Tool]] = [
         name="current_identity",
         description=(
             "Return identity and routing metadata for the current MCP session, "
-            "including transport, homunculus_name, agent_id, "
+            "including transport, solet_name, agent_id, "
             "agent_instance_id, agent_session_id, session_label, bridge_id, "
             "mcp_session_id, roles_held, and identity_trust. Use this to "
             "answer 'who am I?' or verify routing before peer_register, "
@@ -144,7 +144,7 @@ TOOLS: Final[list[Tool]] = [
     ),
     Tool(
         name="download",
-        description="Download a blob from homunculus storage to a local file path.",
+        description="Download a blob from solet storage to a local file path.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -164,7 +164,7 @@ TOOLS: Final[list[Tool]] = [
     Tool(
         name="process_search",
         description=(
-            "Search the homunculus process registry for processes matching a "
+            "Search the solet process registry for processes matching a "
             "natural-language query."
         ),
         inputSchema={
@@ -180,7 +180,7 @@ TOOLS: Final[list[Tool]] = [
     Tool(
         name="process_schema",
         description=(
-            "Retrieve the invocation schema for a single homunculus process by "
+            "Retrieve the invocation schema for a single solet process by "
             "its process_key."
         ),
         inputSchema={
@@ -198,7 +198,7 @@ TOOLS: Final[list[Tool]] = [
     Tool(
         name="process_call",
         description=(
-            "Direct invocation of a homunculus process by process_key.  Zero "
+            "Direct invocation of a solet process by process_key.  Zero "
             "inference, deterministic, fast.  THE PREFERRED entry point "
             "for any known process — knowledge base searches "
             "(service_interface::knowledge_service::search), memory "
@@ -395,7 +395,7 @@ TOOLS: Final[list[Tool]] = [
         name="peer_send_by_name",
         description="\n".join(
             [
-                "Send a peer message to the current holder of a durable homunculus role.",
+                "Send a peer message to the current holder of a durable solet role.",
                 "",
                 "Use this for ChatGPT/operator fleet management. The role binding is",
                 "resolved at send time, so reconnects and bridge churn do not require",
@@ -403,7 +403,7 @@ TOOLS: Final[list[Tool]] = [
                 "",
                 "Examples of role names are Coordinator, Coordinator-Dusk, Architect,",
                 "Git-Controller, and Codex-Reviewer, depending on which roles are",
-                "currently claimed in the homunculus.",
+                "currently claimed in the solet.",
                 "",
                 "Delivery contract:",
                 "  Every send is persisted to the role's durable inbox AND",
@@ -422,7 +422,7 @@ TOOLS: Final[list[Tool]] = [
                 "name": {
                     "type": "string",
                     "description": (
-                        "Durable role name registered in the homunculus role binding "
+                        "Durable role name registered in the solet role binding "
                         "table, such as Coordinator-Dusk or Architect."
                     ),
                 },
@@ -489,7 +489,7 @@ TOOLS: Final[list[Tool]] = [
 
 def _log(msg: str) -> None:
     """Write to stderr; stdout is reserved for MCP JSON-RPC framing."""
-    print(f"[homunculus-bridge] {msg}", file=sys.stderr, flush=True)
+    print(f"[solet-bridge] {msg}", file=sys.stderr, flush=True)
 
 
 def _generate_agent_instance_id() -> str:
@@ -567,21 +567,21 @@ def _resolve_agent_session_id(agent_id: str) -> str:
     return ""
 
 
-async def _discover_port(homunculus_name: str) -> int:
-    """Poll the runtime port file until the homunculus has written it."""
+async def _discover_port(solet_name: str) -> int:
+    """Poll the runtime port file until the solet has written it."""
     attempt = 0
     while True:
         attempt += 1
-        port = read_port_file(BRIDGE_SERVICE_NAME, homunculus_name)
+        port = read_port_file(BRIDGE_SERVICE_NAME, solet_name)
         if port is not None:
             _log(
-                f"discovered bridge port {port} for homunculus "
-                f"{homunculus_name!r} after {attempt} attempt(s)",
+                f"discovered bridge port {port} for solet "
+                f"{solet_name!r} after {attempt} attempt(s)",
             )
             return port
         if attempt == 1 or attempt % 10 == 0:
             _log(
-                f"waiting for {homunculus_name}.{BRIDGE_SERVICE_NAME}.port "
+                f"waiting for {solet_name}.{BRIDGE_SERVICE_NAME}.port "
                 f"(attempt {attempt})",
             )
         await asyncio.sleep(PORT_DISCOVERY_RETRY_S)
@@ -718,9 +718,9 @@ async def _dispatch_tool(
 async def _run() -> None:
     """Bridge entry point: discover, connect, register, serve."""
     enforce_no_legacy_agent_env()
-    homunculus_name = os.environ.get("HOMUNCULUS_NAME")
-    if not homunculus_name:
-        msg = "HOMUNCULUS_NAME env var is required to discover the bridge port"
+    solet_name = os.environ.get("SOLET_NAME")
+    if not solet_name:
+        msg = "SOLET_NAME env var is required to discover the bridge port"
         raise RuntimeError(msg)
     agent_id = os.environ.get(AGENT_IDENTITY_ENV) or DEFAULT_AGENT_ID
     # v10 Control #2.D: honor an injected AGENT_INSTANCE_ID so a managed
@@ -749,7 +749,7 @@ async def _run() -> None:
     session_role = _compute_session_role(session_label)
     parent_pid = os.getppid()
 
-    port = await _discover_port(homunculus_name)
+    port = await _discover_port(solet_name)
     base_url = f"http://127.0.0.1:{port}"
     _log(
         f"starting MCP bridge: agent_id={agent_id} "
@@ -767,14 +767,20 @@ async def _run() -> None:
     # codex-watch-migration wake_capable design (2026-08-06): declared here,
     # never probed — true only for the agent kind with a registered native
     # wake adapter (Claude Code). Codex's bridge has no turn-injection
-    # surface once the patched build retires, so it declares false and the
-    # dispatch path tees its deliveries into the spool wake_waiter.js reads
-    # instead. See models.py's BridgeBinding.wake_capable for the full
-    # rationale.
+    # surface once the patched build retires, so it declares false. A Codex
+    # delivery still reaches the recipient through the watch/durable-inbox
+    # path (durable + observable regardless of wake_capable): an unmanaged
+    # Codex session drains it on its own next user turn (no live Stop-hook
+    # notice exists — codex-0147-async-hook-regression, 2026-08-13, removed
+    # the async Stop binding because stock Codex does not execute async
+    # command hooks), while a spawn_session-managed worker gets an
+    # independent driver-channel nudge from drive_on_delivery, unaffected by
+    # wake_capable or the Stop-hook removal. See models.py's
+    # BridgeBinding.wake_capable for the full rationale.
     wake_capable = agent_id == DEFAULT_AGENT_ID
     forwarder = Forwarder(
         base_url=base_url,
-        homunculus_name=homunculus_name,
+        solet_name=solet_name,
         agent_id=agent_id,
         agent_instance_id=agent_instance_id,
         agent_session_id=agent_session_id,
@@ -790,9 +796,9 @@ async def _run() -> None:
         # Capture the write stream so the background poll loop can emit
         # notifications/claude/channel outside any request context.
         forwarder.bind_write_stream(write_stream)
-        # Open the bridge against the homunculus concurrently with serving stdio --
+        # Open the bridge against the solet concurrently with serving stdio --
         # MCP clients (Codex in particular) enforce a startup timeout
-        # on the initialize handshake, so we cannot block on the homunculus being
+        # on the initialize handshake, so we cannot block on the solet being
         # reachable before returning to the client.
         opener = asyncio.create_task(_open_bridge_safely(forwarder))
         try:

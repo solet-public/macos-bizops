@@ -50,7 +50,7 @@ config:
 # Credentials live in the address book entry "snowflake_account": literals
 # (account, user, warehouse, database, schema, role, auth_method) plus a
 # private_key field that stores a
-# "vault::<homunculus>.default_address_book_plugin.snowflake_private_key"
+# "vault::<solet>.default_address_book_plugin.snowflake_private_key"
 # reference (PEM, chain-consumed). The secret lives in the RESOLVER's
 # namespace so the address book reads it under its own identity
 # (resolve_with_secrets). It is chain-consumed — this plugin neither declares

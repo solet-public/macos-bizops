@@ -19,7 +19,7 @@ from ananta.interfaces.lifecycle_result_types import AutostartResult, RestartRes
 PROVIDER = "local_self_deployment_service"
 
 _PRIOR_PID_PARAM = ParameterMetadata(
-    description="OS pid of the previously active the homunculus process.",
+    description="OS pid of the previously active the solet process.",
     required=True,
     type=ParameterType.INTEGER,
 )
@@ -139,7 +139,7 @@ def _autostart_return_schema() -> ReturnValueSchema:
         properties={
             "status": ParameterMetadata(type=ParameterType.STRING, description="Terminal autostart status."),
             "verb": ParameterMetadata(type=ParameterType.STRING, description="Autostart verb name."),
-            "homunculus_name": ParameterMetadata(type=ParameterType.STRING, description="Target homunculus."),
+            "solet_name": ParameterMetadata(type=ParameterType.STRING, description="Target solet."),
             "label": ParameterMetadata(type=ParameterType.STRING, description="LaunchAgent label."),
             "plist_path": ParameterMetadata(type=ParameterType.STRING, description="LaunchAgent plist path."),
             "prior_state": ParameterMetadata(type=ParameterType.STRING, description="State before the verb."),
@@ -258,7 +258,7 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
     )
     @abstractmethod
     def install_autostart(self, *, dry_run: bool = False) -> AutostartResult:
-        """Install and load the per-homunculus LaunchAgent."""
+        """Install and load the per-solet LaunchAgent."""
 
     @service_interface_process(
         name="uninstall_autostart",
@@ -274,7 +274,7 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
     )
     @abstractmethod
     def uninstall_autostart(self, *, dry_run: bool = False) -> AutostartResult:
-        """Unload and remove the per-homunculus LaunchAgent."""
+        """Unload and remove the per-solet LaunchAgent."""
 
     @service_interface_process(
         name="status_autostart",

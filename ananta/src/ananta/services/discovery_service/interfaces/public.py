@@ -38,7 +38,7 @@ class DiscoveryServiceAPI(ABC):
             "query": ParameterMetadata(
                 description=(
                     "Natural language description of what needs to be accomplished. "
-                    "Examples: 'generate binaural beat audio', 'create image from text', "
+                    "Examples: 'generate a sine tone', 'create image from text', "
                     "'search knowledge base', 'schedule task for later'"
                 ),
                 required=True,

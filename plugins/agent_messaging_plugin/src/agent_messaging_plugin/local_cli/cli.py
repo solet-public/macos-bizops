@@ -1,6 +1,6 @@
-"""`homunculus` — invoke a running homunculus over its localhost bridge (no MCP).
+"""`solet` — invoke a running solet over its localhost bridge (no MCP).
 
-Every command discovers THIS homunculus's bridge port from the CLI's own
+Every command discovers THIS solet's bridge port from the CLI's own
 install location (never a flag or ambient env), opens a one-shot bridge
 session, performs the operation, prints the JSON result to stdout, and closes.
 Errors go to stderr with a mapped exit code.
@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import signal
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,15 +37,17 @@ from ..env_contract import enforce_no_legacy_agent_env
 from ..models import WATCH_AGENT_INSTANCE_PREFIX
 from . import __version__
 from .client import (
+    DEFAULT_JOB_TIMEOUT_S,
     DEFAULT_POLL_TIMEOUT_S,
     BridgeCallError,
     BridgeClient,
     BridgeResultTimeoutError,
-    HomunculusIdentityError,
-    HomunculusNotRunningError,
     RoleClaimRejectedError,
+    SoletIdentityError,
+    SoletNotRunningError,
+    queued_job_id,
     resolve_base_url,
-    resolve_homunculus_name,
+    resolve_solet_name,
 )
 from .spool import (
     WATCH_SESSION_ID_ENV,
@@ -61,7 +64,7 @@ from .spool import (
 )
 from .wake import wake
 
-# watch: reconnect backoff after a transient bridge error / homunculus-down /
+# watch: reconnect backoff after a transient bridge error / solet-down /
 # bridge rotation (blue-green swap 404, idle-reap). Kept short so a swap gap is
 # a blip, not a stall; the loop is silent while waiting, so it wakes no model.
 WATCH_RECONNECT_DELAY_S: Final[float] = 2.0
@@ -133,12 +136,25 @@ class WatchIdentity:
     agent_instance_id: str
 
 
+def _invoked_name() -> str:
+    """The program name the user actually typed, for copy-pasteable hints.
+
+    Read from click's root context rather than hardcoded, because this CLI is
+    installed under the SOLET's own name in a born clone — printing a literal
+    "solet" would hand a clone's operator a command their shell does not have.
+    """
+    context = click.get_current_context(silent=True)
+    if context is None:
+        return "solet"
+    return context.find_root().info_name or "solet"
+
+
 def _emit(payload: dict[str, Any]) -> None:
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def _die(message: str, code: ExitCodes) -> NoReturn:
-    click.echo(f"homunculus: {message}", err=True)
+    click.echo(f"solet: {message}", err=True)
     raise SystemExit(int(code))
 
 
@@ -169,11 +185,21 @@ def _caller_agent_session_id() -> str:
     return os.environ.get(WATCH_SESSION_ID_ENV, "")
 
 
-def _run(fn: Callable[[BridgeClient], dict[str, Any]]) -> dict[str, Any]:
-    """Open a bridge for THIS homunculus, run ``fn`` against it, map failures."""
+def _run(
+    fn: Callable[[BridgeClient], dict[str, Any]],
+    *,
+    propagate_timeout: bool = False,
+) -> dict[str, Any]:
+    """Open a bridge for THIS solet, run ``fn`` against it, map failures.
+
+    ``propagate_timeout`` re-raises ``BridgeResultTimeoutError`` instead of
+    dying on it, for the one caller that has something better to say than the
+    exception text: a job await, which can tell you how to redeem the result
+    later. Default False keeps every existing call site's behavior unchanged.
+    """
     try:
         base_url = resolve_base_url()
-    except (HomunculusNotRunningError, HomunculusIdentityError) as exc:
+    except (SoletNotRunningError, SoletIdentityError) as exc:
         _die(str(exc), ExitCodes.CONNECTION_ERROR)
     try:
         with BridgeClient(
@@ -181,18 +207,20 @@ def _run(fn: Callable[[BridgeClient], dict[str, Any]]) -> dict[str, Any]:
         ) as client:
             return fn(client)
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-        _die(f"cannot reach the homunculus bridge at {base_url}: {exc}",
+        _die(f"cannot reach the solet bridge at {base_url}: {exc}",
              ExitCodes.CONNECTION_ERROR)
     except BridgeResultTimeoutError as exc:
+        if propagate_timeout:
+            raise
         _die(str(exc), ExitCodes.TIMEOUT_ERROR)
     except (BridgeCallError, httpx.HTTPError) as exc:
         _die(str(exc), ExitCodes.EXTERNAL_ERROR)
 
 
 @click.group()
-@click.version_option(__version__, prog_name="homunculus")
+@click.version_option(__version__, prog_name="solet")
 def cli() -> None:
-    """Invoke this homunculus's capabilities over its localhost bridge (no MCP)."""
+    """Invoke this solet's capabilities over its localhost bridge (no MCP)."""
 
 
 @cli.command()
@@ -207,21 +235,99 @@ def cli() -> None:
     show_default=True,
     help="Seconds to wait for the result before giving up.",
 )
+@click.option(
+    "--wait/--no-wait",
+    "wait",
+    default=None,
+    help=(
+        "For a born-async verb that returns a job handle, also wait for the "
+        "JOB to finish. Defaults to waiting on a terminal, not waiting when "
+        "output is piped."
+    ),
+)
+@click.option(
+    "--job-timeout",
+    "job_timeout_s",
+    type=float,
+    default=DEFAULT_JOB_TIMEOUT_S,
+    show_default=True,
+    help="Seconds to wait for a dispatched job to finish before giving up.",
+)
 def call(
     process_key: str,
     arguments: str,
     reason: str | None,
     timeout_s: float,
+    wait: bool | None,
+    job_timeout_s: float,
 ) -> None:
-    """Invoke PROCESS_KEY with ARGUMENTS (a JSON object) and wait for the result."""
+    """Invoke PROCESS_KEY with ARGUMENTS (a JSON object) and wait for the result.
+
+    A born-async verb answers in milliseconds with a job handle, not an
+    outcome: its real work happens later on a background worker. When the
+    dispatch returns ``{job_id, status: queued}`` this waits for the JOB too,
+    so an interactive call ends with the actual result instead of a handle the
+    caller has to go redeem. ``--no-wait`` returns the handle immediately.
+    """
     args = _parse_json_args(arguments)
     result = _run(
         lambda c: c.call_and_wait(
             process_key, args, reason=reason, poll_timeout_s=timeout_s,
         ),
     )
-    _emit(result)
     if str(result.get("status")) != "completed":
+        _emit(result)
+        raise SystemExit(int(ExitCodes.EXTERNAL_ERROR))
+
+    job_id = queued_job_id(result)
+    should_wait = sys.stdout.isatty() if wait is None else wait
+    if job_id is None or not should_wait:
+        _emit(result)
+        return
+
+    _await_and_emit_job(job_id, timeout_s=timeout_s, job_timeout_s=job_timeout_s)
+
+
+def _await_and_emit_job(job_id: str, *, timeout_s: float, job_timeout_s: float) -> None:
+    """Poll a dispatched job to terminal state and print the finished record.
+
+    Progress goes to STDERR so stdout stays a single parseable JSON document —
+    the CLI is piped into `jq` far more often than it is watched.
+
+    On timeout the job is NOT cancelled and nothing is lost; only the waiting
+    stops. The exact command to redeem the result later is printed, because
+    "timed out" without it strands the caller holding an id and no next step.
+    """
+    def _progress(status: str, elapsed: float) -> None:
+        click.echo(
+            f"  job {job_id}: {status} ({elapsed:.0f}s elapsed)",
+            err=True,
+        )
+
+    try:
+        job = _run(
+            lambda c: c.await_job(
+                job_id,
+                job_timeout_s=job_timeout_s,
+                poll_timeout_s=timeout_s,
+                on_poll=_progress,
+            ),
+            propagate_timeout=True,
+        )
+    except SystemExit:
+        raise
+    except BridgeResultTimeoutError as exc:
+        click.echo(f"{exc}", err=True)
+        click.echo(
+            "The job is still running. Retrieve it later with:\n"
+            f"  {_invoked_name()} call service_interface::job_service::get_job "
+            f"'{{\"job_id\": \"{job_id}\"}}'",
+            err=True,
+        )
+        raise SystemExit(int(ExitCodes.TIMEOUT_ERROR)) from exc
+
+    _emit(job)
+    if str(job.get("status")) != "completed":
         raise SystemExit(int(ExitCodes.EXTERNAL_ERROR))
 
 
@@ -267,16 +373,16 @@ def result(action_id: str, wait: bool, timeout_s: float) -> None:
 
 @cli.command()
 def health() -> None:
-    """Check whether the homunculus bridge is answering."""
+    """Check whether the solet bridge is answering."""
     try:
         base_url = resolve_base_url()
-    except (HomunculusNotRunningError, HomunculusIdentityError) as exc:
+    except (SoletNotRunningError, SoletIdentityError) as exc:
         _die(str(exc), ExitCodes.CONNECTION_ERROR)
     client = BridgeClient(base_url)
     try:
         payload = client.health()
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-        _die(f"cannot reach the homunculus bridge at {base_url}: {exc}",
+        _die(f"cannot reach the solet bridge at {base_url}: {exc}",
              ExitCodes.CONNECTION_ERROR)
     except httpx.HTTPError as exc:
         _die(str(exc), ExitCodes.EXTERNAL_ERROR)
@@ -369,13 +475,13 @@ def watch(
     """
     identity = _resolve_watch_identity(role, agent_id)
     try:
-        homunculus_name = resolve_homunculus_name()
+        solet_name = resolve_solet_name()
         # W1 (§34.3): become the session's singleton BEFORE any network traffic,
         # so a refused second arm never touches the registry. The handle is bound
         # to a module-level name for the process lifetime — letting it be garbage
         # collected would close the fd and silently release the flock.
         _acquire_watch_singleton(
-            watch_singleton_lock_path(homunculus_name, identity.agent_instance_id),
+            watch_singleton_lock_path(solet_name, identity.agent_instance_id),
         )
         # W2 (§34.1): SIGTERM must unwind rather than terminate, so the
         # `with BridgeClient(...)` below reaches close() -> /close -> unregister
@@ -385,14 +491,14 @@ def watch(
         _install_sigterm_unwind()
         spool = None if no_spool else (
             spool_path
-            or default_spool_path(homunculus_name, identity.agent_instance_id)
+            or default_spool_path(solet_name, identity.agent_instance_id)
         )
         # Census D4: publish the choice so the wake half pairs with the spool
         # this watcher ACTUALLY uses, not the one it would derive on its own.
         # Written before the first arm so a wake hook firing in the gap reads a
         # current answer rather than a stale predecessor's.
         write_watch_pairing(
-            watch_pairing_path(homunculus_name, identity.agent_instance_id),
+            watch_pairing_path(solet_name, identity.agent_instance_id),
             spool,
         )
         # Marks are keyed on SESSION identity, never on the spool path: a
@@ -407,11 +513,11 @@ def watch(
         _watch_forever(
             identity,
             spool,
-            watch_marks_path(homunculus_name, identity.agent_instance_id),
+            watch_marks_path(solet_name, identity.agent_instance_id),
             exit_with_parent,
             **watch_kwargs,
         )
-    except HomunculusIdentityError as exc:
+    except SoletIdentityError as exc:
         _die(str(exc), ExitCodes.CONNECTION_ERROR)
     except KeyboardInterrupt:
         raise SystemExit(0) from None
@@ -541,7 +647,7 @@ def _watch_forever(
     """Reconnect loop: (re)discover the bridge, re-arm, and stream until drop.
 
     The parent check sits here as well as inside the stream loop so a parent
-    that dies while the homunculus is DOWN — i.e. while this loop is doing
+    that dies while the solet is DOWN — i.e. while this loop is doing
     nothing but backing off — is still noticed.
     """
     while True:
@@ -549,7 +655,7 @@ def _watch_forever(
             raise SystemExit(0)
         try:
             base_url = resolve_base_url()
-        except HomunculusNotRunningError:
+        except SoletNotRunningError:
             time.sleep(WATCH_RECONNECT_DELAY_S)
             continue
         try:

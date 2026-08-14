@@ -45,7 +45,7 @@ Exercises:
   18. export_soql truncated flag set when the org reports more rows than fetched
 
 Run:
-    HOMUNCULUS_NAME=<name> .venv/bin/python3 \
+    SOLET_NAME=<name> .venv/bin/python3 \
         plugins/salesforce_plugin/tests/smoke_soql.py
 
 Exits 0 on success, 1 on first failure.

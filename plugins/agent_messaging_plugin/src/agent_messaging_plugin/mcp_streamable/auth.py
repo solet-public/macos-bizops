@@ -8,10 +8,10 @@ Bearer tokens are JWTs (RFC 7519) signed with HS256:
 - payload: claim contents (``agent_id``, ``agent_instance_id``,
   ``issued_at``, ``session_label``, ``aud``, ``exp``)
 - signature: HMAC-SHA256 of header + "." + payload, computed with the
-  homunculus's HMAC secret. The secret is one vault entry; it never
+  solet's HMAC secret. The secret is one vault entry; it never
   leaves the server. Forging a valid token requires possessing it.
 
-Pre-Task-#53 design: claims were sealed to the homunculus's X25519
+Pre-Task-#53 design: claims were sealed to the solet's X25519
 public key. That provided confidentiality but NOT origin
 authentication — the public key is discoverable via the OAuth
 resource-metadata endpoint, so anyone could mint a sealed claim with
@@ -126,7 +126,7 @@ class BearerAuthError(Exception):
 class BearerVerifier:
     """Verify HMAC-signed bearer tokens against the local HMAC secret.
 
-    The HMAC secret is loaded from the vault at homunculus startup and
+    The HMAC secret is loaded from the vault at solet startup and
     passed to this verifier as raw bytes. Algorithm pinning, skew
     enforcement, and audience binding are applied per token. The
     verifier holds no vault reference — all validation is local once

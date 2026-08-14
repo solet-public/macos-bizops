@@ -226,7 +226,7 @@ def test_no_active_memories(provider: PostgresProvider, schema: str) -> None:
 def main() -> int:
     if os.environ.get("ACTR_ORPHAN_RECONCILE_LIVE_SMOKE") != "1":
         print("=== actr_orphan_reconcile_migration_live_smoke ===")
-        print("  SKIP  set ACTR_ORPHAN_RECONCILE_LIVE_SMOKE=1 to run; needs the live homunculus DB.")
+        print("  SKIP  set ACTR_ORPHAN_RECONCILE_LIVE_SMOKE=1 to run; needs the live solet DB.")
         return 0
     print("=== actr_orphan_reconcile_migration_live_smoke ===")
     schema_name = f"example_test_orphanrecon_{secrets.token_hex(3)}"

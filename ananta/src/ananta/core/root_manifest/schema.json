@@ -1,12 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "the homunculus root_manifest.yaml schema",
-  "description": "Structural validation for <homunculus_root>/root_manifest.yaml. Validated by all three consumers (pre-commit, cutover preflight, startup diagnostic) before drift-detection logic runs. See workbench/2026-06-16_root_manifest_yaml_design.md §3 + §3.10.",
+  "title": "the solet root_manifest.yaml schema",
+  "description": "Structural validation for <solet_root>/root_manifest.yaml. Validated by all three consumers (pre-commit, cutover preflight, startup diagnostic) before drift-detection logic runs. See workbench/2026-06-16_root_manifest_yaml_design.md §3 + §3.10.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
-    "homunculus_name",
+    "solet_name",
     "universal",
     "platform_managed",
     "sanctioned",
@@ -18,7 +18,7 @@
       "type": "integer",
       "const": 1
     },
-    "homunculus_name": {
+    "solet_name": {
       "type": "string",
       "minLength": 1
     },

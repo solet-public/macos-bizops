@@ -40,10 +40,10 @@ _ADDRESS_BOOK_PLUGIN = "default_address_book_plugin"
 # templates static and operator-identity-free (finding F11, Architect
 # 2026-07-11; extended to plugin_config_overrides for per-role isolation,
 # 2026-07-12).
-_HOMUNCULUS_NAME_PLACEHOLDER = "${HOMUNCULUS_NAME}"
+_SOLET_NAME_PLACEHOLDER = "${SOLET_NAME}"
 
 # The state plugin whose materialized config MUST connect as this newborn's OWN
-# role (per-homunculus isolation, operator override 2026-07-12) -- verified
+# role (per-solet isolation, operator override 2026-07-12) -- verified
 # fail-loud after overrides are applied, for any profile that uses it.
 _STATE_PLUGIN = "postgres_state_management_plugin"
 
@@ -168,16 +168,16 @@ def copy_baseline_plugin_configs(
 
 def apply_profile_overrides(target: Path, profile: dict[str, Any], name: str) -> list[Path]:
     """Merge each `plugin_config_overrides` entry into the materialized config,
-    substituting `${HOMUNCULUS_NAME}` in override values with the newborn's
+    substituting `${SOLET_NAME}` in override values with the newborn's
     actual name at write time.
 
-    The `${HOMUNCULUS_NAME}` substitution rides the SAME idiom as
+    The `${SOLET_NAME}` substitution rides the SAME idiom as
     `write_address_book_entries` (one substitution mechanism, two writers): the
-    per-homunculus-role ruling (2026-07-12) needs the newborn's
+    per-solet-role ruling (2026-07-12) needs the newborn's
     `postgres_state_management_plugin` config to connect as its OWN role, so the
     profile declares `plugin_config_overrides.postgres_state_management_plugin.user:
-    ${HOMUNCULUS_NAME}` and it resolves here to the newborn name. Uses the
-    EXPLICIT `name` argument (the newborn), NEVER os.environ["HOMUNCULUS_NAME"]
+    ${SOLET_NAME}` and it resolves here to the newborn name. Uses the
+    EXPLICIT `name` argument (the newborn), NEVER os.environ["SOLET_NAME"]
     -- in verb-mode this runs in the PARENT's process. A single
     serialize/replace/parse keeps it value-agnostic (every string field is
     covered, not just known keys).
@@ -188,7 +188,7 @@ def apply_profile_overrides(target: Path, profile: dict[str, Any], name: str) ->
     for plugin_name, override in overrides.items():
         if not isinstance(override, dict):
             continue
-        substituted = json.loads(json.dumps(override).replace(_HOMUNCULUS_NAME_PLACEHOLDER, name))
+        substituted = json.loads(json.dumps(override).replace(_SOLET_NAME_PLACEHOLDER, name))
         config_path = dest_dir / f"{plugin_name}.json"
         existing: dict[str, Any] = {}
         if config_path.is_file():
@@ -251,7 +251,7 @@ def write_global_system_prompt_config(target: Path, name: str) -> list[Path]:
     write_json(path, {
         "prompt": {
             "system": (
-                f"You are {display}, a local homunculus. Use the available "
+                f"You are {display}, a local solet. Use the available "
                 "platform services carefully, preserve operator privacy, and "
                 "answer with clear operational judgment."
             ),
@@ -322,7 +322,7 @@ def _verify_postgres_user_isolated(target: Path, profile: dict[str, Any], name: 
     Runs only for profiles that actually USE the state plugin. Catches a
     profile that forgot the
     `plugin_config_overrides.postgres_state_management_plugin.user:
-    ${HOMUNCULUS_NAME}` declaration (user stays the retired shared `ananta`
+    ${SOLET_NAME}` declaration (user stays the retired shared `ananta`
     baseline) or a substitution that failed to resolve (`${...}` left literal)
     -- either would silently boot the newborn connecting as the wrong role.
     """
@@ -332,7 +332,7 @@ def _verify_postgres_user_isolated(target: Path, profile: dict[str, Any], name: 
     if not config_path.is_file():
         raise ConfigMaterializeError(
             f"{_STATE_PLUGIN} is in the profile's plugins but its config was not "
-            f"materialized at {config_path} -- cannot verify per-homunculus role "
+            f"materialized at {config_path} -- cannot verify per-solet role "
             "isolation."
         )
     parsed = json.loads(config_path.read_text(encoding="utf-8"))
@@ -340,10 +340,10 @@ def _verify_postgres_user_isolated(target: Path, profile: dict[str, Any], name: 
     if resolved_user != name:
         raise ConfigMaterializeError(
             f"{_STATE_PLUGIN} config `user` resolved to {resolved_user!r}, expected "
-            f"{name!r} (this homunculus's own role). Declare "
-            f"`plugin_config_overrides.{_STATE_PLUGIN}.user: {_HOMUNCULUS_NAME_PLACEHOLDER}` "
+            f"{name!r} (this solet's own role). Declare "
+            f"`plugin_config_overrides.{_STATE_PLUGIN}.user: {_SOLET_NAME_PLACEHOLDER}` "
             "in the profile template so the newborn connects as its OWN role, not the "
-            "retired shared `ananta` role (per-homunculus isolation, 2026-07-12)."
+            "retired shared `ananta` role (per-solet isolation, 2026-07-12)."
         )
 
 
@@ -381,7 +381,7 @@ def write_address_book_entries(
     """Materialize the address-book auto-seed file the newborn reads at boot,
     IFF the profile declares any `address_book_entries` (Architect ruling R1).
 
-    Finding F9 (2026-07-11): `macos-free-homunculus` binds `embedding_service`
+    Finding F9 (2026-07-11): `macos-free-solet` binds `embedding_service`
     to `openai_embeddings_plugin`, whose `prepare_for_readiness` fail-fasts
     unless the `openai_embeddings` address-book entry exists. Genesis
     materializes the plugin CONFIG file but the entry is Postgres DATA no
@@ -404,14 +404,14 @@ def write_address_book_entries(
     if not entries:
         return []
     validated = [_validate_address_book_entry(entry, index) for index, entry in enumerate(entries)]
-    # Deterministic ${HOMUNCULUS_NAME} substitution at write time (finding F11,
+    # Deterministic ${SOLET_NAME} substitution at write time (finding F11,
     # Architect 2026-07-11): template placeholders (e.g. pgvector_service_db's
     # database + db_schema) become the newborn's actual name here. Uses the
-    # EXPLICIT `name` argument (the newborn), NEVER os.environ["HOMUNCULUS_NAME"]
+    # EXPLICIT `name` argument (the newborn), NEVER os.environ["SOLET_NAME"]
     # -- in verb-mode this runs in the PARENT's process, whose env name is the
     # parent's, not the newborn's. A single serialize/replace/parse keeps it
     # value-agnostic (every string field is covered, not just known keys).
-    substituted = json.loads(json.dumps(validated).replace(_HOMUNCULUS_NAME_PLACEHOLDER, name))
+    substituted = json.loads(json.dumps(validated).replace(_SOLET_NAME_PLACEHOLDER, name))
     path = target / "profile" / "config" / "plugins" / _ADDRESS_BOOK_PLUGIN / "entries.json"
     write_json(path, {"entries": substituted})
     return [path]
@@ -422,8 +422,8 @@ def materialize_profile(
 ) -> dict[str, list[Path]]:
     """Run every writer in the canonical order; return a paths-written map.
 
-    `name` is the newborn homunculus's name (from `GenesisContext.name`),
-    threaded to `write_address_book_entries` for the `${HOMUNCULUS_NAME}`
+    `name` is the newborn solet's name (from `GenesisContext.name`),
+    threaded to `write_address_book_entries` for the `${SOLET_NAME}`
     substitution -- the explicit newborn name, never the ambient env var
     (verb-mode runs in the parent's process).
     """
@@ -448,7 +448,7 @@ def materialize_profile(
     # memory formatter path hard-opens profile/config/prompts/system.json.
     written["global_system_prompt"] = write_global_system_prompt_config(target, name)
     # Fail loud if the postgres connect-user did not resolve to this newborn's
-    # own role (per-homunculus isolation, 2026-07-12), or if the knowledge
+    # own role (per-solet isolation, 2026-07-12), or if the knowledge
     # plugin's per-installation root is missing/clobbered (cold-run D1).
     _verify_postgres_user_isolated(target, profile, name)
     _verify_knowledge_base_root_configured(target, profile)

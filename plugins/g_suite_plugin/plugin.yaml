@@ -1,6 +1,6 @@
 name: g_suite_plugin
 description: >
-  Google Workspace — Gmail, Drive, Sheets, Docs, Slides — for the homunculus,
+  Google Workspace — Gmail, Drive, Sheets, Docs, Slides — for the solet,
   peers, and plans. Enterprise single-account user-OAuth 2.0 with PKCE via the
   official Google client libraries. The OAuth app is configured as "Internal"
   (locked to one Workspace org). Refresh/access tokens live in vault; app
@@ -19,7 +19,7 @@ config:
     default: "127.0.0.1"
     description: >
       Host the OAuth callback uvicorn server binds to. The default is explicit
-      IPv4 loopback for a local homunculus. Cloud ALB-fronted deployments must
+      IPv4 loopback for a local solet. Cloud ALB-fronted deployments must
       set 0.0.0.0 explicitly.
   callback_port:
     type: integer
@@ -31,7 +31,7 @@ config:
 
 # App-wide OAuth identity (client_id, client_secret, redirect_uri) lives in the
 # address book entry "google_oauth_app". The entry's client_secret field stores
-# a "vault::<homunculus>.default_address_book_plugin.google_client_secret"
+# a "vault::<solet>.default_address_book_plugin.google_client_secret"
 # reference: the secret lives in the RESOLVER's namespace so the address book
 # reads it under its own identity. It is chain-consumed — this plugin neither
 # declares nor reads that key (see constants.VAULT_KEY_CLIENT_SECRET), which is

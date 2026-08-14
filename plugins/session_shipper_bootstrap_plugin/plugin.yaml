@@ -10,7 +10,7 @@ description: |
 
   The shipper itself is operator-side per [[client-deployment-plugin-pattern]]:
   Claude Code installs scripts via filesystem + shell tools under user
-  approval. This plugin handles the homunculus-side RECEIPT of pairing
+  approval. This plugin handles the solet-side RECEIPT of pairing
   requests + the bridge edit grants paired shippers a session policy.
 
   Per [[one-plugin-per-scenario]] — shipper bootstrap is its own plugin.

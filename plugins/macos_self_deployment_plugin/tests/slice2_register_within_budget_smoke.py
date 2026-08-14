@@ -138,7 +138,7 @@ def _build_plugin(
     "start_interface never fires."
     """
     plugin = MacosSelfDeploymentPlugin()
-    plugin._homunculus_name = "example"
+    plugin._solet_name = "example"
     plugin._self_color = "blue"
     plugin._self_instance_id = "example-blue-smoke0001"
     fake_messaging = SimpleNamespace(bridge_port=bridge_port)

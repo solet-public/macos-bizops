@@ -6,7 +6,7 @@ Symmetric to install_router.py. Idempotent: re-running on an already-uninstalled
 system is a no-op success. Fast-fail on any unexpected supervisor exit code.
 
 Usage:
-    .venv/bin/python3 plugins/macos_self_deployment_plugin/src/macos_self_deployment_plugin/blue_green_router/uninstall_router.py <homunculus_name>
+    .venv/bin/python3 plugins/macos_self_deployment_plugin/src/macos_self_deployment_plugin/blue_green_router/uninstall_router.py <solet_name>
 
 Path overrides (smoke harness only):
     --plist-path <PATH>
@@ -37,19 +37,19 @@ from macos_self_deployment_plugin.blue_green_router.service_install import (  # 
     default_systemd_unit_path,
     launchd_label,
     systemd_unit_name,
-    validate_homunculus_name,
+    validate_solet_name,
 )
 
 SOCKET_CLEANUP_DEADLINE_SECONDS: float = 5.0
 SOCKET_CLEANUP_POLL_INTERVAL_SECONDS: float = 0.1
 
 
-def _remove_router_port_file(homunculus_name: str) -> None:
+def _remove_router_port_file(solet_name: str) -> None:
     """Remove the router-port discovery file written by install_router.
 
     Idempotent: missing file is a no-op success.
     """
-    port_file = Path.home() / ".ananta" / "runtime" / f"{homunculus_name}.router.port"
+    port_file = Path.home() / ".ananta" / "runtime" / f"{solet_name}.router.port"
     if port_file.exists():
         port_file.unlink()
 
@@ -62,7 +62,7 @@ SYSTEMCTL_NOT_LOADED_EXIT: int = 5
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     try:
-        validate_homunculus_name(args.homunculus_name)
+        validate_solet_name(args.solet_name)
         system_name = platform.system()
         if system_name == "Darwin":
             _uninstall_launchd(args)
@@ -72,14 +72,14 @@ def main(argv: list[str] | None = None) -> int:
             raise InstallError(
                 f"unsupported platform {system_name!r}; supported: Darwin, Linux",
             )
-        socket_path = args.socket_path or default_socket_path(args.homunculus_name)
+        socket_path = args.socket_path or default_socket_path(args.solet_name)
         _verify_socket_gone(socket_path)
-        _remove_router_port_file(args.homunculus_name)
+        _remove_router_port_file(args.solet_name)
     except InstallError as exc:
         print(f"uninstall_router: {exc}", file=sys.stderr)
         return 1
     print(
-        f"uninstall_router: OK — router for homunculus={args.homunculus_name!r} "
+        f"uninstall_router: OK — router for solet={args.solet_name!r} "
         "is stopped and removed",
     )
     return 0
@@ -93,7 +93,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "Idempotent: re-running on an uninstalled system is a no-op success."
         ),
     )
-    parser.add_argument("homunculus_name", help="Homunculus name (e.g. 'iris').")
+    parser.add_argument("solet_name", help="Solet name (e.g. 'iris').")
     parser.add_argument(
         "--plist-path", type=Path, default=None,
         help="Override default ~/Library/LaunchAgents/<label>.plist (smoke only).",
@@ -110,8 +110,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _uninstall_launchd(args: argparse.Namespace) -> None:
-    plist_path = args.plist_path or default_launchd_plist_path(args.homunculus_name)
-    label = launchd_label(args.homunculus_name)
+    plist_path = args.plist_path or default_launchd_plist_path(args.solet_name)
+    label = launchd_label(args.solet_name)
     service_target = f"gui/{os.getuid()}/{label}"
     # Bootout first so KeepAlive can't respawn after we unlink the plist.
     _run_launchctl(
@@ -122,8 +122,8 @@ def _uninstall_launchd(args: argparse.Namespace) -> None:
 
 
 def _uninstall_systemd(args: argparse.Namespace) -> None:
-    unit_path = args.unit_path or default_systemd_unit_path(args.homunculus_name)
-    unit_name = systemd_unit_name(args.homunculus_name)
+    unit_path = args.unit_path or default_systemd_unit_path(args.solet_name)
+    unit_name = systemd_unit_name(args.solet_name)
     _run_systemctl(
         ["disable", "--now", unit_name],
         allow_exit_codes={0, SYSTEMCTL_NOT_LOADED_EXIT},

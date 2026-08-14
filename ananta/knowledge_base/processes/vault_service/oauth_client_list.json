@@ -2,7 +2,7 @@
   "process_key": "service_interface::vault_service::oauth_client_list",
   "display_name": "List OAuth Clients",
   "description": "List all OAuth clients currently registered with the Streamable HTTP MCP transport. Returns public metadata only (client_id, client_name, scopes, created_at) — never the secret or its hash.",
-  "embedding_description": "Enumerate the OAuth 2.1 client_credentials pairs registered against this homunculus's Streamable HTTP MCP transport. Returns a list of entries containing client_id, client_name, scopes, and created_at (sorted by created_at). Secrets and their scrypt hashes are NEVER surfaced — only the public client_id is reusable across calls. Use to inventory live connectors or to identify revocation candidates.",
+  "embedding_description": "Enumerate the OAuth 2.1 client_credentials pairs registered against this solet's Streamable HTTP MCP transport. Returns a list of entries containing client_id, client_name, scopes, and created_at (sorted by created_at). Secrets and their scrypt hashes are NEVER surfaced — only the public client_id is reusable across calls. Use to inventory live connectors or to identify revocation candidates.",
   "result_processor_customizations": {
     "action_label": "OAuth clients listed",
     "result_type": "oauth_client_list",

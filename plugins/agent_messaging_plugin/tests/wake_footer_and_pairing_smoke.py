@@ -30,7 +30,7 @@ rather than merely not setting a variable: this process inherits the launcher's
 exports, so an omitted patch would silently test the positive case.
 
 Run:
-    HOMUNCULUS_NAME=<name>-test .venv/bin/python3 \
+    SOLET_NAME=<name>-test .venv/bin/python3 \
         plugins/agent_messaging_plugin/tests/wake_footer_and_pairing_smoke.py
 """
 
@@ -81,7 +81,7 @@ def _check(condition: object, label: str) -> None:
 def _footer_packet() -> str:
     target = wake_mod.WakeTarget(
         role="Claude-C",
-        homunculus_name="testhome",
+        solet_name="testhome",
         spool=Path("/tmp/x.spool"),
         offset_file=Path("/tmp/x.spool.offset"),
         lock_file=Path("/tmp/x.spool.lock"),

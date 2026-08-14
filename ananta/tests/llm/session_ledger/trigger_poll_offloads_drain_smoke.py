@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""``trigger_poll`` dispatch-offload smoke (no homunculus/Postgres/LM Studio).
+"""``trigger_poll`` dispatch-offload smoke (no solet/Postgres/LM Studio).
 
 Locks the 2026-07-10 fleet-wide-dispatch-wedge fix: ``trigger_poll`` is the
 cron HEARTBEAT for the singleton importer-poll drainer, NOT an inline pass. On

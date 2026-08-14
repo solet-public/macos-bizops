@@ -12,9 +12,9 @@ load-bearing):
   * Layer -1 (README + the driving agent's shell) confirms/installs git
     and Python 3.13 — the two things needed to even reach this file.
   * Layer 0 (THIS FILE) confirms/prepares HOST prerequisites: Homebrew,
-    Postgres server + pgvector extension, this homunculus's OWN
+    Postgres server + pgvector extension, this solet's OWN
     non-superuser role AND its own database (both named after it, from
-    HOMUNCULUS_NAME) + PUBLIC-connect revoke on that db + localhost
+    SOLET_NAME) + PUBLIC-connect revoke on that db + localhost
     default-scram auth (NO credential VALUE — the scram password is
     generated and vault-stored by Layer 1, in-venv, because the vault
     substrate needs the venv to exist), and the local LM Server + `nomic`
@@ -64,8 +64,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# The homunculus-name grammar, inlined from
-# `github_midwife_plugin.constants.NAME_PATTERN` (== `is_valid_homunculus_name`).
+# The solet-name grammar, inlined from
+# `github_midwife_plugin.constants.NAME_PATTERN` (== `is_valid_solet_name`).
 # Layer 0 is STRICTLY stdlib and runs BEFORE the venv exists, so it cannot import
 # the plugin -- this duplicate is deliberate (same rationale as the inlined
 # BUILD_BACKEND_PACKAGES list below); keep the two in exact sync. `fullmatch`
@@ -76,10 +76,10 @@ from typing import Any
 _NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{1,62}$")
 
 
-def _require_homunculus_name() -> str:
-    """This homunculus's name IS its Postgres database name (operator ruling
-    2026-07-11: "database per homunculus, named after it"). Layer -1 sets
-    HOMUNCULUS_NAME for the whole bootstrap->genesis chain; bootstrap CONSUMES
+def _require_solet_name() -> str:
+    """This solet's name IS its Postgres database name (operator ruling
+    2026-07-11: "database per solet, named after it"). Layer -1 sets
+    SOLET_NAME for the whole bootstrap->genesis chain; bootstrap CONSUMES
     it and fails loud rather than defaulting -- a silent default would create a
     mis-named database the newborn's state plugin never connects to. Resolved
     at import (like _ADMIN_ROLE below) so every db-touching step in this file
@@ -88,22 +88,22 @@ def _require_homunculus_name() -> str:
     Validated against `_NAME_PATTERN` HERE, at the sole derivation boundary, so
     every downstream SQL/argv site (the pg_roles/pg_database probes, the ACL
     probe, the `REVOKE` on the quoted db identifier, createuser/createdb) sees an
-    already-safe name -- a malformed or malicious HOMUNCULUS_NAME (quotes,
+    already-safe name -- a malformed or malicious SOLET_NAME (quotes,
     semicolons, spaces, a leading hyphen) can never reach the admin psql layer.
     This is the Layer-0 half of the fix for the same injection class the Layer-1
     validator already closed; the pattern forbids the quote/space/semicolon
     metacharacters those sinks would otherwise be vulnerable to.
     """
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "HOMUNCULUS_NAME env var is required -- it is this homunculus's "
-            "database name (database per homunculus, named after it). The "
+            "SOLET_NAME env var is required -- it is this solet's "
+            "database name (database per solet, named after it). The "
             "driving agent must export it for the bootstrap->genesis chain."
         )
     if not _NAME_PATTERN.fullmatch(name):
         raise RuntimeError(
-            f"HOMUNCULUS_NAME {name!r} is not a valid homunculus name: it must "
+            f"SOLET_NAME {name!r} is not a valid solet name: it must "
             f"match {_NAME_PATTERN.pattern} (a lowercase letter, then 1-62 chars "
             "from [a-z0-9_-]). This name is used verbatim as a Postgres role, "
             "database, and schema identifier -- names with quotes, semicolons, "
@@ -112,10 +112,10 @@ def _require_homunculus_name() -> str:
     return name
 
 
-_DATABASE = _require_homunculus_name()
-# This homunculus's OWN Postgres role. db = schema = role = HOMUNCULUS_NAME
-# (operator per-homunculus-isolation ruling, 2026-07-12): a non-superuser role
-# named after the homunculus, owning its own database. The same single identity
+_DATABASE = _require_solet_name()
+# This solet's OWN Postgres role. db = schema = role = SOLET_NAME
+# (operator per-solet-isolation ruling, 2026-07-12): a non-superuser role
+# named after the solet, owning its own database. The same single identity
 # as _DATABASE -- no second derivation, no shared cluster role.
 _ROLE_NAME = _DATABASE
 # The Postgres admin/superuser role. Homebrew Postgres initdb's the superuser
@@ -139,7 +139,7 @@ _LM_SERVER_BASE_URL = "http://localhost:1234/v1"
 _NOMIC_MODEL_SUBSTRING = "nomic"
 _PROBE_TIMEOUT_S = 10
 _INSTALL_TIMEOUT_S = 300
-_ASSUME_YES_ENV = "HOMUNCULUS_ASSUME_YES"
+_ASSUME_YES_ENV = "SOLET_ASSUME_YES"
 
 # The default-scram pg_hba block (KB 20/03; per-role isolation R3,
 # 2026-07-12), inserted immediately ABOVE the blanket `trust` block
@@ -147,11 +147,11 @@ _ASSUME_YES_ENV = "HOMUNCULUS_ASSUME_YES"
 #   * admin-trust: the OS login superuser (_ADMIN_ROLE) stays on `trust`
 #     so `psql -U <admin>` needs no password -- re-asserted here because
 #     the `all all scram` lines below would otherwise catch it too.
-#   * all-databases scram: EVERY other role (each per-homunculus role) is
+#   * all-databases scram: EVERY other role (each per-solet role) is
 #     password-gated over localhost, with NO per-role and NO per-db line.
-#     A per-role or per-db line would leave the NEXT homunculus's role/db
+#     A per-role or per-db line would leave the NEXT solet's role/db
 #     un-gated (silently passwordless) -- the fall-through class this
-#     structurally kills. Any per-homunculus db is covered with zero
+#     structurally kills. Any per-solet db is covered with zero
 #     per-birth hba edits. An existing machine's prior lines (e.g. a previous
 #     own `ananta` scram lines) are left byte-identical -- this only
 #     INSERTS, never rewrites.
@@ -212,14 +212,14 @@ def confirm_interactive(message: str) -> bool:
     """Real confirmer: print the message, prompt on stdin. Default for a real run.
 
     Agent-driven runs that have already inspected the printed action plan can
-    opt in explicitly with ``HOMUNCULUS_ASSUME_YES=1``. This is intentionally an
+    opt in explicitly with ``SOLET_ASSUME_YES=1``. This is intentionally an
     environment flag rather than blind ``yes |`` piping: the transcript records
     that the driver meant to approve bootstrap's named, probe-derived actions.
 
     A non-interactive stdin (an agent-driven run with no live TTY) raises
     EOFError from input(); that is a DECLINE, not a crash — the calling step
     surfaces its own `needs_user_action` naming what was declined, and a
-    re-run with a terminal or ``HOMUNCULUS_ASSUME_YES=1`` resumes at the same
+    re-run with a terminal or ``SOLET_ASSUME_YES=1`` resumes at the same
     step. Caught live by the 2026-07-12 cold-agent seed acceptance test.
     """
     print(message)
@@ -421,10 +421,10 @@ def probe_role_and_db(ctx: BootstrapContext) -> RoleDbState:
         return RoleDbState.PRESENT_HEALTHY
     if not role_exists and not db_exists:
         return RoleDbState.ABSENT
-    # Exactly one of (this homunculus's own role, its own db) exists -- a
+    # Exactly one of (this solet's own role, its own db) exists -- a
     # genuinely INCONSISTENT partial state under per-role isolation (each
-    # homunculus's role AND db are BOTH named after it, so a clean second
-    # homunculus on an already-provisioned machine is fully ABSENT here, not
+    # solet's role AND db are BOTH named after it, so a clean second
+    # solet on an already-provisioned machine is fully ABSENT here, not
     # half-present -- it takes the normal create path below). Layer 0 never
     # drops/resets anything it did not create, so this partial state surfaces
     # as needs_user_action rather than being auto-reconciled.
@@ -442,11 +442,11 @@ def _pg_hba_path(ctx: BootstrapContext) -> Path | None:
 
 
 def _public_connect_revoked(ctx: BootstrapContext) -> bool:
-    """True iff the R4 PUBLIC revoke is in effect on this homunculus's db.
+    """True iff the R4 PUBLIC revoke is in effect on this solet's db.
 
     A NULL `datacl` is Postgres's built-in default ACL -- PUBLIC holds
     CONNECT+TEMP -- and any grantee-less aclitem (rendered `=...`) is an
-    explicit PUBLIC grant. Either way a sibling homunculus's role could open a
+    explicit PUBLIC grant. Either way a sibling solet's role could open a
     connection, the exact hole R4 closes (cold-run finding D3,
     2026-07-13: the create path bundled the revoke but a manually-reconciled
     PRESENT_HEALTHY db skipped it silently).
@@ -474,7 +474,7 @@ def _hba_with_default_scram(content: str) -> str:
     ABOVE the first blanket `all all ... trust` line (first-match-wins), or
     prepended if no such line exists. Idempotent -- returns `content`
     unchanged when the block is already present. Only INSERTS: existing lines
-    (e.g. a previous homunculus's own `ananta` scram lines) stay byte-identical.
+    (e.g. a previous solet's own `ananta` scram lines) stay byte-identical.
     """
     if all(line in content for line in _DEFAULT_SCRAM_LINES):
         return content
@@ -493,8 +493,8 @@ def _inconsistent_role_db_report(state: RoleDbState) -> dict[str, Any]:
         "step_name": "role_and_db", "status": "needs_user_action", "state": state.value,
         "detail": (
             f"exactly one of (role={_ROLE_NAME!r}, db={_DATABASE!r}) already exists -- "
-            "an inconsistent partial state. Under per-homunculus isolation both are "
-            "named after this homunculus, so a clean second homunculus on an "
+            "an inconsistent partial state. Under per-solet isolation both are "
+            "named after this solet, so a clean second solet on an "
             "already-provisioned machine has NEITHER yet (it takes the normal create "
             "path). bootstrap.py never drops or resets a role/database it did not "
             "create. Reconcile by hand (create the missing half, or drop the stray "
@@ -512,12 +512,12 @@ def _role_db_action_plan(
         actions.append(f"createuser -U {_ADMIN_ROLE} {_ROLE_NAME}  (non-superuser)")
         actions.append(f"createdb -U {_ADMIN_ROLE} -O {_ROLE_NAME} {_DATABASE}")
         actions.append("CREATE EXTENSION IF NOT EXISTS vector  (per-db activation, D12)")
-        actions.append(f'REVOKE CONNECT, TEMP ON DATABASE "{_DATABASE}" FROM PUBLIC  (per-homunculus isolation, R4)')
+        actions.append(f'REVOKE CONNECT, TEMP ON DATABASE "{_DATABASE}" FROM PUBLIC  (per-solet isolation, R4)')
     else:
         if not revoke_ok:
             # A reconciled/pre-existing db (cold-run finding D3): PUBLIC can still connect.
             # Idempotent, creates/drops nothing -- enforcing R4 on this
-            # homunculus's OWN db is exactly what the ruling's wizard prescribes.
+            # solet's OWN db is exactly what the ruling's wizard prescribes.
             actions.append(f'REVOKE CONNECT, TEMP ON DATABASE "{_DATABASE}" FROM PUBLIC  (R4 -- missing on this pre-existing db)')
         if not vector_ok:
             # A reconciled/pre-existing db (cold-boot finding D12): brew installing
@@ -574,7 +574,7 @@ def ensure_role_and_db(ctx: BootstrapContext) -> dict[str, Any]:
 def _create_role_db_and_revoke(ctx: BootstrapContext) -> None:
     """createuser (plain -> non-superuser, R2) + createdb -O + per-db vector
     extension activation (D12) + the R4 PUBLIC revoke, all as the trust-
-    superuser admin role. Per-homunculus isolation (2026-07-12): the newborn
+    superuser admin role. Per-solet isolation (2026-07-12): the newborn
     owns its own db, and only its owner role (plus the admin superuser) may
     connect to it.
     """
@@ -600,8 +600,8 @@ def _create_role_db_and_revoke(ctx: BootstrapContext) -> None:
     # session_ledger_summary::embeddings) crash-loops at first boot without
     # this: `psycopg.errors.UndefinedObject: type "vector" does not exist`.
     _create_vector_extension(ctx)
-    # R4 (per-homunculus isolation): close the default PUBLIC-can-connect grant
-    # so a SIBLING homunculus's role cannot even open a connection to this db
+    # R4 (per-solet isolation): close the default PUBLIC-can-connect grant
+    # so a SIBLING solet's role cannot even open a connection to this db
     # (its own owner role keeps implicit ALL; the admin superuser bypasses).
     _revoke_public_connect(ctx)
 
@@ -623,7 +623,7 @@ def _revoke_public_connect(ctx: BootstrapContext) -> None:
 
 
 def _vector_extension_installed(ctx: BootstrapContext) -> bool:
-    """True iff the ``vector`` extension is CREATEd in THIS homunculus's own
+    """True iff the ``vector`` extension is CREATEd in THIS solet's own
     database (D12). Extensions are per-database, not per-cluster/per-role --
     ``ensure_pgvector`` installing the pgvector files via brew makes the
     extension AVAILABLE machine-wide but does not activate it in any specific
@@ -638,9 +638,9 @@ def _vector_extension_installed(ctx: BootstrapContext) -> bool:
 
 
 def _create_vector_extension(ctx: BootstrapContext) -> None:
-    """``CREATE EXTENSION IF NOT EXISTS vector`` on THIS homunculus's own
+    """``CREATE EXTENSION IF NOT EXISTS vector`` on THIS solet's own
     database (D12), as the admin role -- extension activation needs
-    superuser or an explicit CREATE grant, and the per-homunculus owner role
+    superuser or an explicit CREATE grant, and the per-solet owner role
     is deliberately non-superuser (R2). Idempotent -- IF NOT EXISTS makes
     re-running safe, shared by the create path and the reconciled-db repair
     path.

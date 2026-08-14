@@ -5,7 +5,7 @@ seal identity, secret/scratch globs, GH/archive timeouts, README template name,
 the ship-invariant plugin names) moved to ``seed_factory_plugin.constants`` in
 the 2026-07-20 split. What stays here is the genesis surface PLUS the genuinely
 shared names the factory imports cross-plugin (git timeouts, KB-dir names, the
-profile-baseline/template subdir names, HOMUNCULUS_NAME_ENV).
+profile-baseline/template subdir names, SOLET_NAME_ENV).
 """
 
 from __future__ import annotations
@@ -34,10 +34,10 @@ KNOWLEDGE_BASE_DIRNAME: Final[str] = "knowledge_base"
 NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_-]{1,62}$")
 
 
-def is_valid_homunculus_name(name: str) -> bool:
+def is_valid_solet_name(name: str) -> bool:
     """True iff ``name`` FULLY matches :data:`NAME_PATTERN`.
 
-    The single source of truth for "is this a safe homunculus name" across every
+    The single source of truth for "is this a safe solet name" across every
     Layer-1 name-derivation boundary (``steps.validate_name``,
     ``credential_seed``, ``venv_provision``). Uses ``fullmatch`` deliberately, NOT
     ``match``: ``$`` matches just BEFORE a trailing newline, so a name like
@@ -65,7 +65,7 @@ REQUIRED_CLONE_MARKERS: Final[tuple[str, ...]] = ("ananta", "plugins")
 GIT_QUERY_TIMEOUT_S: Final[int] = 30
 GIT_COMMIT_TIMEOUT_S: Final[int] = 60
 
-# The env var the minting homunculus's identity derives from — SHARED (the seed
+# The env var the minting solet's identity derives from — SHARED (the seed
 # factory's content validator fail-closes if it is unset, §4.2 #4). Kept here
-# because the birth spine also reads HOMUNCULUS_NAME across genesis.
-HOMUNCULUS_NAME_ENV: Final[str] = "HOMUNCULUS_NAME"
+# because the birth spine also reads SOLET_NAME across genesis.
+SOLET_NAME_ENV: Final[str] = "SOLET_NAME"

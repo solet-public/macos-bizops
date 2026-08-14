@@ -147,7 +147,7 @@ class _Harness:
 
     def session(self, *, agi: str, session_id: str, label: str = "lbl") -> str:
         """Open a bridge and register a peer identity on it; return the bridge_id."""
-        bridge_id = self.manager.open(homunculus_name="", parent_pid=123).bridge_id
+        bridge_id = self.manager.open(solet_name="", parent_pid=123).bridge_id
         resp = self.client.post(
             f"/api/v1/bridge/{bridge_id}/peer/register",
             json={
@@ -169,7 +169,7 @@ class _Harness:
         """Drive the SHARED claim body with an explicit takeover.
 
         This older smoke remains scoped to the shared MODEL_TURN body. The
-        caller-reachable INFRA route and ``homunculus watch --takeover`` escape
+        caller-reachable INFRA route and ``solet watch --takeover`` escape
         hatch are pinned separately by ``takeover_route_reachability_smoke``;
         keeping this helper direct avoids duplicating that route fixture here.
         """
@@ -389,7 +389,7 @@ def test_unregistered_bridge_cannot_claim() -> None:
     """An identity-less bridge has nothing to bind a role to — refuse, don't guess."""
     h = _Harness()
     try:
-        bridge_id = h.manager.open(homunculus_name="", parent_pid=7).bridge_id
+        bridge_id = h.manager.open(solet_name="", parent_pid=7).bridge_id
         resp = h.claim(bridge_id)
         _check(resp.status_code == 400, "claiming before peer/register is refused")
         _check(

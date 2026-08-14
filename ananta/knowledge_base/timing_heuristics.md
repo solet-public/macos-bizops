@@ -80,15 +80,3 @@ Example:
 
 - "CosyVoice2 TTS: ~70s to produce ~10s WAV on this host. Use ETA 1-2 minutes. First check-in at 60s."
 
----
-
-## Notes on Music / Entrainment (Optional Direction)
-
-If you later want timing primitives for music/entrainment workflows, useful low-level concepts include:
-
-- Tempo (BPM), beat phase, and gradual tempo drift (avoid abrupt jumps)
-- Windowed periodicity (repeating structure) vs. novelty (avoid monotony)
-- Smooth schedules (e.g., change cadence gradually rather than instantly)
-
-Those are compatible with the same "cadence ladder + hysteresis" idea used for interaction timing.
-

@@ -4,21 +4,21 @@ Article Layer: 2
 
 Article Role: hydration_guidance
 
-Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:marketo
+Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:marketo
 
-Embedding Description: Operator-facing pitch and setup steps for connecting a homunculus's marketo_plugin to a Marketo Engage instance with OAuth client-credentials (lead query/CRUD including delete, campaign trigger, static list membership), surfaced during hydration if this plugin is present but not yet connected. Includes checking for and, if needed, walking the operator through the API-only Role/User/LaunchPoint setup Marketo requires.
+Embedding Description: Operator-facing pitch and setup steps for connecting a solet's marketo_plugin to a Marketo Engage instance with OAuth client-credentials (lead query/CRUD including delete, campaign trigger, static list membership), surfaced during hydration if this plugin is present but not yet connected. Includes checking for and, if needed, walking the operator through the API-only Role/User/LaunchPoint setup Marketo requires.
 
 ## Pitch
 
 With `marketo_plugin` installed but no instance registered, every Marketo verb
 returns `marketo.not_configured` — the plugin is present and harmless, but
-does nothing. Connecting it lets the homunculus read and act on a Marketo
+does nothing. Connecting it lets the solet read and act on a Marketo
 Engage instance directly: leads, campaigns, lists — including permanently
 deleting lead records (`delete_leads`) and irreversibly merging lead records
 (`merge_leads` — with `merge_in_crm=true`, the merge also reaches and
 permanently combines the synced CRM record). Both are genuinely destructive,
 unlike `zuora_plugin`'s no-delete posture. Ask before doing any of it: "This
-homunculus can read and modify your Marketo instance — leads, campaigns,
+solet can read and modify your Marketo instance — leads, campaigns,
 lists — including permanently deleting or merging lead records (a merge can
 also permanently combine the synced CRM record). That needs a Marketo
 API-only user (may already exist) and about 5 minutes in the Marketo admin

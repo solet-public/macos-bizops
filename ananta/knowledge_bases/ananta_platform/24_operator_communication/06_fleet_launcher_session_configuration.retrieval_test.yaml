@@ -12,6 +12,9 @@ target_queries:
   - "per role model effort advisor claude code launcher"
   - "CLAUDE_CODE_DISABLE_ADVISOR_TOOL"
   - "why doesn't --settings advisorModel null disable the advisor"
+  - "how does a session clear its own context and keep working"
+  - "my session context is too long clear it without the operator"
+  - "delegate another session to type clear into my terminal"
 
 # forbidden_min_rank is 2, not the platform-conventional 4, for the same reason
 # as 24_operator_communication/04_session_start_orientation.retrieval_test.yaml:
@@ -27,6 +30,14 @@ forbidden_queries:
 
 # This article must rank #1 for its own target queries (operator requirement:
 # stop re-deriving the advisor-disable mechanism from the claude binary).
+#
+# MEASURED 2026-08-14 (cross-KB knowledge_service::search, post 06/09 self-clear
+# edits): all three self-clear targets rank the github_midwife_plugin hydration
+# runbook's "leave sessions running, use /clear" paragraph 1st and this article
+# 2nd; within ananta_platform this article is 1st on all three (ahead of the 09
+# seat self-rotation card, as designed). Whether min_rank is judged within-KB or
+# cross-KB is a semantics decision owned by the test_retrieval yaml-runner
+# canonicalization follow-up; this note records the measured state either way.
 min_rank: 1
 forbidden_min_rank: 2
 

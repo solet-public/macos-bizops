@@ -15,7 +15,7 @@ fails the gate.
 
 The `--allowlist <path>` file is a tracked-debt register: one
 `<file_path>::<function_name>` per line. Operator decision 2026-05-25:
-the currently-listed entries are deferred to the post-AWS-homunculus
+the currently-listed entries are deferred to the post-AWS-solet
 cycle (Task #74). Removing an entry from the allowlist is the unit of
 remediation progress; the allowlist is NOT a skip path.
 

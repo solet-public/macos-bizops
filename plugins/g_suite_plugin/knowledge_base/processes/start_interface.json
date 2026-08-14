@@ -1,7 +1,7 @@
 {
   "process_key": "plugin::g_suite_plugin::start_interface",
   "display_name": "Start Google OAuth Callback Server",
-  "description": "Start the FastAPI/uvicorn HTTPS callback server that handles the Google OAuth redirect. Must be running before the operator completes the browser flow. A local homunculus defaults to explicit IPv4 loopback (127.0.0.1); an ALB-fronted cloud deployment must configure 0.0.0.0 explicitly and routes /oauth/google/* by path rule to this task's port. Returns the bound host, port, and callback URL.",
+  "description": "Start the FastAPI/uvicorn HTTPS callback server that handles the Google OAuth redirect. Must be running before the operator completes the browser flow. A local solet defaults to explicit IPv4 loopback (127.0.0.1); an ALB-fronted cloud deployment must configure 0.0.0.0 explicitly and routes /oauth/google/* by path rule to this task's port. Returns the bound host, port, and callback URL.",
   "embedding_description": "Launch the Google Workspace OAuth redirect listener before connect_account. Serves GET /oauth/google/callback, validates state and PKCE, exchanges the authorization code, and vaults tokens. Local default: 127.0.0.1. For ALB-fronted cloud, explicitly bind 0.0.0.0 and route /oauth/google/* to this port. Returns host, port, callback_url.",
   "result_processor_customizations": {
     "action_label": "Google OAuth callback server started",

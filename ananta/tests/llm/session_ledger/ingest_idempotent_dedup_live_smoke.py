@@ -253,7 +253,7 @@ def main() -> int:
         print("=== ingest_idempotent_dedup_live_smoke ===")
         print(
             "  SKIP  set LEDGER_DEDUP_LIVE_SMOKE=1 to run; "
-            "needs the live homunculus DB."
+            "needs the live solet DB."
         )
         return 0
     print("=== ingest_idempotent_dedup_live_smoke ===")

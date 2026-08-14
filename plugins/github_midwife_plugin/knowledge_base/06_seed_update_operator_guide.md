@@ -1,29 +1,29 @@
-# Updating Your Homunculus — A Step-by-Step Operator Guide
+# Updating Your Solet — A Step-by-Step Operator Guide
 
-Tags: knowledge:tag:seed_update, knowledge:tag:operator_guide, knowledge:tag:homunculus_lifecycle
+Tags: knowledge:tag:seed_update, knowledge:tag:operator_guide, knowledge:tag:solet_lifecycle
 
 Article Layer: 2
 
 Article Role: operations_runbook
 
-Article Tags: planning-stage:homunculus-lifecycle, evidence-category:operations-runbook, domain:local-homunculus, domain:client-deployment, consumer_profile:both
+Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Plain-language, no-jargon walkthrough for the homunculus's OWNER to bring an already-running homunculus up to date with a newer published seed release, written to be followed directly at a terminal rather than requiring a coding agent to drive every step — when a pulled update needs a dependency install, when it needs generated files (AGENTS.md, CLAUDE.md, shell integration, Claude Code hooks) re-rendered and why that specific step needs a coding agent's help even though the rest does not, verifying the user-scope CLAUDE.md instruction section is actually installed rather than assumed, configuring a business-connector export/workspace root on an already-updated homunculus so record reads don't fail loud, the Claude Code plugin cache-refresh step people skip because everything looks like it worked without it, a verification checklist including confirming a newly-live plugin's knowledge is actually searchable plus behavioral read/override/refusal checks for connectors only verifiable on the owner's own machine (Marketo, Zuora), and a closing note on shaping newly-authored joseki cards now that connector reads never return record values inline. Companion to `05_seed_update_runbook.md`, which is written to the coding agent performing the same update and carries the full technical detail and measurement history this guide deliberately leaves out.
+Embedding Description: Plain-language, no-jargon walkthrough for the solet's OWNER to bring an already-running solet up to date with a newer published seed release, written to be followed directly at a terminal rather than requiring a coding agent to drive every step — when a pulled update needs a dependency install, when it needs generated files (AGENTS.md, CLAUDE.md, shell integration, Claude Code hooks) re-rendered and why that specific step needs a coding agent's help even though the rest does not, verifying the user-scope CLAUDE.md instruction section is actually installed rather than assumed, configuring a business-connector export/workspace root on an already-updated solet so record reads don't fail loud, the Claude Code plugin cache-refresh step people skip because everything looks like it worked without it, a verification checklist including confirming a newly-live plugin's knowledge is actually searchable plus behavioral read/override/refusal checks for connectors only verifiable on the owner's own machine (Marketo, Zuora), and a closing note on shaping newly-authored joseki cards now that connector reads never return record values inline. Companion to `05_seed_update_runbook.md`, which is written to the coding agent performing the same update and carries the full technical detail and measurement history this guide deliberately leaves out.
 
 ## When to use this guide
 
-You've been told a new version of your homunculus is available and want to
+You've been told a new version of your solet is available and want to
 bring it up to date without losing anything it has learned or remembers.
 This guide assumes no prior knowledge of how the update was built — just
-that you have a homunculus already running on your computer.
+that you have a solet already running on your computer.
 
-**When NOT to use this:** if your homunculus won't start at all, or you
+**When NOT to use this:** if your solet won't start at all, or you
 want a completely fresh instance, this is the wrong guide — ask whoever
 gave you this document for the alternative.
 
 **If you have a coding agent (Claude Code or Codex) available and you'd
 rather have it drive the whole process:** point it at
-`05_seed_update_runbook.md` in your homunculus's own knowledge base instead
+`05_seed_update_runbook.md` in your solet's own knowledge base instead
 — search for "seed update runbook" — that version is written directly to
 the agent and covers everything below in more technical depth. This guide
 is for running the update yourself, at a terminal, when that isn't how
@@ -31,15 +31,15 @@ you'd rather do it.
 
 ## Before you start
 
-- Make sure your homunculus is currently running: run `<name> health` in a
-  terminal (replace `<name>` with your homunculus's name throughout this
+- Make sure your solet is currently running: run `<name> health` in a
+  terminal (replace `<name>` with your solet's name throughout this
   guide) and confirm you get a healthy response, not an error.
 - You'll need a terminal window and about 10 minutes, most of which is
   waiting.
 
 ## Step 1 — get the update
 
-In a terminal, go to the folder where your homunculus lives and run:
+In a terminal, go to the folder where your solet lives and run:
 
 ```bash
 git pull --ff-only
@@ -61,10 +61,10 @@ the update never touches them directly.
 
 Most updates need nothing here — skip straight to Step 3. Do this step only
 if whoever gave you this guide specifically said the update adds a new
-component or changes what your homunculus depends on:
+component or changes what your solet depends on:
 
 ```bash
-cd <your homunculus's folder>
+cd <your solet's folder>
 .venv/bin/python -m pip install --no-build-isolation -e plugins/<the named component>
 ```
 
@@ -74,16 +74,16 @@ something already installed does nothing harmful.
 ## Step 3 — restart and wait
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/local.homunculus.<name>.plist
-launchctl load ~/Library/LaunchAgents/local.homunculus.<name>.plist
+launchctl unload ~/Library/LaunchAgents/local.solet.<name>.plist
+launchctl load ~/Library/LaunchAgents/local.solet.<name>.plist
 ```
 
-Then wait about 30–60 seconds before doing anything else. Your homunculus
+Then wait about 30–60 seconds before doing anything else. Your solet
 is reloading in the background during this time, and using it too soon can
 cause errors that look scarier than they are. When in doubt, wait a bit
 longer.
 
-*If you'd rather avoid even that brief downtime:* some homunculi support a
+*If you'd rather avoid even that brief downtime:* some solets support a
 zero-downtime update path instead of the restart above. If you have a
 coding agent handy, you can ask it to check and use that path for you
 instead of the commands shown here — otherwise the restart above is always
@@ -91,7 +91,7 @@ safe and is what most operators use.
 
 ## Step 4 — refresh your generated files (only if you were told to)
 
-Some updates change more than your homunculus's own code — they also change
+Some updates change more than your solet's own code — they also change
 files that live on *your* side: your project's `AGENTS.md`/`CLAUDE.md`,
 your shell setup, or your Claude Code hooks. A restart alone does not
 regenerate those; they only update if someone re-runs the setup steps that
@@ -101,7 +101,7 @@ files against what changed and merge carefully, not overwrite blindly).
 
 Skip this step unless whoever gave you this guide said this update touches
 those files. If they did: open a **fresh** Claude Code (or Codex) session
-inside your homunculus's folder and ask it to "re-run step 2 of the seed
+inside your solet's folder and ask it to "re-run step 2 of the seed
 hydration runbook" (add "and step 4a too" if you use named multi-session
 roles). Let the agent walk you through it — it will show you what's
 changing before it touches anything.
@@ -114,11 +114,11 @@ update effectively never reached your agent even though everything else
 went fine. This isn't automatic — there is no installer that does it for
 you, so it only happens when you (or your agent) explicitly re-run this
 step. Verify it's actually there rather than assuming — name your own
-homunculus specifically, not just any homunculus's section, since this
-file can hold more than one if you use more than one homunculus:
+solet specifically, not just any solet's section, since this
+file can hold more than one if you use more than one solet:
 
 ```bash
-grep -c "BEGIN HOMUNCULUS <name> v1" ~/.claude/CLAUDE.md
+grep -c "BEGIN SOLET <name> v1" ~/.claude/CLAUDE.md
 ```
 
 A count of 1 means your section is present. Zero, or the file doesn't
@@ -134,7 +134,7 @@ itself is current.
 
 ## Step 4a — configure the export/workspace root (only if you were told to)
 
-Some updates change what your homunculus requires before it will read from
+Some updates change what your solet requires before it will read from
 business systems (Jira, Salesforce, and similar) — specifically, requiring
 a folder on your computer where results are allowed to be saved, so records
 never land directly in a conversation. Skip this step unless whoever gave
@@ -145,26 +145,26 @@ day to day (the parent folder, not any single project — something like
 `~/Workspace`, not `~/Workspace/some-specific-project`) and ask it to
 configure that as your workspace root for business-connector results. Your
 agent will validate the folder and confirm what it did — if it refuses
-your answer, that's expected behavior protecting your homunculus's own
+your answer, that's expected behavior protecting your solet's own
 files, not an error to work around; give it a different folder instead.
 
 ## Step 5 — refresh the Claude Code plugin (don't skip this)
 
 This is the step people miss, because everything *looks* like it worked
 without it. Pulling the update and restarting brings new files onto your
-computer, but a small companion tool your homunculus uses inside Claude
+computer, but a small companion tool your solet uses inside Claude
 Code — called a **plugin** — keeps running its own separate, older copy
 until you explicitly tell it to refresh. Skipping this step means you keep
 running old behavior with no warning that anything is out of date.
 
 **5a. Find your plugin's marketplace name** (a name that was generated
-automatically when your homunculus was first set up):
+automatically when your solet was first set up):
 
 ```bash
 cat ~/.claude/plugins/known_marketplaces.json
 ```
 
-Look for an entry whose `path` points at your homunculus's folder. The
+Look for an entry whose `path` points at your solet's folder. The
 name of that entry (not `claude-plugins-official`, which is unrelated) is
 your marketplace name — you'll use it in the next command.
 
@@ -186,7 +186,7 @@ guide rather than continuing.
 ## Step 6 — confirm everything actually updated
 
 Open a **brand new** Claude Code window (closing and reopening an existing
-one is not enough — it needs to be a fresh start) inside your homunculus's
+one is not enough — it needs to be a fresh start) inside your solet's
 folder, and run:
 
 ```bash
@@ -196,10 +196,10 @@ folder, and run:
 
 Both should respond normally. If either one errors, or the second command
 comes back empty, get in touch with whoever gave you this guide before
-using your homunculus for anything important.
+using your solet for anything important.
 
 **If this update mentioned a newly-activated plugin** (something you were
-told is now live on your homunculus that wasn't before), confirm its
+told is now live on your solet that wasn't before), confirm its
 knowledge is actually searchable, not just installed. Run two or three
 searches for things that plugin should know about — for example, if it's a
 marketing-data plugin, try queries like `"list campaigns"` or the plugin's
@@ -272,9 +272,9 @@ thing, sometimes wanting the whole set — narrow the request itself (ask for
 specific fields, or a bounded range) rather than forcing one shape as a
 blanket rule.
 
-## What changed in this release — you can now run a small fleet of sessions from this homunculus (2026-08-10 update)
+## What changed in this release — you can now run a small fleet of sessions from this solet (2026-08-10 update)
 
-If you already start extra agent sessions from this homunculus (or want to
+If you already start extra agent sessions from this solet (or want to
 start), this update is the one that makes that practical rather than
 manual. Two things matter for you specifically:
 
@@ -285,18 +285,18 @@ telling anyone. Step 5's refresh commands are what actually pick that up —
 if you skip it thinking "it probably updated with everything else," it
 did not; that's exactly the trap Step 5 exists to catch.
 
-**A new "operating manual" now ships with your homunculus** for anyone
+**A new "operating manual" now ships with your solet** for anyone
 running more than one session of it at once — how to hand off work between
 sessions, pause one, bring back a stuck one, and check whether one is
 running low on its own working memory. If you (or a coding agent working
 on your behalf) manage multiple sessions, ask your agent to search your
-homunculus's knowledge base for "maintenance verbs joseki cards" — that's
+solet's knowledge base for "maintenance verbs joseki cards" — that's
 the manual. If you only ever talk to one session at a time, none of this
 changes anything for you.
 
 **One more thing, only if you use a connected Postgres or Snowflake
 database:** both can now write to your database, but only if the login
-you registered is itself allowed to — your homunculus does not add or
+you registered is itself allowed to — your solet does not add or
 remove any permission on its own; your database's own access rules
 decide. If you never want a particular connection to be able to write,
 register it under a read-only login, same as you would for any other
@@ -311,14 +311,14 @@ exactly as written, with nothing extra. There's no new dependency to
 install, and nothing new to configure.
 
 The one thing worth knowing: if you (or a coding agent working on your
-behalf) ever start OTHER agent sessions from this homunculus — not just the
+behalf) ever start OTHER agent sessions from this solet — not just the
 one you're talking to — this release gives those sessions more ways to
 coordinate with each other (starting, watching, and handing off work
 between them). If that's not something you do, you can ignore this
-entirely; it doesn't change how your homunculus behaves for ordinary use.
+entirely; it doesn't change how your solet behaves for ordinary use.
 
 **One thing to know about, not something this update fixes:** a plugin
-your homunculus ships and enables by default includes a few small reminder
+your solet ships and enables by default includes a few small reminder
 hooks that depend on a program called `node` being present on your
 machine. If it isn't, those specific reminders simply do not run. Most of
 the time you'll notice — you'll see an on-screen error naming the missing
@@ -329,7 +329,7 @@ exception: if it fails to start, there's no visible sign of it at all.
 Your git-safety protection is a separate hook, built differently, and
 keeps working either way. This isn't fixed yet.
 
-See the root `RELEASE_NOTES.md` file in your homunculus's folder for the
+See the root `RELEASE_NOTES.md` file in your solet's folder for the
 full list of what changed, in more detail than this guide covers.
 
 ## Reference

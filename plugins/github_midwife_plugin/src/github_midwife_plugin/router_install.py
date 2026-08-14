@@ -1,4 +1,4 @@
-"""SEED-06 — install the per-homunculus blue-green router at birth.
+"""SEED-06 — install the per-solet blue-green router at birth.
 
 A genesis spine phase that runs right after the main autostart LaunchAgent
 (`autostart.SimpleAutostartRenderer`). Design: `workbench/2026-07-18_seed06_
@@ -9,7 +9,7 @@ action) and §5.
 `macos_self_deployment_plugin` ships the router code (`bizops_standard`, NOT
 `macos_free_minimal`). A free-tier newborn is single-color by design and this
 phase SKIPS cleanly. When the plugin IS in the allowlist the phase is
-FAIL-LOUD — a homunculus that boots believing it can blue-green but silently
+FAIL-LOUD — a solet that boots believing it can blue-green but silently
 cannot is worse than a loud birth failure (design §5).
 
 The heavy lifting (dynamic port pick in 8800-8999, plist/systemd-unit render,

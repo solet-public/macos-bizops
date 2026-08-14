@@ -20,7 +20,7 @@ description: >
 
   LOCAL-PROFILE ONLY: this plugin anchors on the git worktree (it locates the
   repo root by walking up from APP_HOME to the ancestor carrying quality_gates/
-  AND .git). A cloud homunculus has no git repo, so prepare_for_readiness
+  AND .git). A cloud solet has no git repo, so prepare_for_readiness
   fail-louds there by design — DO NOT include platform_dev_surface_plugin in
   cloud manifests.
 

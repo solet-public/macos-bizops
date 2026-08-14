@@ -146,7 +146,7 @@ class PluginManager:
     ) -> None:
         """Bootstrap-compatible plugin discovery method.
 
-        ``allowed_plugins`` (the homunculus's profile manifest) restricts
+        ``allowed_plugins`` (the solet's profile manifest) restricts
         loading to entry points whose name appears in the set. ``None``
         means "no gating" (legacy / dev-box behavior). The first call's
         ``allowed_plugins`` is remembered for subsequent re-discoveries

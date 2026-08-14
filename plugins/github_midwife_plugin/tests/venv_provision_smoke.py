@@ -1,16 +1,16 @@
-"""Verb-mode venv/seed install + newborn self-seed smoke (per-homunculus role
+"""Verb-mode venv/seed install + newborn self-seed smoke (per-solet role
 isolation, operator override 2026-07-12; acquisition mode retired 2026-07-18).
 
-Pins the surviving properties explicitly: `birth_homunculus` requires an
+Pins the surviving properties explicitly: `birth_solet` requires an
 EXISTING clone (an absent/empty target is refused -- acquisition-mode
 clone-of-pinned-upstream was RETIRED, the Seed Factory replaces it), the §7
 `provision_venv` birth variant builds the source-only seed folder's venv
 EXPLICITLY + UNCONDITIONALLY while standard mode leaves it untouched, and --
-under per-homunculus isolation -- the newborn self-seeds its OWN role in its
+under per-solet isolation -- the newborn self-seeds its OWN role in its
 OWN venv subprocess (no parent-provisions-child credential copy; no credential
 crosses a namespace).
 
-Run directly: ``HOMUNCULUS_NAME=<name> .venv/bin/python3
+Run directly: ``SOLET_NAME=<name> .venv/bin/python3
 plugins/github_midwife_plugin/tests/venv_provision_smoke.py``.
 """
 
@@ -124,8 +124,8 @@ def _check_create_venv_and_install_seed_fails_loud(root: Path) -> None:
 
 
 def _check_seed_newborn_credential_subprocess_shape() -> None:
-    """Per-homunculus isolation: the newborn self-seeds its OWN role via a
-    subprocess in its OWN venv (HOMUNCULUS_NAME=<newborn>), running
+    """Per-solet isolation: the newborn self-seeds its OWN role via a
+    subprocess in its OWN venv (SOLET_NAME=<newborn>), running
     credential_seed's --seed CLI with the isolation-sibling-db flag set to the
     parent's db. No password ever crosses the boundary -- nothing is piped in.
     """
@@ -145,9 +145,9 @@ def _check_seed_newborn_credential_subprocess_shape() -> None:
         str(cmd),
     )
     _check(
-        "the seed subprocess env sets HOMUNCULUS_NAME to the NEWBORN's name",
-        kwargs.get("env", {}).get("HOMUNCULUS_NAME") == "newbornhum",
-        str(kwargs.get("env", {}).get("HOMUNCULUS_NAME")),
+        "the seed subprocess env sets SOLET_NAME to the NEWBORN's name",
+        kwargs.get("env", {}).get("SOLET_NAME") == "newbornhum",
+        str(kwargs.get("env", {}).get("SOLET_NAME")),
     )
     _check(
         "no credential crosses the boundary: nothing is piped on the subprocess stdin",
@@ -225,15 +225,15 @@ def _check_require_existing_clone(root: Path) -> None:
 
 
 def _check_birth_refuses_absent_target(root: Path) -> None:
-    """Verb-level retirement pin: birth_homunculus against an absent target no
+    """Verb-level retirement pin: birth_solet against an absent target no
     longer clones a pinned upstream -- it fails loud (ValueError) at the door.
     """
     plugin = GithubMidwifePlugin()
     absent = root / "absent_birth_target"
     try:
-        plugin.birth_homunculus(
+        plugin.birth_solet(
             name="testhum",
-            profile_template="macos-free-homunculus",
+            profile_template="macos-free-solet",
             environment_config={"target": str(absent)},
         )
     except ValueError as exc:
@@ -247,7 +247,7 @@ def _check_birth_refuses_absent_target(root: Path) -> None:
 
 
 def _check_existing_clone_seeds_own_credential(root: Path) -> None:
-    """Standard existing-clone birth builds the per-homunculus self-seed closure
+    """Standard existing-clone birth builds the per-solet self-seed closure
     over the pre-existing <target>/.venv: a pre-seed scram VERIFY, then the
     newborn's OWN self-seed with the isolation self-proof against the parent's
     db. The CLI path (genesis.main) stays on the in-process seed_db_password --
@@ -272,11 +272,11 @@ def _check_existing_clone_seeds_own_credential(root: Path) -> None:
     # The pre-seed scram VERIFY must run BEFORE the self-seed (Architect C3
     # ordering). BOTH are patched so the closure NEVER touches real Postgres.
     # The self-seed's sibling_db must be the parent's db (== the parent
-    # process's HOMUNCULUS_NAME). Derive it from the environment rather than
-    # hardcoding a literal name: the seed factory births homunculi under many
+    # process's SOLET_NAME). Derive it from the environment rather than
+    # hardcoding a literal name: the seed factory births solets under many
     # different names that run these gates, so a hardcode would false-RED
     # there (Reviewer-C, SF-D).
-    expected_sibling = os.environ["HOMUNCULUS_NAME"]
+    expected_sibling = os.environ["SOLET_NAME"]
     call_order: list[str] = []
 
     def _fake_seed(newborn_name: str, newborn_venv: Path, sibling_db: str, *, run: object) -> None:
@@ -290,7 +290,7 @@ def _check_existing_clone_seeds_own_credential(root: Path) -> None:
     with patch("github_midwife_plugin.plugin.run_genesis", _fake_run_genesis), \
          patch.object(venv_provision, "seed_newborn_credential", _fake_seed), \
          patch.object(venv_provision, "verify_newborn_db_scram_gated", _fake_verify_db):
-        plugin._run_genesis_against_clone("newbornhum", target, "macos-free-homunculus", provision_venv=False)  # noqa: SLF001
+        plugin._run_genesis_against_clone("newbornhum", target, "macos-free-solet", provision_venv=False)  # noqa: SLF001
         provisioner = captured.get("credential_provisioner")
         _check(
             "existing-clone birth passes a credential_provisioner to run_genesis (not in-process seed_db_password)",
@@ -334,7 +334,7 @@ def _check_provision_venv_variant(root: Path) -> None:
              patch("github_midwife_plugin.plugin.run_genesis", _fake_run_genesis), \
              patch.object(venv_provision, "seed_newborn_credential", lambda *_a, **_k: None), \
              patch.object(venv_provision, "verify_newborn_db_scram_gated", lambda *_a, **_k: None):
-            plugin._run_genesis_against_clone("hum", target, "macos-free-homunculus", provision_venv=provision)  # noqa: SLF001
+            plugin._run_genesis_against_clone("hum", target, "macos-free-solet", provision_venv=provision)  # noqa: SLF001
         return len(venv_calls)
 
     _check(
@@ -414,7 +414,7 @@ def _check_verify_db_rejects_invalid_name_before_any_probe() -> None:
     except venv_provision.VerbModeProvisionError as exc:
         _check(
             "a space-bearing (conninfo-injecting) newborn name is refused before any psql call",
-            "not a valid homunculus name" in str(exc) and not calls,
+            "not a valid solet name" in str(exc) and not calls,
             f"exc={exc!r} calls={calls!r}",
         )
     else:

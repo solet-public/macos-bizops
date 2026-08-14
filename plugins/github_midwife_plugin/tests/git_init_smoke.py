@@ -1,4 +1,4 @@
-"""Workstream A smoke (2026-07-20) — git-init of the born homunculus worktree.
+"""Workstream A smoke (2026-07-20) — git-init of the born solet worktree.
 
 Drives ``git_init.git_init_worktree`` against a throwaway tmp tree with REAL
 git (no mocking — the git subprocesses ARE the substrate under test), and pins:

@@ -44,13 +44,13 @@ def watch_instance_digest(agent_session_id: str) -> str:
     ).hexdigest()[:_DIGEST_LENGTH]
 
 
-def default_spool_path(homunculus_name: str, agent_instance_id: str) -> Path:
+def default_spool_path(solet_name: str, agent_instance_id: str) -> Path:
     """The per-session spool file, colocated with the bridge port files."""
-    runtime_dir = get_runtime_dir(homunculus_name)
-    return runtime_dir / f"{homunculus_name}.{agent_instance_id}.spool"
+    runtime_dir = get_runtime_dir(solet_name)
+    return runtime_dir / f"{solet_name}.{agent_instance_id}.spool"
 
 
-def watch_pairing_path(homunculus_name: str, agent_instance_id: str) -> Path:
+def watch_pairing_path(solet_name: str, agent_instance_id: str) -> Path:
     """Sidecar naming the spool the WATCHER actually chose, for this session.
 
     Census D4: ``watch`` accepts ``--spool`` / ``--no-spool``, so the delivery
@@ -64,11 +64,11 @@ def watch_pairing_path(homunculus_name: str, agent_instance_id: str) -> Path:
     from session identity alone — the one thing both halves always know without
     a handshake — so ``wake`` can find it no matter where the spool went.
     """
-    runtime_dir = get_runtime_dir(homunculus_name)
-    return runtime_dir / f"{homunculus_name}.{agent_instance_id}.watchpair"
+    runtime_dir = get_runtime_dir(solet_name)
+    return runtime_dir / f"{solet_name}.{agent_instance_id}.watchpair"
 
 
-def watch_singleton_lock_path(homunculus_name: str, agent_instance_id: str) -> Path:
+def watch_singleton_lock_path(solet_name: str, agent_instance_id: str) -> Path:
     """Sidecar the WATCHER flocks to stay a per-session singleton (W1, §34.3).
 
     Derived from session identity, deliberately NOT from the spool path. Two
@@ -81,11 +81,11 @@ def watch_singleton_lock_path(homunculus_name: str, agent_instance_id: str) -> P
     The kernel releases flocks on process death, so this can never go stale and
     needs no cleanup path.
     """
-    runtime_dir = get_runtime_dir(homunculus_name)
-    return runtime_dir / f"{homunculus_name}.{agent_instance_id}.watch.lock"
+    runtime_dir = get_runtime_dir(solet_name)
+    return runtime_dir / f"{solet_name}.{agent_instance_id}.watch.lock"
 
 
-def watch_marks_path(homunculus_name: str, agent_instance_id: str) -> Path:
+def watch_marks_path(solet_name: str, agent_instance_id: str) -> Path:
     """Sidecar holding this SESSION's inbox high-water marks (census D1).
 
     Derived from session identity, deliberately NOT from the spool path — the
@@ -100,8 +100,8 @@ def watch_marks_path(homunculus_name: str, agent_instance_id: str) -> Path:
     than replays. A genuinely NEW session gets a new digest and therefore no
     marks, which is the intended "seed to newest and spool nothing" case.
     """
-    runtime_dir = get_runtime_dir(homunculus_name)
-    return runtime_dir / f"{homunculus_name}.{agent_instance_id}.marks"
+    runtime_dir = get_runtime_dir(solet_name)
+    return runtime_dir / f"{solet_name}.{agent_instance_id}.marks"
 
 
 def write_watch_marks(marks: Path, *, instance_after: str, role_high_water: str) -> None:

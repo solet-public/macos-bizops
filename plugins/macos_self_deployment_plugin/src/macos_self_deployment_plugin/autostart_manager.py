@@ -3,7 +3,7 @@
 Implements the macOS launchd integration for the three autostart verbs
 exposed by ``MacosSelfDeploymentPlugin``:
 
-- ``install_autostart`` — renders the per-homunculus LaunchAgent plist
+- ``install_autostart`` — renders the per-solet LaunchAgent plist
   + ``launchctl load``s it. Idempotent across re-runs: an already-loaded
   agent is unloaded, the plist is rewritten, then re-loaded so an
   in-flight in-memory definition cannot go stale against a refreshed
@@ -27,17 +27,17 @@ so they never touch the operator's real LaunchAgents.
 
 Option B (2026-06-28): the plist runs the colour-agnostic crash-
 supervisor (``-m macos_self_deployment_plugin.supervisor``), NOT
-``ananta.cli`` directly, so the launchd-managed process is never a homunculus
+``ananta.cli`` directly, so the launchd-managed process is never a solet
 colour. ``KeepAlive`` is therefore an unconditional ``<true/>``: the
 supervisor is an infinite poll loop with no intentional clean exit — if
-it ever exits while loaded, restart it. Because no homunculus colour is launchd-
+it ever exits while loaded, restart it. Because no solet colour is launchd-
 managed, a drained/SIGTERM'd colour is never respawned by launchd: the
 ghost-respawn class is structurally impossible, so the interim
 ``Crashed``/``SuccessfulExit`` exit-code dance (and the earlier Slice-4
 ``PathState`` predicate) are both gone from the plist. Respawn of the
 active colour is the supervisor's job (poll the router; spawn from
 ``current`` when no active colour); ``stop_self``'s persistent
-``.draining`` sentinel suppresses that respawn for "operator wants the homunculus
+``.draining`` sentinel suppresses that respawn for "operator wants the solet
 off". See ``supervisor.py``.
 
 The plist ``WorkingDirectory`` is the out-of-tree runtime dir
@@ -85,7 +85,7 @@ class _ObservedState:
 
 
 class AutostartManager:
-    """Render + load + unload + introspect a per-homunculus LaunchAgent.
+    """Render + load + unload + introspect a per-solet LaunchAgent.
 
     All filesystem + ``launchctl`` interactions live here. Smokes
     instantiate with a tmpfs ``plist_dir`` to validate the install +
@@ -98,7 +98,7 @@ class AutostartManager:
     def __init__(
         self,
         *,
-        homunculus_name: str,
+        solet_name: str,
         project_root: Path,
         plist_dir: Path | None = None,
         releases_root: Path | None = None,
@@ -107,7 +107,7 @@ class AutostartManager:
         launchctl_path: str = "/bin/launchctl",
         logger: logging.Logger | None = None,
     ) -> None:
-        self._homunculus_name = homunculus_name
+        self._solet_name = solet_name
         self._project_root = project_root
         self._plist_dir = (
             plist_dir if plist_dir is not None
@@ -118,9 +118,9 @@ class AutostartManager:
         # smokes point it at a throwaway scratch dir.
         self._releases_root = (
             releases_root if releases_root is not None
-            else Path(RELEASES_ROOT_DEFAULT).expanduser() / homunculus_name
+            else Path(RELEASES_ROOT_DEFAULT).expanduser() / solet_name
         )
-        self._label = f"{label_prefix}.{homunculus_name}"
+        self._label = f"{label_prefix}.{solet_name}"
         self._log_dir = (
             log_dir if log_dir is not None
             else Path(AUTOSTART_LOG_DIR_DEFAULT).expanduser()
@@ -360,19 +360,19 @@ class AutostartManager:
         ``python@3.13/3.13.13_1`` cellar). Hand-rolling keeps the verb
         operational even on broken interpreter installs. Inputs are
         operator-controlled and structurally constrained
-        (``homunculus_name`` matches ``[a-z][a-z0-9_]*``, paths come
+        (``solet_name`` matches ``[a-z][a-z0-9_]*``, paths come
         from the operator's filesystem), but we XML-escape regardless
         per defensive-encoding hygiene.
         """
         interpreter = self._resolve_autostart_interpreter()
         profile_dir = self._project_root / "profile"
-        stdout_log = self._log_dir / f"{self._homunculus_name}_autostart.log"
+        stdout_log = self._log_dir / f"{self._solet_name}_autostart.log"
         # §5 CWD hygiene: WorkingDirectory must be out-of-tree, NOT the repo
         # root — else a relative-path write (error.log, a library temp/cache)
         # lands in the git working tree (.gitignore:49 /error.log confirms it
         # happened once). The runtime dir is the canonical out-of-tree home;
         # imports resolve via the venv .pth, not CWD.
-        working_dir = get_runtime_dir(self._homunculus_name)
+        working_dir = get_runtime_dir(self._solet_name)
         # Option B: launch the colour-agnostic supervisor module (NOT
         # ``ananta.cli`` directly). The LaunchAgent has no shell to default
         # ``--app-home``, so explicit-pass is the only correct shape. The
@@ -380,7 +380,7 @@ class AutostartManager:
         # role 1) — the supervisor itself runs from ``current`` and re-resolves
         # it on every spawn. ``KeepAlive`` is an unconditional ``<true/>``:
         # the supervisor is an infinite loop, so any exit while loaded means
-        # restart it. No homunculus colour is launchd-managed under this model, so
+        # restart it. No solet colour is launchd-managed under this model, so
         # the ``Crashed``/``SuccessfulExit`` exit-code dance is obsolete (the
         # ghost-respawn class is structurally impossible); respawn of the
         # active colour is the supervisor's job, gated by ``stop_self``'s
@@ -401,7 +401,7 @@ class AutostartManager:
             '  </array>\n'
             f'  <key>WorkingDirectory</key>\n  <string>{_xml_escape(str(working_dir))}</string>\n'
             '  <key>EnvironmentVariables</key>\n  <dict>\n'
-            f'    <key>HOMUNCULUS_NAME</key>\n    <string>{_xml_escape(self._homunculus_name)}</string>\n'
+            f'    <key>SOLET_NAME</key>\n    <string>{_xml_escape(self._solet_name)}</string>\n'
             # §39.2: without this key the daemon gets launchd's bare PATH and
             # cannot see Homebrew binaries (tmux) even when installed. See
             # AUTOSTART_PATH_ENV for why it is a fixed literal.
@@ -463,7 +463,7 @@ class AutostartManager:
         return AutostartResult(
             status=status,
             verb=verb,
-            homunculus_name=self._homunculus_name,
+            solet_name=self._solet_name,
             label=self._label,
             plist_path=str(self.plist_path),
             prior_state=prior_state,

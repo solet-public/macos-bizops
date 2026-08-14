@@ -83,7 +83,7 @@ def _configured_driver(tmp_dir: Path, *, popen_fn: Any) -> HeadlessHostDriver:
     _stub_worker_hook_files(tmp_dir)
     return HeadlessHostDriver(
         claude_bin=_executable_stub(tmp_dir),
-        homunculus_name="testhom",
+        solet_name="testhom",
         permission_mode="bypassPermissions",
         mcp_config_path=mcp_config,
         cwd=tmp_dir,
