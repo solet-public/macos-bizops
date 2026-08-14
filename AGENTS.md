@@ -1,8 +1,8 @@
 # dax — project instructions
 
-<!-- BEGIN HOMUNCULUS HYDRATION -->
+<!-- BEGIN SOLET HYDRATION -->
 
-This directory is the home of **dax**, a homunculus on the Ananta
+This directory is the home of **dax**, a solet on the Ananta
 platform: a named, persistent agentic instance with its own PostgreSQL schema,
 memories, knowledge bases, and plugins. You — the AGENTS.md-convention
 session reading this — are its driving agent. This managed block governs
@@ -28,6 +28,23 @@ ingestion is enabled it is also the path for session-ledger recall:
 dax call service_interface::session_ledger_service::search_event_content '{"query": "<topic>", "limit": 8}'
 ```
 
+Background-job verbs — connector writes and exports (Google Workspace,
+Snowflake, external Postgres, and similar) — return
+`{"job_id": ..., "status": "queued"}` immediately; the finished result is
+delivered as a message to a live listening session, which a plain `call`
+invocation is not. From a session with no listener, fetch the finished
+payload yourself:
+
+```bash
+dax call service_interface::job_service::get_latest_job '{"plugin_name": "<plugin>", "action_name": "<verb>"}'
+```
+
+When the returned job's `status` is `completed`, its `result` field carries
+the payload (a created sheet's URL, an export's path); `failed` carries
+`error`; a `null` job means nothing matched the filters. It returns the
+LATEST matching job only — poll one dispatch to completion before firing
+another of the same verb from a no-listener session.
+
 It needs no MCP server and no `mcp__dax__*` tools.
 
 MCP is optional and exists only for the operator who explicitly asks for it
@@ -37,14 +54,14 @@ CLI path above is not a fallback, it is the default. Runner-specific
 peer-to-peer wake is a separate concern from knowledge/process access; retrieve
 the current messaging contract before assuming its transport.
 
-If `dax call` itself fails (the homunculus process is not
+If `dax call` itself fails (the solet process is not
 running — check with `dax health`), the fallback is
 source-artifact recovery: read the KB source markdown directly under this
 deployment's own knowledge-base directories (`ananta/knowledge_bases/`,
 `ananta/knowledge_base/`, each plugin's `knowledge_base/`, and any real
 directories under `knowledge_bases/`) instead of the live search. This is an unranked,
 degraded recovery, not a substitute for the live path — it means the
-homunculus needs attention before claiming live retrieval; say so rather than
+solet needs attention before claiming live retrieval; say so rather than
 treating the source read as sufficient. There is no offline query script shipped in
 this deployment to try first: `default_knowledge_plugin`'s query script lives only
 in the platform's own development repo and is pruned from every seed.
@@ -53,6 +70,15 @@ Building on assumptions when a canonical answer exists in dax's
 knowledge base produces drift. If a search returns nothing relevant, that is
 information too: confirm the gap before inventing a pattern, and add an
 article documenting what you ended up with.
+
+Step Zero is a sequence, not a substitution. dax's knowledge
+base governs platform access and cross-session knowledge; the directory this
+session was started in governs the task. After the platform search, the next
+step is the working directory's own context — its `CLAUDE.md`/`AGENTS.md`,
+its docs, and any knowledge base it carries. A session launched outside this
+directory, with dax as support, anchors its work in that
+directory's own guidance — the platform search must never preempt it, and
+task-specific guidance from the working directory governs the task.
 
 Before editing code, changing config, or explaining a subsystem in this repo,
 search dax's knowledge base for the current design record and
@@ -76,23 +102,23 @@ embedding rebuild and causes inference timeouts.
 
 - Picking up updated code or config for an ALREADY-INSTALLED plugin (a
   brand-new plugin comes online via `install_plugin_from_path` instead):
-  check whether `macos_self_deployment_plugin` is in this homunculus's
+  check whether `macos_self_deployment_plugin` is in this solet's
   plugin roster (`list_plugins`). If it is, `apply_manifest` swaps in the
-  new version through the per-homunculus blue-green router, verifying
+  new version through the per-solet blue-green router, verifying
   before cutover, and leaves `previous` as an intact rollback target —
   zero downtime for this no-MCP CLI path (an MCP-connected caller sees the
   bridge go dark for roughly 30–60 seconds during cutover regardless).
   Search the knowledge base for "picking up new code without a bare
   restart apply_manifest" via Step Zero for the exact call shape (it needs
-  `new_manifest` and `reason`). If that plugin is absent, this homunculus
+  `new_manifest` and `reason`). If that plugin is absent, this solet
   has no router and no blue-green path (single-color by design) — restart
   the LaunchAgent below instead. Either way, a bare LaunchAgent restart is a
   full stop that drops in-memory state (blob storage by default); prefer
   `apply_manifest` whenever the router is present.
 - Normal mode (bringing the daemon up or down, not a code/config pickup):
-  the LaunchAgent `local.homunculus.dax` (starts at login,
+  the LaunchAgent `local.solet.dax` (starts at login,
   restarts on failure); stop/start with `launchctl unload -w` / `load -w`
-  on `~/Library/LaunchAgents/local.homunculus.dax.plist`.
+  on `~/Library/LaunchAgents/local.solet.dax.plist`.
 - Foreground (debugging): `/Users/david.westgate/Workspace/dax/client/bin/launch-dax`
   (stop the LaunchAgent first — never run two instances).
 - The `dax` CLI is on PATH via genesis's
@@ -107,10 +133,13 @@ embedding rebuild and causes inference timeouts.
 
 ## Stock Codex durable inbox
 
-The Stop hook carries only a fixed fact — that coordination deliveries are
-pending. It never places peer-message content into hook output. When that nudge
-creates a turn, or whenever a reminder says to check messages, read this
-session's own durable inbox through the local CLI:
+No `Stop` hook ships currently: stock Codex does not execute async command
+hooks on any measured build, so a bound one never fires, and this plugin does
+not carry a synchronous one either (it would block the turn boundary).
+Delivery to this session is durable but silent — nothing surfaces it
+automatically, per-turn or otherwise. Check this session's own durable inbox
+directly, on your own initiative and whenever a reminder says to check
+messages, through the local CLI:
 
 ```bash
 dax call plugin::agent_messaging_plugin::peer_inbox '{"agent_session_id":"'"$AGENT_SESSION_ID"'","limit":5}'
@@ -141,11 +170,20 @@ here — search for the terms below rather than assuming the mechanism:
 - `peer registry role binding durable claim` — why an entry in a raw peer
   list is presence, not a claim, and how `peer_send_by_name` actually
   resolves.
-- `first days owner onboarding` / `homunculus charter template` / `operator
+- `first days owner onboarding` / `solet charter template` / `operator
   decision brief` / `operator collaboration craft` — the governance set for
   working with your operator.
 - `session history ingestion session ledger hydration current notes` — how
   and when session-ledger recall becomes available.
+- `fleet launcher session configuration model effort per role` — how model,
+  effort, and transport are configured per session role. As the driving
+  session you manage the fleet, not just your own context: dispatch
+  parallelizable, mechanical, or long-running work to additional sessions
+  rather than absorbing it inline, and declare each dispatch's model,
+  effort, and lifetime explicitly, matched to the work — a mechanical lane
+  on a cheaper model with bounded effort, a judgment-heavy lane on a
+  stronger tier, never inherited silently. Token efficiency is part of the
+  dispatch decision, and no session is left idling past its usefulness.
 
 ## Development standards (if you extend the platform)
 
@@ -157,9 +195,9 @@ better than you found it. Database access goes through the
 
 ## Reference
 
-The genesis ladder that created this homunculus, and the hydration runbook
+The genesis ladder that created this solet, and the hydration runbook
 that generated this file, live in the knowledge base — search "genesis
 bootstrap ladder" or "hydration operator environment setup" via Step Zero
 above.
 
-<!-- END HOMUNCULUS HYDRATION -->
+<!-- END SOLET HYDRATION -->

@@ -1,4 +1,4 @@
-# dax.zsh — per-homunculus shell environment, sourced by ~/.zshrc.
+# dax.zsh — per-solet shell environment, sourced by ~/.zshrc.
 # Lives in the deployment directory so improvements arrive via `git pull`, never another
 # ~/.zshrc replacement.
 #

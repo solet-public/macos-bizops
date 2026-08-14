@@ -23,17 +23,17 @@ if ! command -v "$codex_bin" >/dev/null 2>&1; then
   exit 1
 fi
 
-# Homunculus name: NOT part of the neutral AGENT_* fleet-identity family
+# Solet name: NOT part of the neutral AGENT_* fleet-identity family
 # below (that family is deliberately unprefixed per the 2026-07-28 ruling in
 # agent_messaging_plugin/env_contract.py) — this is the separate variable
-# naming which homunculus this shell talks to. Several plugins resolve it at
+# naming which solet this shell talks to. Several plugins resolve it at
 # module-import time for scoped vault keys, and quality_gates/run_smokes.py
 # (the Git-Controller gate path) fails loudly without it. launch.template
 # (the daemon launcher) already exports it; keep both launchers in lockstep.
-export HOMUNCULUS_NAME="dax"
+export SOLET_NAME="dax"
 
-# The session id is computed exactly once. The watcher, wake hook, durable
-# inbox, and Codex process must all inherit this same value or their per-session
+# The session id is computed exactly once. The watcher, durable inbox, and
+# Codex process must all inherit this same value or their per-session
 # routing keys diverge silently.
 export AGENT_IDENTITY="codex"
 export AGENT_SESSION_LABEL="$role"
@@ -54,10 +54,19 @@ if [[ "$FLEET_TRANSPORT" == "watch" ]]; then
   if mkdir -p "$runtime_dir" 2>/dev/null && chmod 700 "$runtime_dir" 2>/dev/null; then
     # Plain background child only: no nohup, disown, or setsid. `exec` below
     # preserves this shell's pid, so --exit-with-parent names the Codex process.
+    #
+    # codex-0147-async-hook-regression (2026-08-13): the coordination-hooks
+    # Codex plugin ships no `Stop` handler, so no `solet wake` invocation
+    # ever drains the wake-hook spool this watcher would otherwise tee
+    # message-bearing deliveries into -- it would grow unbounded,
+    # unconsumed, so the flag below disables that tee. Delivery itself is
+    # unaffected: the durable inbox and this watcher's own stdout/log
+    # stream are unconditional and independent of the spool tee.
     "$AGENT_WAKE_CLI" watch \
       --agent-id codex \
       --role "$AGENT_ROLE" \
       --exit-with-parent "$$" \
+      --no-spool \
       >>"$watch_log" 2>&1 &
     watcher_pid=$!
 
