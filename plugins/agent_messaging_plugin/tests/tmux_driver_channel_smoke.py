@@ -112,12 +112,30 @@ class _FakeClock:
 
 
 def test_enter_sent_only_after_n_consecutive_stable_samples() -> None:
-    """Matches ``wait_for_screen_stable``'s own established semantics
-    exactly: the FIRST sample has no predecessor to match against (it only
-    establishes the baseline), so a streak of N consecutive matches always
-    needs N+1 raw captures from a cold start -- this is the same off-by-one
-    shape the iTerm2 precedent has, not a defect."""
-    runner = _FakeTmuxRunner(capture_pane_sequence=["A", "A", "A", "A", "A"])
+    """Baseline-gate fix (driver-channel strand fix, 2026-08-14): the FIRST
+    capture-pane read establishes the BASELINE (the pre-render screen) as
+    well as seeding the cold-start ``prev`` — a value is only eligible to
+    start the stability streak once it genuinely differs from that first
+    look. Updated from the pre-fix fixture (five IDENTICAL samples): a
+    pane that never visibly differs from its own baseline is now
+    indistinguishable from the un-rendered-paste defect this fix closes
+    and correctly falls through to the timeout/fail-open path instead of
+    declaring quick stability (covered separately by
+    ``test_timeout_still_sends_enter_fail_open``) — so demonstrating the
+    N-consecutive-match counting shape now needs a fixture with a genuine
+    pre/post transition: 1 baseline + 1 sample establishing the new value
+    (no count, off-by-one, same shape ``wait_for_screen_stable`` has) + 3
+    matching confirmations = 5 raw captures for a 3-sample streak. (This
+    fixture's baseline already differs from its stable value on the very
+    first transition, so it does not itself distinguish the baseline-gated
+    algorithm from the pre-fix one — that discriminating coverage lives in
+    ``tmux_adapter_smoke.py``'s ``test_driver_channel_enter_waits_for_
+    baseline_change``, whose fixture holds the PRE-send screen steady across
+    the whole stability window before switching. This test's own job stays
+    the N-consecutive-match counting shape and the call-ordering invariants
+    below.)
+    """
+    runner = _FakeTmuxRunner(capture_pane_sequence=["A", "B", "B", "B", "B"])
     channel = tmux_module._TmuxSendKeysDriverChannel(  # noqa: SLF001
         tmux_bin="tmux", session="s1", run_fn=runner,
         stable_samples_required=3, stable_timeout_seconds=100.0,
@@ -126,9 +144,9 @@ def test_enter_sent_only_after_n_consecutive_stable_samples() -> None:
     channel.send("hello")
     _check(runner.literal_text_sent(), "the literal text is sent")
     _check(
-        runner.capture_pane_call_count() == 4,
-        f"4 capture-pane reads for a 3-sample streak (1 baseline + 3 confirmations), "
-        f"got {runner.capture_pane_call_count()}",
+        runner.capture_pane_call_count() == 5,
+        "5 capture-pane reads for a 3-sample streak (1 baseline + 1 transition "
+        f"sample + 3 confirmations), got {runner.capture_pane_call_count()}",
     )
     _check(runner.enter_sent(), "Enter is sent once the pane stabilizes")
     literal_idx = next(i for i, c in enumerate(runner.calls) if "-l" in c)

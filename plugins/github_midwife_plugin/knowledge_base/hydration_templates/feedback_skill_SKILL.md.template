@@ -98,7 +98,11 @@ every time.
 ## Step 7 — file
 
 **Use the web chooser.** It renders the repository's issue forms, which carry
-the required evidence fields and the content-gate checkbox:
+the required evidence fields and the content-gate checkbox. This step needs the
+GitHub CLI: probe `gh --version` first, and if it is absent, offer
+`brew install gh` (the seed-hydration ladder normally installs it; a machine
+hydrated before that step, or where the offer was declined, will land here
+without it) before filing:
 
 ```bash
 gh issue create --web

@@ -305,7 +305,7 @@ class MergeResultProcessorCustomizations:
     """
 
     # Text fields — now loaded from knowledge base JSON, not set in decorators
-    action_label: str = ""  # e.g., "Binaural beat generated"
+    action_label: str = ""  # e.g., "Report generated"
     result_type: str = ""  # e.g., "audio_generated", "memory_stored", "data_retrieved"
     result_description: str = ""  # e.g., "Audio blob with keys: blob_key, duration, format"
     presentation_guidance: str = ""

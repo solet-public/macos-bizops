@@ -38,7 +38,6 @@ from agent_messaging_plugin.codex_adapter import (  # noqa: E402
     _CodexTmuxDriverChannel,
     _identity_env,
 )
-from agent_messaging_plugin.codex_common import _resolve_solet_bin  # noqa: E402
 from agent_messaging_plugin.local_cli.cli import (  # noqa: E402
     WatchIdentity,
     _register_without_claim,
@@ -52,6 +51,13 @@ from agent_messaging_plugin.session_hosts import (  # noqa: E402
     DriverChannelSendError,
     HostCannotSpawnError,
     resolve_host_driver,
+)
+
+# Hoisted out of codex_common to the runner-neutral solet_cli (2026-08-14):
+# the Claude adapters need the identical resolution, and the asymmetry was the
+# registration-loss root cause.
+from agent_messaging_plugin.solet_cli import (  # noqa: E402
+    resolve_solet_bin as _resolve_solet_bin,
 )
 
 _passed = 0
@@ -345,7 +351,8 @@ def test_solet_cli_resolves_from_active_venv_when_path_is_minimal() -> None:
         venv_bin = Path(tmp) / "venv" / "bin"
         venv_bin.mkdir(parents=True)
         sibling = _executable(venv_bin, "solet")
-        with patch("agent_messaging_plugin.codex_common.shutil.which", return_value=None):
+        # Patch target followed the function to solet_cli (2026-08-14 hoist).
+        with patch("agent_messaging_plugin.solet_cli.shutil.which", return_value=None):
             resolved = _resolve_solet_bin(
                 None,
                 python_executable=str(venv_bin / "python3"),
@@ -424,8 +431,16 @@ class _Clock:
 
 
 def test_tmux_channel_verifies_styled_pickup() -> None:
-    ready = "OpenAI Codex\n› review this"
-    run = _PaneRun([ready, ready, ready, "OpenAI Codex\nWorking\n›"])
+    """Updated for the baseline-gate fix (driver-channel strand fix,
+    2026-08-14): the pre-send idle screen and the post-render composed
+    screen must now be DISTINCT strings — under the fix, ``_wait_until_ready``'s
+    return value becomes the baseline ``_wait_until_stable`` refuses to
+    declare "stable" against, so a fixture that reused the same string for
+    both (the pre-fix version of this test) would never see the composed
+    text and only ever observe the fail-closed timeout, not a real pickup."""
+    idle = "OpenAI Codex\n› "
+    composed = "OpenAI Codex\n› review this"
+    run = _PaneRun([idle, idle, composed, composed, "OpenAI Codex\nWorking\n›"])
     clock = _Clock()
     channel = _CodexTmuxDriverChannel(
         tmux_bin="tmux",
@@ -446,7 +461,79 @@ def test_tmux_channel_verifies_styled_pickup() -> None:
     )
 
 
+def test_tmux_channel_enter_waits_for_baseline_change() -> None:
+    """RED-FIRST (driver-channel strand fix, 2026-08-14, hermetically
+    reproduced against the unmodified class — workbench/2026-08-14_driver_
+    channel_strand_fix_report_lane_d.md): capture-pane returns the pre-send
+    idle screen until a TIME threshold (not gated on Enter, so neither the
+    pre-fix nor the fixed algorithm's own control flow can move it), then
+    the real composed text, then a third distinct screen confirming
+    submission. Enter must only fire once the pane has actually shown the
+    composed text — never while it still shows the idle screen the pre-fix
+    code could mistake for "stable".
+
+    FAILING MUTATION: drop the ``current != baseline`` conjunct from
+    ``_wait_until_stable`` (i.e. revert to the pre-fix comparison) — the
+    unfixed code declares stability against 3 identical idle-screen samples
+    well before the render threshold, and the assertion below reds (the
+    pane content observed immediately before Enter is the idle screen, not
+    the composed one).
+    """
+    idle = "OpenAI Codex\n› "
+    composed = "OpenAI Codex\n› a slow paste"
+    submitted = "OpenAI Codex\nWorking\n›"
+    render_at_t = 1.0
+    submit_confirm_at_t = 3.0
+    clock = {"t": 0.0}
+    last_capture: dict[str, str | None] = {"value": None}
+    last_capture_before_enter: dict[str, str | None] = {"value": None}
+
+    def now_fn() -> float:
+        return clock["t"]
+
+    def sleep_fn(seconds: float) -> None:
+        clock["t"] += seconds
+
+    def run_fn(cmd: list[str], **_kw: Any) -> Any:
+        if "capture-pane" in cmd:
+            if clock["t"] >= submit_confirm_at_t:
+                content = submitted
+            elif clock["t"] >= render_at_t:
+                content = composed
+            else:
+                content = idle
+            last_capture["value"] = content
+            return SimpleNamespace(returncode=0, stdout=content, stderr="")
+        if cmd[-1:] == ["Enter"]:
+            last_capture_before_enter["value"] = last_capture["value"]
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    channel = _CodexTmuxDriverChannel(
+        tmux_bin="tmux",
+        session="codex-baseline-gate",
+        run_fn=run_fn,
+        sleep_fn=sleep_fn,
+        now_fn=now_fn,
+        stable_samples=3,
+        verify_timeout_seconds=10.0,
+    )
+    channel.send("a slow paste")
+    _check(
+        last_capture_before_enter["value"] == composed,
+        "Enter is sent only once the pane shows the ACTUAL composed text, "
+        f"never the pre-send idle screen (observed: {last_capture_before_enter['value']!r})",
+    )
+
+
 def test_tmux_channel_refuses_two_enter_noops() -> None:
+    """Updated for the baseline-gate fix (driver-channel strand fix,
+    2026-08-14): a composer that NEVER visibly changes from the pre-send
+    idle screen (the "dim ghost" case) is now refused inside
+    ``_wait_until_stable`` itself — Enter is never sent at all, rather than
+    the pre-fix behavior of blindly pressing Enter twice against unconfirmed
+    content before giving up. Strictly safer: the class's own fail-closed
+    contract ("never call ghost/composed text a delivered turn") now also
+    covers the Enter keypress itself, not just the post-Enter confirmation."""
     run = _PaneRun(["OpenAI Codex\n› dim-ghost"])
     clock = _Clock()
     channel = _CodexTmuxDriverChannel(
@@ -464,8 +551,12 @@ def test_tmux_channel_refuses_two_enter_noops() -> None:
     except DriverChannelSendError:
         raised = True
     enters = [call for call in run.calls if call[-1] == "Enter"]
-    _check(len(enters) == 2, "an Enter no-op gets one separate retry, never an unbounded loop")
-    _check(raised, "two Enter no-ops fail loud instead of calling ghost text delivered")
+    _check(
+        len(enters) == 0,
+        "a composer that never visibly differs from the pre-send baseline "
+        "refuses BEFORE ever pressing Enter, not after two blind attempts",
+    )
+    _check(raised, "a pane that never stabilizes past its own baseline fails loud")
 
 
 class _RegisterOnlyClient:
@@ -638,6 +729,7 @@ def main() -> int:
         test_solet_cli_resolves_from_active_venv_when_path_is_minimal,
         test_app_server_channel_translates_clear_compact_and_active_turn,
         test_tmux_channel_verifies_styled_pickup,
+        test_tmux_channel_enter_waits_for_baseline_change,
         test_tmux_channel_refuses_two_enter_noops,
         test_headless_watch_transport_watcher_arms_no_spool,
         test_tmux_watch_transport_pane_command_arms_no_spool,

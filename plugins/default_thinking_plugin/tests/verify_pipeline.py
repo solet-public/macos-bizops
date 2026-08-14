@@ -188,7 +188,7 @@ def neuro_spec() -> PipelineSpec:
                 {"time_s": 180.0, "cutoff_hz": 1000.0},
             ],
         }),
-        LayerConfig(layer_type="entrainment", properties={
+        LayerConfig(layer_type="rhythmic_pulse", properties={
             "carrier_hz": 174.61,
             "beat_hz": 6.0,
             "level_db": "-20dB",
@@ -220,20 +220,20 @@ def neuro_spec() -> PipelineSpec:
         "orientation": [
             ("substrate", 0, 25),
             ("harmonic_bed", 8, 22),
-            ("entrainment", 12, 20),
+            ("rhythmic_pulse", 12, 20),
         ],
         "core_absorptive_work": [
             ("substrate", 0, 30),
             ("harmonic_bed", 6, 25),
             ("air", 10, 25),
-            ("entrainment", 14, 22),
+            ("rhythmic_pulse", 14, 22),
             ("motif", 25, 20),
         ],
         "fractionation": [
             ("substrate", 0, 20),
             ("harmonic_bed", 5, 20),
             ("air", 8, 20),
-            ("entrainment", 10, 18),
+            ("rhythmic_pulse", 10, 18),
             ("motif", 18, 15),
         ],
     }
@@ -255,7 +255,7 @@ def neuro_spec() -> PipelineSpec:
         overrides = []
         if sec in per_section_beat:
             overrides.append(SegmentLayerOverride(
-                layer_type="entrainment",
+                layer_type="rhythmic_pulse",
                 properties={"beat_hz": per_section_beat[sec]},
             ))
         if sec in filter_breakpoints_for:

@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import signal
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from ..env_contract import enforce_no_legacy_agent_env
 from ..models import WATCH_AGENT_INSTANCE_PREFIX
 from . import __version__
 from .client import (
+    DEFAULT_JOB_TIMEOUT_S,
     DEFAULT_POLL_TIMEOUT_S,
     BridgeCallError,
     BridgeClient,
@@ -43,6 +45,7 @@ from .client import (
     RoleClaimRejectedError,
     SoletIdentityError,
     SoletNotRunningError,
+    queued_job_id,
     resolve_base_url,
     resolve_solet_name,
 )
@@ -133,6 +136,19 @@ class WatchIdentity:
     agent_instance_id: str
 
 
+def _invoked_name() -> str:
+    """The program name the user actually typed, for copy-pasteable hints.
+
+    Read from click's root context rather than hardcoded, because this CLI is
+    installed under the SOLET's own name in a born clone — printing a literal
+    "solet" would hand a clone's operator a command their shell does not have.
+    """
+    context = click.get_current_context(silent=True)
+    if context is None:
+        return "solet"
+    return context.find_root().info_name or "solet"
+
+
 def _emit(payload: dict[str, Any]) -> None:
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -169,8 +185,18 @@ def _caller_agent_session_id() -> str:
     return os.environ.get(WATCH_SESSION_ID_ENV, "")
 
 
-def _run(fn: Callable[[BridgeClient], dict[str, Any]]) -> dict[str, Any]:
-    """Open a bridge for THIS solet, run ``fn`` against it, map failures."""
+def _run(
+    fn: Callable[[BridgeClient], dict[str, Any]],
+    *,
+    propagate_timeout: bool = False,
+) -> dict[str, Any]:
+    """Open a bridge for THIS solet, run ``fn`` against it, map failures.
+
+    ``propagate_timeout`` re-raises ``BridgeResultTimeoutError`` instead of
+    dying on it, for the one caller that has something better to say than the
+    exception text: a job await, which can tell you how to redeem the result
+    later. Default False keeps every existing call site's behavior unchanged.
+    """
     try:
         base_url = resolve_base_url()
     except (SoletNotRunningError, SoletIdentityError) as exc:
@@ -184,6 +210,8 @@ def _run(fn: Callable[[BridgeClient], dict[str, Any]]) -> dict[str, Any]:
         _die(f"cannot reach the solet bridge at {base_url}: {exc}",
              ExitCodes.CONNECTION_ERROR)
     except BridgeResultTimeoutError as exc:
+        if propagate_timeout:
+            raise
         _die(str(exc), ExitCodes.TIMEOUT_ERROR)
     except (BridgeCallError, httpx.HTTPError) as exc:
         _die(str(exc), ExitCodes.EXTERNAL_ERROR)
@@ -207,21 +235,99 @@ def cli() -> None:
     show_default=True,
     help="Seconds to wait for the result before giving up.",
 )
+@click.option(
+    "--wait/--no-wait",
+    "wait",
+    default=None,
+    help=(
+        "For a born-async verb that returns a job handle, also wait for the "
+        "JOB to finish. Defaults to waiting on a terminal, not waiting when "
+        "output is piped."
+    ),
+)
+@click.option(
+    "--job-timeout",
+    "job_timeout_s",
+    type=float,
+    default=DEFAULT_JOB_TIMEOUT_S,
+    show_default=True,
+    help="Seconds to wait for a dispatched job to finish before giving up.",
+)
 def call(
     process_key: str,
     arguments: str,
     reason: str | None,
     timeout_s: float,
+    wait: bool | None,
+    job_timeout_s: float,
 ) -> None:
-    """Invoke PROCESS_KEY with ARGUMENTS (a JSON object) and wait for the result."""
+    """Invoke PROCESS_KEY with ARGUMENTS (a JSON object) and wait for the result.
+
+    A born-async verb answers in milliseconds with a job handle, not an
+    outcome: its real work happens later on a background worker. When the
+    dispatch returns ``{job_id, status: queued}`` this waits for the JOB too,
+    so an interactive call ends with the actual result instead of a handle the
+    caller has to go redeem. ``--no-wait`` returns the handle immediately.
+    """
     args = _parse_json_args(arguments)
     result = _run(
         lambda c: c.call_and_wait(
             process_key, args, reason=reason, poll_timeout_s=timeout_s,
         ),
     )
-    _emit(result)
     if str(result.get("status")) != "completed":
+        _emit(result)
+        raise SystemExit(int(ExitCodes.EXTERNAL_ERROR))
+
+    job_id = queued_job_id(result)
+    should_wait = sys.stdout.isatty() if wait is None else wait
+    if job_id is None or not should_wait:
+        _emit(result)
+        return
+
+    _await_and_emit_job(job_id, timeout_s=timeout_s, job_timeout_s=job_timeout_s)
+
+
+def _await_and_emit_job(job_id: str, *, timeout_s: float, job_timeout_s: float) -> None:
+    """Poll a dispatched job to terminal state and print the finished record.
+
+    Progress goes to STDERR so stdout stays a single parseable JSON document —
+    the CLI is piped into `jq` far more often than it is watched.
+
+    On timeout the job is NOT cancelled and nothing is lost; only the waiting
+    stops. The exact command to redeem the result later is printed, because
+    "timed out" without it strands the caller holding an id and no next step.
+    """
+    def _progress(status: str, elapsed: float) -> None:
+        click.echo(
+            f"  job {job_id}: {status} ({elapsed:.0f}s elapsed)",
+            err=True,
+        )
+
+    try:
+        job = _run(
+            lambda c: c.await_job(
+                job_id,
+                job_timeout_s=job_timeout_s,
+                poll_timeout_s=timeout_s,
+                on_poll=_progress,
+            ),
+            propagate_timeout=True,
+        )
+    except SystemExit:
+        raise
+    except BridgeResultTimeoutError as exc:
+        click.echo(f"{exc}", err=True)
+        click.echo(
+            "The job is still running. Retrieve it later with:\n"
+            f"  {_invoked_name()} call service_interface::job_service::get_job "
+            f"'{{\"job_id\": \"{job_id}\"}}'",
+            err=True,
+        )
+        raise SystemExit(int(ExitCodes.TIMEOUT_ERROR)) from exc
+
+    _emit(job)
+    if str(job.get("status")) != "completed":
         raise SystemExit(int(ExitCodes.EXTERNAL_ERROR))
 
 

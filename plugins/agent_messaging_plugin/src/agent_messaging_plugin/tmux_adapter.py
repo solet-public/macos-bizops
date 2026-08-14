@@ -68,6 +68,7 @@ registry (measured live, 2026-08-09/10 restart_session run — see
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -89,9 +90,11 @@ from .headless_adapter import (
     _resolve_worker_hook_paths,
     _sigterm_then_kill,
 )
+from .solet_cli import expose_worker_cli, resolve_solet_bin, watch_sidecar_argv
 
 logger = logging.getLogger(__name__)
 
+_CLAUDE_AGENT_ID = "claude_code"
 _ENV_PERMISSION_MODE = "FLEET_HEADLESS_PERMISSION_MODE"
 _MIN_TMUX_VERSION = (3, 3)
 DEFAULT_TERMINATE_GRACE_SECONDS = 10.0
@@ -211,7 +214,7 @@ def _emit_role_tag_path() -> Path:
 
 def _env_pairs(
     *, agent_instance_id: str, agent_session_id: str, label: str,
-    solet_name: str, allowed_tools: object, transport: str,
+    solet_name: str, solet_bin: str, allowed_tools: object, transport: str,
 ) -> list[str]:
     """``-e KEY=VAL`` args for ``tmux new-session`` — split out of
     :meth:`TmuxHostDriver.spawn` to keep it under the radon cc threshold.
@@ -220,24 +223,32 @@ def _env_pairs(
     2 slice 1, 2026-08-06) -- never hardcoded here, the same declared,
     never-probed FLEET_TRANSPORT contract every consumer reads
     independently."""
+    # Registration-loss fix (2026-08-14): AGENT_WAKE_CLI must be the wake
+    # CLI's own binary, never `solet_name` (the solet INSTANCE name, e.g.
+    # "mysolet") -- that conflation was the 2026-08-08 deaf-wake defect. The
+    # 2026-08-08 fix used the bare command name "solet", which is only
+    # correct when PATH can resolve it. A tmux pane inherits the tmux
+    # SERVER's environment, not this process's, so a worker ran with a
+    # minimal PATH carrying no venv/bin: MEASURED live in a spawned pane,
+    # `heartbeat_report_alive.py` -> "[Errno 2] No such file or directory:
+    # 'solet'", exit 0, silent. Absolute binary + PATH prepend closes both
+    # halves (the same treatment codex_common landed on 2026-08-13).
+    cli_env: dict[str, str] = {"PATH": os.environ.get("PATH", "")}
+    expose_worker_cli(cli_env, solet_bin)
     pairs: list[str] = []
     for key, value in {
         "SOLET_NAME": solet_name,
-        "AGENT_IDENTITY": "claude_code",
+        "AGENT_IDENTITY": _CLAUDE_AGENT_ID,
         "AGENT_INSTANCE_ID": agent_instance_id,
         "AGENT_SESSION_ID": agent_session_id,
         "AGENT_SESSION_LABEL": label,
-        # Deaf-wake fix (2026-08-08): this MUST be the wake CLI's own binary
-        # name ("solet"), never `solet_name` (the solet
-        # INSTANCE name, e.g. "mysolet") -- wake_waiter.py runs
-        # `subprocess.run([$AGENT_WAKE_CLI, "wake"])` and the instance name
-        # is not a resolvable command (measured: `which <instance-name>` fails, `which
-        # solet` resolves). The prior value was a currently-masked
-        # second defect -- masked because the Stop hook that reads this
-        # variable was never wired at all until this same fix; fixing only
-        # the wiring without this would silently reintroduce a dead wake.
-        "AGENT_WAKE_CLI": "solet",
+        "AGENT_WAKE_CLI": cli_env["AGENT_WAKE_CLI"],
         "FLEET_TRANSPORT": transport,
+        # `new-session -e` is an explicit allowlist boundary -- tmux drops
+        # every variable not named here, which is exactly how the managed
+        # Codex path lost its release PATH until 52edfb559 passed it
+        # through. Same boundary, same fix.
+        "PATH": cli_env["PATH"],
     }.items():
         pairs += ["-e", f"{key}={value}"]
     if isinstance(allowed_tools, (list, tuple)) and allowed_tools:
@@ -256,20 +267,53 @@ def _env_pairs(
     return pairs
 
 
-def _pane_command(claude_cmd: list[str], *, label: str) -> str:
+def _pane_command(
+    claude_cmd: list[str], *, label: str, solet_bin: str, transport: str,
+) -> str:
     """The tag emit MUST run and complete BEFORE ``exec`` replaces this
     shell with the claude process — once exec'd, the pane has no shell left
     to receive a follow-up command; anything sent after that point is raw
     input to whatever is running (a first version of :meth:`TmuxHostDriver.
     spawn` had exactly this bug: a post-spawn ``send-keys`` landed as
     garbage input to the just-exec'd process instead of running as a
-    command)."""
+    command).
+
+    REGISTRATION SIDECAR (2026-08-14, ratified — mirrors
+    ``codex_tmux._pane_command`` exactly): on the ``watch`` transport this
+    also backgrounds ``solet watch``, which is what actually REGISTERS the
+    worker's presence (``local_cli.cli.watch``: "Hold this session's
+    REGISTERED PRESENCE"). Before this, no claude_code spawn path armed it —
+    registration depended entirely on the worker model volunteering to run
+    the ``/rename`` skill, which the fallback first turn explicitly tells it
+    not to do ("take no other action"). Measured consequence, twice on
+    2026-08-13/14: a multi-hour productive worker that never appeared in
+    ``peer_list``, unreachable by ``peer_send``, contributing zero liveness.
+
+    Branched on the CALLER-RESOLVED ``transport``, never probed — the same
+    declared-FLEET_TRANSPORT contract every other consumer reads.
+    """
     emit_script = _emit_role_tag_path()
-    emit_prefix = (
+    parts = [
         f"sh {shlex.quote(str(emit_script))} {shlex.quote(label)}; "
-        if emit_script.exists() else ""
-    )
-    return f"{emit_prefix}exec {shlex.join(claude_cmd)}"
+        if emit_script.exists() else "",
+    ]
+    if transport == "watch" and solet_bin:
+        # spool=True, deliberately UNLIKE codex's --no-spool: wake_waiter.py
+        # is a real async Stop hook on this runtime and the spool tee is
+        # exactly what it consumes. Arming without it would re-deafen the
+        # wake this sidecar exists to enable.
+        watch_cmd = shlex.join(
+            watch_sidecar_argv(solet_bin, agent_id=_CLAUDE_AGENT_ID, spool=True),
+        )
+        # $$ is shell-expanded BEFORE exec; the exec'd claude process retains
+        # that same shell pid, so the sidecar gets a true parent-liveness
+        # target without minting a second identity (it inherits
+        # AGENT_SESSION_ID/AGENT_INSTANCE_ID from `new-session -e`, so the
+        # watcher claims under the id it inherits, as the identity rules
+        # require -- exactly one mint, in spawn()).
+        parts.append(f"{watch_cmd} --exit-with-parent $$ >/dev/null 2>&1 & ")
+    parts.append(f"exec {shlex.join(claude_cmd)}")
+    return "".join(parts)
 
 
 def _sanitize_session_name(raw: str) -> str:
@@ -345,7 +389,24 @@ class _TmuxSendKeysDriverChannel:
     not merely inferred from the parallel. The fix mirrors that one exactly:
     poll the pane's own rendered content (``tmux capture-pane -p``) until it
     stops changing across N consecutive samples, THEN send the submitting
-    ``Enter`` — never immediately after the text send."""
+    ``Enter`` — never immediately after the text send.
+
+    **Baseline-gated stability fix (driver-channel strand fix, 2026-08-14,
+    hermetically reproduced — workbench/2026-08-14_driver_channel_strand_
+    fix_report_lane_d.md):** the stability wait above had no BASELINE — it
+    only compared each sample to the one immediately before it. When the TUI
+    is slow to render the injected paste (busy event loop, mid-turn work),
+    the first several samples can all show the PRE-SEND screen, which is
+    just as internally-identical as a genuinely-stable POST-render screen —
+    "stability" was declared against the OLD content, Enter fired into a
+    composer that did not yet contain the text, and the paste rendered
+    afterward with its submitting Enter already spent. The fix captures a
+    baseline sample before the stability poll begins and only counts a
+    sample toward ``stable_samples_required`` once it both matches the
+    immediately-preceding sample AND differs from that baseline — the
+    fail-open timeout (log loudly, still send Enter) is unchanged byte for
+    byte, so a render that never visibly changes the pane (e.g. output
+    scrolled away) still submits within the timeout rather than hanging."""
 
     def __init__(
         self, *, tmux_bin: str, session: str, run_fn: Any,
@@ -375,7 +436,10 @@ class _TmuxSendKeysDriverChannel:
             # pane that died between driver_channel()'s liveness check and
             # this write (TOCTOU) gets a swallowed, logged send rather than
             # an unmapped exception escaping through the verb layer. Never
-            # attempts the Enter if the text send itself already failed.
+            # attempts the Enter if the text send itself already failed —
+            # and never touches capture-pane either (tmux_driver_channel_
+            # smoke.py's own pre-existing invariant): a session we couldn't
+            # even write to gets zero further probing, not a wasted read.
             logger.warning(
                 "tmux driver channel send() failed — session %r is no longer reachable",
                 self._session,
@@ -411,17 +475,36 @@ class _TmuxSendKeysDriverChannel:
 
     def _wait_for_paste_stable(self) -> None:
         """Poll until the pane's rendered content is IDENTICAL across
-        ``stable_samples_required`` consecutive samples, matching
-        ``wait_for_screen_stable``'s exact "identical to the immediately
-        preceding sample" semantics — there is no target signature to check
-        against (the payload's post-render form isn't known in advance,
-        same reasoning as the iTerm2 precedent). Fails OPEN on timeout
-        (logs loudly, still sends the Enter) rather than closed: this
-        channel's own established contract is fire-and-forget best-effort,
-        never silently doing nothing — a timeout is no worse than today's
-        unguarded immediate-Enter behavior, and better whenever the pane
-        happens to settle just past the window."""
+        ``stable_samples_required`` consecutive samples AND differs from the
+        BASELINE — this function's own first sample, taken right after the
+        text send succeeded — matching ``wait_for_screen_stable``'s
+        "identical to the immediately preceding sample" semantics, but
+        gated on an actual change from that first look first. Captured here
+        rather than before the text send (tmux_driver_channel_smoke.py's
+        own pre-existing invariants: zero ``capture-pane`` calls when the
+        literal send itself fails, and every capture-pane read happening
+        strictly between the text send and the submitting Enter) — the
+        brief's fix note explicitly allows either timing ("before, or
+        immediately after, the text send").
+
+        Without the baseline gate, a slow-rendering TUI can hold that same
+        first-look screen across every remaining sample in the window, and N
+        identical PRE-render samples satisfy "stable" exactly as well as N
+        identical POST-render ones — the strand-fix defect this gate closes
+        (hermetically reproduced, workbench/2026-08-14_driver_channel_
+        strand_fix_report_lane_d.md). There is still no target signature to
+        check the CHANGED content against (the payload's post-render form
+        isn't known in advance, same reasoning as the iTerm2 precedent).
+        Fails OPEN on timeout (logs loudly, still sends the Enter) rather
+        than closed: this channel's own established contract is
+        fire-and-forget best-effort, never silently doing nothing — a
+        render that never visibly differs from that first look (e.g. output
+        scrolled away, or a render so fast the very first sample already
+        shows it) still submits via this same timeout path, exactly as
+        before this fix."""
         deadline = self._now_fn() + self._stable_timeout_seconds
+        baseline: str | None = None
+        have_baseline = False
         prev: str | None = None
         stable_count = 0
         while True:
@@ -434,7 +517,10 @@ class _TmuxSendKeysDriverChannel:
                 )
                 return
             current = self._capture_pane()
-            if current is not None and current == prev:
+            if not have_baseline:
+                baseline = current
+                have_baseline = True
+            if current is not None and current == prev and current != baseline:
                 stable_count += 1
                 if stable_count >= self._stable_samples_required:
                     return
@@ -471,6 +557,95 @@ def _sigterm_then_kill_process_group(pgid: int, grace_seconds: float) -> None:
         logger.error("SIGKILL denied for tmux pane process group pgid=%d", pgid)
 
 
+def _tmux_hook_settings_json(
+    *,
+    allowlist_hook_path: Path,
+    capture_hook_path: Path,
+    heartbeat_hook_path: Path,
+    rotation_due_hook_path: Path,
+    wake_hook_path: Path,
+    check_messages_hook_path: Path,
+    step_zero_hook_path: Path,
+    role_binding_hook_path: Path,
+    allow_askuserquestion: bool,
+) -> str:
+    """The tmux driver's ``--settings`` JSON: the same hook wiring and tool
+    deny rule as ``headless_adapter.py``'s ``_hook_settings_json`` (module-
+    level here, not a method, to keep :class:`TmuxHostDriver` under the
+    god-class LOC ceiling — pure function over resolved hook paths, no
+    ``self`` needed).
+
+    Agent/Task tool deny (capability-tier guardrail redesign, fleet-watch-
+    transport-migration phase 2 slice 1+5, 2026-08-06): carried here, not
+    just in this checkout's own project-scope ``.claude/settings.json``,
+    because ``--setting-sources project`` resolves relative to whatever
+    ``cwd`` the spawned worker actually runs in. AskUserQuestion default-
+    deny (operator ruling 2026-08-14): this is the only Claude-runtime host
+    driver where the tool's blocking picker can render (a real interactive
+    CLI) — the headless driver never enumerates the tool at all (measured;
+    see ``headless_adapter.py``'s own docstring), so it needs no equivalent
+    here. ``allow_askuserquestion`` is the per-spawn escape hatch
+    (``SpawnSessionRequest.allow_askuserquestion``, mirrors the seed
+    launcher's ``SOLET_ALLOW_ASKUSERQUESTION=1``); ``False`` (the default)
+    keeps the deny on."""
+    deny = ["Agent", "Task"]
+    if not allow_askuserquestion:
+        deny.append("AskUserQuestion")
+    settings = {
+        "permissions": {
+            "deny": deny,
+        },
+        "hooks": {
+            "PreToolUse": [
+                {"hooks": [{"type": "command", "command": f"python3 {allowlist_hook_path}"}]},
+            ],
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": f"python3 {capture_hook_path}"}]},
+                {
+                    # Matches coordination-hooks@<solet>'s own hooks.json
+                    # matcher for this event exactly (fidelity, not a
+                    # new choice) -- check_messages_reminder.py also
+                    # fires here (in addition to UserPromptSubmit
+                    # below) matching the plugin's own dual wiring.
+                    "matcher": "startup|resume|clear",
+                    "hooks": [
+                        {"type": "command", "command": f"python3 {check_messages_hook_path}"},
+                        {"type": "command", "command": f"python3 {role_binding_hook_path}"},
+                    ],
+                },
+            ],
+            "UserPromptSubmit": [
+                {"hooks": [{"type": "command", "command": f"python3 {step_zero_hook_path}"}]},
+                {"hooks": [{"type": "command", "command": f"python3 {check_messages_hook_path}"}]},
+            ],
+            "PostToolUse": [
+                {"hooks": [
+                    {"type": "command", "command": f"python3 {heartbeat_hook_path}"},
+                    {"type": "command", "command": f"python3 {rotation_due_hook_path}"},
+                ]},
+            ],
+            "Stop": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"python3 {wake_hook_path}",
+                            # Matches wake_waiter.js's own required
+                            # shape exactly -- without this the Stop
+                            # hook applies Claude Code's short default
+                            # timeout instead of blocking indefinitely
+                            # for a peer-message wake.
+                            "asyncRewake": True,
+                            "timeout": 86400,
+                        },
+                    ],
+                },
+            ],
+        },
+    }
+    return json.dumps(settings)
+
+
 class TmuxHostDriver:
     """The ``tmux`` driver (§5): preferred-where-declared substrate. One
     detached tmux session per :meth:`spawn` call, running the interactive
@@ -482,6 +657,7 @@ class TmuxHostDriver:
         tmux_bin: str | None = None,
         claude_bin: str | None = None,
         solet_name: str | None = None,
+        solet_bin: str | None = None,
         permission_mode: str | None = None,
         transport: str | None = None,
         mcp_config_path: Path | None = None,
@@ -503,6 +679,7 @@ class TmuxHostDriver:
             claude_bin, "claude", str(Path.home() / ".local" / "bin" / "claude"),
         )
         self._solet_name = _resolve_str(solet_name, "SOLET_NAME")
+        self._solet_bin = resolve_solet_bin(solet_bin)
         self._permission_mode = _resolve_str(permission_mode, _ENV_PERMISSION_MODE)
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
         # mirrors headless_adapter.HeadlessHostDriver's own floor exactly --
@@ -661,73 +838,22 @@ class TmuxHostDriver:
         check_messages_hook_path = resolved_hooks["check_messages_reminder.py"]
         step_zero_hook_path = resolved_hooks["step_zero_reminder.py"]
         role_binding_hook_path = resolved_hooks["role_binding_reminder.py"]
-        import json  # noqa: PLC0415 -- kept local, mirrors headless_adapter's own inline usage
-
-        # Agent/Task tool deny (capability-tier guardrail redesign, fleet-
-        # watch-transport-migration phase 2 slice 1+5, 2026-08-06): carried
-        # here, not just in this checkout's own project-scope
-        # .claude/settings.json, because --setting-sources project resolves
-        # relative to whatever cwd the spawned worker actually runs in -- a
-        # non-checkout spawn would not inherit this origin's tracked
-        # settings file. See headless_adapter.py._hook_settings_json's own
-        # docstring for the live scratch-probe evidence this mirrors.
-        settings = {
-            "permissions": {
-                "deny": ["Agent", "Task"],
-            },
-            "hooks": {
-                "PreToolUse": [
-                    {"hooks": [{"type": "command", "command": f"python3 {allowlist_hook_path}"}]},
-                ],
-                "SessionStart": [
-                    {"hooks": [{"type": "command", "command": f"python3 {capture_hook_path}"}]},
-                    {
-                        # Matches coordination-hooks@<solet>'s own hooks.json
-                        # matcher for this event exactly (fidelity, not a
-                        # new choice) -- check_messages_reminder.py also
-                        # fires here (in addition to UserPromptSubmit
-                        # below) matching the plugin's own dual wiring.
-                        "matcher": "startup|resume|clear",
-                        "hooks": [
-                            {"type": "command", "command": f"python3 {check_messages_hook_path}"},
-                            {"type": "command", "command": f"python3 {role_binding_hook_path}"},
-                        ],
-                    },
-                ],
-                "UserPromptSubmit": [
-                    {"hooks": [{"type": "command", "command": f"python3 {step_zero_hook_path}"}]},
-                    {"hooks": [{"type": "command", "command": f"python3 {check_messages_hook_path}"}]},
-                ],
-                "PostToolUse": [
-                    {"hooks": [
-                        {"type": "command", "command": f"python3 {heartbeat_hook_path}"},
-                        {"type": "command", "command": f"python3 {rotation_due_hook_path}"},
-                    ]},
-                ],
-                "Stop": [
-                    {
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": f"python3 {wake_hook_path}",
-                                # Matches wake_waiter.js's own required
-                                # shape exactly -- without this the Stop
-                                # hook applies Claude Code's short default
-                                # timeout instead of blocking indefinitely
-                                # for a peer-message wake.
-                                "asyncRewake": True,
-                                "timeout": 86400,
-                            },
-                        ],
-                    },
-                ],
-            },
-        }
+        settings_json = _tmux_hook_settings_json(
+            allowlist_hook_path=allowlist_hook_path,
+            capture_hook_path=capture_hook_path,
+            heartbeat_hook_path=heartbeat_hook_path,
+            rotation_due_hook_path=rotation_due_hook_path,
+            wake_hook_path=wake_hook_path,
+            check_messages_hook_path=check_messages_hook_path,
+            step_zero_hook_path=step_zero_hook_path,
+            role_binding_hook_path=role_binding_hook_path,
+            allow_askuserquestion=bool(spec.get("allow_askuserquestion")),
+        )
         cmd = [
             self._claude_bin,
             "--permission-mode", permission_mode,
             "--setting-sources", "project",
-            "--settings", json.dumps(settings),
+            "--settings", settings_json,
         ]
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
         # mirrors headless_adapter.py's own posture exactly -- "mcp" gets
@@ -793,14 +919,14 @@ class TmuxHostDriver:
 
         env_pairs = _env_pairs(
             agent_instance_id=agent_instance_id, agent_session_id=agent_session_id,
-            label=label, solet_name=self._solet_name,
-            allowed_tools=spec.get("allowed_tools") or (), transport=transport,
-        )
+            label=label, solet_name=self._solet_name, solet_bin=self._solet_bin,
+            allowed_tools=spec.get("allowed_tools") or (), transport=transport)
         try:
             claude_cmd = self._spawn_command(spec, transport=transport)
         except WorkerHookResolutionError as exc:
             raise HostCannotSpawnError(str(exc)) from exc
-        pane_command = _pane_command(claude_cmd, label=label)
+        pane_command = _pane_command(
+            claude_cmd, label=label, solet_bin=self._solet_bin, transport=transport)
         new_session_cmd = [
             self._tmux_bin, "new-session", "-d", "-s", session_name,
             "-x", str(self._pane_width), "-y", str(self._pane_height),

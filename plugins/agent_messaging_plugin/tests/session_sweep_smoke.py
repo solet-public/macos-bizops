@@ -389,6 +389,110 @@ def test_overdue_skips_spawning_row_with_future_deadline() -> None:
     )
 
 
+def test_overdue_spawning_alive_row_is_extended_not_reaped() -> None:
+    """2026-08-13 (live-measured): a spawning row past its deadline whose host
+    process is OBSERVED ALIVE is a live session whose registration never
+    completed, not an orphaned spawn — a tmux worker productive for hours was
+    reaped mid-programme by the deadline alone. Observed-alive earns a
+    deadline re-arm + a distinct steward notice; nothing is terminated.
+
+    RED MUTATION: drop the probe branch (always terminate) — this leg's
+    lifecycle assertion goes red; or notify without re-arming — the deadline
+    assertion goes red."""
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    _spawn_live(state, agent_instance_id="agi-alive-steward")
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-alive-steward"}},
+        {"agent_id": "claude_code"},
+    )
+    steward_bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-alive-steward")
+    past = (T0 - timedelta(seconds=10)).isoformat()
+    _spawn_live(
+        state, agent_instance_id="agi-alive-unreg", lifecycle_state=LIFECYCLE_SPAWNING,
+        report_by_seconds=3600, report_by_override=past,
+        spawned_by_instance_id="agi-alive-steward",
+    )
+    marked = sweep_overdue_sessions(
+        state, peer_registry=reg, bridge_manager=mgr, now=T0,
+        host_alive_probe=lambda _row: True,
+    )
+    _check(marked == 0, "an observed-alive spawning row is NOT counted as swept")
+    row = read_managed_session(state, "agi-alive-unreg")
+    _check(
+        row["lifecycle_state"] == LIFECYCLE_SPAWNING,
+        "observed-alive: the row stays 'spawning', never terminated",
+    )
+    new_report_by = str(row.get("report_by") or "")
+    _check(
+        new_report_by > T0.isoformat(),
+        f"observed-alive: report_by was re-armed into the future (got {new_report_by!r})",
+    )
+    _, events = mgr.get(steward_bridge_id).events_after(-1)
+    _check(
+        len(events) == 1
+        and events[0].event_type == "session_spawn_unregistered_notice"
+        and "agi-alive-unreg" in events[0].content
+        and "OBSERVED ALIVE" in events[0].content,
+        f"the steward gets exactly one spawn-UNREGISTERED notice (distinct "
+        f"class from orphaned) naming the row (got {events!r})",
+    )
+
+
+def test_overdue_spawning_alive_past_patience_is_reaped() -> None:
+    """The bound that keeps the alive-branch from regressing the hung-spawn
+    fix (the OTHER live-measured shape: a hung process, alive, 'spawning'
+    8+ hours, doing nothing): an observed-alive row whose spawn timestamp is
+    older than SPAWN_ALIVE_PATIENCE_WINDOWS x its own window is reaped even
+    though its process is alive — liveness cannot distinguish productive from
+    hung, so patience is bounded.
+
+    RED MUTATION: remove the patience bound — this leg's terminated
+    assertion goes red (the row would be extended forever)."""
+    state = _state()
+    past = (T0 - timedelta(seconds=10)).isoformat()
+    _spawn_live(
+        state, agent_instance_id="agi-alive-exhausted", lifecycle_state=LIFECYCLE_SPAWNING,
+        report_by_seconds=300, report_by_override=past,
+    )
+    # Age the spawn timestamp past the patience bound (4 windows x 300s).
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-alive-exhausted"}},
+        {"last_transition_at": (T0 - timedelta(seconds=300 * 5)).isoformat()},
+    )
+    marked = sweep_overdue_sessions(state, now=T0, host_alive_probe=lambda _row: True)
+    _check(marked == 1, "an observed-alive row PAST patience is swept")
+    _check(
+        read_managed_session(state, "agi-alive-exhausted")["lifecycle_state"]
+        == LIFECYCLE_TERMINATED,
+        "past patience the reap proceeds even though the process is alive",
+    )
+
+
+def test_overdue_spawning_operator_host_alive_is_not_evidence() -> None:
+    """The operator host driver's ``alive()`` is an unconditional True by
+    design (it observes via registration only) — a NON-observation. The
+    production probe must not treat it as evidence, or every operator-hosted
+    row would earn indefinite patience. This leg runs WITHOUT a probe
+    override: the real probe sees host='operator' and declines to observe,
+    so the established reap proceeds."""
+    state = _state()
+    past = (T0 - timedelta(seconds=10)).isoformat()
+    _spawn_live(
+        state, agent_instance_id="agi-op-host", lifecycle_state=LIFECYCLE_SPAWNING,
+        report_by_override=past,
+    )
+    marked = sweep_overdue_sessions(state, now=T0)
+    _check(
+        marked == 1,
+        "an operator-hosted spawning row past deadline is reaped — the "
+        "operator driver's vacuous alive() is never liveness evidence",
+    )
+
+
 def test_overdue_spawning_notifies_steward_of_orphan() -> None:
     """The steward (spawner) of an orphaned spawn is very likely still
     alive and would want to know its spawn never came up -- distinct event
@@ -833,6 +937,9 @@ def main() -> int:
     test_overdue_marks_without_notify_when_registry_absent()
     test_overdue_terminates_stuck_spawning_row()
     test_overdue_skips_spawning_row_with_future_deadline()
+    test_overdue_spawning_alive_row_is_extended_not_reaped()
+    test_overdue_spawning_alive_past_patience_is_reaped()
+    test_overdue_spawning_operator_host_alive_is_not_evidence()
     test_overdue_spawning_notifies_steward_of_orphan()
     test_deadline_dependency_not_yet_due_skipped()
     test_deadline_dependency_fires_and_delivers()

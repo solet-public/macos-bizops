@@ -12,11 +12,15 @@ Run: ``.venv/bin/python3 quality_gates/tests/sql_access_gate_smoke.py``
 from __future__ import annotations
 
 import ast
+import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 _GATE_DIR = Path(__file__).resolve().parent.parent
+_REPO_ROOT = _GATE_DIR.parent
+_VENV_PYTHON = _REPO_ROOT / ".venv" / "bin" / "python3"
 if str(_GATE_DIR) not in sys.path:
     sys.path.insert(0, str(_GATE_DIR))
 
@@ -301,6 +305,85 @@ def test_content_anchor() -> None:
     check("content-anchor entry is_permanent (false-positive note)", entry.is_permanent is True)
 
 
+_SUMMARY_RE = re.compile(
+    r"SUMMARY: (\d+) finding\(s\) — (\d+) non-allowlisted, (\d+) allowlisted\."
+)
+_CANONICAL_ARGS = (
+    "--allowlist", "quality_gates/sql_access_allowlist.txt",
+    "--require-clean", "ananta/src/ananta/llm/session_ledger",
+    "--require-clean", "ananta/src/ananta/llm/agent_messaging",
+    "--require-clean", "ananta/src/ananta/core/actions",
+    "--require-clean", "plugins/default_knowledge_plugin/src",
+    "--require-clean", "plugins/actr_memory_plugin/src",
+    "--require-clean", "plugins/default_thinking_plugin/src",
+)
+
+
+def _run_gate(extra_args: tuple[str, ...], cwd: Path) -> tuple[int, str]:
+    """Invoke the gate as a real subprocess (exercises actual argv parsing)."""
+    proc = subprocess.run(
+        [str(_VENV_PYTHON), str(_GATE_DIR / "sql_access_gate.py"), *extra_args],
+        cwd=str(cwd), capture_output=True, text=True, timeout=120,
+    )
+    return proc.returncode, proc.stdout
+
+
+def _summary_counts(stdout: str) -> tuple[int, int, int]:
+    match = _SUMMARY_RE.search(stdout)
+    assert match is not None, f"no SUMMARY line in gate output:\n{stdout[-500:]}"
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def test_bare_invocation_matches_canonical_run_vs_run() -> None:
+    print("Bare invocation (no args) run-vs-run equivalence with the canonical "
+          "invocation (2026-08-14 lane E — the standing false-alarm generator):")
+    canonical_code, canonical_out = _run_gate(_CANONICAL_ARGS, cwd=_REPO_ROOT)
+    bare_code, bare_out = _run_gate((), cwd=_REPO_ROOT)
+    check("canonical invocation exits 0 on a clean tree", canonical_code == 0)
+    check("bare invocation now exits the SAME as canonical (was: always exit 1)",
+          bare_code == canonical_code)
+    check("bare invocation's finding counts match canonical's EXACTLY "
+          "(live comparison, not a hardcoded count — the tree's census drifts)",
+          _summary_counts(bare_out) == _summary_counts(canonical_out))
+
+
+def test_bare_invocation_cwd_independent() -> None:
+    print("Bare invocation from a subdirectory still resolves REPO_ROOT-relative "
+          "defaults (the smokes-cwd trap) and matches canonical run-vs-run:")
+    canonical_code, canonical_out = _run_gate(_CANONICAL_ARGS, cwd=_REPO_ROOT)
+    subdir_code, subdir_out = _run_gate((), cwd=_GATE_DIR)
+    check("bare-from-subdirectory exits the SAME as canonical",
+          subdir_code == canonical_code)
+    check("bare-from-subdirectory finding counts match canonical EXACTLY",
+          _summary_counts(subdir_out) == _summary_counts(canonical_out))
+
+
+def test_explicit_allowlist_only_unaffected() -> None:
+    print("Explicit --allowlist with NO --require-clean (the gate_registry.py / "
+          "platform_gates.py caller shape) is byte-untouched by the bare-default fix:")
+    allowlist_only_code, allowlist_only_out = _run_gate(
+        ("--allowlist", "quality_gates/sql_access_allowlist.txt"), cwd=_REPO_ROOT,
+    )
+    check("explicit --allowlist-only still exits 0 (unchanged)", allowlist_only_code == 0)
+    check("explicit --allowlist-only prints NO --require-clean section "
+          "(defaults did NOT get bolted on)",
+          "--require-clean" not in allowlist_only_out)
+    canonical_code, canonical_out = _run_gate(_CANONICAL_ARGS, cwd=_REPO_ROOT)
+    check("explicit --allowlist-only's finding counts still match canonical's "
+          "(same tree, same allowlist — only the --require-clean ratchets differ)",
+          _summary_counts(allowlist_only_out) == _summary_counts(canonical_out))
+
+
+def test_explicit_args_override_defaults() -> None:
+    print("An explicit --allowlist continues to override the bare-invocation default "
+          "(a nonexistent path proves the default was NOT silently substituted):")
+    code, out = _run_gate(("--allowlist", "quality_gates/does_not_exist.txt"), cwd=_REPO_ROOT)
+    check("nonexistent explicit --allowlist path is honored as an EMPTY allowlist "
+          "(load_allowlist returns Allowlist() for a missing path — every finding "
+          "surfaces non-allowlisted, proving the canonical default was overridden)",
+          code == 1 and _summary_counts(out)[1] > 0)
+
+
 def main() -> int:
     for test in (
         test_s0_driver_import,
@@ -314,6 +397,10 @@ def main() -> int:
         test_require_clean_honors_permanent,
         test_s2_statement_shape,
         test_content_anchor,
+        test_bare_invocation_matches_canonical_run_vs_run,
+        test_bare_invocation_cwd_independent,
+        test_explicit_allowlist_only_unaffected,
+        test_explicit_args_override_defaults,
     ):
         test()
     print()

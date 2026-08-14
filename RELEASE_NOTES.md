@@ -4,6 +4,115 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-14 — Content hygiene, fleet-worker reliability, and a default deny for blocking choice prompts
+
+No breaking changes and no migration steps. Update with the standard short
+form: `git pull --ff-only`, restart, wait for startup to finish (the seed
+update runbook, `05_seed_update_runbook.md`, is the complete procedure).
+
+**Where this release lives.** The seed's canonical home is the new repository
+announced in the previous release. As a transition courtesy this update is
+also published at the previous home, which still faces archival — if you have
+not re-pointed your clone's origin yet (previous release, Step 2a), do it with
+this update.
+
+### Content hygiene across shipped knowledge and examples
+
+Shipped knowledge bases, process descriptions, code docstrings, and test
+fixtures have been swept of creative-era terminology and off-domain examples.
+One rename is behavior-visible if you consume audio quality reports (profiles
+carrying the audio plugins): `evaluate_audio_quality`'s context-hint key family
+is now the `modulation_posture` family — `modulation_posture`,
+`primary_modulation_mechanism`, `secondary_modulation_mechanisms` — renamed
+consistently across code, process documentation, and fixtures. Callers passing
+the previous key names get no error — the hint simply no longer matches — so
+check any stored evaluation contexts against the currently documented keys
+along with the pull.
+
+### Blocking structured-choice prompts are now denied by default
+
+Claude Code's `AskUserQuestion` tool renders a multiple-choice picker that
+holds its session until a human answers; its auto-continue timeout defaults to
+`"never"`. In unattended, worker, or peer-driven sessions that is a silent
+stall — the session looks idle while it waits for a click nobody knows it
+wants. The session launcher now passes a small settings overlay
+(`<clone>/client/claude-session-overlay.json`) that denies the tool by default.
+Overrides, in order of reach: `SOLET_ALLOW_ASKUSERQUESTION=1` for one attended
+launch; remove the overlay flag from your rendered launcher to make the picker
+your standing default; or keep the tool and set `askUserQuestionTimeout` in
+your own settings so unanswered dialogs eventually continue. Doctrine and
+rationale: the fleet-launcher session-configuration article
+(`24_operator_communication/06`).
+
+### A lighter default local model for new births
+
+Newborn solets now default to `qwen/qwen3-14b` as the local inference model
+(previously `qwen/qwen3-30b-a3b-2507`), with the request cap matched to its
+32k context window. Any equivalent ~14B-class instruct model served by your
+local endpoint works — set your preferred model id in the inference plugin's
+config after birth. Existing deployments are untouched: this changes only
+what a fresh birth materializes from the profile baseline.
+
+### Background connector jobs — where the result goes
+
+Connector writes and exports (Google Workspace, Snowflake, external Postgres,
+and similar) dispatch as background jobs: the call returns
+`{"job_id": ..., "status": "queued"}` immediately, and the finished result is
+delivered as a message to a live listening session. A session that dispatched
+through the plain `<name> call` CLI holds no listener, so it fetches the
+finished payload itself with the `get_latest_job` process — filter by plugin
+and verb; a completed job's `result` field carries the payload (a created
+sheet's URL, an export's destination). The generated `CLAUDE.md` /
+`AGENTS.md` bootstrap files and the Google Workspace plugin's knowledge base
+now carry the exact command shape, so sessions learn this without being told.
+
+### The GitHub CLI joins the hydration tool ladder
+
+The `/feedback` skill files upstream feedback through the repository's issue
+forms via `gh issue create --web`, so the GitHub CLI was a real dependency
+with no install step. Hydration now probes for `gh` (Step 1), offers
+`brew install gh` under your normal approval flow (Step 2), and verifies it
+(final checklist). Declining is recorded and tolerated; the skill re-states
+the dependency at first use instead of failing silently.
+
+### Spawned fleet workers register reliably
+
+Workers spawned through `spawn_session` now register on the watch transport
+automatically (measured ~0.6 s after their ledger row), with absolute CLI
+paths through both adapters and a message spool from the first moment. The
+session reaper now observes actual process liveness before reaping a spawning
+row, applies bounded patience, and emits an explicit notice instead of
+silently killing a live worker whose registration was lost to transport
+churn. The paste-stability wait in the tmux and codex driver channels is
+baseline-gated, closing a class where a slow-rendering paste could confirm
+"stability" on the pre-send screen and fire Enter before the text existed.
+
+### Retrieval verification: a runner, a revived daily audit, and a seal gate
+
+- The knowledge plugin's retrieval-audit verb now measures every KB article's
+  `.retrieval_test.yaml` companion claims against the live index — a
+  post-deploy instrument, not a commit gate. (The origin also carries a thin
+  CLI runner over the same discovery; that script is maintainer tooling and is
+  not part of the seed.)
+- The daily retrieval audit is repaired and running again, now distinguishing
+  stale process keys and legacy-key claims from genuine content drift.
+- Sealing now runs an assemble-time cited-path gate: a shipped document that
+  cites a path the bundle does not carry fails the mint instead of shipping a
+  dead instruction. Known-tolerated citations live in a reviewed allowlist
+  that ships with the gate.
+
+### Operations knowledge
+
+The joseki catalog gains cards for scoped landings, managed-worker dispatch,
+and the full remint-and-respond release cycle; the maintenance-verbs article
+gains a seat self-rotation card, and the fleet-launcher article carries the
+measured procedure (and its traps) for a session clearing its own context via
+a delegated helper. The SQL access gate now resolves its canonical
+configuration when invoked bare, removing a phantom-red class from fully-bare
+invocations.
+
+---
+
 ## 2026-08-13 — BREAKING: the homunculus→solet rename, a new feedback channel, and the seed's new home
 
 **This is the final release published at this repository.** Everything from

@@ -2109,6 +2109,10 @@ plugins/agent_messaging_plugin/tests/role_binding_store_smoke.py
 # guards, planted-secret refuses with NO .git, point-in-time tree_hash.
 # seed_readme: the generated README passes §4.2 by construction + hydration
 # pointer (GAP-5 read-as-file) + token substitution.
+# cited_path_gate (workbench brief 2026-08-14, lane C): walks shipped markdown
+# for backtick-quoted repo-path citations, verdicts DEAD/UNPARSEABLE against
+# the bundle's own census, tolerance-file-aware. Wired into
+# validate_and_seal_seed_bundle's checks tuple, seal-time, before any git op.
 # github_midwife_plugin seed factory SF-D (2026-07-18, Claude-B, RISKY —
 # publish procedure). The mint_seed / mint_and_birth_local authored joseki
 # cards encode the §5 rev-D ladder: seal (VERB) before any gh, gh repo create
@@ -2918,3 +2922,64 @@ plugins/agent_messaging_plugin/tests/codex_managed_session_smoke.py
 # the cited "325/325" had never exercised it (this register is an allowlist;
 # in-scope-for-static-gates is not in-suite). Offline: filesystem/profile
 # parsing only, no live platform.
+
+# spawned CLAUDE-worker peer registration (2026-08-14, registration-loss RCA
+# lane R) -- the tmux/headless adapters' absolute solet resolution and PATH
+# export, the presence sidecar that actually puts a spawned worker in
+# peer_list (--no-claim, spool KEPT unlike Codex, none on the mcp transport),
+# and the /rename skill + seed-template lockstep that claims against the
+# derived agi-watch id rather than the launcher's AGENT_INSTANCE_ID. Offline:
+# argv/env shape assertions and file-text reads only; no tmux server, bridge,
+# database, or model turn. Every leg verified to RED under a named mutation.
+plugins/agent_messaging_plugin/tests/spawned_worker_registration_smoke.py
+
+# retrieval-companion runner (2026-08-14, yaml-runner canonicalization lane Y) --
+# the pure logic of plugins/default_knowledge_plugin/tools/run_retrieval_companions.py:
+# shape validation, discovery across BOTH companion filename spellings
+# (*.retrieval_test.yaml AND *_retrieval_test.yaml), the ratified split scope
+# (targets judged within the article's own KB, forbidden judged cross-KB), rank
+# scoring at every threshold boundary, and the refusal to build a verdict from an
+# unreadable report envelope. The RUNNER itself needs live retrieval and is
+# deliberately NOT registered here (same class as tools/retrieval_probe.py, run
+# post-deploy); this entry gates the half that can be proven offline -- temp-dir
+# fixtures and hand-built payloads, no solet, no database, no model turn. Every
+# leg verified RED under a named mutation, including the one that first survived
+# green: deleting the retired-key guard left `non_target_queries` still refused by
+# the downstream unknown-key guard, so the assertion now pins the MESSAGE, not
+# just the exception type.
+
+# retrieval-audit scope split + LEGACY_KEY finding (2026-08-14, retrieval-audit
+# revival lane A) -- the audit path's half of the same hoist: ScopePolicy /
+# ScopePlan / RATIFIED_SCOPE_PLAN / RETIRED_KEYS now live in retrieval_audit.py
+# and run_retrieval_companions.py imports them, so this smoke proves object
+# IDENTITY across both consumers, not just equal values. Also guards
+# run_case_under_scope_plan's one/two-call merge (process_key_freshness always
+# from the call that carried the target queries, never double-counted) and the
+# new LEGACY_KEY finding: parse_test_file stays tolerant of the retired
+# non_target_queries key (never raises, still coerces to an empty forbidden
+# set) but records it, and aggregate_audit fails the article on it even when
+# every live query passes -- closing the defect where five companions on the
+# retired spelling reported PASSING with their overreach claims unenforced.
+# Offline by construction: hand-built payloads and a temp-dir fixture, no
+# solet, no database, no model turn.
+plugins/default_knowledge_plugin/tests/retrieval_audit_scope_and_legacy_smoke.py
+ananta/tests/core/services/job_service_retrieval_smoke.py
+ananta/tests/core/services/job_service_lifecycle_smoke.py
+plugins/agent_messaging_plugin/tests/cli_job_await_smoke.py
+
+# completion-wake routing (2026-08-14, lane-w-completion-wake) -- the PUSH half
+# of the background-job completion contract, whose durable/retrievable half the
+# job_service smokes above cover. The core smoke pins the replace decision: a
+# bridge-origin flow carrying a completion_route_role stamp submits the delivery
+# verb INSTEAD of the inference continuation, an unstamped flow stays pull-only
+# (the negative control that keeps coverage honestly partial), errors route like
+# results, a failed delivery falls back leaving the unreached marker standing,
+# and -- the property most at risk from a careless refactor -- a routed
+# completion still resolves its FRG token. The plugin smoke pins the dispatch
+# stamp and the delivery verb, including why it is not peer_send_by_name: that
+# verb's sender ladder would resolve a bridge-origin completion's sender to the
+# job's own originator, stamping every completion as sent by its recipient.
+# Offline by construction: fakes and hand-built rows, no solet, no database, no
+# model turn.
+ananta/tests/core/actions/job_completion_role_routing_smoke.py
+plugins/agent_messaging_plugin/tests/job_completion_delivery_smoke.py

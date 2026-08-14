@@ -420,7 +420,11 @@ class ServiceManager:
             )
 
             # Initialize job service
-            self.job_service = JobService(self.state_service)
+            # AsyncJobManager (constructed above) is passed so the staleness
+            # sweep can terminate a dead job through the manager's own
+            # update_job path — completion routing + FRG token resolution
+            # included — instead of writing a terminal status behind its back.
+            self.job_service = JobService(self.state_service, self.async_job_manager)
 
             # Initialize lifecycle management service
             self.lifecycle_management_service = LifecycleManagementService(

@@ -118,6 +118,7 @@ Check each expected-good state read-only before writing anything.
 
 - `<clone>/client/` absent means hydration has not run; present means a re-run, so compare intended content before overwriting and prefer updating over clobbering.
 - `<clone>/CLAUDE.md` and `<clone>/AGENTS.md` may exist from a prior hydration; same re-run rule for both. Probe `~/.claude/settings.json` for the `SOLET_STEP_ZERO_HOOK=` / `SOLET_ROLE_RECLAIM_HOOK=` markers (this solet's or another's) and `~/.claude/skills/rename/SKILL.md` plus `~/.claude/skills/feedback/SKILL.md` for prior installs; a pre-2026-07-22 hydration may have left hook copies in `<clone>/.claude/settings.json` — migrate those to user scope on a re-run rather than leaving both.
+- Probe the GitHub CLI read-only: `gh --version`. The `/feedback` skill this ladder installs files upstream feedback through `gh issue create --web`, so a machine without `gh` has a shipped capability that fails at first use. Record present/absent for Step 2's offer; do not install anything during the probe.
 - Read the shell templates that drive the integration: `zshrc.template`, `solet.zsh.template`, and any fleet/sample launcher file referenced by the clone or already present in the operator's startup file. Then inspect `~/.zshrc` or the active shell's startup file only far enough to classify its structure and choose an additive integration point. Do not print or copy secret-looking values into the transcript or generated files.
 - Confirm genesis actually finished: the newborn's LaunchAgent plist exists and the manifest marker `<clone>/profile/data/github_midwife/attempt.json` is present. If not, stop; hydration follows genesis, it does not replace it.
 
@@ -186,6 +187,7 @@ instead — a restated count is a future stale arity.
 | `claude_settings.json.template` | `~/.claude/settings.json` (reference shape only — the install commands below write the live file; see the coordination-hooks install step) | 0644 |
 | `rename_skill_SKILL.md.template` | `~/.claude/skills/rename/SKILL.md` | 0644 |
 | `feedback_skill_SKILL.md.template` | `~/.claude/skills/feedback/SKILL.md` | 0644 |
+| `claude_session_overlay.json.template` | `<clone>/client/claude-session-overlay.json` | 0644 |
 | `user_claude_md_section.template` | `~/.claude/CLAUDE.md` (create-or-merge, one marker-delimited section) | 0644 |
 | ⚙ `zshrc.template` | the user's startup file — **CONDITIONAL: only on an accepted shell-integration offer** (Step 2); additive integration is preferred and whole-file replacement is the fallback, rendered with `{{BACKUP_PATH}}` | 0644 |
 | ⚙ `fleet_functions.zsh.template` | `<clone>/client/<name>-fleet.zsh` — **CONDITIONAL: only on an accepted Step 4a git-safety offer**; sourced from the user's startup file | 0644 |
@@ -195,6 +197,48 @@ an operator who renders only the unconditional rows and stops has an incomplete
 deployment, and would never learn of the remaining two from a table that omitted
 them. Their own steps carry the offer wording and the accept/decline handling —
 this table exists so nothing is invisible, not to replace those steps.
+
+### GitHub CLI (`gh`) — the `/feedback` skill's filing tool
+
+The `/feedback` skill rendered above files upstream feedback through the seed
+repository's issue forms via `gh issue create --web`, so the GitHub CLI is a
+real dependency of a capability this ladder installs — not an optional nicety.
+If Step 1's probe found `gh` absent, offer its install now, under the user's
+normal tool-approval flow like every other action in this ladder:
+
+```bash
+brew install gh
+```
+
+Then verify `gh --version` answers. Authentication is not part of hydration:
+the `--web` filing path opens the browser, where the user's own GitHub login
+applies, and `gh auth login` can be run later if the user wants authenticated
+CLI operations. If the user declines the install, record the decline and move
+on — the skill's own filing step states the dependency again at first use, so
+nothing fails silently later.
+
+### Structured-choice prompts (`AskUserQuestion`) — default deny, launcher-enforced
+
+The Claude launcher rendered above passes
+`--settings <clone>/client/claude-session-overlay.json`, whose only content is
+a permissions deny of the `AskUserQuestion` structured-choice tool. This is an
+operator-ruled default (2026-08-14): the picker blocks its session until a
+human answers — its auto-continue timeout defaults to `"never"` — so in
+unattended, worker, or peer-driven sessions it strands the session and breaks
+inter-agent messaging flows. Settings sources merge in Claude Code, so the
+overlay unions the deny into launcher-started sessions without editing any
+file the user owns. Two overrides, tell the user both exist:
+
+- Per-launch: `SOLET_ALLOW_ASKUSERQUESTION=1 claude-<name> <label>` skips the
+  overlay for that attended session.
+- If the user says they actually want structured-choice prompts as their
+  default, remove the overlay flag lines from `<clone>/client/bin/claude-<name>`
+  and record the choice; a softer alternative to offer is keeping the tool but
+  setting `askUserQuestionTimeout` in their user settings so an unanswered
+  dialog eventually auto-continues instead of hanging.
+
+Codex has no equivalent structured-choice tool, so the Codex launcher renders
+without an overlay — that asymmetry is correct, not an omission.
 
 **Install the stock-Codex plugin through Codex, not by copying cache state.**
 After rendering `.agents/plugins/marketplace.json`, run these from a normal
@@ -638,6 +682,8 @@ Then, that the no-MCP command and session tooling work:
 - A fresh session started via `claude-<name>` carries the intended label and can use the `<name>` command without a venv activation.
 - `CLAUDE.md` and `AGENTS.md` each contain the `BEGIN SOLET HYDRATION` / `END SOLET HYDRATION` block, including the no-MCP Step Zero command, the access-mode contract (no-MCP CLI default, MCP by explicit operator request only, source-artifact recovery when the runtime is unavailable), the implementation/debugging KB-first rule, and the pointer to the router-vs-bridge distinction.
 - `~/.claude/settings.json` parses as JSON and contains exactly one `extraKnownMarketplaces` entry keyed to the rendered marketplace name (pointing at `<clone>` as a `directory` source) and exactly one `enabledPlugins.coordination-hooks@<marketplace-name>: true` entry — the session hooks moved into that plugin (Step 2), so this file no longer carries them and its own `hooks/hooks.json` roster is what determines which hooks execute, not a literal env-var-keyed command string here; `~/.claude/skills/rename/SKILL.md` and `~/.claude/skills/feedback/SKILL.md` both exist.
+- `gh --version` answers, unless the operator declined the Step 2 GitHub CLI offer — the `/feedback` skill's filing path is `gh issue create --web`, and a recorded decline is the only passing state other than presence.
+- `<clone>/client/claude-session-overlay.json` exists, parses as JSON, and contains exactly the `AskUserQuestion` permissions deny; the rendered `claude-<name>` launcher carries the `--settings` overlay flag gated on `SOLET_ALLOW_ASKUSERQUESTION` — both halves, because an overlay file without the flag (or the reverse) is the prohibition in name only.
 - `~/.claude/plugins/installed_plugins.json` names `coordination-hooks@<marketplace-name>` with an `installPath` that **exists on disk** — `ls` it, do not stop at the JSON parsing. A present JSON entry with a missing path is the exact broken-but-registered state the install step's CLI commands exist to prevent; a JSON-only check would report this as passing.
 - The UserPromptSubmit hook in that session points the agent at `<name> call`, not MCP.
 - A bare `claude` session in an unrelated directory starts with no hook errors and no injected solet context (the label guard covers both hooks).

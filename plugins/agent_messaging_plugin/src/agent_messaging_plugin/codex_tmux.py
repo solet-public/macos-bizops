@@ -28,7 +28,6 @@ from .codex_common import (
     _identity_env,
     _read_codex_config,
     _refuse_claude_provider_overlay,
-    _resolve_solet_bin,
     _toml_string,
     _without_parent_runtime_env,
 )
@@ -38,6 +37,7 @@ from .headless_adapter import (
     _resolve_default_cwd,
     _sigterm_then_kill,
 )
+from .solet_cli import resolve_solet_bin as _resolve_solet_bin
 from .tmux_adapter import (
     DEFAULT_PANE_HEIGHT,
     DEFAULT_PANE_WIDTH,
@@ -79,7 +79,14 @@ class _CodexTmuxDriverChannel:
     def send(self, text: str) -> None:
         from .session_hosts import DriverChannelSendError  # noqa: PLC0415
 
-        self._wait_until_ready()
+        # _wait_until_ready's return value is the idle prompt it observed
+        # right before the literal send -- the genuine pre-send baseline,
+        # reused rather than re-captured (driver-channel strand fix,
+        # 2026-08-14, mirrored from the tmux twin's own fix: see
+        # tmux_adapter.py's _TmuxSendKeysDriverChannel.send/
+        # _wait_for_paste_stable docstrings for the shared defect and fix
+        # shape, hermetically reproduced against each class independently).
+        baseline = self._wait_until_ready()
         literal = self._run(
             [self._tmux_bin, "send-keys", "-t", self._session, "-l", "--", text],
         )
@@ -87,7 +94,7 @@ class _CodexTmuxDriverChannel:
             raise DriverChannelSendError(
                 f"tmux literal send failed for Codex session {self._session!r}",
             )
-        composed = self._wait_until_stable()
+        composed = self._wait_until_stable(baseline)
         if self._submit_and_observe_change(composed):
             return
         # A same-burst Enter can be absorbed by the TUI.  One separately
@@ -143,13 +150,31 @@ class _CodexTmuxDriverChannel:
             "text was not pasted.",
         )
 
-    def _wait_until_stable(self) -> str:
+    def _wait_until_stable(self, baseline: str | None) -> str:
+        """Poll until the styled pane is IDENTICAL across ``stable_samples``
+        consecutive captures AND differs from ``baseline`` (the idle prompt
+        :meth:`_wait_until_ready` observed right before the literal send).
+        Without the baseline gate, a slow-rendering composer can hold that
+        same idle screen across every sample in the window, and N identical
+        PRE-paste samples satisfy "stable" exactly as well as N identical
+        POST-render ones -- Enter then fires against a composer that still
+        visibly shows nothing but the idle prompt, and
+        :meth:`_submit_and_observe_change`'s own post-Enter check can be
+        fooled into a false "delivered" signal by that same paste finally
+        rendering on its own schedule (driver-channel strand fix, 2026-08-14,
+        hermetically reproduced -- workbench/2026-08-14_driver_channel_
+        strand_fix_report_lane_d.md). Still fails CLOSED on timeout (raises,
+        never sends Enter for un-confirmed composed text) -- this class's own
+        established contract, unchanged by this fix; a composer whose full
+        render genuinely never differs from the pre-send idle screen raises
+        here exactly as before, rather than silently proceeding with a stale
+        ``composed`` value."""
         deadline = self._now_fn() + self._verify_timeout_seconds
         previous: str | None = None
         count = 0
         while self._now_fn() <= deadline:
             current = self._capture_styled()
-            if current is not None and current == previous:
+            if current is not None and current == previous and current != baseline:
                 count += 1
                 if count >= self._stable_samples:
                     return current

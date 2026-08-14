@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
 import logging
 import os
 import secrets
@@ -40,6 +41,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
+from ananta.constants import FRAMEWORK_ASYNC_JOBS_TABLE, FRAMEWORK_NAMESPACE
 from ananta.core.actions.action_metadata import (
     ContextHandling,
     MergeErrorProcessorCustomizations,
@@ -54,6 +56,11 @@ from ananta.core.domain.types import ActionResult, ErrorDetail
 from ananta.core.plugins.plugin_base import ServicePlugin
 from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
 from ananta.core.runtime import find_available_port, write_routerless_bridge_port_file
+from ananta.core.state.job_completion_reach import (
+    COMPLETION_REACH_KEY,
+    REACH_ROLE_INBOX_DELIVERED,
+    write_job_metadata,
+)
 from ananta.error_handling import FrameworkError
 from ananta.interfaces import IOInterfacePlugin
 from ananta.interfaces.agent_messaging_service_interface import (
@@ -270,6 +277,17 @@ if TYPE_CHECKING:  # pragma: no cover — type-only references
 logger = logging.getLogger(__name__)
 SYSTEM_SCHEDULER_ID: Final[str] = "system:scheduler"
 SYSTEM_SCHEDULER_LABEL: Final[str] = "System (Scheduler)"
+SYSTEM_JOB_COMPLETION_ID: Final[str] = "system:job-completion"
+"""Sender sentinel for a job completion pushed into a role inbox (Lane W).
+
+Deliberately NOT :data:`SYSTEM_SCHEDULER_ID`. Two reasons, both load-bearing:
+a completion is not scheduler-originated and labelling it so would be a false
+provenance claim; and peer threads are keyed on
+``(sender_bridge_id, peer_instance)``, so its own sentinel gives completions
+their own thread per recipient instead of interleaving them with scheduler
+traffic.
+"""
+SYSTEM_JOB_COMPLETION_LABEL: Final[str] = "System (Job Completion)"
 # peer_inbox page size. Deliberately far below the route's 50: a freshly
 # /clear'd Coordinator-Dawn measured a 422,513-character page at 50 instance +
 # 50 role entries on 2026-08-01 — roughly 4KB per entry, because an entry
@@ -1538,6 +1556,18 @@ class AgentMessagingPlugin(
                     retryable=False,
                 ),
             ),
+            "deliver_job_completion": EdgeProcessDefinition(
+                name="deliver_job_completion",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    # Matches its role-send sibling: a failed delivery leaves
+                    # the unreached stamp in place and the drain owns recovery,
+                    # so an automatic retry would duplicate a push whose
+                    # persist half may already have landed.
+                    retryable=False,
+                ),
+            ),
             "peer_claim_role": EdgeProcessDefinition(
                 name="peer_claim_role",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(
@@ -2138,6 +2168,164 @@ class AgentMessagingPlugin(
         )
         return _success_result(data=outcome.to_payload())
 
+    @platform_process(
+        name="deliver_job_completion",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "name": ParameterMetadata(
+                description=(
+                    "Role name to deliver the completion to, taken from the "
+                    "originating flow's completion_route_role stamp. Never "
+                    "caller-supplied in normal operation."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "job_id": ParameterMetadata(
+                description="The completed job's id, as the dispatch returned it.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "provider_name": ParameterMetadata(
+                description="Originating 'plugin.verb' that produced the job.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "status": ParameterMetadata(
+                description="Terminal job status: completed or error.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "payload": ParameterMetadata(
+                description=(
+                    "The job's attached result or error payload, embedded in "
+                    "the delivered message so the recipient needs no second "
+                    "lookup."
+                ),
+                required=False,
+                type=ParameterType.OBJECT,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "Delivery outcome plus whether the job's completion_reach was "
+            "upgraded to role_inbox_delivered."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="deliver_job_completion delivery + stamp result",
+            properties={
+                "thread_id": ParameterMetadata(type=ParameterType.STRING),
+                "message_id": ParameterMetadata(type=ParameterType.STRING),
+                "delivery": ParameterMetadata(type=ParameterType.STRING),
+                "resolved_agent_id": ParameterMetadata(type=ParameterType.STRING),
+                "resolved_agent_instance_id": ParameterMetadata(
+                    type=ParameterType.STRING,
+                ),
+                "resolved_session_label": ParameterMetadata(
+                    type=ParameterType.STRING,
+                ),
+                "reach_stamped": ParameterMetadata(type=ParameterType.BOOLEAN),
+            },
+        ),
+    )
+    def deliver_job_completion(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Deliver a finished job's outcome into a durable role-addressed inbox.
+
+        The push half of the background-job completion contract, whose durable
+        + retrievable half ``job_service`` already ships. Submitted by
+        ``AsyncJobManager`` in place of the inference continuation when the
+        originating flow carries a ``completion_route_role``.
+
+        Distinct from :meth:`peer_send_by_name` for ONE load-bearing reason:
+        the sender. That verb runs the REL-01 resolution ladder over the flow's
+        own trigger_data, whose caller-attribution rung would resolve to the
+        job's originator — i.e. the recipient — and stamp the completion as
+        having been sent by the very session it is being delivered to. A job
+        completion has no human sender, so the sentinel is hardcoded here and
+        never taken from the flow or the caller.
+
+        Stamping is downstream of a MEASURED hand-off: the reach value is
+        upgraded only after ``dispatch_role_send`` returns, because the
+        submission of an action cannot observe the delivery it requests.
+        ``queued_for_replay`` counts as success — the persist-first contract
+        means the envelope is durable and the repair drain owns re-delivery —
+        and that is exactly the property the stamp is asserting.
+        """
+        if self._peer_registry is None or self._bridge_manager is None:
+            return _failure_result(
+                code="bridge.not_running",
+                message="Bridge not started — call start_interface first",
+            )
+        raw = params.get("parameters", params)
+        name = str(raw.get("name", "")).strip()
+        job_id = str(raw.get("job_id", "")).strip()
+        if not name or not job_id:
+            return _failure_result(
+                code="missing_arguments",
+                message=(
+                    "deliver_job_completion requires a non-empty 'name' and "
+                    "'job_id'."
+                ),
+            )
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            role = resolve_role_binding(state_service, name)
+        except RoleBindingVacantError as exc:
+            return _failure_result(code="peer_role_vacant", message=str(exc))
+        if not role.agent_instance_id:
+            return _failure_result(
+                code="peer_role_malformed",
+                message=(
+                    f"agent_role_binding row for {name!r} is missing "
+                    "'agent_instance_id'; re-claim via peer_claim_role."
+                ),
+            )
+        status = str(raw.get("status", "")).strip()
+        payload = raw.get("payload")
+        content: list[TextPart] = [
+            TextPart(
+                type="text",
+                text=_format_job_completion_message(
+                    job_id=job_id,
+                    provider_name=str(raw.get("provider_name", "")).strip(),
+                    status=status,
+                    payload=payload if isinstance(payload, dict) else None,
+                ),
+            )
+        ]
+        outcome = dispatch_role_send(
+            bridge_manager=self._bridge_manager,
+            peer_registry=self._peer_registry,
+            agent_messaging_service=self._require_service(),
+            state_service=state_service,
+            role_name=name,
+            role=role,
+            sender_bridge_id=SYSTEM_JOB_COMPLETION_ID,
+            sender_agent_id=SYSTEM_AGENT_ID,
+            sender_agent_instance_id=SYSTEM_JOB_COMPLETION_ID,
+            sender_session_label=SYSTEM_JOB_COMPLETION_LABEL,
+            sender_parent_pid=None,
+            # A completion has no conversational counterpart to reply to; the
+            # job row and its payloads remain the authoritative record.
+            reply_to_role="",
+            content=content,
+            message_id=f"arm-{secrets.token_hex(16)}",
+        )
+        stamped = _stamp_role_inbox_delivered(state_service, job_id)
+        payload_out = dict(outcome.to_payload())
+        payload_out["reach_stamped"] = stamped
+        return _success_result(data=payload_out)
+
     def _send_handover_notice(
         self,
         *,
@@ -2479,6 +2667,25 @@ class AgentMessagingPlugin(
                 ),
                 required=False,
                 type=ParameterType.STRING,
+            ),
+            "allow_askuserquestion": ParameterMetadata(
+                description=(
+                    "Per-spawn escape hatch for the AskUserQuestion default-deny "
+                    "(operator ruling, 2026-08-14: the structured-choice picker "
+                    "stalls an unattended/peer-driven session, so it is denied by "
+                    "default). Only the tmux host driver honors this -- it "
+                    "launches a real interactive claude CLI, the one Claude-"
+                    "runtime host where the picker can render. The headless "
+                    "driver never enumerates the tool at all (measured: its "
+                    "stream-json mode omits it from the tool list by "
+                    "construction), so this flag is inert there, and the codex "
+                    "runtime has no equivalent tool. No plugin.yaml default -- "
+                    "the ruling fixes the global default (deny); this is purely "
+                    "a per-call override, named after the seed launcher's own "
+                    "SOLET_ALLOW_ASKUSERQUESTION=1."
+                ),
+                required=False,
+                type=ParameterType.BOOLEAN,
             ),
             "report_by_seconds": ParameterMetadata(
                 description="Initial report-or-die deadline, in seconds from spawn.",
@@ -6748,10 +6955,11 @@ def _run_session_claude_mapping_riders(state_service: Any) -> None:
 
 def _spawn_dispatch_overrides_from_params(raw: dict[str, Any]) -> dict[str, Any]:
     """The dispatch-override subset of ``spawn_session``'s params (host,
-    model, effort, allowed_tools, permission_mode) — split out of
-    ``_spawn_session_request_from_params`` to keep it under the radon cc
-    threshold; these five fields share one purpose (per-spawn dispatch
-    overrides), so grouping them is a real seam, not an arbitrary split."""
+    model, effort, allowed_tools, permission_mode, allow_askuserquestion) —
+    split out of ``_spawn_session_request_from_params`` to keep it under the
+    radon cc threshold; these six fields share one purpose (per-spawn
+    dispatch overrides), so grouping them is a real seam, not an arbitrary
+    split."""
     return {
         "host": (str(raw["host"]) if raw.get("host") else None),
         "agent_runtime": str(raw.get("agent_runtime", "") or "claude_code"),
@@ -6759,6 +6967,7 @@ def _spawn_dispatch_overrides_from_params(raw: dict[str, Any]) -> dict[str, Any]
         "effort": str(raw.get("effort", "") or ""),
         "allowed_tools": _as_str_tuple(raw.get("allowed_tools"), default=()),
         "permission_mode": str(raw.get("permission_mode", "") or ""),
+        "allow_askuserquestion": bool(raw.get("allow_askuserquestion", False)),
     }
 
 
@@ -7118,6 +7327,129 @@ def _sender_from_role(
         bridge_id=SYSTEM_SCHEDULER_ID,
         reply_to_role=role_name,
     )
+
+
+JOB_COMPLETION_PAYLOAD_CHAR_BUDGET: Final[int] = 2000
+"""How much attached payload travels inside the delivered message.
+
+A completion payload is unbounded (a Sheets dump, a query result), and an
+inbox entry carries the whole message — the same arithmetic that put
+``PEER_INBOX_DEFAULT_LIMIT`` at 5. Past this budget the message carries a
+truncated head plus the exact verb that returns the whole payload, so the
+recipient is never left guessing whether it saw everything.
+"""
+
+
+def _format_job_completion_message(
+    *,
+    job_id: str,
+    provider_name: str,
+    status: str,
+    payload: dict[str, Any] | None,
+) -> str:
+    """Render the completion envelope the recipient acts on.
+
+    Names route, content binds: the message states the job id, what produced
+    it, its terminal status and the payload itself, so acting on it needs no
+    second lookup. Truncation is disclosed IN the message with the verb that
+    retrieves the rest — a silently clipped payload would read as a complete
+    one.
+    """
+    origin = provider_name or "unknown provider"
+    header = (
+        f"Job {job_id} finished with status '{status or 'unknown'}' "
+        f"(from {origin})."
+    )
+    if not payload:
+        body = (
+            "No payload was attached. "
+            f"Full job row: service_interface::job_service::get_job "
+            f'{{"job_id": "{job_id}"}}'
+        )
+        return f"{header}\n{body}"
+    rendered = json.dumps(payload, indent=2, default=str, sort_keys=True)
+    label = "Result" if status == "completed" else "Error"
+    if len(rendered) > JOB_COMPLETION_PAYLOAD_CHAR_BUDGET:
+        head = rendered[:JOB_COMPLETION_PAYLOAD_CHAR_BUDGET]
+        return (
+            f"{header}\n{label} payload (TRUNCATED at "
+            f"{JOB_COMPLETION_PAYLOAD_CHAR_BUDGET} of {len(rendered)} chars — "
+            f"retrieve the whole payload with "
+            f'service_interface::job_service::get_job {{"job_id": "{job_id}"}}'
+            f"):\n{head}"
+        )
+    return f"{header}\n{label} payload:\n{rendered}"
+
+
+def _decode_job_metadata(raw: object) -> dict[str, object]:
+    """A job row's ``metadata`` column as a dict (it is TEXT holding JSON)."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str) and raw.strip():
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _read_job_metadata(state_service: Any, job_id: str) -> dict[str, object] | None:
+    """Current job metadata, or None when the row itself cannot be read.
+
+    None and ``{}`` are deliberately different answers: an unreadable row must
+    not be stamped, while a readable row with empty metadata is a fine thing to
+    stamp onto.
+    """
+    result = state_service.read_state(
+        namespace=FRAMEWORK_NAMESPACE,
+        query={
+            "table": FRAMEWORK_ASYNC_JOBS_TABLE,
+            "filters": {"id": job_id},
+            "limit": 1,
+        },
+    )
+    data = result.get("data") if isinstance(result, dict) else None
+    records = data.get("records") if isinstance(data, dict) else None
+    if not isinstance(records, list) or not records:
+        return None
+    record = records[0]
+    return _decode_job_metadata(record.get("metadata") if isinstance(record, dict) else None)
+
+
+def _stamp_role_inbox_delivered(state_service: Any, job_id: str) -> bool:
+    """Upgrade the job's completion_reach to role_inbox_delivered.
+
+    Returns whether the stamp was written. Best-effort and LOUD, mirroring
+    ``record_completion_reach``: a stamp that cannot be written leaves the
+    pre-stamped unreached value in place, so a delivered-but-unstamped job is
+    listed in the drain a second time rather than being lost. Over-reporting an
+    unreached job is recoverable; silently dropping one is not.
+    """
+    try:
+        metadata = _read_job_metadata(state_service, job_id)
+        if metadata is None:
+            logger.warning(
+                "job %s not readable after delivery; completion_reach left "
+                "unreached (it will be listed by the drain again)",
+                job_id,
+            )
+            return False
+        write_job_metadata(
+            state_service,
+            FRAMEWORK_NAMESPACE,
+            FRAMEWORK_ASYNC_JOBS_TABLE,
+            job_id,
+            {**metadata, COMPLETION_REACH_KEY: REACH_ROLE_INBOX_DELIVERED},
+        )
+    except Exception:  # noqa: BLE001 — a failed stamp must never undo a delivery
+        logger.error(
+            "failed to stamp %s for job %s after a successful delivery; the "
+            "unreached stamp stands and the drain will list it again",
+            REACH_ROLE_INBOX_DELIVERED,
+            job_id,
+            exc_info=True,
+        )
+        return False
+    return True
 
 
 def _resolve_role_send_sender(

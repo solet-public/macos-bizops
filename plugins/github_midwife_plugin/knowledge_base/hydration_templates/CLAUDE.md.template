@@ -37,6 +37,23 @@ ingestion is enabled it is also the path for session-ledger recall:
 {{SOLET_NAME}} call service_interface::session_ledger_service::search_event_content '{"query": "<topic>", "limit": 8}'
 ```
 
+Background-job verbs — connector writes and exports (Google Workspace,
+Snowflake, external Postgres, and similar) — return
+`{"job_id": ..., "status": "queued"}` immediately; the finished result is
+delivered as a message to a live listening session, which a plain `call`
+invocation is not. From a session with no listener, fetch the finished
+payload yourself:
+
+```bash
+{{SOLET_NAME}} call service_interface::job_service::get_latest_job '{"plugin_name": "<plugin>", "action_name": "<verb>"}'
+```
+
+When the returned job's `status` is `completed`, its `result` field carries
+the payload (a created sheet's URL, an export's path); `failed` carries
+`error`; a `null` job means nothing matched the filters. It returns the
+LATEST matching job only — poll one dispatch to completion before firing
+another of the same verb from a no-listener session.
+
 It needs no MCP server, no `claude mcp add`, and no
 `mcp__{{SOLET_NAME}}__*` tools.
 
@@ -136,7 +153,10 @@ here — search for the terms below rather than assuming the mechanism:
 - `session history ingestion session ledger hydration current notes` — how
   and when session-ledger recall becomes available.
 - `fleet launcher session configuration model effort per role` — how model,
-  effort, and transport are configured per session role. As the driving
+  effort, and transport are configured per session role, and why the launcher
+  denies the structured-choice `AskUserQuestion` prompt by default (it stalls
+  unattended and peer-driven sessions; `SOLET_ALLOW_ASKUSERQUESTION=1` lifts
+  it for one attended launch). As the driving
   session you manage the fleet, not just your own context: dispatch
   parallelizable, mechanical, or long-running work to additional sessions
   rather than absorbing it inline, and declare each dispatch's model,

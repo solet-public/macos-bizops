@@ -333,6 +333,18 @@ class SpawnSessionRequest:
     # permission_mode. Empty here means "let the resolver fill it from
     # policy," never "spawn with no transport declared."
     transport: str = ""
+    # AskUserQuestion default-deny (operator ruling 2026-08-14): per-spawn
+    # escape hatch, named after the seed launcher's own
+    # SOLET_ALLOW_ASKUSERQUESTION=1 override for cross-surface consistency.
+    # Unlike permission_mode/transport this has NO plugin.yaml resolution
+    # step -- the ruling fixes the global default (deny) outright, so a bare
+    # dataclass default is the whole story; only the tmux driver reads it
+    # (the headless driver never enumerates the tool in the first place --
+    # see headless_adapter.py's own docstring for the measured evidence --
+    # and the codex runtime has no equivalent tool at all), but it is
+    # threaded through the shared dispatch spec dict unconditionally, same
+    # as every other claude_code-only field already is.
+    allow_askuserquestion: bool = False
 
 
 def spawn_session(
@@ -405,6 +417,7 @@ def spawn_session(
                 "allowed_tools": req.allowed_tools,
                 "permission_mode": req.permission_mode,
                 "transport": req.transport,
+                "allow_askuserquestion": req.allow_askuserquestion,
                 "agent_runtime": req.agent_runtime,
                 # T2 authority-template (seat's design ruling 2026-08-05):
                 # the ONLY two ManagedSessionSpec fields the trusted spawn
