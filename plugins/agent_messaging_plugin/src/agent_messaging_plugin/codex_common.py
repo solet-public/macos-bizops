@@ -6,12 +6,20 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
-import sys
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+# Hoisted to the runner-neutral module (2026-08-14, registration-loss RCA):
+# these were never Codex-specific, and every spawned CLAUDE worker needed the
+# identical treatment -- that asymmetry is what left Claude workers
+# unregistered. Aliased to the established private names so no Codex call site
+# moves; `resolve_solet_bin` is now imported from `solet_cli` directly by the
+# drivers that need it, since a re-export through here reads as ownership it
+# no longer has.
+from .solet_cli import expose_worker_cli as _expose_worker_cli
+from .solet_cli import worker_path as _worker_path
 
 _CODEX_AGENT_ID = "codex"
 _COORDINATION_PLUGIN_PREFIX = "coordination-hooks@"
@@ -63,30 +71,6 @@ def _codex_home(explicit: Path | None) -> Path:
     return Path(configured) if configured else Path.home() / ".codex"
 
 
-def _resolve_solet_bin(
-    explicit: str | None,
-    *,
-    python_executable: str | None = None,
-) -> str:
-    """Resolve the CLI from PATH, then from the active Python environment.
-
-    Materialized blue-green releases intentionally run with a minimal PATH
-    that does not include their own ``venv/bin`` directory.  The release's
-    Python executable and ``solet`` console script are siblings, so that
-    directory is the deterministic second rung when PATH lookup is empty.
-    """
-    if explicit is not None:
-        return explicit
-    discovered = shutil.which("solet")
-    if discovered:
-        return discovered
-    executable = Path(python_executable or sys.executable)
-    sibling = executable.parent / "solet"
-    if sibling.is_file() and os.access(sibling, os.X_OK):
-        return str(sibling)
-    return ""
-
-
 def _read_codex_config(config_path: Path) -> dict[str, Any]:
     try:
         with config_path.open("rb") as handle:
@@ -116,26 +100,6 @@ def _mcp_server_config(
         return None
     server = servers.get(solet_name)
     return server if isinstance(server, Mapping) else None
-
-
-def _expose_worker_cli(env: dict[str, str], solet_bin: str) -> None:
-    """Expose the resolved CLI to hooks and ordinary worker shell commands."""
-    env["AGENT_WAKE_CLI"] = solet_bin or "solet"
-    if not solet_bin or not Path(solet_bin).is_absolute():
-        return
-    cli_dir = str(Path(solet_bin).parent)
-    path_entries = env.get("PATH", "").split(os.pathsep)
-    if cli_dir in path_entries:
-        return
-    env["PATH"] = os.pathsep.join(
-        [cli_dir, *[entry for entry in path_entries if entry]],
-    )
-
-
-def _worker_path(solet_bin: str) -> str:
-    env = {"PATH": os.environ.get("PATH", "")}
-    _expose_worker_cli(env, solet_bin)
-    return env["PATH"]
 
 
 def _identity_env(

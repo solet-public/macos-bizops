@@ -31,6 +31,47 @@ standing default on hydrated machines).
 
 ## Watcher path (transport `watch`, the default)
 
+**Detect the incumbent watcher FIRST — it decides which of the two branches
+below you take.** A fleet-spawned worker is launched with its presence
+watcher already armed by the spawn adapter (`--no-claim`: it registered
+presence and deliberately claimed no role); an operator-launched session has
+no sidecar and must arm its own. Arming a second watcher for the same session
+is REFUSED, never merged — `{{SOLET_NAME}} watch` takes a per-session flock
+and exits with `another watcher already holds this session's lock ... one
+watch per session; stop the incumbent first` — so branch 1b run blindly just
+errors out on every spawned worker.
+
+A watcher does NOT register under `$AGENT_INSTANCE_ID`. It registers under a
+derived, stable id: `agi-watch-` + the first 24 hex chars of
+`sha256($AGENT_SESSION_ID)`. Compute it and look for it in the registry:
+
+```bash
+WATCH_ID="agi-watch-$(printf %s "$AGENT_SESSION_ID" | shasum -a 256 | cut -c1-24)"
+echo "$WATCH_ID"
+{{SOLET_NAME}} call plugin::agent_messaging_plugin::peer_list '{}' | grep -c "$WATCH_ID"
+```
+
+- **`$WATCH_ID` present in `peer_list`** (count ≥ 1) → branch 1a.
+- **Absent** (count 0) → branch 1b.
+
+### 1a. Incumbent sidecar → claim the role through it (do NOT arm a second)
+
+Presence already exists; only the durable role binding is missing. Claim it
+with the verb, against the identity the WATCHER actually registered — never
+`$AGENT_INSTANCE_ID`, which is the launcher's id and holds no binding:
+
+```bash
+{{SOLET_NAME}} call plugin::agent_messaging_plugin::peer_claim_role \
+  "{\"name\": \"$ROLE\", \"agent_id\": \"$AGENT_IDENTITY\", \"agent_instance_id\": \"$WATCH_ID\", \"agent_session_id\": \"$AGENT_SESSION_ID\", \"session_label\": \"$ROLE\"}"
+```
+
+Confirm `action` is `registered` (first claim) or `updated` (refresh). If the
+call reports `role_held_live`, another live session holds the name — report
+that and stop; do not pass `takeover` without operator confirmation. Then go
+to step 4, using `$WATCH_ID` wherever it asks for the instance id.
+
+### 1b. No incumbent → arm the watcher with the role, as before
+
 1. Start the registered-presence watcher as a persistent background process
    (a background Bash task; keep it running for the session's lifetime; if a
    previous watcher from this conversation is running for a different role,
@@ -59,6 +100,11 @@ standing default on hydrated machines).
    `agent_instance_id` it printed. New JSON lines on later looks are
    deliveries (peer messages, role-addressed sends) — treat them like any
    peer message.
+
+   Note the `"claim"` value here reports `{"claimed": false, "reason":
+   "managed_registration_only"}` for a `--no-claim` arm — that is the
+   sidecar's shape, not this branch's; seeing it means you took the wrong
+   branch and should claim via 1a instead.
 
 ## MCP path (transport `mcp`)
 

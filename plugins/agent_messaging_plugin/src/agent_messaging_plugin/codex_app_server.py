@@ -24,7 +24,6 @@ from .codex_common import (
     _mcp_server_config,
     _read_codex_config,
     _refuse_claude_provider_overlay,
-    _resolve_solet_bin,
     _toml_string,
 )
 from .headless_adapter import (
@@ -33,6 +32,7 @@ from .headless_adapter import (
     _resolve_default_cwd,
     _sigterm_then_kill,
 )
+from .solet_cli import resolve_solet_bin as _resolve_solet_bin
 
 
 @dataclass(slots=True)

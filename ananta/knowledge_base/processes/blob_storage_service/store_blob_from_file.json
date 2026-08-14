@@ -13,6 +13,6 @@
   "error_processor_customizations": {
     "action_context": "Reads a local file from an absolute path and stores its bytes as a blob. The agent supplies only the path; the platform reads the contents.",
     "error_interpretation": "file_path_not_absolute: file_path must be absolute (no ~, no relative paths). file_not_found: no file at the supplied path. file_not_regular: path exists but is a directory or other non-regular entry. file_unreadable: file exists but the solet's user lacks read permission. file_empty: file is zero bytes. mime_type_unknown: extension did not yield a MIME type and none was supplied explicitly.",
-    "recovery_guidance": "For file_path_not_absolute: ask the user for an absolute path (e.g. /path/to/render.flac, not ~/Music/render.flac). For file_not_found / file_unreadable: confirm the path and that the solet's user can read it. For file_not_regular: pass a real file path, not a directory. For file_empty: confirm the render actually produced output. For mime_type_unknown: pass mime_type explicitly (e.g. 'audio/flac', 'image/jpeg')."
+    "recovery_guidance": "For file_path_not_absolute: ask the user for an absolute path (e.g. /path/to/quarterly_report.pdf, not ~/Documents/quarterly_report.pdf). For file_not_found / file_unreadable: confirm the path and that the solet's user can read it. For file_not_regular: pass a real file path, not a directory. For file_empty: confirm the render actually produced output. For mime_type_unknown: pass mime_type explicitly (e.g. 'audio/flac', 'image/jpeg')."
   }
 }

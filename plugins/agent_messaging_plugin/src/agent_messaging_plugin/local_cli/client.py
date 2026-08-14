@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final
@@ -32,6 +33,18 @@ DEFAULT_REQUEST_TIMEOUT_S: Final[float] = 30.0
 DEFAULT_POLL_TIMEOUT_S: Final[float] = 120.0
 POLL_INTERVAL_S: Final[float] = 0.5
 
+# Born-async job awaiting (second hop). A job's real work is external — a
+# Google API round trip, an export — so it is polled far more slowly than the
+# ms-scale action dispatch above; 0.5s here would be pure noise against the
+# platform.
+JOB_POLL_INTERVAL_S: Final[float] = 2.0
+DEFAULT_JOB_TIMEOUT_S: Final[float] = 300.0
+GET_JOB_PROCESS_KEY: Final[str] = "service_interface::job_service::get_job"
+
+# Job statuses that mean "still working" (AsyncJobManager's ledger vocabulary;
+# its terminal set is completed / error / cancelled).
+NON_TERMINAL_JOB_STATUSES: Final[frozenset[str]] = frozenset({"queued", "processing"})
+
 # A genesis-born clone rewrites root_manifest.yaml's solet_name to its own
 # name, but an unmaterialized source tree still carries this literal
 # placeholder -- so it is the signal to use the clone-dir basename.
@@ -42,6 +55,58 @@ _NAME_PLACEHOLDER: Final[str] = "solet"
 NON_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
     {"queued", "pending", "dispatched", "processing", "running"},
 )
+
+
+def _envelope_data_sections(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """The places a verb's own return value can sit in a CLI result payload.
+
+    There is no universal ``data`` key across producers (measured 2026-08-14):
+    a plugin verb's envelope puts its return directly under ``result.data``
+    (g_suite's ``_success``), while a service-interface verb nests it one
+    deeper under ``result.data.result`` (JobService's KEY_DATA/KEY_RESULT).
+    Both measured shapes are checked and NOTHING else — an unrecognized shape
+    yields no sections, so the caller falls through to its normal behavior
+    rather than acting on a guess.
+    """
+    sections: list[dict[str, Any]] = []
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return sections
+    data = result.get("data")
+    if isinstance(data, dict):
+        sections.append(data)
+        inner = data.get("result")
+        if isinstance(inner, dict):
+            sections.append(inner)
+    return sections
+
+
+def queued_job_id(payload: dict[str, Any]) -> str | None:
+    """The job id of a ``{job_id, status: queued}`` dispatch, else None.
+
+    BOTH keys are required. A payload carrying a ``job_id`` without
+    ``status == "queued"`` is something else — ``get_job``'s own answer, for
+    one — and treating it as a fresh dispatch would start an await loop on a
+    job that already finished.
+    """
+    for section in _envelope_data_sections(payload):
+        job_id = section.get("job_id")
+        if (
+            isinstance(job_id, str)
+            and job_id
+            and str(section.get("status", "")) == "queued"
+        ):
+            return job_id
+    return None
+
+
+def _extract_job_record(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """The job record from a ``get_job`` result payload, or None."""
+    for section in _envelope_data_sections(payload):
+        job = section.get("job")
+        if isinstance(job, dict):
+            return job
+    return None
 
 
 class SoletNotRunningError(RuntimeError):
@@ -270,6 +335,51 @@ class BridgeClient:
                     f"after {poll_timeout_s:.0f}s",
                 )
             time.sleep(POLL_INTERVAL_S)
+
+    def await_job(
+        self,
+        job_id: str,
+        *,
+        job_timeout_s: float = DEFAULT_JOB_TIMEOUT_S,
+        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
+        on_poll: Callable[[str, float], None] | None = None,
+    ) -> dict[str, Any]:
+        """Poll a born-async job by id until it reaches a terminal status.
+
+        The SECOND hop. ``call_and_wait`` above waits for the DISPATCH to
+        return, which for a born-async verb is only the ``{job_id, status:
+        queued}`` handle — the real work has not started. This polls
+        ``get_job`` until the job itself is terminal, and returns the job
+        record (result and error payloads already attached by the verb).
+
+        ``on_poll`` receives ``(status, elapsed_s)`` per poll so the caller can
+        show progress without this module deciding where progress belongs.
+
+        Raises ``BridgeResultTimeoutError`` when the job is still non-terminal
+        at the deadline — the job keeps running; only the waiting stops.
+        """
+        deadline = time.monotonic() + job_timeout_s
+        started = time.monotonic()
+        status = "unknown"
+        while True:
+            payload = self.call_and_wait(
+                GET_JOB_PROCESS_KEY,
+                {"job_id": job_id},
+                reason=f"await job {job_id}",
+                poll_timeout_s=poll_timeout_s,
+            )
+            job = _extract_job_record(payload)
+            if job is not None:
+                status = str(job.get("status", "unknown"))
+                if status not in NON_TERMINAL_JOB_STATUSES:
+                    return job
+            if on_poll is not None:
+                on_poll(status, time.monotonic() - started)
+            if time.monotonic() >= deadline:
+                raise BridgeResultTimeoutError(
+                    f"job {job_id} still '{status}' after {job_timeout_s:.0f}s",
+                )
+            time.sleep(JOB_POLL_INTERVAL_S)
 
     def process_call(
         self,

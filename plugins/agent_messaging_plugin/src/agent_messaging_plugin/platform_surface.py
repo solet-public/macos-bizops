@@ -73,6 +73,27 @@ _PROCESS_SEARCH_DEFAULT_RESULTS: Final[int] = 10
 _PROCESS_SEARCH_MAX_RESULTS: Final[int] = 50
 _QUERY_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9]+")
 
+COMPLETION_ROUTE_ROLE_KEY: Final[str] = "completion_route_role"
+"""Flow ``trigger_data`` key naming where this flow's job completion is delivered.
+
+Its READER is ``ananta.core.state.job_completion_route`` (which restates the
+literal, matching the ``bridge_process_call`` precedent in
+``job_completion_reach``); this module is its sole WRITER.
+
+Deliberately NOT a member of the ``caller_attribution_*`` family, though it is
+stamped from the same resolved value at the same instant. That family is
+documented as single-consumer — read only by the send verbs' sender-stamping —
+so that an attributed CLI call can never re-point a flow's inference vertex, and
+a second reader would spend a bright line that is worth more intact than the one
+key it saves. The two also carry DIFFERENT predicates: attribution records who
+called, this records where a completion should land. They coincide today and are
+free to diverge (a caller routing completions to a coordinator lane, or opting
+out of push delivery, changes one and not the other).
+
+ABSENT means unaddressable and is never guessed: written only when a durable
+role was actually resolved, so completion delivery reads presence as permission.
+"""
+
 
 def _role_for_instance(
     state_service: Any, agent_instance_id: str, *, purpose: str,
@@ -813,6 +834,13 @@ class PlatformSurface:
             # caller and for an unresolvable key.
             **caller_attribution.as_trigger_fields(),
         }
+        # Lane W: the completion-delivery ROUTE, stamped here from the same
+        # already-resolved attribution value rather than re-derived at
+        # completion time. Conditional on purpose — see
+        # COMPLETION_ROUTE_ROLE_KEY: presence IS the permission to push, so a
+        # roleless caller must leave the key absent rather than carry "".
+        if caller_attribution.role:
+            trigger[COMPLETION_ROUTE_ROLE_KEY] = caller_attribution.role
         if bridge.client_id:
             trigger["authenticated_principal"] = {
                 "client_id": bridge.client_id,

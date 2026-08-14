@@ -51,6 +51,8 @@ from agent_messaging_plugin.headless_adapter import (  # noqa: E402
 from agent_messaging_plugin.session_hosts import HostCannotSpawnError  # noqa: E402
 from agent_messaging_plugin.tmux_adapter import (  # noqa: E402
     _THIRD_PARTY_PROVIDER_ENV_MARKERS,
+    DEFAULT_PASTE_STABLE_SAMPLES_REQUIRED,
+    DEFAULT_PASTE_STABLE_TIMEOUT_SECONDS,
     TmuxHostDriver,
     _effective_spawn_env,
     _emit_role_tag_path,
@@ -58,6 +60,7 @@ from agent_messaging_plugin.tmux_adapter import (  # noqa: E402
     _parse_tmux_version,
     _provider_ignores_dev_channels,
     _sanitize_session_name,
+    _TmuxSendKeysDriverChannel,
 )
 
 _passed = 0
@@ -132,6 +135,11 @@ def _configured_driver(
         "tmux_bin": _executable_stub(tmp_dir, "fake-tmux"),
         "claude_bin": _executable_stub(tmp_dir, "fake-claude"),
         "solet_name": "testhom",
+        # Injected, never resolved from the ambient environment: the CLI/PATH
+        # and presence-sidecar assertions would otherwise pass or fail on
+        # whether the machine running the gate happens to have a `solet` on
+        # PATH or beside its interpreter.
+        "solet_bin": _executable_stub(tmp_dir, "fake-solet"),
         "permission_mode": "bypassPermissions",
         "mcp_config_path": mcp_config,
         "cwd": tmp_dir,
@@ -147,6 +155,54 @@ def _configured_driver(
     if confirm_poll_interval_seconds is not None:
         kwargs["confirm_poll_interval_seconds"] = confirm_poll_interval_seconds
     return TmuxHostDriver(**kwargs)
+
+
+def _check_wake_cli_and_path(cmd: list[str]) -> None:
+    """Registration-loss fix (2026-08-14) assertions on the ``new-session -e``
+    environment. Split out of ``test_spawn_command_and_env_wiring`` so that
+    test stays under the radon cyclomatic-complexity gate."""
+    wake_cli = next(
+        (v.split("=", 1)[1] for v in cmd if v.startswith("AGENT_WAKE_CLI=")), "",
+    )
+    _check(
+        Path(wake_cli).name == "fake-solet" and "testhom" not in wake_cli,
+        "AGENT_WAKE_CLI is the wake-CLI EXECUTABLE, never the solet instance "
+        "name -- `which <instance-name>` cannot resolve, so a value that "
+        "tracked solet_name (e.g. 'testhom' here) silently broke every "
+        "worker's idle-wake Stop hook; deaf-wake fix, 2026-08-08",
+    )
+    _check(
+        Path(wake_cli).is_absolute(),
+        "AGENT_WAKE_CLI is ABSOLUTE, not the bare name -- a tmux pane "
+        "inherits the tmux SERVER's minimal PATH, under which a bare 'solet' "
+        "is unresolvable, and both the Stop-hook waker and the PostToolUse "
+        "heartbeat then died silently (FileNotFoundError, exit 0); "
+        "registration-loss fix, 2026-08-14",
+    )
+    pane_path = next(
+        (v.split("=", 1)[1] for v in cmd if v.startswith("PATH=")), "",
+    )
+    _check(
+        pane_path.split(os.pathsep)[0] == str(Path(wake_cli).parent),
+        "PATH crosses the `new-session -e` allowlist boundary with the CLI's "
+        "directory first, so hooks and skills invoking a BARE `solet` resolve "
+        "it too",
+    )
+
+
+def _check_presence_sidecar(pane_command: str) -> None:
+    """On the watch transport the emit is followed by the BACKGROUNDED
+    presence sidecar -- the step that actually puts this worker in
+    ``peer_list`` -- and only then the exec."""
+    _check(
+        "fake-solet" in pane_command and " watch " in pane_command
+        and "--no-claim" in pane_command,
+        "the pane arms the --no-claim presence sidecar before exec",
+    )
+    _check(
+        0 <= pane_command.find(" watch ") < pane_command.find("exec "),
+        "the sidecar is backgrounded BEFORE exec replaces the pane's shell",
+    )
 
 
 def _is_send_enter(cmd: list[str]) -> bool:
@@ -409,14 +465,7 @@ def test_spawn_command_and_env_wiring() -> None:
         )
         _check("AGENT_SESSION_LABEL=lane-x" in env_str, "label prefers lane_id when given")
         _check("SOLET_NAME=testhom" in env_str, "SOLET_NAME flows from driver config")
-        _check(
-            "AGENT_WAKE_CLI=solet" in env_str,
-            "AGENT_WAKE_CLI is the literal wake-CLI executable name, not the "
-            "solet instance name -- `which <instance-name>` cannot "
-            "resolve, so a value that tracked solet_name (e.g. "
-            "'testhom' here) silently broke every worker's idle-wake Stop "
-            "hook; deaf-wake fix, 2026-08-08",
-        )
+        _check_wake_cli_and_path(cmd)
         _check(
             "FLEET_TRANSPORT=watch" in env_str,
             "an unspecified transport resolves to the charter's default 'watch' "
@@ -425,7 +474,8 @@ def test_spawn_command_and_env_wiring() -> None:
         )
         pane_command = cmd[-1]
         _check(pane_command.startswith("sh "), "the tag emit runs BEFORE exec (pane command prefix)")
-        _check("; exec " in pane_command, "the pane command execs into claude after the emit")
+        _check("exec " in pane_command, "the pane command execs into claude after the emit")
+        _check_presence_sidecar(pane_command)
         _check(
             "--model opus" in pane_command.replace("'", "") or "opus" in pane_command,
             "model override flows into the claude argv",
@@ -561,11 +611,35 @@ def test_spawn_settings_json_wires_all_three_hooks_and_the_deny_rule() -> None:
             "same PostToolUse group as the heartbeat hook, not replacing it",
         )
         _check(
+            settings_json["permissions"]["deny"] == ["Agent", "Task", "AskUserQuestion"],
+            "the tmux driver's --settings ALSO injects the Agent/Task/AskUserQuestion "
+            "tool deny rule (capability-tier guardrail redesign, 2026-08-06; "
+            "AskUserQuestion default-deny, operator ruling 2026-08-14), merged "
+            "alongside the three hooks -- 'Agent' is the live-registry-confirmed "
+            "name, 'Task' a defensive alias, AskUserQuestion denied by default "
+            "because this driver launches a real interactive claude CLI where the "
+            "tool's blocking picker can actually render",
+        )
+
+
+def test_spawn_allow_askuserquestion_omits_it_from_the_deny_list() -> None:
+    """The per-spawn escape hatch (SpawnSessionRequest.allow_askuserquestion,
+    mirrors the seed launcher's SOLET_ALLOW_ASKUSERQUESTION=1): Agent/Task
+    stay denied unconditionally, only AskUserQuestion's presence in the deny
+    list is conditional on this spec key."""
+    calls: list[list[str]] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
+        driver.spawn({"agent_instance_id": "agi-settings-2", "allow_askuserquestion": True})
+        new_session_call = next(c for c in calls if "new-session" in c)
+        pane_command = new_session_call[-1]
+        claude_argv = _extract_claude_argv_from_pane_command(pane_command)
+        settings_idx = claude_argv.index("--settings")
+        settings_json = json.loads(claude_argv[settings_idx + 1])
+        _check(
             settings_json["permissions"]["deny"] == ["Agent", "Task"],
-            "the tmux driver's --settings ALSO injects the Agent/Task tool deny rule "
-            "(capability-tier guardrail redesign, 2026-08-06), merged alongside the "
-            "three hooks -- 'Agent' is the live-registry-confirmed name, 'Task' a "
-            "defensive alias",
+            "allow_askuserquestion=True omits AskUserQuestion from the deny list "
+            "while leaving the unconditional Agent/Task deny untouched",
         )
 
 
@@ -728,6 +802,109 @@ def test_capability_report_shape() -> None:
             "attach_hint" in report and "tmux" in str(report["attach_hint"]),
             "capability_report carries a human-usable attach hint",
         )
+
+
+def test_driver_channel_enter_waits_for_baseline_change() -> None:
+    """RED-FIRST (driver-channel strand fix, 2026-08-14, hermetically
+    reproduced against the unmodified class — workbench/2026-08-14_driver_
+    channel_strand_fix_report_lane_d.md): ``capture-pane`` returns the
+    PRE-send screen until a TIME threshold (never gated on Enter, so neither
+    the pre-fix nor the fixed algorithm's own control flow can move it),
+    then the real post-render screen. Enter must only fire once the pane
+    has actually re-rendered — never while it still shows the pre-send
+    content the pre-fix code could mistake for "stable".
+
+    FAILING MUTATION: drop the ``current != baseline`` conjunct from
+    ``_wait_for_paste_stable`` (i.e. revert to the pre-fix comparison) — the
+    unfixed code declares stability against
+    ``DEFAULT_PASTE_STABLE_SAMPLES_REQUIRED`` identical pre-send samples
+    well before the render threshold, and the assertion below reds (the
+    pane content observed immediately before Enter is the pre-send screen,
+    not the post-render one).
+    """
+    pre_screen = "> claude is thinking...\n(pre-send screen, busy event loop)"
+    post_screen = "> claude is thinking...\n[Pasted text #1 +42 lines]"
+    render_at_t = 2.0
+    clock = {"t": 0.0}
+    last_capture: dict[str, str | None] = {"value": None}
+    last_capture_before_enter: dict[str, str | None] = {"value": None}
+
+    def now_fn() -> float:
+        return clock["t"]
+
+    def sleep_fn(seconds: float) -> None:
+        clock["t"] += seconds
+
+    def run_fn(cmd: list[str], **_kw: Any) -> _FakeCompleted:
+        if "capture-pane" in cmd:
+            content = post_screen if clock["t"] >= render_at_t else pre_screen
+            last_capture["value"] = content
+            return _FakeCompleted(stdout=content)
+        if "send-keys" in cmd and cmd[-1:] == ["Enter"]:
+            last_capture_before_enter["value"] = last_capture["value"]
+        return _FakeCompleted()
+
+    channel = _TmuxSendKeysDriverChannel(
+        tmux_bin="tmux",
+        session="repro-baseline-gate",
+        run_fn=run_fn,
+        sleep_fn=sleep_fn,
+        now_fn=now_fn,
+        stable_samples_required=DEFAULT_PASTE_STABLE_SAMPLES_REQUIRED,
+        stable_timeout_seconds=DEFAULT_PASTE_STABLE_TIMEOUT_SECONDS,
+    )
+    channel.send("a paste that renders slowly")
+    _check(
+        last_capture_before_enter["value"] == post_screen,
+        "Enter is sent only once the pane shows the ACTUAL post-render "
+        f"content, never the pre-send screen (observed: {last_capture_before_enter['value']!r})",
+    )
+
+
+def test_driver_channel_fails_open_when_baseline_never_changes() -> None:
+    """Degenerate-case companion (brief item 2): a paste whose render
+    leaves the visible pane UNCHANGED (e.g. output scrolled away) must
+    still submit via the existing fail-open timeout — never hang waiting
+    for a change that will never come. ``capture-pane`` returns the exact
+    same content on every poll, so ``current != baseline`` never holds; the
+    only way out is the pre-existing timeout path, unmodified by this fix.
+    """
+    constant_screen = "> claude is thinking...\n(never visibly changes)"
+    clock = {"t": 0.0}
+    calls: list[list[str]] = []
+
+    def now_fn() -> float:
+        return clock["t"]
+
+    def sleep_fn(seconds: float) -> None:
+        clock["t"] += seconds
+
+    def run_fn(cmd: list[str], **_kw: Any) -> _FakeCompleted:
+        calls.append(cmd)
+        if "capture-pane" in cmd:
+            return _FakeCompleted(stdout=constant_screen)
+        return _FakeCompleted()
+
+    channel = _TmuxSendKeysDriverChannel(
+        tmux_bin="tmux",
+        session="repro-baseline-unchanged",
+        run_fn=run_fn,
+        sleep_fn=sleep_fn,
+        now_fn=now_fn,
+        stable_timeout_seconds=5.0,
+        poll_interval_seconds=0.5,
+    )
+    channel.send("a paste that never visibly renders")
+    enter_calls = [c for c in calls if "send-keys" in c and c[-1:] == ["Enter"]]
+    _check(
+        len(enter_calls) == 1,
+        "Enter still fires exactly once via the fail-open timeout when the "
+        "pane content never differs from the baseline",
+    )
+    _check(
+        clock["t"] >= 5.0,
+        f"the fail-open path was reached only after the full timeout elapsed (t={clock['t']:.2f}s)",
+    )
 
 
 def test_needs_dev_channels_confirmation_guard() -> None:
@@ -1226,12 +1403,15 @@ def main() -> int:
     test_spawn_transport_mcp_override_uses_real_mcp_config()
     test_spawn_transport_watch_uses_explicit_empty_mcp_config()
     test_spawn_settings_json_wires_all_three_hooks_and_the_deny_rule()
+    test_spawn_allow_askuserquestion_omits_it_from_the_deny_list()
     test_spawn_env_session_mapping_spool_dir()
     test_spawn_env_heartbeat_marker_dir()
     test_spawn_wires_authority_system_prompt_with_full_substitution()
     test_spawn_wraps_run_fn_failure()
     test_spawn_wraps_nonzero_exit()
     test_capability_report_shape()
+    test_driver_channel_enter_waits_for_baseline_change()
+    test_driver_channel_fails_open_when_baseline_never_changes()
     test_needs_dev_channels_confirmation_guard()
     test_provider_ignores_dev_channels_predicate()
     test_effective_spawn_env_is_process_env_plus_optional_overlay()

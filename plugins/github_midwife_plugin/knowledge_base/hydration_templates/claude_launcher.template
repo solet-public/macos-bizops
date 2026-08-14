@@ -24,6 +24,17 @@ typeset -a extra_flags
 [[ -n "$model" ]]  && extra_flags+=(--model "$model")
 [[ -n "$effort" ]] && extra_flags+=(--effort "$effort")
 
+# AskUserQuestion default deny (operator ruling 2026-08-14): the structured-
+# choice picker blocks a session until a human answers (its timeout defaults
+# to "never"), which strands unattended and worker sessions and breaks
+# inter-agent messaging flows. Claude Code settings sources MERGE, so this
+# overlay unions a permissions deny into the session without touching the
+# user's own settings. Override for an attended session that wants the
+# picker: launch with SOLET_ALLOW_ASKUSERQUESTION=1. Rationale and doctrine:
+# search the knowledge base for "structured-choice prompt default deny".
+[[ "$SOLET_ALLOW_ASKUSERQUESTION" != "1" ]] && \
+  extra_flags+=(--settings "{{CLONE_DIR}}/client/claude-session-overlay.json")
+
 # Session label: read by the optional peer bridge for role identity and by the
 # coordination-hooks plugin's role-binding reminder for the role re-claim.
 # Session id: stable for this whole process tree, so the role binding

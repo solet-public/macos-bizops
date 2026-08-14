@@ -207,6 +207,27 @@ _SCAN_ROOTS = (
     REPO_ROOT / "plugins",
     REPO_ROOT / "quality_gates",
 )
+
+# --- canonical bare-invocation defaults (2026-08-14, lane E) — the exact pair
+# the Git-Controller commit skill's Step 7.6 passes explicitly. A FULLY bare
+# run (no --allowlist AND no --require-clean at all) resolves to these so its
+# verdict matches the canonical invocation instead of reporting every finding
+# as non-allowlisted (a standing false-alarm generator: same tree, opposite
+# verdicts). An explicit --allowlist (with or without --require-clean, the
+# shape used by gate_registry.py / platform_gates.py) is left untouched —
+# defaults apply ONLY when both flags are absent, so no existing caller's
+# behavior changes by even one finding. Paths are REPO_ROOT-anchored (derived
+# from this file's own location, not cwd) so a bare run from a subdirectory
+# still resolves correctly. ---
+_DEFAULT_ALLOWLIST = REPO_ROOT / "quality_gates" / "sql_access_allowlist.txt"
+_DEFAULT_REQUIRE_CLEAN = (
+    "ananta/src/ananta/llm/session_ledger",
+    "ananta/src/ananta/llm/agent_messaging",
+    "ananta/src/ananta/core/actions",
+    "plugins/default_knowledge_plugin/src",
+    "plugins/actr_memory_plugin/src",
+    "plugins/default_thinking_plugin/src",
+)
 _PRUNE_DIRS = frozenset({"__pycache__", ".mypy_cache", ".pytest_cache"})
 _OPERATOR_TOOLING_SEGMENTS = frozenset({"research", "tools", "migrations", "parity_tests"})
 _PLUGIN_SCOPE_SEGMENTS = frozenset({"src", "tests"})
@@ -642,9 +663,19 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_bare_defaults(args: argparse.Namespace) -> None:
+    """Mutate ``args`` in place: a FULLY bare invocation resolves to the
+    canonical --allowlist + --require-clean pair (see ``_DEFAULT_ALLOWLIST``
+    above). Any explicit --allowlist is left untouched."""
+    if args.allowlist is None and not args.require_clean:
+        args.allowlist = _DEFAULT_ALLOWLIST
+        args.require_clean = list(_DEFAULT_REQUIRE_CLEAN)
+
+
 def run(argv: list[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    _resolve_bare_defaults(args)
     allowlist = load_allowlist(args.allowlist) if args.allowlist else Allowlist()
 
     try:

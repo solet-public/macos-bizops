@@ -1,4 +1,4 @@
-# Maintenance-Verbs Joseki Cards: Rotation, Restart, Memory Sync, KB Refresh, Context Gauge
+# Maintenance-Verbs Joseki Cards: Rotation, Seat Self-Rotation, Restart, Memory Sync, KB Refresh, Context Gauge
 
 Tags: knowledge:tag:maintenance_verbs, knowledge:tag:joseki, knowledge:tag:session_lifecycle, knowledge:tag:memory_passthrough, knowledge:tag:context_gauge
 
@@ -8,9 +8,9 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:agent-messaging, consumer_profile:both
 
-Embedding Description: Ordered-call joseki cards for six recurring fleet maintenance operations — rotate a worker, restart a dead one, sync the local memory-passthrough projection, curate the ambient MEMORY.md head at a rotation boundary, refresh a plugin's KB/process registry, check a session's context-window occupancy — each with its verify step and known traps. Follow the card, don't re-derive the sequence.
+Embedding Description: Ordered-call joseki cards for seven recurring fleet maintenance operations — rotate a worker, rotate the operator seat itself through a delegated helper that drives its terminal, restart a dead worker, sync the local memory-passthrough projection, curate the ambient MEMORY.md head at a rotation boundary, refresh a plugin's KB/process registry, check a session's context-window occupancy — each with its verify step and known traps. Follow the card, don't re-derive the sequence.
 
-**When you need this**: a session is about to rotate, restart, or check on another managed session; a session needs to hydrate or drain its local memory-passthrough projection; a seat is at a rotation boundary or just hit a hydrate budget failure and needs to curate the ambient MEMORY.md head back under budget; a session is editing a plugin's KB process JSON or config and needs to refresh the live registry; a session (worker or the operator seat) needs to know how close it is to its context-window ceiling. Design records: `workbench/2026-08-09_maintenance_verbs_m0_design_mverbs-impl.md` (maintenance-verbs programme, Lane A, M0/M1) and the 2026-08-10 maintenance-verbs M2 memory-curation charter draft (M2, ambient-index curation & placement decay).
+**When you need this**: a session is about to rotate, restart, or check on another managed session; the operator seat itself needs its context cleared and resumed mid-programme without an operator keystroke; a session needs to hydrate or drain its local memory-passthrough projection; a seat is at a rotation boundary or just hit a hydrate budget failure and needs to curate the ambient MEMORY.md head back under budget; a session is editing a plugin's KB process JSON or config and needs to refresh the live registry; a session (worker or the operator seat) needs to know how close it is to its context-window ceiling. Design records: `workbench/2026-08-09_maintenance_verbs_m0_design_mverbs-impl.md` (maintenance-verbs programme, Lane A, M0/M1) and the 2026-08-10 maintenance-verbs M2 memory-curation charter draft (M2, ambient-index curation & placement decay).
 
 ---
 
@@ -27,6 +27,26 @@ Clears a managed worker's context and drives its next work turn — the "rotate 
 **Traps:**
 - *Ledger id vs. watch id* (step 1) — a watch-transport worker has TWO different `agent_instance_id`s; `peer_send_by_name` wants the role (routes via the watch id), the fleet lifecycle verbs want the ledger id. Neither accepts the other's.
 - *Armed ≠ fired* (step 5) — a rotation recorded as complete on the strength of a delivery receipt and one `busy`/`idle` reading, with no positive observation of an actual turn, is exactly the failure mode that left a seat un-rotated for 6.4 hours in a recorded 2026-08-09 incident. A delivery confirmation is not a turn.
+
+## Card: Seat self-rotation (delegated helper)
+
+Clears the operator seat's own context and resumes it mid-programme — the seat-side counterpart of worker rotation. A managed (tmux-hosted) worker never needs this card: the worker-rotation card's `clear_session` + `drive_session` verbs are its mechanism. This card is for the session with no manager above it — it delegates the drive to a helper session it dispatches itself, using only primitives every deployment has (spawning plus terminal injection), never a vendor remote-control capability. Proven live 2026-08-13: a helper cleared the driving seat and resumed it mid-programme, and the seat's durable identity and role binding survived the clear intact, with no re-claim needed.
+
+1. **Checkpoint.** Drain pending memory write-through, bring the workbench records current, and confirm no worker is holding for a go-signal only this seat can send.
+2. **Write the resume handoff file** in workbench: what is in flight, the read order for the fresh context, and the single first action.
+3. **Dispatch the helper** (an inexpensive model tier — the task is mechanical) with a brief naming the target surface and the only two texts it may ever inject: the literal `/clear`, and a short pickup prompt pointing at the handoff file.
+4. **Helper: resolve the seat's pane via the iTerm2 Python API** — enumerate sessions and match the `user.role` session variable (set by the launcher's OSC SetUserVar) under the 0/1/N gate: exactly one match, or refuse loud. Not AppleScript: `osascript` addressing a session by id for `write text` fails with error -1728 even when the same id came from AppleScript's own enumeration loop.
+5. **Inject `/clear`, then the carriage return as a separate send.** A `\n` inside the text never submits — the composer needs a distinct `\r` (Enter) send.
+6. **Verify the clear took** by reading the screen back, and expect the mid-turn race: if the seat was mid-turn when the injection landed, both injected texts sit in its pending-input queue until the turn ends — poll until the queue drains and the fresh splash appears.
+7. **Inject the pickup prompt + `\r`, then verify the fresh session is PROCESSING it** — actively working, not merely idle. `/clear`, executing from the queue, can consume a queued pickup prompt along with itself, leaving the fresh session deaf on an empty prompt line; if deaf, re-inject the pickup + `\r` once and re-verify.
+8. **Report per-step evidence.** The fresh seat captures the helper's transcript as the rotation record, then terminates the helper.
+
+**Traps:**
+- *AppleScript is the wrong API* (step 4) — the -1728 direct-addressing failure reproduces even after the id resolves cleanly by enumeration; do not iterate osascript syntax, switch to the Python API.
+- *Mid-turn injection queues; `/clear` eats the queued follow-up* (steps 6–7) — the pair of races observed in the live proof: injected text does not execute during the target's turn, and the clear can silently consume the queued resume prompt. Verify PROCESSING, not just cleared; one re-inject is the designed recovery.
+- *Deaf-until-driven* (step 7) — a cleared interactive session sits idle until someone types a turn; the pickup injection IS that turn. Without it the rotation stalls indefinitely with no error anywhere.
+- *Screen reads render spacing as NUL bytes* — normalize before matching text in a verify step.
+- *Long injections collapse to paste chips* (step 3) — keep the pickup prompt short and point at the handoff file rather than carrying content inline.
 
 ## Card: Worker restart
 

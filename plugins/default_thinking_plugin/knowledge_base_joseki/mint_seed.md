@@ -27,15 +27,18 @@ EMBEDDING_DESCRIPTION: Mint and publish a shareable solet seed repository: assem
 ## Sequence
 
 [ ] 1. Assemble a clean seed bundle from the committed ref
+    RESULT_PROCESSOR_KIND: deterministic_continuation
     a) Assemble a clean seed bundle from the committed ref into output_dir (plugin::seed_factory_plugin::assemble_seed)
 
 [ ] 2. (Publish only) Re-validate and SEAL the assembled bundle
+    RESULT_PROCESSOR_KIND: deterministic_continuation
     a) Re-validate the actual folder and seal it into a fresh neutral-identity commit, returning {repo_path, commit_sha, tree_hash} (plugin::seed_factory_plugin::validate_and_seal_seed_bundle)
 
 [ ] 3. (Publish only, PUBLIC only) Obtain explicit operator confirmation for public visibility
     a) Obtain explicit operator confirmation before publishing public — private is the default; public is never chosen by omission [agent-executed: surface the choice via post_message and wait for an explicit operator go]
 
 [ ] 4. (Publish only) Publish the sealed commit — create or append-update, never clobber, never force
+    RESULT_PROCESSOR_KIND: deterministic_continuation
     a) Publish the sealed commit to GitHub: create the repo (private by default) or append a re-mint commit to an existing seed repo (plugin::seed_factory_plugin::publish_seed)
 
 ## Expected Step Count
@@ -60,7 +63,7 @@ EMBEDDING_DESCRIPTION: Mint and publish a shareable solet seed repository: assem
 
 ## Next Joseki
 
-`mint_and_birth_local` — when the intent is to birth a live solet from the assembled seed rather than publish it. The two share step 1 (`assemble_seed`) and diverge after: publish (this card) vs. local birth.
+`remint_and_respond` — the successor card for the case this one does not cover: updating a seed repository that already has adopters. It wraps this ladder in the obligations a release to real users carries — predecessor lineage read from the published head, an assert-by-name census of the assembled bundle, the born-clone publication gate, a release cut from the notes, and the feedback closures in the same session. Use this card for a first mint or a local bundle with no audience; use `remint_and_respond` once there is one. Alternatively `mint_and_birth_local` — when the intent is to birth a live solet from the assembled seed rather than publish it. All three share step 1 (`assemble_seed`) and diverge after: publish (this card), release-to-adopters (`remint_and_respond`), or local birth (`mint_and_birth_local`).
 
 ## Repair Joseki
 

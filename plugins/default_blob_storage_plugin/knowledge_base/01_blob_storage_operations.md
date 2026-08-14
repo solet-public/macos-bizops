@@ -80,11 +80,11 @@ For *agent-driven ingestion* of large finished binary artifacts (audio renders, 
 This mirrors the vault `store_from_file` pattern: ingestion methods that name a *source* rather than carrying the value itself.
 
 ```
-[ ] N. Ingest finished FLAC render into blob storage
+[ ] N. Ingest finished quarterly report into blob storage
     PROCESS: service_interface::blob_storage_service::store_blob_from_file
     ARGS: {
-      "namespace": "soundcloud_artist_studio_plugin",
-      "file_path": "/Users/alice/Music/finished_render.flac"
+      "namespace": "<namespace>",
+      "file_path": "/Users/alice/Documents/quarterly_report.pdf"
     }
 ```
 

@@ -96,12 +96,20 @@ from .schema import (
     TABLE_SESSION_DEPENDENCY,
     TABLE_SESSION_ROLE_CLAIM,
 )
+from .session_hosts import OPERATOR_HOST
 from .session_lifecycle_store import (
+    DEFAULT_REPORT_BY_SECONDS,
     StaleLifecycleStateError,
     list_managed_sessions,
     transition_lifecycle_state,
 )
-from .session_lifecycle_verbs import VerbError, drive_on_delivery, terminate_session
+from .session_lifecycle_verbs import (
+    VerbError,
+    _rearm_report_by,
+    _resolve_termination_driver,
+    drive_on_delivery,
+    terminate_session,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -136,6 +144,26 @@ EVENT_SESSION_OVERDUE_NOTICE = "session_overdue_notice"
 # (spawning row past its deadline, terminated outright — see sweep_overdue_
 # sessions' spawning leg).
 EVENT_SESSION_SPAWN_ORPHANED_NOTICE = "session_spawn_orphaned_notice"
+
+# Third spawn-notice class: "alive but never registered" — the spawning row is
+# past its report_by, but the HOST DRIVER OBSERVES the spawned process alive
+# (live-measured 2026-08-13: a tmux worker, productive for hours and reporting
+# over a side channel, was reaped mid-programme because ledger liveness keyed
+# on peer registration alone). Instead of the reaper, the row's deadline is
+# re-armed and its steward told — bounded, because the OTHER live-measured
+# shape (a hung claude process that sat 'spawning' 8+ hours doing nothing,
+# the red-first case the reap itself fixed) is ALSO "alive": a liveness probe
+# cannot distinguish productive from hung, so patience runs out.
+EVENT_SESSION_SPAWN_UNREGISTERED_NOTICE = "session_spawn_unregistered_notice"
+
+# Total patience for an observed-alive, never-registered spawning row: this
+# many of the row's OWN spawn windows (report_by_seconds), measured from the
+# row's spawn timestamp (last_transition_at — unchanged while the row stays
+# 'spawning'). The first window is the original deadline; the remainder are
+# announced re-arms. Past the bound, the reap proceeds even though the
+# process is alive — every extension was announced, so the termination is
+# never the steward's first news.
+SPAWN_ALIVE_PATIENCE_WINDOWS: int = 4
 
 
 def _parse_iso(value: object) -> datetime | None:
@@ -338,6 +366,133 @@ def _notify_steward_of_spawn_orphaned(
     )
 
 
+def _spawning_host_observed_alive(row: dict[str, Any]) -> bool:
+    """True ONLY on a genuine host-level observation that the spawned process
+    is alive. False on every non-observation: an operator-hosted row (that
+    driver's ``alive()`` is an unconditional ``True`` by design — it observes
+    via registration only, so its answer is not evidence), a row with no
+    ``host_ref``, an unresolvable driver, or a probe that raises. The
+    fail-toward direction is deliberate: an unanswerable probe falls back to
+    the established reap, never to indefinite patience."""
+    host = str(row.get("host") or "")
+    host_ref = str(row.get("host_ref") or "")
+    if not host_ref or host == OPERATOR_HOST:
+        return False
+    agent_instance_id = str(row.get("agent_instance_id") or "")
+    try:
+        driver, _ = _resolve_termination_driver(row, agent_instance_id)
+        return bool(driver.alive(host_ref))
+    except VerbError:
+        return False
+    except Exception:  # noqa: BLE001 — a probe that raises is a non-observation, not a sweep failure
+        logger.warning(
+            "spawning row %s host-liveness probe raised; treating as unobserved",
+            agent_instance_id, exc_info=True,
+        )
+        return False
+
+
+def _spawn_alive_patience_exhausted(row: dict[str, Any], *, clock: datetime) -> bool:
+    """Whether an observed-alive spawning row has used up its bounded patience:
+    :data:`SPAWN_ALIVE_PATIENCE_WINDOWS` of its own spawn window, measured from
+    the row's spawn timestamp. ``last_transition_at`` IS the spawn timestamp for
+    a row still in ``spawning`` — the state has never transitioned. A row with
+    no parseable spawn timestamp exhausts immediately (no basis for patience —
+    fail toward the established reap)."""
+    spawned_at = _parse_iso(row.get("last_transition_at"))
+    if spawned_at is None:
+        return True
+    window = int(row.get("report_by_seconds") or 0) or DEFAULT_REPORT_BY_SECONDS
+    return (clock - spawned_at).total_seconds() > window * SPAWN_ALIVE_PATIENCE_WINDOWS
+
+
+def _notify_steward_of_spawn_unregistered(
+    *,
+    state: StateManagementInterface,
+    peer_registry: PeerRegistry,
+    bridge_manager: BridgeSessionManager,
+    row: dict[str, Any],
+) -> None:
+    """Steward notice for an observed-alive, never-registered spawning row
+    whose deadline was just re-armed instead of reaped — mirrors
+    :func:`_notify_steward_of_spawn_orphaned`'s resolve-then-append pattern.
+    The ``flow_id`` is stable per row so repeated extensions thread rather
+    than scatter."""
+    agent_instance_id = str(row.get("agent_instance_id") or "")
+    spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
+    if not spawner_instance_id:
+        return
+    binding = _resolve_steward_binding(
+        state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
+    )
+    if binding is None:
+        logger.warning(
+            "session %s spawn-unregistered: spawner %s not resolvable to a live "
+            "binding — deadline re-armed, steward not notified",
+            agent_instance_id, spawner_instance_id,
+        )
+        return
+    prose = (
+        f"session_spawn_unregistered_notice: {agent_instance_id} (lane_id="
+        f"{row.get('lane_id')!r}) is past its report_by deadline and has never "
+        "registered, but its host process is OBSERVED ALIVE — its deadline was "
+        "re-armed instead of reaping it. Patience is bounded: after "
+        f"{SPAWN_ALIVE_PATIENCE_WINDOWS} spawn windows in this state the row is "
+        "terminated even though the process is alive. If this session is doing "
+        "real work, drive it to register; if it is hung, terminate_session it now."
+    )
+    meta: dict[str, object] = {"flow_id": f"session-spawn-unregistered-{agent_instance_id}"}
+    try:
+        bridge_manager.append_event(
+            binding.bridge_id, EVENT_SESSION_SPAWN_UNREGISTERED_NOTICE, prose, meta,
+        )
+    except Exception:  # noqa: BLE001 — best-effort notify; the deadline is already re-armed
+        logger.warning(
+            "session %s spawn-unregistered notice append failed", agent_instance_id, exc_info=True,
+        )
+    drive_on_delivery(
+        state, recipient_agent_instance_id=spawner_instance_id,
+        sender_label="session_spawn_unregistered_notice",
+    )
+
+
+def _observed_alive_within_patience(
+    row: dict[str, Any],
+    *,
+    clock: datetime,
+    host_alive_probe: Callable[[dict[str, Any]], bool] | None,
+) -> bool:
+    """The whole earn-an-extension predicate: a genuine host-liveness
+    observation AND unexhausted patience. Split from
+    :func:`_mark_one_spawning_orphaned` to keep it under the radon cc
+    threshold; ``host_alive_probe`` overrides the real observation for tests
+    only."""
+    probe = host_alive_probe if host_alive_probe is not None else _spawning_host_observed_alive
+    return probe(row) and not _spawn_alive_patience_exhausted(row, clock=clock)
+
+
+def _extend_observed_alive_spawning_row(
+    state: StateManagementInterface,
+    row: dict[str, Any],
+    *,
+    agent_instance_id: str,
+    peer_registry: PeerRegistry | None,
+    bridge_manager: BridgeSessionManager | None,
+) -> None:
+    """The observed-alive branch of :func:`_mark_one_spawning_orphaned` —
+    re-arm the row's deadline from its own window, then best-effort notify the
+    steward. Split out to keep the caller under the radon cc threshold."""
+    _rearm_report_by(
+        state, agent_instance_id,
+        report_by_seconds=int(row.get("report_by_seconds") or 0),
+    )
+    if peer_registry is not None and bridge_manager is not None:
+        _notify_steward_of_spawn_unregistered(
+            state=state, peer_registry=peer_registry,
+            bridge_manager=bridge_manager, row=row,
+        )
+
+
 def _mark_one_spawning_orphaned(
     state: StateManagementInterface,
     row: dict[str, Any],
@@ -345,6 +500,7 @@ def _mark_one_spawning_orphaned(
     clock: datetime,
     peer_registry: PeerRegistry | None,
     bridge_manager: BridgeSessionManager | None,
+    host_alive_probe: Callable[[dict[str, Any]], bool] | None = None,
 ) -> bool:
     """Counterpart to :func:`_mark_one_overdue` for a ``spawning`` row past
     its ``report_by`` deadline. Not a bare :func:`transition_lifecycle_state`
@@ -363,6 +519,18 @@ def _mark_one_spawning_orphaned(
         return False
     agent_instance_id = str(row.get("agent_instance_id") or "")
     if not agent_instance_id:
+        return False
+    # OBSERVE before reaping (2026-08-13, live-measured both ways): a spawning
+    # row past its deadline whose host process is observed alive is not an
+    # orphaned spawn — it is a live session whose registration never completed.
+    # It earns a bounded, ANNOUNCED deadline re-arm instead of the reaper. An
+    # unobservable or observed-dead host, or exhausted patience, falls through
+    # to the established reap unchanged.
+    if _observed_alive_within_patience(row, clock=clock, host_alive_probe=host_alive_probe):
+        _extend_observed_alive_spawning_row(
+            state, row, agent_instance_id=agent_instance_id,
+            peer_registry=peer_registry, bridge_manager=bridge_manager,
+        )
         return False
     try:
         terminate_session(state, agent_instance_id=agent_instance_id, directed_by="sweep:platform")
@@ -385,6 +553,7 @@ def sweep_overdue_sessions(
     now: datetime | None = None,
     peer_registry: PeerRegistry | None = None,
     bridge_manager: BridgeSessionManager | None = None,
+    host_alive_probe: Callable[[dict[str, Any]], bool] | None = None,
 ) -> int:
     """Mark ``live``/``idle`` managed_session rows ``overdue`` past ``report_by``,
     then best-effort notify each row's steward (D2-lane-tail follow-up #3 —
@@ -393,6 +562,10 @@ def sweep_overdue_sessions(
     Also terminates ``spawning`` rows past ``report_by`` — see
     :func:`_mark_one_spawning_orphaned`; a ``spawning`` row was invisible to
     an earlier version of this sweep, which scanned only ``live``/``idle``.
+    Since 2026-08-13 that leg OBSERVES host liveness first: an observed-alive
+    row gets a bounded, announced deadline re-arm instead of the reaper
+    (``host_alive_probe`` overrides the observation for tests only —
+    production callers omit it and get the real host-driver probe).
 
     Uncapped ``query_state`` per lifecycle_state (equality filter — no
     op-grammar dependency), never ``query_ordered``'s capped page: a fleet-wide
@@ -422,6 +595,7 @@ def sweep_overdue_sessions(
         if _mark_one_spawning_orphaned(
             state, row, clock=clock,
             peer_registry=peer_registry, bridge_manager=bridge_manager,
+            host_alive_probe=host_alive_probe,
         ):
             marked += 1
     return marked

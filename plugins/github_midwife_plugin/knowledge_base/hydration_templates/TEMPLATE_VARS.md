@@ -41,6 +41,7 @@ reconcile the runbook against it — the dependency runs one way.
 | `zshrc.template` | `~/.zshrc` (ONLY on accepted offer — see runbook) | 0644 |
 | `solet.zsh.template` | `<clone>/client/<name>.zsh` | 0644 |
 | `claude_launcher.template` | `<clone>/client/bin/claude-<name>` | 0755 |
+| `claude_session_overlay.json.template` | `<clone>/client/claude-session-overlay.json` — token-free literal copy. The `AskUserQuestion` default-deny overlay the Claude launcher passes via `--settings` (settings sources merge, so the deny unions in without touching the user's own files). The launcher skips the flag entirely under `SOLET_ALLOW_ASKUSERQUESTION=1` — that env var is the whole override mechanism, so this file's content stays a bare permissions deny; adding other keys here would smuggle un-overridable configuration into every session | 0644 |
 | `codex_launcher.template` | `<clone>/client/bin/codex-<name>` | 0755 |
 | `launch.template` | `<clone>/client/bin/launch-<name>` | 0755 |
 | `CLAUDE.md.template` | `<clone>/CLAUDE.md` | 0644 |

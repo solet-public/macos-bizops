@@ -187,6 +187,44 @@ Errors are typed with the `gsuite.*` prefix: `gsuite.not_connected`,
 `gsuite.not_found`, `gsuite.invalid_params`, `gsuite.result_too_large`
 (`sheets_get_values` only, see below).
 
+## Retrieving a background job's result without a live listener
+
+Every mutating or long-running verb here is born-async (the D0.3
+deferred-completion shape): the dispatch call returns
+`{"job_id": ..., "status": "queued"}` in milliseconds, the work runs on the
+plugin's background thread, and the finished result is delivered as a message
+to a live listening session. A session that invoked the verb through a plain
+`<name> call` holds no listener, so the completion has nowhere to land — the
+job still finishes; only the delivery is skipped.
+
+From such a session, fetch the finished payload directly (measured 2026-08-14):
+
+```bash
+<name> call service_interface::job_service::get_latest_job '{"plugin_name": "g_suite_plugin", "action_name": "sheets_create_from_files"}'
+```
+
+- `status: completed` → the job's `result` field carries the verb's payload
+  (for a sheet creation, the spreadsheet id/URL).
+- `status: pending`/`processing` → poll again; the job has not finished.
+- `status: failed` → the job's `error` field carries the failure.
+- `job: null` → nothing matched the filters (no such job has been created —
+  check `plugin_name`/`action_name` spelling; this is a normal empty answer,
+  not an error).
+
+One limit worth knowing: the verb returns the LATEST matching job only, so
+two dispatches of the same verb from a no-listener session leave the earlier
+job unreachable by THIS route. When the `job_id` from the dispatch envelope
+is still in hand, fetch that exact job instead — it cannot be displaced by a
+later dispatch:
+
+```bash
+<name> call service_interface::job_service::get_job '{"job_id": "<the dispatched job_id>"}'
+```
+
+Both verbs attach the job's stored `result` and `error` payloads to the row
+they return (measured 2026-08-14 — the ledger row itself has no such
+columns; the payloads live in a companion store and are read back for you).
+
 ## Business-data limits migration (2026-08-02) — g_suite is LIMITS-ONLY
 
 Unlike jira_plugin/marketo_plugin/zuora_plugin's full data-export treatment

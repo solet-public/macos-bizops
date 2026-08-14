@@ -99,9 +99,18 @@ def _configured_driver(
     mcp_config = tmp_dir / ".mcp.json"
     mcp_config.write_text("{}")
     _stub_worker_hook_files(tmp_dir)
+    # Injected, never resolved from the ambient environment: the CLI/PATH and
+    # presence-sidecar assertions would otherwise pass or fail depending on
+    # whether the machine running the gate happens to have a `solet` on PATH
+    # or beside its interpreter.
+    solet_bin = tmp_dir / "stub-venv" / "bin" / "solet"
+    solet_bin.parent.mkdir(parents=True, exist_ok=True)
+    solet_bin.write_text("#!/bin/sh\nexit 0\n")
+    solet_bin.chmod(0o755)
     kwargs: dict[str, Any] = {
         "claude_bin": _executable_stub(tmp_dir),
         "solet_name": "testhom",
+        "solet_bin": str(solet_bin),
         "permission_mode": "bypassPermissions",
         "mcp_config_path": mcp_config,
         "cwd": tmp_dir,
@@ -511,8 +520,20 @@ def test_spawn_env_and_command_wiring() -> None:
             },
         )
         _check(host_ref == "54321", "spawn() returns str(pid) as host_ref")
-        _check(len(calls) == 1, "popen_fn called exactly once")
-        env = calls[0]["env"]
+        # Registration-loss fix (2026-08-14): a `watch`-transport spawn now
+        # ALSO backgrounds the presence sidecar that puts the worker in
+        # peer_list, so the worker process is popen call 0 and the watcher is
+        # call 1 (mirrors codex_app_server). Asserted by position rather than
+        # by a bare count, so a mutation that drops the worker spawn and keeps
+        # only the watcher still reds here.
+        worker_calls = [c for c in calls if "watch" not in c["cmd"]]
+        watcher_calls = [c for c in calls if "watch" in c["cmd"]]
+        _check(len(worker_calls) == 1, "popen_fn spawns exactly one worker process")
+        _check(
+            len(watcher_calls) == 1,
+            "popen_fn also arms exactly one presence watcher on the watch transport",
+        )
+        env = worker_calls[0]["env"]
         _check(
             env["AGENT_INSTANCE_ID"] == "agi-abc",
             "env carries the ledger's own agent_instance_id",
@@ -524,12 +545,27 @@ def test_spawn_env_and_command_wiring() -> None:
         _check(env["AGENT_SESSION_LABEL"] == "lane-x", "label prefers lane_id when given")
         _check(env["SOLET_NAME"] == "testhom", "SOLET_NAME flows from driver config")
         _check(
-            env["AGENT_WAKE_CLI"] == "solet",
-            "AGENT_WAKE_CLI is the literal wake-CLI executable name, not the "
-            "solet instance name -- `which <instance-name>` cannot "
-            "resolve, so a value that tracked solet_name (e.g. "
-            "'testhom' here) silently broke every worker's idle-wake Stop "
-            "hook; deaf-wake fix, 2026-08-08",
+            Path(env["AGENT_WAKE_CLI"]).name == "solet"
+            and env["AGENT_WAKE_CLI"] != env["SOLET_NAME"],
+            "AGENT_WAKE_CLI is the wake-CLI EXECUTABLE, never the solet "
+            "instance name -- `which <instance-name>` cannot resolve, so a "
+            "value that tracked solet_name (e.g. 'testhom' here) silently "
+            "broke every worker's idle-wake Stop hook; deaf-wake fix, "
+            "2026-08-08",
+        )
+        _check(
+            Path(env["AGENT_WAKE_CLI"]).is_absolute(),
+            "AGENT_WAKE_CLI is ABSOLUTE, not the bare name -- a bare 'solet' "
+            "is unresolvable under the minimal PATH a tmux pane or a "
+            "materialized release actually runs with, and both the Stop-hook "
+            "waker and the PostToolUse heartbeat then died silently "
+            "(FileNotFoundError, exit 0); registration-loss fix, 2026-08-14",
+        )
+        _check(
+            env["PATH"].split(os.pathsep)[0]
+            == str(Path(env["AGENT_WAKE_CLI"]).parent),
+            "the CLI's directory leads PATH, so hooks and skills that invoke "
+            "a BARE `solet` resolve it too",
         )
         _check(
             env["FLEET_TRANSPORT"] == "watch",

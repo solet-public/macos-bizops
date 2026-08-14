@@ -31,12 +31,15 @@ from .kb_process_registry import registry_has_process_key
 from .kb_search import _SEARCH_MIN_TOP_K, apply_min_score, collect_tiered_results, get_active_names
 from .layer_filter import build_layer_constraint
 from .retrieval_audit import (
+    RATIFIED_SCOPE_PLAN,
     AuditCase,
+    ScopePolicy,
     aggregate_audit,
     discover_test_files,
     filter_cases_to_active,
     parse_test_file,
     render_markdown,
+    run_case_under_scope_plan,
 )
 from .retrieval_test import build_search_fn, run_retrieval_test
 
@@ -175,8 +178,10 @@ class KnowledgeSearchPluginMixin:
         fail_fast: bool = False,
     ) -> dict[str, Any]:
         """Walk every ``*.retrieval_test.yaml`` under ``corpus_root``, run the
-        per-article retrieval test against each, aggregate DRIFT, OVERREACH, and
-        STALE_PROCESS_KEY findings, and write a Markdown report under ``report_dir``.
+        per-article retrieval test against each under the ratified split scope
+        (``retrieval_audit.RATIFIED_SCOPE_PLAN``), aggregate DRIFT, OVERREACH,
+        STALE_PROCESS_KEY, and LEGACY_KEY findings, and write a Markdown report
+        under ``report_dir``.
         """
         if self._kb_root is None:
             raise RuntimeError(f"{PLUGIN_NAME}: knowledge_base_root not configured")
@@ -228,6 +233,7 @@ class KnowledgeSearchPluginMixin:
                 "drifts": aggregate.drifts,
                 "overreaches": aggregate.overreaches,
                 "stale_keys": aggregate.stale_keys,
+                "legacy_keys": aggregate.legacy_keys,
                 "report_path": str(report_path),
                 "duration_seconds": duration_seconds,
             },
@@ -249,15 +255,30 @@ class KnowledgeSearchPluginMixin:
         }
 
     def _run_single_audit(self, case: AuditCase) -> dict[str, Any]:
-        """Run one article's retrieval test against the full active corpus."""
-        response = self.test_retrieval(
-            article_path=case.article_path,
-            target_queries=case.target_queries,
-            forbidden_queries=case.forbidden_queries,
-            min_rank=case.min_rank,
-            forbidden_min_rank=case.forbidden_min_rank,
-            active_knowledge_bases=None,
-            process_key_assertions=case.process_key_assertions,
+        """Run one article's retrieval test under the ratified split-scope plan.
+
+        ``min_rank``/DRIFT is judged within the article's own knowledge base;
+        forbidden/OVERREACH is judged across every active one
+        (``RATIFIED_SCOPE_PLAN``, ``retrieval_audit.ScopePolicy`` -- the same
+        plan ``run_retrieval_companions.py`` executes, one definition for both).
+        """
+        def _call(
+            scope: ScopePolicy, target_queries: list[str], forbidden_queries: list[str],
+        ) -> dict[str, Any]:
+            response = self.test_retrieval(
+                article_path=case.article_path,
+                target_queries=target_queries,
+                forbidden_queries=forbidden_queries,
+                min_rank=case.min_rank,
+                forbidden_min_rank=case.forbidden_min_rank,
+                active_knowledge_bases=(
+                    [case.knowledge_base] if scope is ScopePolicy.OWN_KB else None
+                ),
+                process_key_assertions=case.process_key_assertions,
+            )
+            data = response.get("data", {})
+            return data if isinstance(data, dict) else {}
+
+        return run_case_under_scope_plan(
+            RATIFIED_SCOPE_PLAN, case.target_queries, case.forbidden_queries, _call,
         )
-        data = response.get("data", {})
-        return data if isinstance(data, dict) else {}
