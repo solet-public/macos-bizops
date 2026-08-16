@@ -855,17 +855,40 @@ class StateService(BootstrappableServiceInterface):
         return self._database_operation_service.delete_records(namespace, query)
 
     def query_state(self, namespace: str, filters: dict[str, object]) -> ActionResult:
-        """Query state using DatabaseOperationService.
+        """DEPRECATED alias for :meth:`read_state` — prefer ``read_state``.
 
-        Delegates to DatabaseOperationService which handles validation and
-        appropriate storage access (bootstrap vs plugin mode).
+        ``query_state`` is a second NAME for the ``read_state`` primitive, not a
+        second primitive: every backend implements it by delegating (the
+        postgres and rds plugins literally ``return self.read_state(...)``, and
+        ``BootstrapDatabaseStorage`` now does too). New code should call
+        :meth:`read_state` directly, or :meth:`query_ordered` when it wants a
+        page rather than a complete filtered set. Existing call sites are being
+        migrated in waves; this is not scheduled for removal until they are done.
+
+        **The ``filters`` parameter is the WHOLE QUERY, not just its filter
+        clause.** The name is historical and actively misleading — the dict is
+        passed through unchanged and becomes ``read_state``'s ``query``, so it
+        takes the same envelope::
+
+            {"table": str,
+             "filters": dict,        # the actual filter clause
+             "limit": int,           # optional — compiled into SQL LIMIT
+             "unbounded": bool}      # optional — consent to a scan over the cap
+
+        In particular ``limit`` and ``unbounded`` WORK HERE and always have. A
+        2026-08-15 census recorded these call sites as structurally unable to
+        bound themselves; that was wrong, and it was wrong because nothing in
+        this signature or docstring said the slot existed. It does. Pass a
+        ``limit``. See ``ananta.services.state_service.read_bounds`` for the
+        bound and why an over-cap read is refused rather than truncated.
 
         Args:
             namespace: Target namespace to query
-            filters: Filter criteria for data retrieval
+            filters: The ``{table, filters, limit?, unbounded?}`` query envelope
+                described above — NOT merely a filter mapping.
 
         Returns:
-            ActionResult with filtered data or error details
+            ActionResult with the records, or error details
 
         Raises:
             FrameworkError: If database operation service is not initialized or query fails

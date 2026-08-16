@@ -19,17 +19,41 @@ fault before the marker → next boot re-runs); idempotent because it flips ONLY
 rows where ``delivered=true`` and ``consumed=false``, so a re-run (or a lost
 marker) is a no-op.
 
-State-interface ONLY (no raw SQL/DDL): ``query_state`` UNCAPPED over the whole
-table — NOT ``query_ordered``, whose 100-cap would silently truncate this
-unbounded table — then ``update_state`` on each grandfathered row by id. It
-rides the INJECTED :class:`StateManagementInterface` (the platform's
+State-interface ONLY (no raw SQL/DDL): the whole table is walked as
+``query_ordered`` pages via ``iter_table_rows``, then ``update_state`` on each
+grandfathered row by id. It rides the INJECTED :class:`StateManagementInterface`
+(the platform's
 authenticated pool) exactly like ``message_important_backfill``, so it CANNOT
 hit the JOS-02 migration-credential failure mode: that migration built its OWN
 ``PostgresConfig`` from plugin JSON → defaulted ``password='change_me'`` → auth
 failure, and its only smoke used a STUB state service so the live-auth path was
 never exercised. This backfill never opens a connection; the live path IS the
-injected authenticated service, and S7 exercises it against a real (non-stub)
-state fake.
+injected authenticated service, and
+``plugins/agent_messaging_plugin/tests/role_message_consumed_backfill_smoke.py``
+exercises it against a real (non-stub) state fake.
+
+(That last sentence used to name "S7" and was FALSE — no such test existed
+anywhere in the tree, and none had since this module shipped. A coverage claim in
+a docstring is worse than silence: it stops the next reader from checking. The
+smoke it now names was written on 2026-08-15 and is registered in
+``quality_gates/gate_smokes.txt``, which is an allowlist — an unregistered smoke
+silently never runs.)
+
+**This read used to be deliberately UNCAPPED**, on the reasoning that
+``query_ordered``'s 100-row page cap "would silently truncate this unbounded
+table". That was correct against the old 10,000-row default and is now exactly
+inverted: the default bound is 100 (``read_bounds.MAX_READ_ROWS``), so the
+uncapped read is the one that gets refused, and a sibling read on this same boot
+path took ``start_interface`` down on 2026-08-15 for precisely that reason. A
+page cap only truncates if you stop after one page — ``iter_table_rows`` pages
+until a short page proves the end, on a tie-safe ``(created_at, id)`` cursor.
+Grandfathering rows mid-walk is safe: both cursor columns are immutable after
+insert.
+
+Nothing fired here only because the durable marker is set on this profile. **A
+one-shot marker is not a bound, it is a delay** — any database with pre-migration
+history and no marker (a rebuild, a restore) would have booted straight into the
+refusal.
 """
 
 from __future__ import annotations
@@ -47,9 +71,9 @@ from ananta.llm.agent_messaging.schema import (
 )
 from ananta.llm.agent_messaging.state_results import (
     require_completed,
-    require_records,
     require_updated,
 )
+from ananta.services.state_service.bounded_read import iter_table_rows
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -58,6 +82,18 @@ logger = logging.getLogger(__name__)
 
 _COL_ID = "id"
 _COL_DELIVERED = "delivered"
+
+# Measured 4,346 rows on 2026-08-15, growing with every role message. Same
+# reasoning as ``message_important_backfill``'s ceiling: below the 109,393-row
+# read that caused the 2026-08-15 stall, so a one-shot walk refuses before it can
+# become that read again.
+_ROLE_MESSAGE_CEILING = 100_000
+_CEILING_REASON = (
+    "one row per role message ever routed (measured 4,346 on 2026-08-15); this "
+    "is a ONE-SHOT grandfathering pass, so the walk happens at most once per "
+    "database, and the ceiling stays below the 109,393-row read that caused the "
+    "2026-08-15 stall."
+)
 
 # Durable one-shot marker (set ONLY after a successful full pass → self-healing).
 _BACKFILL_MARKER_KEY = "agent_role_message_consumed_backfill_v1_complete"
@@ -81,11 +117,24 @@ def backfill_role_message_consumed(
     if _backfill_already_complete(state):
         return {"updated": [], "status": STATUS_ALREADY_DONE}
     migration_time = datetime.now(UTC).isoformat()
-    result = state.query_state(
-        NAMESPACE, {"table": TABLE_AGENT_ROLE_MESSAGE, "filters": {}},
-    )
     updated: list[str] = []
-    for row in require_records(result):
+    rows = iter_table_rows(
+        state,
+        namespace=NAMESPACE,
+        table=TABLE_AGENT_ROLE_MESSAGE,
+        filters={},
+        ceiling=_ROLE_MESSAGE_CEILING,
+        reason=_CEILING_REASON,
+    )
+    for row in rows:
+        # `filters` stays empty rather than pushing {consumed: False,
+        # delivered: True} down, even though both halves ARE columns and the
+        # grammar could express it. Whether pre-migration rows carry False or
+        # NULL in those columns is not something this site has measured, and an
+        # equality filter would silently skip the NULL ones — which are exactly
+        # the rows to grandfather. Pagination fixes the bound without betting on
+        # that; pushing the predicate down is a worthwhile follow-up that needs
+        # its own measurement first.
         if not _needs_backfill(row):
             continue
         row_id = str(row[_COL_ID])

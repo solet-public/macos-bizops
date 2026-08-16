@@ -146,6 +146,13 @@ class ManagedSessionSpec:
     spawned_by_instance_id: str = ""
     spawned_by_role: str = ""
     role_name: str = ""
+    # W6 (#13 §44.3): the name the worker answers to on its own machine.
+    # Empty means "derive it" — insert_managed_session falls back to
+    # role_name then lane_id, the same order spawn_session resolves.
+    local_name: str = ""
+    # W4A item 3: an EXPLICIT operator choice to spawn onto a host whose
+    # preflight found worker hooks unable to run. Default off.
+    degraded_hooks_acknowledged: bool = False
     visibility: str = SESSION_VISIBILITY_HEADLESS
     model: str = ""
     effort: str = ""
@@ -173,6 +180,14 @@ def insert_managed_session(
         "agent_runtime": spec.agent_runtime,
         "spawned_by_instance_id": spec.spawned_by_instance_id,
         "spawned_by_role": spec.spawned_by_role,
+        # W6: role_name was a ManagedSessionSpec field that this writer never
+        # persisted and no caller ever passed — an inert knob. It is
+        # load-bearing now (it is what the incumbent refusal names), so it is
+        # written, and local_name is derived from it exactly as spawn_session
+        # resolves it so a direct store caller cannot mint a different rule.
+        "role_name": spec.role_name,
+        "local_name": spec.local_name or spec.role_name or spec.lane_id,
+        "degraded_hooks_acknowledged": spec.degraded_hooks_acknowledged,
         "visibility": spec.visibility,
         "model": spec.model,
         "effort": spec.effort,
@@ -435,6 +450,27 @@ def backfill_registration(
         },
         {"agent_session_id": agent_session_id, "agent_id": agent_id},
     )
+    # W4A: registration is the exact event the watchdog was waiting for, so a
+    # registration that arrives LATE clears the mark rather than leaving a row
+    # that permanently reads as deaf. Cleared loudly, not silently: a worker
+    # that registered late is a different story from one that never did, and
+    # the next reader needs to be able to tell them apart.
+    if row.get("registration_overdue_at"):
+        logger.warning(
+            "registration watchdog: %s registered LATE -- it was marked "
+            "registration-overdue at %s (%s) and has now completed "
+            "registration. Clearing the mark; the delay itself was real.",
+            matched_instance_id, row.get("registration_overdue_at"),
+            row.get("registration_overdue_reason"),
+        )
+        state.update_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {
+                "table": TABLE_MANAGED_SESSION,
+                "filters": {_COL_AGENT_INSTANCE_ID: matched_instance_id, _COL_IS_DELETED: 0},
+            },
+            {"registration_overdue_at": None, "registration_overdue_reason": ""},
+        )
     if str(row.get(_COL_LIFECYCLE_STATE) or "") != LIFECYCLE_SPAWNING:
         return
     try:
@@ -469,6 +505,47 @@ def set_host_ref(
             "filters": {_COL_AGENT_INSTANCE_ID: agent_instance_id, _COL_IS_DELETED: 0},
         },
         {"host_ref": host_ref},
+    )
+
+
+def mark_registration_overdue(
+    state: StateManagementInterface,
+    *,
+    agent_instance_id: str,
+    reason: str,
+    observed_at: datetime,
+) -> None:
+    """W4A: stamp the registration-overdue FIELDS on a still-``spawning`` row.
+
+    Deliberately NOT a :func:`transition_lifecycle_state` call, and the
+    reasoning is the whole design call — see
+    :func:`session_sweep.sweep_unregistered_spawning_sessions`. The row is
+    still genuinely in the spawn phase AND is now registration-overdue; those
+    are two facts, and a lifecycle state can only hold one of them. A new
+    state would also have to be WRITTEN by somebody, and the defining property
+    of this failure is that nobody is home — so it would encode "the platform
+    noticed", not a lifecycle fact about the session.
+
+    Predicated on the row still being ``spawning`` so a registration or a
+    terminate landing in the race window is never overwritten with a mark that
+    is already false. Idempotent by the same predicate plus the null check in
+    the sweep: the FIRST observation's timestamp is the one that survives, so
+    the field answers "since when", not "as of the last tick".
+    """
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {
+            "table": TABLE_MANAGED_SESSION,
+            "filters": {
+                _COL_AGENT_INSTANCE_ID: agent_instance_id,
+                _COL_IS_DELETED: 0,
+                _COL_LIFECYCLE_STATE: LIFECYCLE_SPAWNING,
+            },
+        },
+        {
+            "registration_overdue_at": observed_at.isoformat(),
+            "registration_overdue_reason": reason,
+        },
     )
 
 

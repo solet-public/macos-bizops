@@ -12,10 +12,11 @@ import json
 import logging
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import psycopg
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
+from ananta.services.state_service.read_bounds import MAX_READ_ROWS
 from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
@@ -68,6 +69,12 @@ from .search import run_similarity_search
 from .utils import qualified_table
 
 logger = logging.getLogger(__name__)
+
+# Membership reads are chunked to this many candidate ids per query. DERIVED
+# from the state service's own row cap rather than hard-coded, so the two can
+# never drift apart: a chunk read filters on at most this many external_ids and
+# therefore can never return more rows than the cap allows.
+_EXTERNAL_ID_CHUNK: Final[int] = MAX_READ_ROWS
 
 
 def make_local_pool(config: PGVectorConfig) -> ConnectionPool:  # type: ignore[type-arg]
@@ -388,23 +395,39 @@ class PGVectorProvider:
         if not candidate_external_ids:
             return {KEY_MISSING: []}
 
-        read_result = self._state_service.read_state(
-            namespace=namespace,
-            query={
-                KEY_TABLE: TABLE_EMBEDDINGS,
-                KEY_FILTERS: {
-                    COLUMN_EXTERNAL_ID: candidate_external_ids,
-                    COLUMN_IS_DELETED: DELETED_FLAG_ACTIVE,
+        # CHUNKED (D9, 2026-08-15): the membership read is bounded by the
+        # CALLER's list length, and that caller is the orphan reconcile, which
+        # passes every active memory id — 42,500 on this deployment. One read
+        # of that shape exceeds the read_state row cap and is refused, which
+        # killed a green boot at `reindex_orphaned_memories`. Chunking makes
+        # each read bounded BY CONSTRUCTION (a chunk can match at most its own
+        # length), so this needs no `unbounded` opt-in and never depends on how
+        # large the caller's list happens to get.
+        present: set[str] = set()
+        for start in range(0, len(candidate_external_ids), _EXTERNAL_ID_CHUNK):
+            chunk = candidate_external_ids[start : start + _EXTERNAL_ID_CHUNK]
+            read_result = self._state_service.read_state(
+                namespace=namespace,
+                query={
+                    KEY_TABLE: TABLE_EMBEDDINGS,
+                    KEY_FILTERS: {
+                        COLUMN_EXTERNAL_ID: chunk,
+                        COLUMN_IS_DELETED: DELETED_FLAG_ACTIVE,
+                    },
+                    # Explicit and exact: the filter can match at most one row
+                    # per candidate, so this states the true bound rather than
+                    # relying on the provider's default.
+                    KEY_LIMIT: len(chunk),
                 },
-            },
-        )
-        if read_result.get(KEY_ACTION_STATUS) != STATUS_COMPLETED:
-            error = read_result.get(KEY_ERROR, "Unknown error")
-            raise RuntimeError(f"StateService read failed: {error}")
+            )
+            if read_result.get(KEY_ACTION_STATUS) != STATUS_COMPLETED:
+                error = read_result.get(KEY_ERROR, "Unknown error")
+                raise RuntimeError(f"StateService read failed: {error}")
 
-        data = cast(dict[str, Any], read_result.get(KEY_DATA, {}))
-        records = cast(list[dict[str, Any]], data.get(KEY_RECORDS, []))
-        present = {str(row.get(COLUMN_EXTERNAL_ID)) for row in records}
+            data = cast(dict[str, Any], read_result.get(KEY_DATA, {}))
+            records = cast(list[dict[str, Any]], data.get(KEY_RECORDS, []))
+            present.update(str(row.get(COLUMN_EXTERNAL_ID)) for row in records)
+
         return {
             KEY_MISSING: [
                 eid

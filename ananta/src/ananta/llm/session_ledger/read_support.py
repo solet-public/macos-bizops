@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol, cast
@@ -493,9 +494,9 @@ class _CensusAggregator:
         self,
         *,
         sources: list[dict[str, object]],
-        sessions: list[dict[str, object]],
-        tool_calls: list[dict[str, object]],
-        import_batches: list[dict[str, object]],
+        sessions: Iterable[dict[str, object]],
+        tool_calls: Iterable[dict[str, object]],
+        import_batches: Iterable[dict[str, object]],
         fingerprint_seeds: tuple[int, int],
     ) -> None:
         self._sources = sources
@@ -503,22 +504,36 @@ class _CensusAggregator:
         # Live-session id -> source_id. An event / tool_call whose session is
         # absent here (soft-deleted or never present) is dropped from the
         # per-source tally — the INNER-JOIN ``s.is_deleted = 0`` semantics.
-        self._session_source: dict[str, str] = {
-            str(row["id"]): str(row["source_id"]) for row in sessions
-        }
-        self._sessions = self._tally_sessions(sessions)
+        self._session_source: dict[str, str] = {}
+        # ``sessions`` is consumed EXACTLY ONCE. It used to be walked twice — a
+        # dict comprehension for ``_session_source``, then ``_tally_sessions`` —
+        # which is harmless for a list and silently wrong for the paged
+        # generators these are now fed (2026-08-16, lane-ak): the second pass
+        # would see an exhausted iterator and every session tally would come back
+        # empty, with no error. Merged into one loop so the parameter can honestly
+        # be an ``Iterable``.
+        #
+        # ORDERING IS LOAD-BEARING: ``_tally_tool_calls`` and ``fold_event_page``
+        # both look rows up in ``_session_source``, so the session stream must be
+        # fully drained before either runs.
+        self._sessions = self._tally_sessions_and_index(sessions)
         self._tool_calls = self._tally_tool_calls(tool_calls)
         self._batches = self._tally_batches(import_batches)
         self._event_count: dict[str, int] = {}
         self._fingerprint_a: dict[str, int] = {}
         self._fingerprint_b: dict[str, int] = {}
 
-    @staticmethod
-    def _tally_sessions(
-        sessions: list[dict[str, object]],
+    def _tally_sessions_and_index(
+        self, sessions: Iterable[dict[str, object]],
     ) -> dict[str, _SessionTally]:
+        """Per-source session tallies AND the id->source_id index, in one pass.
+
+        One loop rather than two so ``sessions`` can be a paged generator; the
+        arithmetic is identical to the two passes it replaces.
+        """
         tally: dict[str, _SessionTally] = {}
         for row in sessions:
+            self._session_source[str(row["id"])] = str(row["source_id"])
             entry = tally.setdefault(str(row["source_id"]), _SessionTally())
             entry.session_count += 1
             if row.get("canonical_external_session_id") is None:
@@ -528,7 +543,7 @@ class _CensusAggregator:
         return tally
 
     def _tally_tool_calls(
-        self, tool_calls: list[dict[str, object]],
+        self, tool_calls: Iterable[dict[str, object]],
     ) -> dict[str, int]:
         counts: dict[str, int] = {}
         for row in tool_calls:
@@ -540,7 +555,7 @@ class _CensusAggregator:
 
     @staticmethod
     def _tally_batches(
-        import_batches: list[dict[str, object]],
+        import_batches: Iterable[dict[str, object]],
     ) -> dict[str, _BatchTally]:
         tally: dict[str, _BatchTally] = {}
         for row in import_batches:
@@ -625,8 +640,32 @@ class _StateReader(Protocol):
     ) -> list[dict[str, object]]: ...
 
 
+class _TableWalker(Protocol):
+    """The repository's paged whole-table walk seam, as a callback contract.
+
+    Added 2026-08-16 (lane-ak) so ``build_census`` can stream the three hot
+    tables it previously read whole. Mirrors ``base.walk_table``'s signature; the
+    binding lives in ``read.py`` where ``self._state`` is in scope.
+    """
+
+    def __call__(
+        self,
+        table: str,
+        filters: dict[str, object],
+        *,
+        ceiling: int,
+        reason: str,
+    ) -> Iterator[dict[str, object]]: ...
+
+
 class _OrderedReader(Protocol):
-    """The mixin's bound ``_query_ordered`` read seam, as a callback contract."""
+    """The mixin's bound ``_query_ordered`` read seam, as a callback contract.
+
+    ``after`` is the primitive's native row-value cursor — a tuple matching
+    ``order_by`` in arity and direction. Declared here (2026-08-16, lane-ak)
+    because :func:`walk_sessions_page` pages with it; the existing
+    :func:`fold_census_events` caller does not pass it and is unaffected.
+    """
 
     def __call__(
         self,
@@ -635,6 +674,7 @@ class _OrderedReader(Protocol):
         filters: dict[str, object],
         order_by: list[list[str]],
         limit: int,
+        after: tuple[object, ...] | None = None,
     ) -> list[dict[str, object]]: ...
 
 
@@ -679,33 +719,77 @@ def fold_census_events(
         last_id = str(page[-1]["id"])
 
 
+#: Ceilings for the three census walks. NOT claims that these tables are small —
+#: they are the largest in the ledger. They are claims about THIS call site: the
+#: census is a diagnostic fold, and a fold that has consumed this many rows
+#: without finishing is reporting on a ledger that has outgrown a whole-table
+#: census entirely. Measured 2026-08-15 PDT / 2026-08-16 UTC: session 27,208,
+#: tool_call 637,496, import_batch 284,787.
+_CENSUS_SESSION_CEILING = 5_000_000
+_CENSUS_TOOL_CALL_CEILING = 20_000_000
+_CENSUS_IMPORT_BATCH_CEILING = 10_000_000
+
+
 def build_census(
     *,
     query: _StateReader,
     query_ordered: _OrderedReader,
+    walk: _TableWalker,
     now: datetime,
     page_size: int,
     fingerprint_seeds: tuple[int, int],
 ) -> list[dict[str, object]]:
     """Compose the per-source ledger census — SQL-lockdown GAP-1 composition root.
 
-    Issues the bounded source / session / tool_call / import_batch reads via the
-    injected ``query`` (the mixin's ``_query`` → ``query_state``; small-row
-    tables, read whole), pages the ~1M-row ``__event`` scan via ``query_ordered``
-    (:func:`fold_census_events`), folds everything in the DB-free
-    :class:`_CensusAggregator`, and returns the per-source rows. Operator D1
-    ruling (2026-06-20): Python-fold + re-baseline, NO aggregate primitive. The
-    read seam is dependency-injected (no held service reference), so this is the
-    full census composition the mixin delegates to in one thin method — keeping
-    ``SessionLedgerReadMixin`` a focused query surface (the god-class budget).
-    ``now`` is the repository clock pre-normalized to naive UTC by the caller
-    (the F1 batch-age seam).
+    Reads ``__source`` whole via ``query`` (21 rows, measured), **streams** the
+    three large tables via ``walk``, pages the ~1M-row ``__event`` scan via
+    ``query_ordered`` (:func:`fold_census_events`), folds everything in the
+    DB-free :class:`_CensusAggregator`, and returns the per-source rows. Operator
+    D1 ruling (2026-06-20): Python-fold + re-baseline, NO aggregate primitive.
+    The read seams are dependency-injected (no held service reference), so this
+    is the full census composition the mixin delegates to in one thin method —
+    keeping ``SessionLedgerReadMixin`` a focused query surface (the god-class
+    budget). ``now`` is the repository clock pre-normalized to naive UTC by the
+    caller (the F1 batch-age seam).
+
+    Read-cap sweep, 2026-08-16 (lane-ak). ``session``, ``tool_call`` and
+    ``import_batch`` were read WHOLE through ``query``. Measured on the serving
+    release, ``census`` is **dead** — it refuses on ``session`` with
+    ``cap_rows: 100`` before it ever reaches the larger two. The verb was ranked
+    as a pagination job on the strength of its 637k-row ``tool_call`` read; it
+    actually dies earlier, so it was unusable rather than merely at risk.
+
+    **Why streaming and not ``list()``.** Materializing the walks would clear the
+    cap and still hold ~950,000 rows on the shared process at once. The fold
+    needs every row but never needs two at the same time — so the rows stream and
+    only the per-source tallies are retained. That is the same shape
+    :func:`fold_census_events` already uses for events, one function below.
+
+    **Why ``walk`` and not a bespoke keyset.** Unlike ``list_sessions`` and the
+    per-session event walk, this caller has NO required order — the tallies are
+    counts and the fingerprint is an order-independent XOR — so
+    ``bounded_read.iter_table_rows``' fixed ``(created_at, id)`` cursor is
+    exactly right. This is the case where the shared helper IS the correct tool.
     """
     aggregator = _CensusAggregator(
+        # __source stays a whole read: 21 rows, and it is iterated again in
+        # result(). Streaming it would buy nothing and cost a second walk.
         sources=query(TABLE_SOURCE, {"is_deleted": 0}),
-        sessions=query(TABLE_SESSION, {"is_deleted": 0}),
-        tool_calls=query(TABLE_TOOL_CALL, {"is_deleted": 0}),
-        import_batches=query(TABLE_IMPORT_BATCH, {"is_deleted": 0}),
+        sessions=walk(
+            TABLE_SESSION, {},
+            ceiling=_CENSUS_SESSION_CEILING,
+            reason="one row per ingested session (measured 27,208 on 2026-08-16).",
+        ),
+        tool_calls=walk(
+            TABLE_TOOL_CALL, {},
+            ceiling=_CENSUS_TOOL_CALL_CEILING,
+            reason="one row per recorded tool call (measured 637,496 on 2026-08-16).",
+        ),
+        import_batches=walk(
+            TABLE_IMPORT_BATCH, {},
+            ceiling=_CENSUS_IMPORT_BATCH_CEILING,
+            reason="one row per import batch (measured 284,787 on 2026-08-16).",
+        ),
         fingerprint_seeds=fingerprint_seeds,
     )
     fold_census_events(
@@ -814,6 +898,143 @@ def select_sessions_page(
     return [_project_session_row(row) for row in kept[:limit]]
 
 
+#: Page size for the session walk — the ``query_ordered`` Gap-C ceiling.
+_SESSION_PAGE_ROWS = 100
+
+#: How many session rows :func:`walk_sessions_page` will examine before refusing.
+#: NOT a claim that ``__session`` is small — it is 27,208 rows (measured
+#: 2026-08-15 PDT / 2026-08-16 UTC). It is a claim about this call site: a page
+#: read that has scanned half a million rows without filling a <=200-row page has
+#: a predicate so unselective that walking further is the wrong answer, and the
+#: caller should be narrowing its window instead.
+_SESSION_WALK_CEILING = 500_000
+
+
+def _pushable_window_filters(window: SessionWindow) -> dict[str, object]:
+    """The half of the window the flat filter grammar CAN carry.
+
+    The grammar is **one condition per column** (``ordered_query._filter_matches``:
+    a column's value is one scalar, one list, or ONE ``{"op", "value"}`` spec). A
+    two-sided window is two conditions on one column, so it cannot be expressed —
+    which is exactly what ``list_sessions``' original docstring said, and it was
+    right. Gap-A added half-open comparators, not two-sided ones.
+
+    What IS expressible is ONE side per column, and pushing it down is always
+    sound: it can only remove rows that :func:`_session_in_window` would reject
+    anyway, and that function still re-checks both sides. The lower bound is
+    preferred because both sort orders are recency-based, so ``>= since`` is the
+    side that usually eliminates most of the table.
+
+    This is a narrowing, not the predicate. The caller must still post-filter.
+    """
+    filters: dict[str, object] = {}
+    if window.since is not None:
+        filters["last_event_at"] = {"op": "gte", "value": window.since}
+    elif window.until is not None:
+        filters["last_event_at"] = {"op": "lte", "value": window.until}
+    if window.first_event_since is not None:
+        filters["first_event_at"] = {"op": "gte", "value": window.first_event_since}
+    elif window.first_event_until is not None:
+        filters["first_event_at"] = {"op": "lte", "value": window.first_event_until}
+    return filters
+
+
+def walk_sessions_page(
+    query_ordered: _OrderedReader,
+    *,
+    filters: dict[str, object],
+    window: SessionWindow,
+    order_by: SessionsOrderBy,
+    limit: int,
+) -> list[dict[str, object]]:
+    """One page of ``list_sessions``, without reading the table to build it.
+
+    Read-cap sweep, 2026-08-15 PDT / 2026-08-16 UTC (lane-ak). This replaces an
+    UNBOUNDED ``query_state`` that read **14,412 rows to return 50** and then
+    applied the windows, the sort and the limit in Python. Measured live, that
+    read is refused on the currently-serving release at the OLD 10,000-row cap —
+    the public ``list_sessions`` verb has been dead, not merely at risk.
+
+    **Why this is a walk and not simply a bounded read.** The obvious repair —
+    push ``order_by`` and ``limit`` into ``query_ordered`` and keep the Python
+    window — is WRONG, and wrong in a worse way than the bug it replaces. The
+    provider would return the top ``limit`` rows in sort order, the Python window
+    would then drop some of them, and the caller would receive fewer rows than
+    qualify with no indication anything was dropped: a silent under-return.
+    Post-filtering a truncated set is unfaithful, which is precisely what the
+    original docstring warned about.
+
+    So the walk pages *in the caller's sort order* and post-filters each page,
+    accumulating until ``limit`` rows have SURVIVED the window or the source is
+    exhausted. Every qualifying row is examined; none is truncated away before
+    being filtered. Only one page is ever in memory.
+
+    In practice it stops almost immediately: both sort orders are recency-based
+    and the windows are recency windows, so the qualifying rows are at the head
+    of the scan. The ceiling exists for the case where they are not.
+
+    The cursor is ``(sort-column, id)`` — a bespoke keyset rather than
+    ``bounded_read.iter_table_rows``, for the same reason as
+    ``read.iter_events_by_sequence``: the helper's cursor is fixed at
+    ``(created_at, id)`` and this caller chooses its order at runtime (four
+    columns x two directions). The ``id`` tie-break makes the order total, so a
+    tie at a page boundary cannot drop its remainder.
+
+    Args:
+        query_ordered: the repository's ``_query_ordered`` seam.
+        filters: equality/``is_null`` predicates already pushed down by the
+            caller. ``is_deleted`` must NOT be included — ``query_ordered``
+            applies ``is_deleted = 0`` by default, and passing both is the way to
+            get this wrong.
+        window: the two two-sided windows, applied in Python (see above).
+        order_by: the caller's sort choice.
+        limit: how many surviving rows to return.
+
+    Returns:
+        Up to ``limit`` projected session rows, in ``order_by`` order.
+
+    Raises:
+        LedgerRepositoryError: the walk passed ``_SESSION_WALK_CEILING`` rows.
+    """
+    column, reverse = _SESSIONS_ORDER_KEY[order_by]
+    direction = "desc" if reverse else "asc"
+    composite = [[column, direction], ["id", direction]]
+    scan_filters = {**filters, **_pushable_window_filters(window)}
+
+    kept: list[dict[str, object]] = []
+    after: tuple[object, ...] | None = None
+    scanned = 0
+    while len(kept) < limit:
+        page = query_ordered(
+            TABLE_SESSION,
+            filters=scan_filters,
+            order_by=composite,
+            limit=_SESSION_PAGE_ROWS,
+            after=after,
+        )
+        if not page:
+            break
+        scanned += len(page)
+        if scanned > _SESSION_WALK_CEILING:
+            raise LedgerRepositoryError(
+                f"list_sessions walked more than {_SESSION_WALK_CEILING} "
+                f"__session rows without filling a {limit}-row page. The scan was "
+                f"refused rather than continued: at this point the window "
+                f"predicate is matching almost nothing and the work belongs in a "
+                f"narrower query, not a longer walk."
+            )
+        for row in page:
+            if _session_in_window(row, window):
+                kept.append(_project_session_row(row))
+                if len(kept) == limit:
+                    break
+        if len(page) < _SESSION_PAGE_ROWS:
+            break
+        last = page[-1]
+        after = (last[column], last["id"])
+    return kept
+
+
 def _junction_canonical_ids(
     query: _StateReader, source_kind: IngestSourceKind,
 ) -> list[str]:
@@ -900,6 +1121,7 @@ def _read_full_group_membership(
 
 def list_sessions_via_junction(
     query: _StateReader,
+    query_ordered: _OrderedReader,
     *,
     window: SessionWindow,
     project_path: str | None,
@@ -950,18 +1172,53 @@ def list_sessions_via_junction(
             order_by=order_by,
             limit=limit,
         )
-    filters: dict[str, object] = {"is_deleted": 0}
+    # ``is_deleted: 0`` is ABSENT deliberately: the walk reads through
+    # ``query_ordered``, which applies that predicate by default. The original
+    # passed it explicitly because ``query_state`` applies none. Passing both is
+    # the way to get this wrong; the two predicates are identical (each excludes
+    # a NULL ``is_deleted``), so the swap is semantics-preserving.
+    filters: dict[str, object] = {}
     if not include_siblings:
         filters["canonical_external_session_id"] = {"op": "is_null"}
     if project_path is not None:
         filters["project_path"] = project_path
     if vendor is not None:
         filters["vendor"] = vendor.value
-    if source_kind is not None:
-        canonical_ids = _junction_canonical_ids(query, source_kind)
-        if not canonical_ids:
-            return []
-        filters["id"] = canonical_ids
+
+    if source_kind is None:
+        return walk_sessions_page(
+            query_ordered,
+            filters=filters,
+            window=window,
+            order_by=order_by,
+            limit=limit,
+        )
+
+    # ── source_kind path: STILL UNBOUNDED, deferred to wave 2b (2026-08-16) ──
+    #
+    # Not an oversight and not safe — it is a bigger repair than the default
+    # path and was split rather than rushed. Measured on the live ledger:
+    #
+    #   _junction_canonical_ids {source_kind=claude_code_local}  = 4,005 rows
+    #                           {source_kind=claude_code_history}=   941
+    #                           {source_kind=codex_local}        =   488
+    #
+    # so this branch is over the 100-row cap TWICE: once on the junction read
+    # itself, and again on the ``id = ANY(canonical_ids)`` session read below,
+    # whose list is that same 4,005 ids. Repairing it means paginating the
+    # junction read and chunking the membership read at the cap — ``base.py``
+    # already has ``_query_membership_chunked`` for exactly that shape, but this
+    # module receives read seams as injected callables and cannot reach it, so
+    # the fix needs a threaded chunked reader and its own smoke.
+    #
+    # The default path above (no ``source_kind``) is the one that is dead in
+    # production and is what this change fixes. This branch was already broken
+    # before the change and is no worse after it.
+    canonical_ids = _junction_canonical_ids(query, source_kind)
+    if not canonical_ids:
+        return []
+    filters["id"] = canonical_ids
+    filters["is_deleted"] = 0
     return select_sessions_page(
         query(TABLE_SESSION, filters),
         window=window,

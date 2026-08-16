@@ -12,7 +12,7 @@ The five migrated reads:
 * ``list_sessions_by_ids``                  — id IN (...) → ``query_state`` ``= ANY``
 * ``find_event_id_by_vendor_id``            — ORDER sequence DESC LIMIT 1 → ``query_ordered``
 * ``find_call_event_id_for_resolution``     — + event_type filter → ``query_ordered``
-* ``fetch_all_events_for_session``          — unbounded ORDER sequence → ``query_state`` + Python sort
+* ``iter_all_events_for_session``           — paged (sequence, id) keyset walk
 * ``list_sources``                          — unbounded ORDER created_at → ``query_state`` + Python sort
 
 Method: each test runs the migrated read through a real ``SessionLedgerRepository``
@@ -46,6 +46,7 @@ sys.path.insert(
 )
 
 from ananta.constants import SOLET_NAME_ENV_VAR  # noqa: E402
+from ananta.llm.session_ledger.read import _EVENT_PAGE_ROWS  # noqa: E402
 from ananta.llm.session_ledger.repository import (  # noqa: E402
     SessionLedgerRepository,
 )
@@ -192,18 +193,32 @@ def test_list_sessions_by_ids(repo: SessionLedgerRepository, provider: PostgresP
     )
 
 
-def test_fetch_all_events_for_session(repo: SessionLedgerRepository, provider: PostgresProvider) -> None:
-    """fetch_all_events_for_session → query_state + Python sequence sort == raw ORDER BY sequence."""
+def test_iter_all_events_for_session(repo: SessionLedgerRepository, provider: PostgresProvider) -> None:
+    """iter_all_events_for_session → paged (sequence, id) keyset walk == raw ORDER BY sequence.
+
+    Read-cap sweep, 2026-08-16 (lane-ak). The method under test changed from an
+    unbounded ``query_state`` + Python sort into a paged keyset walk, so what
+    this smoke has to prove changed with it. Matching the raw ORDER BY is
+    necessary but no longer sufficient: a walk that silently stopped after its
+    first page would still match a raw query on any session with fewer than
+    ``_EVENT_PAGE_ROWS`` events.
+
+    So the sample is the BUSIEST session (``ORDER BY count(*) DESC``) and the
+    smoke asserts explicitly that it straddles at least one page boundary. If it
+    does not, that is reported as a FAILURE rather than passing quietly: a
+    fixture that cannot reach the boundary cannot test the cursor, and a green
+    from such a fixture means nothing.
+    """
     pick = _raw(
         provider,
         f'SELECT session_id FROM "{_SCHEMA}".session_ledger__event WHERE is_deleted = 0 '
         "GROUP BY session_id ORDER BY count(*) DESC LIMIT 1",
     )
     if not pick:
-        _check(False, "fetch_all_events_for_session: no live events to sample")
+        _check(False, "iter_all_events_for_session: no live events to sample")
         return
     session_id = str(pick[0][0])
-    migrated = repo.fetch_all_events_for_session(session_id=session_id)
+    migrated = list(repo.iter_all_events_for_session(session_id=session_id))
     raw = _raw(
         provider,
         f'SELECT id, sequence FROM "{_SCHEMA}".session_ledger__event '
@@ -213,15 +228,27 @@ def test_fetch_all_events_for_session(repo: SessionLedgerRepository, provider: P
     migrated_seq = [(str(r["id"]), int(r["sequence"])) for r in migrated]  # type: ignore[call-overload]
     raw_seq = [(str(r[0]), int(r[1])) for r in raw]
     _check(
+        len(raw_seq) > _EVENT_PAGE_ROWS,
+        f"iter_all_events_for_session FIXTURE straddles a page boundary: busiest "
+        f"session has {len(raw_seq)} events vs page size {_EVENT_PAGE_ROWS} "
+        f"(below it, this test cannot detect a walk that stops after page 1)",
+    )
+    _check(
         migrated_seq == raw_seq,
-        f"fetch_all_events_for_session ordered (id,sequence) matches raw ORDER BY "
-        f"sequence ASC for session with {len(raw_seq)} events",
+        f"iter_all_events_for_session ordered (id,sequence) matches raw ORDER BY "
+        f"sequence ASC across {len(raw_seq)} events "
+        f"({-(-len(raw_seq) // _EVENT_PAGE_ROWS)} pages)",
+    )
+    _check(
+        len(migrated_seq) == len(raw_seq),
+        f"iter_all_events_for_session yielded every row ({len(migrated_seq)}), not "
+        f"a first-page prefix ({_EVENT_PAGE_ROWS})",
     )
     _check(
         migrated_seq == sorted(migrated_seq, key=lambda t: t[1]),
-        "fetch_all_events_for_session result is sequence-ascending (Python sort holds)",
+        "iter_all_events_for_session result is sequence-ascending (order comes "
+        "from query_ordered, not a post-hoc Python sort)",
     )
-
 
 def test_find_event_id_by_vendor_id(repo: SessionLedgerRepository, provider: PostgresProvider) -> None:
     """find_event_id_by_vendor_id → query_ordered DESC LIMIT 1 == raw."""
@@ -306,7 +333,7 @@ def main() -> int:
     repo = SessionLedgerRepository(state_service=adapter)  # type: ignore[arg-type]
     test_list_sources(repo, provider)
     test_list_sessions_by_ids(repo, provider)
-    test_fetch_all_events_for_session(repo, provider)
+    test_iter_all_events_for_session(repo, provider)
     test_find_event_id_by_vendor_id(repo, provider)
     test_find_call_event_id_for_resolution(repo, provider)
     print(f"\n{_passed} passed, {len(_failed)} failed")

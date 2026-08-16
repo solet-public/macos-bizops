@@ -40,7 +40,7 @@ What does NOT live here:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from typing import cast
 
@@ -55,6 +55,8 @@ from ananta.llm.session_ledger.schema import (
     TABLE_EVENT,
     TABLE_IMPORT_BATCH,
 )
+from ananta.services.state_service.bounded_read import iter_table_rows
+from ananta.services.state_service.read_bounds import MAX_READ_ROWS
 
 # Module-level RELOAD_SAFE marker — no module-level mutable state, no
 # background threads, no held service references. Pure class adapter.
@@ -83,6 +85,83 @@ def _naive_utc(value: object) -> object:
     if isinstance(value, datetime) and value.tzinfo is not None:
         return value.astimezone(UTC).replace(tzinfo=None)
     return value
+
+
+def count_rows(
+    state: StateManagementInterface, table: str, filters: dict[str, object]
+) -> int:
+    """Scalar ``COUNT(*)`` under ``filters`` — the no-rows-shipped ledger read.
+
+    The right primitive whenever a call site reads rows only to call ``len`` on
+    them. ``count`` materializes nothing, so it is not subject to the read cap
+    and cannot be refused however large the matching set is.
+
+    Same filter grammar as the repository's ``_query``, and — like it, unlike
+    ``query_ordered`` — NO automatic ``is_deleted`` exclusion. Pass
+    ``is_deleted: 0`` explicitly.
+
+    A free function rather than a repository method on purpose: it needs nothing
+    from the instance but the state interface, and the repository base is at the
+    god-class bound (2026-08-16, lane-ak — adding these two as methods pushed it
+    from 468 to 517 LOC).
+    """
+    result = state.count(NAMESPACE, {"table": table, "filters": filters})
+    if result.get("action_status") != ActionStatus.COMPLETED.value:
+        return 0
+    data = result.get("data")
+    inner = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(inner, dict):
+        return 0
+    return int(cast(int, inner.get("value", 0)))
+
+
+def walk_table(
+    state: StateManagementInterface,
+    table: str,
+    filters: dict[str, object],
+    *,
+    ceiling: int,
+    reason: str,
+    include_deleted: bool = False,
+) -> Iterator[dict[str, object]]:
+    """Yield EVERY ledger row matching ``filters``, paged — the row-capped read.
+
+    The seam for a ledger read that genuinely needs the whole matching set over a
+    table that grows. The repository's ``_query`` carries the provider's row bound
+    for the WHOLE read and is refused above it; this walks tie-safe
+    ``(created_at, id)`` pages instead, so it is complete at any table size, never
+    consents to a full scan, and holds one page in memory rather than the result.
+
+    Prefer this over ``_query(..., unbounded=True)`` for anything that grows:
+    ``unbounded=True`` is consent to materialize the whole table on the shared
+    process, correct only for a set that CANNOT grow past what the process holds.
+
+    **The ``is_deleted`` asymmetry, which is the trap in this migration.**
+    ``query_state`` (behind ``_query``) applies NO soft-delete filter — callers
+    pass ``is_deleted: 0`` themselves. ``query_ordered`` (behind this walk)
+    applies one BY DEFAULT. So moving a site from one to the other changes its
+    deleted-row semantics unless the filter is adjusted in the same edit: drop
+    the caller's explicit ``is_deleted: 0`` (it is now the default and passing
+    both is the way to get this wrong), and pass ``include_deleted=True`` where
+    the site deliberately wanted deleted rows too. Note that ``is_deleted = 0``
+    and the default both EXCLUDE a NULL ``is_deleted``, so a site whose original
+    filter was the explicit ``{"is_deleted": 0}`` is unchanged — but a site whose
+    Python fold was the OR-predicate ``is_deleted IS NULL OR = 0`` is NOT, and
+    needs ``include_deleted=True`` plus its fold kept.
+
+    Safe to write to rows mid-walk: the cursor columns are immutable after
+    insert. See :func:`~ananta.services.state_service.bounded_read.iter_table_rows`
+    for the full contract, including why the ceiling boundary is ``>``.
+    """
+    return iter_table_rows(
+        state,
+        namespace=NAMESPACE,
+        table=table,
+        filters=filters,
+        ceiling=ceiling,
+        reason=reason,
+        include_deleted=include_deleted,
+    )
 
 
 class SessionLedgerRepositoryBase:
@@ -272,8 +351,35 @@ class SessionLedgerRepositoryBase:
             out.append(cast(dict[str, object], row))
         return out
 
+    def _query_membership_chunked(
+        self,
+        table: str,
+        *,
+        column: str,
+        values: list[str],
+        extra_filters: dict[str, object] | None = None,
+    ) -> list[dict[str, object]]:
+        """A ``col = ANY(values)`` read, chunked so each query is bounded.
+
+        D9 shape (2026-08-15): a membership read's result size is bounded by
+        the CALLER's list length, not by anything the query states. When that
+        list is derived from a whole-table scan it can exceed the state
+        service's row cap and the read is refused. Chunking makes every query
+        bounded BY CONSTRUCTION — a chunk matches at most its own length — so
+        this needs no ``unbounded`` opt-in and holds however large the caller's
+        list grows. Chunk size is DERIVED from the cap so the two cannot drift.
+        """
+        if not values:
+            return []
+        base_filters = dict(extra_filters or {})
+        out: list[dict[str, object]] = []
+        for start in range(0, len(values), MAX_READ_ROWS):
+            chunk = values[start : start + MAX_READ_ROWS]
+            out.extend(self._query(table, {**base_filters, column: chunk}))
+        return out
+
     def _query(
-        self, table: str, filters: dict[str, object],
+        self, table: str, filters: dict[str, object], *, unbounded: bool = False,
     ) -> list[dict[str, object]]:
         """Equality / ``= ANY`` / ``is_null`` / Gap-A range read via ``query_state``.
 
@@ -283,10 +389,16 @@ class SessionLedgerRepositoryBase:
         → ``col <op> %s``. Callers must include ``is_deleted: 0`` explicitly —
         ``query_state`` (unlike ``query_ordered``) does not inject the soft-delete
         filter.
+
+        ``unbounded=True`` is the sanctioned opt-in to the state service's row
+        cap, for a read that deliberately wants every matching row. It is a
+        consent, not a bypass: pass it only where the caller genuinely needs the
+        complete set and the alternative is a refused read.
         """
-        result = self._state.query_state(
-            NAMESPACE, {"table": table, "filters": filters},
-        )
+        query: dict[str, object] = {"table": table, "filters": filters}
+        if unbounded:
+            query["unbounded"] = True
+        result = self._state.query_state(NAMESPACE, query)
         return self._records_from_result(result, context=table)
 
     def _query_ordered(

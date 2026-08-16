@@ -413,14 +413,59 @@ def test_search_sessions_filter_envelopes() -> None:
 
 
 def test_register_source_returns_outcome_not_action() -> None:
-    import inspect  # noqa: PLC0415
+    """The insert path reports ``outcome=registered``; the idempotent hit reports
+    ``outcome=existed``; neither uses the ``action`` key.
 
+    REWRITTEN 2026-08-16 (lane-ak, coordinator ruling). The original asserted
+    this by ``inspect.getsource(SessionLedgerService._register_source_internal)``
+    and grepping for the literal strings. That check had been FAILING on master
+    for the ``registered`` half — **and the behaviour had never regressed.** A
+    refactor moved the insert-path return one call deeper, into
+    ``duplicate_source_repair.insert_source_or_absorb_race`` (line 77), where the
+    grep could not see it. The failure was a refactor artifact, not a defect.
+
+    A behavioural property cannot be verified by scanning source text: the check
+    breaks on refactors that preserve behaviour, and would equally PASS on a
+    function that merely mentioned the string in a comment. The intent is
+    preserved and the method replaced — this drives the real seam against the
+    fixture store and asserts the RETURNED envelopes.
+
+    The ``action`` key matters because the platform's result-contract validator
+    treats a top-level ``action`` as ``action_status``; ``existed``/``registered``
+    are not valid ActionStatus values and would trip
+    ``result_status_not_completed``.
+    """
     from ananta.services.session_ledger_service.service import SessionLedgerService  # noqa: PLC0415
 
-    source = inspect.getsource(SessionLedgerService._register_source_internal)
-    _check('"outcome": "existed"' in source, "register_source returns outcome=existed")
-    _check('"outcome": "registered"' in source, "register_source returns outcome=registered")
-    _check('"action":' not in source, "register_source does NOT use 'action' key")
+    class _ServiceStub:
+        """Carries only what ``_register_source_internal`` touches: ``_repository``."""
+
+        def __init__(self, repository: SessionLedgerRepository) -> None:
+            self._repository = repository
+
+    tables: dict[str, list[dict[str, Any]]] = {}
+    stub = _ServiceStub(_repo(tables))
+    args = {"source_kind": IngestSourceKind.CODEX_LOCAL.value, "root_uri": "file:///tmp/rs-probe/"}
+
+    first = SessionLedgerService._register_source_internal(cast("Any", stub), **args)
+    second = SessionLedgerService._register_source_internal(cast("Any", stub), **args)
+
+    _check(
+        first.get("outcome") == "registered",
+        f"register_source INSERT path returns outcome=registered (got {first.get('outcome')!r})",
+    )
+    _check(
+        second.get("outcome") == "existed",
+        f"register_source IDEMPOTENT hit returns outcome=existed (got {second.get('outcome')!r})",
+    )
+    _check(
+        first.get("source_id") and first.get("source_id") == second.get("source_id"),
+        "both calls name the SAME source_id — idempotent on (source_kind, root_uri)",
+    )
+    _check(
+        "action" not in first and "action" not in second,
+        "neither envelope uses the 'action' key (it would be read as action_status)",
+    )
 
 
 def main() -> int:

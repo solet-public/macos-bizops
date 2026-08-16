@@ -212,11 +212,41 @@ def _reader() -> _FakeReader:
     )
 
 
+def _walker(reader: _FakeReader) -> Any:
+    """A ``walk`` seam over the fake that yields rows ONE AT A TIME.
+
+    A GENERATOR on purpose. ``build_census`` streams its three large tables now
+    (read-cap sweep, 2026-08-16), and a fake that handed back a list would let a
+    double-consumption bug pass unnoticed — which is exactly the defect this
+    change had to fix: ``_CensusAggregator`` used to walk ``sessions`` twice, once
+    to build the id->source index and once to tally. With lists that is merely
+    wasteful; with generators the second pass sees an exhausted iterator and every
+    session tally silently comes back EMPTY.
+
+    ``counts`` records how many times each table was walked, so
+    ``test_census_streams_each_table_exactly_once`` can assert the property
+    directly rather than inferring it from the tallies being right.
+    """
+
+    class _Walk:
+        def __init__(self) -> None:
+            self.counts: dict[str, int] = {}
+
+        def __call__(
+            self, table: str, filters: dict[str, Any], *, ceiling: int, reason: str,
+        ) -> Any:
+            self.counts[table] = self.counts.get(table, 0) + 1
+            yield from (dict(row) for row in reader.query(table, {**filters, "is_deleted": 0}))
+
+    return _Walk()
+
+
 def _census(*, page_size: int) -> list[dict[str, object]]:
     reader = _reader()
     return build_census(
         query=reader.query,
         query_ordered=reader.query_ordered,
+        walk=_walker(reader),
         now=_NOW,
         page_size=page_size,
         fingerprint_seeds=_SEEDS,
@@ -369,6 +399,7 @@ def test_fingerprint_distinguishes_content() -> None:
     mutated = _by_source(
         build_census(
             query=reader.query, query_ordered=reader.query_ordered,
+            walk=_walker(reader),
             now=_NOW, page_size=100, fingerprint_seeds=_SEEDS,
         )
     )["src-A"]
@@ -401,6 +432,54 @@ def test_real_method_clock_normalization() -> None:
         a["event_count"] == 3 and a["fingerprint_a"] is not None,
         "real census_source_rows() folds events through the base _query_ordered "
         "envelope seam",
+    )
+
+
+def test_census_streams_each_table_exactly_once() -> None:
+    """Each large table is walked ONCE, and the tallies survive being streamed.
+
+    Read-cap sweep, 2026-08-16 (lane-ak). ``build_census`` used to read
+    ``session`` / ``tool_call`` / ``import_batch`` WHOLE through ``query`` —
+    measured 27,208 / 637,496 / 284,787 rows, and refused outright on the serving
+    release (``cap_rows: 100`` on ``session``), so ``census`` was dead rather than
+    merely at risk. They stream now.
+
+    Streaming exposed a latent trap that lists had been hiding:
+    ``_CensusAggregator`` consumed ``sessions`` TWICE — once to build the
+    id->source index, once to tally. Harmless for a list; with a generator the
+    second pass sees an exhausted iterator and **every session tally silently
+    comes back empty, with no error**. The two passes are now one.
+
+    This asserts the property directly (walk count == 1 per table) rather than
+    inferring it from the tallies being correct, because a future refactor could
+    reintroduce a second pass over a re-materialized list and leave the tallies
+    right while quietly discarding the memory guarantee.
+    """
+    reader = _reader()
+    walker = _walker(reader)
+    rows = build_census(
+        query=reader.query,
+        query_ordered=reader.query_ordered,
+        walk=walker,
+        now=_NOW,
+        page_size=100,
+        fingerprint_seeds=_SEEDS,
+    )
+    for table in (TABLE_SESSION, TABLE_TOOL_CALL, TABLE_IMPORT_BATCH):
+        _check(
+            walker.counts.get(table) == 1,
+            f"{table} was walked exactly once (got {walker.counts.get(table)})",
+        )
+    by = _by_source(rows)
+    _check(
+        by["src-A"]["session_count"] > 0,
+        f"session tallies survived streaming (src-A session_count="
+        f"{by['src-A']['session_count']}) — 0 here is the exhausted-iterator bug",
+    )
+    _check(
+        by["src-A"]["tool_call_count"] > 0,
+        "tool_call tallies survived streaming — they depend on the session index "
+        "being fully built BEFORE the tool_call stream is consumed",
     )
 
 

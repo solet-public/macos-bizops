@@ -230,6 +230,88 @@ def _validate_spawn_role(
         )
 
 
+def resolve_local_name(*, role_class: str, role_name: str, lane_id: str) -> str:
+    """W6 (#13 §44.3): the name a spawned worker will answer to locally.
+
+    ``role_name`` for a PROJECT-class role, ``lane_id`` otherwise. The
+    project class is the one whose whole point is that the worker IS the
+    role — a Git-Controller has to be named ``Git-Controller`` on its own
+    machine or it cannot pass the mutation guard, which resolves the caller
+    by reading the local session file's ``name`` and comparing it exactly.
+    Every other class is lane work, and lane_id is what those sessions were
+    already labelled with, so this is a no-op for them.
+    """
+    if role_name and role_class == ROLE_CLASS_PROJECT:
+        return role_name
+    return lane_id
+
+
+def _refuse_if_local_name_held(
+    state: StateManagementInterface, *, local_name: str, role_name: str,
+) -> None:
+    """W6 OPERATOR RULING (2026-08-14): a second spawn for a role that is
+    already held is REFUSED, LOUDLY. Never a silent uniquifying suffix, never
+    a silent eviction.
+
+    A suffix is not available even in principle: the Git-Controller mutation
+    guard compares the local session name EXACTLY
+    (``.claude/hooks/git_controller_gate.py``: ``session_name == controller``),
+    so ``Git-Controller-2`` is simply a session that cannot mutate git. And a
+    silent eviction would make a routine act destructive. So the only
+    non-colliding answer is to refuse and name the incumbent.
+
+    The incumbent is a non-terminal ``managed_session`` row sharing this
+    ``local_name`` — the ledger, not the role binding, because the collision
+    being prevented is two LOCAL PROCESSES answering to one name on one
+    machine. That choice also keeps crash succession cheap for free: a
+    crashed holder's row is swept to ``terminated`` by the platform sweep,
+    after which a replacement spawns without an operator in the loop. This
+    mirrors the claim path's own posture, where a DEAD holder is deliberately
+    still claimable (``role_claim.py``) — the refusal is about live
+    collisions, not about corpses.
+    """
+    if not local_name:
+        return
+    result = state.query_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {
+            "table": TABLE_MANAGED_SESSION,
+            "filters": {"local_name": local_name, "is_deleted": 0},
+        },
+    )
+    for row in require_records(result):
+        if str(row.get("lifecycle_state") or "") in _TERMINAL_STATES:
+            continue
+        raise VerbError(
+            "local_name_already_held",
+            f"refusing to spawn a second session named {local_name!r}"
+            f"{f' (role {role_name!r})' if role_name else ''}: "
+            f"{row.get('agent_instance_id')} is already live under that name "
+            f"(lifecycle_state={row.get('lifecycle_state')!r}, "
+            f"host={row.get('host')!r}, host_ref={row.get('host_ref')!r}, "
+            f"lane_id={row.get('lane_id')!r}). Two sessions answering to one "
+            "local name collide silently — the git mutation guard matches the "
+            "name exactly, so both would pass it. Terminate the incumbent "
+            "first (this plugin's terminate_session verb, agent_instance_id="
+            f"{row.get('agent_instance_id')}), then spawn the replacement. "
+            "Spawning does NOT claim the durable role binding either way; the "
+            "new worker claims it explicitly once it is up.",
+        )
+
+
+def _resolve_and_guard_local_name(
+    state: StateManagementInterface, req: SpawnSessionRequest,
+) -> str:
+    """W6: resolve the worker's local name, then refuse if it is already held.
+    Split out of :func:`spawn_session` to keep it under the radon cc threshold
+    (the same precedent :func:`_dispatch_first_turn` established)."""
+    local_name = req.local_name or resolve_local_name(
+        role_class=req.role_class, role_name=req.role_name, lane_id=req.lane_id,
+    )
+    _refuse_if_local_name_held(state, local_name=local_name, role_name=req.role_name)
+    return local_name
+
+
 _LEGISLATABLE_ROLE_CLASSES = frozenset({ROLE_CLASS_PRIMARY, ROLE_CLASS_PRINCIPAL})
 
 
@@ -345,6 +427,14 @@ class SpawnSessionRequest:
     # threaded through the shared dispatch spec dict unconditionally, same
     # as every other claude_code-only field already is.
     allow_askuserquestion: bool = False
+    # W6 (#13 §44.3): the name the spawned worker answers to on its own
+    # machine. Empty means "resolve it" — spawn_session defaults it to
+    # role_name for a project-class role and lane_id otherwise.
+    local_name: str = ""
+    # W4A item 3 (#8 §43.1): proceed even though the host's preflight can
+    # prove the worker's hooks will not run. Default off — running degraded
+    # is a stated choice, recorded on the ledger row and logged loudly.
+    degraded_hooks_acknowledged: bool = False
 
 
 def spawn_session(
@@ -376,6 +466,9 @@ def spawn_session(
     if not req.budget_line:
         raise VerbError("budget_line_required", "spawn_session requires a non-empty budget_line.")
     _validate_spawn_role(state, role_class=req.role_class, role_name=req.role_name)
+    # W6: resolved BEFORE the host lookup so a refused second spawn costs
+    # nothing and, like the role validation above, fails BEFORE dispatch.
+    local_name = _resolve_and_guard_local_name(state, req)
 
     try:
         driver, resolved_host = resolve_host_driver(req.host, req.agent_runtime)
@@ -403,6 +496,12 @@ def spawn_session(
         report_by_seconds=req.report_by_seconds,
         ttl_seconds=req.ttl_seconds,
         directed_by=req.directed_by,
+        # W6: the spawn's stated INTENT. Recording role_name does not claim
+        # the binding — spawning never claims a role as a side effect
+        # (operator ruling 2026-08-14); the worker claims it explicitly.
+        role_name=req.role_name,
+        local_name=local_name,
+        degraded_hooks_acknowledged=req.degraded_hooks_acknowledged,
     )
     row = insert_managed_session(state, spec)
 
@@ -426,6 +525,13 @@ def spawn_session(
                 # delegation contract; a fake driver ignores them.
                 "role_class": req.role_class,
                 "spawned_by_role": req.spawned_by_role,
+                # W6: the local name both adapters label the worker with —
+                # the headless driver's --name, the tmux label the session
+                # name derives from.
+                "local_name": local_name,
+                # W4A item 3: the driver's own preflight consumes this to
+                # decide between refusing and proceeding-but-loud.
+                "degraded_hooks_acknowledged": req.degraded_hooks_acknowledged,
             },
         )
     except HostCannotSpawnError as exc:

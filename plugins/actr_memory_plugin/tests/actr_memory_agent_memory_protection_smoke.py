@@ -51,6 +51,10 @@ from actr_memory_plugin.backend import (  # noqa: E402
     KNOWLEDGE_OFFICIAL_TAG,
     ACTRMemoryBackend,
 )
+from ananta.services.state_service.ordered_query import (  # noqa: E402
+    apply_ordered_query_in_memory,
+    parse_ordered_query,
+)
 
 _passed = 0
 _failed: list[str] = []
@@ -100,15 +104,47 @@ class _FakeState:
 
     def read_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
         del namespace
+        # `action_status` is part of the real envelope on EVERY read — this
+        # fake omitted it while its own `query_state` below included it, so it
+        # was quietly unfaithful. memory_store now requires a COMPLETED status
+        # (an error must never read as an empty result), which is what exposed
+        # the gap; a fake that cannot represent the failure case cannot test it.
         if query.get("table") == "memory":
-            return {"data": {"records": [dict(m) for m in self._memories]}}
-        return {"data": {"records": []}}  # memorization table: empty
+            return {
+                "action_status": "completed",
+                "data": {"records": [dict(m) for m in self._memories]},
+            }
+        # memorization table: empty
+        return {"action_status": "completed", "data": {"records": []}}
 
     def query_state(self, namespace: str, filters: dict[str, Any]) -> dict[str, Any]:
         del namespace, filters
         return {
             "action_status": "completed",
             "data": {"records": [dict(m) for m in self._memories]},
+        }
+
+    def query_ordered(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+        """Ordered/bounded/tie-safe read — DELEGATED to the real primitives.
+
+        ``_get_all_memory_ids`` pages the ``memory`` table through
+        ``iter_table_rows`` (2026-08-15 read-cap repair), so this verb is now on
+        the path under test. It delegates to ``parse_ordered_query`` +
+        ``apply_ordered_query_in_memory`` — the same primitives the in-memory
+        backend and the postgres providers run — rather than hand-rolling the
+        grammar, so an over-cap page size, a non-composite order_by or a
+        mishandled ``after`` cursor fails here exactly as it would in production.
+        A hand-rolled version could not fail on any of those and would green a
+        walk the real provider refuses.
+        """
+        del namespace
+        spec = parse_ordered_query(query)
+        selected = apply_ordered_query_in_memory(
+            [dict(m) for m in self._memories], spec,
+        )
+        return {
+            "action_status": "completed",
+            "data": {"records": [dict(r) for r in selected]},
         }
 
     def delete_records(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
@@ -188,11 +224,61 @@ def test_agent_memory_survives_get_all_memory_ids() -> None:
     )
 
 
+def test_protection_holds_past_the_page_boundary() -> None:
+    """The purge walk pages; protection must survive the page boundary.
+
+    ``_get_all_memory_ids`` reads the whole ``memory`` table — 22,238 rows
+    measured on 2026-08-15, against a 100-row default read bound — so it is
+    paginated. Two ways that can go wrong while a four-row fixture stays green:
+    a walk that stops after one page returns a PREFIX (and the purge then misses
+    most vectors), or a walk whose cursor mishandles ties drops rows silently.
+
+    Both are live risks here rather than theoretical: every memory row in this
+    fixture shares one ``created_at``, which is realistic for a bulk KB ingest
+    and is exactly the case a ``created_at``-only cursor splits at a page
+    boundary. The protected records are planted on the LAST page, where a
+    short walk would never reach them — so this also proves the protection is
+    enforced across the whole table, not just its head.
+    """
+    plain = [
+        _memory(f"m-plain-{n:05d}", tags=["conversation"], content=f"ordinary {n}")
+        for n in range(250)
+    ]
+    protected = [
+        _memory("m-zz-agent", tags=[AGENT_MEMORY_TAG], content="projection record"),
+        _memory("m-zz-kb", tags=[KNOWLEDGE_OFFICIAL_TAG], content="official KB chunk"),
+    ]
+    fake = _FakeState([*plain, *protected])
+    backend = object.__new__(ACTRMemoryBackend)
+    backend.state_service = fake
+
+    ids = backend._get_all_memory_ids(exclude_protected=True)
+
+    _check(
+        len(ids) == len(plain),
+        f"every unprotected id across all pages is returned "
+        f"(expected {len(plain)}, got {len(ids)}) — a one-page walk returns 100",
+    )
+    _check(
+        len(set(ids)) == len(ids),
+        "and no id is returned twice (the cursor advances across pages)",
+    )
+    _check(
+        "m-zz-agent" not in ids and "m-zz-kb" not in ids,
+        "protected records planted on the LAST page are still excluded",
+    )
+    _check(
+        f"m-plain-{len(plain) - 1:05d}" in ids,
+        "including the final unprotected row — no off-by-one at the last boundary",
+    )
+
+
 def main() -> int:
     print("=== actr_memory_agent_memory_protection_smoke ===")
     test_agent_memory_excluded_from_consolidation()
     test_agent_memory_survives_delete_all_records()
     test_agent_memory_survives_get_all_memory_ids()
+    test_protection_holds_past_the_page_boundary()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

@@ -135,6 +135,174 @@ _PLUGIN_HOOKS_DIR_RELATIVE = Path(
     "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks",
 )
 
+# W4A item 2 (#8 §43.1) — the managed-policy preflight.
+#
+# An org-managed Claude Code policy carrying ``hooks`` inside
+# ``strictPluginOnlyCustomization`` strips hooks from every NON-PLUGIN source,
+# which includes the ``--settings`` blob this driver (and the tmux driver)
+# uses to inject worker hooks. The adopter's own isolation test established
+# that; we did not infer it from the flag's name.
+#
+# EVIDENCE GRADES, kept explicit because they differ and the difference
+# matters if this ever mis-fires:
+#  * The REMOTE path is MEASURED on an affected machine: a managed policy can be
+#    pulled remotely to ~/.claude/remote-settings.json, and on such a machine the
+#    system path DOES NOT EXIST at all. Searching only the system locations
+#    therefore reports "no managed policy in force" on exactly the deployments
+#    where one IS in force — a silent fail-open. Listed FIRST because it is the
+#    only location a policy has actually been observed at in the field.
+#  * The macOS system path is the originally-reported location.
+#  * The Linux and Windows paths are Claude Code's documented siblings for the
+#    same file. They are NOT adopter-evidenced, and there is no such file on
+#    this machine to check any of them against — which is exactly why the
+#    reader below is driven by a FIXTURE in the smokes rather than by a live
+#    probe. An absent-file probe verifies nothing about the populated case.
+_MANAGED_SETTINGS_PATHS: tuple[Path, ...] = (
+    Path.home() / ".claude" / "remote-settings.json",
+    Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
+    Path("/etc/claude-code/managed-settings.json"),
+    Path("C:/ProgramData/ClaudeCode/managed-settings.json"),
+)
+_STRICT_PLUGIN_ONLY_KEY = "strictPluginOnlyCustomization"
+_STRICT_PLUGIN_ONLY_HOOKS = "hooks"
+
+
+def _managed_policy_strips_hooks(paths: tuple[Path, ...]) -> Path | None:
+    """The first policy file that declares hooks plugin-only, or ``None``.
+
+    FAILS OPEN on an unreadable or malformed file, loudly. Refusing every
+    spawn because a policy file could not be parsed would be a worse failure
+    than the one this guards, and it would be a refusal we cannot actually
+    justify — an unparseable file is not evidence that hooks are stripped.
+    The registration watchdog (``session_sweep``) is the backstop that catches
+    the consequence whatever the cause, so this narrow prover does not need to
+    guess.
+    """
+    for path in paths:
+        try:
+            if not path.is_file():
+                continue
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.warning(
+                "managed-settings preflight: %s exists but could not be read or "
+                "parsed — proceeding WITHOUT this check (an unparseable policy "
+                "file is not evidence that hooks are stripped)", path, exc_info=True,
+            )
+            continue
+        if not isinstance(raw, dict):
+            continue
+        strict = raw.get(_STRICT_PLUGIN_ONLY_KEY)
+        if isinstance(strict, list) and _STRICT_PLUGIN_ONLY_HOOKS in strict:
+            return path
+    return None
+
+
+def _claude_bin_remedy(claude_bin: str) -> str | None:
+    if claude_bin and os.access(claude_bin, os.X_OK):
+        return None
+    return (
+        f"no executable 'claude' binary found (checked PATH via "
+        f"shutil.which, then {claude_bin!r}) — install Claude "
+        "Code or pass claude_bin explicitly."
+    )
+
+
+def _solet_name_remedy(solet_name: str) -> str | None:
+    if solet_name:
+        return None
+    return (
+        "SOLET_NAME is not set — the spawned process cannot "
+        "discover its bridge port without it."
+    )
+
+
+def _permission_mode_remedy(resolved_permission_mode: str) -> str | None:
+    if resolved_permission_mode:
+        return None
+    return (
+        f"no permission mode configured (neither a per-spawn override nor "
+        f"{_ENV_PERMISSION_MODE} is set) — an unattended headless worker "
+        "needs an explicit operator-ruled posture; this driver never "
+        "defaults to bypass."
+    )
+
+
+def _mcp_config_remedy(resolved_transport: str, mcp_config_path: Path) -> str | None:
+    if resolved_transport != "mcp" or mcp_config_path.exists():
+        return None
+    return (
+        f"no MCP config found at {mcp_config_path} — required because "
+        "the resolved transport is 'mcp' (a real MCP bridge config must "
+        "exist and is passed verbatim to --mcp-config); 'watch' transport "
+        "spawns with an inline empty MCP config and never reads this file, "
+        "so switching FLEET_SESSION_HOST/transport to 'watch' (the charter "
+        "default) also satisfies this remedy without creating the file."
+    )
+
+
+def _managed_policy_remedy(
+    managed_settings_paths: tuple[Path, ...] | None,
+    *,
+    degraded_hooks_acknowledged: bool,
+) -> str | None:
+    """W4A item 2: an attributable refusal, matching this module's own
+    :class:`WorkerHookResolutionError` precedent — a spawn we can PROVE will
+    come up deaf is refused by name at config time rather than discovered
+    later from a row that never leaves ``spawning``."""
+    if degraded_hooks_acknowledged:
+        return None
+    policy_path = _managed_policy_strips_hooks(
+        managed_settings_paths if managed_settings_paths is not None
+        else _MANAGED_SETTINGS_PATHS,
+    )
+    if policy_path is None:
+        return None
+    return (
+        f"the managed Claude Code policy at {policy_path} lists "
+        f"{_STRICT_PLUGIN_ONLY_HOOKS!r} in {_STRICT_PLUGIN_ONLY_KEY}, which "
+        "strips hooks from every non-plugin source — including the "
+        "--settings blob this driver injects the worker's hooks through. "
+        "A worker spawned here would answer turns while running NONE of "
+        "its hooks: it would never register, never heartbeat, and never "
+        "capture its session mapping. Delivering the worker hooks as "
+        "PLUGIN hooks is the capability fix and is not yet shipped. To "
+        "spawn anyway, set degraded_hooks_acknowledged on the spawn — it "
+        "is recorded on the ledger row, so running degraded stays a "
+        "stated choice rather than a later discovery."
+    )
+
+
+def _resolve_local_label(spec: Mapping[str, object], *, agent_instance_id: str) -> str:
+    """W6 (#13 §44.3): the name the worker answers to on its own machine.
+
+    ``spawn_session`` resolves ``local_name`` (role_name for a project-class
+    role, else lane_id) and passes it down; the lane_id fallback preserves the
+    previous behaviour exactly for any caller that sends no ``local_name``.
+    Shared by BOTH host drivers so the two can never disagree about what a
+    worker is called — the tmux driver imports it from here.
+    """
+    return (
+        str(spec.get("local_name") or "")
+        or str(spec.get("lane_id") or "")
+        or agent_instance_id
+    )
+
+
+def _log_degraded_spawn(degraded_ok: bool, *, agent_instance_id: str) -> None:
+    """W4A item 3: proceeding is allowed, silence is not. The ledger records
+    the acknowledgement; this is the same fact in the log, so the choice is
+    legible from either surface."""
+    if not degraded_ok or _managed_policy_strips_hooks(_MANAGED_SETTINGS_PATHS) is None:
+        return
+    logger.warning(
+        "DEGRADED SPAWN: %s is being spawned with degraded_hooks_acknowledged "
+        "set, onto a host whose managed policy strips non-plugin hooks. This "
+        "worker will run NONE of its injected hooks — it will not register, "
+        "heartbeat, or capture its session mapping. This was an explicit choice.",
+        agent_instance_id,
+    )
+
 
 class WorkerHookResolutionError(RuntimeError):
     """Raised when a worker-injected hook file resolves at neither rung of
@@ -562,7 +730,12 @@ class HeadlessHostDriver:
         self._processes: dict[str, _TrackedHeadlessProcess] = {}
 
     def verify_config(
-        self, *, permission_mode: str | None = None, transport: str | None = None,
+        self,
+        *,
+        permission_mode: str | None = None,
+        transport: str | None = None,
+        degraded_hooks_acknowledged: bool = False,
+        managed_settings_paths: tuple[Path, ...] | None = None,
     ) -> list[str]:
         """Config-time, fail-closed remedies (§5) — empty means ready to
         spawn. Checked explicitly at the top of :meth:`spawn` too, so a
@@ -589,36 +762,20 @@ class HeadlessHostDriver:
         exactly (spec-level override, then this driver's constructor/env
         floor, then the charter default ``"watch"``) so a bare call sees the
         same posture :meth:`spawn` would actually take."""
-        remedies: list[str] = []
-        if not (self._claude_bin and os.access(self._claude_bin, os.X_OK)):
-            remedies.append(
-                f"no executable 'claude' binary found (checked PATH via "
-                f"shutil.which, then {self._claude_bin!r}) — install Claude "
-                "Code or pass claude_bin explicitly.",
-            )
-        if not self._solet_name:
-            remedies.append(
-                "SOLET_NAME is not set — the spawned process cannot "
-                "discover its bridge port without it.",
-            )
-        if not (permission_mode or self._permission_mode):
-            remedies.append(
-                f"no permission mode configured (neither a per-spawn override nor "
-                f"{_ENV_PERMISSION_MODE} is set) — an unattended headless worker "
-                "needs an explicit operator-ruled posture; this driver never "
-                "defaults to bypass.",
-            )
-        resolved_transport = transport if transport is not None else (self._transport or "watch")
-        if resolved_transport == "mcp" and not self._mcp_config_path.exists():
-            remedies.append(
-                f"no MCP config found at {self._mcp_config_path} — required because "
-                "the resolved transport is 'mcp' (a real MCP bridge config must "
-                "exist and is passed verbatim to --mcp-config); 'watch' transport "
-                "spawns with an inline empty MCP config and never reads this file, "
-                "so switching FLEET_SESSION_HOST/transport to 'watch' (the charter "
-                "default) also satisfies this remedy without creating the file.",
-            )
-        return remedies
+        candidates = (
+            _claude_bin_remedy(self._claude_bin),
+            _solet_name_remedy(self._solet_name),
+            _permission_mode_remedy(permission_mode or self._permission_mode),
+            _mcp_config_remedy(
+                transport if transport is not None else (self._transport or "watch"),
+                self._mcp_config_path,
+            ),
+            _managed_policy_remedy(
+                managed_settings_paths,
+                degraded_hooks_acknowledged=degraded_hooks_acknowledged,
+            ),
+        )
+        return [remedy for remedy in candidates if remedy is not None]
 
     def capability_report(self) -> dict[str, object]:
         return {
@@ -895,9 +1052,11 @@ class HeadlessHostDriver:
         # §36.3), _spawn_env (the FLEET_TRANSPORT env var), and
         # _spawn_command (the MCP-config argv posture).
         transport = self._resolve_transport(spec)
+        degraded_ok = bool(spec.get("degraded_hooks_acknowledged"))
         remedies = self.verify_config(
             permission_mode=str(spec.get("permission_mode") or ""),
             transport=transport,
+            degraded_hooks_acknowledged=degraded_ok,
         )
         if remedies:
             raise HostCannotSpawnError("; ".join(remedies))
@@ -908,7 +1067,8 @@ class HeadlessHostDriver:
                 "driver cannot register the spawned process under the "
                 "ledger's identity without it.",
             )
-        label = str(spec.get("lane_id") or "") or agent_instance_id
+        _log_degraded_spawn(degraded_ok, agent_instance_id=agent_instance_id)
+        label = _resolve_local_label(spec, agent_instance_id=agent_instance_id)
         # Minted exactly ONCE, here — never re-derived elsewhere (two
         # evaluations of an identity expression is two identities).
         agent_session_id = f"ases-{agent_instance_id}"

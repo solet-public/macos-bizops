@@ -250,6 +250,7 @@ from .session_sweep import (
     sweep_deadline_dependencies,
     sweep_lane_closed_dependencies,
     sweep_overdue_sessions,
+    sweep_unregistered_spawning_sessions,
 )
 from .system_slots import (
     validate_system_slot_declarations,
@@ -5166,6 +5167,20 @@ class AgentMessagingPlugin(
         )
         if overdue:
             logger.info("D1 sweep: marked %d session(s) overdue", overdue)
+        # W4A registration watchdog — same optional-collaborator contract as
+        # sweep_overdue_sessions above (mark always, notify when possible).
+        # Runs BEFORE the mapping riders so a row that is about to register
+        # this tick is not marked on the strength of a stale read.
+        unregistered = sweep_unregistered_spawning_sessions(
+            state_service, peer_registry=self._peer_registry, bridge_manager=self._bridge_manager,
+        )
+        if unregistered:
+            logger.warning(
+                "D1 sweep: marked %d session(s) registration-overdue — a worker "
+                "that has not registered past its bound did not run its "
+                "registration hook",
+                unregistered,
+            )
         _run_session_claude_mapping_riders(state_service)
         if self._peer_registry is not None and self._bridge_manager is not None:
             fired = sweep_deadline_dependencies(
@@ -6990,6 +7005,11 @@ def _spawn_session_request_from_params(
         spawned_by_instance_id=str(raw.get("spawned_by_instance_id", "") or ""),
         spawned_by_role=str(raw.get("spawned_by_role", "") or ""),
         directed_by=directed_by,
+        # W6: an explicit override; omitted means spawn_session resolves it
+        # (role_name for a project-class role, else lane_id).
+        local_name=str(raw.get("local_name", "") or ""),
+        # W4A item 3: default OFF — running degraded is opt-in, per spawn.
+        degraded_hooks_acknowledged=bool(raw.get("degraded_hooks_acknowledged") or False),
         **_spawn_dispatch_overrides_from_params(raw),
     )
 

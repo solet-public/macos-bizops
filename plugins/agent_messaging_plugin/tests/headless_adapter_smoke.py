@@ -36,6 +36,7 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
 from agent_messaging_plugin.headless_adapter import (  # noqa: E402
+    _MANAGED_SETTINGS_PATHS,
     _WORKER_INJECTED_HOOK_FILENAMES,
     HeadlessHostDriver,
     WorkerHookResolutionError,
@@ -48,6 +49,12 @@ from agent_messaging_plugin.session_hosts import HostCannotSpawnError  # noqa: E
 
 _passed = 0
 _failed: list[str] = []
+
+
+# Side-channel echo wait. Overridable ONLY so the red-first probe can force the
+# timeout path (see _ECHO_WAIT_ENV); production runs never set it.
+_ECHO_WAIT_ENV = "HEADLESS_SMOKE_ECHO_WAIT_S"
+_ECHO_WAIT_SECONDS = float(os.environ.get(_ECHO_WAIT_ENV, "30"))
 
 
 def _check(condition: object, label: str) -> None:
@@ -354,6 +361,132 @@ def test_verify_config_remedies_are_independent() -> None:
         _check(
             configured.verify_config(transport="mcp") == [],
             "a fully-configured driver has zero remedies",
+        )
+
+
+def _write_policy(path: Path, body: object) -> Path:
+    """A POPULATED managed-settings fixture. There is no such file on this
+    machine, and an absent-file probe verifies nothing about the populated
+    case — so every leg below drives the reader with a real file it wrote."""
+    path.write_text(json.dumps(body), encoding="utf-8")
+    return path
+
+
+def test_managed_policy_hooks_plugin_only_refuses_spawn() -> None:
+    """W4A item 2 (#8 §43.1): the adopter's exact policy shape produces an
+    attributable refusal instead of a worker that comes up deaf."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {"strictPluginOnlyCustomization": ["hooks"]},
+        )
+        remedies = driver.verify_config(
+            transport="watch", managed_settings_paths=(policy,),
+        )
+        _check(len(remedies) == 1, f"exactly one remedy fires (got {remedies!r})")
+        _check(
+            "strictPluginOnlyCustomization" in remedies[0] and str(policy) in remedies[0],
+            "the remedy names the offending key AND the file it read it from",
+        )
+        _check(
+            "degraded_hooks_acknowledged" in remedies[0],
+            "and names the escape hatch, so the refusal is actionable",
+        )
+
+
+def test_default_policy_paths_include_the_remote_pulled_location() -> None:
+    """The DEFAULT search list must include ~/.claude/remote-settings.json.
+
+    Measured on an affected machine: a managed policy can be pulled remotely to
+    ``~/.claude/remote-settings.json``, and on such a machine the macOS system
+    path DOES NOT EXIST at all. Searching only the system locations therefore
+    reported "no managed policy in force" on exactly the deployments where one
+    IS in force — a silent fail-open.
+
+    Why no existing leg caught it: every other test in this block INJECTS its
+    own ``managed_settings_paths`` fixture, so none of them ever exercises the
+    default tuple. A defect that is an omission from a default is invisible to
+    tests that always override that default — which is why this leg asserts on
+    the constant itself rather than on behaviour driven by a fixture.
+    """
+    names = [(p.parent.name, p.name) for p in _MANAGED_SETTINGS_PATHS]
+    _check(
+        (".claude", "remote-settings.json") in names,
+        f"the remote-pulled policy location is searched by default (got {names!r})",
+    )
+    _check(
+        names and names[0] == (".claude", "remote-settings.json"),
+        "and it is searched FIRST — the only location a real affected machine "
+        "has been observed to use",
+    )
+    _check(
+        any(p.name == "managed-settings.json" for p in _MANAGED_SETTINGS_PATHS),
+        "without dropping the documented system locations",
+    )
+
+
+def test_managed_policy_without_hooks_key_is_not_a_remedy() -> None:
+    """The discriminating leg: a policy file that exists and restricts
+    something ELSE must not refuse the spawn. Without this, the check would
+    fire on the mere presence of a managed policy."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {"strictPluginOnlyCustomization": ["mcpServers"], "hooks": {}},
+        )
+        _check(
+            driver.verify_config(transport="watch", managed_settings_paths=(policy,)) == [],
+            "a managed policy that does NOT list 'hooks' plugin-only is no remedy",
+        )
+
+
+def test_managed_policy_acknowledged_degraded_proceeds() -> None:
+    """W4A item 3: the explicit opt-out turns the refusal off."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {"strictPluginOnlyCustomization": ["hooks"]},
+        )
+        _check(
+            driver.verify_config(
+                transport="watch", managed_settings_paths=(policy,),
+                degraded_hooks_acknowledged=True,
+            ) == [],
+            "an acknowledged-degraded spawn is allowed through the preflight",
+        )
+
+
+def test_managed_policy_malformed_file_fails_open() -> None:
+    """Deliberately the OPPOSITE failure direction from the spawn refusal,
+    and the reason is evidential: an unparseable policy file is not evidence
+    that hooks are stripped, so refusing on it would be a refusal we cannot
+    justify. The registration watchdog catches the consequence regardless."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        policy = tmp_dir / "managed-settings.json"
+        policy.write_text("{not json at all", encoding="utf-8")
+        _check(
+            driver.verify_config(transport="watch", managed_settings_paths=(policy,)) == [],
+            "a malformed policy file fails OPEN (and logs), never blocks the spawn",
+        )
+
+
+def test_managed_policy_absent_file_is_silent() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        _check(
+            driver.verify_config(
+                transport="watch", managed_settings_paths=(tmp_dir / "nope.json",),
+            ) == [],
+            "no policy file -> no remedy (the ordinary machine, including this one)",
         )
 
 
@@ -917,14 +1050,64 @@ def test_alive_and_terminate_real_process() -> None:
         )
 
 
-def _real_echo_to_file_popen_fn(echo_file: Path) -> Any:
+def _real_echo_to_file_popen_fn(
+    echo_file: Path, *, launch_delay_s: float = 0.0,
+) -> Any:
     """A real process that reads ONE line from stdin and writes it to
     ``echo_file`` (NOT stdout) -- spawn() now drains stdout in a background
     thread (the stdout-never-read fix), so a test observing what send()
     wrote can no longer read the child's stdout pipe directly; it must
-    observe through a side channel the driver doesn't touch."""
+    observe through a side channel the driver doesn't touch.
 
-    def _fn(*_a: Any, **_k: Any) -> subprocess.Popen[str]:
+    ARGV-AWARE, AND THAT IS LOAD-BEARING (2026-08-16). ``spawn()`` makes TWO
+    popen calls through this injected fn, not one: the worker itself, and then
+    the presence sidecar (``_resolve_transport``'s floor is "watch", so
+    ``_arm_watcher`` runs). An argv-BLIND fake handed the echo argv to both, so
+    the watcher child ran ``open(echo_file, "w")`` — CREATE+TRUNCATE — on
+    startup and then blocked forever on a stdin nobody writes. If its startup
+    landed after the real child's write, it truncated the delivered line to
+    zero bytes.
+
+    That is the whole of the ~1-in-6 flake this file carried: file exists, size
+    0, and NO wait bound can fix it because the bytes were already destroyed.
+    Measured deterministically from the seat: argv-blind + a 150ms watcher delay
+    -> 6/6 fail (size 0); argv-aware, same delay -> 6/6 pass (size 95). Load is
+    the natural delay source, which is why it surfaced in full-suite and
+    gate-register runs rather than on an idle box.
+
+    Only the WORKER spawn gets the echo child; the watcher arm gets the real
+    argv it asked for (the stub ``solet`` exits 0). This is the
+    widening-degrades-fakes trap: the 08-13/14 registration fix widened spawn
+    from one popen call to two, and this fake was never re-audited.
+
+    ``launch_delay_s`` exists so the regression test can force the ordering that
+    used to lose the bytes; production paths never set it.
+    """
+
+    def _is_watcher(argv: object) -> bool:
+        """Discriminate on argv[0] ONLY — the launched BINARY.
+
+        Not a substring search over the whole argv: measured 2026-08-16, the
+        WORKER's argv also contains "watch", because its ``--settings`` JSON
+        wires the watch/wake hooks. A whole-argv match therefore classifies the
+        worker as the watcher, routes the real echo argv to neither, and fails
+        every run. The sidecar is the one launched via the stub ``solet``
+        binary, so argv[0] is the only honest signal.
+        """
+        parts = [str(x) for x in argv] if isinstance(argv, (list, tuple)) else [str(argv)]
+        return bool(parts) and Path(parts[0]).name == "solet"
+
+    def _fn(*a: Any, **_k: Any) -> subprocess.Popen[str]:
+        argv = a[0] if a else []
+        if _is_watcher(argv):
+            if launch_delay_s:
+                time.sleep(launch_delay_s)
+            # The sidecar gets what it actually asked for. Never the echo argv:
+            # a second writer on the same path is what broke this.
+            return subprocess.Popen(  # noqa: S603 -- caller-supplied stub argv, test-only
+                [str(x) for x in argv],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
         return subprocess.Popen(  # noqa: S603 -- fixed harmless argv, test-only
             [
                 sys.executable, "-c",
@@ -951,15 +1134,37 @@ def test_driver_channel_send_writes_stream_json_envelope() -> None:
         )
         assert channel is not None
         channel.send("/clear")
-        deadline = time.monotonic() + 5.0
+        # A REAL child process must be scheduled, read a line from its stdin and
+        # write it out, so this wait is a race against the machine rather than a
+        # behavioural assertion. The bound is generous because a slow box is not a
+        # product defect.
+        #
+        # THE BOUND WAS NEVER THE BUG, and the record of getting that wrong is
+        # kept deliberately. At 5s this failed ~1-in-6; widening to 30s still
+        # failed 2 of 8, which DISPROVED "the bound is too tight" rather than
+        # confirming it. The real cause was this file's OWN fixture truncating
+        # the file from a second child — see _real_echo_to_file_popen_fn. A
+        # timing bound cannot fix destroyed bytes, and widening one to chase an
+        # intermittent hides the question instead of answering it.
+        deadline = time.monotonic() + _ECHO_WAIT_SECONDS
         while not (echo_file.exists() and echo_file.stat().st_size > 0):
             if time.monotonic() > deadline:
                 break
             time.sleep(0.05)
+        wrote_echo = echo_file.exists() and echo_file.stat().st_size > 0
         _check(
-            echo_file.exists() and echo_file.stat().st_size > 0,
-            "the child wrote the echoed line to the side-channel file within 5s",
+            wrote_echo,
+            f"the child wrote the echoed line to the side-channel file within {_ECHO_WAIT_SECONDS:g}s",
         )
+        if not wrote_echo:
+            # HALT before anything that reads the file. Previously execution fell
+            # through to json.loads() on an empty file, so a TIMEOUT surfaced as
+            # `JSONDecodeError: Expecting value: line 1 column 1` four lines later
+            # — an unhandled traceback pointing at JSON parsing when the finding
+            # was a wait that expired. A check that does not stop its dependents
+            # reports the wrong defect.
+            driver.terminate(host_ref, grace_seconds=2)
+            return
         payload = json.loads(echo_file.read_text())
         _check(
             payload.get("type") == "user",
@@ -969,6 +1174,78 @@ def test_driver_channel_send_writes_stream_json_envelope() -> None:
             payload.get("message", {}).get("content", [{}])[0].get("text") == "/clear",
             "the envelope carries the sent text verbatim",
         )
+        driver.terminate(host_ref, grace_seconds=2)
+
+
+def test_sidecar_popen_never_targets_the_worker_side_channel() -> None:
+    """MECHANISM, asserted directly and WITHOUT timing.
+
+    The previous version of this check counted popen calls by the argv the
+    DRIVER passed in — which cannot see the bug, because the fixture substitutes
+    the echo argv internally. An argv-blind fake still shows one solet argv and
+    one claude argv, so the count looked right while both children wrote the
+    same file. Measured: that assertion passed under the very mutation it was
+    written to catch.
+
+    So this asks the only question that settles it — hand the fixture a SIDECAR
+    argv and see whether the child it returns touches the worker's file. No
+    spawn, no delay, no ordering: if the sidecar can write that path at all, the
+    collision is live.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        echo_file = Path(tmp) / "echo.txt"
+        echo_file.write_text("SENTINEL")
+        solet_stub = Path(tmp) / "stub-venv" / "bin" / "solet"
+        solet_stub.parent.mkdir(parents=True, exist_ok=True)
+        solet_stub.write_text("#!/bin/sh\nexit 0\n")
+        solet_stub.chmod(0o755)
+
+        fn = _real_echo_to_file_popen_fn(echo_file)
+        proc = fn([str(solet_stub), "watch", "--role", "probe"])
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        _check(
+            echo_file.read_text() == "SENTINEL",
+            "a SIDECAR-argv child never writes the worker's side-channel file "
+            "(argv-blind fixtures truncate it — the R1 gate blocker)",
+        )
+
+
+def test_watcher_arm_does_not_clobber_the_worker_side_channel() -> None:
+    """END-TO-END companion to the mechanism check above: a real spawn with the
+    watcher arm deliberately DELAYED 150ms so it lands after the worker's write
+    — the ordering that used to destroy the bytes, forced rather than awaited.
+
+    Asserting outcomes here is enough only because the mechanism is asserted
+    separately; the collision has at least three observable states (empty file,
+    malformed non-empty json from a mid-write read, and a benign pass), and
+    enumerating shapes is a losing game.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        echo_file = Path(tmp) / "echo.txt"
+        driver = _configured_driver(
+            Path(tmp),
+            popen_fn=_real_echo_to_file_popen_fn(echo_file, launch_delay_s=0.15),
+        )
+        host_ref = driver.spawn({"agent_instance_id": "agi-echo-clobber"})
+        channel = driver.driver_channel(host_ref)
+        assert channel is not None
+        channel.send("/clear")
+        deadline = time.monotonic() + _ECHO_WAIT_SECONDS
+        while not (echo_file.exists() and echo_file.stat().st_size > 0):
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.05)
+        time.sleep(0.35)  # sleep PAST the injected delay: that ordering is the test
+        survived = echo_file.exists() and echo_file.stat().st_size > 0
+        _check(survived, "the worker's side-channel survives a LATE watcher arm")
+        if survived:
+            _check(
+                json.loads(echo_file.read_text()).get("type") == "user",
+                "the surviving bytes are the worker's envelope, not a truncated remnant",
+            )
         driver.terminate(host_ref, grace_seconds=2)
 
 
@@ -1068,6 +1345,12 @@ def main() -> int:
     test_resolve_worker_hook_paths_resolves_every_required_filename()
     test_spawn_refuses_when_a_worker_hook_resolves_at_neither_rung()
     test_verify_config_remedies_are_independent()
+    test_managed_policy_hooks_plugin_only_refuses_spawn()
+    test_default_policy_paths_include_the_remote_pulled_location()
+    test_managed_policy_without_hooks_key_is_not_a_remedy()
+    test_managed_policy_acknowledged_degraded_proceeds()
+    test_managed_policy_malformed_file_fails_open()
+    test_managed_policy_absent_file_is_silent()
     test_verify_config_mcp_config_required_only_for_mcp_transport()
     test_verify_config_accepts_a_per_spawn_permission_mode_override()
     test_spawn_refuses_when_unconfigured()
@@ -1086,6 +1369,8 @@ def main() -> int:
     test_spawn_wraps_popen_oserror()
     test_alive_and_terminate_real_process()
     test_driver_channel_send_writes_stream_json_envelope()
+    test_sidecar_popen_never_targets_the_worker_side_channel()
+    test_watcher_arm_does_not_clobber_the_worker_side_channel()
     test_driver_channel_none_for_unknown_host_ref()
     test_driver_channel_none_for_dead_but_still_tracked_process()
     test_send_swallows_broken_pipe_from_dead_process()

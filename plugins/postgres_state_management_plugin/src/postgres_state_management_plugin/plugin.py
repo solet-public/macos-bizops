@@ -38,6 +38,12 @@ from ananta.interfaces.vault_service_interface import VaultServiceInterface
 from ananta.services.schema_management import SchemaRegistryService
 from ananta.services.state_service.interfaces import StateManagementAPI, StateProvider
 from ananta.services.state_service.ordered_query import parse_ordered_query
+from ananta.services.state_service.read_bounds import (
+    MAX_READ_ROWS,
+    ReadBoundError,
+    overflow_message,
+    resolve_read_limit,
+)
 from ananta.types.schema_standardizer import SchemaStandardizer
 from ananta.types.schema_types import SchemaDefinition, TableSchema
 
@@ -250,18 +256,51 @@ class _PostgresStateTransaction(StateTransaction):
     def query_state(
         self, namespace: str, filters: dict[str, object]
     ) -> list[dict[str, object]]:
+        """Non-locking SELECT within the txn, bounded like ``read_state``.
+
+        The autocommit ``read_state`` has carried the ``MAX_READ_ROWS`` bound
+        since D1 (INCIDENT.md 2026-08-15) and this module already imports
+        ``resolve_read_limit`` / ``overflow_message`` for it — but the bound was
+        applied only there, leaving the transaction-scoped read unbounded. That
+        gap mattered more than it looks: ``StateTransaction`` exposes no
+        ``read_state``, so inside a transaction this is the ONLY row-returning
+        read primitive there is, and its callers had no bounded alternative to
+        migrate to.
+
+        This is the same policy applied in a second place, NOT a second policy
+        (``read_bounds`` module docstring). Semantics are byte-for-byte
+        ``read_state``'s: an explicit ``limit`` is honoured as-is; over the cap
+        without ``unbounded=True`` is refused before any SQL runs; and with no
+        limit the query fetches ``cap + 1`` rows so that overflow can be PROVED
+        and REFUSED rather than silently truncated to a prefix.
+        """
         table = filters.get("table")
         inner = filters.get("filters")
         if not isinstance(table, str) or not isinstance(inner, dict):
             raise ValueError(
                 "query_state requires filters={'table': str, 'filters': dict}"
             )
+        fetch_limit, overflow_is_error = resolve_read_limit(
+            filters.get("limit"),
+            unbounded=filters.get("unbounded", False),
+            table=table,
+        )
         composed, params = self._provider.build_select_sql(
-            namespace, table, inner, serialize=serialize_value_for_txn
+            namespace,
+            table,
+            inner,
+            fetch_limit or None,
+            serialize=serialize_value_for_txn,
         )
         with self._conn.cursor() as cur:
             cur.execute(composed, params)
             rows = cur.fetchall()
+        # Raise rather than return a prefix: a truncated read corrupts every
+        # analysis built on it, where a loud refusal stops one caller. Raising
+        # also rolls the surrounding transaction back, which is the correct
+        # outcome for a read-modify-write that cannot see all of its input.
+        if overflow_is_error and len(rows) > MAX_READ_ROWS:
+            raise ReadBoundError(overflow_message(table=table))
         return [dict(row) for row in rows]
 
     def increment_and_return(self, namespace: str, data: dict[str, object]) -> int:
@@ -709,13 +748,24 @@ class PostgresStatePlugin(
                 )
 
             filters = query.get("filters", {})
-            limit = query.get("limit")
 
-            # Validate limit
-            if limit is not None and not isinstance(limit, int):
+            # D1 (INCIDENT.md 2026-08-15): an unbounded read of a 109k-row
+            # table returned every row, became an 82 MB action payload, and
+            # froze the platform for 3h20m. Resolve the row bound BEFORE the
+            # query runs — the cap is compiled into the SQL, so an over-large
+            # result never leaves Postgres. Mirrors ordered_query.py's Gap-C
+            # policy rather than introducing a second one.
+            try:
+                fetch_limit, overflow_is_error = resolve_read_limit(
+                    query.get("limit"),
+                    unbounded=query.get("unbounded", False),
+                    table=table,
+                )
+            except ReadBoundError as exc:
                 return create_error_result(
-                    "'limit' must be an integer",
-                    error_code="query.invalid_limit",
+                    str(exc),
+                    error_code="query.limit_over_cap",
+                    details={"namespace": namespace, "table": table},
                 )
 
             # Execute query
@@ -723,8 +773,22 @@ class PostgresStatePlugin(
                 namespace=namespace,
                 table=table,
                 conditions=filters if isinstance(filters, dict) else None,
-                limit=limit,
+                limit=fetch_limit or None,
             )
+
+            # The no-explicit-limit path fetched cap+1 rows purely to detect
+            # overflow. Getting that many back PROVES more rows exist without
+            # ever materialising them all, so refuse — never return the prefix.
+            if overflow_is_error and len(rows) > MAX_READ_ROWS:
+                return create_error_result(
+                    overflow_message(table=table),
+                    error_code="query.unbounded_read_over_cap",
+                    details={
+                        "namespace": namespace,
+                        "table": table,
+                        "cap_rows": MAX_READ_ROWS,
+                    },
+                )
 
             # Return flat structure matching return_value_schema
             # Schema expects: records, count, namespace, table at top level
@@ -1110,17 +1174,21 @@ class PostgresStatePlugin(
             )
 
     def query_state(self, namespace: str, filters: dict[str, object]) -> ActionResult:
-        """
-        Query state data with filters.
+        """DEPRECATED alias for :meth:`read_state` — prefer ``read_state``.
+
+        A second NAME for one primitive, not a second primitive. ``filters`` is
+        forwarded verbatim and becomes ``read_state``'s ``query``, so it is the
+        whole ``{table, filters, limit?, unbounded?}`` envelope: an explicit
+        ``limit`` compiles into the SQL and the ``MAX_READ_ROWS`` bound applies
+        here exactly as it does to ``read_state``, because it IS ``read_state``.
 
         Args:
             namespace: Namespace identifier
-            filters: Query filters
+            filters: The ``{table, filters, limit?, unbounded?}`` query envelope.
 
         Returns:
             ActionResult with query results
         """
-        # Delegate to read_state
         return self.read_state(namespace, filters)
 
     def query_ordered(self, namespace: str, data: dict[str, object]) -> ActionResult:

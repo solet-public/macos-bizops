@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING
 
 from ananta.core.domain.enums import ActionStatus
 from ananta.core.domain.status import is_status_match
-from ananta.core.domain.timestamps import to_naive_utc
 from ananta.error_handling import FrameworkError
+from ananta.services.state_service.bounded_read import iter_table_rows
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_service_protocol import StateServiceProtocol
@@ -62,6 +62,25 @@ TERMINAL_STATES = frozenset(
 # seven TokenState values), so "non-terminal" is exactly the complement of the
 # terminal set — letting an equality ``=ANY`` filter stand in for ``NOT IN``.
 NON_TERMINAL_STATES = frozenset(TokenState) - TERMINAL_STATES
+
+# Bound on the pending-token walk in ``get_pending_tokens``.
+#
+# NOT a claim that `flow_tokens` is small — it held 110,926 rows when this was
+# written. It is a claim about the PREDICATE: non-terminal tokens for ONE flow.
+# A flow whose outstanding work is in the tens of thousands is not a flow with a
+# backlog, it is a flow that is broken, and this method exists to help a human
+# look at that — so refusing beats returning a list nobody can read.
+#
+# Measured 2026-08-15 PDT / 2026-08-16 UTC: the worst live flow
+# (`flow-ledger-periodic-poll`) held 25,339 rows total and 129 non-terminal.
+# 10,000 is ~77x that non-terminal figure and still far below the whole table.
+_PENDING_TOKEN_WALK_CEILING = 10_000
+_PENDING_TOKEN_WALK_REASON = (
+    "non-terminal tokens for a SINGLE flow (worst live flow measured 129 on "
+    "2026-08-15 PDT / 2026-08-16 UTC); a flow with more outstanding tokens than "
+    "this is malfunctioning rather than busy, and this debug view cannot help "
+    "with it."
+)
 
 
 class FlowRuntimeGraph:
@@ -210,8 +229,28 @@ class FlowRuntimeGraph:
     # =========================================================================
 
     def get_pending_token_count(self, flow_id: str) -> int:
-        """Count non-terminal tokens for a flow."""
-        result = self._state_service.query_state(
+        """Count non-terminal tokens for a flow — a scalar aggregate, no rows.
+
+        THE READ IS GONE, not bounded (2026-08-15 PDT / 2026-08-16 UTC). This
+        used to fetch every matching row and return ``len(rows)``, which is the
+        most expensive possible way to ask "how many" — and once the default row
+        bound dropped to 100 it stopped working at all. Measured on the release
+        that first ran with that bound: ``flow-ledger-periodic-poll`` held 25,339
+        rows, **129 of them non-terminal**, so the read was refused and every
+        completion for that flow failed with "Failed to query pending token
+        count".
+
+        That mattered far more than one flow, because this is reached from
+        ``complete_token`` -> ``_check_flow_completion`` — **on every action
+        completion**. A bound here would have been correct and still wrong: the
+        caller never wanted the rows, it wanted the number, and ``count`` runs
+        the aggregate inside the owner plugin and ships a scalar. It is outside
+        the row cap entirely, so this site cannot regress at any table size.
+
+        No ``is_deleted`` handling is added or removed: ``count`` applies no
+        automatic exclusion, and neither did the ``query_state`` it replaces.
+        """
+        result = self._state_service.count(
             "core",
             {
                 "table": "flow_tokens",
@@ -221,40 +260,48 @@ class FlowRuntimeGraph:
                 },
             },
         )
-        rows = self._query_rows(
+        return self._query_scalar(
             result,
             f"Failed to query pending token count for flow {flow_id}",
             {"flow_id": flow_id},
         )
-        return len(rows)
 
     def get_pending_tokens(self, flow_id: str) -> list[dict[str, object]]:
         """Get all pending tokens for a flow (for debugging/observability).
 
-        Uses uncapped ``query_state`` plus a Python sort rather than
+        PAGINATED (2026-08-15 PDT / 2026-08-16 UTC). This genuinely needs the
+        rows — unlike :meth:`get_pending_token_count` above, which wanted only
+        the number and now asks for only the number — so the repair is a walk
+        rather than a deletion.
+
+        The docstring this replaces argued the opposite, and the argument was
+        correct when it was written: "uses uncapped ``query_state`` rather than
         ``query_ordered`` — the latter silently caps at 100 rows, which would
-        under-report a flow with many outstanding tokens. ``created_at`` is
-        coerced to a value for ordering (never compared as an ISO spelling),
-        with ``id`` as a deterministic tie-break (the raw query had none, so
-        equal-``created_at`` ties were previously nondeterministic).
+        under-report a flow with many outstanding tokens". Against the old
+        10,000-row default that reasoning held. It is now exactly inverted: the
+        default bound is 100, so the UNCAPPED read is the one that gets refused,
+        and a page cap only truncates if you stop after one page. ``iter_table_rows``
+        pages until a short page proves the end.
+
+        The Python sort is gone with it. Its key was ``(created_at, id)``, which
+        is precisely the helper's own cursor — so the ordering now comes from the
+        read rather than from re-sorting a fully materialised result, and the
+        ``id`` tie-break that made equal-``created_at`` ordering deterministic is
+        preserved by the cursor's second column.
         """
-        result = self._state_service.query_state(
-            "core",
-            {
-                "table": "flow_tokens",
-                "filters": {
+        ordered = list(
+            iter_table_rows(
+                self._state_service,
+                namespace="core",
+                table="flow_tokens",
+                filters={
                     "flow_id_trace": flow_id,
                     "state": [s.value for s in NON_TERMINAL_STATES],
                 },
-            },
-        )
-        rows = self._query_rows(
-            result,
-            f"Failed to query pending tokens for flow {flow_id}",
-            {"flow_id": flow_id},
-        )
-        ordered = sorted(
-            rows, key=lambda r: (to_naive_utc(r["created_at"]), str(r["id"]))
+                ceiling=_PENDING_TOKEN_WALK_CEILING,
+                reason=_PENDING_TOKEN_WALK_REASON,
+                include_deleted=True,
+            ),
         )
         return [
             {
@@ -371,6 +418,41 @@ class FlowRuntimeGraph:
                 return generated_id
 
         return None
+
+    def _query_scalar(
+        self, result: object, message: str, details: dict[str, object]
+    ) -> int:
+        """Extract the integer from a ``count`` result, fail-fast.
+
+        The scalar lands at ``data.result.value`` — NESTED, not flat. Checked
+        rather than assumed: reading ``data.value`` would yield ``None`` on a
+        perfectly healthy response and silently report every flow as having zero
+        pending tokens, which would mark live flows complete. A wrong count here
+        is worse than an error, so every departure from the expected shape
+        raises rather than defaulting.
+        """
+        if not isinstance(result, dict):
+            raise FrameworkError(
+                message=message,
+                error_code="frg.count_failed",
+                details={**details, "result": repr(result)},
+            )
+        if not is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
+            raise FrameworkError(
+                message=message,
+                error_code="frg.count_failed",
+                details={**details, "result": dict(result)},
+            )
+        data = result.get("data")
+        inner = data.get("result") if isinstance(data, dict) else None
+        value = inner.get("value") if isinstance(inner, dict) else None
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise FrameworkError(
+                message=f"{message} (malformed count envelope)",
+                error_code="frg.count_failed",
+                details={**details, "result": dict(result)},
+            )
+        return value
 
     def _query_rows(
         self, result: object, message: str, details: dict[str, object]

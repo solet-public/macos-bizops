@@ -19,7 +19,7 @@ Per Architect's §3.1 mapping the 12 methods are:
 - ``list_quiescent_sessions``, ``list_sessions_by_ids``,
   ``find_session_id_by_external_session_id``, ``find_event_id_by_vendor_id``,
   ``find_call_event_id_for_resolution``, ``find_latest_away_summary_for_session``,
-  ``fetch_all_events_for_session`` (7 supporting helpers consumed across domains)
+  ``iter_all_events_for_session`` (7 supporting helpers consumed across domains)
 
 ``get_source`` and ``find_source_id_by_kind_and_root_uri`` stay in
 ``repository.py`` until cycle 3 — per Architect's §3.2 mapping they relocate to
@@ -28,10 +28,17 @@ Per Architect's §3.1 mapping the 12 methods are:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta
+from functools import partial
 from typing import cast
 
-from ananta.llm.session_ledger.base import SessionLedgerRepositoryBase, _naive_utc
+from ananta.interfaces.state_management_interface import StateManagementInterface
+from ananta.llm.session_ledger.base import (
+    SessionLedgerRepositoryBase,
+    _naive_utc,
+    walk_table,
+)
 from ananta.llm.session_ledger.read_support import (
     SessionWindow,
     _merge_active_leases,
@@ -87,6 +94,97 @@ _FINGERPRINT_SEED_B = 527612190
 # level so a smoke can shrink it to exercise the multi-page cursor cheaply.
 _CENSUS_EVENT_PAGE_SIZE = 100
 
+# Keyset page size for the per-session ``__event`` walk. Same Gap-C ceiling as
+# the census page above, and the same reason it is held at module level: a smoke
+# shrinks it so a fixture can straddle a page boundary without needing 101 rows.
+# A fixture that cannot reach the page boundary cannot test the cursor, and a
+# green from such a fixture is worth nothing.
+_EVENT_PAGE_ROWS = 100
+
+
+def _walk_census_table(
+    state: StateManagementInterface,
+    table: str,
+    filters: dict[str, object],
+    *,
+    ceiling: int,
+    reason: str,
+) -> Iterator[dict[str, object]]:
+    """``base.walk_table`` with the state interface curried in — the census walker.
+
+    A free function bound with ``partial`` at the call site rather than a method,
+    for the same reason as :func:`iter_events_by_sequence`: it needs nothing from
+    the instance but the state interface, and ``SessionLedgerReadMixin`` sits at
+    the 500-LOC god-class bound (adding it as a method took it to 513).
+
+    Passing the binding, rather than ``self._state`` itself, keeps
+    ``read_support`` free of a held service reference — it takes every read seam
+    as an injected callable and this preserves that.
+    """
+    return walk_table(state, table, filters, ceiling=ceiling, reason=reason)
+
+
+def iter_events_by_sequence(
+    query_ordered: Callable[..., list[dict[str, object]]],
+    *,
+    session_id: str,
+) -> Iterator[dict[str, object]]:
+    """Yield one session's ``__event`` rows in ``sequence`` order, paged.
+
+    Read-cap sweep, 2026-08-16 (lane-ak). The call site this replaces was an
+    UNBOUNDED ``query_state`` over ``__event`` — 2,077,082 live rows across
+    27,208 sessions — followed by a Python ``rows.sort()``. Both halves were
+    wrong, and the row cap only made the first half loud:
+
+    * **The read.** A session's event count is bounded by nothing. The mean is
+      ~76, but the mean is not the failure mode: a long session runs to
+      thousands. Under the pre-2026-08-15 10,000-row cap that mostly passed; at
+      the 100-row cap it refuses for any session past its first hundred events.
+      Paged, it is complete at any session length.
+    * **The sort.** Sorting needs the whole result in memory, which is exactly
+      the property paging exists to avoid — a paged read followed by a sort is
+      not a paged read. The ordering moved INTO the read instead.
+
+    **Why this is a bespoke walk and not ``bounded_read.iter_table_rows``.**
+    That helper's cursor is fixed at ``(created_at, id)``; this caller's contract
+    is ``sequence`` order. Satisfying a different order through the helper means
+    materializing the whole walk and re-sorting it — discarding the one property
+    the helper is for. When the caller's required order is not the helper's
+    cursor, the keyset walk belongs at the call site.
+
+    The cursor keeps the ``id`` tie-break for the same reason the helper does: a
+    single-column cursor splits an equal-valued group across a page boundary and
+    silently drops the remainder. ``sequence`` is NOT NULL and per-session
+    unique in practice, but "in practice" is not what a cursor should rest on.
+
+    Args:
+        query_ordered: The repository's ``_query_ordered`` seam. Passed in rather
+            than reached for through ``self`` so this stays a free function —
+            ``SessionLedgerReadMixin`` is at the 500-LOC god-class bound.
+        session_id: The session whose events to walk.
+
+    Yields:
+        Each live event row for the session, ``sequence`` ascending.
+    """
+    after: tuple[object, ...] | None = None
+    while True:
+        page = query_ordered(
+            TABLE_EVENT,
+            filters={"session_id": session_id},
+            order_by=[["sequence", "asc"], ["id", "asc"]],
+            limit=_EVENT_PAGE_ROWS,
+            after=after,
+        )
+        if not page:
+            return
+        yield from page
+        # A short page proves the end. A full page might be the end too, but
+        # asking again is one cheap round-trip; assuming it is not costs rows.
+        if len(page) < _EVENT_PAGE_ROWS:
+            return
+        last = page[-1]
+        after = (last["sequence"], last["id"])
+
 
 class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
     """Read/query domain mixin.
@@ -126,6 +224,7 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
         return build_census(
             query=self._query,
             query_ordered=self._query_ordered,
+            walk=partial(_walk_census_table, self._state),
             now=cast(datetime, _naive_utc(self._clock())),
             page_size=_CENSUS_EVENT_PAGE_SIZE,
             fingerprint_seeds=(_FINGERPRINT_SEED_A, _FINGERPRINT_SEED_B),
@@ -151,17 +250,20 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
     ) -> list[dict[str, object]]:
         """M17 typed signature; SQL-lockdown junction read-then-route.
 
-        Thin delegator to :func:`list_sessions_via_junction` (the junction
-        source_kind route + the uncapped ``query_state`` session read + the
-        Python two-window / sort / limit fold live there, keeping this mixin
-        under the god-class budget). Window bounds are ``_naive_utc``-normalized
-        here (F1 seam); ``limit`` clamps to ``[1, 200]`` (uncapped query_state —
-        no cap-narrowing). See the helper for the source_kind-via-junction
-        mechanism + the include_siblings+source_kind FULL-group expansion
-        (canonical + siblings via the shared external_session_id).
+        Thin delegator to :func:`list_sessions_via_junction`. Window bounds are
+        ``_naive_utc``-normalized here (F1 seam); ``limit`` clamps to
+        ``[1, 200]``. See the helper for the source_kind-via-junction mechanism
+        + the include_siblings+source_kind FULL-group expansion (canonical +
+        siblings via the shared external_session_id).
+
+        Read-cap sweep, 2026-08-16 UTC (lane-ak): the default path walks pages
+        instead of reading ``__session`` whole (14,412 rows to return 50, and
+        refused outright on the serving release). The ``source_kind`` path is
+        NOT yet repaired — wave 2b. Both explained at ``walk_sessions_page``.
         """
         return list_sessions_via_junction(
             self._query,
+            self._query_ordered,
             window=SessionWindow(
                 since=_naive_dt(since),
                 until=_naive_dt(until),
@@ -203,6 +305,9 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
         custom_title-seed branch short-circuits without a second read.
         """
         cutoff = self._clock() - timedelta(minutes=max(1, int(quiescence_minutes)))
+        # unbounded (2026-08-15): the anti-join + 1..50 LIMIT are applied
+        # downstream, so this wants the whole eligible set and the row cap
+        # refuses it. Restores pre-cap behaviour; pagination is the follow-up.
         candidates = self._query(
             TABLE_SESSION,
             {
@@ -210,22 +315,24 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
                 "canonical_external_session_id": {"op": "is_null"},
                 "last_event_at": {"op": "lte", "value": _naive_utc(cutoff)},
             },
+            unbounded=True,
         )
         if not candidates:
             return []
-        summaries = self._query(
+        # Chunked: sized by the candidate list, so refused once it exceeds the cap.
+        summaries = self._query_membership_chunked(
             TABLE_SUMMARY,
-            {
-                "session_id": [str(row["id"]) for row in candidates],
-                "is_deleted": 0,
-            },
+            column="session_id",
+            values=[str(row["id"]) for row in candidates],
+            extra_filters={"is_deleted": 0},
         )
         # No is_deleted filter on __source — faithful to the original
         # INNER JOIN (which had none), so a soft-deleted source's sessions are
         # still summarized; a session whose source row is absent is dropped.
-        sources = self._query(
+        sources = self._query_membership_chunked(
             TABLE_SOURCE,
-            {"id": sorted({str(row["source_id"]) for row in candidates})},
+            column="id",
+            values=sorted({str(row["source_id"]) for row in candidates}),
         )
         return select_quiescent_sessions(
             candidates,
@@ -251,10 +358,18 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
           ``query_state`` read path binds filter values raw — so the F1 strip
           moves to the callsite (``self._clock()`` is ``datetime.now(UTC)``,
           tz-aware).
-        * Both reads are UNCAPPED ``query_state`` (not ``query_ordered``) because
-          the old SQL had no ``LIMIT`` and the live-lease set can exceed the
-          100-row Gap-C cap; ordering is re-established in Python (the Slice-1
-          ``fetch_all_events_for_session`` precedent).
+        * Both reads are ``query_state`` (not ``query_ordered``) because the old
+          SQL had no ``LIMIT``; ordering is re-established in Python.
+
+          The Slice-1 ``fetch_all_events_for_session`` precedent this used to
+          cite was RETIRED by the read-cap sweep on 2026-08-16 (lane-ak) — that
+          site is now :func:`iter_events_by_sequence`, a paged keyset walk, and
+          citing it as authority for an uncapped read is exactly backwards. What
+          keeps THESE two reads correct is not the precedent but the measurement:
+          ``__active_lease`` holds 0 rows and the ``__session`` read that follows
+          is keyed on the resulting lease ids, so both sets are bounded by the
+          live-lease count rather than by table size. If live leases ever routinely
+          exceed the cap, this becomes a paged walk too.
         * INNER-JOIN cardinality is preserved by emitting one row per live lease
           whose session is also live (lease ⋈ session on ``session_id``). The
           deterministic ``(expires_at, id)`` desc sort replaces the old
@@ -359,40 +474,27 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
     # Event listing + lookups
     # ------------------------------------------------------------------
 
-    def fetch_all_events_for_session(
+    def iter_all_events_for_session(
         self,
         *,
         session_id: str,
-    ) -> list[dict[str, object]]:
-        """Return every ``__event`` row for ``session_id`` ordered by ``sequence``.
+    ) -> Iterator[dict[str, object]]:
+        """Yield every ``__event`` row for ``session_id`` in ``sequence`` order.
 
-        Phase 2 Tier 1 codex re-ingest sub-strategy B: MESSAGE/SYSTEM rows
-        carry no ``vendor_event_id`` in the codex parser's discipline, so
-        the helper has to pair stripped rows with re-parsed events by
-        positional ordering rather than key lookup. The pairing logic
-        needs both stripped AND clean rows for the session — clean rows
-        anchor the index alignment when re-parse counts match, and serve
-        as type/timestamp references when the ±5s + event_type fallback
-        heuristic runs against drift.
+        Thin delegator to the module-level :func:`iter_events_by_sequence`, which
+        owns the keyset walk and the full rationale for why it is a bespoke walk
+        rather than ``bounded_read.iter_table_rows``.
 
-        Columns selected match the ``_restore_codex_local`` consumer:
-
-        * ``id`` — platform event_id to pass to ``restore_event_content``
-        * ``sequence`` — canonical per-session ordering key
-        * ``event_at`` — for the ±5s positional-pairing heuristic
-        * ``event_type`` — for the event_type-match positional-pairing
-          predicate
-        * ``content_text`` — NULL means stripped, NOT NULL means clean
-        * ``vendor_event_id`` — informational; the caller already filters
-          candidates without vendor_event_id before calling this
+        **No production caller today.** The only reference is
+        ``ananta/tests/llm/session_ledger/read_migration_live_smoke.py``, and the
+        ``_restore_codex_local`` consumer its docstring names does not exist in
+        the tree. Kept rather than deleted (coordinator ruling, 2026-08-16): the
+        hazard was the read being unbounded, not the capability existing, and
+        deleting it would protect nobody from the next person writing the same
+        walk from scratch. Deletion stays a live option — this note is here so
+        the next reader can take it without re-deriving the fact.
         """
-        rows = self._query(
-            TABLE_EVENT, {"session_id": session_id, "is_deleted": 0},
-        )
-        # query_state gives no ordering; the codex re-ingest positional-pairing
-        # consumer needs per-session sequence order (sequence is a NOT NULL int).
-        rows.sort(key=lambda r: cast(int, r.get("sequence", 0)))
-        return rows
+        return iter_events_by_sequence(self._query_ordered, session_id=session_id)
 
     def find_event_id_by_vendor_id(
         self,

@@ -59,6 +59,7 @@ from agent_messaging_plugin.schema import (  # noqa: E402
 )
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     ManagedSessionSpec,
+    backfill_registration,
     insert_managed_session,
     read_managed_session,
     transition_lifecycle_state,
@@ -68,10 +69,13 @@ from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
     terminate_session,
 )
 from agent_messaging_plugin.session_sweep import (  # noqa: E402
+    DEFAULT_REGISTRATION_BOUND_S,
+    EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE,
     SessionRoleClaimPruner,
     sweep_deadline_dependencies,
     sweep_lane_closed_dependencies,
     sweep_overdue_sessions,
+    sweep_unregistered_spawning_sessions,
 )
 
 T0 = datetime(2026, 8, 3, 12, 0, 0, tzinfo=UTC)
@@ -926,6 +930,214 @@ def test_retire_session_crash_mid_retire_is_redrivable() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# W4A registration watchdog (sweep_unregistered_spawning_sessions)
+# ---------------------------------------------------------------------------
+
+
+def _spawn_unregistered(
+    state: StateManagementInterface,
+    *,
+    agent_instance_id: str,
+    spawned_at: datetime,
+    host: str = "headless",
+    spawned_by_instance_id: str = "",
+    degraded_hooks_acknowledged: bool = False,
+) -> None:
+    """A ``spawning`` row whose spawn timestamp we CONTROL, so the watchdog
+    tests advance a clock across the bound instead of asserting on a static
+    row. ``last_transition_at`` is the anchor the bound is measured from."""
+    insert_managed_session(
+        state,
+        ManagedSessionSpec(
+            agent_instance_id=agent_instance_id, lane_id="lane-z", brief_ref="",
+            work_class=WORK_CLASS_READ_ONLY, budget_line="b1", host=host,
+            spawned_by_instance_id=spawned_by_instance_id,
+            degraded_hooks_acknowledged=degraded_hooks_acknowledged,
+        ),
+    )
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": agent_instance_id}},
+        {"last_transition_at": spawned_at.isoformat()},
+    )
+
+
+def test_registration_within_bound_is_not_marked() -> None:
+    """The advancing half #1: the SAME row, read before the bound, is clean."""
+    state = _state()
+    _spawn_unregistered(state, agent_instance_id="agi-fresh", spawned_at=T0)
+    marked = sweep_unregistered_spawning_sessions(
+        state, now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S - 1),
+    )
+    _check(marked == 0, "a spawning row inside the registration bound is not marked")
+    _check(
+        not read_managed_session(state, "agi-fresh").get("registration_overdue_at"),
+        "and carries no registration_overdue_at",
+    )
+
+
+def test_registration_past_bound_marks_field_not_state() -> None:
+    """The advancing half #2 AND the design call itself: past the bound the
+    row is MARKED but its lifecycle_state is untouched. A new lifecycle state
+    would have destroyed the fact that the row is still spawning; the field
+    keeps both facts."""
+    state = _state()
+    _spawn_unregistered(state, agent_instance_id="agi-deaf", spawned_at=T0)
+    marked = sweep_unregistered_spawning_sessions(
+        state, now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
+    )
+    _check(marked == 1, "the same row, past the bound, is marked")
+    row = read_managed_session(state, "agi-deaf")
+    _check(bool(row.get("registration_overdue_at")), "registration_overdue_at is stamped")
+    _check(
+        row["lifecycle_state"] == LIFECYCLE_SPAWNING,
+        "FIELD-NOT-STATE: lifecycle_state is still 'spawning' -- the watchdog "
+        "attributes, it does not transition",
+    )
+    reason = str(row.get("registration_overdue_reason") or "")
+    _check(
+        "has not registered" in reason and "registration hook has not run" in reason,
+        f"the reason states what was OBSERVED at the seam (got {reason!r})",
+    )
+
+
+def test_registration_watchdog_never_reaps() -> None:
+    """The other half of the leg-separation contract: unlike the report_by
+    spawning leg, this one kills nothing, even long past the bound."""
+    state = _state()
+    _spawn_unregistered(state, agent_instance_id="agi-alive", spawned_at=T0)
+    sweep_unregistered_spawning_sessions(state, now=T0 + timedelta(days=365))
+    _check(
+        read_managed_session(state, "agi-alive")["lifecycle_state"] == LIFECYCLE_SPAWNING,
+        "a year past the bound the row is STILL 'spawning' -- attribution, never the reaper",
+    )
+
+
+def test_registration_fires_without_any_report_by() -> None:
+    """Independence from the report-or-die contract: an operator-host row is
+    given no report_by by insert_managed_session, and the report_by spawning
+    leg skips such a row by design. The watchdog must not inherit that blind
+    spot -- its bound is registration, not the work deadline."""
+    state = _state()
+    _spawn_unregistered(state, agent_instance_id="agi-nocontract", spawned_at=T0, host="operator")
+    _check(
+        not read_managed_session(state, "agi-nocontract").get("report_by"),
+        "setup: the row genuinely has no report_by",
+    )
+    _check(
+        sweep_overdue_sessions(state, now=T0 + timedelta(days=365)) == 0,
+        "setup: the report_by spawning leg cannot see it (no contract)",
+    )
+    marked = sweep_unregistered_spawning_sessions(state, now=T0 + timedelta(days=365))
+    _check(marked == 1, "the registration watchdog marks it anyway")
+    _check(
+        bool(read_managed_session(state, "agi-nocontract").get("registration_overdue_at")),
+        "and the mark is actually ON THE ROW, not merely counted by the sweep",
+    )
+
+
+def test_registration_mark_is_idempotent_and_keeps_first_observation() -> None:
+    state = _state()
+    _spawn_unregistered(state, agent_instance_id="agi-once", spawned_at=T0)
+    first_clock = T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1)
+    sweep_unregistered_spawning_sessions(state, now=first_clock)
+    stamped = read_managed_session(state, "agi-once")["registration_overdue_at"]
+    again = sweep_unregistered_spawning_sessions(state, now=first_clock + timedelta(hours=5))
+    _check(again == 0, "a second sweep does not re-mark an already-marked row")
+    _check(
+        read_managed_session(state, "agi-once")["registration_overdue_at"] == stamped,
+        "the field records the FIRST observation ('since when'), not the last tick",
+    )
+
+
+def test_registration_late_registration_clears_the_mark() -> None:
+    """A worker that registers LATE is a different story from one that never
+    did, so the mark clears rather than leaving the row permanently deaf."""
+    state = _state()
+    _spawn_unregistered(state, agent_instance_id="agi-late", spawned_at=T0)
+    sweep_unregistered_spawning_sessions(
+        state, now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
+    )
+    _check(
+        bool(read_managed_session(state, "agi-late").get("registration_overdue_at")),
+        "setup: the row is marked registration-overdue",
+    )
+    backfill_registration(
+        state, agent_instance_id="agi-late", agent_id="claude_code",
+        agent_session_id="ases-agi-late",
+    )
+    row = read_managed_session(state, "agi-late")
+    _check(not row.get("registration_overdue_at"), "a late registration clears the mark")
+    _check(row["lifecycle_state"] == LIFECYCLE_LIVE, "and the row completes spawning->live")
+
+
+def test_registration_non_spawning_rows_are_never_marked() -> None:
+    state = _state()
+    _spawn_live(state, agent_instance_id="agi-running", lifecycle_state=LIFECYCLE_LIVE)
+    marked = sweep_unregistered_spawning_sessions(state, now=T0 + timedelta(days=365))
+    _check(marked == 0, "a row that already registered (live) is never marked")
+
+
+def test_registration_acknowledged_degraded_is_marked_but_says_so() -> None:
+    """Item 3's half of the story: an acknowledged degraded spawn is still
+    observed and still recorded -- honesty about what happened -- but the
+    reason says the risk was accepted, so it does not read as a surprise."""
+    state = _state()
+    _spawn_unregistered(
+        state, agent_instance_id="agi-degraded", spawned_at=T0,
+        degraded_hooks_acknowledged=True,
+    )
+    marked = sweep_unregistered_spawning_sessions(
+        state, now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
+    )
+    _check(marked == 1, "an acknowledged-degraded row is still marked (the fact is still true)")
+    _check(
+        "ACKNOWLEDGED" in str(
+            read_managed_session(state, "agi-degraded").get("registration_overdue_reason") or "",
+        ),
+        "but its reason records that this was an accepted risk",
+    )
+
+
+def test_registration_notifies_steward_with_distinct_event() -> None:
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    _spawn_live(state, agent_instance_id="agi-steward-w4a")
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-steward-w4a"}},
+        {"agent_id": "claude_code"},
+    )
+    steward_bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-steward-w4a")
+    _spawn_unregistered(
+        state, agent_instance_id="agi-deaf-child", spawned_at=T0,
+        spawned_by_instance_id="agi-steward-w4a",
+    )
+    sweep_unregistered_spawning_sessions(
+        state, peer_registry=reg, bridge_manager=mgr,
+        now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
+    )
+    _, events = mgr.get(steward_bridge_id).events_after(-1)
+    _check(
+        len(events) == 1
+        and events[0].event_type == EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE
+        and "agi-deaf-child" in events[0].content,
+        f"the steward gets exactly one registration-overdue notice, under an "
+        f"event type distinct from the other three spawn notices (got {events!r})",
+    )
+
+
+def test_registration_marks_without_notify_when_registry_absent() -> None:
+    state = _state()
+    _spawn_unregistered(state, agent_instance_id="agi-noreg", spawned_at=T0)
+    marked = sweep_unregistered_spawning_sessions(
+        state, now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
+    )
+    _check(marked == 1, "an early-boot tick with no bridge still MARKS the row")
+
+
 def main() -> int:
     test_overdue_no_report_by_never_swept()
     test_overdue_marks_past_deadline_live_and_idle()
@@ -955,6 +1167,16 @@ def main() -> int:
     test_pruner_absence_within_grace_window_not_pruned()
     test_pruner_absence_past_grace_window_pruned()
     test_retire_session_crash_mid_retire_is_redrivable()
+    test_registration_within_bound_is_not_marked()
+    test_registration_past_bound_marks_field_not_state()
+    test_registration_watchdog_never_reaps()
+    test_registration_fires_without_any_report_by()
+    test_registration_mark_is_idempotent_and_keeps_first_observation()
+    test_registration_late_registration_clears_the_mark()
+    test_registration_non_spawning_rows_are_never_marked()
+    test_registration_acknowledged_degraded_is_marked_but_says_so()
+    test_registration_notifies_steward_with_distinct_event()
+    test_registration_marks_without_notify_when_registry_absent()
 
     print()
     print(f"PASSED: {_passed}")

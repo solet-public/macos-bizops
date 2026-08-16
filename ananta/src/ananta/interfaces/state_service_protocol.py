@@ -65,11 +65,30 @@ class StateServiceProtocol(Protocol):
         ...
 
     def query_state(self, namespace: str, filters: dict[str, object]) -> ActionResult:
-        """Query state with filters."""
+        """DEPRECATED alias for :meth:`read_state` — prefer ``read_state``.
+
+        ``filters`` is the whole ``{table, filters, limit?, unbounded?}`` query
+        envelope, not just a filter mapping: it is forwarded unchanged and
+        becomes ``read_state``'s ``query``, so ``limit`` and ``unbounded`` are
+        honoured and the ``MAX_READ_ROWS`` bound applies.
+        """
         ...
 
     def query_ordered(self, namespace: str, data: dict[str, object]) -> ActionResult:
         """Ordered, bounded, tie-safe query (filters + order_by + limit + after)."""
+        ...
+
+    def count(self, namespace: str, data: dict[str, object]) -> ActionResult:
+        """Count rows in a filtered set; the scalar lands at ``data.result.value``.
+
+        The SQL aggregate runs inside the owner plugin and ships a number, not
+        rows. Declared here because it is the sanctioned repair for a call site
+        that reads a whole table only to call ``len()`` on the result — the
+        cheapest of those reads is still the most expensive way to ask "how
+        many". See ``StateManagementInterface.count`` for the full ``data``
+        contract, including that there is NO automatic ``is_deleted``
+        exclusion.
+        """
         ...
 
     def execute_sql(

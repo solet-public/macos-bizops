@@ -32,6 +32,7 @@ plugins/macos_self_deployment_plugin/tests/supervisor_smoke.py
 plugins/macos_self_deployment_plugin/tests/backstop_loop_integration_smoke.py
 plugins/macos_self_deployment_plugin/tests/drain_sigterm_exit_smoke.py
 plugins/macos_self_deployment_plugin/tests/router_socket_wait_smoke.py
+plugins/macos_self_deployment_plugin/tests/router_socket_ownership_smoke.py
 # LaunchAgent plist render contract (Option-B supervisor KeepAlive, out-of-tree
 # CWD, and the §39.2 Homebrew-inclusive PATH the daemon needs to see tmux at
 # all). Pure render assertions -- no launchctl, no filesystem mutation outside
@@ -836,6 +837,15 @@ plugins/default_knowledge_plugin/tests/refresh_deprecation_honoring_smoke.py
 # (no summarization on the calling thread — runtime + static). Offline (stub
 # repo/writer/inference; real BoundedSummaryExecutor for the threading cases).
 ananta/tests/llm/session_ledger/quiescent_drain_smoke.py
+# quiescent_read_bounds_smoke (2026-08-15): auto-summarize failed on EVERY
+# 10-minute cycle after the read_state row cap deployed — list_quiescent_sessions
+# reads the whole eligible session set (27,139 rows live) because the anti-join
+# and the 1..50 LIMIT are applied downstream in Python. Pins BOTH bounding
+# shapes so neither can be silently dropped: the candidate read carries the
+# sanctioned unbounded=True consent, and the summary/source membership reads are
+# CHUNKED (bounded by construction, no opt-in), with the caller's other filters
+# preserved and the downstream limit still honoured.
+ananta/tests/llm/session_ledger/quiescent_read_bounds_smoke.py
 
 # LED-01 event-content embedding producer + search (2026-07-06). Pins: the
 # operator scope filter incl. the Codex reasoning-subtype EXCLUSION (red-first:
@@ -1983,6 +1993,14 @@ plugins/agent_messaging_plugin/tests/current_identity_smoke.py
 # + kw-only pool_builder/state_service) + qualified_table now double-quotes (assertion
 # updated; _no_pool guard proves the delete path never opens the pool).
 plugins/pgvector_service_plugin/tests/delete_all_in_namespace_smoke.py
+# find_missing_external_ids_chunking_smoke (2026-08-15, D9): the membership read
+# is bounded by the CALLER's candidate-list length, and the orphan reconcile
+# passes every active memory id (42,500 live) — one read of that shape exceeds
+# the read_state row cap and killed a green boot at reindex_orphaned_memories.
+# Pins that an over-cap list issues MULTIPLE reads each within the cap, that the
+# missing set is correct across chunk boundaries, and that a refused read still
+# raises instead of reading as "all present".
+plugins/pgvector_service_plugin/tests/find_missing_external_ids_chunking_smoke.py
 # s3_blob_storage_smoke: stale FakeStateService (no write_state) -> InMemoryMetadataState
 # faithful full-mirror (§9.1 fallback; write->data.result.generated_id, read->data.records)
 # + S3ByteIO byte-path injection + hex content assertion + search_blobs test-5.
@@ -2113,6 +2131,20 @@ plugins/agent_messaging_plugin/tests/role_binding_store_smoke.py
 # for backtick-quoted repo-path citations, verdicts DEAD/UNPARSEABLE against
 # the bundle's own census, tolerance-file-aware. Wired into
 # validate_and_seal_seed_bundle's checks tuple, seal-time, before any git op.
+# seed_factory_plugin CONTRIBUTOR-POLICY coherence gate (R5, 2026-08-15): the
+# published seed shipped five issue forms alongside a CONTRIBUTING.md refusing
+# issue reports, contradicted by its own public issue history. Seal-time,
+# fail-closed, in validate_and_seal_seed_bundle's checks tuple. Anchored on the
+# VERBATIM shipped refusal so a regex tidy-up that stops matching what actually
+# shipped reddens here, and on the pull-request-refusal false-positive
+# direction, which is correct policy and must never be flagged.
+# seed_factory_plugin PRE-BIRTH agent instructions (2026-08-15): the generated
+# root CLAUDE.md / AGENTS.md a downloaded-but-uninstalled seed now ships. Pins
+# the pre-birth contract (installed-or-not probe, no hydration marker, Step Zero
+# neutralized, own-project-directories service model, {{SOLET_NAME}} intact),
+# fail-loud on a partial template set, and the two shipping-surface gates the
+# pair must pass at the seed ROOT — §4.2 content validation and zero cited-path
+# findings.
 # github_midwife_plugin seed factory SF-D (2026-07-18, Claude-B, RISKY —
 # publish procedure). The mint_seed / mint_and_birth_local authored joseki
 # cards encode the §5 rev-D ladder: seal (VERB) before any gh, gh repo create
@@ -2225,6 +2257,15 @@ plugins/actr_memory_plugin/tests/actr_memory_upsert_tag_union_smoke.py
 plugins/actr_memory_plugin/tests/actr_memory_export_import_root_gate_smoke.py
 plugins/actr_memory_plugin/tests/actr_memory_tags_param_schema_parity_smoke.py
 plugins/actr_memory_plugin/tests/config_binding_order_smoke.py
+
+# Memory-store read discipline (2026-08-15) — regression pin for the green-boot
+# death on the read_state row cap: whole-table readers (get_all_memories /
+# get_all_memorizations) must carry the unbounded=True opt-in, id-filtered
+# readers must NOT, and an error-shaped read result must RAISE from every
+# helper instead of being swallowed into an empty list (an error rendered
+# empty is indistinguishable from data loss — identity verification read
+# "no memories" where the truth was "the read was refused").
+plugins/actr_memory_plugin/tests/actr_memory_read_discipline_smoke.py
 
 # Unified-memory-passthrough Slice 2 (2026-07-16) — the Claude-only loop-prover's
 # LOCAL mechanics (hermetic, no live solet): PostToolUse capture + echo-break, the
@@ -2983,3 +3024,264 @@ plugins/agent_messaging_plugin/tests/cli_job_await_smoke.py
 # model turn.
 ananta/tests/core/actions/job_completion_role_routing_smoke.py
 plugins/agent_messaging_plugin/tests/job_completion_delivery_smoke.py
+
+# oversized action payloads + action-path liveness (2026-08-15,
+# lane-ac-payload-guard) -- the "cannot happen again" half of the 2026-08-15
+# action-queue freeze, whose root cause was an 82 MB deliver_result payload
+# whose json.loads held the GIL for two hours and starved every other thread.
+# The smoke's load-bearing case is [3]: it hands the claim guard input that is
+# BOTH over the bound and unparseable, so a guard placed downstream of
+# json.loads raises a decode error while a correct pre-parse guard raises the
+# size refusal -- the only assertion that can distinguish a guard which fires in
+# time from one that has already caused the outage it was meant to prevent. The
+# fixtures ADVANCE (a real over-bound string, a real over-cap record set) rather
+# than asserting on constants, and every guard here was red-mutated: disabling
+# the enqueue check, parsing before measuring, restoring the unbounded read,
+# flipping the liveness conjunction to OR, and requeueing an oversized orphan
+# each turn exactly the check that names that property red. Offline by
+# construction: pure functions and a spy, no solet, no database.
+ananta/tests/core/actions/oversized_payload_guard_smoke.py
+
+# migrate_to_solet LaunchAgent OWNERSHIP — both directions, because each alone
+# is satisfied by a catastrophic implementation. The P2 rebrand renamed
+# --homunculus to --solet; the migration knew the flag and would have rewritten
+# it, but skipped candidates by NAME (com.openai.*), which caught our own
+# tunnel supervisor and left the ChatGPT connector without public ingress for
+# four days (2026-08-15). Positive-only would pass a change that migrates every
+# plist on the machine — the exact blast radius the skip exists to prevent;
+# negative-only would pass the original defect. Also pins report/apply
+# symmetry: --scan-stale never looked at ~/Library/LaunchAgents, so it returned
+# a clean report about the one surface apply mode edits. Red-mutated three
+# ways: restoring the name-prefix skip, forcing ownership true, and dropping
+# the LaunchAgents scan — each flips a different named check. Offline by
+# construction: temp tree, no launchctl, real machine never read.
+plugins/macos_self_deployment_plugin/tests/migrate_to_solet_ownership_smoke.py
+
+# adopter issue #9 -- the split result envelope (2026-08-15,
+# lane-ae-issue9-envelope). An envelope came back carrying a success payload
+# AND an unsupported_on_host error. Both halves were real: error_message is one
+# mutable column on the action_events row, result is the latest of many
+# action_results rows, and one action row that executed twice ends up pairing
+# attempt 1's error with attempt 2's success. The completed-status writer never
+# cleared the column; its failure counterpart always sets it.
+#
+# The smoke registers BOTH halves of the fix, because the first alone is a
+# regression: a bare clear makes the envelope clean and the double execution
+# INVISIBLE, deleting the only surviving evidence that an action row ever runs
+# twice. So the clear must announce itself -- a WARNING carrying the action_id
+# and both timestamps, plus a counter on get_metrics().
+#
+# Red-mutated four ways, each flipping a different named check: dropping the
+# clear reproduces the adopter's exact envelope; clearing SILENTLY (the trap --
+# the one-line patch) leaves the envelope check green and reddens all seven
+# instrument checks; announcing unconditionally reddens the clean-completion
+# control; and swallowing an unreadable pre-clear read reddens the blind-spot
+# check. Nothing under test is stubbed -- the two shipped status writers, the
+# shipped result store and the shipped envelope reader all run against an
+# envelope-faithful in-memory pair of tables. Offline by construction: no
+# solet, no database, no model turn.
+ananta/tests/core/actions/completion_clears_stale_error_smoke.py
+
+# query_state_bounds_smoke (2026-08-15, lane B of the unbounded-state-read
+# programme): pins the MAX_READ_ROWS row bound at EVERY query_state
+# implementation, which had four and they disagreed.
+#
+# Registered mainly as a REGRESSION PIN ON A FALSE PREMISE. The programme's
+# census recorded 70 query_state call sites as structurally unable to bound
+# themselves, on the reasoning that its (namespace, filters) signature has no
+# limit slot. It has one: the filters dict IS read_state's query dict, so
+# limit/unbounded pass straight through and always did. Section 1 measures that
+# end-to-end so the belief cannot be re-derived from the signature and acted on
+# a second time -- the census instrument itself encoded it and mis-filed a call
+# site that was already passing limit=1.
+#
+# The two REAL holes it closes, neither of which the census could see because it
+# classified call sites and never implementations: BootstrapDatabaseStorage
+# carried its own copy of the body that skipped the cap its sibling read_state
+# applies to the same rows off the same in-memory store; and the transaction
+# query_state had no bound at all -- which mattered because StateTransaction
+# exposes no read_state, making it the ONLY row-returning read primitive inside
+# a transaction, with no bounded alternative to migrate to.
+#
+# Red-mutated in both directions per hole, each reddening a different named
+# check: undoing the bootstrap delegation reddens the over-cap refusal; making
+# bootstrap read_state actually filter (the opposite direction, and the change
+# deliberately NOT made) reddens the no-result-change checks; dropping the txn
+# overflow raise reddens the never-truncate pair; and dropping the fetch_limit
+# pass-through reddens the LIMIT-compilation pair. Section 4 is the load-bearing
+# one: an over-cap unbounded read must RAISE, never return a prefix.
+#
+# PURE UNIT, offline by construction: real implementations against recording
+# fakes. No solet, no database, no model turn.
+ananta/tests/services/state_service/query_state_bounds_smoke.py
+
+# --- Lane A, unbounded state reads (2026-08-15 SCAN_UNBOUNDED remediation) ---
+#
+# bounded_read_ceiling_smoke pins the CALL-SITE half of the read-bound contract.
+# read_bounds owns the provider cap; bounded_read owns what a site must do when
+# it passes an explicit limit to read a whole small table. The asymmetry it
+# guards: no limit -> loud refusal past the cap, explicit limit ->
+# overflow_is_error=False -> SILENT PREFIX past the limit. So "just add a limit"
+# converts a site that failed loudly at 10,000 into one that quietly returns 500
+# of 600. The boundary is >= (at exactly `ceiling` rows a result cannot be told
+# from a truncated one); the M1 calibration mutates precisely that.
+#
+# unbounded_scan_repair_behaviour_smoke asserts the repaired sites DO THEIR JOB
+# rather than merely pass a limit. Each of the three carried two defects — an
+# unbounded read AND a result navigated through a data["result"] key that
+# read_state has never returned — so a bound-only assertion would have gone green
+# against all three at once. Calibrated with the navigation reverted while the
+# bound is KEPT (M4): the resolved-value checks redden while every filter/limit
+# check stays green.
+#
+# PURE UNIT, offline by construction: real production classes against recording
+# spy state services. No solet, no database, no model turn.
+ananta/tests/services/state_service/bounded_read_ceiling_smoke.py
+ananta/tests/services/state_service/unbounded_scan_repair_behaviour_smoke.py
+
+# 2026-08-15 read-cap boot repair — the three agent_messaging_plugin startup
+# backfills, all of which read a whole table with no limit on the BOOT path.
+# _run_startup_backfills runs them before the FastAPI surface comes up, so a
+# refused read there does not degrade a feature, it stops the bridge starting:
+# that is exactly what happened when the default read bound dropped to 100 and
+# role_class_backfill's 133-row role_binding read was refused, taking agent
+# messaging and the action queue down with it.
+#
+# All three reads are paginated now (bounded_read.iter_table_rows). Each smoke
+# carries a fixture that STRADDLES THREE PAGES, because the property under test
+# is completeness across a page boundary and a fixture below the boundary cannot
+# test it — the pre-repair role_class smoke was green on five rows throughout the
+# outage. Each also wraps RealShapeState in CapEnforcingState, which refuses an
+# over-bound unbounded read the way the provider does; without it these smokes
+# stay green against code that cannot boot at all.
+#
+# role_class_backfill_smoke plants its cardinality violation on page THREE (a
+# single-page read reports a clean fleet) and is red-first proven against the
+# pre-fix source: reverting the read reproduces the live
+# query.unbounded_read_over_cap refusal.
+#
+# message_important_backfill_smoke EXISTED BUT WAS NEVER REGISTERED HERE, so it
+# had never run. role_message_consumed_backfill_smoke is new — that module's
+# docstring claimed "S7 exercises it against a real state fake" and no such test
+# existed anywhere in the tree.
+#
+# PURE UNIT, offline: in-memory state over real ActionResult shapes, with pages
+# served by the real ordered-query primitives. No solet, no database.
+plugins/agent_messaging_plugin/tests/message_important_backfill_smoke.py
+plugins/agent_messaging_plugin/tests/role_message_consumed_backfill_smoke.py
+
+# read-cap sibling sweep, 2026-08-15 PDT / 2026-08-16 UTC (lane-ak). Pins
+# read.py's per-session event walk after it stopped being an unbounded
+# query_state + Python sort over a 2,077,082-row table.
+#
+# REGISTERED IN THE SAME CHANGE AS THE CODE, deliberately. The sibling
+# read_migration_live_smoke.py is NOT in this register and therefore has never
+# run in the suite — a 360/365 green says nothing about a file outside the
+# allowlist. That gap is exactly what this sweep found when it changed that
+# smoke and then could not demonstrate the change was exercised.
+#
+# The fixture is DELIBERATELY UNLIKE PRODUCTION and must stay that way: live
+# data is dense with zero created_at ties, i.e. benign in both dimensions a
+# cursor can get wrong, so a production-shaped fixture would test nothing. Its
+# created_at-tie group is the only executable evidence for the "wrong tool"
+# rule in bounded_read.iter_table_rows' docstring; delete it and "simplifying"
+# this site onto the shared helper starts passing review.
+#
+# Red-first calibrated against 4 mutations: dropped id tie-break (4 red),
+# first-page-only (5 red), full-page-means-done (5 red), and ordering by
+# created_at instead of sequence (1 red — precisely the ordering assertion).
+#
+# PURE UNIT, offline: a query_ordered fake that honours row-value `after`
+# cursors, refuses a cursor/order_by arity mismatch, and applies the
+# include_deleted default. No solet, no database.
+ananta/tests/llm/session_ledger/event_sequence_walk_smoke.py
+
+# 2026-08-16 read-cap, second round — the flow-scoped counters in core/.
+# Both sites read every matching row and returned len(rows), and both were
+# found by the census and classified HOT, then parked in a tier-2 list whose
+# predicates were SAMPLED by eye rather than measured. {flow_id_trace, state}
+# and {flow_id_trace, status} read like narrow keys; they matched 129 and 2,902.
+#
+# FlowRuntimeGraph.get_pending_token_count is reached from complete_token on
+# EVERY action completion — it failed loudly and broke the completion path.
+# ActionQueuePoller._get_flow_error_count is worse because it is QUIET: its
+# record extractor graceful-degrades a refused read to [], so it reported 0
+# errors for a flow with 2,902 and the max-flow-errors CIRCUIT BREAKER (threshold
+# 3) silently stopped firing — on a path only ever taken because a flow is
+# already going wrong.
+#
+# Both repaired with the scalar `count` verb rather than a bound: the callers
+# wanted a number, and count runs the aggregate in the owner plugin and ships no
+# rows, so it is outside the row cap entirely. get_pending_tokens genuinely needs
+# its rows and is paginated instead.
+#
+# Red-first proven: reverting the FRG count reproduces the live production error
+# string verbatim ("Failed to query pending token count for flow ..."); reverting
+# the poller count reddens 3 checks; degrading the scalar extractor to 0 on a
+# non-completed envelope reddens 2. That last mutation was GREEN until
+# calibration found the branch uncovered — restoring 0 there would have
+# re-silenced the breaker one layer down without failing anything.
+#
+# PURE UNIT, offline: pages served by the real ordered-query primitives, and the
+# fake REFUSES an over-cap unbounded read the way the provider does. Without that
+# refusal the smoke would pass against code that cannot run in production.
+ananta/tests/core/state/flow_counter_bound_smoke.py
+
+# read-cap sweep wave 2a, 2026-08-16 (lane-ak).
+#
+# session_page_walk_smoke — pins read_support.walk_sessions_page, which replaced
+# list_sessions' unbounded whole-table read (14,412 rows to return 50; MEASURED
+# DEAD on rel-20260816T042114Z-41eed531f with cap_rows=100).
+#
+# Its fixture is DELIBERATELY UNLIKE PRODUCTION and must stay that way. The
+# defining property is POSITION, not size: qualifying rows lie BEYOND the first
+# page ("band A" = 90 non-qualifying rows at the head of the sort order), because
+# a big fixture whose survivors all sit in page 1 exercises the cursor exactly as
+# little as a 5-row one. Band A is also the ONLY reason the inlined M3 check —
+# pushing `limit` down without post-filtering, which silently UNDER-RETURNS — is
+# detectable at all. If M3 ever passes trivially, band A has been weakened:
+# repair the fixture, do not delete the test.
+#
+# Red-first calibrated: dropped id tie-break (RED: 10 of 20 tie-group rows lost
+# at a page boundary), non-advancing cursor (RED: walk ceiling raises), dropped
+# pushed-down equality filters (RED: wrong-vendor row appears). The tie-break
+# mutation did NOT redden on the first attempt — the fixture contained the tie
+# group but no test reached it at the default limit; that gap was found by
+# running the mutation and is now closed by test_tie_group_survives_a_page_boundary.
+#
+# list_sessions_m17_filters_smoke — EXISTED SINCE M17 AND HAD NEVER BEEN
+# REGISTERED, so none of its 26 checks had ever run in the suite. Third
+# unregistered smoke found during this sweep. It covers list_sessions' windows,
+# order variants, limit, canonical-only default, vendor filtering and both
+# source_kind routes — i.e. exactly the surface wave 2a changes.
+#
+# Both PURE UNIT, offline: in-memory state shims over real ActionResult shapes.
+# No solet, no database.
+ananta/tests/llm/session_ledger/session_page_walk_smoke.py
+ananta/tests/llm/session_ledger/list_sessions_m17_filters_smoke.py
+
+# read-cap sweep census follow-on, 2026-08-16 (lane-ak).
+#
+# census_fold_smoke — EXISTED SINCE THE 2026-06-20 CENSUS MIGRATION AND HAD NEVER
+# BEEN REGISTERED, so none of its checks had ever run in the suite. FOURTH
+# unregistered smoke found during this sweep (after message_important_backfill,
+# core_slice3_migration_live, and list_sessions_m17_filters). It is the ONLY
+# behavioural coverage of build_census, including the change registered here.
+#
+# It now also pins the streaming property: build_census reads __source whole (21
+# rows) but STREAMS session / tool_call / import_batch through base.walk_table
+# rather than reading them whole (27,208 / 637,496 / 284,787 rows measured;
+# `census` was DEAD on rel-20260816T042114Z-41eed531f, refusing on `session`).
+#
+# Its `walk` fake is a GENERATOR on purpose. Streaming exposed a trap that lists
+# had hidden: _CensusAggregator consumed `sessions` TWICE — once to index, once
+# to tally — which is merely wasteful for a list and silently WRONG for a
+# generator (the second pass sees an exhausted iterator and every session tally
+# comes back empty, with no error). A list-returning fake would let that bug pass.
+#
+# Red-first calibrated: reintroducing the double consumption (RED, 4 checks incl.
+# session_count=0), and dropping the id->source index build (RED, 5 checks — the
+# tool_call and event joins lose their session lookup).
+#
+# PURE UNIT, offline: in-memory reader + state shim over real ActionResult shapes.
+ananta/tests/llm/session_ledger/census_fold_smoke.py

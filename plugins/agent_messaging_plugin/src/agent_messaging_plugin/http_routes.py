@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, Final
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+from ananta.core.actions.action_path_liveness import ACTION_PATH_LIVENESS
 from ananta.llm.agent_messaging.models import (
     PeerInboxRequest,
     TextPart,
@@ -338,7 +339,24 @@ def register_routes(
             return JSONResponse(
                 content={"status": "starting"}, status_code=503,
             )
-        return JSONResponse(content={"status": "healthy"}, status_code=200)
+        # D5 (INCIDENT.md 2026-08-15): this endpoint answered ``healthy`` for
+        # 3h20m through a total action-queue freeze because it never touched
+        # the action path — it is served by the bridge surface, which was the
+        # half of the process that stayed alive. The liveness view below is
+        # read from in-process counters the poller maintains: no database
+        # query, no lock, no await. That is deliberate. A DB read here would
+        # need the GIL and would therefore HANG under exactly the condition it
+        # exists to detect, taking the target group down with it instead of
+        # reporting the problem.
+        liveness = ACTION_PATH_LIVENESS.snapshot()
+        # ``degraded`` still answers 200: the bridge surface IS serving, and
+        # failing the probe would make a supervisor kill a process whose
+        # messaging half is healthy. The status string is the alarm; the HTTP
+        # code stays honest about what this endpoint can actually attest.
+        status = "degraded" if liveness["action_path_stalled"] else "healthy"
+        return JSONResponse(
+            content={"status": status, "action_path": liveness}, status_code=200,
+        )
 
 
 # ---------------------------------------------------------------------------

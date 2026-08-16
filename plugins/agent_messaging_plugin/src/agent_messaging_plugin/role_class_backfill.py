@@ -48,9 +48,9 @@ from ananta.llm.agent_messaging.role_binding import (
 )
 from ananta.llm.agent_messaging.state_results import (
     require_completed,
-    require_records,
     require_updated,
 )
+from ananta.services.state_service.bounded_read import iter_table_rows
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -58,7 +58,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _COL_ID = "id"
-_COL_IS_DELETED = "is_deleted"
+
+# Both walks below are paginated rather than read whole, and both declare this
+# ceiling. Measured 2026-08-15: `role` 149 rows, `role_binding` 133 — already
+# past the 100-row default read bound, which is what made the unpaginated reads
+# refuse and take the bridge's start_interface down with them. These tables hold
+# one row per role ever legislated and one per role ever bound, so they grow with
+# the fleet's ROLE vocabulary rather than with its traffic; ~67x the measured size
+# is generous headroom for that, and past it the fleet holds more roles than an
+# operator could steward — which is the condition worth failing loudly on, since
+# the cardinality report below exists to be read by a human.
+_ROLE_TABLE_CEILING = 10_000
+_CEILING_REASON = (
+    "one row per role ever legislated (measured 149 on 2026-08-15) and per role "
+    "ever bound (133); these grow with the fleet's role vocabulary, not its "
+    "traffic, and a boot-time walk of them is sized for the hundreds."
+)
 
 # Durable one-shot marker (set ONLY after a successful full pass -> self-healing).
 _BACKFILL_MARKER_KEY = "role_class_backfill_v1_complete"
@@ -119,11 +134,26 @@ def _stamp_missing_role_class(state: StateManagementInterface) -> list[str]:
     default. Idempotent: only rows missing the value are touched."""
     if _backfill_already_complete(state):
         return []
-    result = state.query_state(
-        AGENT_ROLE_BINDING_NAMESPACE, {"table": TABLE_ROLE, "filters": {}},
-    )
     stamped: list[str] = []
-    for row in require_records(result):
+    # Paginated, not read whole: `role` is past the 100-row read bound (149
+    # measured), so the unpaginated read this replaced refused outright. Writing
+    # to rows mid-walk is safe here — the cursor is (created_at, id), both
+    # immutable, so a role_class stamp cannot move a row across it.
+    rows = iter_table_rows(
+        state,
+        namespace=AGENT_ROLE_BINDING_NAMESPACE,
+        table=TABLE_ROLE,
+        filters={},
+        ceiling=_ROLE_TABLE_CEILING,
+        reason=_CEILING_REASON,
+    )
+    for row in rows:
+        # Deliberately still a Python-side test rather than a pushed-down
+        # filter. "Unset" here is falsy — NULL *or* the empty string — and the
+        # flat filter grammar has no OR, so the natural one-predicate rewrite
+        # (`role_class IS NULL`) would silently narrow this to a subset and skip
+        # rows it is supposed to stamp. Pagination fixes the bound; narrowing the
+        # predicate is a separate change and would not be behaviour-preserving.
         if row.get(COL_ROLE_CLASS):
             continue
         role_name = str(row.get(COL_ROLE) or "")
@@ -145,15 +175,26 @@ def _detect_cardinality_violations(
     report every instance holding more than one NAMED role. ``sys:*`` slots are
     slot machinery, not named roles, and are exempt from the count (design §2).
     """
-    result = state.query_state(
-        AGENT_ROLE_BINDING_NAMESPACE,
-        {
-            "table": TABLE_ROLE_BINDING,
-            "filters": {_COL_IS_DELETED: 0, COL_HOLDER_KIND: HOLDER_KIND_SESSION},
-        },
+    # THE SITE THAT TOOK THE BRIDGE DOWN. 133 live session bindings against a
+    # 100-row default bound, read with no limit, on the boot path — so
+    # start_interface raised, agent messaging never started, and the action queue
+    # stalled. Paginated now, because this report is only correct if it sees
+    # EVERY row: a prefix would under-count holders and report a clean fleet.
+    #
+    # The is_deleted=0 half of the old filter is now include_deleted=False (the
+    # default) — the same predicate spelled the way query_ordered expects, rather
+    # than passed twice.
+    rows = iter_table_rows(
+        state,
+        namespace=AGENT_ROLE_BINDING_NAMESPACE,
+        table=TABLE_ROLE_BINDING,
+        filters={COL_HOLDER_KIND: HOLDER_KIND_SESSION},
+        ceiling=_ROLE_TABLE_CEILING,
+        reason=_CEILING_REASON,
+        include_deleted=False,
     )
     roles_by_instance: dict[str, list[str]] = {}
-    for row in require_records(result):
+    for row in rows:
         role_name = str(row.get(COL_ROLE) or "")
         if not role_name or is_system_role(role_name):
             continue

@@ -17,8 +17,31 @@ from ananta.constants import FRAMEWORK_NAMESPACE
 from ananta.core.domain.status import is_status_match
 from ananta.core.plugins.plugin_contracts import ActionStatus
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
+from ananta.services.state_service.bounded_read import assert_within_ceiling
 
 logger = logging.getLogger(__name__)
+
+# `action_definitions` is a REGISTRY, not a log: it holds one row per action the
+# platform can execute, written by registration and removed by deregistration.
+# It is bounded by the size of the codebase — how many actions exist to register
+# — and not by traffic, runtime, or user data. Nothing appends to it per request.
+# 10,000 is roughly two orders of magnitude above the plausible number of
+# distinct actions a deployment defines (measured 2026-08-15:
+# core.action_definitions holds 0 rows on this deployment, and the process
+# registry — same shape, populated — holds 756). The 756 is why this ceiling
+# stays well above the platform's default bound of 100 and takes the explicit
+# `unbounded` opt-in instead: a registry of this shape plausibly runs to
+# hundreds of rows, so capping it at the default would refuse legitimate reads.
+#
+# Stating the reason rather than only the number is the point: if this ever
+# trips, the assumption that broke is "one row per defined action" — meaning
+# something is writing per-execution rows into a registry — and that is the
+# actual bug to go fix, not the ceiling.
+_ACTION_DEFINITIONS_CEILING = 10_000
+_ACTION_DEFINITIONS_CEILING_REASON = (
+    "action_definitions holds one row per registered action, so it is bounded by "
+    "how many actions the codebase defines and never by traffic or runtime."
+)
 
 
 class ValidationServiceProtocol(Protocol):
@@ -159,11 +182,37 @@ class ActionRegistrationManager:
             Dictionary containing registered actions or error information
         """
         result = self.state_service.read_state(
-            namespace=FRAMEWORK_NAMESPACE, query={"table": "action_definitions"}
+            namespace=FRAMEWORK_NAMESPACE,
+            query={
+                "table": "action_definitions",
+                "limit": _ACTION_DEFINITIONS_CEILING,
+                # Conscious opt-in to a scan larger than the platform DEFAULT row
+                # bound (100). This does NOT mean "no bound" — the bound is the
+                # explicit limit above, and assert_within_ceiling makes it loud.
+                # It means "this caller genuinely wants the whole registry and has
+                # said so", which is exactly what resolve_read_limit requires
+                # before honouring a limit over the default.
+                "unbounded": True,
+            },
         )
 
         if is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
             actions_data: dict[str, object] = result.get("data", {})
+            records = actions_data.get("records", [])
+            if isinstance(records, list):
+                # The limit above bounds the read; this makes the bound
+                # self-enforcing. An explicit limit turns the provider's loud
+                # overflow refusal OFF (read_bounds.resolve_read_limit returns
+                # overflow_is_error=False for an explicit limit), so without this
+                # check a table that outgrew the ceiling would hand back a silent
+                # prefix — every caller would see a registry that had quietly
+                # lost its tail.
+                assert_within_ceiling(
+                    records,
+                    table="action_definitions",
+                    ceiling=_ACTION_DEFINITIONS_CEILING,
+                    reason=_ACTION_DEFINITIONS_CEILING_REASON,
+                )
             return actions_data
         else:
             logger.error(f"Failed to retrieve registered actions: {result}")

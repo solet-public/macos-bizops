@@ -9,10 +9,12 @@ from collections import defaultdict
 from datetime import UTC, datetime
 
 from ananta.core.domain.types import ActionResult
+from ananta.error_handling import ErrorSeverity, FrameworkError
 from ananta.services.state_service.ordered_query import (
     apply_ordered_query_in_memory,
     parse_ordered_query,
 )
+from ananta.services.state_service.read_bounds import MAX_READ_ROWS, overflow_message
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,23 @@ class BootstrapDatabaseStorage:
         table_value = query.get("table", "default")
         table = table_value if isinstance(table_value, str) else "default"
         records = self._memory_data[namespace][table]
+
+        # Lockstep with the postgres/rds providers (D1, INCIDENT.md
+        # 2026-08-15). ``ordered_query`` already holds the invariant that all
+        # three backends agree on the bound; leaving the bootstrap path
+        # unbounded would hand a future migration an unguarded read.
+        if len(records) > MAX_READ_ROWS and not bool(query.get("unbounded", False)):
+            raise FrameworkError(
+                message=overflow_message(table=table),
+                error_code="query.unbounded_read_over_cap",
+                details={
+                    "namespace": namespace,
+                    "table": table,
+                    "cap_rows": MAX_READ_ROWS,
+                    "row_count": len(records),
+                },
+                severity=ErrorSeverity.ERROR,
+            )
 
         return {
             "action_status": "completed",
@@ -175,31 +194,41 @@ class BootstrapDatabaseStorage:
         }
 
     def query_state(self, namespace: str, filters: dict[str, object]) -> ActionResult:
-        """Query data with filtering from memory.
+        """Query data from memory — delegates to :meth:`read_state`.
+
+        ``query_state`` is a second NAME for the ``read_state`` primitive, not a
+        second primitive: both the postgres and the rds plugins implement it as
+        ``return self.read_state(namespace, filters)``. This class used to be the
+        odd one out, with its own copy that read the same table off the same
+        in-memory store and skipped the ``MAX_READ_ROWS`` bound that ``read_state``
+        twelve lines up applies (D1, INCIDENT.md 2026-08-15). Delegating restores
+        the invariant that all three backends agree on the bound.
+
+        The two bodies were otherwise identical: the copy did NOT filter
+        (``filtered_records = records  # Simplistic``) and neither does
+        :meth:`read_state`, so no caller's result set changes here — the only
+        behavioural difference is that an over-cap read now refuses instead of
+        shipping every row. Bootstrap's not-actually-filtering is a pre-existing
+        property of BOTH read methods and is deliberately left alone: bootstrap
+        runs before the state plugin binds, where a change in what a read returns
+        is least observable and most fatal.
 
         Args:
             namespace: Target namespace to query
-            filters: Filter criteria for data retrieval
+            filters: The same ``{table, filters, limit?, unbounded?}`` query
+                envelope :meth:`read_state` takes — the parameter is named
+                ``filters`` for interface compatibility, but the dict is the
+                whole query, not just its filter clause.
 
         Returns:
-            ActionResult with filtered data
+            ActionResult with the records
+
+        Raises:
+            FrameworkError: If the table holds more than ``MAX_READ_ROWS`` rows
+                and the caller did not pass ``unbounded=True`` (raised by
+                :meth:`read_state`).
         """
-
-        table_value = filters.get("table", "default")
-        table = table_value if isinstance(table_value, str) else "default"
-        records = self._memory_data[namespace][table]
-
-        # Simple filter implementation for bootstrap mode
-        # In practice, would apply actual filter logic
-        filtered_records = records  # Simplistic - return all records
-
-        return {
-            "action_status": "completed",
-            "data": {"records": filtered_records},
-            "actions": [],
-            "error": None,
-            "timestamp": datetime.now(UTC).isoformat(),
-        }
+        return self.read_state(namespace, filters)
 
     def query_ordered(self, namespace: str, data: dict[str, object]) -> ActionResult:
         """Ordered, bounded, tie-safe query against the in-memory store.

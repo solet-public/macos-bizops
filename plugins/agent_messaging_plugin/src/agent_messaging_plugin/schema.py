@@ -671,9 +671,36 @@ def get_managed_session_schema() -> TableSchema:
                 type=ColumnType.TEXT,
                 description="Lineage: the spawner's role name at spawn time, if any.",
             ),
+            "role_name": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "The durable role this session was spawned to fill, if any. "
+                    "Recording it does NOT claim the binding — spawning never claims "
+                    "a role as a side effect (operator ruling 2026-08-14); the worker "
+                    "claims it explicitly. This column is the spawn's stated INTENT, "
+                    "which is what makes the W6 incumbent refusal legible."
+                ),
+            ),
             "lane_id": ColumnDefinition(
                 type=ColumnType.TEXT,
                 description="The lane this session was spawned for (provenance, anti-laundering).",
+            ),
+            "local_name": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "W6 (#13 §44.3): the name the spawned worker answers to on its "
+                    "OWN machine — the headless driver's --name, the tmux label the "
+                    "session name derives from. Defaulted by spawn_session to "
+                    "role_name for a project-class role and lane_id otherwise. "
+                    "Persisted because it is the COLLISION KEY: the Git-Controller "
+                    "mutation guard resolves the caller by reading the local session "
+                    "file's 'name' field and comparing it EXACTLY "
+                    "(.claude/hooks/git_controller_gate.py find_session_name / "
+                    "session_name == controller), so two non-terminal rows sharing a "
+                    "local_name are two processes that both pass the same guard. No "
+                    "uniquifying suffix is available precisely because that compare "
+                    "is exact."
+                ),
             ),
             "brief_ref": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -757,6 +784,36 @@ def get_managed_session_schema() -> TableSchema:
                 type=ColumnType.DATETIME,
                 description="Timestamp of the most recent lifecycle_state write.",
             ),
+            "registration_overdue_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description=(
+                    "W4A (#8 §43.1): when the registration watchdog observed this "
+                    "row STILL in 'spawning' past its registration bound. A FIELD, "
+                    "not a lifecycle state, deliberately (see "
+                    "session_sweep.sweep_unregistered_spawning_sessions): the row is "
+                    "still genuinely spawning AND now registration-overdue, which are "
+                    "two facts a single state column would collapse. Null means never "
+                    "observed overdue; a late registration clears it."
+                ),
+            ),
+            "registration_overdue_reason": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "W4A: the attribution that goes with registration_overdue_at — "
+                    "what the platform could actually observe at the seam, never an "
+                    "inference from any policy blob's shape."
+                ),
+            ),
+            "degraded_hooks_acknowledged": ColumnDefinition(
+                type=ColumnType.BOOLEAN,
+                default=0,
+                description=(
+                    "W4A item 3: this spawn EXPLICITLY opted to proceed on a host "
+                    "whose preflight found worker hooks unable to run. Default 0 — "
+                    "running degraded is a stated operator choice recorded at spawn, "
+                    "never something discovered later from the silence."
+                ),
+            ),
             "directed_by": ColumnDefinition(
                 type=ColumnType.TEXT,
                 description=(
@@ -769,6 +826,11 @@ def get_managed_session_schema() -> TableSchema:
         indexes=[
             IndexDefinition(name="idx_managed_session_lane", columns=["lane_id"]),
             IndexDefinition(name="idx_managed_session_state", columns=["lifecycle_state"]),
+            # W6: the incumbent lookup behind the second-spawn refusal is
+            # "non-terminal row with this local_name", run on the spawn path
+            # before dispatch — indexed so the guard costs one index probe
+            # rather than a fleet scan on every spawn.
+            IndexDefinition(name="idx_managed_session_local_name", columns=["local_name"]),
         ],
     )
 

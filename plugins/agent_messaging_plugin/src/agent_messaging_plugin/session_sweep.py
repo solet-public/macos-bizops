@@ -101,6 +101,7 @@ from .session_lifecycle_store import (
     DEFAULT_REPORT_BY_SECONDS,
     StaleLifecycleStateError,
     list_managed_sessions,
+    mark_registration_overdue,
     transition_lifecycle_state,
 )
 from .session_lifecycle_verbs import (
@@ -164,6 +165,19 @@ EVENT_SESSION_SPAWN_UNREGISTERED_NOTICE = "session_spawn_unregistered_notice"
 # process is alive — every extension was announced, so the termination is
 # never the steward's first news.
 SPAWN_ALIVE_PATIENCE_WINDOWS: int = 4
+
+# W4A (#8 §43.1): fourth spawn-notice class, and the one that ATTRIBUTES.
+# "This row has not registered and by construction therefore has not run its
+# registration hook" — a statement about the seam, not about any policy blob.
+EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE = "session_registration_overdue_notice"
+
+# The registration bound, deliberately NOT report_by. Registration is a
+# machine-speed event — a worker that is going to register does it seconds
+# after its process comes up — so a bound measured in a couple of minutes is
+# already generous, and it is SHORTER than DEFAULT_REPORT_BY_SECONDS (300) on
+# purpose: the attribution has to land BEFORE the report-or-die machinery
+# starts telling a different story about the same row.
+DEFAULT_REGISTRATION_BOUND_S: float = 120.0
 
 
 def _parse_iso(value: object) -> datetime | None:
@@ -601,6 +615,156 @@ def sweep_overdue_sessions(
     return marked
 
 
+def sweep_unregistered_spawning_sessions(
+    state: StateManagementInterface,
+    *,
+    now: datetime | None = None,
+    peer_registry: PeerRegistry | None = None,
+    bridge_manager: BridgeSessionManager | None = None,
+    registration_bound_s: float = DEFAULT_REGISTRATION_BOUND_S,
+) -> int:
+    """W4A registration watchdog — surface a worker that came up DEAF.
+
+    An adopter running an org-managed Claude Code policy carrying
+    ``strictPluginOnlyCustomization: ["hooks"]`` spawned a worker that answered
+    its first turn while NONE of its injected hooks ran: no hook events, empty
+    session-mapping spool, ``lifecycle_state`` stuck at ``spawning``. We
+    accepted the reporter's framing — **the defect is the silence, not the
+    unsupported environment** — so this leg exists to make the row SAY so.
+
+    WHY THIS IS NOT THE EXISTING ``spawning`` LEG, and why the two must not be
+    merged (the next reader will otherwise try):
+    :func:`sweep_overdue_sessions`' spawning leg is bounded by ``report_by``
+    (the WORK deadline) and its remedy is the REAPER — terminate the row, or,
+    since 2026-08-13, re-arm it when the host driver observes the process
+    alive. This leg is bounded by REGISTRATION latency and its remedy is
+    ATTRIBUTION: it writes a field, logs loudly, and tells the steward what was
+    observed. It transitions nothing and kills nothing.
+    Concretely, the adopter's worker takes the observed-alive path over there:
+    it answered its first turn, so it probes alive, so it is re-armed with a
+    notice that announces a DEADLINE EXTENSION — true, and not the news that a
+    worker's hooks never ran. That leg working exactly as designed is what
+    produced the reported silence, which is why the fix is a separate
+    observation rather than another branch inside it.
+
+    MECHANISM-INDEPENDENT BY CONSTRUCTION. The trigger is "still ``spawning``
+    past the bound" — the seam itself. A row in that condition has, by
+    construction, not run ``capture_session_mapping``, whatever the cause:
+    the policy shape in front of us, a policy shape nobody has reported yet, a
+    crashed hook, a mis-wired plugin, a read-only spool. Nothing here reads a
+    settings file or reasons about one; the managed-policy PREFLIGHT
+    (``HeadlessHostDriver.verify_config``) is a separate, narrower thing that
+    refuses a spawn it can prove is doomed. A check written from the one
+    incident in front of us would miss the next one.
+
+    Idempotent: a row already carrying ``registration_overdue_at`` is skipped,
+    so the field records the FIRST observation and the steward is told once.
+    Returns the number of rows newly marked.
+    """
+    clock = now or datetime.now(UTC)
+    marked = 0
+    for row in _managed_sessions_in_state(state, LIFECYCLE_SPAWNING):
+        if _mark_one_registration_overdue(
+            state, row, clock=clock, registration_bound_s=registration_bound_s,
+            peer_registry=peer_registry, bridge_manager=bridge_manager,
+        ):
+            marked += 1
+    return marked
+
+
+def _mark_one_registration_overdue(
+    state: StateManagementInterface,
+    row: dict[str, Any],
+    *,
+    clock: datetime,
+    registration_bound_s: float,
+    peer_registry: PeerRegistry | None,
+    bridge_manager: BridgeSessionManager | None,
+) -> bool:
+    """One row's worth of :func:`sweep_unregistered_spawning_sessions` — split
+    out to keep the outer loop under the radon cc threshold, same shape as
+    :func:`_mark_one_overdue`. Returns whether the row was newly marked."""
+    if row.get("registration_overdue_at"):
+        return False
+    agent_instance_id = str(row.get("agent_instance_id") or "")
+    if not agent_instance_id:
+        return False
+    # Age from last_transition_at: it is the row's spawn timestamp and stays
+    # unchanged while the row remains 'spawning' (the same anchor the
+    # observed-alive patience bound uses).
+    spawned_at = _parse_iso(row.get("last_transition_at"))
+    if spawned_at is None or (clock - spawned_at).total_seconds() < registration_bound_s:
+        return False
+    acknowledged = bool(row.get("degraded_hooks_acknowledged"))
+    reason = (
+        f"still 'spawning' {int((clock - spawned_at).total_seconds())}s after spawn "
+        f"(registration bound {int(registration_bound_s)}s) — the spawned process has "
+        "not registered, so its registration hook has not run. Its hooks may have been "
+        "stripped by host policy, failed to load, or never fired."
+    )
+    if acknowledged:
+        reason += " This spawn ACKNOWLEDGED degraded hooks, so this was an accepted risk."
+    mark_registration_overdue(
+        state, agent_instance_id=agent_instance_id, reason=reason, observed_at=clock,
+    )
+    logger.warning(
+        "registration watchdog: session %s (lane_id=%r, host=%r) is %s. This row "
+        "would otherwise sit in 'spawning' with nothing said about why.",
+        agent_instance_id, row.get("lane_id"), row.get("host"), reason,
+    )
+    if peer_registry is not None and bridge_manager is not None:
+        _notify_steward_of_registration_overdue(
+            state=state, peer_registry=peer_registry, bridge_manager=bridge_manager,
+            row=row, reason=reason,
+        )
+    return True
+
+
+def _notify_steward_of_registration_overdue(
+    *,
+    state: StateManagementInterface,
+    peer_registry: PeerRegistry,
+    bridge_manager: BridgeSessionManager,
+    row: dict[str, Any],
+    reason: str,
+) -> None:
+    """Best-effort steward notice for a registration-overdue row — mirrors
+    :func:`_notify_steward_of_spawn_orphaned`'s resolve-then-append pattern.
+    Distinct event type from the other three spawn notices so a receiver can
+    tell "came up deaf" from "never came up" and from "alive but late"."""
+    agent_instance_id = str(row.get("agent_instance_id") or "")
+    spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
+    if not spawner_instance_id:
+        return
+    binding = _resolve_steward_binding(
+        state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
+    )
+    if binding is None:
+        logger.warning(
+            "session %s registration-overdue: spawner %s not resolvable to a live "
+            "binding — row marked, steward not notified",
+            agent_instance_id, spawner_instance_id,
+        )
+        return
+    prose = (
+        f"session_registration_overdue_notice: {agent_instance_id} (lane_id="
+        f"{row.get('lane_id')!r}, host={row.get('host')!r}) is {reason} The session "
+        "may still be RUNNING and answering turns — a worker whose hooks did not "
+        "run can look healthy from the outside while being invisible to the "
+        "platform. Treat it as unmanaged until it registers."
+    )
+    meta: dict[str, object] = {"flow_id": f"session-registration-overdue-{agent_instance_id}"}
+    try:
+        bridge_manager.append_event(
+            binding.bridge_id, EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE, prose, meta,
+        )
+    except (PeerAmbiguousError, PeerSessionAmbiguousError, PeerUnreachableError):
+        logger.warning(
+            "session %s registration-overdue: steward notice could not be delivered",
+            agent_instance_id, exc_info=True,
+        )
+
+
 def _mark_one_overdue(
     state: StateManagementInterface,
     row: dict[str, Any],
@@ -945,10 +1109,13 @@ class SessionRoleClaimPruner:
 
 __all__ = [
     "DEFAULT_PRUNE_GRACE_WINDOW_S",
+    "DEFAULT_REGISTRATION_BOUND_S",
     "EVENT_SESSION_DEPENDENCY_WAKE",
     "EVENT_SESSION_OVERDUE_NOTICE",
+    "EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE",
     "SessionRoleClaimPruner",
     "sweep_deadline_dependencies",
     "sweep_lane_closed_dependencies",
     "sweep_overdue_sessions",
+    "sweep_unregistered_spawning_sessions",
 ]

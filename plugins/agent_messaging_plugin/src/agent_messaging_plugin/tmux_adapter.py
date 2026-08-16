@@ -86,6 +86,7 @@ from .headless_adapter import (
     _authority_system_prompt,
     _pid_alive,
     _resolve_heartbeat_marker_dir,
+    _resolve_local_label,
     _resolve_session_mapping_spool_dir,
     _resolve_worker_hook_paths,
     _sigterm_then_kill,
@@ -811,7 +812,9 @@ class TmuxHostDriver:
             ),
         }
 
-    def _spawn_command(self, spec: Mapping[str, object], *, transport: str) -> list[str]:
+    def _spawn_command(
+        self, spec: Mapping[str, object], *, transport: str, label: str,
+    ) -> list[str]:
         permission_mode = str(spec.get("permission_mode") or "") or self._permission_mode
         # R4 Package C (2026-08-10): resolved via the two-rung ladder
         # (origin checkout, then the plugin's shipped fallback copy) --
@@ -851,6 +854,23 @@ class TmuxHostDriver:
         )
         cmd = [
             self._claude_bin,
+            # W6 (#13 §44.3, Z-Q4 ruling 2026-08-14): the tmux host had NEVER
+            # been guard-nameable — the Git-Controller gate resolves its caller
+            # from ~/.claude/sessions/<pid>.json's "name", a file only the
+            # headless driver has ever populated (it alone passed --name), so
+            # a tmux worker's name was always auto-derived and could never
+            # match. That asymmetry is the latent defect under #13; naming the
+            # tmux session was never going to be enough on its own.
+            #
+            # OBSERVED, not inferred (the flag's headless behaviour does not
+            # establish its interactive behaviour, and tmux launches a real
+            # interactive CLI): live argv of the operator's own interactive
+            # session carries `--name <coordinator-role>` and its session file
+            # reads {"kind":"interactive","name":"<coordinator-role>"} with NO
+            # "nameSource" field, while every tmux worker without the flag reads
+            # "nameSource":"derived" with an auto-name. --name populates the
+            # guard's file in interactive mode.
+            "--name", label,
             "--permission-mode", permission_mode,
             "--setting-sources", "project",
             "--settings", settings_json,
@@ -911,7 +931,10 @@ class TmuxHostDriver:
                 "cannot register the spawned session under the ledger's "
                 "identity without it.",
             )
-        label = str(spec.get("lane_id") or "") or agent_instance_id
+        # W6 (#13 §44.3): shared with the headless driver so the two can never
+        # disagree about what a worker is called. The tmux session name derives
+        # from it, so a role-named spawn gets a role-named session for free.
+        label = _resolve_local_label(spec, agent_instance_id=agent_instance_id)
         session_name = _sanitize_session_name(f"fleet-{label}-{agent_instance_id[-8:]}")
         # Minted exactly ONCE, here — never re-derived elsewhere (two
         # evaluations of an identity expression is two identities).
@@ -922,7 +945,7 @@ class TmuxHostDriver:
             label=label, solet_name=self._solet_name, solet_bin=self._solet_bin,
             allowed_tools=spec.get("allowed_tools") or (), transport=transport)
         try:
-            claude_cmd = self._spawn_command(spec, transport=transport)
+            claude_cmd = self._spawn_command(spec, transport=transport, label=label)
         except WorkerHookResolutionError as exc:
             raise HostCannotSpawnError(str(exc)) from exc
         pane_command = _pane_command(

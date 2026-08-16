@@ -11,10 +11,30 @@ import logging
 from typing import Any
 
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
+from ananta.services.state_service.bounded_read import assert_within_ceiling
 
 from ..constants import SchedulerJobStatus
 from ..models import ScheduleData
 from ..utils.logging_utils import safe_log_error
+
+# `schedules` is a REGISTRY of configured jobs: one row per schedule a caller
+# deliberately created, removed when the schedule is deleted. It is bounded by
+# how many recurring jobs a deployment configures — nothing appends to it per
+# fire, per run, or per request (execution history is not kept here).
+#
+# If this trips, the assumption that broke is "one row per configured schedule",
+# which most likely means schedules are being created and never cleaned up.
+# Raising the number would hide that; the loud failure is the useful outcome.
+# MEASURED 2026-08-15: default_scheduling_plugin.schedules holds 6 rows. 100
+# deliberately matches the platform's default row bound rather than exceeding it,
+# so this read needs no `unbounded` opt-in and stays correct when the default
+# drops to 100 — a deployment with more than 100 distinct configured jobs is a
+# different system than this one, and should say so out loud.
+_SCHEDULES_TABLE_CEILING = 100
+_SCHEDULES_TABLE_CEILING_REASON = (
+    "schedules holds one row per configured recurring job, deliberately created "
+    "and deleted, with no per-execution rows appended (measured: 6 rows)."
+)
 
 RELOAD_SAFE = True
 
@@ -157,7 +177,11 @@ class ScheduleRepository:
         try:
             result = self.state_service.read_state(
                 namespace=self.namespace,
-                query={"table": "schedules", "filters": {}},
+                query={
+                    "table": "schedules",
+                    "filters": {},
+                    "limit": _SCHEDULES_TABLE_CEILING,
+                },
             )
 
             if result.get("action_status") == "completed":
@@ -166,6 +190,16 @@ class ScheduleRepository:
                     records_value = data.get("records", [])
                     schedules = {}
                     if isinstance(records_value, list):  # type: ignore[reportUnnecessaryIsInstance]
+                        # A partial read here means schedules that exist in the
+                        # database silently never fire, with nothing anywhere
+                        # reporting a missing one — the failure would show up as
+                        # "that job stopped running" weeks later.
+                        records_value = assert_within_ceiling(
+                            records_value,
+                            table="schedules",
+                            ceiling=_SCHEDULES_TABLE_CEILING,
+                            reason=_SCHEDULES_TABLE_CEILING_REASON,
+                        )
                         for record in records_value:
                             if isinstance(record, dict):
                                 schedule = ScheduleData(**self._deserialize_record(record))

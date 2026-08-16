@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # ruff: noqa: I001, E402
 # pyright: reportMissingImports=false
-from _git_controller_walker import walk_git_invocations
+from _git_controller_walker import heredoc_body_is_script_source, walk_git_invocations
 
 
 EXPLORE_SUBAGENT = "Explore"
@@ -211,23 +211,48 @@ def check_bash(
     return False, ""
 
 
-def _command_targets_dot_git(command: str) -> bool:
-    """Return true for an fs-mutator or redirect targeting ``.git/``."""
-    try:
-        from _git_controller_lex import CHAIN_SEPARATORS, punctuation_tokenize
-
-        tokens = punctuation_tokenize(command)
-    except (ValueError, ImportError):
-        return False
+def _tokens_target_dot_git(tokens: list[str], separators: frozenset[str]) -> bool:
+    """Return true for an fs-mutator or redirect whose operands name ``.git/``."""
     for index, token in enumerate(tokens):
         if token not in _FS_MUTATING_VERBS and token not in _SHELL_REDIRECT_TOKENS:
             continue
         for operand in tokens[index + 1:]:
-            if operand in CHAIN_SEPARATORS:
+            if operand in separators:
                 break
             if ".git/" in operand or operand == ".git":
                 return True
     return False
+
+
+def _command_targets_dot_git(command: str) -> bool:
+    """Return true for an fs-mutator or redirect targeting ``.git/``.
+
+    Heredoc BODIES are excluded for the same reason the walker excludes them:
+    they are data. Prose about repository internals — a note saying never to
+    delete ``.git/index`` by hand — is not a mutation, and reading it as one
+    is the identical false positive one door over. A body fed to a shell
+    evaluator is still scanned, exactly as the walker scans it.
+    """
+    try:
+        from _git_controller_lex import (
+            CHAIN_SEPARATORS,
+            punctuation_tokenize,
+            split_heredoc_bodies,
+        )
+
+        retained, heredocs = split_heredoc_bodies(command)
+        segments = [retained]
+        segments.extend(
+            body
+            for owner_line, body in heredocs
+            if heredoc_body_is_script_source(owner_line)
+        )
+        return any(
+            _tokens_target_dot_git(punctuation_tokenize(segment), CHAIN_SEPARATORS)
+            for segment in segments
+        )
+    except (ValueError, ImportError):
+        return False
 
 
 def _collect_tool_input_paths(tool_input: dict[str, object]) -> list[str]:

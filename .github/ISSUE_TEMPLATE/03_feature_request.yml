@@ -9,8 +9,10 @@ body:
         State the outcome you need, not the implementation you imagine. The
         maintainers own the method, and a stated goal gives them room to solve it
         better than a sketch would. If your sketch has outgrown an appendix, you
-        have a design offer — send it as a pull request carrying a document
-        instead (see the issue chooser).
+        have a design offer — that is still this form: put the design in the
+        body below, alternatives and recommendation included. Long is fine. The
+        repository does not accept pull requests or patches (see
+        CONTRIBUTING.md), so a design travels as an issue or not at all.
 
   - type: input
     id: item_number
@@ -65,7 +67,9 @@ body:
       label: Implementation sketch (optional appendix)
       description: >-
         Welcome here, never as the headline. If this section is longer than
-        everything above it, send a design pull request instead.
+        everything above it, you have a design offer rather than a feature
+        request — that is fine, and it still belongs here: say so at the top of
+        the body and let this section be the design.
     validations:
       required: false
 

@@ -152,7 +152,16 @@ Notes:
   `{{SOLET_NAME}} call plugin::agent_messaging_plugin::peer_holds_role`
   with `{"name": "$ROLE", "agent_instance_id": "<from the armed line / step 1>"}`
   — a raw peer-list entry is presence, not a claim.
-- If the role is already held by ANOTHER live session, the claim still
-  succeeds and displaces the prior holder (address-book name uniqueness).
-  Only run one session per role name at a time.
+- If the role is already held by ANOTHER LIVE session, the claim is REFUSED
+  with `role_held_live`, naming the incumbent. It does NOT displace the
+  holder. Report the refusal and stop; passing `takeover` needs explicit
+  operator confirmation first, exactly as branch 1a says. (This paragraph
+  used to say the opposite — that the claim "still succeeds and displaces the
+  prior holder". That described the behaviour BEFORE the `role_held_live`
+  gate shipped, and it contradicted this skill's own branch-1a instruction.)
+- A holder that reads DEAD by the liveness window is still claimable, with no
+  takeover and no explicit terminate. That is deliberate, not a gap: a
+  crashed session cannot release its own role, so refusing dead holders too
+  would strand the role permanently behind a session that no longer exists.
+- Still only run one session per role name at a time.
 - If any step fails, surface the error verbatim — don't paper over it.

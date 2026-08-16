@@ -45,6 +45,10 @@ from ananta.services.memory_service.actr.activation import compute_final_score
 from ananta.services.memory_service.actr.consolidation import cluster_memories, generate_summary
 from ananta.services.memory_service.actr.constants import EMBEDDING_MAX_CHARS, VECTOR_NAMESPACE
 from ananta.services.memory_service.schema import NAMESPACE
+from ananta.services.state_service.bounded_read import (
+    assert_within_ceiling,
+    iter_table_rows,
+)
 
 from .constants import CONFIG_KEY_EXPORT_ALLOWED_ROOTS, PLUGIN_NAME
 from .export_containment import assert_path_within_allowed_roots
@@ -81,6 +85,40 @@ from .session_query import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A boot invariant over rows that MUST NOT EXIST: every focus_buffer row is
+# supposed to carry a session_id, and the JOS-02 migration clears the legacy ones
+# that do not. The healthy count is 0 (MEASURED: actr_memory_plugin.focus_buffer
+# holds 0 unscoped rows, 2026-08-15), and the error path prints every offending
+# memory_id, so a ceiling here bounds an error message rather than a table.
+#
+# 100 deliberately matches the platform's default row bound rather than exceeding
+# it: this read needs no `unbounded` opt-in and stays correct when the default
+# drops to 100. A hundred legacy pins is already far more than "the migration did
+# not run" needs to be obvious.
+_UNSCOPED_FOCUS_CEILING = 100
+
+# Bound on the PURGE walk (``_get_all_memory_ids``), which pages the whole
+# ``memory`` table to collect every id for embedding cleanup.
+#
+# This is NOT a claim that the table is small — it plainly is not, and that is
+# why the walk is paginated rather than ceiling-checked like the focus read
+# above. It is a claim about the MECHANISM: a purge that collects ids in Python
+# and deletes them one at a time is sized for a corpus, not for a warehouse.
+#
+# Measured 22,238 rows on 2026-08-15, and growing fast — it gained ~7,600 rows in
+# fifteen minutes of that day's sweep, because it accumulates a row per
+# knowledge-base chunk ingested. Half a million is roughly 20x the measured size
+# and ~5,000 pages; past it the honest repair is a set-based delete evaluated in
+# the database, not a larger number here. Purge is an explicit, confirmed,
+# destructive operator action, so failing loud and making them re-decide is the
+# right behaviour at that size.
+_PURGE_WALK_CEILING = 500_000
+_PURGE_WALK_CEILING_REASON = (
+    "one row per stored memory, including every knowledge-base chunk (measured "
+    "22,238 on 2026-08-15); a purge that collects ids in Python and deletes them "
+    "individually is sized for a corpus, not a warehouse."
+)
 
 # Tag used for identity memories (must match prompt_context_builder.IDENTITY_TAG)
 IDENTITY_TAG = "identity"
@@ -1228,16 +1266,46 @@ class ACTRMemoryBackend:
         Raising at readiness with the migration pointer is the ONLY loud
         surface such a row can have.
         """
-        result = self.state_service.read_state(
-            namespace=NAMESPACE,
-            query={"table": "focus_buffer"},
-        )
-        rows = result.get("data", {}).get("records", [])
-        unscoped = [
-            str(r.get("memory_id", "?"))
-            for r in rows
-            if not r.get("session_id")
-        ]
+        # This previously read every row in focus_buffer and re-tested
+        # `session_id` in Python. The predicates it needs already exist in the
+        # filter grammar, so the read is now SELECTIVE rather than merely
+        # bounded: in the healthy case it matches zero rows, and the cost stops
+        # scaling with how many memories are pinned.
+        #
+        # TWO reads, deliberately. The Python test being replaced was `not
+        # r.get("session_id")`, which is true for NULL *and* for the empty
+        # string — and the JOS-02 migration this invariant guards uses that same
+        # falsy test to decide what to delete. SQL `IS NULL` does not match '',
+        # and the flat filter grammar has no OR, so expressing only the NULL half
+        # would have quietly narrowed a boot invariant to a subset of what its
+        # own migration cleans. A row with session_id='' would then pass
+        # readiness while still being unre-pinnable — the exact hazard this
+        # invariant exists to catch.
+        rows: list[dict[str, Any]] = []
+        for predicate in ({"op": "is_null"}, ""):
+            result = self.state_service.read_state(
+                namespace=NAMESPACE,
+                query={
+                    "table": "focus_buffer",
+                    "filters": {"session_id": predicate},
+                    "limit": _UNSCOPED_FOCUS_CEILING,
+                },
+            )
+            matched = result.get("data", {}).get("records", [])
+            rows.extend(
+                assert_within_ceiling(
+                    matched,
+                    table="focus_buffer",
+                    ceiling=_UNSCOPED_FOCUS_CEILING,
+                    reason=(
+                        "these are pre-JOS-02 legacy pins with no session_id; the "
+                        "migration clears them and nothing creates new ones, so the "
+                        "expected count is zero and any large number means the "
+                        "migration never ran."
+                    ),
+                )
+            )
+        unscoped = [str(r.get("memory_id", "?")) for r in rows]
         if unscoped:
             raise FrameworkError(
                 message=(
@@ -2342,20 +2410,45 @@ class ACTRMemoryBackend:
             exclude_protected: If True, skip records carrying a
                 PURGE_PROTECTED_TAGS tag (knowledge:official / agent_memory).
         """
-        result = self.state_service.query_state(
+        # PAGINATED, not read whole (2026-08-15 read-cap repair). This is a
+        # BOOT-PATH read: _handle_clean_restart -> purge_memories -> here, and
+        # that startup step raises StartupError on a non-COMPLETED result, so a
+        # refusal aborts the boot rather than logging a warning. `memory` was
+        # measured at 22,238 rows against a 100-row default bound, so the
+        # unpaginated read this replaced could not have completed.
+        #
+        # It has not fired only because the step returns early unless
+        # ANANTA_CLEAN_RESTART=true — and an env gate is a delay, not a bound.
+        # The boot that sets it is a rebuilt database or a clean-restart
+        # recovery: precisely the boot someone reaches for when a deploy has
+        # already gone wrong, and the worst possible moment to discover this.
+        #
+        # include_deleted=True is REQUIRED, not a convenience. query_ordered's
+        # default applies SQL `is_deleted = 0`, which does not match NULL, while
+        # the Python test below deliberately keeps `is_deleted IS NULL OR = 0`
+        # (an OR the flat filter grammar cannot express — see the docstring).
+        # Letting the default filter here would silently narrow the purge to a
+        # subset and strand vectors whose records get deleted by
+        # _delete_all_memory_records, breaking the symmetry the docstring
+        # requires between the two halves of a purge.
+        rows = iter_table_rows(
+            self.state_service,
             namespace=NAMESPACE,
-            filters={"table": "memory"},
+            table="memory",
+            filters={},
+            ceiling=_PURGE_WALK_CEILING,
+            reason=_PURGE_WALK_CEILING_REASON,
+            include_deleted=True,
         )
-
-        if result.get("action_status") != ActionStatus.COMPLETED.value:
-            raise FrameworkError(
-                message=f"Failed to get memory IDs: {result.get('error')}",
-                error_code="memory.query_failed",
-            )
-
-        rows = cast(list[dict[str, Any]], result.get("data", {}).get("records", []))
         ids: list[str] = []
-        for row in rows:
+        for raw in rows:
+            # iter_table_rows yields dict[str, object] — deliberately narrower
+            # than the dict[str, Any] the previous `cast` produced, so pyright
+            # now sees `row.get(...)` as `object` rather than silently `Any`.
+            # Cast once at the boundary rather than at each use: the surrounding
+            # method is Any-typed by the state layer's own shape, and casting per
+            # call site would spread the same assertion over three lines.
+            row = cast(dict[str, Any], raw)
             if row.get("is_deleted") not in (None, 0):
                 continue
             if exclude_protected:

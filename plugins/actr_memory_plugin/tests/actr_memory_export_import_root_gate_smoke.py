@@ -72,9 +72,15 @@ def _refused(path: str, roots: list[str], label: str) -> None:
 class _FakeExportState:
     def read_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
         del namespace
+        # `action_status` is part of the real read envelope; omitting it made
+        # this fake unfaithful, which memory_store's COMPLETED-status
+        # requirement exposed (an error must never read as an empty result).
         if query.get("table") == "memory":
-            return {"data": {"records": [{"id": "m1", "tags": ["agent_memory"], "content": "c"}]}}
-        return {"data": {"records": []}}
+            return {
+                "action_status": "completed",
+                "data": {"records": [{"id": "m1", "tags": ["agent_memory"], "content": "c"}]},
+            }
+        return {"action_status": "completed", "data": {"records": []}}
 
 
 def test_containment_unit() -> None:

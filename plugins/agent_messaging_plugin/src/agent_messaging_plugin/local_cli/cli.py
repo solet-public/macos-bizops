@@ -373,7 +373,15 @@ def result(action_id: str, wait: bool, timeout_s: float) -> None:
 
 @cli.command()
 def health() -> None:
-    """Check whether the solet bridge is answering."""
+    """Report bridge reachability AND action-path liveness.
+
+    The bridge half answering is not evidence the platform is working: on
+    2026-08-15 this command printed ``healthy`` for 3h20m while the action
+    queue was completely frozen, because it only ever exercised the surface
+    that stayed alive. The ``action_path`` block in the response carries the
+    half that died — ``action_path_stalled`` is the verdict, and ``status``
+    reads ``degraded`` when it trips.
+    """
     try:
         base_url = resolve_base_url()
     except (SoletNotRunningError, SoletIdentityError) as exc:

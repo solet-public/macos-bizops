@@ -79,8 +79,9 @@ def test_status_update_is_keyed_on_action_id_alone(c: Checker) -> None:
             "status write is filtered by action id alone (no task outcome)",
         )
         c.check(
-            call["updates"] == {"status": "completed"},
-            "status write sets status=completed (dispatch flag)",
+            call["updates"] == {"status": "completed", "error_message": None},
+            "status write sets status=completed and clears error_message "
+            "(dispatch flag; neither field is a task outcome)",
         )
 
 
@@ -93,15 +94,24 @@ def test_mark_completed_sets_status_before_result_handling(c: Checker) -> None:
         call
         for call in state.update_calls
         if call["query"].get("table") == "action_events"
-        and call["updates"] == {"status": "completed"}
+        and call["updates"] == {"status": "completed", "error_message": None}
     ]
     c.check(
         len(marked) == 1 and marked[0]["query"].get("filters") == {"id": "ae-2"},
         "status is marked completed even with no stored result (completion at dispatch)",
     )
+    # The contract frozen here is that the status write precedes RESULT
+    # handling, not that it is the first database call of any kind. Since
+    # adopter issue #9 the completion path reads the row once BEFORE the write,
+    # to capture the error_message that the write is about to clear — the
+    # double-execution detector. That read is not a result lookup, and the
+    # ordering the contract exists to protect is unchanged: a regression that
+    # made completion WAIT on the task result would move "update" after the
+    # trailing "query" and still redden this check.
     c.check(
-        state.events[:2] == ["update", "query"],
-        "status write precedes the result lookup (dispatch before result handling)",
+        state.events[:3] == ["query", "update", "query"],
+        "status write precedes the result lookup (dispatch before result "
+        "handling), after the pre-clear read",
     )
 
 
