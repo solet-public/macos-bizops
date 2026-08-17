@@ -671,9 +671,36 @@ def get_managed_session_schema() -> TableSchema:
                 type=ColumnType.TEXT,
                 description="Lineage: the spawner's role name at spawn time, if any.",
             ),
+            "role_name": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "The durable role this session was spawned to fill, if any. "
+                    "Recording it does NOT claim the binding — spawning never claims "
+                    "a role as a side effect (operator ruling 2026-08-14); the worker "
+                    "claims it explicitly. This column is the spawn's stated INTENT, "
+                    "which is what makes the W6 incumbent refusal legible."
+                ),
+            ),
             "lane_id": ColumnDefinition(
                 type=ColumnType.TEXT,
                 description="The lane this session was spawned for (provenance, anti-laundering).",
+            ),
+            "local_name": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "W6 (#13 §44.3): the name the spawned worker answers to on its "
+                    "OWN machine — the headless driver's --name, the tmux label the "
+                    "session name derives from. Defaulted by spawn_session to "
+                    "role_name for a project-class role and lane_id otherwise. "
+                    "Persisted because it is the COLLISION KEY: the Git-Controller "
+                    "mutation guard resolves the caller by reading the local session "
+                    "file's 'name' field and comparing it EXACTLY "
+                    "(.claude/hooks/git_controller_gate.py find_session_name / "
+                    "session_name == controller), so two non-terminal rows sharing a "
+                    "local_name are two processes that both pass the same guard. No "
+                    "uniquifying suffix is available precisely because that compare "
+                    "is exact."
+                ),
             ),
             "brief_ref": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -757,6 +784,36 @@ def get_managed_session_schema() -> TableSchema:
                 type=ColumnType.DATETIME,
                 description="Timestamp of the most recent lifecycle_state write.",
             ),
+            "registration_overdue_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description=(
+                    "W4A (#8 §43.1): when the registration watchdog observed this "
+                    "row STILL in 'spawning' past its registration bound. A FIELD, "
+                    "not a lifecycle state, deliberately (see "
+                    "session_sweep.sweep_unregistered_spawning_sessions): the row is "
+                    "still genuinely spawning AND now registration-overdue, which are "
+                    "two facts a single state column would collapse. Null means never "
+                    "observed overdue; a late registration clears it."
+                ),
+            ),
+            "registration_overdue_reason": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "W4A: the attribution that goes with registration_overdue_at — "
+                    "what the platform could actually observe at the seam, never an "
+                    "inference from any policy blob's shape."
+                ),
+            ),
+            "degraded_hooks_acknowledged": ColumnDefinition(
+                type=ColumnType.BOOLEAN,
+                default=0,
+                description=(
+                    "W4A item 3: this spawn EXPLICITLY opted to proceed on a host "
+                    "whose preflight found worker hooks unable to run. Default 0 — "
+                    "running degraded is a stated operator choice recorded at spawn, "
+                    "never something discovered later from the silence."
+                ),
+            ),
             "directed_by": ColumnDefinition(
                 type=ColumnType.TEXT,
                 description=(
@@ -769,6 +826,11 @@ def get_managed_session_schema() -> TableSchema:
         indexes=[
             IndexDefinition(name="idx_managed_session_lane", columns=["lane_id"]),
             IndexDefinition(name="idx_managed_session_state", columns=["lifecycle_state"]),
+            # W6: the incumbent lookup behind the second-spawn refusal is
+            # "non-terminal row with this local_name", run on the spawn path
+            # before dispatch — indexed so the guard costs one index probe
+            # rather than a fleet scan on every spawn.
+            IndexDefinition(name="idx_managed_session_local_name", columns=["local_name"]),
         ],
     )
 
@@ -955,6 +1017,105 @@ def get_session_context_status_schema() -> TableSchema:
                 type=ColumnType.DATETIME,
                 not_null=True,
                 description="When the reporting hook computed this snapshot (its own clock).",
+            ),
+            # CACHE STATE (2026-08-16). The economic rotation policy's cold
+            # trigger needs to know whether the prompt cache is live, and only
+            # the reporting hook can see that -- it reads the transcript, which
+            # no verb does. Without these columns the policy's cold branch
+            # exists in code and can never fire.
+            #
+            # All three describe THE MOST RECENT ASSISTANT CALL, the same call
+            # current_tokens is summed from. They are nullable because a report
+            # from a pre-2026-08-16 hook carries none of them, and a NULL here
+            # means "not reported", never "cache is warm" -- the read-back verb
+            # surfaces that distinction rather than defaulting it away.
+            "cache_read_tokens": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description=(
+                    "cache_read_input_tokens on the most recent assistant call. "
+                    "0 means that call read NOTHING from cache and paid full "
+                    "price; NULL means the reporting hook did not report it."
+                ),
+            ),
+            "cache_cold": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description=(
+                    "1 when the reporter classified the prompt cache as expired, "
+                    "0 warm, NULL not reported. Classified by "
+                    "rotation_thresholds.classify_cache_state, which EXCLUDES "
+                    "the first call after a /clear -- that call is cold by "
+                    "construction because the clear rewrites the prefix, and "
+                    "counting it would make every rotation recommend another."
+                ),
+            ),
+            "cache_overage_signature": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description=(
+                    "1 when REPEATED cold calls across sub-TTL gaps indicate the "
+                    "cache is not surviving its nominal window -- what usage "
+                    "overage looks like from outside, since the account state "
+                    "itself is not observable to this platform. 0 no, NULL not "
+                    "reported. A single cold call after a long idle gap is "
+                    "ordinary expiry and does NOT set this."
+                ),
+            ),
+            # REPORTER ATTRIBUTION (2026-08-16). Several COPIES of the
+            # reporting hook can be registered on the same event at once (the
+            # repo's own .claude/hooks copy and an INSTALLED plugin-cache copy
+            # both bind PostToolUse, and settings sources merge rather than
+            # override). They serialize on a shared throttle marker that
+            # carries no record of which copy wrote it, so exactly one copy
+            # serves each tick and NOTHING in the resulting row said which.
+            #
+            # That made a missing field ambiguous in a way no reader could
+            # resolve: absent cache state could mean the verbs are not
+            # deployed, OR that a stale copy served the tick. These two
+            # columns make a row attributable, on two INDEPENDENT axes --
+            # a current-generation hook running from the wrong surface and a
+            # stale-generation hook running from the right one are different
+            # failures, and one composite value would blur them.
+            #
+            # Nullable for the same reason as the cache columns above, and
+            # with more force: a reporter predating this widening sends
+            # neither, so NULL here positively identifies a pre-attribution
+            # reporter. Absence is the signal, not an absence of signal.
+            "reporter_surface": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "Which registered COPY of the reporting hook served this "
+                    "tick, as a path CLASS rather than a machine-specific "
+                    "path: 'checkout' for a hook under the repo's own "
+                    ".claude/hooks (including a subdirectory of it), "
+                    "'plugin_cache' for an installed plugin-cache copy, "
+                    "'vendored' for the in-repo vendored source an install "
+                    "copies FROM, 'release' for that same source inside a "
+                    "deployed release tree, and 'unknown' when the hook could "
+                    "not classify its own location. NULL means the reporter "
+                    "predates this column and is therefore a stale copy by "
+                    "construction. 'vendored'/'release' were added 2026-08-17 "
+                    "after a row was observed ALTERNATING between 'checkout' "
+                    "and 'unknown' on one session -- the shared-throttle race "
+                    "between two copies that both carry this field, which the "
+                    "original collapsed bucket could not name."
+                ),
+            ),
+            "reporter_generation": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description=(
+                    "The reporting hook's own content-generation constant, "
+                    "bumped in lockstep whenever its reporting content "
+                    "changes. Deliberately NOT a git sha -- a hook cannot "
+                    "know the commit it was copied from, and inferring one "
+                    "would promise precision the reporter does not have. "
+                    "Lets a reader tell a current copy from an older one "
+                    "that is still being served. NULL means the reporter "
+                    "predates this column."
+                ),
             ),
         },
         indexes=[

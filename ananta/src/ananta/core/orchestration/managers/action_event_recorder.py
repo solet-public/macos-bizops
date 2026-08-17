@@ -3,6 +3,7 @@ import logging
 from datetime import UTC, datetime
 
 from ananta.constants import NOTES_MAX_LENGTH
+from ananta.core.actions.payload_bounds import check_action_parameters_size
 from ananta.core.contexts.normalization import normalize_flow_id, normalize_session_id
 from ananta.core.domain.types import ActionResult
 from ananta.core.result_processing import ErrorProcessorKind, ResultProcessorKind
@@ -109,6 +110,19 @@ class ActionEventRecorder(IActionEventRecorder):
             )
         normalized_notes = notes_value.strip()[:NOTES_MAX_LENGTH]
 
+        # Serialize parameters ONCE, then bound the resulting string before it
+        # is persisted. Measuring the string json.dumps had to produce anyway
+        # costs nothing extra and — load-bearing — involves no parse: the
+        # 2026-08-15 outage was caused by an 82 MB payload whose json.loads
+        # held the GIL for two hours, so any guard downstream of a parse has
+        # already caused the outage it exists to prevent. See
+        # ananta.core.actions.payload_bounds for the bound's derivation.
+        serialized_parameters = json.dumps(action.get("parameters", {}))
+        check_action_parameters_size(
+            serialized_parameters,
+            process_key=str(action.get("process_key", "")),
+        )
+
         # Use validated IDs (already normalized to prevent empty string propagation)
         action_data: dict[str, object] = {
             "core__sessions_id": validated_session_id,
@@ -120,7 +134,7 @@ class ActionEventRecorder(IActionEventRecorder):
             "depth": depth,
             "name": action_name,
             "process_key": action.get("process_key"),
-            "parameters": json.dumps(action.get("parameters", {})),
+            "parameters": serialized_parameters,
             "notes": normalized_notes,
             "result_processor": (
                 json.dumps(action.get("result_processor"))

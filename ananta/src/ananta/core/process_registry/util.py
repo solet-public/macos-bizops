@@ -53,10 +53,17 @@ class ProcessRegistryUtil:
             logger.error(f"Error looking up process '{process_key}': {e}")
             return None
 
-    def _extract_external_id_from_result(
-        self, result: ActionResult | dict[str, object]
-    ) -> str | None:
-        """Extract external_id from a state service query result."""
+    def _first_record(self, result: ActionResult | dict[str, object]) -> dict[str, object] | None:
+        """The first row of a ``read_state`` result, or ``None`` if there is none.
+
+        ``read_state`` returns ``data = {records, count, namespace, table}``.
+        Every reader in this class previously looked for ``data["result"]``
+        first, which that envelope has never carried (``count``/``update_state``
+        carry a ``result`` key; ``read_state`` does not). The lookups therefore
+        bailed at the missing key and reported "not found" for rows that were
+        sitting in the table — see the class docstring on the three methods this
+        replaces.
+        """
         if not is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
             return None
 
@@ -64,16 +71,19 @@ class ProcessRegistryUtil:
         if not isinstance(data, dict):
             return None
 
-        result_data = data.get("result")
-        if not isinstance(result_data, dict):
-            return None
-
-        records = result_data.get("records")
+        records = data.get("records")
         if not isinstance(records, list) or not records:
             return None
 
-        process_record = records[0]
-        if not isinstance(process_record, dict):
+        first = records[0]
+        return first if isinstance(first, dict) else None
+
+    def _extract_external_id_from_result(
+        self, result: ActionResult | dict[str, object]
+    ) -> str | None:
+        """Extract external_id from a state service query result."""
+        process_record = self._first_record(result)
+        if process_record is None:
             return None
 
         external_id = process_record.get("external_id")
@@ -88,26 +98,46 @@ class ProcessRegistryUtil:
             if not self.state_service or not process_external_id:
                 return {}
 
+            # `external_id` was previously passed at the TOP LEVEL of the query
+            # dict. The provider reads only query["table"], ["filters"],
+            # ["limit"] and ["unbounded"] — so the predicate was silently
+            # dropped and this scanned all 756 rows of core.process_registry
+            # (measured 2026-08-15) to answer a single-row lookup. A filter at
+            # the wrong nesting level is not a weak filter, it is no filter, and
+            # nothing in the source makes that visible: this is why the census
+            # classified the site as having "(no filters key)" rather than as
+            # the inert-predicate bug it actually is.
             result = self.state_service.read_state(
                 FRAMEWORK_NAMESPACE,
-                {"table": "process_registry", "external_id": process_external_id},
+                {
+                    "table": "process_registry",
+                    "filters": {"external_id": process_external_id},
+                    # external_id carries a unique constraint (see sync_records'
+                    # conflict_columns), so the true bound is exactly one row.
+                    "limit": 1,
+                },
             )
 
-            if is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
-                process_data = result.get("data")
-                if isinstance(process_data, dict):
-                    provider_type = process_data.get("provider_type", "plugin")
-                    provider = process_data.get("provider", "")
-                    function_name = process_data.get("function_name", "")
-                    return {
-                        "provider_type": provider_type
-                        if isinstance(provider_type, str)
-                        else "plugin",
-                        "provider": provider if isinstance(provider, str) else "",
-                        "function_name": function_name if isinstance(function_name, str) else "",
-                    }
+            process_record = self._first_record(result)
+            if process_record is None:
+                return {}
 
-            return {}
+            # Read off the ROW. The previous version read these keys off the
+            # envelope itself, where none of them exist — so every `.get(key,
+            # default)` returned its default and the method handed back
+            # {"provider_type": "plugin", "provider": "", "function_name": ""}
+            # for every input, including ones with no matching row at all. That
+            # is worse than returning nothing: it is a well-formed answer
+            # assembled entirely out of default arguments, and it looks exactly
+            # like a successful lookup to every caller.
+            provider_type = process_record.get("provider_type", "plugin")
+            provider = process_record.get("provider", "")
+            function_name = process_record.get("function_name", "")
+            return {
+                "provider_type": provider_type if isinstance(provider_type, str) else "plugin",
+                "provider": provider if isinstance(provider, str) else "",
+                "function_name": function_name if isinstance(function_name, str) else "",
+            }
 
         except Exception as e:
             logger.error(f"Error getting process info for '{process_external_id}': {e}")
@@ -124,14 +154,10 @@ class ProcessRegistryUtil:
                 {"table": "process_registry", "filters": {"process_key": process_key}, "limit": 1},
             )
 
-            if is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
-                data = result.get("data")
-                if isinstance(data, dict):
-                    result_data = data.get("result")
-                    if isinstance(result_data, dict):
-                        return result_data
-
-            return None
+            # Same envelope correction as _first_record: this returned
+            # data["result"], which read_state does not carry, so it returned
+            # None for every process_key in the table.
+            return self._first_record(result)
 
         except Exception as e:
             logger.error(f"Error querying process registry for '{process_key}': {e}")

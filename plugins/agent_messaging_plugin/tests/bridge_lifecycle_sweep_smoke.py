@@ -32,6 +32,12 @@ the roleless lane + the 40+ zombie-row class). Cases:
      regression-guarded. (A4, 2026-08-04: the REL-05 deaf-wake reconciler
      rider retired from this tick; D1's session sweep is the surviving rider
      this case now asserts survives a raising INF-02 sweep.)
+     ★ L4 (2026-08-17): the same guard now covers the rotation-surface rider.
+     It needs the guard MORE than the others do: the rider is wrapped in its
+     own try/except, so an un-wiring that leaves a duck-typed self without the
+     attribute raises INSIDE the guard and is logged, not failed — the tick
+     goes green while no notice is ever delivered. Asserting invocation is the
+     only thing that can tell "composed" from "composed and swallowed".
 
 Run:
     SOLET_NAME=<name>-test .venv/bin/python3 \
@@ -418,6 +424,7 @@ def _sweep_tick_forwarded_rider_cases() -> None:
     fake_self = SimpleNamespace(
         _autonomic_assignment=autonomic,
         _run_session_lifecycle_sweep=lambda: swept.append("d1_sweep"),
+        _run_rotation_surface_sweep=lambda: swept.append("l4_rotation_surface"),
     )
     AgentMessagingPlugin._on_sweep_tick(cast("Any", fake_self))  # noqa: SLF001
     _check(
@@ -425,7 +432,11 @@ def _sweep_tick_forwarded_rider_cases() -> None:
         and "forwarded.gc_terminal_rows" in calls,
         "F1 _on_sweep_tick INVOKES both INF-06 forwarded riders (sweep + GC)",
     )
-    _check(swept == ["d1_sweep"], "F1 _on_sweep_tick also invokes the D1 session sweep")
+    _check(
+        swept == ["d1_sweep", "l4_rotation_surface"],
+        "F1 _on_sweep_tick invokes the D1 session sweep AND the L4 rotation-surface "
+        "rider -- an un-invoked rider delivers no notice however well it is tested",
+    )
 
     # A raising INF-02 completion sweep must NOT skip the forwarded riders or
     # the D1 session-lifecycle sweep (per-rider fault-isolation).
@@ -441,13 +452,56 @@ def _sweep_tick_forwarded_rider_cases() -> None:
     fake_self2 = SimpleNamespace(
         _autonomic_assignment=autonomic2,
         _run_session_lifecycle_sweep=lambda: swept.append("d1_sweep"),
+        _run_rotation_surface_sweep=lambda: swept.append("l4_rotation_surface"),
     )
     AgentMessagingPlugin._on_sweep_tick(cast("Any", fake_self2))  # noqa: SLF001
     _check(
         "forwarded.sweep_serve_timeouts" in calls
         and "forwarded.gc_terminal_rows" in calls
-        and swept == ["d1_sweep"],
-        "F2 a RAISING INF-02 sweep does not skip the forwarded riders / D1 sweep",
+        and swept == ["d1_sweep", "l4_rotation_surface"],
+        "F2 a RAISING INF-02 sweep does not skip the forwarded riders / D1 sweep / "
+        "L4 rotation surface",
+    )
+
+    # F3 — the fault-isolation runs BOTH ways: a raising D1 sweep must not cost
+    # the tick its L4 notices, and a raising L4 rider must not cost the D1
+    # sweep. The two are separate try/excepts precisely so neither can.
+    def _d1_boom() -> None:
+        raise RuntimeError("D1 sweep fault")
+
+    calls.clear()
+    swept.clear()
+    autonomic3 = SimpleNamespace(
+        completions=SimpleNamespace(sweep_serve_timeouts=lambda: calls.append("completions.sweep")),
+        forwarded=_ForwardedRiderSpy(calls),
+    )
+    fake_self3 = SimpleNamespace(
+        _autonomic_assignment=autonomic3,
+        _run_session_lifecycle_sweep=_d1_boom,
+        _run_rotation_surface_sweep=lambda: swept.append("l4_rotation_surface"),
+    )
+    AgentMessagingPlugin._on_sweep_tick(cast("Any", fake_self3))  # noqa: SLF001
+    _check(
+        swept == ["l4_rotation_surface"],
+        "F3 a RAISING D1 sweep does not skip the L4 rotation-surface rider",
+    )
+
+    def _l4_boom() -> None:
+        raise RuntimeError("L4 rotation-surface fault")
+
+    swept.clear()
+    fake_self4 = SimpleNamespace(
+        _autonomic_assignment=SimpleNamespace(
+            completions=SimpleNamespace(sweep_serve_timeouts=lambda: None),
+            forwarded=_ForwardedRiderSpy(calls),
+        ),
+        _run_session_lifecycle_sweep=lambda: swept.append("d1_sweep"),
+        _run_rotation_surface_sweep=_l4_boom,
+    )
+    AgentMessagingPlugin._on_sweep_tick(cast("Any", fake_self4))  # noqa: SLF001
+    _check(
+        swept == ["d1_sweep"],
+        "F3 a RAISING L4 rotation-surface rider does not skip the D1 sweep",
     )
 
 

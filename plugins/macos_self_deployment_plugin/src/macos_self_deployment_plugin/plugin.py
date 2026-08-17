@@ -100,6 +100,7 @@ from macos_self_deployment_plugin.constants import (
     RESULT_TYPE_ROLLBACK_RELEASE,
     RESULT_TYPE_STATUS,
     RESULT_TYPE_STOP_SELF,
+    ROUTER_PORT_SUFFIX,
     ROUTER_SOCKET_SUFFIX,
     STATUS_COMPLETED,
     STATUS_FAILED,
@@ -367,7 +368,7 @@ def _router_socket_path(solet_name: str) -> Path:
 
 
 def _wait_for_router_socket(socket_path: Path) -> None:
-    """Bounded wait for the router's unix socket, then fail loudly if absent.
+    """Bounded wait for a router that ANSWERS, then fail loudly if none does.
 
     The router is a SEPARATE KeepAlive LaunchAgent that comes up independently
     of the solet; at a fresh BIRTH both agents load ~simultaneously (RunAtLoad), so
@@ -376,18 +377,73 @@ def _wait_for_router_socket(socket_path: Path) -> None:
     one-shot on that benign race (the FATAL first-boot + LaunchAgent-restart
     cycle observed on fresh seed births). Still raises past the window -- a
     genuinely absent router is a real error (L3 plan §3.5).
+
+    Readiness is a CONVERSATION, not a stat. This check previously polled
+    ``socket_path.exists()``, which is wrong in both directions: a stale socket
+    file left by a dead router read as healthy and let the boot proceed against
+    nothing, while a live router holding an unlinked socket read as absent. The
+    probe fixes the first direction outright. It does NOT fix the second — no
+    path-based check can reach an already-unlinked socket — it only DIAGNOSES
+    it; ``MgmtServer.stop()``'s ownership check is what prevents it. The failure
+    text below names all three states apart so the next person reading a FATAL
+    log knows which one they are in.
     """
     deadline = time.monotonic() + DEFAULT_ROUTER_SOCKET_WAIT_SECONDS
-    while not socket_path.exists() and time.monotonic() < deadline:
+    while True:
+        if stale_runtime_cleanup.router_mgmt_status(socket_path) is not None:
+            return
+        if time.monotonic() >= deadline:
+            break
         time.sleep(DEFAULT_ROUTER_SOCKET_POLL_INTERVAL_SECONDS)
-    if not socket_path.exists():
-        raise RuntimeError(
-            f"{PLUGIN_NAME}: router socket not found at {socket_path} after "
-            f"waiting {DEFAULT_ROUTER_SOCKET_WAIT_SECONDS:.0f}s. Install the "
-            "router via plugins/macos_self_deployment_plugin/src/"
-            "macos_self_deployment_plugin/blue_green_router/install_router.py "
-            "before binding deployment_service to this plugin."
+    raise RuntimeError(
+        f"{PLUGIN_NAME}: no router answered the mgmt `status` verb at "
+        f"{socket_path} after waiting "
+        f"{DEFAULT_ROUTER_SOCKET_WAIT_SECONDS:.0f}s. "
+        f"{_router_socket_failure_diagnosis(socket_path)}"
+    )
+
+
+def _router_socket_failure_diagnosis(socket_path: Path) -> str:
+    """Name which of the three no-router states the evidence points at.
+
+    The three are genuinely different failures with different fixes, and the
+    old existence check could not tell any of them apart:
+
+      (a) nothing installed      - no socket file, no router.port sibling
+      (b) stale socket file      - file present, nothing answering on it
+      (c) socket held + unlinked - router alive, path gone (restart overlap)
+
+    (c) is an INFERENCE, not a measurement: the router.port file that
+    ``install_router`` wrote is still there while the socket path is not, which
+    is the fingerprint an overlapping restart leaves. Stated as an inference on
+    purpose — a path-based check cannot observe an unlinked socket, so the
+    honest output is a named hypothesis plus the command that would confirm it.
+    """
+    port_sibling = socket_path.with_name(
+        socket_path.name.replace(ROUTER_SOCKET_SUFFIX, ROUTER_PORT_SUFFIX)
+    )
+    if socket_path.exists():
+        return (
+            "The socket FILE is present but nothing answered on it: a router "
+            "died without cleaning up, or is wedged. Remove the stale file and "
+            "restart the router LaunchAgent."
         )
+    if port_sibling.is_file():
+        return (
+            f"No socket file, but {port_sibling.name} is still present — this "
+            "is the fingerprint of an overlapping router restart (an outgoing "
+            "router unlinking the incoming router's socket on shutdown). "
+            "INFERENCE, not a measurement: a path-based check cannot see a "
+            f"socket that is held but unlinked. Confirm with `lsof -U | grep "
+            f"{socket_path.name}` — if a live router IS holding it, restart "
+            "that router to re-create the path."
+        )
+    return (
+        "No socket file and no router.port sibling: no router is installed for "
+        "this solet. Install it via plugins/macos_self_deployment_plugin/src/"
+        "macos_self_deployment_plugin/blue_green_router/install_router.py "
+        "before binding deployment_service to this plugin."
+    )
 
 
 def _resolve_project_root_for_autostart() -> Path:

@@ -30,17 +30,41 @@ or exceptions:
   read, no join primitive.
 
 The ``started_at < cutoff`` orphan-batch range predicate (also not in the
-grammar) is handled the same way: the small running-batch set is read by equality
-and Python-filtered on the cutoff, then the stale ids are failed in one ``=ANY``
+grammar) is handled the same way: the running-batch set is read by equality and
+Python-filtered on the cutoff, then the stale ids are failed in one ``=ANY``
 ``update_state`` whose ``status = RUNNING`` predicate IS the compare-and-set.
+
+Read-cap sweep, 2026-08-16 (lane-ak). Every ``query_state`` read above was
+UNBOUNDED — no ``limit``, no ``unbounded``, whole matching set in one shot. That
+survived only because the cap was 10,000; ``dcb1722c7`` lowered it to 100 and all
+six became refusals. Two distinct urgencies, kept distinct on purpose:
+
+* ``__session`` at 27,208 rows was ALREADY over the old 10,000 cap — pre-existing
+  breakage, not a regression this deploy introduces.
+* ``__summary`` (4,913) and the per-source RUNNING ``__import_batch`` set (94 for
+  the largest source) both WORKED under the old cap and would be newly broken by
+  the new one. Those are regressions.
+
+The Python folds themselves are not the defect and are not removed: each encodes
+a predicate the flat filter grammar genuinely cannot express — a cross-column
+comparison, a LIKE prefix, an AND-composed range. What changed is that they now
+fold over a PAGED walk (``base.walk_table``, one page in memory, tie-safe
+``(created_at, id)`` cursor) instead of a materialized whole table, and the two
+folds that only ever produced a NUMBER became scalar ``count`` aggregates
+(``base.count_rows``) that ship no rows at all.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
-from ananta.llm.session_ledger.base import SessionLedgerRepositoryBase
+from ananta.llm.session_ledger.base import (
+    SessionLedgerRepositoryBase,
+    count_rows,
+    walk_table,
+)
 from ananta.llm.session_ledger.schema import (
     TABLE_EVENT,
     TABLE_IMPORT_BATCH,
@@ -55,6 +79,38 @@ RELOAD_SAFE = True
 logger = logging.getLogger(__name__)
 
 _EMB_INTERNAL_PREFIX = "emb-"
+
+# ── Walk ceilings ────────────────────────────────────────────────────────────
+#
+# Every whole-table read in this module was a single unbounded ``_query``. That
+# was correct against the pre-2026-08-15 10,000-row cap for the SUMMARY reads
+# and already wrong for the SESSION ones; at the 100-row cap all of them are
+# refused. They are now paged walks, and a paged walk still has to say how far
+# it is willing to go — the ceiling is that statement.
+#
+# A ceiling is NOT a claim that the table is small. It is a claim about how large
+# a walk THIS call site was designed to perform, so that a table which has grown
+# past the design gets a loud error naming the assumption instead of a repair
+# pass that quietly runs for an hour.
+
+#: One row per ingested LLM session, across every source. Measured 27,208 on
+#: 2026-08-16; the ledger ingests a few thousand sessions a month, so this is
+#: roughly a decade of headroom. These are one-shot operator repair verbs — if a
+#: repair ever needs to walk half a million sessions, the right answer is a
+#: set-based statement, not a longer row loop.
+_SESSION_WALK_CEILING = 500_000
+
+#: One row per summary chunk (a small multiple of summarized sessions).
+#: Measured 4,913 on 2026-08-16. Same reasoning, same order of headroom.
+_SUMMARY_WALK_CEILING = 200_000
+
+#: RUNNING ``__import_batch`` rows for ONE source. These accumulate only when a
+#: poll dies mid-batch, and draining them is what this verb is for — so the set
+#: is bounded by the failure rate, not by the ledger's size. Measured 94 for the
+#: largest source (``agent_messaging``) on 2026-08-16 — SIX rows under the
+#: 100-row cap, which is why this read is in the sweep at all rather than filed
+#: as theoretical.
+_RUNNING_BATCH_WALK_CEILING = 100_000
 
 
 def _as_dt(value: object) -> datetime:
@@ -119,6 +175,17 @@ def _summary_external_id(row: dict[str, object]) -> str | None:
     return f"{session_id}:{chunk_index}"
 
 
+def _started_before(row: dict[str, object], cutoff: datetime) -> bool:
+    """True iff an ``__import_batch`` row started strictly before ``cutoff``.
+
+    A row with no ``started_at`` is NOT stale — mirroring the pre-migration SQL
+    ``started_at < cutoff``, whose ``<`` yields NULL (unmatched) on a NULL
+    operand. Same NULL convention as :func:`_is_inverted`.
+    """
+    started_at = row.get("started_at")
+    return started_at is not None and _as_dt(started_at) < cutoff
+
+
 def _orphan_result(*, total: int, remaining: int) -> dict[str, int]:
     """Build the orphan-batch return envelope from before/after RUNNING counts.
 
@@ -141,17 +208,55 @@ class SessionLedgerInvertedBoundsRepairMixin(SessionLedgerRepositoryBase):
 
     __slots__ = ()
 
+    # ── shared walks ─────────────────────────────────────────────────────────
+
+    def _walk_live_sessions(self) -> Iterator[dict[str, object]]:
+        """Every live ``__session`` row, paged.
+
+        ``walk_table`` applies ``is_deleted = 0`` itself (it pages through
+        ``query_ordered``), so — unlike the ``_query`` it replaces — the filter
+        is empty rather than carrying an explicit ``is_deleted: 0``. Passing both
+        is the one way to get this wrong.
+        """
+        return walk_table(
+            self._state,
+            TABLE_SESSION,
+            {},
+            ceiling=_SESSION_WALK_CEILING,
+            reason=(
+                "one row per ingested LLM session across every source "
+                "(measured 27,208 on 2026-08-16); these are one-shot operator "
+                "repairs, and past this size the repair belongs in a set-based "
+                "statement rather than a row loop."
+            ),
+        )
+
+    def _walk_live_summaries(self) -> Iterator[dict[str, object]]:
+        """Every live ``__summary`` row, paged. Same ``is_deleted`` note as above."""
+        return walk_table(
+            self._state,
+            TABLE_SUMMARY,
+            {},
+            ceiling=_SUMMARY_WALK_CEILING,
+            reason=(
+                "one row per summary chunk, a small multiple of the summarized "
+                "session count (measured 4,913 on 2026-08-16)."
+            ),
+        )
+
     # ── GAP-i: inverted first/last event_at bounds ───────────────────────────
 
     def count_inverted_first_last_event_at_sessions(self) -> int:
         """Count live ``__session`` rows where ``last_event_at < first_event_at``.
 
-        Cross-column predicate (GAP-i) → Python-fold over a ``query_state`` read
-        of the live sessions (``query_state`` does not inject the soft-delete
-        filter, so ``is_deleted: 0`` is passed explicitly).
+        Cross-column predicate (GAP-i): ``last_event_at < first_event_at``
+        compares two COLUMNS, and the filter grammar is column-vs-value only, so
+        the predicate cannot be pushed to the provider and cannot be answered by
+        the scalar ``count`` aggregate either. The rows have to be folded in
+        Python — but only a counter is kept, never the rows, so the walk holds
+        one page at a time regardless of how many sessions exist.
         """
-        rows = self._query(TABLE_SESSION, {"is_deleted": 0})
-        return sum(1 for row in rows if _is_inverted(row))
+        return sum(1 for row in self._walk_live_sessions() if _is_inverted(row))
 
     def repair_inverted_first_last_event_at(self) -> int:
         """Recompute ``first_event_at`` / ``last_event_at`` for inverted rows.
@@ -166,10 +271,17 @@ class SessionLedgerInvertedBoundsRepairMixin(SessionLedgerRepositoryBase):
         recompute is deterministic, so the ``update_state`` is filtered on ``id``
         alone — the outer inverted-row re-read makes a re-run a no-op (a repaired
         row is no longer inverted). Returns the rows-affected total.
+
+        The outer scan WRITES to the rows it is walking. That is safe here and
+        not by luck: the walk's cursor is ``(created_at, id)``, neither of which
+        this update touches, and it is a row-value cursor rather than an offset,
+        so a repaired row cannot move across it or shift the rows ahead of it.
+        The repair also cannot drop a row out of the walk's predicate — it never
+        writes ``is_deleted``.
         """
         repaired = 0
         now = self._clock()
-        for row in self._query(TABLE_SESSION, {"is_deleted": 0}):
+        for row in self._walk_live_sessions():
             if not _is_inverted(row):
                 continue
             session_id = str(row["id"])
@@ -218,12 +330,20 @@ class SessionLedgerInvertedBoundsRepairMixin(SessionLedgerRepositoryBase):
     def count_summary_rows_with_pgvector_internal_id_pointer(self) -> int:
         """Count active ``__summary`` rows whose ``embedding_vector_id`` is an internal ``emb-`` id.
 
-        LIKE pattern (GAP-ii) → Python ``str.startswith('emb-')`` over a
-        ``query_state`` read; NULL / non-str pointers do not match, mirroring SQL
-        ``LIKE``.
+        LIKE pattern (GAP-ii) → Python ``str.startswith('emb-')`` over a paged
+        walk; NULL / non-str pointers do not match, mirroring SQL ``LIKE``. Only
+        a counter is kept, never the rows.
+
+        A prefix match CAN in principle be pushed down as the half-open range
+        ``embedding_vector_id >= 'emb-' AND < 'emb.'`` using the Gap-A ``gte`` /
+        ``lt`` comparators, which would ship only the matching rows. It is not
+        done here on purpose: that rewrite is correct only under a collation
+        where ``'.'`` sorts immediately after ``'-'``, so it silently returns the
+        wrong set under a different one. A predicate whose correctness depends on
+        the database's collation is not worth the pages it saves on a repair verb
+        that runs by hand.
         """
-        rows = self._query(TABLE_SUMMARY, {"is_deleted": 0})
-        return sum(1 for row in rows if _has_internal_pointer(row))
+        return sum(1 for row in self._walk_live_summaries() if _has_internal_pointer(row))
 
     def repair_summary_embedding_vector_ids(self) -> dict[str, int]:
         """Rewrite stale ``__summary.embedding_vector_id`` values to the deterministic external_id.
@@ -251,13 +371,21 @@ class SessionLedgerInvertedBoundsRepairMixin(SessionLedgerRepositoryBase):
           genuinely unfixed);
         * ``total_rows_now_correct`` — active rows no longer internal
           (``active_after - broken_after``).
+
+        Both passes are paged walks. The first counts and repairs in ONE pass
+        (the pre-migration code materialized the whole table, counted it, then
+        iterated the same list) — identical arithmetic, but nothing larger than a
+        page is ever held. Writing during that pass is safe for the same reason
+        as in :meth:`repair_inverted_first_last_event_at`: the pointer rewrite
+        touches neither cursor column nor ``is_deleted``, so a repaired row
+        neither moves across the cursor nor drops out of the walk.
         """
         now = self._clock()
-        active_before = self._query(TABLE_SUMMARY, {"is_deleted": 0})
-        broken_before = sum(1 for row in active_before if _has_internal_pointer(row))
-        for row in active_before:
+        broken_before = 0
+        for row in self._walk_live_summaries():
             if not _has_internal_pointer(row):
                 continue
+            broken_before += 1
             external_id = _summary_external_id(row)
             if external_id is None:
                 logger.warning(
@@ -276,12 +404,16 @@ class SessionLedgerInvertedBoundsRepairMixin(SessionLedgerRepositoryBase):
                 },
                 {"embedding_vector_id": external_id, "updated_at": now},
             )
-        active_after = self._query(TABLE_SUMMARY, {"is_deleted": 0})
-        broken_after = sum(1 for row in active_after if _has_internal_pointer(row))
+        active_after = 0
+        broken_after = 0
+        for row in self._walk_live_summaries():
+            active_after += 1
+            if _has_internal_pointer(row):
+                broken_after += 1
         return {
             "updated_count": broken_before - broken_after,
             "skipped_count": broken_after,
-            "total_rows_now_correct": len(active_after) - broken_after,
+            "total_rows_now_correct": active_after - broken_after,
         }
 
     # ── orphan running import batches (started_at < cutoff range) ─────────────
@@ -295,12 +427,20 @@ class SessionLedgerInvertedBoundsRepairMixin(SessionLedgerRepositoryBase):
     ) -> dict[str, int]:
         """Mark stale running ``__import_batch`` rows for a source as failed.
 
-        ``started_at < cutoff`` is a range predicate (not in the filter grammar):
-        the per-source running-batch set is small + bounded, so it is read by
-        equality (``source_id`` + ``status = RUNNING``) and Python-filtered on the
-        cutoff. The stale ids are failed in one ``=ANY`` ``update_state`` guarded
-        on ``status = RUNNING`` — the predicate IS the compare-and-set, so a batch
-        a concurrent pass already failed matches 0 rows.
+        ``started_at < cutoff`` is a range predicate: the per-source running-batch
+        set is read by equality (``source_id`` + ``status = RUNNING``) and
+        Python-filtered on the cutoff. The stale ids are failed in one ``=ANY``
+        ``update_state`` guarded on ``status = RUNNING`` — the predicate IS the
+        compare-and-set, so a batch a concurrent pass already failed matches 0
+        rows.
+
+        The pre-2026-08-16 code called this set "small + bounded" and read it
+        with one unbounded ``_query``. Measured: 94 RUNNING rows for the
+        ``agent_messaging`` source, six under the 100-row cap, and the set grows
+        precisely when polls are failing — i.e. it is *unbounded in the direction
+        that matters*, and the read would have started refusing at the moment the
+        verb became necessary. It is a paged walk now, and the two ``len()``
+        calls are scalar ``count`` aggregates that ship no rows at all.
 
         Return shape preserves the pre-migration **post-state** contract: the
         counts come from a fresh RUNNING recount AFTER the CAS (not the status-CAS
@@ -317,15 +457,14 @@ class SessionLedgerInvertedBoundsRepairMixin(SessionLedgerRepositoryBase):
                 return _orphan_result(total=0, remaining=0)
         now = self._clock()
         cutoff = now - timedelta(seconds=stale_threshold_seconds)
-        running = self._running_batches(source_id)
-        total = len(running)
+        total = self._running_batch_count(source_id)
         if total == 0:
             return _orphan_result(total=0, remaining=0)
-        stale_ids: list[str] = []
-        for row in running:
-            started_at = row.get("started_at")
-            if started_at is not None and _as_dt(started_at) < cutoff:
-                stale_ids.append(str(row["id"]))
+        stale_ids = [
+            str(row["id"])
+            for row in self._walk_running_batches(source_id)
+            if _started_before(row, cutoff)
+        ]
         if stale_ids:
             self._update(
                 TABLE_IMPORT_BATCH,
@@ -344,18 +483,48 @@ class SessionLedgerInvertedBoundsRepairMixin(SessionLedgerRepositoryBase):
                     "updated_at": now,
                 },
             )
-        remaining = len(self._running_batches(source_id))
+        remaining = self._running_batch_count(source_id)
         return _orphan_result(total=total, remaining=remaining)
 
-    def _running_batches(self, source_id: str) -> list[dict[str, object]]:
-        """Live RUNNING ``__import_batch`` rows for one source (before + recount)."""
-        return self._query(
+    def _running_batch_count(self, source_id: str) -> int:
+        """How many live RUNNING ``__import_batch`` rows one source has.
+
+        Both the before-total and the after-recount only ever needed a NUMBER;
+        the pre-2026-08-16 code got it by reading every row and calling ``len``.
+        ``count`` is a scalar aggregate — no rows cross the process boundary, so
+        it is outside the read cap entirely and cannot be refused at any size.
+        """
+        return count_rows(
+            self._state,
             TABLE_IMPORT_BATCH,
             {
                 "source_id": source_id,
                 "status": ImportBatchStatus.RUNNING.value,
                 "is_deleted": 0,
             },
+        )
+
+    def _walk_running_batches(self, source_id: str) -> Iterator[dict[str, object]]:
+        """Live RUNNING ``__import_batch`` rows for one source, paged.
+
+        Only the cutoff fold needs the rows themselves — the equality half of the
+        predicate is pushed down to the provider and only ``started_at <
+        cutoff`` is evaluated in Python, because the flat filter grammar has no
+        range comparator that composes with the ``=`` terms here. ``walk_table``
+        supplies ``is_deleted = 0``, so it is absent from ``filters``.
+        """
+        return walk_table(
+            self._state,
+            TABLE_IMPORT_BATCH,
+            {"source_id": source_id, "status": ImportBatchStatus.RUNNING.value},
+            ceiling=_RUNNING_BATCH_WALK_CEILING,
+            reason=(
+                "RUNNING import batches for ONE source — rows that started and "
+                "never finished (measured 94 for the largest source on "
+                "2026-08-16). Draining them is what this verb does, so a source "
+                "holding this many means polls have been failing unnoticed for a "
+                "very long time and the backlog needs looking at, not walking."
+            ),
         )
 
 

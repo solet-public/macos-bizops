@@ -11,8 +11,38 @@ from typing import Any
 
 from ananta.core.plugins.plugin_contracts import ActionResult
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
+from ananta.services.state_service.bounded_read import assert_within_ceiling
 
 from ..errors import BlobStorageErrorCode, create_error_response, is_unique_constraint_error
+
+# ⚠ THIS READ IS EXPECTED TO REFUSE TODAY, AND THAT IS THE POINT.
+#
+# MEASURED 2026-08-15: default_blob_storage_plugin.metadata holds **193,390
+# rows**. Shipping that as records would be a LARGER read than the 109,393-row
+# scan that froze the platform for 3h20m and started this whole programme. So
+# there is no ceiling at which "read them all" is a safe repair — raising the
+# number until it fits would be reconstructing the outage on purpose.
+#
+# The ceiling is therefore set at the OLD platform cap, below the measured size,
+# so the read fails loud instead of succeeding expensively. Deliberately NO
+# `unbounded` opt-in: this call site is not entitled to that scan.
+#
+# What this function actually needs is a set difference (which blob ids on disk
+# have no metadata row), and that belongs in the database. The state interface
+# cannot express it today — the same missing-verb gap as the absent GROUP BY.
+# Until it can, get_metadata_blob_ids must not run.
+#
+# Safe to leave refusing: its only caller, filesystem_provider's
+# _cleanup_orphaned_files, has NO caller of its own anywhere in the repository
+# (verified 2026-08-15), so nothing invokes this path today. Before anything
+# wires it up, it needs redesigning — see the report.
+_METADATA_TABLE_CEILING = 10_000
+_METADATA_TABLE_CEILING_REASON = (
+    "one row per stored blob (measured: 193,390), and the caller unlinks every "
+    "blob file whose id is missing from this set, so a partial read would delete "
+    "live blobs; reading them all would be a larger scan than the one that caused "
+    "the 2026-08-15 outage."
+)
 
 
 def extract_generated_id(result: ActionResult) -> str | None:
@@ -192,14 +222,43 @@ def get_metadata_blob_ids(
 ) -> set[str]:
     """Return set of blob_ids that have metadata records."""
     result = state_service.read_state(
-        namespace=plugin_name, query={"table": "metadata", "filters": {}}
+        namespace=plugin_name,
+        query={"table": "metadata", "filters": {}, "limit": _METADATA_TABLE_CEILING},
     )
     if result.get("action_status") != "completed":
-        return set()
+        # Was `return set()`. The sole caller — filesystem_provider's
+        # _cleanup_orphaned_files — treats every blob_id ABSENT from this set as
+        # an orphan and unlinks its file. An empty set therefore does not mean
+        # "no metadata", it means "delete every blob on disk".
+        #
+        # That made the row cap a data-destruction trigger rather than a
+        # protection: once this table passed 10,000 rows the read would be
+        # refused, the refusal would degrade to an empty set, and the next
+        # cleanup pass would erase the entire blob store. Any transient database
+        # error does the same thing.
+        #
+        # Fail loud instead. The caller wraps this in a blanket `except
+        # Exception: pass`, so the raise skips that cleanup pass — which is the
+        # safe direction for a destructive operation whose input is unavailable.
+        raise RuntimeError(
+            f"blob metadata read failed for namespace {plugin_name!r}; refusing to "
+            f"report an empty metadata set, because the caller deletes every blob "
+            f"file missing from it: {result.get('error')}"
+        )
     data = result.get("data", {})
     records = data.get("records", [])
     if not isinstance(records, list):
         return set()
+    # This set is used to decide which blobs are ORPHANED, so a truncated read
+    # would silently mark live blobs as having no metadata. That is the exact
+    # shape of harm the no-silent-truncation rule exists for: the caller cannot
+    # tell a short answer from a complete one, and acts destructively on it.
+    records = assert_within_ceiling(
+        records,
+        table="metadata",
+        ceiling=_METADATA_TABLE_CEILING,
+        reason=_METADATA_TABLE_CEILING_REASON,
+    )
     return {r["blob_id"] for r in records if isinstance(r, dict) and "blob_id" in r}
 
 

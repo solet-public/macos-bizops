@@ -1123,19 +1123,33 @@ class DiscoveryService:
         return UsagePatterns(follows_sequences=[], followed_by_sequences=[])
 
     def get_service_health(self) -> dict[str, Any]:
-        result = self.state_service.read_state(
-            namespace=self.namespace, query={"table": "usage_stats", "filters": {}}
+        # SELECT COUNT(*), written as one. This previously read the ENTIRE
+        # usage_stats table with `filters: {}` and no limit purely to call len()
+        # on the rows — shipping every row across the boundary to compute a
+        # number the database can produce as a scalar. `count` runs the
+        # aggregate inside the owner plugin and returns only that scalar.
+        #
+        # It was also reading a key that does not exist: it looked for
+        # data["result"]["records"], but read_state's envelope is
+        # {records, count, namespace, table} with no "result". So
+        # total_usage_records was structurally 0 no matter what the table held —
+        # a whole-table fetch whose result was then discarded. The bound and the
+        # navigation are fixed together here because bounding a read whose
+        # result is thrown away would leave the site just as broken.
+        result = self.state_service.count(
+            namespace=self.namespace, data={"table": "usage_stats", "filters": {}}
         )
 
         total_usage_records = 0
-        # Type narrowing: safely extract records
+        # count reports its scalar at data.result.value (this envelope DOES have
+        # a "result" key — read_state's does not; they are different shapes).
         data_obj = result.get("data")
         if isinstance(data_obj, dict):
             result_obj = data_obj.get("result")
             if isinstance(result_obj, dict):
-                records_obj = result_obj.get("records")
-                if isinstance(records_obj, list):
-                    total_usage_records = len(records_obj)
+                value_obj = result_obj.get("value")
+                if isinstance(value_obj, int):
+                    total_usage_records = value_obj
 
         # Check if vector services are available
         vector_service = self._get_vector_service()

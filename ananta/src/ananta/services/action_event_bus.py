@@ -18,6 +18,36 @@ from ananta.interfaces.bootstrappable_service_interface import (
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
 from ananta.services.action_event_validator import ActionEventValidator
 from ananta.services.event_persistence_manager import EventPersistenceManager
+from ananta.services.state_service.bounded_read import assert_within_ceiling
+
+# `event_bus_events` is an append-only log with no pruning anywhere in EventBus,
+# so it is the one table in the 2026-08-15 read-bound repair that is NOT small by
+# construction — it is unbounded by design. The two halves of get_stats are
+# therefore bounded differently, and deliberately:
+#
+#   total_events   -> the `count` verb. A scalar from the database, exact at any
+#                     table size, no rows shipped, cannot overflow.
+#   the breakdowns -> require the rows themselves, because grouping is the one
+#                     thing the state interface cannot yet express. There is a
+#                     `count`, a `max_value` and a `min_value`, but no GROUP BY,
+#                     so "events per type" cannot be pushed into SQL.
+#
+# Rather than ship a silently-partial breakdown, the read declares a ceiling and
+# refuses past it. A partial breakdown is the worst of the options: a set of
+# real-looking counts that quietly stop matching total_events, with nothing in
+# the returned dict showing which number to trust.
+#
+# The real fix is a grouped-aggregate verb on the state interface. Until that
+# exists, this is honest about its limit instead of guessing past it.
+#
+# The breakdown read carries `unbounded: True`. That flag is badly named for what
+# it does here: it means "larger than the platform DEFAULT row bound (100)", NOT
+# "no bound". The bound is the explicit limit below, and assert_within_ceiling
+# makes reaching it loud. Without the opt-in, resolve_read_limit refuses any
+# limit over the default outright. A per-type breakdown computed from the first
+# 100 events would be a set of real-looking numbers that had quietly stopped
+# matching total_events — worse than refusing.
+_STATS_BREAKDOWN_CEILING = 5_000
 
 logger = logging.getLogger(__name__)
 
@@ -680,7 +710,7 @@ class EventBus(ActionEventBus):
             if records is None:
                 return {"total_events": 0, "active_subscriptions": len(self._subscribers)}
 
-            stats = self._build_stats_from_records(records)
+            stats = self._build_stats_from_records(records, self._total_event_count())
 
             with self._lock:
                 stats["active_subscriptions"] = len(self._subscribers)
@@ -697,11 +727,20 @@ class EventBus(ActionEventBus):
             }
 
     def _fetch_event_records(self) -> list[dict[str, object]] | None:
-        """Fetch event records from database."""
+        """Fetch event records for the per-type/per-plugin breakdown."""
         if self.state_service is None:
             return None
 
-        result = self.state_service.read_state("core", {"table": "event_bus_events"})
+        result = self.state_service.read_state(
+            "core",
+            # `unbounded` here means "larger than the DEFAULT bound", not
+            # "unbounded" — see _STATS_BREAKDOWN_CEILING above.
+            {
+                "table": "event_bus_events",
+                "limit": _STATS_BREAKDOWN_CEILING,
+                "unbounded": True,
+            },
+        )
 
         if not is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
             raise Exception(f"Failed to read events for stats: {result}")
@@ -711,10 +750,37 @@ class EventBus(ActionEventBus):
         if not isinstance(records_raw, list):
             return []
 
-        return [r for r in records_raw if isinstance(r, dict)]
+        records = [r for r in records_raw if isinstance(r, dict)]
+        return assert_within_ceiling(
+            records,
+            table="event_bus_events",
+            ceiling=_STATS_BREAKDOWN_CEILING,
+            reason=(
+                "the per-type and per-plugin breakdowns must be computed in Python "
+                "because the state interface has no grouped-aggregate verb, so this "
+                "read only stays sane while the event log is small; nothing in this "
+                "class prunes it."
+            ),
+        )
 
-    def _build_stats_from_records(self, records: list[dict[str, object]]) -> dict[str, object]:
-        """Build stats dict from event records."""
+    def _total_event_count(self) -> int:
+        """Exact row count for ``event_bus_events`` — a scalar, not a table read."""
+        if self.state_service is None:
+            return 0
+
+        result = self.state_service.count("core", {"table": "event_bus_events"})
+        if not is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
+            raise Exception(f"Failed to count events for stats: {result}")
+
+        data = result.get("data", {})
+        result_obj = data.get("result")
+        value = result_obj.get("value") if isinstance(result_obj, dict) else None
+        return value if isinstance(value, int) else 0
+
+    def _build_stats_from_records(
+        self, records: list[dict[str, object]], total_events: int
+    ) -> dict[str, object]:
+        """Build stats dict from event records and the authoritative total."""
         events_by_type: dict[str, int] = {}
         events_by_plugin: dict[str, int] = {}
 
@@ -726,7 +792,11 @@ class EventBus(ActionEventBus):
             events_by_plugin[source_plugin] = events_by_plugin.get(source_plugin, 0) + 1
 
         return {
-            "total_events": len(records),
+            # From COUNT(*), not len(records): the two agree today and would
+            # diverge the moment the breakdown read were ever partial. Taking the
+            # total from the scalar means the number that most callers actually
+            # want stays correct independently of the breakdown's ceiling.
+            "total_events": total_events,
             "events_by_type": events_by_type,
             "events_by_plugin": events_by_plugin,
         }

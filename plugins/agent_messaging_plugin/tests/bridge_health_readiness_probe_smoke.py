@@ -7,6 +7,15 @@ Verifies the Task #11 platform-side fix shipped 2026-06-12 per
   1. With NO ``readiness_probe`` (default / local-dev mode) the health
      endpoint returns 200 ``healthy`` unconditionally — backward-
      compatible with every existing caller that hits this route.
+
+UPDATED 2026-08-15 (lane-ac-payload-guard, INCIDENT.md D5): the 200 body is
+now a SUPERSET — ``{"status": ..., "action_path": {...}}`` — because a probe
+that could not see a total action-queue freeze reported ``healthy`` for 3h20m.
+The assertions below therefore pin the load-bearing fields (``status_code``
+and ``status``) plus the presence of the new ``action_path`` verdict, rather
+than exact dict equality, which would fail on any additive change. That is a
+strengthening, not a loosening: this smoke now also proves the liveness block
+is actually served, which nothing previously checked.
   2. With a ``readiness_probe`` callable that returns ``False`` (the
      "streamable uvicorn not yet bound" window during a cloud cold
      boot), the endpoint returns 503 ``starting``.
@@ -84,12 +93,22 @@ def case_1_no_probe_returns_200() -> None:
             "case 1 (no probe → 200)",
             f"expected 200, got {response.status_code}",
         )
-    if response.json() != {"status": "healthy"}:
+    body = response.json()
+    if body.get("status") != "healthy":
         _fail(
             "case 1 (no probe → 200 body)",
-            f"expected {{'status': 'healthy'}}, got {response.json()!r}",
+            f"expected status 'healthy', got {body!r}",
         )
-    _ok("case 1 — no readiness_probe → 200 healthy (legacy contract preserved)")
+    # D5: the liveness block must actually be served. Asserting its presence is
+    # what stops this endpoint from silently regressing to the shape that
+    # reported healthy through a 3h20m freeze.
+    action_path = body.get("action_path")
+    if not isinstance(action_path, dict) or "action_path_stalled" not in action_path:
+        _fail(
+            "case 1 (action_path liveness block)",
+            f"expected an action_path block carrying action_path_stalled, got {body!r}",
+        )
+    _ok("case 1 — no readiness_probe → 200 healthy + action_path liveness block")
 
 
 def case_2_probe_false_returns_503() -> None:
@@ -126,10 +145,10 @@ def case_3_probe_flip_returns_200_after_ready() -> None:
             "case 3 (post-flip → 200)",
             f"expected 200 after flip, got {second.status_code}",
         )
-    if second.json() != {"status": "healthy"}:
+    if second.json().get("status") != "healthy":
         _fail(
             "case 3 (post-flip body)",
-            f"expected {{'status': 'healthy'}}, got {second.json()!r}",
+            f"expected status 'healthy', got {second.json()!r}",
         )
     _ok("case 3 — probe flip False→True → 503→200 without router rebuild")
 

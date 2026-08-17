@@ -1,7 +1,7 @@
 """Memory store operations for ACT-R memory plugin."""
 
 import logging
-from typing import Any, cast
+from typing import Any
 
 from ananta.core.domain.enums import ActionStatus
 from ananta.error_handling import FrameworkError
@@ -17,6 +17,27 @@ from .record_helpers import (
 logger = logging.getLogger(__name__)
 
 
+def _read_records(result: dict[str, Any], *, op: str) -> list[dict[str, Any]]:
+    """Records from a COMPLETED read, or a loud failure — never a silent [].
+
+    2026-08-15: a green-color boot died because ``get_all_memories`` reduced a
+    ``read_state`` refusal (``query.unbounded_read_over_cap``) to an empty
+    list via a bare ``.get("data", {}).get("records", [])`` — identity
+    verification then reported "no memories found" where the truth was "the
+    read was refused". The write half of this file already raises on a
+    non-completed result; the read half must hold the same line, because an
+    error rendered as an empty result is indistinguishable from data loss.
+    """
+    if result.get("action_status") != ActionStatus.COMPLETED.value:
+        error_msg = result.get("error", "Unknown error reading state")
+        raise FrameworkError(
+            message=f"Failed to {op}: {error_msg}",
+            error_code="memory.read_error",
+        )
+    rows = result.get("data", {}).get("records", [])
+    return [row for row in rows if isinstance(row, dict)]
+
+
 def get_memory(state_service: Any, memory_id: str) -> dict[str, Any] | None:
     """Get a memory by ID from state service.
 
@@ -29,13 +50,13 @@ def get_memory(state_service: Any, memory_id: str) -> dict[str, Any] | None:
         namespace=NAMESPACE,
         query={"table": "memory", "filters": {"id": memory_id}},
     )
-    rows = result.get("data", {}).get("records", [])
+    rows = _read_records(result, op="read memory by id")
     if not rows:
         return None
 
     memory = rows[0]
     parse_memory_json_fields(memory)
-    return cast(dict[str, Any], memory)
+    return memory
 
 
 def save_memory(state_service: Any, memory: dict[str, Any]) -> str:
@@ -77,11 +98,11 @@ def get_memorization(state_service: Any, memory_id: str) -> dict[str, Any] | Non
             "filters": {"actr_memory_plugin__memory_id": memory_id},
         },
     )
-    rows = result.get("data", {}).get("records", [])
+    rows = _read_records(result, op="read memorization by memory id")
     if not rows:
         return None
 
-    return cast(dict[str, Any], rows[0])
+    return rows[0]
 
 
 def save_memorization(state_service: Any, record: dict[str, Any]) -> str:
@@ -131,18 +152,24 @@ def get_all_memories(
     if status:
         filters["status"] = status
 
+    # A DELIBERATE whole-table read: ``tags`` is a JSON-string column, so the
+    # tag filter cannot be expressed in the equality filter grammar and is
+    # applied client-side below. ``unbounded=True`` is the consented opt-in to
+    # the read_state row cap (D1, 2026-08-15) — the memory table routinely
+    # exceeds the cap because knowledge-base articles are memories, and the
+    # capped default turned every tag read into a refusal on a live store.
+    # Pushing this filter into SQL is the recorded follow-up, not this fix.
     result = state_service.read_state(
         namespace=NAMESPACE,
-        query={"table": "memory", "filters": filters} if filters else {"table": "memory"},
+        query={"table": "memory", "filters": filters, "unbounded": True}
+        if filters
+        else {"table": "memory", "unbounded": True},
     )
 
-    rows = result.get("data", {}).get("records", [])
+    rows = _read_records(result, op="read all memories")
 
     memories: list[dict[str, Any]] = []
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-
         parse_memory_json_fields(row)
 
         if tag and tag not in row.get("tags", []):
@@ -186,20 +213,21 @@ def get_all_memorizations(
     if status:
         filters["status"] = status
 
+    # Same whole-table shape as ``get_all_memories`` — the status filter is a
+    # coarse equality, and callers expect the complete set. Opt in to the row
+    # cap explicitly rather than inheriting a refusal the day this table
+    # crosses it.
     result = state_service.read_state(
         namespace=NAMESPACE,
-        query={"table": "memorization", "filters": filters}
+        query={"table": "memorization", "filters": filters, "unbounded": True}
         if filters
-        else {"table": "memorization"},
+        else {"table": "memorization", "unbounded": True},
     )
 
-    rows = result.get("data", {}).get("records", [])
+    rows = _read_records(result, op="read all memorizations")
 
     records: list[dict[str, Any]] = []
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-
         if "actr_memory_plugin__memory_id" in row:
             row["memory_id"] = row.pop("actr_memory_plugin__memory_id")
 

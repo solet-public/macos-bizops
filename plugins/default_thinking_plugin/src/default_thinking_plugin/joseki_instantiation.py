@@ -2,9 +2,8 @@
 
 Turns a registered joseki card + concrete bindings into a joseki-scoped WBS
 document ready for ``register_authored_work_breakdown_structure`` — with NO
-inference and NO judgment. Design:
-``workbench/2026-07-05_run_joseki_driver_design_spec.md`` §4.1 (v3,
-review-CLEAR).
+inference and NO judgment. Design origin: checkout-local design spec
+(``workbench/2026-07-05_run_joseki_driver_design_spec.md`` §4.1, v3 review-CLEAR).
 
 ADMISSION RULE (mirrors the pull engine's Q15 posture): v1 instantiates ONLY
 cards that are CLOSED-WORLD under the given bindings. A card that needs

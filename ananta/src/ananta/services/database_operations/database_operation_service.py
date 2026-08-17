@@ -153,14 +153,21 @@ class DatabaseOperationService:
         return self._storage_strategy.delete_records(namespace, query)
 
     def query_state(self, namespace: str, filters: dict[str, object]) -> ActionResult:
-        """Query data with namespace validation and proper delegation.
+        """DEPRECATED alias for :meth:`read_state` — prefer ``read_state``.
+
+        The ``filters`` dict is passed through unchanged and becomes
+        ``read_state``'s ``query``, so it is the whole ``{table, filters,
+        limit?, unbounded?}`` envelope rather than just a filter mapping —
+        ``limit`` and ``unbounded`` are honoured here. See
+        :meth:`ananta.services.state_service.StateService.query_state` for the
+        full contract and the deprecation rationale.
 
         Args:
             namespace: Target namespace to query
-            filters: Filter criteria for data retrieval
+            filters: The ``{table, filters, limit?, unbounded?}`` query envelope.
 
         Returns:
-            ActionResult with filtered data or error details
+            ActionResult with the records, or error details
 
         Raises:
             FrameworkError: If validation fails or query operation fails

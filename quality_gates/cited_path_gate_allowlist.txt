@@ -149,12 +149,10 @@ DEAD plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md::deplo
 DEAD plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md::hooks/_git_policy.py
 DEAD plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md::hooks/git_controller_gate.py
 DEAD plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md::hooks/hooks.json
-DEAD plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md::plugins/codex_filesystem_session_source_plugin/knowledge_base/hydration_guidance.md
 DEAD plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md::tests/run_all.py
 DEAD plugins/github_midwife_plugin/knowledge_base/05_seed_update_runbook.md::24_operator_communication/09_maintenance_verbs_joseki_cards.md
 DEAD plugins/github_midwife_plugin/knowledge_base/05_seed_update_runbook.md::coordination-hooks/.claude-plugin/plugin.json
 DEAD plugins/github_midwife_plugin/knowledge_base/05_seed_update_runbook.md::plugins/seed_factory_plugin/knowledge_base/02_seed_publish_runbook.md
-DEAD plugins/github_midwife_plugin/knowledge_base/08_deployment_report_card.md::plugins/codex_filesystem_session_source_plugin/knowledge_base/hydration_guidance.md
 DEAD plugins/github_midwife_plugin/knowledge_base/hydration_templates/TEMPLATE_VARS.md::agent_messaging_plugin/env_contract.py
 DEAD plugins/github_midwife_plugin/knowledge_base/hydration_templates/TEMPLATE_VARS.md::hooks/hooks.json
 DEAD plugins/github_midwife_plugin/knowledge_base/hydration_templates/TEMPLATE_VARS.md::mcp_bridge/__main__.py

@@ -4,6 +4,205 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-17 — Rotation notices, deploy-proof worker paths, and session listings that page
+
+No breaking changes for standard configurations. Context-status rows and the
+sweep's event stream gain new fields and event kinds (supersets of their
+previous shapes); consumers doing exact-shape equality on either must update.
+Update with the standard short form: `git pull --ff-only`, restart, wait for
+startup to finish (`05_seed_update_runbook.md` is the complete procedure).
+
+### Sessions are told when their context needs rotation
+
+Long-lived agent sessions used to discover an over-budget context only by
+symptom. The platform sweep now measures two conditions on its regular tick
+and says so:
+
+- **Rotation-due notices**: a session whose context gauge crosses its
+  rotation band gets a notice composed onto the sweep tick, **latched** — one
+  notice at condition onset, re-armed only when the condition clears, with an
+  honest bound of at most one repeat per platform restart. A wiring guard
+  fails loudly if the notice rider is present but unwired, so the feature
+  cannot silently un-ship.
+- **Gauge-coverage notices**: a live session with no context-gauge row at all
+  is itself reported — absence of the measurement is a condition, not a blind
+  spot.
+- **The operator seat is covered from the other side.** The one session the
+  sweep's delivery path cannot reach gets the same rotation-due notice from a
+  prompt-submit hook in the coordination-hooks plugin (now 0.5.9). The two
+  halves share provenance checks so a notice always names which surface
+  produced it.
+- **The gauge itself got honest**: each context-status row now names which of
+  five hook surfaces wrote it (checkout, vendored, release, cache, unknown)
+  and carries prompt-cache state, so rotation economics are measured rather
+  than guessed. A collapsed "unknown" surface from earlier releases resolves
+  into its real writer.
+
+### Long-running workers survive deploys
+
+Worker spawn used to pin the wake CLI and its registration sidecar to a path
+inside a **versioned release directory**. Blue-green deploys reap old
+releases, so every deploy silently broke every standing worker's wake path —
+no error in any log, the worker just went quiet. The worker CLI path is now
+expressed through the deployment's atomically-swapped `current` symlink at
+the single resolution choke point all surfaces inherit, left **unresolved**
+so it survives every future cutover, and the rewrite refuses during a
+mid-cutover version skew rather than guessing. This applies at spawn time:
+workers spawned before this release keep their versioned paths until
+respawned. A knowledge-base article ships the full contract, including how
+to read a live process's environment to confirm which form of the path it
+actually holds. Separately, the spawned solet subprocess's PATH now carries
+the wake CLI's own directory, closing a silent fail-open.
+
+### Session listings page instead of refusing
+
+On mature deployments, `list_sessions` read whole tables and collided with
+the 10,000-row read cap introduced in the previous release — refusing loudly
+with no filters, and on `source_kind` filters too. All fleet and
+session-source membership reads now page or bound themselves, and the census
+counts its two count-only tables instead of walking them. The read cap keeps
+its job; the callers stopped deserving to hit it.
+
+### Scheduler correctness across time zones and restarts
+
+Cron triggers are evaluated in UTC, and a trigger whose fire time fell inside
+a platform-down window now defers to its next window instead of erroring
+permanently at startup. A time-convention knowledge-base article ships with
+two worked incidents.
+
+### Gates that tell the truth
+
+The quality-gate suite now covers its own directory with the same linters it
+enforces; a gate that crashes is reported as a crash rather than rendered as
+a violation count; the secrets scanner no longer dies on a tracked absolute
+or escaping symlink; and a contributor-listing verb serializes its datetime
+fields with explicit offsets at the edge seam.
+
+### Content and identity hygiene
+
+Two shipped files carried reserved origin-identity tokens in prose; both are
+scrubbed, and the census that catches the class ran clean on both profiles at
+this mint. Shipped process-guidance citations that pointed at unshipped
+working files now cite process keys. The dual-home seed release procedure
+itself is now deterministic, so updates to both published homes of this seed
+are one procedure rather than two improvisations.
+
+---
+
+## 2026-08-15 — Payload safety bounds, migration repairs, and workers that fail loud
+
+No breaking changes for standard configurations; one health endpoint's
+response body is a superset of its previous shape (details below). Update
+with the standard short form: `git pull --ff-only`, restart, wait for
+startup to finish (`05_seed_update_runbook.md` is the complete procedure).
+
+### Oversized action payloads can no longer freeze the platform
+
+An action payload large enough to spend hours inside the JSON parser could
+wedge the entire action queue while `health` kept answering healthy — the
+dispatch half of the platform froze, the messaging half stayed up, and
+nothing said so. Four guards close the class:
+
+- **A 16 MiB byte bound on action parameters**, enforced before anything
+  parses: at enqueue, measured on the serialization every action already
+  passes through, and again at claim, as a raw length check on the stored
+  text. An oversized row found at claim time fails only itself; the rest of
+  its batch dispatches normally.
+- **`read_state` is capped at 10,000 rows** across all storage backends. A
+  read that would exceed the cap is refused loudly rather than silently
+  truncated — an over-large result is an error, never a prefix — with an
+  explicit `unbounded=True` opt-in for callers that genuinely need more.
+- **`GET /api/v1/bridge/health` now reports the action path.** The body
+  gains an `action_path` block, and `status` may read `degraded` when work
+  is waiting but the dispatcher has stopped claiming — exactly the
+  signature that was previously invisible. The HTTP status code is
+  unchanged (200), so code-only probes are unaffected; a consumer doing
+  exact-body equality on the old shape must update.
+- **A size-aware orphan reaper.** Rows stuck in `processing` well past any
+  plausible dispatch age are failed with a legible reason when they exceed
+  the byte bound, and returned to the queue only when they are small enough
+  to be safe — an oversized orphan is never requeued to wedge the platform
+  a second time.
+
+One caller needed repair to live with the new cap, and the repair ships in
+this same release: the memory store's tag reads scan the whole memory table
+and filter client-side, and on a mature deployment that table exceeds the
+cap (knowledge-base articles are memories). Those deliberate whole-table
+reads now carry the explicit `unbounded=True` opt-in, and — the deeper fix —
+every memory-store read now fails loudly on an error result instead of
+rendering it as an empty result set. Before this repair, a refused read was
+indistinguishable from "no memories exist", which is exactly how our own
+first deploy of the cap failed its boot-time identity verification; the
+error-swallowing predates this release, the cap merely exposed it.
+
+### Router socket ownership — the rename-migration crash loop (#4)
+
+Root cause of the silent crash loop reported after a solet rename: an
+overlapping router restart (`bootout` + `bootstrap`, or `kickstart -k`,
+which overlaps by design) briefly runs two routers against one socket path,
+and the outgoing router unconditionally deleted the socket the incoming
+router had just bound. The management socket is now owned by inode: stop
+unlinks only a socket it still owns; start probes the path, waits out an
+answering incumbent for a bounded window, and refuses loudly only past it;
+and the platform child's readiness wait connects and asks instead of
+testing bare path existence, naming the failure states apart. The
+migration script also closes the race from its end with a bounded wait for
+the old launchd label to clear before re-bootstrapping, and backfills
+`StandardOutPath`/`StandardErrorPath` onto solet-owned launch plists that
+predate log redirection — so a future failure of this shape is loud
+instead of logless.
+
+### Migration completeness (#5, #6)
+
+`migrate_to_solet.py` now migrates the Claude Code MCP server environment:
+`HOMUNCULUS_*` keys inside `mcpServers.*.env` in `~/.claude.json` are
+renamed to their `SOLET_*` forms, idempotently, refusing fail-safe while
+any Claude Code process is running, since Claude Code holds that file in
+memory and rewrites it on exit (#5). A new `--scan-stale` mode is a
+report-only sweep for surviving old-name references in user-authored docs,
+config, and memory — three categories (historical, live-process-state,
+fixable), never auto-rewriting anything, because a memory fact's filename,
+slug, and links must move together (#6). The update runbook's Step 3a
+carries the post-apply sequence for all of it.
+
+### Spawned workers: named at birth, loud when deaf (#13, #8)
+
+- A spawned worker's local session name now defaults to its durable role
+  name, and the tmux spawn path passes the name through to the CLI — so a
+  spawned Git-Controller is recognized by the git gate at birth, without a
+  rename round-trip (#13). Spawning never claims the durable role binding
+  as a side effect, and a second spawn for a role whose local name is
+  already held live is refused loudly, naming the incumbent. A dead
+  holder stays cheaply claimable — crash succession is deliberate.
+- The silence half of #8: a worker whose registration hooks were stripped
+  used to sit in `spawning` indefinitely, because the sweep found its host
+  process alive and kept extending its deadline. A registration watchdog
+  now stamps and loudly reports any row still unregistered past a bound,
+  independent of host liveness, and a spawn preflight refuses a host whose
+  managed policy strips hooks (`strictPluginOnlyCustomization` including
+  `hooks`), failing open and loud on an unreadable policy file. The
+  capability half — delivering worker hooks as plugin hooks so they
+  survive that policy — awaits the probe results on #8.
+
+### Heredoc bodies are data, not commands
+
+The git-mutation guard tokenized heredoc body content as command tokens, so
+prose about git inside a heredoc — documentation, commit-message drafts,
+JSON payloads — could be blocked as a banned invocation. Heredoc bodies
+are now treated as data in every shipped copy of the guard, and
+`coordination-hooks` is bumped to 0.5.6 so previously installed copies
+actually pick the fix up rather than staying dormant on the old version.
+
+### Corrections
+
+- The self-deployment plugin's socket-teardown documentation no longer
+  claims asyncio unlinks the socket path on close; only the bind path was
+  ever unguarded, and the inode-ownership fix above is complete on its own.
+
+Issues answered by this release: #4, #5, #6 (closing round #3) and #13
+(closing round #10). The capability probe for #8 and the reproduction for
+#9 remain open on their issues.
+
 ## 2026-08-14 — Content hygiene, fleet-worker reliability, and a default deny for blocking choice prompts
 
 No breaking changes and no migration steps. Update with the standard short
@@ -234,6 +433,18 @@ Feedback is now filed as **GitHub issues through the repository's issue
 forms**, rather than as a pull request carrying a numbered document. Design
 proposals are the exception and still travel as a pull request.
 
+> **Superseded 2026-08-15 — read this before acting on the paragraph above.**
+> The design-proposal exception is gone. **The repository accepts no pull
+> requests and no patches at all**; an RFC-shaped design proposal is now a
+> **feature-request issue carrying the design in its body**. The reason is what
+> a solet does to the machine that installs it — provisions a database, writes
+> keychain credentials, installs a background service, edits the shell — which
+> makes merging unreviewed code a supply-chain path into every downstream
+> install. Bug reports remain wanted; Apache-2.0 still lets you fork and change
+> your own clone freely. See `CONTRIBUTING.md`. The entry above is left as
+> written because a changelog records what a release said at the time, and
+> rewriting it would erase the change this note describes.
+
 What did not change: rounds are still `Part N`, items are still `§N.M`, the
 four item classes are the same, and the evidence and content rules are the
 same. To move: instead of writing one document per round and opening a pull
@@ -377,7 +588,10 @@ repair lane is queued, and this entry closes when it lands.
 
 ## 2026-08-11 — the feedback channel is now official, and your deployment gets a report card
 
-**Upstream feedback has a shipped runbook now.** Adopters invented the
+**Upstream feedback has a shipped runbook now.** *(Historical: the
+pull-request delivery described here was replaced by GitHub issue forms on
+2026-08-13, and pull requests were declined entirely on 2026-08-15. The item
+conventions below survive both changes unchanged.)* Adopters invented the
 pattern this release formalizes — pull requests of dated, numbered feedback
 documents against the seed repository — and it worked well enough that it is
 now the documented channel, with the conventions that made it work stated

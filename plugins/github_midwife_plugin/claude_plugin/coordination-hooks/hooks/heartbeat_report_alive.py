@@ -17,11 +17,15 @@ Throttled to at most once per :data:`_THROTTLE_SECONDS` via a per-worker
 local marker file's mtime (cheap -- a stat(), no CLI/network round trip on
 most firings) rather than checking the platform on every single tool call.
 When the throttle allows a stamp, shells out to ``solet call
-plugin::agent_messaging_plugin::report_alive`` (PATH-resolved, same
-convention this repo's other hooks already rely on for ``python3`` --
-report_alive takes ``agent_instance_id`` as an explicit argument, so the
-bare-CLI no-caller-identity trap does not apply, per the T1 ruling's own
-recon finding).
+plugin::agent_messaging_plugin::report_alive`` -- PATH-resolved, argv
+literally ``["solet", "call", ...]`` per SECURITY.md's disclosed contract,
+but the PATH it resolves against is widened (see :func:`_solet_call_env`)
+to also search ``AGENT_WAKE_CLI``'s directory when that directory actually
+holds a ``solet`` binary (2026-08-16: a worker whose PATH excludes the venv
+bin dir silently FileNotFoundError'd on a plain PATH lookup). report_alive
+takes ``agent_instance_id`` as an explicit argument, so the bare-CLI
+no-caller-identity trap does not apply, per the T1 ruling's own recon
+finding).
 
 Known accepted gap (seat's own framing, not engineered around): a single
 tool call longer than the worker's report_by window still trips the
@@ -58,6 +62,7 @@ _INSTANCE_ID_ENV = "AGENT_INSTANCE_ID"
 _THROTTLE_SECONDS = 180.0
 
 _REPORT_ALIVE_PROCESS_KEY = "plugin::agent_messaging_plugin::report_alive"
+_WAKE_CLI_ENV = "AGENT_WAKE_CLI"
 
 
 def _warn(message: str) -> None:
@@ -87,6 +92,54 @@ def _touch_marker(marker_path: Path) -> None:
     marker_path.write_text(str(time.time()))
 
 
+def _solet_call_env() -> dict[str, str]:
+    """``os.environ``, with PATH APPENDED by ``AGENT_WAKE_CLI``'s directory
+    when that directory actually contains a file named ``solet`` --
+    SECURITY.md's disclosed contract for this hook keeps argv literally
+    ``["solet", "call", ...]`` (PATH-resolved, from the session's own
+    environment, same category as before); this widens WHICH directories
+    PATH searches, not what gets exec'd by name.
+
+    APPEND, not prepend (2026-08-16, cross-session review): a prepend would
+    make the release venv's bin dir win PATH resolution for EVERY lookup in
+    this subprocess and anything it spawns, not just ``solet`` -- that
+    directory also carries ``python3``/``pip``, so a prepend would silently
+    change which of those a child process resolves too, a behavior change
+    beyond "find the right solet" with no signal in the diff's intent.
+    Append fixes the identical missing-solet case (a PATH that lacks solet
+    entirely resolves it either way, first match or last) while never
+    shadowing an existing resolution -- it only ever adds a location PATH
+    lookup falls through to, never reorders one already there.
+
+    2026-08-16 dark-gauge root cause: a bare ``"solet"`` lookup against the
+    UNMODIFIED PATH silently ``FileNotFoundError``s on a worker whose PATH
+    excludes the venv bin dir -- caught by the ``except OSError`` below,
+    warned to stderr (nothing reads it), exit 0. The throttle marker still
+    gets touched upstream of this call, so the failure looks identical to a
+    healthy tick from the outside: "stamp updates, no report ever lands."
+    Measured live, reproduced by hand.
+
+    ``AGENT_WAKE_CLI`` is exported at spawn time pointing into a versioned
+    release directory, and a deploy reaps old releases -- so a long-lived
+    worker's export can go DANGLING out from under it (measured live,
+    2026-08-16: a worker spawned before a same-day deploy held an
+    AGENT_WAKE_CLI naming a release directory that no longer existed). The
+    ``is_file()`` guard -- a stat for the FILE, not merely the directory's
+    existence -- means a dangling export contributes NOTHING to PATH -- no
+    bogus directory gets appended at all -- so a session whose PATH already
+    resolves solet fine is completely unaffected either way; only a session
+    that would otherwise fail gains a chance to resolve."""
+    cli = os.environ.get(_WAKE_CLI_ENV, "").strip()
+    if not cli:
+        return dict(os.environ)
+    solet_dir = str(Path(cli).parent)
+    if not (Path(solet_dir) / "solet").is_file():
+        return dict(os.environ)
+    env = dict(os.environ)
+    env["PATH"] = f"{env.get('PATH', '')}:{solet_dir}"
+    return env
+
+
 def _call_report_alive(agent_instance_id: str) -> bool:
     payload = json.dumps({
         "agent_instance_id": agent_instance_id,
@@ -97,6 +150,7 @@ def _call_report_alive(agent_instance_id: str) -> bool:
         result = subprocess.run(
             ["solet", "call", _REPORT_ALIVE_PROCESS_KEY, payload],
             capture_output=True, text=True, timeout=20, check=False,
+            env=_solet_call_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         _warn(f"report_alive subprocess failed to run: {exc}")

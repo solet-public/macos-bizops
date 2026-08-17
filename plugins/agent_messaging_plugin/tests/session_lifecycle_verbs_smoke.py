@@ -38,11 +38,14 @@ if TYPE_CHECKING:
 from _real_state_fake import RealShapeState  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     AGENT_ROLE_BINDING_NAMESPACE,
+    ROLE_CLASS_EPHEMERAL,
     ROLE_CLASS_PRINCIPAL,
     ROLE_CLASS_PROJECT,
     TABLE_ROLE,
+    TABLE_ROLE_BINDING,
     role_binding_external_id,
 )
+from ananta.llm.agent_messaging.state_results import require_records  # noqa: E402
 
 import agent_messaging_plugin.session_hosts as session_hosts  # noqa: E402
 from agent_messaging_plugin.headless_adapter import (  # noqa: E402
@@ -83,6 +86,7 @@ from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
     drive_session,
     list_sessions,
     report_alive,
+    resolve_local_name,
     retire_session,
     session_status,
     spawn_session,
@@ -230,6 +234,142 @@ def test_spawn_role_class_conflict() -> None:
         "spawning a 'project' claim against an already-principal-legislated "
         "name -> role_class_conflict",
     )
+
+
+def test_local_name_defaults_by_role_class() -> None:
+    """W6: role_name for a PROJECT-class role, lane_id for everything else."""
+    _check(
+        resolve_local_name(
+            role_class=ROLE_CLASS_PROJECT, role_name="Git-Controller", lane_id="lane-1",
+        ) == "Git-Controller",
+        "a project-class role is named for the ROLE (it IS the role)",
+    )
+    _check(
+        resolve_local_name(
+            role_class=ROLE_CLASS_EPHEMERAL, role_name="Helper", lane_id="lane-1",
+        ) == "lane-1",
+        "a non-project role stays lane-named (no behaviour change for lane work)",
+    )
+    _check(
+        resolve_local_name(role_class=ROLE_CLASS_PROJECT, role_name="", lane_id="lane-1")
+        == "lane-1",
+        "a project spawn with no role_name falls back to lane_id",
+    )
+
+
+def test_spawn_refuses_second_session_under_a_live_local_name() -> None:
+    """W6 OPERATOR RULING: refused loudly, never a suffix, never an eviction."""
+    state = _state()
+    _install_fake_hosts()
+    try:
+        spawn_session(
+            state,
+            _spawn_req(
+                host=_TEST_HOST, role_class=ROLE_CLASS_PROJECT, role_name="Git-Controller",
+            ),
+        )
+        code, message = None, ""
+        try:
+            spawn_session(
+                state,
+                _spawn_req(
+                    host=_TEST_HOST, role_class=ROLE_CLASS_PROJECT, role_name="Git-Controller",
+                ),
+            )
+        except VerbError as exc:
+            code, message = exc.code, exc.message
+        _check(code == "local_name_already_held", f"the second spawn is refused (got {code!r})")
+        _check(
+            "Git-Controller" in message and "terminate_session" in message,
+            "the refusal names the contested name AND the verb that frees it",
+        )
+        _check("agi-" in message, "and identifies the incumbent by agent_instance_id")
+    finally:
+        _remove_fake_hosts()
+
+
+def test_spawn_allows_replacement_after_incumbent_terminated() -> None:
+    """The other half of terminate-then-spawn: the refusal must not strand the
+    name. This is also why the gate keys on a NON-TERMINAL row — a crashed
+    worker swept to 'terminated' frees its name with no operator in the loop,
+    the same crash-succession posture the claim path keeps for dead holders."""
+    state = _state()
+    _install_fake_hosts()
+    try:
+        first = spawn_session(
+            state,
+            _spawn_req(
+                host=_TEST_HOST, role_class=ROLE_CLASS_PROJECT, role_name="Git-Controller",
+            ),
+        )
+        terminate_session(
+            state, agent_instance_id=first["agent_instance_id"], directed_by="operator:none",
+        )
+        replaced = spawn_session(
+            state,
+            _spawn_req(
+                host=_TEST_HOST, role_class=ROLE_CLASS_PROJECT, role_name="Git-Controller",
+            ),
+        )
+        _check(
+            replaced["agent_instance_id"] != first["agent_instance_id"],
+            "once the incumbent is terminated the replacement spawns normally",
+        )
+    finally:
+        _remove_fake_hosts()
+
+
+def test_spawn_does_not_claim_the_role_binding() -> None:
+    """W6 OPERATOR RULING: spawning must NOT claim the durable binding —
+    claiming adds a name and never releases the incumbent's, so an automatic
+    claim at spawn would evict whoever holds the role."""
+    state = _state()
+    _install_fake_hosts()
+    try:
+        result = spawn_session(
+            state,
+            _spawn_req(
+                host=_TEST_HOST, role_class=ROLE_CLASS_PROJECT, role_name="Git-Controller",
+            ),
+        )
+        rows = require_records(
+            state.query_state(
+                AGENT_ROLE_BINDING_NAMESPACE,
+                {
+                    "table": TABLE_ROLE_BINDING,
+                    "filters": {"external_id": role_binding_external_id("Git-Controller")},
+                },
+            ),
+        )
+        _check(rows == [], "no role_binding row exists after the spawn -- nothing was claimed")
+        row = read_managed_session(state, result["agent_instance_id"])
+        _check(
+            row.get("role_name") == "Git-Controller",
+            "the ledger records role_name as the spawn's stated INTENT",
+        )
+        _check(
+            row.get("local_name") == "Git-Controller",
+            "and local_name, which is what the worker is actually named",
+        )
+    finally:
+        _remove_fake_hosts()
+
+
+def test_spawn_lane_named_workers_do_not_collide_on_role() -> None:
+    """Two ephemeral spawns on DIFFERENT lanes must both proceed — the
+    refusal is about one contested name, not about spawning generally."""
+    state = _state()
+    _install_fake_hosts()
+    try:
+        spawn_session(state, _spawn_req(host=_TEST_HOST, lane_id="lane-a"))
+        code = None
+        try:
+            spawn_session(state, _spawn_req(host=_TEST_HOST, lane_id="lane-b"))
+        except VerbError as exc:
+            code = exc.code
+        _check(code is None, f"a spawn on a different lane is unaffected (got {code!r})")
+    finally:
+        _remove_fake_hosts()
 
 
 def test_list_and_status() -> None:
@@ -1555,6 +1695,11 @@ def test_drive_session_rearm_honors_spawn_window() -> None:
 def main() -> int:
     test_spawn_errors()
     test_spawn_role_class_conflict()
+    test_local_name_defaults_by_role_class()
+    test_spawn_refuses_second_session_under_a_live_local_name()
+    test_spawn_allows_replacement_after_incumbent_terminated()
+    test_spawn_does_not_claim_the_role_binding()
+    test_spawn_lane_named_workers_do_not_collide_on_role()
     test_list_and_status()
     test_clear_session_sends_and_can_park()
     test_compact_session_sends_no_park()

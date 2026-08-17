@@ -22,6 +22,7 @@ from _git_controller_lex import (
     CHAIN_SEPARATORS as _CHAIN_SEPARATORS,
     extract_subst_pieces as _extract_subst_pieces,
     punctuation_tokenize as _punctuation_tokenize,
+    split_heredoc_bodies as _split_heredoc_bodies,
 )
 
 MAX_RECURSION = 5
@@ -143,6 +144,31 @@ def _handle_shell_eval_token(
     return inner, cmd_idx + 1
 
 
+def heredoc_body_is_script_source(owner_line: str) -> bool:
+    """True when a heredoc opened on ``owner_line`` is fed to a shell evaluator.
+
+    A body handed to ``bash``/``sh``/``eval`` — ``bash <<EOF`` or
+    ``cat <<EOF | bash`` — is script SOURCE, not data, and stays exactly as
+    visible to the walker as it was before heredoc bodies were split out. This
+    is the half of the heredoc fix that keeps it from widening the hole: prose
+    in a body becomes data, a body actually run by a shell does not.
+
+    Any evaluator token ANYWHERE on the line counts, not just the leading
+    command word, so the pipe-to-shell form is covered too. A line that will
+    not tokenize returns True — an ambiguous owner is treated as an evaluator,
+    which can only keep a body visible, never hide one.
+
+    Note this does NOT address the runtime-script-source escape the gate's own
+    docstring already declares out of scope: ``cat <<EOF > /tmp/x.sh`` written
+    now and run later is invisible to any single-command check.
+    """
+    try:
+        tokens = _punctuation_tokenize(owner_line)
+    except ValueError:
+        return True
+    return any(posixpath.basename(tok) in SHELL_EVAL_BINARIES for tok in tokens)
+
+
 def walk_git_invocations(
     command: str, depth: int = 0,
 ) -> tuple[list[list[str]], bool]:
@@ -154,7 +180,8 @@ def walk_git_invocations(
     """
     if depth > MAX_RECURSION:
         return [], True
-    outer, subst_pieces = _extract_subst_pieces(command)
+    retained, heredocs = _split_heredoc_bodies(command)
+    outer, subst_pieces = _extract_subst_pieces(retained)
     try:
         tokens = _punctuation_tokenize(outer)
     except ValueError:
@@ -176,5 +203,10 @@ def walk_git_invocations(
         i += 1
     for _, piece in subst_pieces:
         inner_inv, _ = walk_git_invocations(piece, depth + 1)
+        invocations.extend(inner_inv)
+    for owner_line, body in heredocs:
+        if not heredoc_body_is_script_source(owner_line):
+            continue
+        inner_inv, _ = walk_git_invocations(body, depth + 1)
         invocations.extend(inner_inv)
     return invocations, True

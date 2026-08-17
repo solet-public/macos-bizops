@@ -503,9 +503,27 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         # Execute via ActionExecutor
         if not self._action_executor:
             error_msg = "ActionExecutor not initialized"
-            self.logger.error(f"SCHEDULER-CALLBACK-ERROR: {error_msg}")
-            self._mark_schedule_failed(schedule_id, error_msg)
-            self._update_universal_schedule_job(schedule_id, {"status": "failed"})
+            # Deliberately NOT _mark_schedule_failed: that persists
+            # schedules.status=error, which SchedulerManager.restore_schedules
+            # reads to SKIP the schedule on the next process restart — turning
+            # one fire landing in the set_action_factory injection gap (open
+            # during every blue-green swap's startup window) into a
+            # permanently dead schedule. Measured 2026-08-16 from
+            # profile/data/logs/2026-08-15_profile.log: sch-2n0h8hh6jp9te
+            # never fired again after exactly this write. Leaving
+            # schedules.status untouched lets the schedule survive restore;
+            # for a recurring schedule its own next cron tick is the retry
+            # (sub-minute for high-frequency crons, up to one period for
+            # low-frequency ones — a disclosed, bounded miss, not a silent
+            # drop). "pending" (not "failed") on the universal job tracker
+            # keeps the row inside asynchronous_jobs.status's allowed set
+            # (core_schemas.py CHECK) without a schema change.
+            self.logger.error(
+                f"SCHEDULER-CALLBACK-DEFERRED: {error_msg} — schedule {schedule_id} "
+                "left at its current status; retried on its own next scheduled "
+                "fire instead of being dropped by a future restore"
+            )
+            self._update_universal_schedule_job(schedule_id, {"status": "pending"})
             return
 
         success, error = self._action_executor.execute_scheduled_actions(schedule)

@@ -59,10 +59,12 @@ platform_managed:
 #
 # Development-checkout surfaces — present in a git clone of the platform
 # origin; NOT in a sealed seed bundle, and not yet created at the moment a
-# newborn runs its first apply_manifest.  Agent-instruction and hydration
-# surfaces (CLAUDE.md, AGENTS.md, .claude/) are written by the operator-run
-# hydration runbook, which happens AFTER birth — so the cutover gate can and
-# does fire before they exist.
+# newborn runs its first apply_manifest.  `.claude/` is written by the
+# operator-run hydration runbook, which happens AFTER birth — so the cutover
+# gate can and does fire before it exists.  CLAUDE.md and AGENTS.md are the
+# exception since 2026-08-15: they now have TWO legitimate lifecycles (see
+# their entries below), and remain sanctioned rather than required because
+# neither shape is universal across the clones that exist today.
 sanctioned:
   - path: .gitignore
     reason: "development-checkout surface; a sealed seed ships no dotfiles and a newborn's is written by git-init at hydration, after the first cutover gate"
@@ -76,12 +78,21 @@ sanctioned:
     reason: "development-checkout surface; per-clone MCP wiring, written at hydration if the operator selects the MCP transport"
     operator_approved: "2026-07-28"
 
+  # BOTH states, since 2026-08-15. (1) PRE-BIRTH: a sealed seed now ships a
+  # generated AGENTS.md/CLAUDE.md at its root (seed_factory_plugin's
+  # seed_agents.md.template / seed_claude.md.template, written by assemble
+  # exactly as the generated README is), so a downloaded-but-uninstalled clone
+  # HAS them before any cutover gate runs.  (2) POST-BIRTH: the operator-run
+  # hydration runbook merges its managed block into whichever file is there,
+  # creating it if absent — so a clone born before 2026-08-15, or one whose
+  # hydration has not been run, legitimately has neither.  Sanctioned (not
+  # required) is exactly the present-or-absent tolerance both states need.
   - path: AGENTS.md
-    reason: "agent-instruction bootstrap surface; rendered into a born clone by the hydration runbook, after birth and after the first cutover gate"
+    reason: "agent-instruction bootstrap surface with two lifecycles: shipped pre-birth as a generated file in a sealed seed bundle (2026-08-15), and merged into post-birth by the operator-run hydration runbook — absent only in a clone born before that change whose hydration has not run"
     operator_approved: "2026-07-28"
 
   - path: CLAUDE.md
-    reason: "agent-instruction bootstrap surface; rendered into a born clone by the hydration runbook, after birth and after the first cutover gate"
+    reason: "agent-instruction bootstrap surface with two lifecycles: shipped pre-birth as a generated file in a sealed seed bundle (2026-08-15), and merged into post-birth by the operator-run hydration runbook — absent only in a clone born before that change whose hydration has not run"
     operator_approved: "2026-07-28"
 
   - path: .claude

@@ -15,12 +15,27 @@ marker leaves it unset → the next boot re-runs. Idempotent regardless: it flip
 ONLY rows where the JSONB flag is true and the column is still false, so a re-run
 (or a lost marker) is a no-op.
 
-State-interface ONLY (no raw SQL/DDL): ``query_state`` UNCAPPED over the whole
-table — NOT ``query_ordered``, whose 100-cap would silently truncate this
-unbounded table — to read every row, then ``update_state`` to flip the column on
-the matching rows (a small set; IMPORTANT messages are a fraction). New rows get
-the column from ``AgentMessagingRepository._insert_message`` directly, so this
+State-interface ONLY (no raw SQL/DDL): the whole table is walked as ``query_ordered``
+pages via ``iter_table_rows``, then ``update_state`` flips the column on the
+matching rows (a small set; IMPORTANT messages are a fraction). New rows get the
+column from ``AgentMessagingRepository._insert_message`` directly, so this
 backfill is purely for pre-migration history.
+
+**This read used to be deliberately UNCAPPED**, on the reasoning that
+``query_ordered``'s 100-row page cap "would silently truncate this unbounded
+table". That was correct against the old 10,000-row default and is now exactly
+inverted: the default bound is 100 (``read_bounds.MAX_READ_ROWS``), so the
+uncapped read is the one that gets refused, and a sibling read on this same boot
+path took ``start_interface`` down on 2026-08-15 for precisely that reason. A
+page cap only truncates if you stop after one page — ``iter_table_rows`` pages
+until a short page proves the end, on a tie-safe ``(created_at, id)`` cursor, so
+the walk is complete AND bounded per page. Flipping ``important`` mid-walk is
+safe: both cursor columns are immutable after insert.
+
+Nothing fired here only because the durable marker is set on this profile. **A
+one-shot marker is not a bound, it is a delay** — any database with pre-migration
+history and no marker (a rebuild, a restore) would have booted straight into the
+refusal.
 """
 
 from __future__ import annotations
@@ -32,9 +47,9 @@ from typing import TYPE_CHECKING
 from ananta.llm.agent_messaging.schema import NAMESPACE, TABLE_AGENT_MESSAGE
 from ananta.llm.agent_messaging.state_results import (
     require_completed,
-    require_records,
     require_updated,
 )
+from ananta.services.state_service.bounded_read import iter_table_rows
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -44,6 +59,21 @@ logger = logging.getLogger(__name__)
 _COL_ID = "id"
 _COL_IMPORTANT = "important"
 _COL_METADATA = "metadata"
+
+# Measured 14,270 rows on 2026-08-15, growing with every message sent. The
+# ceiling sits BELOW 109,393 on purpose: that is the size of the unbounded read
+# that froze the platform for 3h20m and started this whole programme, so a
+# one-shot walk here refuses before it can become that same read again. The
+# remedy at that point is not a bigger number — it is expressing the projection
+# as a set-based statement in the database, which the state interface cannot do
+# today because the source predicate is a JSONB field.
+_AGENT_MESSAGE_CEILING = 100_000
+_CEILING_REASON = (
+    "one row per agent message ever sent (measured 14,270 on 2026-08-15); this "
+    "is a ONE-SHOT pre-migration projection, so the walk happens at most once "
+    "per database, and the ceiling stays below the 109,393-row read that caused "
+    "the 2026-08-15 stall."
+)
 
 # Durable one-shot marker (set ONLY after a successful full pass → self-healing).
 _BACKFILL_MARKER_KEY = "agent_message_important_backfill_v1_complete"
@@ -64,11 +94,23 @@ def backfill_message_important(state: StateManagementInterface) -> dict[str, obj
     """
     if _backfill_already_complete(state):
         return {"updated": [], "status": STATUS_ALREADY_DONE}
-    result = state.query_state(
-        NAMESPACE, {"table": TABLE_AGENT_MESSAGE, "filters": {}},
-    )
     updated: list[str] = []
-    for row in require_records(result):
+    rows = iter_table_rows(
+        state,
+        namespace=NAMESPACE,
+        table=TABLE_AGENT_MESSAGE,
+        filters={},
+        ceiling=_AGENT_MESSAGE_CEILING,
+        reason=_CEILING_REASON,
+    )
+    for row in rows:
+        # `filters` stays empty rather than pushing `important=False` down. The
+        # column landed additively with default=False, and whether pre-migration
+        # rows carry False or NULL is not something this site has measured — an
+        # equality filter would silently skip the NULL ones, which are exactly
+        # the rows the backfill exists for. Pagination fixes the bound without
+        # betting on that; narrowing the predicate is a separate change that
+        # needs its own measurement first.
         if not _needs_backfill(row):
             continue
         message_id = str(row[_COL_ID])

@@ -123,11 +123,17 @@ class PluginDatabaseStorage:
         return self._plugin.delete_records(namespace, query)
 
     def query_state(self, namespace: str, filters: dict[str, object]) -> ActionResult:
-        """Query data via plugin delegation.
+        """Query data via plugin delegation — DEPRECATED alias for ``read_state``.
+
+        The dict is forwarded to the plugin unchanged, and both state plugins
+        implement ``query_state`` as ``return self.read_state(...)``, so it is
+        the whole ``{table, filters, limit?, unbounded?}`` query envelope and
+        ``limit`` / ``unbounded`` are honoured. See
+        :meth:`ananta.services.state_service.StateService.query_state`.
 
         Args:
             namespace: Target namespace to query
-            filters: Filter criteria for data retrieval
+            filters: The ``{table, filters, limit?, unbounded?}`` query envelope.
 
         Returns:
             ActionResult from plugin execution

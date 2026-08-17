@@ -96,6 +96,8 @@ _MUST_NOT_ROUTE = ("TaskCreate", "TaskUpdate", "TaskList", "BashOutput")
 
 # ruff: noqa: I001, E402
 # pyright: reportMissingImports=false
+import _git_controller_lex as lex
+import _git_controller_walker as walker
 import git_controller_gate as gate
 from _git_controller_walker import walk_git_invocations
 
@@ -612,6 +614,162 @@ def case_global_flags_before_subcommand() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Layer A — heredoc bodies are DATA
+# ---------------------------------------------------------------------------
+#
+# Reported 2026-08-14 (adopter round Part 44, disclosed on
+# solet-public/macos-bizops#10). §44.2 fixed the adjacent case — a
+# mutation-shaped substring inside a quoted DATA argument — by rewriting the
+# lexer/token-walker. Heredoc bodies were the surface that rewrite did not
+# reach: the walker punctuation-tokenized the WHOLE command string, so a
+# heredoc body carrying ordinary prose about this very gate parsed as a
+# command plus an unrecognized subcommand and was blocked as a banned
+# invocation. Writing documentation about the guard tripped the guard.
+#
+# The three cases below are one triple and are only meaningful together:
+# bodies become data (the fix), evaluator-fed bodies stay visible (the fix
+# does not widen the hole), and everything structurally outside a body stays
+# visible (the fix does not swallow the command).
+
+_HEREDOC_PROSE = "cat > note.md <<'EOF'\nthe git gate blocks this immediately\nEOF"
+
+
+def case_heredoc_body_is_data() -> None:
+    """A heredoc BODY must not be walked for git invocations.
+
+    All four opener spellings are covered because the delimiter forms are
+    lexed separately and a fix that handles only the quoted form would leave
+    the bare and tab-stripped ones live.
+    """
+    _expect_allow(gate.check_bash, ({"command": _HEREDOC_PROSE}, SOME), "heredoc prose body")
+    _expect_allow(
+        gate.check_bash,
+        ({"command": "cat > n.md <<EOF\nthe git gate blocks this\nEOF"}, SOME),
+        "heredoc prose body, bare delimiter",
+    )
+    _expect_allow(
+        gate.check_bash,
+        ({"command": 'cat > n.md <<"EOF"\nthe git gate blocks this\nEOF'}, SOME),
+        "heredoc prose body, double-quoted delimiter",
+    )
+    _expect_allow(
+        gate.check_bash,
+        ({"command": "cat > n.md <<-EOF\n\tthe git gate blocks this\n\tEOF"}, SOME),
+        "heredoc prose body, <<- tab-stripped delimiter and terminator",
+    )
+    _expect_allow(
+        gate.check_bash,
+        ({"command": "cat <<'A' > x; cat <<'B' > y\nthe git gate\nA\nmore git prose\nB"}, SOME),
+        "two heredocs on one line, consumed in order",
+    )
+    # The SAME false positive one door over: `_command_targets_dot_git` also
+    # tokenized the whole command string, so prose ABOUT `.git/` was read as a
+    # mutation OF `.git/`. Fixed through the same split helper, bounded to the
+    # heredoc aspect only — the case group above still asserts every real
+    # `.git/` mutation blocks.
+    _expect_allow(
+        gate.check_bash,
+        ({"command": "cat > n.md <<'EOF'\nnever rm .git/index by hand\nEOF"}, SOME),
+        "heredoc prose body naming .git/ (not a mutation of it)",
+    )
+
+
+def case_heredoc_body_to_shell_evaluator_still_visible() -> None:
+    """A body fed to a shell evaluator is script SOURCE, and stays walked.
+
+    This is the discriminating half of the heredoc fix. "Prose in a body is
+    data" must not become "anything after `<<` is invisible" — a heredoc piped
+    or handed to a shell really does execute, and every case here blocked
+    before the fix and must still block after it.
+    """
+    _expect_block(
+        gate.check_bash,
+        ({"command": "bash <<'EOF'\ngit push origin main\nEOF"}, SOME),
+        "bash <<EOF body",
+        contains="push",
+    )
+    _expect_block(
+        gate.check_bash,
+        ({"command": "cat <<'EOF' | bash\ngit push origin main\nEOF"}, SOME),
+        "cat <<EOF | bash body (evaluator anywhere on the owner line)",
+        contains="push",
+    )
+    _expect_block(
+        gate.check_bash,
+        ({"command": "/bin/sh <<'EOF'\ngit push origin main\nEOF"}, SOME),
+        "path-qualified evaluator <<EOF body",
+        contains="push",
+    )
+    _expect_block(
+        gate.check_bash,
+        ({"command": "bash <<'EOF'\nrm .git/index\nEOF"}, SOME),
+        ".git/ mutation inside an evaluator-fed body",
+    )
+    # MUTATION CHECK: if the evaluator predicate stopped recognizing shells,
+    # every case above would flip to allowed and this case would pass
+    # vacuously against a gate that had gone blind.
+    _check(
+        walker.heredoc_body_is_script_source("cat <<'EOF' | bash")
+        and walker.heredoc_body_is_script_source("bash <<'EOF'")
+        and not walker.heredoc_body_is_script_source("cat > note.md <<'EOF'"),
+        "heredoc_body_is_script_source discriminates evaluator from writer",
+    )
+    # An owner line that will not tokenize is treated as an evaluator: an
+    # ambiguous owner can only keep a body VISIBLE, never hide one.
+    _check(
+        walker.heredoc_body_is_script_source("cat > 'unbalanced <<'EOF'"),
+        "unparseable owner line falls to script-source, not to data",
+    )
+
+
+def case_heredoc_boundaries_do_not_hide_surrounding_commands() -> None:
+    """Only body lines become data — never the command around them.
+
+    The retained command keeps the owning command, the `<<` operator, the
+    delimiter word and every line after the terminator, which is what makes
+    this a false-positive fix rather than a new hole.
+    """
+    _expect_block(
+        gate.check_bash,
+        ({"command": "cat > n.md <<'EOF'\nhello\nEOF\ngit push"}, SOME),
+        "command after the heredoc terminator stays visible",
+        contains="push",
+    )
+    _expect_block(
+        gate.check_bash,
+        ({"command": "cat > n.md <<'EOF' && git push\nhello\nEOF"}, SOME),
+        "mutation on the owner line itself stays visible",
+        contains="push",
+    )
+    # Unterminated body: fail VISIBLE. Treating a runaway delimiter as data
+    # would swallow the rest of the command string, which is reachable by
+    # accident (a typo'd terminator), not only by design.
+    _expect_block(
+        gate.check_bash,
+        ({"command": "cat > n.md <<'EOF'\ngit push origin main"}, SOME),
+        "unterminated heredoc body is walked, not swallowed",
+        contains="push",
+    )
+    # A here-string is not a heredoc: its data is on the SAME line. Reading
+    # `<<<` as an opener would consume the following lines as a body.
+    _expect_block(
+        gate.check_bash,
+        ({"command": "grep x <<< 'data'\ngit push"}, SOME),
+        "<<< here-string does not open a heredoc",
+        contains="push",
+    )
+    retained, bodies = lex.split_heredoc_bodies(_HEREDOC_PROSE)
+    _check(
+        "<<" in retained and "EOF" in retained and "cat" in retained,
+        f"retained command keeps owner, operator and delimiter (got {retained!r})",
+    )
+    _check(
+        len(bodies) == 1 and bodies[0][1] == "the git gate blocks this immediately",
+        f"exactly the body line is split out as data (got {bodies!r})",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Layer B — subprocess fixtures
 # ---------------------------------------------------------------------------
 
@@ -689,6 +847,31 @@ def case_subprocess_architect_git_stash_blocked() -> None:
     # blocked session what to do next is a live regression in operator
     # guidance, raised to Architect/Dawn and recorded in the lane note. If the
     # operator restores escalation wording, restore this leg with it.
+
+
+def case_subprocess_heredoc_prose_allowed() -> None:
+    """The reported false positive, measured the way it was reported.
+
+    The Layer-A cases call ``check_bash`` directly; this drives the whole hook
+    on a PreToolUse payload, which is the evidence class the adopter report
+    and the 2026-08-14 probe used. The paired evaluator case is the control:
+    without it, an exit-0 here would also be produced by a gate that had
+    stopped reading heredocs entirely.
+    """
+    code, _ = _run_hook_subprocess(
+        name=SOME,
+        payload={"tool_name": "Bash", "tool_input": {"command": _HEREDOC_PROSE}},
+    )
+    _check(code == 0, f"subprocess heredoc prose body: exit=0 (got {code})")
+    code, stderr = _run_hook_subprocess(
+        name=SOME,
+        payload={
+            "tool_name": "Bash",
+            "tool_input": {"command": "bash <<'EOF'\ngit push origin main\nEOF"},
+        },
+    )
+    _check(code == 2, f"subprocess evaluator-fed heredoc body: exit=2 (got {code})")
+    _check("push" in stderr, f"block names the invocation inside the body (got {stderr[:200]!r})")
 
 
 def case_subprocess_gc_git_stash_allowed() -> None:
@@ -883,10 +1066,14 @@ LAYER_A_CASES = (
     case_walker_basics,
     case_is_invocation_allowed_basics,
     case_global_flags_before_subcommand,
+    case_heredoc_body_is_data,
+    case_heredoc_body_to_shell_evaluator_still_visible,
+    case_heredoc_boundaries_do_not_hide_surrounding_commands,
 )
 
 LAYER_B_CASES = (
     case_subprocess_architect_git_stash_blocked,
+    case_subprocess_heredoc_prose_allowed,
     case_subprocess_gc_git_stash_allowed,
     case_subprocess_architect_git_status_allowed,
     case_subprocess_architect_edit_into_git_blocked,

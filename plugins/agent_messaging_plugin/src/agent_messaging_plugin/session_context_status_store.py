@@ -26,6 +26,16 @@ _COL_IS_DELETED = "is_deleted"
 _CONFLICT_COLUMNS = ["agent_instance_id"]
 
 
+def _as_flag(value: bool | None) -> int | None:
+    """``True``/``False`` -> 1/0, and ``None`` STAYS ``None``.
+
+    Deliberately not ``int(bool(value))``: that maps ``None`` to 0, collapsing
+    "not reported" into "cache is warm" — the exact distinction these columns
+    exist to preserve.
+    """
+    return None if value is None else int(value)
+
+
 def upsert_session_context_status(
     state: StateManagementInterface,
     *,
@@ -35,10 +45,31 @@ def upsert_session_context_status(
     current_tokens: int,
     ceiling: int,
     measured_at: str,
+    cache_read_tokens: int | None = None,
+    cache_cold: bool | None = None,
+    cache_overage_signature: bool | None = None,
+    reporter_surface: str | None = None,
+    reporter_generation: int | None = None,
 ) -> None:
     """Overwrite the single latest snapshot for `agent_instance_id`. Conflicts
     on `agent_instance_id` alone (unlike `session_claude_mapping`'s
-    per-firing history triple) — this table is a cache, not a log."""
+    per-firing history triple) — this table is a cache, not a log.
+
+    The three cache fields default to ``None`` = NOT REPORTED, which is a
+    third state and never a synonym for "warm". A reporter predating the
+    2026-08-16 cache-state widening sends none of them, and a reader must be
+    able to tell that apart from a reporter that looked and found the cache
+    live — otherwise every un-upgraded hook silently asserts a warm cache.
+
+    ``reporter_surface``/``reporter_generation`` say WHICH COPY of the
+    reporting hook produced this row, because more than one copy can be
+    registered on the same event at once. Latest write wins here — that is
+    what "a cache, not a log" means — so without them a row cannot be
+    attributed to a reporter at all, and a field missing because a STALE
+    copy served the tick is indistinguishable from one missing because the
+    verbs are undeployed. Both default to ``None`` = pre-attribution
+    reporter, which is itself a positive finding about that row.
+    """
     require_completed(
         state.upsert_state(
             AGENT_ROLE_BINDING_NAMESPACE,
@@ -51,6 +82,11 @@ def upsert_session_context_status(
                     "current_tokens": current_tokens,
                     "ceiling": ceiling,
                     "measured_at": measured_at,
+                    "cache_read_tokens": cache_read_tokens,
+                    "cache_cold": _as_flag(cache_cold),
+                    "cache_overage_signature": _as_flag(cache_overage_signature),
+                    "reporter_surface": reporter_surface,
+                    "reporter_generation": reporter_generation,
                 },
                 "conflict_columns": _CONFLICT_COLUMNS,
             },

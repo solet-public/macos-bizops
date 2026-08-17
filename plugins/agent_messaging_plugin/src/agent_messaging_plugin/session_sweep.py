@@ -82,6 +82,7 @@ from ananta.llm.agent_messaging.state_results import (
     require_updated,
 )
 
+from . import rotation_thresholds
 from .peer_registry import PeerAmbiguousError, PeerSessionAmbiguousError, PeerUnreachableError
 from .schema import (
     CONDITION_DEADLINE,
@@ -96,11 +97,13 @@ from .schema import (
     TABLE_SESSION_DEPENDENCY,
     TABLE_SESSION_ROLE_CLAIM,
 )
+from .session_context_status_store import read_session_context_status
 from .session_hosts import OPERATOR_HOST
 from .session_lifecycle_store import (
     DEFAULT_REPORT_BY_SECONDS,
     StaleLifecycleStateError,
     list_managed_sessions,
+    mark_registration_overdue,
     transition_lifecycle_state,
 )
 from .session_lifecycle_verbs import (
@@ -139,6 +142,35 @@ EVENT_SESSION_DEPENDENCY_WAKE = "session_dependency_wake"
 # the session_dependency wake above even though both ride append_event.
 EVENT_SESSION_OVERDUE_NOTICE = "session_overdue_notice"
 
+# Same convention again, for the two L4 sweep legs (2026-08-17).
+#
+# WHY THESE LIVE IN THE SWEEP AND NOT IN A HOOK. The reporting hook binds
+# PostToolUse, which fires AFTER a tool call, which follows a model call. So
+# during an idle gap it does not tick at all, and by its first tick after
+# resuming the full-price prefix rewrite has already been paid. It cannot warn
+# before the cost, by construction. The sweep walks sessions on its OWN
+# schedule without any session having to act first, which makes it the only
+# surface that can observe "this session has been idle a while, its context is
+# large, its cache is about to lapse" BEFORE the next call pays for it.
+EVENT_ROTATION_DUE_NOTICE = "rotation_due_notice"
+
+# The gauge-coverage leg. Signature it detects: the platform believes a session
+# is LIVE (its lifecycle row says so, i.e. report_alive is landing) while NO
+# session_context_status row exists for it -- hooks are running, the gauge
+# write is not.
+#
+# This is a MISSING-row detector, not a stale-row detector: a session whose
+# gauge froze while keeping an old row is a different case and is deliberately
+# out of scope here rather than half-covered.
+#
+# It is state-based on purpose. The obvious alternative -- compare the hook's
+# throttle-marker mtime against the absent row -- needs AGENT_HEARTBEAT_MARKER_DIR,
+# which the spawn adapters export to Claude Code sessions and which the platform
+# process running this sweep has no reason to hold. A detector that silently
+# no-ops when its input is missing is the exact fail-open shape this leg exists
+# to catch, so building it that way would put the bug inside its own alarm.
+EVENT_GAUGE_COVERAGE_NOTICE = "gauge_coverage_notice"
+
 # Distinct from EVENT_SESSION_OVERDUE_NOTICE so a receiver can tell the two
 # classes apart: "went quiet" (overdue, may self-heal) vs "never came up"
 # (spawning row past its deadline, terminated outright — see sweep_overdue_
@@ -164,6 +196,19 @@ EVENT_SESSION_SPAWN_UNREGISTERED_NOTICE = "session_spawn_unregistered_notice"
 # process is alive — every extension was announced, so the termination is
 # never the steward's first news.
 SPAWN_ALIVE_PATIENCE_WINDOWS: int = 4
+
+# W4A (#8 §43.1): fourth spawn-notice class, and the one that ATTRIBUTES.
+# "This row has not registered and by construction therefore has not run its
+# registration hook" — a statement about the seam, not about any policy blob.
+EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE = "session_registration_overdue_notice"
+
+# The registration bound, deliberately NOT report_by. Registration is a
+# machine-speed event — a worker that is going to register does it seconds
+# after its process comes up — so a bound measured in a couple of minutes is
+# already generous, and it is SHORTER than DEFAULT_REPORT_BY_SECONDS (300) on
+# purpose: the attribution has to land BEFORE the report-or-die machinery
+# starts telling a different story about the same row.
+DEFAULT_REGISTRATION_BOUND_S: float = 120.0
 
 
 def _parse_iso(value: object) -> datetime | None:
@@ -601,6 +646,156 @@ def sweep_overdue_sessions(
     return marked
 
 
+def sweep_unregistered_spawning_sessions(
+    state: StateManagementInterface,
+    *,
+    now: datetime | None = None,
+    peer_registry: PeerRegistry | None = None,
+    bridge_manager: BridgeSessionManager | None = None,
+    registration_bound_s: float = DEFAULT_REGISTRATION_BOUND_S,
+) -> int:
+    """W4A registration watchdog — surface a worker that came up DEAF.
+
+    An adopter running an org-managed Claude Code policy carrying
+    ``strictPluginOnlyCustomization: ["hooks"]`` spawned a worker that answered
+    its first turn while NONE of its injected hooks ran: no hook events, empty
+    session-mapping spool, ``lifecycle_state`` stuck at ``spawning``. We
+    accepted the reporter's framing — **the defect is the silence, not the
+    unsupported environment** — so this leg exists to make the row SAY so.
+
+    WHY THIS IS NOT THE EXISTING ``spawning`` LEG, and why the two must not be
+    merged (the next reader will otherwise try):
+    :func:`sweep_overdue_sessions`' spawning leg is bounded by ``report_by``
+    (the WORK deadline) and its remedy is the REAPER — terminate the row, or,
+    since 2026-08-13, re-arm it when the host driver observes the process
+    alive. This leg is bounded by REGISTRATION latency and its remedy is
+    ATTRIBUTION: it writes a field, logs loudly, and tells the steward what was
+    observed. It transitions nothing and kills nothing.
+    Concretely, the adopter's worker takes the observed-alive path over there:
+    it answered its first turn, so it probes alive, so it is re-armed with a
+    notice that announces a DEADLINE EXTENSION — true, and not the news that a
+    worker's hooks never ran. That leg working exactly as designed is what
+    produced the reported silence, which is why the fix is a separate
+    observation rather than another branch inside it.
+
+    MECHANISM-INDEPENDENT BY CONSTRUCTION. The trigger is "still ``spawning``
+    past the bound" — the seam itself. A row in that condition has, by
+    construction, not run ``capture_session_mapping``, whatever the cause:
+    the policy shape in front of us, a policy shape nobody has reported yet, a
+    crashed hook, a mis-wired plugin, a read-only spool. Nothing here reads a
+    settings file or reasons about one; the managed-policy PREFLIGHT
+    (``HeadlessHostDriver.verify_config``) is a separate, narrower thing that
+    refuses a spawn it can prove is doomed. A check written from the one
+    incident in front of us would miss the next one.
+
+    Idempotent: a row already carrying ``registration_overdue_at`` is skipped,
+    so the field records the FIRST observation and the steward is told once.
+    Returns the number of rows newly marked.
+    """
+    clock = now or datetime.now(UTC)
+    marked = 0
+    for row in _managed_sessions_in_state(state, LIFECYCLE_SPAWNING):
+        if _mark_one_registration_overdue(
+            state, row, clock=clock, registration_bound_s=registration_bound_s,
+            peer_registry=peer_registry, bridge_manager=bridge_manager,
+        ):
+            marked += 1
+    return marked
+
+
+def _mark_one_registration_overdue(
+    state: StateManagementInterface,
+    row: dict[str, Any],
+    *,
+    clock: datetime,
+    registration_bound_s: float,
+    peer_registry: PeerRegistry | None,
+    bridge_manager: BridgeSessionManager | None,
+) -> bool:
+    """One row's worth of :func:`sweep_unregistered_spawning_sessions` — split
+    out to keep the outer loop under the radon cc threshold, same shape as
+    :func:`_mark_one_overdue`. Returns whether the row was newly marked."""
+    if row.get("registration_overdue_at"):
+        return False
+    agent_instance_id = str(row.get("agent_instance_id") or "")
+    if not agent_instance_id:
+        return False
+    # Age from last_transition_at: it is the row's spawn timestamp and stays
+    # unchanged while the row remains 'spawning' (the same anchor the
+    # observed-alive patience bound uses).
+    spawned_at = _parse_iso(row.get("last_transition_at"))
+    if spawned_at is None or (clock - spawned_at).total_seconds() < registration_bound_s:
+        return False
+    acknowledged = bool(row.get("degraded_hooks_acknowledged"))
+    reason = (
+        f"still 'spawning' {int((clock - spawned_at).total_seconds())}s after spawn "
+        f"(registration bound {int(registration_bound_s)}s) — the spawned process has "
+        "not registered, so its registration hook has not run. Its hooks may have been "
+        "stripped by host policy, failed to load, or never fired."
+    )
+    if acknowledged:
+        reason += " This spawn ACKNOWLEDGED degraded hooks, so this was an accepted risk."
+    mark_registration_overdue(
+        state, agent_instance_id=agent_instance_id, reason=reason, observed_at=clock,
+    )
+    logger.warning(
+        "registration watchdog: session %s (lane_id=%r, host=%r) is %s. This row "
+        "would otherwise sit in 'spawning' with nothing said about why.",
+        agent_instance_id, row.get("lane_id"), row.get("host"), reason,
+    )
+    if peer_registry is not None and bridge_manager is not None:
+        _notify_steward_of_registration_overdue(
+            state=state, peer_registry=peer_registry, bridge_manager=bridge_manager,
+            row=row, reason=reason,
+        )
+    return True
+
+
+def _notify_steward_of_registration_overdue(
+    *,
+    state: StateManagementInterface,
+    peer_registry: PeerRegistry,
+    bridge_manager: BridgeSessionManager,
+    row: dict[str, Any],
+    reason: str,
+) -> None:
+    """Best-effort steward notice for a registration-overdue row — mirrors
+    :func:`_notify_steward_of_spawn_orphaned`'s resolve-then-append pattern.
+    Distinct event type from the other three spawn notices so a receiver can
+    tell "came up deaf" from "never came up" and from "alive but late"."""
+    agent_instance_id = str(row.get("agent_instance_id") or "")
+    spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
+    if not spawner_instance_id:
+        return
+    binding = _resolve_steward_binding(
+        state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
+    )
+    if binding is None:
+        logger.warning(
+            "session %s registration-overdue: spawner %s not resolvable to a live "
+            "binding — row marked, steward not notified",
+            agent_instance_id, spawner_instance_id,
+        )
+        return
+    prose = (
+        f"session_registration_overdue_notice: {agent_instance_id} (lane_id="
+        f"{row.get('lane_id')!r}, host={row.get('host')!r}) is {reason} The session "
+        "may still be RUNNING and answering turns — a worker whose hooks did not "
+        "run can look healthy from the outside while being invisible to the "
+        "platform. Treat it as unmanaged until it registers."
+    )
+    meta: dict[str, object] = {"flow_id": f"session-registration-overdue-{agent_instance_id}"}
+    try:
+        bridge_manager.append_event(
+            binding.bridge_id, EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE, prose, meta,
+        )
+    except (PeerAmbiguousError, PeerSessionAmbiguousError, PeerUnreachableError):
+        logger.warning(
+            "session %s registration-overdue: steward notice could not be delivered",
+            agent_instance_id, exc_info=True,
+        )
+
+
 def _mark_one_overdue(
     state: StateManagementInterface,
     row: dict[str, Any],
@@ -943,12 +1138,403 @@ class SessionRoleClaimPruner:
         return (now - first_seen).total_seconds() > self._grace_window_s
 
 
+class NoticeLatch:
+    """One-notice-per-EPISODE gate for a sweep notice with no state edge behind
+    it.
+
+    The overdue notice does not need this: it rides the ``live -> overdue``
+    lifecycle transition, so the row itself remembers that the notice was sent
+    and the edge cannot be taken twice. The L4 notices have no such edge — a
+    gauge row stays above the rotation threshold until the session actually
+    rotates, and a session with no gauge row stays dark. Composed onto a tick
+    without a latch, both would re-deliver the identical notice every
+    ``bridge_sweep_interval_seconds`` for as long as the condition holds, which
+    trains the reader to ignore the channel. An ignored warning is worse than
+    no warning, so the latch is part of making these notices live, not a
+    refinement of it.
+
+    Three properties, each deliberate:
+
+    * **Latched on SUCCESSFUL delivery only** (:meth:`record_sent` is called by
+      the caller after the append returns True). A failed append leaves the key
+      un-latched so the next tick retries — an episode must never be silenced
+      by its own delivery failure.
+    * **Re-arms when the condition CLEARS** (:meth:`retain_active`). A second
+      episode is a second notice; only repetition WITHIN an episode is
+      suppressed.
+    * **In-memory, so it is bounded by the process lifetime.** A solet restart
+      re-arms every episode and each live episode gets one more notice. That is
+      a stated bound rather than an oversight: the alternative is a durable
+      suppression table, and one repeat per restart is a cheaper failure than a
+      schema for it. It is also self-limiting in the direction that matters —
+      restarts are rare, ticks are every 5 minutes.
+    """
+
+    def __init__(self) -> None:
+        self._latched: set[str] = set()
+
+    def suppressed(self, key: str) -> bool:
+        """True when ``key``'s episode has already been notified."""
+        return key in self._latched
+
+    def record_sent(self, key: str) -> None:
+        """Latch ``key`` — call only after delivery actually succeeded."""
+        self._latched.add(key)
+
+    def retain_active(self, active: set[str]) -> None:
+        """Release every latched key whose condition no longer holds, so the
+        next episode notifies again."""
+        self._latched &= active
+
+
+def _latch_or_transient(latch: NoticeLatch | None) -> NoticeLatch:
+    """``latch``, or a throwaway one for a caller that passed none.
+
+    A fresh latch is EXACTLY equivalent to no latch for a single sweep — each
+    key is visited once per call, so nothing it records can suppress anything
+    within that call — which is what lets every leg below read as if a latch is
+    always present. The alternative (``if latch is not None`` at each of the
+    three use sites) is the same behaviour spelled three times, and it is the
+    spelling in which one forgotten branch is a silent repeat-every-tick.
+    """
+    return NoticeLatch() if latch is None else latch
+
+
+def _rotation_due_sessions(
+    state: StateManagementInterface,
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """``(agent_instance_id, steward_instance_id, enriched gauge row)`` for
+    every live/idle session that is currently rotation-due.
+
+    Splitting the SCAN from the NOTIFY keeps the sweep's loop about delivery
+    policy (latch, count) and leaves "what counts as due" where it already
+    lives, in :func:`_rotation_due_row`.
+    """
+    found: list[tuple[str, str, dict[str, Any]]] = []
+    for lifecycle_state in ("live", "idle"):
+        for row in _managed_sessions_in_state(state, lifecycle_state):
+            enriched = _rotation_due_row(state, row)
+            if enriched is not None:
+                found.append(
+                    (str(row["agent_instance_id"]), str(row["spawned_by_instance_id"]), enriched),
+                )
+    return found
+
+
+def _gauge_dark_session(
+    state: StateManagementInterface, row: dict[str, Any],
+) -> tuple[str, str] | None:
+    """``(agent_instance_id, steward_instance_id)`` when this LIVE row has no
+    gauge row at all, else ``None``.
+
+    Same "every ``None`` is a deliberate skip" idiom as
+    :func:`_rotation_due_row`: no identity, no steward to tell, or a session
+    that is reporting perfectly well.
+    """
+    agent_instance_id = str(row.get("agent_instance_id") or "")
+    spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
+    if not agent_instance_id or not spawner_instance_id:
+        return None
+    if read_session_context_status(state, agent_instance_id) is not None:
+        return None
+    return agent_instance_id, spawner_instance_id
+
+
+def _rotation_prose(agent_instance_id: str, row: dict[str, Any]) -> str:
+    """The notice text: the MEASURED numbers, never a bare "you should rotate".
+
+    Two qualifications are carried IN THE TEXT rather than assumed away,
+    because both are live limitations of the data this reads:
+
+    * The bands are MODEL-BLIND. ``rotation_band`` takes no model argument and
+      its thresholds came from one tier's economics, so the model is named
+      beside the band and the reader discounts it themselves. A tier-specific
+      verdict presented as universal is how a hygiene-level number reads as an
+      emergency.
+    * A row whose reporter is unattributable cannot be trusted to the same
+      degree. A reporter predating attribution sends no cache state, so the
+      band it implies is the WARM default rather than a measurement -- and an
+      urgent-sounding notice derived from a default is false precision. Such a
+      row is reported AS unattributable instead of being silently upgraded.
+    """
+    band = row.get("rotation_band") or "unknown"
+    guidance = row.get("rotation_guidance") or "no guidance derived"
+    surface = row.get("reporter_surface")
+    generation = row.get("reporter_generation")
+    attribution = (
+        f"reported by {surface}/gen{generation}"
+        if surface is not None and generation is not None
+        else "REPORTER UNATTRIBUTABLE (predates attribution) -- treat the band "
+        "as provisional: an un-upgraded reporter sends no cache state, so this "
+        "band is the warm default rather than a measurement"
+    )
+    return (
+        f"rotation_due_notice: {agent_instance_id} is at "
+        f"{row.get('current_tokens')} tokens on {row.get('model')!r} "
+        f"({row.get('fraction'):.3f} of a {row.get('ceiling')} ceiling), "
+        f"band={band} -- {guidance}. Measured at {row.get('measured_at')}. "
+        f"{attribution}. NOTE the bands are model-blind: the thresholds derive "
+        f"from one tier's economics, so weigh this against {row.get('model')!r}'s "
+        f"own costs rather than reading the band as universal."
+    )
+
+
+def _notify_rotation_due(
+    *,
+    state: StateManagementInterface,
+    peer_registry: PeerRegistry,
+    bridge_manager: BridgeSessionManager,
+    row: dict[str, Any],
+    agent_instance_id: str,
+    spawner_instance_id: str,
+) -> bool:
+    """Best-effort steward notice for one rotation-due session.
+
+    Mirrors :func:`_notify_steward_of_overdue`'s resolve-then-append shape, and
+    inherits its posture: a delivery fault must never raise back into the sweep
+    loop or block the OTHER rows in this tick.
+
+    ★ THIS DOES NOT REACH AN OPERATOR-PRESENT SEAT, and that is structural
+    rather than a gap to fix here. ``append_event`` lands on the recipient's
+    bridge and is read when that session next takes a turn; ``drive_on_delivery``
+    no-ops for exactly this case (a session with no ``managed_session`` row --
+    an ordinary operator-launched seat -- and again for the degenerate
+    ``operator`` host driver). So this leg serves MANAGED WORKERS. The seat is
+    served by a separate surface that can reach it at a decision point, and
+    until that lands this notice fires into a void for seats.
+    """
+    binding = _resolve_steward_binding(
+        state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
+    )
+    if binding is None:
+        logger.warning(
+            "session %s is rotation-due: steward %s not resolvable to a live binding "
+            "-- notice not delivered",
+            agent_instance_id, spawner_instance_id,
+        )
+        return False
+    meta: dict[str, object] = {"flow_id": f"rotation-due-{agent_instance_id}"}
+    try:
+        bridge_manager.append_event(
+            binding.bridge_id,
+            EVENT_ROTATION_DUE_NOTICE,
+            _rotation_prose(agent_instance_id, row),
+            meta,
+        )
+    except Exception:  # noqa: BLE001 — best-effort notify, never fails the sweep
+        logger.warning(
+            "session %s rotation-due notice append failed", agent_instance_id, exc_info=True,
+        )
+        return False
+    drive_on_delivery(
+        state, recipient_agent_instance_id=spawner_instance_id,
+        sender_label=EVENT_ROTATION_DUE_NOTICE,
+    )
+    return True
+
+
+def _rotation_due_row(
+    state: StateManagementInterface, row: dict[str, Any],
+) -> dict[str, Any] | None:
+    """The gauge row for ``row``'s session, enriched with the derived band —
+    or ``None`` when this session is not rotation-due.
+
+    Every ``None`` here is a distinct, deliberate skip rather than a failure:
+    no steward to notify, no gauge row yet, an unusable ceiling, or simply
+    below the threshold. Split out of the sweep loop so the loop reads as
+    "for each session, notify if due" and the decision of what counts as DUE
+    lives in one place.
+    """
+    agent_instance_id = str(row.get("agent_instance_id") or "")
+    spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
+    if not agent_instance_id or not spawner_instance_id:
+        return None
+    gauge = read_session_context_status(state, agent_instance_id)
+    if gauge is None:
+        return None
+    current = int(gauge.get("current_tokens") or 0)
+    ceiling = int(gauge.get("ceiling") or 0)
+    if ceiling <= 0:
+        return None
+    fraction = current / ceiling
+    if fraction < rotation_thresholds.ROTATION_THRESHOLD_FRACTION:
+        return None
+    band, guidance = rotation_thresholds.rotation_band(
+        current, cache_cold=bool(gauge.get("cache_cold")),
+    )
+    enriched = dict(gauge)
+    enriched.update(
+        {"fraction": fraction, "rotation_band": band, "rotation_guidance": guidance},
+    )
+    return enriched
+
+
+def sweep_rotation_due_sessions(
+    state: StateManagementInterface,
+    *,
+    peer_registry: PeerRegistry | None = None,
+    bridge_manager: BridgeSessionManager | None = None,
+    latch: NoticeLatch | None = None,
+) -> int:
+    """Notify stewards of managed sessions whose gauge says rotation is due.
+
+    THE PRE-COST SURFACE. A ``PostToolUse`` hook cannot warn before the cost —
+    it does not tick during the idle gap in which the cache lapses, so its
+    first tick after resuming is already downstream of the full-price rewrite.
+    This sweep runs on its own schedule and needs no session to act first,
+    which is what lets a warning precede the spend.
+
+    Reads the snapshots ``report_context_status`` already writes rather than
+    measuring anything itself, and carries the MEASURED number and band into
+    the notice (see :func:`_rotation_prose` for the two qualifications that
+    ride with it).
+
+    Returns the count actually notified. Notification requires both a peer
+    registry and a bridge manager; absent either, this returns 0 without
+    raising, matching :func:`sweep_overdue_sessions`' posture that an
+    early-boot tick must not fail.
+
+    ``latch`` gates repetition (see :class:`NoticeLatch`). Passing NONE means
+    "notify every call", which is right for a one-shot invocation or a test and
+    WRONG for a repeating tick — the composed production caller
+    (``plugin.py``'s rotation-surface rider) always supplies one, because a
+    rotation-due condition persists across ticks and an unlatched notice would
+    re-deliver every ``bridge_sweep_interval_seconds`` until the session
+    rotates.
+    """
+    if peer_registry is None or bridge_manager is None:
+        return 0
+    gate = _latch_or_transient(latch)
+    notified = 0
+    due: set[str] = set()
+    for agent_instance_id, spawner_instance_id, enriched in _rotation_due_sessions(state):
+        due.add(agent_instance_id)
+        if gate.suppressed(agent_instance_id):
+            continue
+        if _notify_rotation_due(
+            state=state, peer_registry=peer_registry, bridge_manager=bridge_manager,
+            row=enriched, agent_instance_id=agent_instance_id,
+            spawner_instance_id=spawner_instance_id,
+        ):
+            notified += 1
+            gate.record_sent(agent_instance_id)
+    gate.retain_active(due)
+    return notified
+
+
+def _notify_gauge_coverage(
+    *,
+    state: StateManagementInterface,
+    peer_registry: PeerRegistry,
+    bridge_manager: BridgeSessionManager,
+    agent_instance_id: str,
+    spawner_instance_id: str,
+) -> bool:
+    """Tell the steward one live session is producing no gauge row.
+
+    Same best-effort posture as the sibling notices: a delivery fault warns and
+    returns False rather than raising into the sweep loop, so one unreachable
+    steward never costs the other rows their notice.
+    """
+    binding = _resolve_steward_binding(
+        state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
+    )
+    if binding is None:
+        return False
+    prose = (
+        f"gauge_coverage_notice: {agent_instance_id} is LIVE (report_alive is "
+        "landing, so its hooks are running) but has NO session_context_status "
+        "row at all — the reporting path between the hook's tick and the "
+        "state write is failing SILENTLY. The reporting hook is non-fatal by "
+        "design and warns only to stderr, so it cannot surface this itself. "
+        "Check that session's solet invocation and its environment."
+    )
+    try:
+        bridge_manager.append_event(
+            binding.bridge_id, EVENT_GAUGE_COVERAGE_NOTICE, prose,
+            {"flow_id": f"gauge-coverage-{agent_instance_id}"},
+        )
+    except Exception:  # noqa: BLE001 — best-effort notify, never fails the sweep
+        logger.warning(
+            "session %s gauge-coverage notice append failed",
+            agent_instance_id, exc_info=True,
+        )
+        return False
+    return True
+
+
+def sweep_gauge_coverage(
+    state: StateManagementInterface,
+    *,
+    peer_registry: PeerRegistry | None = None,
+    bridge_manager: BridgeSessionManager | None = None,
+    latch: NoticeLatch | None = None,
+) -> int:
+    """Notify stewards of LIVE sessions that have no gauge row at all.
+
+    The signature this catches was measured on 2026-08-16: the reporting hook's
+    ``solet`` invocation could fail silently (a bare binary name, an
+    ``OSError`` caught and warned to stderr nobody reads), while the throttle
+    marker — written BEFORE the report — kept updating. From outside, a session
+    reporting perfectly and a session whose every report was discarded looked
+    identical. Four sessions were dark for an unknown period and nothing
+    surfaced it; it was found by a person going looking.
+
+    The hook cannot catch this: its non-fatal-by-design contract requires it to
+    swallow its own failures, and a component cannot report the failure of its
+    own reporting path. The session cannot: it has no idea the write failed.
+    The sweep can, because it sees BOTH facts — a lifecycle row saying live and
+    an absent gauge row — and neither side can see the other.
+
+    Deliberately generic in what it keys on: any future silent failure between
+    tick and write (a renamed process key, a permissions change, a verb
+    rejecting an argument) produces the same signature. Keying on the mismatch
+    rather than on any particular cause is what makes it outlive the bug that
+    motivated it.
+
+    ``latch`` gates repetition exactly as in :func:`sweep_rotation_due_sessions`
+    — a dark session stays dark until someone fixes it, so an unlatched notice
+    would repeat every tick for the whole outage. The latch releases the key
+    when a gauge row appears, which makes a RELAPSE (reporting recovered, then
+    broke again) a fresh notice rather than a silence.
+    """
+    if peer_registry is None or bridge_manager is None:
+        return 0
+    gate = _latch_or_transient(latch)
+    notified = 0
+    dark: set[str] = set()
+    for row in _managed_sessions_in_state(state, "live"):
+        pair = _gauge_dark_session(state, row)
+        if pair is None:
+            continue
+        agent_instance_id, spawner_instance_id = pair
+        dark.add(agent_instance_id)
+        if gate.suppressed(agent_instance_id):
+            continue
+        if _notify_gauge_coverage(
+            state=state, peer_registry=peer_registry, bridge_manager=bridge_manager,
+            agent_instance_id=agent_instance_id, spawner_instance_id=spawner_instance_id,
+        ):
+            notified += 1
+            gate.record_sent(agent_instance_id)
+    gate.retain_active(dark)
+    return notified
+
+
 __all__ = [
     "DEFAULT_PRUNE_GRACE_WINDOW_S",
+    "DEFAULT_REGISTRATION_BOUND_S",
+    "EVENT_GAUGE_COVERAGE_NOTICE",
+    "EVENT_ROTATION_DUE_NOTICE",
     "EVENT_SESSION_DEPENDENCY_WAKE",
     "EVENT_SESSION_OVERDUE_NOTICE",
+    "EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE",
+    "NoticeLatch",
     "SessionRoleClaimPruner",
     "sweep_deadline_dependencies",
+    "sweep_gauge_coverage",
     "sweep_lane_closed_dependencies",
     "sweep_overdue_sessions",
+    "sweep_rotation_due_sessions",
+    "sweep_unregistered_spawning_sessions",
 ]

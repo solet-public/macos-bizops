@@ -4,7 +4,9 @@ from datetime import UTC, datetime, timedelta
 
 from ananta.core.domain.constants import SESSION_TIMEOUT_MINUTES
 from ananta.core.domain.enums import SessionStatus
+from ananta.core.domain.status import is_status_match
 from ananta.core.domain.types import ActionResult
+from ananta.core.plugins.plugin_contracts import ActionStatus
 from ananta.error_handling import FrameworkError
 from ananta.services.state_service import StateService
 
@@ -131,59 +133,80 @@ class SessionManager(ISessionManager):
 
         return True
 
-    def _extract_sessions_list(self, result: ActionResult) -> list[object]:
-        """Extract sessions list from ActionResult data structure."""
+    def _extract_updated_count(self, result: ActionResult) -> int:
+        """Rows affected by an ``update_state``, read off the real envelope.
+
+        ``update_state`` reports the scalar at ``data.result.updated``. The
+        helper this replaced looked for ``data["result"]`` on a ``read_state``
+        envelope, which carries ``{records, count, namespace, table}`` and has no
+        ``result`` key at all — so it fell through to its ``or data`` branch, got
+        a dict where it required a list, and returned empty every time. That made
+        ``cleanup_expired_sessions`` return 0 having expired nothing, on both the
+        capped and uncapped paths. The two envelopes are genuinely different
+        shapes; neither key is guessable from the other.
+        """
+        if not is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
+            raise FrameworkError(
+                message="Failed to expire past-due sessions",
+                error_code="session_manager.cleanup_expired_failed",
+                details={"error": result.get("error")},
+            )
+
         data = result.get("data")
-        if not isinstance(data, dict):
-            return []
+        result_obj = data.get("result") if isinstance(data, dict) else None
+        updated = result_obj.get("updated") if isinstance(result_obj, dict) else None
+        if not isinstance(updated, int):
+            raise FrameworkError(
+                message=(
+                    "update_state did not report an integer 'updated' count at "
+                    "data.result.updated"
+                ),
+                error_code="session_manager.cleanup_expired_malformed_result",
+                details={"data": data},
+            )
+        return updated
 
-        sessions_raw = data.get("result") or data.get("results") or data
-        if not isinstance(sessions_raw, list):
-            return []
+    def cleanup_expired_sessions(self) -> int:
+        """Mark every past-due ACTIVE session EXPIRED; return how many were marked.
 
-        return sessions_raw
+        One set-based UPDATE, evaluated in the database, shipping zero rows.
 
-    def _is_session_expired(self, expires_at_str: str, current_time: datetime) -> bool:
-        """Check if session has expired based on expires_at timestamp."""
-        expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
-        return current_time > expires_at
+        This previously read all of ``core.sessions`` with ``filters: {}`` and no
+        limit, then compared ``expires_at`` in a Python loop and issued one
+        UPDATE per expired row. Every part of that was a defect:
 
-    def _mark_session_expired(self, session_id: object) -> None:
-        """Mark a single session as expired in state service."""
-        self.state_service.update_state(
+        * **The read was unbounded.** ``core.sessions`` holds 21,723 rows
+          (measured 2026-08-15), so the read is refused outright by the
+          ``read_state`` row cap — see ``read_bounds.MAX_READ_ROWS``.
+        * **Expressing the predicate would not have been enough.** 21,702 of
+          those rows match ``expires_at < now``, so a filtered-but-unlimited read
+          is still 2x over the cap. The selectivity of a predicate is a
+          measurement, not something its shape tells you.
+        * **The loop then issued one round-trip per expired row** — 21,702 of
+          them, had it ever run.
+
+        So the read is not bounded here, it is removed: the work this function
+        does is a filtered UPDATE, and the state interface can express that
+        directly. The row count no longer affects the cost or the correctness,
+        which is the property a growing table needs.
+        """
+        result = self.state_service.update_state(
             namespace="core",
-            query={"table": "sessions", "filters": {"id": session_id}},
+            query={
+                "table": "sessions",
+                "filters": {
+                    "status": SessionStatus.ACTIVE.value,
+                    # Gap-A range op, compiled to SQL ``<`` by the provider's
+                    # _build_filter_clauses. Restricting to ACTIVE keeps the
+                    # statement idempotent: an already-EXPIRED row is not
+                    # rewritten (and not re-counted) on the next sweep.
+                    "expires_at": {"op": "lt", "value": datetime.now(UTC).isoformat()},
+                },
+            },
             updates={"status": SessionStatus.EXPIRED.value},
         )
 
-    def cleanup_expired_sessions(self) -> int:
-        result = self.state_service.read_state(
-            namespace="core", query={"table": "sessions", "filters": {}}
-        )
-
-        sessions_list = self._extract_sessions_list(result)
-        if not sessions_list:
-            return 0
-
-        expired_count = 0
-        current_time = datetime.now(UTC)
-
-        for session_obj in sessions_list:
-            if not isinstance(session_obj, dict):
-                continue
-
-            expires_at_str = session_obj.get("expires_at")
-            if not isinstance(expires_at_str, str):
-                continue
-
-            try:
-                if self._is_session_expired(expires_at_str, current_time):
-                    self._mark_session_expired(session_obj.get("id"))
-                    expired_count += 1
-            except Exception:
-                pass
-
-        return expired_count
+        return self._extract_updated_count(result)
 
     def update_session_activity(self, session_id: str) -> bool:
         """Update last_activity and extend expires_at for a session.

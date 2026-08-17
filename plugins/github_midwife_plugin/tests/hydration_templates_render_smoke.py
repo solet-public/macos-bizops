@@ -372,10 +372,22 @@ def _missing_and_forbidden(
 # hooks.json's actual registrations, and those four are deliberately never
 # wired there -- see manifest_consistency_smoke.py's
 # AGENT_INVOKED_CLI_UTILITIES design note), so they need no entry here.
+#
+# rotation_due_notice.py (L4b, 2026-08-17) is the same filesystem-presence
+# shape as capture.py/session_context.py, one step further out: its
+# precondition is neither an env var nor a directory but the PRESENCE OF A
+# MARKER FILE for this session generation, and its source references
+# AGENT_SESSION_LABEL nowhere. It cannot be label-gated without inventing a
+# dependency it does not have -- the sibling that DOES read the label
+# (rotation_due_watch.py) is the one that composes the notification text; this
+# one only carries that already-written text to the session. Belongs here for
+# the reason the bucket exists (it no-ops cleanly in an unlabeled user-scope
+# install), not as an exemption from the opposite branch.
 _LABEL_INDEPENDENT_HOOKS = frozenset(
     {
         "git_controller_gate.py", "check_messages_reminder.py", "wake_waiter.py",
         "heartbeat_report_alive.py", "capture.py", "session_context.py",
+        "rotation_due_notice.py",
     },
 )
 _PLUGIN_HOOKS_DIR = (

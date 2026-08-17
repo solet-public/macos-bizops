@@ -7,13 +7,21 @@
 # parent, which would otherwise be unfileable with blank issues disabled.
 blank_issues_enabled: false
 
+# The "Design proposal (RFC-shaped) — send a pull request, not an issue"
+# contact link was REMOVED 2026-08-15 (operator ruling, "open source, closed
+# contribution"). It was an active instruction to do the one thing the project
+# cannot absorb: someone following it did real work that then had to be
+# declined. CONTRIBUTING.md now states plainly that pull requests, patches and
+# design proposals are all not accepted, and why — merging unreviewed code into
+# a seed that provisions a database, writes keychain credentials, installs a
+# background service and edits the shell would make this repository a
+# supply-chain path into every downstream install.
 contact_links:
-  - name: Design proposal (RFC-shaped) — send a pull request, not an issue
-    url: https://github.com/solet-public/macos-bizops/blob/main/plugins/github_midwife_plugin/knowledge_base/07_upstream_feedback_runbook.md
+  - name: Reporting a security vulnerability — do not open an issue
+    url: https://github.com/solet-public/macos-bizops/security/policy
     about: >-
-      A worked-through design with alternatives considered and a recommendation
-      is a document, not a form field. Write it under workbench/ in your clone
-      and open a pull request carrying it. Your local copy of the upstream
-      feedback runbook has the branch naming and the full procedure. If you are
-      unsure whether you have a design offer or a feature request, file the
-      feature request form — a maintainer can ask you to promote it.
+      A public issue discloses the problem to everyone before there is a fix,
+      including to the people running this software on their own machines. Use
+      the Report a vulnerability button on the Security tab, or email
+      info@solet.ai. The full policy, including what to include and what is in
+      scope, is in .github/SECURITY.md in your own clone.

@@ -1,8 +1,20 @@
 # Grow a solet from seed
 
-This repository is a **clean, public-safe solet seed**: a fresh
-source tree with no operator identity, no credentials, and no git history. It
-mints a new *solet* — a named agentic instance — on your own machine.
+A **solet** is a named, persistent agentic service that runs in the background
+on your own machine. It has its own PostgreSQL schema, its own memories and
+knowledge bases, and its own plugins. Once it is installed you reach it from any
+directory through a command named after it, and the coding agent you work with
+asks it before starting a task instead of re-deriving what it already knows.
+
+This repository is a **clean, public-safe seed** for growing one: a fresh source
+tree with no operator identity, no credentials, and no git history. It mints a
+new solet on your own machine.
+
+What a given seed is *provisioned for* is decided by the plugin bundle it was
+minted with — a seed can be a minimal general-purpose solet, or one carrying
+business-system connectors and developer tooling. The plugins in this particular
+seed are exactly the directories under `plugins/`, and the bundle it was minted
+from is recorded as `bundle_name` in `PROVENANCE.json`.
 
 The seed itself carries **no secrets**. Credentials are provisioned locally at
 genesis time (macOS Keychain + PostgreSQL) in your own terminal — never embedded
@@ -17,6 +29,14 @@ Clone this repository to your machine, then work from inside it:
 git clone <this-repo-url> {{SOLET_NAME}}
 cd {{SOLET_NAME}}
 ```
+
+Both of those are placeholders, not literals. `<this-repo-url>` is the URL you
+are cloning from — the "Code" button on this page. `{{SOLET_NAME}}` is the name
+you pick for your solet in Genesis step 1 below; choose it now and use the same
+value everywhere. The double braces are deliberate and are left unrendered in
+the published seed, because a name is filled in when a solet is born, not when
+the seed is minted. Step 1 writes the same value as `<name>` in prose; the shell
+snippets write it as `{{SOLET_NAME}}`.
 
 Every command below runs from inside that clone. (If you received this seed as a
 plain local folder rather than a GitHub repository, just `cd` into it — there is
@@ -46,7 +66,8 @@ change tiers. If a maintainer explicitly tells you to override the selected
 profile, set `SOLET_PROFILE=<profile-template>` before bootstrap.
 
 1. **Agree a name** for the new solet with the user. It must be lowercase
-   and match `[a-z][a-z0-9_-]{1,62}` — call it `<name>` below.
+   and match `[a-z][a-z0-9_-]{1,62}` — called `<name>` in the prose below and
+   `{{SOLET_NAME}}` in the shell snippets. Same value, two spellings.
 2. **Export the name** so the bootstrap chain can consume it:
 
    ```
@@ -186,6 +207,8 @@ between raw `.zshrc` implementation details up front.
 
 ## License
 
+Copyright (c) 2026 Run Agent Orchestration Corporation
+
 The free solet seed and bundled open-core components in this repository are
 licensed under the Apache License, Version 2.0. See `LICENSE` and `NOTICE`.
 
@@ -196,6 +219,13 @@ Apache-2.0 license.
 Premium plugins, hosted-service features, and commercial add-ons are licensed
 separately and are not included in this free seed unless expressly stated.
 
-This is a **publish / reference-only** seed. It does not accept contributions,
-pull requests, or issues — fork it and grow your own solet instead. Seed
-updates are published as new sealed commits. See `CONTRIBUTING.md`.
+**Bug reports are welcome and wanted; code contributions are not accepted.**
+File defects, questions and feature requests through the repository's issue
+forms — a report with the version, the command and the actual output is worth
+more to us than a patch. Pull requests, patches and design proposals are not
+accepted: merging code we cannot review to that standard would make this
+repository a supply-chain path into every downstream install. Apache-2.0
+already grants you the right to fork and change it, so you do not need us to
+merge anything. Seed updates are published as new sealed commits. See
+`CONTRIBUTING.md`, and `.github/SECURITY.md` for vulnerabilities — those go to
+a private channel, never a public issue.

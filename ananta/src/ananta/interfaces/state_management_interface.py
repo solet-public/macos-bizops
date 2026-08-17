@@ -72,9 +72,20 @@ class StateTransaction(ABC):
     def query_state(
         self, namespace: str, filters: dict[str, object]
     ) -> list[dict[str, object]]:
-        """Non-locking SELECT within the txn. ``filters = {table, filters}``.
+        """Non-locking SELECT within the txn, ROW-BOUNDED.
 
-        Returns the rows. Raises on failure.
+        ``filters = {table, filters, limit?, unbounded?}``. Returns the rows.
+        Raises on failure (→ the surrounding context manager rolls back).
+
+        NOT deprecated, unlike the autocommit ``query_state`` alias: this
+        interface exposes no ``read_state``, so within a transaction this is the
+        only row-returning read primitive and has no bounded alternative to
+        defer to. It therefore carries the bound itself — same
+        ``MAX_READ_ROWS`` policy as the autocommit ``read_state`` (see
+        ``ananta.services.state_service.read_bounds``): an explicit ``limit`` is
+        honoured, over the cap without ``unbounded=True`` is refused before any
+        SQL runs, and with no limit an over-cap result raises ``ReadBoundError``
+        rather than returning a silent prefix.
         """
         ...
 
@@ -296,7 +307,16 @@ class StateManagementInterface(ABC):
     def delete_records(self, namespace: str, query: dict[str, object]) -> ActionResult: ...
 
     @abstractmethod
-    def query_state(self, namespace: str, filters: dict[str, object]) -> ActionResult: ...
+    def query_state(self, namespace: str, filters: dict[str, object]) -> ActionResult:
+        """DEPRECATED alias for :meth:`read_state` — prefer ``read_state``.
+
+        ``filters`` is the whole ``{table, filters, limit?, unbounded?}`` query
+        envelope, forwarded unchanged to ``read_state``; ``limit`` and
+        ``unbounded`` are honoured, and the ``MAX_READ_ROWS`` bound applies.
+        Use :meth:`read_state` for a complete filtered set, or
+        :meth:`query_ordered` for a page.
+        """
+        ...
 
     @abstractmethod
     def query_ordered(self, namespace: str, data: dict[str, object]) -> ActionResult:

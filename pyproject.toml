@@ -113,7 +113,7 @@ venv = ".venv"
 # Allow plugins to resolve ananta.* imports
 extraPaths = ["ananta/src"]
 
-include = ["ananta/src", "plugins", "initialization/src"]
+include = ["ananta/src", "plugins", "initialization/src", "quality_gates"]
 exclude = [
     "**/tests",
     # RULING (reviewing seat, 2026-08-08):

@@ -45,6 +45,7 @@ from ananta.services.state_service.ordered_query import (
     apply_ordered_query_in_memory,
     parse_ordered_query,
 )
+from ananta.services.state_service.read_bounds import MAX_READ_ROWS
 
 # The columns the state-plugin standardizer auto-adds to EVERY table (id + the
 # external_id UNIQUE key + namespace + audit/timestamps + soft-delete). A write may
@@ -105,8 +106,21 @@ def _ok(data: dict[str, Any]) -> dict[str, Any]:
     return {"action_status": "completed", "data": data}
 
 
-def _err(message: str) -> dict[str, Any]:
-    return {"action_status": "failed", "error": {"message": message}, "data": {}}
+def _err(
+    message: str,
+    *,
+    code: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """A provider-ERROR envelope. ``code``/``details`` are optional so existing
+    callers are unchanged; the bound refusal carries them because a consumer that
+    branches on the code (rather than on the message text) needs them present."""
+    error: dict[str, Any] = {"message": message}
+    if code is not None:
+        error["code"] = code
+    if details is not None:
+        error["details"] = details
+    return {"action_status": "failed", "error": error, "data": {}}
 
 
 
@@ -362,3 +376,47 @@ class RealShapeState:
     # -- assertion helper --------------------------------------------
     def rows(self, namespace: str, table: str) -> list[dict[str, Any]]:
         return self._table(namespace, table)
+
+
+class CapEnforcingState:
+    """``RealShapeState`` plus the provider's row-bound REFUSAL on ``query_state``.
+
+    OPT-IN wrapper, deliberately not folded into ``RealShapeState`` itself: every
+    existing smoke keeps its current behaviour, and only a smoke that cares about
+    the bound pays for modelling it.
+
+    Why it exists. ``RealShapeState.query_state`` answers an unbounded read with
+    the whole table, at any size. That makes it blind to the defect class behind
+    the 2026-08-15 boot failure: the default read bound is 100
+    (``read_bounds.MAX_READ_ROWS``), and a whole-table read past it is REFUSED
+    outright rather than served. A smoke on the bare fake therefore stays green
+    against code that cannot run in production at all — which is exactly what
+    happened to the role_class backfill's smoke while the bridge would not start.
+
+    Wrap the fake in this when the code under test reads a table that can exceed
+    the bound, and the smoke will fail the way production does, with the same
+    ``query.unbounded_read_over_cap`` code. ``MAX_READ_ROWS`` is imported rather
+    than retyped so the model cannot drift from the bound it models.
+    """
+
+    def __init__(self, inner: RealShapeState) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def query_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+        result = self._inner.query_state(namespace, query)
+        if query.get("limit") is not None or query.get("unbounded"):
+            return result
+        records = result.get("data", {}).get("records", [])
+        if len(records) <= MAX_READ_ROWS:
+            return result
+        table = str(query.get("table", ""))
+        return _err(
+            f"read_state on table {table!r} returned more than the "
+            f"{MAX_READ_ROWS}-row cap for a query with no explicit 'limit'. "
+            f"Refused rather than truncated.",
+            code="query.unbounded_read_over_cap",
+            details={"namespace": namespace, "table": table, "cap_rows": MAX_READ_ROWS},
+        )

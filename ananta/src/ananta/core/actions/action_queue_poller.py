@@ -46,6 +46,12 @@ from ananta.constants import (
     TEMPLATE_VAR_RESULT,
     TEMPLATE_VAR_SESSION_ID,
 )
+from ananta.core.actions.action_path_liveness import ACTION_PATH_LIVENESS
+from ananta.core.actions.orphan_reaper import reap_orphaned_processing_actions
+from ananta.core.actions.payload_bounds import (
+    OversizedActionPayloadError,
+    check_claimed_parameters_size,
+)
 from ananta.core.contexts.normalization import normalize_flow_id, normalize_session_id
 from ananta.core.domain.enums import JobStatus
 from ananta.core.domain.types import ActionResult
@@ -118,6 +124,12 @@ _PENDING_JOB_STATES: frozenset[JobStatus] = frozenset(
 # a full read could never fill a batch and the tripwire would false-fire each poll.
 _DISPATCH_READ_CAP = 100
 
+# How often the D8 orphan reap runs, in poll cycles. At the default 1 s poll
+# interval this is roughly every five minutes — far more often than the
+# one-hour orphan threshold needs, and rare enough that the extra query is
+# invisible against dispatch traffic.
+_ORPHAN_REAP_EVERY_N_CYCLES = 300
+
 # REL-03 swap-window guard. The two VERTEX result/error-PROCESSING process
 # keys — the ONLY action class that produced the mid-cutover
 # ``Empty source_namespace`` traceback burst (each of a flow's already-queued
@@ -138,6 +150,17 @@ _RESULT_ERROR_PROCESSING_KEYS: Final[frozenset[str]] = frozenset(
 # a stale entry can only ever match a genuinely-terminated flow — the cap
 # bounds memory without a TTL. Mirrors the deferred-vertex LRU cap style.
 _TERMINATED_FLOW_TOMBSTONE_CAP: Final[int] = 2048
+
+# The three spellings a completed read envelope arrives in (enum, str(enum),
+# enum value) — the state interface is not consistent about which it returns.
+# Shared by ``_query_records`` and the double-execution detector so the two
+# cannot drift: a detector that mis-reads the envelope status would go blind
+# exactly when the read seam changed.
+_COMPLETED_READ_STATUSES: Final[tuple[object, ...]] = (
+    ActionStatus.COMPLETED,
+    str(ActionStatus.COMPLETED),
+    ActionStatus.COMPLETED.value,
+)
 
 
 @dataclass
@@ -377,7 +400,16 @@ class ActionQueuePoller:
 
         # Metrics
         self.total_actions_processed = 0
+        # Rows seen ``queued`` on the most recent fetch — half of the D5
+        # stall conjunction (the other half is poll age). See
+        # ananta.core.actions.action_path_liveness.
+        self._last_observed_queue_depth = 0
         self.total_poll_cycles = 0
+        # Double executions of a SINGLE action row, detected on the success
+        # path by ``_report_double_execution``. Process-local like the counters
+        # above (reset on restart) — the durable half of the signal is the
+        # WARNING log line, which carries the action_id and both timestamps.
+        self.total_double_executions_detected = 0
         self.last_poll_time: datetime | None = None
 
     def _cleanup_pending_attachments(self, flow_id: str) -> None:
@@ -852,6 +884,7 @@ class ActionQueuePoller:
                     await self._poll_once()
                     self.total_poll_cycles += 1
                     self.last_poll_time = datetime.now(UTC)
+                    self._maybe_reap_orphans()
 
             except Exception as e:
                 logger.error(f"Error in polling cycle: {e}", exc_info=True)
@@ -866,6 +899,11 @@ class ActionQueuePoller:
         queued_actions = await self._get_queued_actions()
 
         if not queued_actions:
+            # D5: stamp the heartbeat on an EMPTY cycle too. If only productive
+            # cycles refreshed it, a quiet platform would be indistinguishable
+            # from a frozen one and the liveness signal would reproduce the
+            # exact ambiguity it exists to remove.
+            ACTION_PATH_LIVENESS.record_poll_cycle(queue_depth=0, dispatched=0)
             return
 
         # CRITICAL: Mark ALL actions as 'processing' IMMEDIATELY after query
@@ -874,10 +912,12 @@ class ActionQueuePoller:
             self._mark_action_processing(action.id)
 
         # Process each action (now safely claimed)
+        dispatched = 0
         for action in queued_actions:
             try:
                 await self._process_action(action)
                 self.total_actions_processed += 1
+                dispatched += 1
 
             except Exception as e:
                 logger.error(f"Failed to process action {action.id}: {e}", exc_info=True)
@@ -886,6 +926,35 @@ class ActionQueuePoller:
                 self._mark_action_failed(
                     action.id, str(e), error_detail=_typed_error_detail(e),
                 )
+
+        # Stamped only after the drain loop returns. That placement is the
+        # signal: a handler that holds the GIL (the 2026-08-15 failure mode)
+        # never lets this line run, so the age grows and the stall becomes
+        # visible from the still-serving HTTP surface.
+        ACTION_PATH_LIVENESS.record_poll_cycle(
+            queue_depth=self._last_observed_queue_depth,
+            dispatched=dispatched,
+        )
+
+    def _maybe_reap_orphans(self) -> None:
+        """Run the D8 orphan reap occasionally, never on every cycle.
+
+        Gated on a cycle count rather than run inline because the reap issues
+        its own query and the poll loop is serial — a per-cycle reap would add
+        a database round trip to the platform's hottest loop for work that only
+        matters on the timescale of hours.
+
+        Failures are swallowed with a log: an orphan reap is maintenance, and
+        it must never be able to take down the dispatch loop that carries every
+        session's work. This is the one place where continuing past an error is
+        clearly right.
+        """
+        if self.total_poll_cycles % _ORPHAN_REAP_EVERY_N_CYCLES != 0:
+            return
+        try:
+            reap_orphaned_processing_actions(self.state_service)
+        except Exception as exc:  # noqa: BLE001 — maintenance must not stop dispatch
+            logger.error("Orphan reap pass failed: %s", exc, exc_info=True)
 
     def _requires_main_thread(self, process_key: str) -> bool:
         """
@@ -988,6 +1057,10 @@ class ActionQueuePoller:
                 },
             )
             rows = self._query_records(result)
+            # Queue depth for the D5 liveness signal. Free — the poller has to
+            # read these rows to do its own work, so publishing the count costs
+            # nothing and needs no extra query on the health path.
+            self._last_observed_queue_depth = len(rows)
             claimable = [
                 row
                 for row in rows
@@ -1003,7 +1076,24 @@ class ActionQueuePoller:
                 namespace = (
                     namespaces.get(session_id) if isinstance(session_id, str) else None
                 )
-                actions.append(self._build_queued_action(row, namespace))
+                try:
+                    actions.append(self._build_queued_action(row, namespace))
+                except OversizedActionPayloadError as exc:
+                    # Fail ONLY the oversized row and keep the rest of the
+                    # batch. D12 in INCIDENT.md: the poller claims in batches,
+                    # and when one oversized action wedged its batch the five
+                    # innocent small actions beside it were stranded in
+                    # ``processing`` with no retry path. Letting this propagate
+                    # would reproduce that — worse, the caller's except-all
+                    # below would return an EMPTY batch and stall dispatch
+                    # entirely for as long as the row sits at the queue head.
+                    logger.error(
+                        "OVERSIZED_ACTION_PAYLOAD: failing action %s (%s) — %s",
+                        exc.action_id,
+                        row.get("process_key"),
+                        exc,
+                    )
+                    self._mark_action_failed(exc.action_id, str(exc))
             return actions
 
         except Exception as e:
@@ -1117,10 +1207,24 @@ class ActionQueuePoller:
         former ``LEFT JOIN`` column), supplied by the caller.
         """
         parameters = row.get("parameters")
+        raw_parameters = cast("str", parameters) if parameters else "{}"
+        # Bound the payload BEFORE anything parses it. ``parameters`` is a
+        # ColumnType.TEXT column, so psycopg hands back a plain ``str`` with no
+        # driver-side parse — ``len()`` here is O(1) and is the last point on
+        # the dispatch path that is still upstream of every ``json.loads`` of
+        # this string (_resolve_attachments, _prepare_action_parameters, and
+        # the executor all parse it downstream of this call). A guard placed at
+        # any of those sites would run after the two-hour GIL-held parse that
+        # caused the 2026-08-15 outage.
+        check_claimed_parameters_size(
+            raw_parameters,
+            action_id=cast("str", row.get("id")),
+            process_key=cast("str", row.get("process_key")),
+        )
         return QueuedAction(
             id=cast("str", row.get("id")),
             process_key=cast("str", row.get("process_key")),
-            parameters=cast("str", parameters) if parameters else "{}",
+            parameters=raw_parameters,
             notes=self._truncate_notes(row.get("notes")),
             created_at=str(row.get("sequence")),
             session_id=cast("str | None", row.get("core__sessions_id")),
@@ -1505,12 +1609,139 @@ class ActionQueuePoller:
         )
 
     def _update_action_status_to_completed(self, action_id: str) -> None:
-        """Update action status to completed in database (tolerate zero-affected)."""
+        """Complete the action AND clear any ``error_message`` a prior attempt left.
+
+        This writer used to set ``status`` alone, while its failure counterpart
+        ``_update_action_status_to_failed`` sets ``status`` *and*
+        ``error_message``. That asymmetry is the whole of adopter issue #9:
+        ``error_message`` is one mutable column on the ``action_events`` row,
+        but ``result`` is the LATEST of many ``action_results`` rows for the
+        same action. When one action row executes twice — attempt 1 fails and
+        stamps the column, attempt 2 succeeds and appends a result row — the
+        envelope reader (``PlatformSurface.process_result``) pairs attempt 1's
+        error with attempt 2's success. Both halves are real; they are from
+        different executions.
+
+        Clearing the column fixes the envelope. Clearing it SILENTLY would be
+        worse than the bug: the stale column is currently the only surviving
+        evidence that an action executed twice at all, so a bare clear would
+        close the symptom and delete the instrument. Hence the split below —
+        clear the field, and treat having had something to clear as a detected
+        double execution worth announcing.
+
+        The status write stays faithful (``WHERE id =``) and zero-affected
+        stays tolerated: a status write that misses a deleted/cancelled row
+        must never raise inside the drain loop.
+        """
+        stale_error = self._read_stale_error_message(action_id)
         self.state_service.update_state(
             namespace="core",
             query={"table": "action_events", "filters": {"id": action_id}},
-            updates={"status": ActionStatus.COMPLETED.value},
+            updates={
+                "status": ActionStatus.COMPLETED.value,
+                # Explicit NULL, not an omission: the column is the merge
+                # surface, so leaving it alone is what produced #9.
+                "error_message": None,
+            },
         )
+        if stale_error is not None:
+            self._report_double_execution(action_id, stale_error)
+
+    def _read_stale_error_message(self, action_id: str) -> str | None:
+        """The action row's current ``error_message``, or ``None`` if it has none.
+
+        Read immediately BEFORE the success write, because the write destroys
+        it. A non-empty value here cannot have come from this execution — the
+        dispatch branch is a strict ``if is_success: mark_completed else:
+        mark_failed``, so one execution never travels both paths. It therefore
+        means an EARLIER attempt at this same action row already failed.
+
+        A read that does not come back is a blind spot for the detector, not a
+        reason to fail the completion: it is announced (below) rather than
+        swallowed, so a detector that has gone deaf is visible as such instead
+        of looking like a quiet, race-free platform.
+        """
+        read = self.state_service.query_state(
+            "core",
+            {"table": "action_events", "filters": {"id": action_id}},
+        )
+        if read.get("action_status") not in _COMPLETED_READ_STATUSES:
+            logger.warning(
+                "DOUBLE-EXECUTION DETECTOR BLIND: could not read action_events "
+                "for %s before clearing error_message (read envelope status=%r); "
+                "a stale error on this row would be cleared unannounced.",
+                action_id,
+                read.get("action_status"),
+            )
+            return None
+        record = self._first_record(read)
+        if record is None:
+            # Routine: the row was deleted or cancelled between claim and
+            # completion. Zero-affected is already tolerated by the write.
+            return None
+        value = self._opt_str(record, "error_message")
+        if value is None or not value.strip():
+            return None
+        return value
+
+    def _report_double_execution(self, action_id: str, stale_error: str) -> None:
+        """Announce that one action row was executed more than once.
+
+        Called only when the success path found a non-empty ``error_message``
+        to clear. That is evidence, not housekeeping — the two attempts leave
+        no per-process provenance in the rows, so this log line is currently
+        the only place the race is observable at all. It carries the action_id
+        and both timestamps so the gap between the attempts can be measured
+        without re-deriving it from the tables.
+
+        Deliberately WARNING, not DEBUG: the poller logs its successes at
+        DEBUG, and a signal that only appears when debug logging happens to be
+        on is not an instrument.
+        """
+        self.total_double_executions_detected += 1
+        previous_at, previous_rows = self._previous_result_row_summary(action_id)
+        logger.warning(
+            "DOUBLE-EXECUTION DETECTED: action %s completed, but an earlier "
+            "attempt at the SAME action row had already failed and stamped "
+            "error_message. Clearing the stale error. "
+            "previous_attempt_result_at=%s this_completion_at=%s "
+            "previous_result_rows=%d detections_this_process=%d "
+            "cleared_error_message=%r",
+            action_id,
+            previous_at if previous_at is not None else "unknown",
+            datetime.now(UTC).isoformat(),
+            previous_rows,
+            self.total_double_executions_detected,
+            stale_error,
+        )
+
+    def _previous_result_row_summary(self, action_id: str) -> tuple[str | None, int]:
+        """``(created_at of the newest result row so far, how many exist)``.
+
+        Read on the detection path only. ``_mark_action_completed`` stores THIS
+        execution's result row after the status write, so every row visible
+        here belongs to an earlier execution — the newest of them is when the
+        attempt that stamped ``error_message`` recorded its outcome.
+
+        Returns ``(None, 0)`` when the earlier attempt recorded no result row
+        at all. That combination is itself informative: it is the signature of
+        the adjacent defect where a second execution flips an already-failed
+        action to ``completed`` and takes the early return before storing
+        anything. Reporting it honestly beats inventing a timestamp.
+        """
+        read = self.state_service.query_state(
+            "core",
+            {"table": "action_results", "filters": {"core__action_events_id": action_id}},
+        )
+        records = self._query_records(read)
+        if not records:
+            return None, 0
+        newest = max(records, key=lambda r: str(r.get("created_at") or ""))
+        created_at = newest.get("created_at")
+        # Stringify rather than type-guard: providers serialise this column as
+        # an ISO string, but a datetime here must still reach the log line —
+        # dropping it would report "unknown" for a timestamp we actually have.
+        return (None if created_at is None else str(created_at)), len(records)
 
     def _retrieve_action_details(
         self,
@@ -2658,15 +2889,73 @@ class ActionQueuePoller:
         return not has_io_source and not has_vertex_binding
 
     def _get_flow_error_count(self, flow_id: str) -> int:
-        """Count failed actions in this flow via the state interface."""
-        result = self.state_service.query_state(
+        """Count failed actions in this flow — a scalar aggregate, no rows.
+
+        THE READ IS GONE, not bounded (2026-08-15 PDT / 2026-08-16 UTC). This
+        used to fetch every failed action row and return ``len(records)``, and
+        the number it feeds is a CIRCUIT BREAKER: the caller terminates the flow
+        once the count reaches ``_max_flow_errors`` (3).
+
+        That made the old shape worse than the sibling defect in
+        ``FlowRuntimeGraph.get_pending_token_count``, which at least failed
+        loudly. Here ``_query_records`` graceful-degrades a refused read to
+        ``[]`` — deliberately, so the poll loop keeps draining — so once the
+        default row bound dropped to 100 this returned **0 errors for a flow with
+        thousands**, ``0 >= 3`` was False, and **the breaker silently stopped
+        firing.** Measured on the live trace: ``flow-ledger-periodic-poll`` had
+        **2,902** failed actions, 29x the cap, against a threshold of 3.
+
+        It is also the third site in one night whose bound fails exactly when it
+        is needed: this one is only ever consulted on the failure path, so the
+        read that was too big to complete was one taken *because the flow was
+        already going wrong*.
+
+        ``count`` runs the aggregate inside the owner plugin and ships a scalar,
+        so it is outside the row cap entirely and cannot regress at any table
+        size. Filters are unchanged, and ``count`` applies no automatic
+        ``is_deleted`` exclusion — neither did the ``query_state`` it replaces.
+        """
+        result = self.state_service.count(
             "core",
             {
                 "table": "action_events",
                 "filters": {"flow_id_trace": flow_id, "status": ActionStatus.FAILED.value},
             },
         )
-        return len(self._query_records(result))
+        value = self._query_scalar(result)
+        if value is None:
+            # FAIL OPEN, LOUDLY. Returning 0 here means "do not terminate", which
+            # is the safe direction for a TRANSIENT read miss — a blip must not
+            # kill a healthy flow, and the poll loop must keep draining. But the
+            # silence is what let this defect run: an unreadable breaker input is
+            # now an ERROR in the log naming the flow, so "the breaker is not
+            # firing" can be distinguished from "there is nothing to fire on".
+            logger.error(
+                "ERROR-ROUTING: could not read the failed-action count for flow "
+                "%s — the max-flow-errors breaker CANNOT FIRE this pass and the "
+                "flow continues. Envelope: %r",
+                flow_id,
+                result,
+            )
+            return 0
+        return value
+
+    def _query_scalar(self, count_result: ActionResult) -> int | None:
+        """Return the integer from a ``count`` envelope, or ``None`` if unusable.
+
+        The scalar is NESTED at ``data.result.value``; reading ``data.value``
+        would yield ``None`` on a perfectly healthy response. ``None`` is
+        returned rather than 0 so the caller must decide what an unknown count
+        means — 0 and "unknown" are the same value here and opposite facts.
+        """
+        if count_result.get("action_status") not in _COMPLETED_READ_STATUSES:
+            return None
+        data = count_result.get("data")
+        inner = data.get("result") if isinstance(data, dict) else None
+        value = inner.get("value") if isinstance(inner, dict) else None
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+        return value
 
     def _record_tool_use(
         self,
@@ -3058,11 +3347,7 @@ class ActionQueuePoller:
         semantics of the legacy ``execute_sql`` helpers this replaced. The state
         interface returns records as a list of dicts (``SELECT *``).
         """
-        if query_result.get("action_status") not in (
-            ActionStatus.COMPLETED,
-            str(ActionStatus.COMPLETED),
-            ActionStatus.COMPLETED.value,
-        ):
+        if query_result.get("action_status") not in _COMPLETED_READ_STATUSES:
             return []
 
         data = query_result.get("data", {})
@@ -3364,6 +3649,11 @@ class ActionQueuePoller:
             "running": self.running,
             "total_actions_processed": self.total_actions_processed,
             "total_poll_cycles": self.total_poll_cycles,
+            # Non-zero means one action row executed more than once while this
+            # process was up (adopter issue #9's upstream cause). Every increment
+            # has a matching DOUBLE-EXECUTION DETECTED warning carrying the
+            # action_id and both timestamps.
+            "total_double_executions_detected": self.total_double_executions_detected,
             "last_poll_time": self.last_poll_time.isoformat() if self.last_poll_time else None,
             "poll_interval": self.poll_interval,
             "max_actions_per_poll": self.max_actions_per_poll,

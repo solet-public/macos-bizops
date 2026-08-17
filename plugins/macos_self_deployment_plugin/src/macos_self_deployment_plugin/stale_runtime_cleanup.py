@@ -79,9 +79,28 @@ def restore_router_owned_bridge_port_file_if_router_live(solet_name: str) -> boo
     router_port = _read_port_file(router_port_file)
     if router_port is None:
         return False
-    if not router_socket.exists():
-        return False
-    if _router_mgmt_status(router_socket) is None:
+    # The mgmt probe is the SINGLE authority for router liveness here; it
+    # replaced a preceding `router_socket.exists()` stat that could not change
+    # the outcome in either direction (the probe connects BY PATH, so it fails
+    # for an absent path exactly as the stat did). This is a diagnosis change,
+    # NOT a fix: the two states below were already handled correctly and
+    # indistinguishably, and now they are logged apart. Contrast
+    # `plugin._wait_for_router_socket`, where the equivalent stat WAS
+    # load-bearing and wrong — see the mgmt socket ownership contract article.
+    if router_mgmt_status(router_socket) is None:
+        if router_socket.exists():
+            logger.debug(
+                "Router mgmt socket present at %s but nothing answered; "
+                "treating the router as down (stale socket file).",
+                router_socket,
+            )
+        else:
+            logger.debug(
+                "No router mgmt socket at %s; treating the router as down. "
+                "NOTE: a live router holding an UNLINKED socket is "
+                "indistinguishable from this by any path-based check.",
+                router_socket,
+            )
         return False
     bridge_port_file.write_text(str(router_port), encoding="utf-8")
     bridge_port_file.chmod(0o600)
@@ -109,7 +128,7 @@ def _read_port_file(path: Path) -> int | None:
     return port if 0 < port < _PORT_CEILING else None
 
 
-def _router_mgmt_status(socket_path: Path) -> dict[str, object] | None:
+def router_mgmt_status(socket_path: Path) -> dict[str, object] | None:
     """Probe the router's mgmt socket for liveness; return its status payload.
 
     Speaks the router's verb-dispatch protocol (``{"verb": "status",

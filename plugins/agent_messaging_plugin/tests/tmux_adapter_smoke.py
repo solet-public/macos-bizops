@@ -487,6 +487,59 @@ def test_spawn_command_and_env_wiring() -> None:
         )
 
 
+def test_spawn_local_name_drives_label_session_name_and_claude_name() -> None:
+    """W6 (#13 §44.3): a local_name replaces lane_id as the worker's label,
+    and reaches all three places that matter — the tmux session name, the
+    AGENT_SESSION_LABEL env var, and (Z-Q4 ruling) claude's own --name, which
+    is what populates the file the Git-Controller mutation guard reads."""
+    calls: list[list[str]] = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
+        host_ref = driver.spawn(
+            {
+                "agent_instance_id": "agi-abc123ef", "lane_id": "lane-x",
+                "local_name": "Git-Controller",
+            },
+        )
+        _check(
+            host_ref == "fleet-Git-Controller-abc123ef",
+            f"the tmux session name derives from local_name, not lane_id (got {host_ref!r})",
+        )
+        cmd = next(c for c in calls if "new-session" in c)
+        _check(
+            "AGENT_SESSION_LABEL=Git-Controller" in " ".join(cmd),
+            "AGENT_SESSION_LABEL carries the local_name",
+        )
+        pane_command = cmd[-1]
+        _check(
+            "--name Git-Controller" in pane_command.replace("'", ""),
+            f"claude is launched with --name <local_name> -- without this the "
+            f"guard reads an auto-derived name and blocks (got {pane_command!r})",
+        )
+
+
+def test_spawn_without_local_name_keeps_lane_id_behaviour() -> None:
+    """The compatibility half: a caller that sends no local_name gets exactly
+    the previous behaviour, so no existing lane's naming changes."""
+    calls: list[list[str]] = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
+        host_ref = driver.spawn(
+            {"agent_instance_id": "agi-abc123ef", "lane_id": "lane-x"},
+        )
+        _check(
+            host_ref == "fleet-lane-x-abc123ef",
+            f"no local_name -> the session name still derives from lane_id (got {host_ref!r})",
+        )
+        pane_command = next(c for c in calls if "new-session" in c)[-1]
+        _check(
+            "--name lane-x" in pane_command.replace("'", ""),
+            "and --name falls back to the lane_id label",
+        )
+
+
 def test_spawn_threads_allowed_tools_into_env() -> None:
     calls: list[list[str]] = []
 
@@ -1399,6 +1452,8 @@ def main() -> int:
     test_spawn_refuses_when_unconfigured()
     test_spawn_refuses_without_agent_instance_id()
     test_spawn_command_and_env_wiring()
+    test_spawn_local_name_drives_label_session_name_and_claude_name()
+    test_spawn_without_local_name_keeps_lane_id_behaviour()
     test_spawn_threads_allowed_tools_into_env()
     test_spawn_transport_mcp_override_uses_real_mcp_config()
     test_spawn_transport_watch_uses_explicit_empty_mcp_config()

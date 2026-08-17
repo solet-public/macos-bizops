@@ -1,6 +1,6 @@
 ---
 name: feedback
-description: File a round of upstream feedback to the maintainers of the seed this solet was born from — defects, questions, feature requests, and closure confirmations as GitHub issues through the repository's issue forms, or an RFC-shaped design proposal as a pull request carrying a document. Runs the evidence discipline and the content gate before anything is published. Use on /feedback, and when the operator asks to report a bug, ask upstream a question, request a capability, or confirm a fix.
+description: File a round of upstream feedback to the maintainers of the seed this solet was born from — defects, questions, feature requests, closure confirmations, and RFC-shaped design proposals, every one of them as a GitHub issue through the repository's issue forms. The seed accepts bug reports and does not accept pull requests or patches. Runs the evidence discipline and the content gate before anything is published. Use on /feedback, and when the operator asks to report a bug, ask upstream a question, request a capability, propose a design, or confirm a fix.
 ---
 
 You are filing upstream feedback on the operator's behalf. The operator should
@@ -21,11 +21,21 @@ procedure, that article is the why:
 | What you have | What to file |
 |---|---|
 | A defect, a question, a feature request, or a closure confirmation | One GitHub issue per item, through the repository's issue form for that class |
-| A worked-through design with alternatives considered and a recommendation | A pull request carrying a document — not an issue |
+| A worked-through design with alternatives considered and a recommendation | A **feature-request issue carrying the design in its body** |
+| A security vulnerability | **Not an issue** — the private channel in `.github/SECURITY.md` |
 
-If you are unsure, file an issue. A maintainer can ask you to promote it. An
-implementation sketch that has outgrown an appendix is the signal that you have
-a design offer rather than a feature request.
+Everything goes through an issue. **Never open a pull request and never attach a
+patch**: this repository does not accept them, so one would sit unanswered while
+the same content in an issue gets a disposition. The reason is what a solet does
+to the machine that installs it — provisions a database, writes keychain
+credentials, installs a background service, edits the shell — which makes
+unreviewed merged code a supply-chain path into every downstream install. The
+description is the part the maintainers can act on, and it is wanted.
+
+If you are unsure, file an issue. An implementation sketch that has outgrown an
+appendix is the signal that you have a design offer rather than a feature
+request — same form either way, so this is a framing question, not a routing
+one.
 
 ## Step 2 — find the channel
 
@@ -122,9 +132,12 @@ For a **multi-item round**, file the round's parent issue first using the
 feedback-round form, then file each item and attach it to the parent as a
 sub-issue. A single-item round needs no parent — file the one issue.
 
-For a **design proposal**, write the document under `workbench/`, push it on a
-branch named `seed-feedback/<YYYY-MM-DD>-<this-solet-name>`, and open a pull
-request against the seed repository. The pull request is the delivery event.
+For a **design proposal**, use the feature-request form and put the design in
+its body — the outcome needed, the alternatives considered, the tradeoffs, the
+recommendation. Draft it under `workbench/` first if that helps you think, then
+paste it in. Do not push a branch and do not open a pull request: the
+maintainers cannot merge one. A design offer is accepted as information, not as
+a roadmap commitment.
 
 ## Step 8 — tell the operator what to expect
 

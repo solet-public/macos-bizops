@@ -631,12 +631,17 @@ ruling 2026-08-02, quoted in full in the ingestion disclosure section below).
 Consent is still required — ingestion reads the operator's own transcript
 files, so this step runs as an offer with an explicit yes, like everything
 else in this ladder. The setup procedures live with the session-source
-plugins themselves: follow
-`plugins/claude_code_filesystem_session_source_plugin/knowledge_base/hydration_guidance.md`
-for Claude Code transcripts and
-`plugins/codex_filesystem_session_source_plugin/knowledge_base/hydration_guidance.md`
-where the operator also uses Codex — cover EVERY coding agent the operator
-actually uses, not just the one driving this hydration.
+plugins themselves — one `hydration_guidance.md` inside each, at
+`plugins/*_filesystem_session_source_plugin/knowledge_base/hydration_guidance.md`:
+the Claude Code plugin for Claude Code transcripts, the Codex plugin where the
+operator also uses Codex. Cover EVERY coding agent the operator actually uses,
+not just the one driving this hydration.
+
+That path is written as a PATTERN rather than spelled out because **which
+session-source plugins your seed carries depends on its capability bundle** —
+this article is birth-spine and ships in every profile, while those plugins do
+not. List the directory to see which you have; a seed provisioned without any
+session source has no such file, and this whole step does not apply to it.
 
 Verify by retrieval, not by registration: after the initial backfill, a
 `session_ledger_service::search_event_content` query for a topic from a real

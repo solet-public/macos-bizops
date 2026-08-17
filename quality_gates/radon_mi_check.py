@@ -28,6 +28,8 @@ Exit codes:
   0 — every file ranks A or B
   2 — one or more files rank C (or worse)
   64 — usage error (bad arguments / non-existent paths)
+  70 — GATE CRASH: the analyser raised, so no verdict exists for the tree.
+       A crash is NOT a violation count; see `gate_scope.GateCrashError`.
 
 Output: one line per file `<path> - <rank> (<value>)`. Failing files are
 also summarized to stderr.
@@ -40,6 +42,11 @@ import ast
 import sys
 from pathlib import Path
 
+from gate_scope import (
+    GATE_CRASH_EXIT,
+    GateCrashError,
+    repo_python_files,
+)
 from radon.metrics import mi_rank, mi_visit
 
 
@@ -113,17 +120,30 @@ def _measure(path: Path, raw: bool) -> tuple[float, str] | None:
     except SyntaxError as exc:
         print(f"WARN: post-strip syntax error in {path}: {exc}", file=sys.stderr)
         return None
+    except Exception as exc:  # noqa: BLE001 — any analyser failure is a non-verdict
+        raise GateCrashError(path, f"{type(exc).__name__} in radon mi_visit: {exc}") from exc
     return mi, mi_rank(mi)
 
 
 def _expand_targets(raw_paths: list[str]) -> list[Path]:
+    """Resolve CLI path arguments to concrete `.py` files.
+
+    A DIRECTORY expands to its in-repo `.py` files only (tracked, or
+    untracked and not ignored). Measured
+    2026-08-16: a bare run over `plugins/cosyvoice2_tts_plugin` reached
+    18,321 files in `src/.venv_cosyvoice`, reported sympy's C-grade
+    functions as this repo's findings, and then crashed on one of them.
+
+    A file named EXPLICITLY is always scanned, in-repo or not — the caller
+    asked for that path by name, and a brand-new file is the normal case.
+    """
     out: list[Path] = []
     for raw in raw_paths:
         p = Path(raw)
         if not p.exists():
             continue
         if p.is_dir():
-            out.extend(sorted(p.rglob("*.py")))
+            out.extend(repo_python_files(p))
         elif p.suffix == ".py":
             out.append(p)
     return out
@@ -244,10 +264,15 @@ def main(argv: list[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    targets = _expand_targets(args.paths)
+    try:
+        targets = _expand_targets(args.paths)
+    except GateCrashError as crash:
+        print(f"GATE-CRASH: {crash}", file=sys.stderr)
+        return GATE_CRASH_EXIT
     if not targets:
         print("ERROR: no Python files to scan from given paths.", file=sys.stderr)
         return 64
+
 
     allowlist: frozenset[str] = frozenset()
     allowlist_active = args.allowlist is not None
@@ -258,7 +283,16 @@ def main(argv: list[str]) -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 64
 
-    failures = _measure_targets(targets, args.raw, allowlist)
+    try:
+        failures = _measure_targets(targets, args.raw, allowlist)
+    except GateCrashError as crash:
+        print(f"GATE-CRASH: {crash}", file=sys.stderr)
+        print(
+            "No verdict was produced. This is NOT a violation count: the "
+            "analyser aborted, so this run measured nothing about the tree.",
+            file=sys.stderr,
+        )
+        return GATE_CRASH_EXIT
     if not failures:
         print(f"\nOK: {len(targets)} file(s) scanned, 0 maintainability violations.")
         return 0

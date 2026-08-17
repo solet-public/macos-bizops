@@ -66,7 +66,14 @@ class _FakeState:
 
     def read_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
         del namespace, query
-        return {"data": {"records": [dict(r) for r in self._rows]}}
+        # `action_status` is part of the real read envelope and this fake's own
+        # `delete_records` below already returns it; the read half omitting it
+        # was an unfaithful fake, surfaced when memory_store began requiring a
+        # COMPLETED status so an error can never read as an empty result.
+        return {
+            "action_status": "completed",
+            "data": {"records": [dict(r) for r in self._rows]},
+        }
 
     def delete_records(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
         del namespace

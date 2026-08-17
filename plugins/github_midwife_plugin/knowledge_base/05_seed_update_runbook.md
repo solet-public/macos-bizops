@@ -8,7 +8,7 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born solet without losing its state — why a fast-forward git pull from the same seed repo is the default update path and teardown-plus-re-birth is only the fallback, the exact sequence (health probe, pull --ff-only, restart preferring apply_manifest's zero-downtime blue-green swap over a bare LaunchAgent restart when a router is present, startup quiescence wait, automatic knowledge-base re-ingest for changed files), when the virtual environment needs attention (editable installs make pulled code live at restart; only NEW plugins or changed dependencies need a pip step), configuring the business-connector export/workspace root on an already-hydrated install when a release adds or extends connector containment (the one-time gap an existing clone never closes on its own), re-running the changed hydration steps afterward — including adding a release-added plugin to the clone's profile manifest and running its hydration guidance so it actually activates — the four stale copies a restart alone never refreshes (the installed Claude Code plugin's version-keyed CACHE copy, an already-open MCP bridge subprocess, an armed watcher, and knowledge-base chunks indexed from files the release removed — a deletion-only KB change is invisible to the startup staleness check and needs an explicit knowledge-service re-install with a negative-search verification) with the verifiable diff-based refresh check for the plugin cache, the one-time `git remote set-url` re-point when the seed repository moves to a new home (taken after the pull, verified with a fetch, rolled back to the old URL if the new one is unreachable), and the verification checklist including the watcher role-claim ground truth.
+Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born solet without losing its state — why a fast-forward git pull from the same seed repo is the default update path and teardown-plus-re-birth is only the fallback, the exact sequence (health probe, pull --ff-only, restart preferring apply_manifest's zero-downtime blue-green swap over a bare LaunchAgent restart when a router is present, startup quiescence wait, automatic knowledge-base re-ingest for changed files), when the virtual environment needs attention (editable installs make pulled code live at restart; only NEW plugins or changed dependencies need a pip step), configuring the business-connector export/workspace root on an already-hydrated install when a release adds or extends connector containment (the one-time gap an existing clone never closes on its own), re-running the changed hydration steps afterward — including adding a release-added plugin to the clone's profile manifest and running its hydration guidance so it actually activates — the four stale copies a restart alone never refreshes (the installed Claude Code plugin's version-keyed CACHE copy, an already-open MCP bridge subprocess, an armed watcher, and knowledge-base chunks indexed from files the release removed — a deletion-only KB change is invisible to the startup staleness check and needs an explicit knowledge-service re-install with a negative-search verification) with the verifiable diff-based refresh check for the plugin cache, the one-time `git remote set-url` re-point when the seed repository moves to a new home (taken after the pull, verified with a fetch, rolled back to the old URL if the new one is unreachable), the solet rename migration's post-apply sequence (backfilling a pre-June LaunchAgent plist's missing StandardOutPath/StandardErrorPath log redirection as a stopgap versus re-running the autostart install verb as the durable fix, renaming the HOMUNCULUS_* environment keys inside `~/.claude.json`'s MCP server entries and why that step refuses outright while any Claude Code process is still running, and running `--scan-stale`'s report-only sweep for surviving old-name references split into historical/leave-alone, live-process-state/relaunch-to-fix, and fixable/safe-to-edit-directly categories with the memory-fact filename-plus-frontmatter-plus-backlink triple that a blind rename would break), and the verification checklist including the watcher role-claim ground truth.
 
 ## When to use this runbook
 
@@ -127,13 +127,17 @@ first, then apply:
 <clone>/.venv/bin/python3 <clone>/deployment/scripts/migrate_to_solet.py --apply
 ```
 
-The script boots out the affected LaunchAgents, rewrites their labels,
-filenames, environment keys, and arguments, flips the launcher shell
+The script boots out the affected LaunchAgents (with a bounded wait for the
+old label to actually clear `launchctl print` before bootstrapping — never
+an unbounded spin, fails loud if it doesn't clear in time), rewrites their
+labels, filenames, environment keys, and arguments, flips the launcher shell
 functions, reinstalls the messaging plugin so `<clone>/.venv/bin/solet`
 replaces the old console script (the old shim is removed, not aliased), and
 bootstraps the agents back. Idempotent: re-running reports already-migrated
-pieces and changes nothing. Updates that do not cross the boundary find
-nothing to do — the dry run prints an empty plan and you move on.
+pieces and changes nothing — re-running `--apply` against an already-migrated
+surface produces byte-identical files, never a spurious rewrite. Updates that
+do not cross the boundary find nothing to do — the dry run prints an empty
+plan and you move on.
 
 After the platform is back (Step 4), run the residual guard: enumerate the
 plugin-config store and fail loud on any `homunculus_name` key it still
@@ -141,6 +145,48 @@ carries (`solet call` a config listing if the release provides one, or ask
 the solet directly to enumerate its plugin-config keys). A hit means a
 plugin carried deployment-local config this script does not know about —
 stop and repair before continuing, do not rename it ad hoc.
+
+**Post-apply, in the order you'll hit them:**
+
+1. **Plist log redirection is a durable-path issue, not a one-shot patch.**
+   `migrate_to_solet.py` backfills `StandardOutPath`/`StandardErrorPath` on a
+   solet-owned plist that predates them (pre-June installs), pointed at the
+   same `<log_dir>/<name>_autostart.log` `autostart_manager` itself derives —
+   but a field patch is a stopgap. The DURABLE path is re-running the
+   autostart install verb: `_classify_install_prior` re-renders a
+   `present_but_stale` plist wholesale, which a field patch never will. Prefer
+   that over trusting the migration script's patch to have caught everything.
+
+2. **`~/.claude.json`'s MCP server env keys need Claude Code closed.** The
+   migration script renames `HOMUNCULUS_*` → `SOLET_*` inside every
+   `mcpServers.*.env` block, but refuses outright while any Claude Code
+   process is running — detected by process, not by a lockfile, and fails
+   safe (refuses on an ambiguous detection too, never a false "not running").
+   **Quit every Claude Code window/session on this machine before this
+   surface applies**, or its renames silently no-op this run; Claude Code
+   holds the file in memory and rewrites it on exit regardless of what the
+   script wrote moments earlier.
+
+3. **Run `--scan-stale` as the last manual-sweep step.**
+   ```bash
+   <clone>/.venv/bin/python3 <clone>/deployment/scripts/migrate_to_solet.py --scan-stale
+   ```
+   Report-only, case-insensitive, over `~/.claude/`, this clone's own
+   `.claude/`, and `CLAUDE*.md`. Three categories, because the fix differs by
+   category — never auto-rewritten, in any of them:
+   - **historical** (a transcript, log, or other append-only record —
+     `projects/*/*.jsonl`, `file-history/`, `history.jsonl`, `jobs/`,
+     `paste-cache/`, `backups/`, `*.pre-*`, and siblings): leave alone,
+     always — rewriting one falsifies the record.
+   - **live process state** (`~/.claude/sessions/<pid>.json`): not a
+     transcript, but still never hand-edited — a hit here is fixed by
+     relaunching that session, not by editing its state file.
+   - **fixable** (everything else): a plain edit is safe, EXCEPT a memory
+     fact — any `.md` under a `memory/` directory — where the filename, its
+     frontmatter `name:` slug, and every `[[link]]` pointing at it must move
+     together. A blind substitution breaks that triple and leaves dangling
+     links; fix those by hand, one fact at a time, never with a bulk
+     find-and-replace.
 
 ## Step 4 — restart and WAIT
 
@@ -275,17 +321,70 @@ content when `plugin.json`'s `version` is unchanged — `install` reports
 "already installed," `update` reports "already at the latest version," and
 in both cases the cache bytes are untouched. Only `claude plugin uninstall`
 followed by a fresh `claude plugin install` forces a real re-copy regardless
-of version. **`coordination-hooks/.claude-plugin/plugin.json`'s `version`
-has never moved past `0.1.0`** (confirmed at source): every shipped hook
-change to date has been dormant on any machine with a prior install, by
-construction, until that machine's operator runs an explicit
-uninstall-then-reinstall. **Named fix: bump `plugin.json`'s `version` on
-every shipped hook change**, as a step in the *release* procedure — a
-refresh the operator cannot trigger from their own side is not their step
-to own. Recovery today, without a version bump: `claude plugin uninstall
+of version. **Named fix: bump `plugin.json`'s `version` on every shipped
+hook change**, as a step in the *release* procedure — a refresh the operator
+cannot trigger from their own side is not their step to own. Recovery
+without a version bump: `claude plugin uninstall
 coordination-hooks@<marketplace-name> --scope local && claude plugin
 install coordination-hooks@<marketplace-name> --scope local` — the diff
 check above is what tells you whether this is actually needed.
+
+⚠ **SUPERSEDED, 2026-08-16.** An earlier revision of this section stated that
+`coordination-hooks/.claude-plugin/plugin.json`'s `version` "has never moved
+past `0.1.0`." That was true when measured on 2026-08-02 and is false now:
+the version-bump fix was adopted and has been followed diligently — **13
+bumps, `0.2.0` (2026-08-02) through `0.5.6` (2026-08-14)**, verified from
+commit history. Do not plan against the old claim.
+
+**The correction matters more than the date, because the bump discipline was
+impeccable and the machine was still two versions behind.** Measured
+2026-08-16 on the development host: `installed_plugins.json` pinned `0.5.4`
+with `lastUpdated` 2026-08-13, while the source manifest read `0.5.6` and the
+pinned `gitCommitSha` was **146 commits behind master**. An update *had* run
+on 08-13 and correctly picked up `0.5.4` — so the mechanism is proven to work
+on that host. Then two further bumps landed with no update behind them, and
+the diff check reported **five** stale hook files, not one.
+
+**A VERSION BUMP ARMS THE REFRESH; IT DOES NOT PERFORM IT.** Bumping only
+makes the next `claude plugin update` willing to re-copy. Somebody still has
+to run it. A release procedure that ends at the bump records an *armed*
+state as though it were a *fired* one — and the gap is silent, because the
+repo reads correct at every version while the installed process keeps
+executing old code. **Every shipped hook change therefore needs three
+steps, not one:**
+
+1. **BUMP** `plugin.json`'s `version` (release-side).
+2. **FIRE** the refresh on each affected host — `claude plugin update
+   coordination-hooks@<marketplace-name>`, or the uninstall-then-install
+   pair above when the version did not move.
+3. **VERIFY IT FIRED** — never infer it from step 1 or 2 completing:
+
+```bash
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+print([(e["version"], e.get("gitCommitSha")) for k,v in d["plugins"].items()
+       if k.startswith("coordination-hooks@") for e in v])' \
+  ~/.claude/plugins/installed_plugins.json
+```
+
+The reported `version` must match the source manifest, and the reported
+`gitCommitSha` must be the commit you expect to be running — check it with
+`git merge-base --is-ancestor <sha> master` plus a commit-count, not by
+reading the repo file you just edited. Then re-run the `diff -r` check above
+and require empty output. A bump whose version the install never picked up
+looks identical, from the repo side, to one it did.
+
+**Cut the new version AFTER the hook change lands, not before.** A version
+already bumped before the edit does not cover it: on 2026-08-16 the `0.5.6`
+bump (2026-08-14) predated two later commits that both modified the vendored
+hook, so a reinstall at `0.5.6` would have shipped a hook missing both. Check
+with `git log <bump-commit>..master -- <vendored-hook-path>` and require empty
+output before treating a version as covering.
+
+**Reinstall only from a clean tree.** When the marketplace source is a
+`directory` entry pointing at a working checkout — the common local
+arrangement — the install snapshots whatever the working tree contains at
+that moment, uncommitted and unrelated dirty files included. Confirm a clean
+tree first, or install from a source that cannot carry work in progress.
 
 ⚠ **Declarative `extraKnownMarketplaces` + `enabledPlugins` alone — the
 mechanism `01_hydration_runbook.md` currently relies on, with no explicit
@@ -422,9 +521,12 @@ are still `Part N`, items are still `§N.M`, the four item classes are the same,
 and the evidence and content rules are the same. What changed is where an item
 goes: each item is filed through the repository's issue form for its class,
 a multi-item round gets a parent issue with the items attached as sub-issues,
-and a design proposal — an RFC-shaped document — is the one thing that still
-travels as a pull request. Answers come back as issue closures and GitHub
-releases; subscribe to the new repository's releases rather than polling it.
+and a design proposal — an RFC-shaped document — is a feature-request issue
+carrying the design in its body. **The repository accepts no pull requests and
+no patches** (see `CONTRIBUTING.md`); Apache-2.0 already lets you fork and
+change your own clone, so nothing about that policy limits what you can build.
+Answers come back as issue closures and GitHub releases; subscribe to the new
+repository's releases rather than polling it.
 The full procedure is in the upstream feedback runbook, which was rewritten in
 this release; read it before your next round rather than working from memory of
 the old convention.
@@ -436,9 +538,11 @@ re-indexes it normally — this is not the deletion-blind case Step 6's fourth
 stale copy describes, and no `install` call is required. Confirm rather than
 assume: after the restart, search your own knowledge base for the old
 convention (a phrase like "seed feedback pull request convention numbered
-parts"). You should get the NEW hybrid guidance back. If you get the old
-pull-request-per-round instructions instead, the re-index did not take, and
-that is when Step 6's re-install applies:
+parts"). You should get the CURRENT issues-only guidance back — every item,
+design proposals included, filed through an issue form. If you get either of
+the superseded conventions instead — pull-request-per-round, or the
+2026-08-13 hybrid where designs alone travelled as a pull request — the
+re-index did not take, and that is when Step 6's re-install applies:
 
 ```bash
 solet call service_interface::knowledge_service::install '{"name": "github_midwife_plugin"}'
@@ -674,10 +778,11 @@ by this worker) — opens a non-read-only connection; every existing read
 verb on both connectors is unaffected and stays strictly read-only.
 Neither plugin performs a write-permission check of its own — the
 connected database's own RBAC/grants are the entire control plane
-(operator ruling 2026-08-09 + Amendment 1). Full detail:
-`plugins/external_postgres_plugin/knowledge_base/01_external_postgres_overview.md`
-and `plugins/snowflake_plugin/knowledge_base/01_snowflake_overview.md`,
-both under "Read/write posture." **Two things about Snowflake's write verb
+(operator ruling 2026-08-09 + Amendment 1). Full detail is in each connector's
+own overview article — `01_external_postgres_overview.md` and
+`01_snowflake_overview.md`, both under "Read/write posture" — in the
+corresponding plugin's knowledge base, if this seed carries those connectors.
+**Two things about Snowflake's write verb
 are open, not yet answered by measurement:** `RETURNING`-equivalent
 clause support is object-dependent and uncharacterized here (the
 connector rolls back rather than silently discarding rows if one produces
@@ -685,8 +790,8 @@ output with no export path given); and this release ships with no live
 write smoke against a real Snowflake account — every registered
 connection here is pinned to a read-only role, so a write was never
 exercised end-to-end, only against a fake client. Confirm against
-`plugins/snowflake_plugin/knowledge_base/01_snowflake_overview.md` before
-telling an operator either caveat has been resolved.
+`01_snowflake_overview.md` before telling an operator either caveat has
+been resolved.
 
 Full detail: this release's `RELEASE_NOTES.md` at the repo root.
 

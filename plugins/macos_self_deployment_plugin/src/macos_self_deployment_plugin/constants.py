@@ -110,6 +110,16 @@ AUTOSTART_SUPERVISOR_MODULE: Final[str] = "macos_self_deployment_plugin.supervis
 # liveness-poll path cannot drift.
 ROUTER_SOCKET_SUFFIX: Final[str] = ".router.sock"
 
+# Router public-port discovery filename suffix: ``<runtime>/<name>.router.port``.
+# NOTE (tracked debt, 2026-08-14 Lane X): this constant is NEW and currently has
+# ONE consumer — the readiness-failure diagnosis in ``plugin.py``, which reads
+# the file's PRESENCE as the fingerprint of an overlapping router restart. The
+# same string is still spelled literally in router.py, uninstall_router.py,
+# mcp_ingress.py and stale_runtime_cleanup.py; those were left alone because
+# sweeping them crosses into files other lanes hold. Fold them in when one lane
+# owns them all.
+ROUTER_PORT_SUFFIX: Final[str] = ".router.port"
+
 # Synthetic flow-id prefix for durably-enqueued complete_swap rows.
 # The enqueuing actor (blue) typically holds no caller flow_id —
 # apply_manifest's interface contract doesn't carry one — so the
@@ -142,6 +152,26 @@ DEFAULT_PRIOR_TERM_POLL_INTERVAL_SECONDS: Final[float] = 0.2
 # fails LOUDLY past the window — a genuinely absent router is a real error.
 DEFAULT_ROUTER_SOCKET_WAIT_SECONDS: Final[float] = 20.0
 DEFAULT_ROUTER_SOCKET_POLL_INTERVAL_SECONDS: Final[float] = 0.5
+
+# MgmtServer.start() bounded wait for an INCUMBENT router to release the mgmt
+# socket path before reclaiming it. An overlapping restart (`launchctl
+# bootout` immediately followed by `bootstrap`, and `launchctl kickstart -k`,
+# which is overlapping BY DESIGN) briefly runs two routers: the outgoing one
+# still answers `status` while the incoming one is binding. Waiting that window
+# out lets the normal restart heal; a path still answering past it is a genuine
+# two-router condition and start() refuses loudly (RouterSocketBusyError)
+# rather than deleting a live router's socket.
+#
+# COUPLING — read before tuning either number. This wait MUST stay well under
+# DEFAULT_ROUTER_SOCKET_WAIT_SECONDS (20.0) above, the platform child's own
+# deadline for the socket to appear. The child starts its 20s clock
+# independently of the router's reclaim wait, so a reclaim wait at or near 20s
+# trades a socket-stolen failure for a worse one: the router politely waiting
+# for an incumbent while the child times out and the platform crash-loops. The
+# two are a budget, not two independent knobs.
+DEFAULT_MGMT_SOCKET_RECLAIM_WAIT_SECONDS: Final[float] = 5.0
+DEFAULT_MGMT_SOCKET_RECLAIM_POLL_INTERVAL_SECONDS: Final[float] = 0.2
+DEFAULT_MGMT_SOCKET_PROBE_TIMEOUT_SECONDS: Final[float] = 1.0
 
 # GTE-06 L2 fresh-source preflight probe (design §3.3 / Q1 ruling). The
 # probe imports + bare-instantiates the manifest's plugin set in a fresh

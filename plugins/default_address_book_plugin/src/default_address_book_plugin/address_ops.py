@@ -7,6 +7,7 @@ from typing import Any
 
 from ananta.core.domain.types import ActionResult
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
+from ananta.services.state_service.bounded_read import assert_within_ceiling
 
 from .address_queries import (
     count_tags_in_rows,
@@ -19,6 +20,23 @@ from .address_queries import (
 from .constants import ErrorCode
 from .memory_integration import archive_memory, ingest_to_memory, strengthen_memory
 from .result_helpers import error, now, success
+
+# The address book is a HUMAN-CURATED contact list: rows arrive one at a time
+# through explicit `register` calls, never from traffic, telemetry, or automated
+# ingestion. Its size is bounded by how many contacts a person or deployment
+# chooses to enter. 50,000 is far above any plausible curated book while still
+# being a real bound.
+#
+# If this ceiling ever trips, the assumption that broke is "a human entered every
+# one of these" — something is writing address rows programmatically, and that is
+# the bug to chase rather than a number to raise.
+# MEASURED 2026-08-15: default_address_book_plugin.address holds 26 rows.
+_ADDRESS_TABLE_CEILING = 50_000
+_ADDRESS_TABLE_CEILING_REASON = (
+    "the address table is a human-curated contact list written one entry at a "
+    "time by explicit registration, so it is bounded by curation and not by "
+    "traffic (measured: 26 rows)."
+)
 
 # ── Registration ─────────────────────────────────────────────────────────────
 
@@ -516,7 +534,23 @@ def list_types_impl(
     state_service: StateServiceProtocol,
     namespace: str,
 ) -> ActionResult:
-    result = state_service.read_state(namespace=namespace, query={"table": "address"})
+    # Counting rows per address_type needs the rows, because the state interface
+    # has no grouped aggregate. So the read declares its ceiling and refuses past
+    # it rather than silently reporting type counts computed from a prefix — a
+    # partial breakdown here would look exactly like a complete one.
+    result = state_service.read_state(
+        namespace=namespace,
+        query={
+            "table": "address",
+            "limit": _ADDRESS_TABLE_CEILING,
+            # Conscious opt-in to a scan larger than the platform DEFAULT bound
+            # (100), not a removal of the bound: the limit above IS the bound and
+            # assert_within_ceiling below makes reaching it loud. An address book
+            # with more than 100 contacts is entirely ordinary, so the default
+            # would refuse legitimate reads here.
+            "unbounded": True,
+        },
+    )
     rows: list[dict[str, Any]] = []
     if isinstance(result, dict):  # type: ignore[reportUnnecessaryIsInstance]
         data = result.get("data", {})
@@ -524,6 +558,12 @@ def list_types_impl(
             result_rows = data.get("records", [])
             if isinstance(result_rows, list):
                 rows = [r for r in result_rows if isinstance(r, dict)]
+    rows = assert_within_ceiling(
+        rows,
+        table="address",
+        ceiling=_ADDRESS_TABLE_CEILING,
+        reason=_ADDRESS_TABLE_CEILING_REASON,
+    )
 
     type_counts: dict[str, int] = {}
     for r in rows:

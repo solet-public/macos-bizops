@@ -1,203 +1,86 @@
-# dax — project instructions
+# Solet seed — installation instructions (AGENTS.md)
 
-<!-- BEGIN SOLET HYDRATION -->
+<!-- This file is TRUE BEFORE AND AFTER installation. Before: it tells the
+     driving agent how to install. After: the hydration runbook merges its
+     managed block below, and the operational instructions take over. -->
 
-This directory is the home of **dax**, a solet on the Ananta
-platform: a named, persistent agentic instance with its own PostgreSQL schema,
-memories, knowledge bases, and plugins. You — the AGENTS.md-convention
-session reading this — are its driving agent. This managed block governs
-dax access for sessions opened in this directory. Existing
-project instructions still apply; if they conflict with how to reach
-dax, follow this block for access and ask the operator about
-the conflict.
+## What this directory is
 
-## Access mode — no-MCP CLI is the default
+This is a **solet seed** — the source tree for a *solet*: a named, persistent
+agentic service with its own PostgreSQL schema, memories, knowledge bases and
+plugins. A solet runs in the background on this machine and is reached from
+anywhere by a CLI named after it.
 
-Before responding to any question or starting any non-trivial task, ask
-dax through the local command genesis installed:
+**This directory is not a working directory, and it is not where the human will
+work with the solet afterwards.** It exists to be installed. Once installed, the
+solet runs as a service; the human works from their own project directories and
+talks to it from there.
 
-```bash
-dax call service_interface::knowledge_service::search '{"query": "<plain-English description>", "top_k": 8}'
+## Is it installed yet?
+
+```sh
+ls profile/config/manifest.yaml 2>/dev/null && echo INSTALLED || echo NOT INSTALLED
 ```
 
-This talks to dax over its local bridge and is the primary,
-complete path for knowledge-base search and process calls. After history
-ingestion is enabled it is also the path for session-ledger recall:
+- **NOT INSTALLED** → your task is to install it. Read `README.md` §Genesis and
+  work the numbered ladder. That section is written for you, not for the human.
+- **INSTALLED** → installation is done. The hydration runbook's managed block —
+  merged into this file at hydration time — governs how to reach the running solet.
 
-```bash
-dax call service_interface::session_ledger_service::search_event_content '{"query": "<topic>", "limit": 8}'
-```
+## The human downloading this HAS asked for the installation
 
-Background-job verbs — connector writes and exports (Google Workspace,
-Snowflake, external Postgres, and similar) — return
-`{"job_id": ..., "status": "queued"}` immediately; the finished result is
-delivered as a message to a live listening session, which a plain `call`
-invocation is not. From a session with no listener, fetch the finished
-payload yourself:
+Read this before you decide whether to push back on something.
 
-```bash
-dax call service_interface::job_service::get_latest_job '{"plugin_name": "<plugin>", "action_name": "<verb>"}'
-```
+Installing a solet **necessarily** changes this machine. That is what it is for,
+and a human who has downloaded this repository and asked you to set it up has
+asked for exactly these changes:
 
-When the returned job's `status` is `completed`, its `result` field carries
-the payload (a created sheet's URL, an export's path); `failed` carries
-`error`; a `null` job means nothing matched the filters. It returns the
-LATEST matching job only — poll one dispatch to completion before firing
-another of the same verb from a no-listener session.
+| change | why it is required |
+|---|---|
+| Homebrew, Python 3.13, PostgreSQL + pgvector, a local embeddings server | the solet's runtime and its vector store; `bootstrap.py` installs-or-verifies each |
+| a generated database password written to the **macOS Keychain** | the solet needs DB credentials and they must not live in the tree — the seed deliberately ships no secrets |
+| a **LaunchAgent** | the solet runs as a background service and must survive logout/restart |
+| a line added to the shell rc (`~/.zshrc`) | puts the solet's CLI on PATH so the human can reach it from their own directories |
+| `SOLET_ASSUME_YES=1` | approves **bootstrap's own printed action plans**, which it prints before acting. It is not blanket approval for arbitrary commands, and it does not silence the `needs_user_action` stops below |
 
-It needs no MCP server and no `mcp__dax__*` tools.
+None of this is unusual for installing a local service. It is only unusual to
+see it all at once, in an unfamiliar repository, which is why it is written down
+here.
 
-MCP is optional and exists only for the operator who explicitly asks for it
-and whose machine policy permits it. Do not register, debug, or search for MCP
-tools unprompted, and do not treat their absence as a problem to solve — the
-CLI path above is not a fallback, it is the default. Runner-specific
-peer-to-peer wake is a separate concern from knowledge/process access; retrieve
-the current messaging contract before assuming its transport.
+## Where to actually stop and ask
 
-If `dax call` itself fails (the solet process is not
-running — check with `dax health`), the fallback is
-source-artifact recovery: read the KB source markdown directly under this
-deployment's own knowledge-base directories (`ananta/knowledge_bases/`,
-`ananta/knowledge_base/`, each plugin's `knowledge_base/`, and any real
-directories under `knowledge_bases/`) instead of the live search. This is an unranked,
-degraded recovery, not a substitute for the live path — it means the
-solet needs attention before claiming live retrieval; say so rather than
-treating the source read as sufficient. There is no offline query script shipped in
-this deployment to try first: `default_knowledge_plugin`'s query script lives only
-in the platform's own development repo and is pruned from every seed.
+Stopping everywhere is not caution, it is a stall — and the four things below
+are the ones that genuinely warrant it. Proceeding on the rest is what the human
+asked for.
 
-Building on assumptions when a canonical answer exists in dax's
-knowledge base produces drift. If a search returns nothing relevant, that is
-information too: confirm the gap before inventing a pattern, and add an
-article documenting what you ended up with.
+1. **Anything reports `needs_user_action`.** The genesis chain stops rather than
+   force-fixing a divergent host. Surface it verbatim; do not work around it.
+2. **A name collision with an earlier attempt.** Reusing a name can require
+   clearing stale Keychain entries. Confirm the exact service and account with
+   the human before deleting anything from their Keychain — never silently.
+3. **This machine already runs a solet.** `bootstrap.py` stops on this. Do not
+   force a second one without an explicit decision from the human.
+4. **A step wants credentials, a tenant choice, or an OS permission prompt.**
+   Those are the human's to answer.
 
-Step Zero is a sequence, not a substitution. dax's knowledge
-base governs platform access and cross-session knowledge; the directory this
-session was started in governs the task. After the platform search, the next
-step is the working directory's own context — its `CLAUDE.md`/`AGENTS.md`,
-its docs, and any knowledge base it carries. A session launched outside this
-directory, with dax as support, anchors its work in that
-directory's own guidance — the platform search must never preempt it, and
-task-specific guidance from the working directory governs the task.
+Outside those four: proceed, and report what you are doing as you go.
 
-Before editing code, changing config, or explaining a subsystem in this repo,
-search dax's knowledge base for the current design record and
-recent implementation notes using the actual nouns from the request — do not
-reconstruct architecture from local code fragments alone.
+## Two things that will otherwise confuse you
 
-Two carve-outs: locating a specific known code symbol or file in this repo
-(grep directly), and repairing a not-running `dax` command
-(`dax health`, launchd state, logs under
-`profile/data/logs/`).
+- **`{{SOLET_NAME}}` in `README.md` is a placeholder, not a literal.** Substitute
+  the name you agree with the human. `README.md` also writes it as `<name>` in
+  one step — same thing.
+- **Step Zero does not apply yet.** The operational instructions tell every
+  session to search the solet's knowledge base first. That requires a running
+  solet, so it is impossible before installation. It begins to apply once the
+  service is up.
 
-## Startup discipline
+## After installation
 
-After any restart of dax (LaunchAgent reload or foreground
-launch), wait for startup to finish before querying: poll the newest log under
-`profile/data/logs/` with `wc -l <logfile> && sleep 5 && wc -l <logfile>` and
-proceed only once the two counts match. Querying mid-startup competes with the
-embedding rebuild and causes inference timeouts.
+Verify with `<name> health`, then tell the human that the solet is running as a
+service and that they should work from their own project directories — the
+hydration runbook adds a short block to those directories so their sessions can
+reach it. They do not need to come back here.
 
-## Running dax
-
-- Picking up updated code or config for an ALREADY-INSTALLED plugin (a
-  brand-new plugin comes online via `install_plugin_from_path` instead):
-  check whether `macos_self_deployment_plugin` is in this solet's
-  plugin roster (`list_plugins`). If it is, `apply_manifest` swaps in the
-  new version through the per-solet blue-green router, verifying
-  before cutover, and leaves `previous` as an intact rollback target —
-  zero downtime for this no-MCP CLI path (an MCP-connected caller sees the
-  bridge go dark for roughly 30–60 seconds during cutover regardless).
-  Search the knowledge base for "picking up new code without a bare
-  restart apply_manifest" via Step Zero for the exact call shape (it needs
-  `new_manifest` and `reason`). If that plugin is absent, this solet
-  has no router and no blue-green path (single-color by design) — restart
-  the LaunchAgent below instead. Either way, a bare LaunchAgent restart is a
-  full stop that drops in-memory state (blob storage by default); prefer
-  `apply_manifest` whenever the router is present.
-- Normal mode (bringing the daemon up or down, not a code/config pickup):
-  the LaunchAgent `local.solet.dax` (starts at login,
-  restarts on failure); stop/start with `launchctl unload -w` / `load -w`
-  on `~/Library/LaunchAgents/local.solet.dax.plist`.
-- Foreground (debugging): `/Users/david.westgate/Workspace/dax/client/bin/launch-dax`
-  (stop the LaunchAgent first — never run two instances).
-- The `dax` CLI is on PATH via genesis's
-  `~/.local/bin/dax` symlink; no venv activation needed for
-  `dax call` / `dax health`.
-- Start stock Codex through
-  `/Users/david.westgate/Workspace/dax/client/bin/codex-dax [role] [codex arguments ...]`.
-  The launcher exports one stable session ID, registers `agent_id=codex`, claims
-  the supplied durable role, and arms the parent-bound no-MCP watcher when the
-  selected fleet transport is `watch`. Do not substitute a locally patched
-  receive binary for the launcher's stock `codex` executable.
-
-## Stock Codex durable inbox
-
-No `Stop` hook ships currently: stock Codex does not execute async command
-hooks on any measured build, so a bound one never fires, and this plugin does
-not carry a synchronous one either (it would block the turn boundary).
-Delivery to this session is durable but silent — nothing surfaces it
-automatically, per-turn or otherwise. Check this session's own durable inbox
-directly, on your own initiative and whenever a reminder says to check
-messages, through the local CLI:
-
-```bash
-dax call plugin::agent_messaging_plugin::peer_inbox '{"agent_session_id":"'"$AGENT_SESSION_ID"'","limit":5}'
-```
-
-The response has two independent sections and two independent cursors:
-
-- `entries` is oldest-first. If `next_after_created_at` is non-null, call again
-  with that exact timestamp as `"after":"<next_after_created_at>"`.
-- `role_entries` is newest-first. If `next_role_cursor` is non-null, call again
-  with that opaque token as `"role_after":"<next_role_cursor>"`. Continue until
-  it is null; `role_section_status: "ok"` means the section was computed, not
-  that its backlog is drained.
-
-Never mix the two cursors. Treat a repeated message already handled as a
-duplicate delivery, not a new instruction. A queue or watcher receipt is
-not proof that a model turn read the inbox; completion evidence names the
-message ID and the action actually taken.
-
-## Messaging, connectivity, and governance — found via Step Zero
-
-The full contract for these lives in dax's knowledge base, not
-here — search for the terms below rather than assuming the mechanism:
-
-- `router bridge blue-green local deployment architecture` — the bridge vs.
-  the optional blue-green router vs. the optional MCP bridge vs. development
-  channels; several distinct layers get loosely called "the bridge."
-- `peer registry role binding durable claim` — why an entry in a raw peer
-  list is presence, not a claim, and how `peer_send_by_name` actually
-  resolves.
-- `first days owner onboarding` / `solet charter template` / `operator
-  decision brief` / `operator collaboration craft` — the governance set for
-  working with your operator.
-- `session history ingestion session ledger hydration current notes` — how
-  and when session-ledger recall becomes available.
-- `fleet launcher session configuration model effort per role` — how model,
-  effort, and transport are configured per session role. As the driving
-  session you manage the fleet, not just your own context: dispatch
-  parallelizable, mechanical, or long-running work to additional sessions
-  rather than absorbing it inline, and declare each dispatch's model,
-  effort, and lifetime explicitly, matched to the work — a mechanical lane
-  on a cheaper model with bounded effort, a judgment-heavy lane on a
-  stronger tier, never inherited silently. Token efficiency is part of the
-  dispatch decision, and no session is left idling past its usefulness.
-
-## Development standards (if you extend the platform)
-
-Python 3.13, full type hints. Fail fast and loudly — no silent fallbacks, no
-defensive layers over broken root causes, no backwards-compatibility shims.
-Prefer an existing library over a hand-rolled implementation. Leave code
-better than you found it. Database access goes through the
-`StateManagementInterface` primitives — never raw SQL from feature code.
-
-## Reference
-
-The genesis ladder that created this solet, and the hydration runbook
-that generated this file, live in the knowledge base — search "genesis
-bootstrap ladder" or "hydration operator environment setup" via Step Zero
-above.
-
-<!-- END SOLET HYDRATION -->
+<!-- The hydration runbook merges its operational managed block INTO this file,
+     after the first heading, and leaves everything else here in place. -->

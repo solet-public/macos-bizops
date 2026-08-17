@@ -268,7 +268,15 @@ class RecordingStateService:
     def query_state(self, namespace: str, query: dict[str, Any]) -> dict[str, object]:
         self.query_calls.append((namespace, query))
         self.events.append("query")
-        return {}  # no records -> _first_record None -> early return
+        # A SUCCESSFUL read that found no rows — which is what the docstring
+        # above has always claimed this returns. It used to return a bare `{}`,
+        # an envelope with no `action_status` at all, i.e. a read that FAILED.
+        # Both make `_first_record` return None, so every assertion here behaved
+        # identically and the difference stayed invisible — until a reader that
+        # distinguishes "no rows" from "could not read" (the poller's
+        # double-execution detector) started reporting this fixture as an
+        # unreadable row. Empty-but-completed is the faithful shape.
+        return {"action_status": "completed", "data": {"records": []}}
 
 
 class RecordingSubmissionService:

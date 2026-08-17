@@ -73,6 +73,18 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   lightweight context-status reading on every un-throttled tick, independent
   of the threshold check. Like the heartbeat, it prints nothing to stdout;
   diagnostics are stderr-only. See `SECURITY.md` for the full contract.
+- **Rotation-due notice** (`UserPromptSubmit`, unconditional) — the delivery
+  half of the hook above, for the session it cannot deliver to. When the
+  watch hook finds no steward to notify (an operator-present session, which
+  has none), it writes the notice to a local marker instead of dropping it;
+  this hook surfaces that marker as prompt context on the session's own next
+  turn, once per session generation, then stamps the marker so it never
+  repeats. It is the only hook here that prints a `hookSpecificOutput`
+  block, so what it will inject is bounded: content comes from a marker file
+  this hook checks is owned by the current user and not group/world-writable,
+  and is otherwise carried verbatim. On the ordinary path — no marker — it
+  reads stdin, globs at most two directories, and emits nothing. See
+  `SECURITY.md` for the full contract.
 - **Memory-passthrough capture** (`PostToolUse`, `Write|Edit|MultiEdit`) —
   when the touched file is under this agent's own memory directory,
   appends one journal record (path, hash, timestamp) locally. No content

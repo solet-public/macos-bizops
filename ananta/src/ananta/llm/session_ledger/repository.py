@@ -181,7 +181,8 @@ class SessionLedgerRepository(
     # ``SessionLedgerReadMixin`` (``read.py``).
 
 
-    # W5.O cycle 2: ``fetch_all_events_for_session``,
+    # W5.O cycle 2: ``iter_all_events_for_session`` (renamed from
+    # ``fetch_all_events_for_session`` by the 2026-08-16 read-cap sweep),
     # ``find_event_id_by_vendor_id``, ``find_call_event_id_for_resolution``,
     # and ``list_tool_calls`` relocated to ``SessionLedgerReadMixin``
     # (``read.py``).

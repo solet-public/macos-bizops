@@ -45,7 +45,12 @@ class StateProvider(ABC):
 
     @abstractmethod
     def query_state(self, namespace: str, filters: dict[str, Any]) -> ActionResult:
-        """INTERNAL - Query state with filters."""
+        """INTERNAL - DEPRECATED alias for ``read_state``; prefer ``read_state``.
+
+        ``filters`` is the whole ``{table, filters, limit?, unbounded?}`` query
+        envelope, forwarded unchanged; ``limit`` / ``unbounded`` are honoured
+        and the ``MAX_READ_ROWS`` bound applies.
+        """
         ...
 
     @abstractmethod

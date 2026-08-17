@@ -34,6 +34,49 @@ if TYPE_CHECKING:
 # arithmetic exactly (800_000 * 0.1 = 80_000).
 CACHE_READ_COST_FRACTION = 0.1
 
+# The path CLASSES a reporting hook can identify itself as (2026-08-16). A
+# CLASS, deliberately, not a path: the stored row must stay meaningful across
+# machines, and an absolute path would encode one host's layout into shared
+# state. 'unknown' is a first-class member rather than an error case — a hook
+# that cannot classify its own location must be able to say exactly that,
+# because the alternative is guessing, and a guessed surface is worse than an
+# admitted unknown for the one job these columns have.
+REPORTER_SURFACE_CHECKOUT = "checkout"
+REPORTER_SURFACE_PLUGIN_CACHE = "plugin_cache"
+REPORTER_SURFACE_UNKNOWN = "unknown"
+# WIDENED 2026-08-17 (phase 1 of 2). The original three collapsed at least
+# three genuinely distinct surfaces into `unknown`: the vendored source copy
+# in the repo, the copy of it inside a deployed release tree, and -- not
+# anticipated when the field shipped -- any checkout hook living in a
+# SUBDIRECTORY of `.claude/hooks/`, which the reporter's `parents[N]` test
+# failed to recognise. Measured consequence: a row's surface was observed
+# ALTERNATING between `checkout` and `unknown` tick-by-tick on the same
+# session, which is the shared-throttle race between two copies that both
+# carry the field -- and the collapsed bucket made it impossible to say which
+# copy the other one was.
+#
+# ★ THIS HALF LANDS AND DEPLOYS ALONE, BEFORE ANY REPORTER EMITS THE NEW
+# VALUES. The verb rejects an unrecognised surface BEFORE any write, so a
+# reporter that learned the new classes first would have every report refused
+# and would write no row at all -- turning an attribution gap into a total
+# reporting outage for exactly the sessions the change exists to illuminate.
+# Widening is inert on its own: it rejects nothing that previously passed, and
+# nothing emits these yet. The reporter half follows only once this is
+# CONFIRMED SERVING (checked against the serving release's own identity, not
+# master and not a deploy report -- deployed is not serving until the swap is
+# confirmed).
+REPORTER_SURFACE_VENDORED = "vendored"
+REPORTER_SURFACE_RELEASE = "release"
+REPORTER_SURFACES = frozenset(
+    {
+        REPORTER_SURFACE_CHECKOUT,
+        REPORTER_SURFACE_PLUGIN_CACHE,
+        REPORTER_SURFACE_VENDORED,
+        REPORTER_SURFACE_RELEASE,
+        REPORTER_SURFACE_UNKNOWN,
+    },
+)
+
 
 def report_context_status(
     state: StateManagementInterface,
@@ -44,6 +87,11 @@ def report_context_status(
     current_tokens: int,
     ceiling: int,
     measured_at: str,
+    cache_read_tokens: int | None = None,
+    cache_cold: bool | None = None,
+    cache_overage_signature: bool | None = None,
+    reporter_surface: str | None = None,
+    reporter_generation: int | None = None,
 ) -> dict[str, Any]:
     """Overwrite the caller's own latest context-status snapshot. The caller
     (today: `rotation_due_watch.py`, extended) already did the local
@@ -51,10 +99,30 @@ def report_context_status(
     this verb trusts the reported `ceiling`/`current_tokens` rather than
     recomputing them, so it never touches a file itself.
 
+    The three cache fields are OPTIONAL and describe THE MOST RECENT
+    ASSISTANT CALL — the same call `current_tokens` is summed from.
+    Omitting them records NOT REPORTED, which the read-back verb surfaces
+    as `null` rather than as a warm cache: a reporter that never looked
+    and a reporter that looked and found the cache live are different
+    facts, and collapsing them would let every un-upgraded hook assert a
+    warm cache it never measured.
+
+    `reporter_surface`/`reporter_generation` are OPTIONAL and identify WHICH
+    COPY of the reporting hook produced this snapshot. More than one copy can
+    be registered on the same event at once, they serialize on a shared
+    throttle marker that records nothing about who claimed it, and this
+    table keeps only the latest row — so without these a row is
+    unattributable, and an absent cache field cannot be told apart from a
+    stale copy having served that tick. Omitting them records a
+    pre-attribution reporter, which is a positive finding, not missing data.
+
     Errors: `missing_argument` (any of the five required fields empty/absent
     — fast-fail before any write), `negative_tokens` (a reported value that
     cannot be a real token count, catching a caller bug loud rather than
-    silently caching garbage)."""
+    silently caching garbage), `unknown_reporter_surface` (a surface outside
+    the known classes — a typo'd or invented surface would quietly poison
+    exactly the attribution these columns exist to provide, so it fails loud
+    instead of being stored)."""
     if not agent_instance_id.strip():
         raise VerbError(
             "missing_argument", "report_context_status requires a non-empty agent_instance_id.",
@@ -75,6 +143,13 @@ def report_context_status(
             f"report_context_status got current_tokens={current_tokens!r}, ceiling={ceiling!r} "
             "— neither can be non-positive for a real measurement.",
         )
+    if reporter_surface is not None and reporter_surface not in REPORTER_SURFACES:
+        raise VerbError(
+            "unknown_reporter_surface",
+            f"report_context_status got reporter_surface={reporter_surface!r}, which is not one "
+            f"of {sorted(REPORTER_SURFACES)}. Report 'unknown' when the hook cannot classify its "
+            "own location — an invented surface silently poisons attribution.",
+        )
     upsert_session_context_status(
         state,
         agent_instance_id=agent_instance_id,
@@ -83,8 +158,71 @@ def report_context_status(
         current_tokens=current_tokens,
         ceiling=ceiling,
         measured_at=measured_at,
+        cache_read_tokens=cache_read_tokens,
+        cache_cold=cache_cold,
+        cache_overage_signature=cache_overage_signature,
+        reporter_surface=reporter_surface,
+        reporter_generation=reporter_generation,
     )
     return {"status": "recorded"}
+
+
+def _tri_state(raw: object) -> bool | None:
+    """Stored 1/0/NULL -> True/False/None. ``None`` means NOT REPORTED.
+
+    Never coerces NULL to False. A reporter that never looked and a reporter
+    that looked and found the cache live are different facts, and this is the
+    boundary where collapsing them would become invisible to every caller.
+    """
+    return None if raw is None else bool(raw)
+
+
+def _cache_view(row: dict[str, Any], current_tokens: int) -> dict[str, Any]:
+    """Cache state plus the economic band it implies.
+
+    The band is DERIVED at read time from the live policy constants, the same
+    rule `fraction`/`rotation_due` already follow — a change to the bands must
+    never require backfilling stored rows.
+
+    When cache state was not reported the band is still computed, as the WARM
+    band, and `cache_cold` is `null` so the caller can see the assumption
+    rather than inherit it silently.
+    """
+    cold = _tri_state(row.get("cache_cold"))
+    band, guidance = rotation_thresholds.rotation_band(
+        current_tokens, cache_cold=bool(cold),
+    )
+    return {
+        "cache_read_tokens": (
+            None if row.get("cache_read_tokens") is None
+            else int(row["cache_read_tokens"])
+        ),
+        "cache_cold": cold,
+        "cache_overage_signature": _tri_state(row.get("cache_overage_signature")),
+        "rotation_band": band,
+        "rotation_guidance": guidance,
+    }
+
+
+def _reporter_view(row: dict[str, Any]) -> dict[str, Any]:
+    """Which copy of the reporting hook wrote this row, on two independent axes.
+
+    Both `null` means the tick was served by a reporter predating this
+    widening — which is a POSITIVE finding, not missing data: only a stale
+    copy can produce it. That matters because this table keeps one row per
+    session and the latest write wins, so an absent cache field is otherwise
+    ambiguous between "the verbs are not deployed" and "a stale copy served
+    this tick". These two fields are what makes those distinguishable, and
+    they are deliberately NOT folded into one value — a current-generation
+    hook running from the wrong surface and a stale-generation hook running
+    from the right one are different failures with different fixes.
+    """
+    generation = row.get("reporter_generation")
+    surface = row.get("reporter_surface")
+    return {
+        "reporter_surface": None if surface is None else str(surface),
+        "reporter_generation": None if generation is None else int(generation),
+    }
 
 
 def session_context_status(
@@ -96,7 +234,23 @@ def session_context_status(
     or (until the seat-wiring design note is acted on) any `host=operator`
     seat. Callers must treat `resolved=False` as a loud, honest gap, never
     estimate a number in its place (the standing repo rule against silently
-    promoting an unknown into a fact)."""
+    promoting an unknown into a fact).
+
+    Cache fields carry three states, not two: ``true``/``false``/``null``,
+    where ``null`` is NOT REPORTED. `cache_cold` reflects the reporter's
+    classification, which EXCLUDES the first call after a `/clear` — that call
+    is cold by construction, and counting it would make every rotation
+    recommend another one. `rotation_band` applies the ratified economic
+    policy; with cache state unreported it is the WARM band, and the `null`
+    beside it is how you can tell.
+
+    `reporter_surface`/`reporter_generation` say which copy of the reporting
+    hook wrote this row. Read them BEFORE concluding anything from an absent
+    cache field: several hook copies can be registered at once and only the
+    latest write survives here, so `null` cache state next to a stale or
+    absent reporter means "a stale copy served this tick", which is a
+    different fact — and a different fix — from "the verbs are undeployed".
+    """
     if not agent_instance_id.strip():
         raise VerbError(
             "missing_argument", "session_context_status requires a non-empty agent_instance_id.",
@@ -120,6 +274,13 @@ def session_context_status(
             "per_prompt_carriage_estimate_tokens": 0,
             "rotation_due": False,
             "measured_at": "",
+            "cache_read_tokens": None,
+            "cache_cold": None,
+            "cache_overage_signature": None,
+            "rotation_band": None,
+            "rotation_guidance": None,
+            "reporter_surface": None,
+            "reporter_generation": None,
         }
     current_tokens = int(row.get("current_tokens") or 0)
     ceiling = int(row.get("ceiling") or 0) or rotation_thresholds.DEFAULT_CONSERVATIVE_CEILING
@@ -136,11 +297,19 @@ def session_context_status(
         "per_prompt_carriage_estimate_tokens": round(current_tokens * CACHE_READ_COST_FRACTION),
         "rotation_due": fraction >= rotation_thresholds.ROTATION_THRESHOLD_FRACTION,
         "measured_at": str(row.get("measured_at") or ""),
+        **_cache_view(row, current_tokens),
+        **_reporter_view(row),
     }
 
 
 __all__ = [
     "CACHE_READ_COST_FRACTION",
+    "REPORTER_SURFACES",
+    "REPORTER_SURFACE_CHECKOUT",
+    "REPORTER_SURFACE_PLUGIN_CACHE",
+    "REPORTER_SURFACE_RELEASE",
+    "REPORTER_SURFACE_UNKNOWN",
+    "REPORTER_SURFACE_VENDORED",
     "report_context_status",
     "session_context_status",
 ]

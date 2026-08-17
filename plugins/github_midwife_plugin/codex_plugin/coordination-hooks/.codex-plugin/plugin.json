@@ -1,6 +1,6 @@
 {
   "name": "coordination-hooks",
-  "version": "0.1.0+codex.20260814002958",
+  "version": "0.1.0+codex.20260815032358",
   "description": "An unconditional project-orientation reminder, opt-in unread-message and role-binding reminders, and a Git-Controller mistake-prevention gate for coordinated multi-session work.",
   "author": {
     "name": "seed-factory"
