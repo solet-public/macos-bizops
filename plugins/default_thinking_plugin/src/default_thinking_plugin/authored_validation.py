@@ -2,8 +2,8 @@
 
 Frontier agents author Work Breakdown Structure markdown in their own
 context and hand the finished document to the platform by value; the
-platform validates and stores it — it does not author (plan of record
-``workbench/2026-07-01_claude_coding_agent_substrate_architecture_and_planning_v2.md``,
+platform validates and stores it — it does not author (origin: checkout-local
+substrate architecture plan ``workbench/2026-07-01_claude_coding_agent_substrate_architecture_and_planning_v2.md``,
 Phase 3). This module is the validation half of that seam: it runs the SAME
 production validators the thinking-model authoring path applies before
 storage (``artifact_helpers`` + the core plan parser), but in COLLECT mode —

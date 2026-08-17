@@ -29,6 +29,13 @@ Exit codes:
   0 — no C+ functions, or every C+ function is allowlisted
   2 — one or more non-allowlisted C+ functions
   64 — usage error (bad arguments / non-existent paths)
+  70 — GATE CRASH: the analyser raised, so no verdict exists for the tree.
+       A crash is NOT a violation count, and callers must not render it as
+       one — see `gate_scope.GateCrashError` and `code_quality_check.py`'s
+       `_GateOutcome.CRASH`. Observed 2026-08-16: `radon`'s `cc_visit`
+       raises `RecursionError` on some deeply-nested third-party sources,
+       which previously escaped as a bare traceback and exit 1, and the
+       aggregate reported it as "Blocking gate violations (radon_cc)".
 """
 
 from __future__ import annotations
@@ -37,17 +44,33 @@ import argparse
 import sys
 from pathlib import Path
 
+from gate_scope import (
+    GATE_CRASH_EXIT,
+    GateCrashError,
+    repo_python_files,
+)
 from radon.complexity import cc_rank, cc_visit
 
 
 def _expand_targets(raw_paths: list[str]) -> list[Path]:
+    """Resolve CLI path arguments to concrete `.py` files.
+
+    A DIRECTORY expands to its in-repo `.py` files only (tracked, or
+    untracked and not ignored). Measured
+    2026-08-16: a bare run over `plugins/cosyvoice2_tts_plugin` reached
+    18,321 files in `src/.venv_cosyvoice`, reported sympy's C-grade
+    functions as this repo's findings, and then crashed on one of them.
+
+    A file named EXPLICITLY is always scanned, in-repo or not — the caller
+    asked for that path by name, and a brand-new file is the normal case.
+    """
     out: list[Path] = []
     for raw in raw_paths:
         p = Path(raw)
         if not p.exists():
             continue
         if p.is_dir():
-            out.extend(sorted(p.rglob("*.py")))
+            out.extend(repo_python_files(p))
         elif p.suffix == ".py":
             out.append(p)
     return out
@@ -111,6 +134,8 @@ def _scan_file(path: Path) -> list[tuple[int, str, str, int]]:
     except SyntaxError as exc:
         print(f"WARN: syntax error in {path}: {exc}", file=sys.stderr)
         return []
+    except Exception as exc:  # noqa: BLE001 — any analyser failure is a non-verdict
+        raise GateCrashError(path, f"{type(exc).__name__} in radon cc_visit: {exc}") from exc
     findings: list[tuple[int, str, str, int]] = []
     for item in visited:
         rank = cc_rank(item.complexity)
@@ -209,7 +234,11 @@ def main(argv: list[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    targets = _expand_targets(args.paths)
+    try:
+        targets = _expand_targets(args.paths)
+    except GateCrashError as crash:
+        print(f"GATE-CRASH: {crash}", file=sys.stderr)
+        return GATE_CRASH_EXIT
     if not targets:
         print("ERROR: no Python files to scan from given paths.", file=sys.stderr)
         return 64
@@ -223,7 +252,16 @@ def main(argv: list[str]) -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 64
 
-    findings = _scan_all(targets, allowlist, args.raw)
+    try:
+        findings = _scan_all(targets, allowlist, args.raw)
+    except GateCrashError as crash:
+        print(f"GATE-CRASH: {crash}", file=sys.stderr)
+        print(
+            "No verdict was produced. This is NOT a violation count: the "
+            "analyser aborted, so this run measured nothing about the tree.",
+            file=sys.stderr,
+        )
+        return GATE_CRASH_EXIT
     return _report(findings, len(targets), allowlist_active)
 
 

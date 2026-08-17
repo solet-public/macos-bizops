@@ -1,12 +1,12 @@
 # Security notes — coordination-hooks
 
 This page pre-answers the questions a security review of this plugin is
-likely to ask. The plugin is fifteen Claude Code hooks/utilities: three
+likely to ask. The plugin is sixteen Claude Code hooks/utilities: three
 context reminders (`step_zero_reminder.py`, `check_messages_reminder.py`,
 `role_binding_reminder.py`), one opt-in idle-wake waiter (`wake_waiter.py`),
-one opt-in git-mutation guard (`git_controller_gate.py`), two opt-in
+one opt-in git-mutation guard (`git_controller_gate.py`), three opt-in
 liveness/rotation hooks (`heartbeat_report_alive.py`,
-`rotation_due_watch.py`), six memory-passthrough files — two Claude
+`rotation_due_watch.py`, `rotation_due_notice.py`), six memory-passthrough files — two Claude
 Code hooks (`capture.py`, `session_context.py`) plus four agent-invoked
 CLI utilities that never fire automatically (`drain.py`,
 `hydrate_render.py`, `index_render.py`, `sync.py`) and one shared library
@@ -29,9 +29,9 @@ agent-invoked, never auto-fired, and its own stdout is the drain/hydrate
 result JSON it was invoked to produce — never injected into a session's
 context by this plugin (there is no hook wiring for it to be injected
 through). Precisely stated, since "execute" and "write" are different
-claims held to different, separately-checked bars below: the other eleven
+claims held to different, separately-checked bars below: the other twelve
 hooks execute nothing — no subprocess, no shell, no external command —
-though five of those eleven DO write files (a materially narrower claim,
+though six of those twelve DO write files (a materially narrower claim,
 see the memory-passthrough section below and the spawn-injected worker
 hooks section for exactly which files and what they write).
 
@@ -227,12 +227,12 @@ fixed-argv `solet call <fixed process_key> <JSON payload>` invocations
 (no shell, `subprocess.run` only, built entirely from this session's own
 environment and its own transcript — never from tool-call content); and
 `sync.py`'s (agent-invoked, never auto-fired) same-shape invocations, one
-per export and one per pending journal entry on drain. The other eleven
+per export and one per pending journal entry on drain. The other twelve
 hooks/utilities execute nothing: the reminders inject only compiled-in
 text, the gate lexes and inspects tool-call text without ever executing
 or evaluating it, and `capture.py`/`session_context.py`/`drain.py`/
 `hydrate_render.py`/`index_render.py`/`headless_tool_allowlist_gate.py`/
-`capture_session_mapping.py` never shell out at all (some of
+`capture_session_mapping.py`/`rotation_due_notice.py` never shell out at all (some of
 these DO write files — a materially different, narrower claim, see above).
 
 ## The wake waiter — the one privileged hook, in full
@@ -373,6 +373,51 @@ One accepted gap, stated in the heartbeat's own docstring rather than
 engineered around: a single tool call longer than a session's report-by
 window still trips an overdue alarm mid-call, since the hook only fires
 *after* a tool call completes. Rare; disclosed, not chased.
+
+## The rotation-due notice hook — the one hook whose output enters a prompt
+
+`rotation_due_notice.py` (`UserPromptSubmit`, unconditional) is the delivery
+half of the rotation-due signal for a session the fleet's own sweep cannot
+reach. It reviews no state and measures nothing: when `rotation_due_watch.py`
+finds no steward to notify (an operator-present session has none) it writes
+the notice to a local marker file, and this hook surfaces that marker as
+context on the session's own next turn, once, then stamps it so it never
+repeats.
+
+**Why it gets its own section.** It is the only hook in this plugin that puts
+FILE CONTENT into a prompt. The reminders inject compiled-in literals and
+`session_context.py` injects a fixed template; this one injects text it read
+from disk. That is a different class of claim and is bounded explicitly rather
+than by category:
+
+- **Provenance is checked before injection.** A marker is refused unless it is
+  owned by the current user AND is not group- or world-writable. The relevant
+  exposure is concrete: the writer's fallback marker root lives under the
+  system temp directory, which on a shared host is world-writable, so without
+  this check any local user could place text into another user's next prompt.
+  On a platform with no `geteuid` the ownership half cannot run and is SKIPPED
+  rather than faked — the permission half still applies.
+- **Scope of what is injected.** The marker's `content` field verbatim, inside
+  a fixed frame this hook compiles in. No other field of the marker reaches
+  the prompt, and nothing else on disk is read.
+- **Bounded volume.** At most one `hookSpecificOutput` object per prompt
+  however many markers match, and each marker is surfaced at most once —
+  the stamp is written INTO the marker, so there is no second file that could
+  disagree with it about whether the notice was delivered.
+
+**Execution and writes.** No subprocess of any kind — it is not one of the
+four subprocess-capable files. It writes exactly one file: the marker it just
+surfaced, rewritten with a `surfaced_at` timestamp added.
+
+**Failure posture.** Non-fatal by design like every hook here: an unreadable,
+unparseable, foreign-owned or world-writable marker is skipped with a stderr
+diagnostic and exit `0`. A marker that cannot be stamped is still DELIVERED
+and will repeat on the next prompt — deliberately, since a repeated warning is
+a smaller failure than a swallowed one.
+
+**On the ordinary path it does nothing.** No marker means: read stdin, glob at
+most two directories, emit nothing. This hook fires on every prompt, so its
+empty path is the cost that is actually paid.
 
 ## The memory-passthrough files — two hooks, four CLI utilities, one shared library
 
@@ -542,7 +587,11 @@ their scripts, plus exactly one interpolated value: the
 `role_binding_reminder.py` so the reminder can name the label the session
 was launched with. It is JSON-escaped on the way out, it originates in the
 operator-controlled process environment, and it is the only non-literal
-character any hook here can place in injected context.
+character the REMINDERS can place in injected context. Two other hooks inject
+by design and are bounded in their own sections rather than by this one:
+`session_context.py` (a fixed template interpolating this session's own
+resolved paths and a pending count) and `rotation_due_notice.py` (the
+`content` field of a provenance-checked local marker file).
 
 No reminder relays message content, search results, or any other dynamic
 data. Whatever knowledge-base, messaging, or role-binding mechanism a
@@ -841,10 +890,13 @@ way Claude Code invokes them.
 | The wake waiter's argv is fixed, with no shell | `tests/manifest_consistency_smoke.py` |
 | The prose surfaces (README.md, this page) describe the wake waiter's real argv — expected tokens derived from the source literal, the stale unbounded form refused | `tests/manifest_consistency_smoke.py` |
 | A broken wake path never traps the session | `tests/wake_waiter_smoke.py` |
-| Fourteen of fifteen hooks are default-off behind an environment or filesystem-presence guard; `step_zero_reminder.py` is unconditionally armed by design | `tests/reminder_hooks_smoke.py` and `tests/wake_waiter_smoke.py` |
+| Fifteen of sixteen hooks are default-off behind an environment or filesystem-presence guard; `step_zero_reminder.py` is unconditionally armed by design | `tests/reminder_hooks_smoke.py` and `tests/wake_waiter_smoke.py` |
 | The git-mutation guard blocks every mutating git invocation (direct, shell-wrapped, chained, path-qualified) for a non-controller session, allows it for the controller, and is fail-open when its env var is unset | `tests/git_controller_gate_smoke.py` |
 | The heartbeat and rotation-due watch hooks' `solet call` argv carries their fixed process key, never a shell, never `subprocess.call`/`Popen` | `tests/manifest_consistency_smoke.py` |
 | The heartbeat and rotation-due watch hooks never print a `hookSpecificOutput` block | disclosed here (source-read); no dedicated behavioral smoke ships in this plugin's own `tests/` yet — see the Known gaps note below |
+| The rotation-due notice hook refuses to inject a marker owned by another uid or one that is group/world-writable, and skips the ownership half rather than faking it where no uid exists | the checkout's .claude/hooks/tests/rotation_due_notice_smoke.py — checkout-external, see the Known gaps note below |
+| The rotation-due notice hook surfaces a marker at most once (the stamp is written into the marker itself), emits exactly ONE `hookSpecificOutput` object however many markers match, and still delivers when the stamp cannot be written | the checkout's .claude/hooks/tests/rotation_due_notice_smoke.py — same external caveat |
+| The rotation-due notice hook's copies in this plugin and in the checkout's `.claude/hooks/` are BYTE-IDENTICAL (it has no adaptation window) and behave identically on the empty and the surfaced path | `.claude/hooks/tests/coordination_hook_ports_smoke.py` parity leg — same external caveat |
 | The origin-resolution ladder (env → root_manifest.yaml, placeholder-skipped → dirname) resolves identically across both independent implementations (the hooks' `_journal.py` and the memory-tag verb resolver), across a matrix of env/file/dirname combinations | `.claude/hooks/tests/memory_passthrough_origin_ladder_smoke.py` — checkout-external, see the Known gaps note below |
 | The heartbeat, rotation-due watch, capture, and session-context hook copies in this plugin and in the checkout's `.claude/hooks/` behave identically (throttle/latch marker paths, arming, argv/output shape) | the checkout's own `.claude/hooks/tests/coordination_hook_ports_smoke.py` parity legs — external to this plugin's own `tests/`, so not run by `tests/run_all.py`; see the Known gaps note below |
 | The spawn-injected `headless_tool_allowlist_gate.py`/`capture_session_mapping.py` copies in this plugin and in the checkout's `.claude/hooks/` behave identically (exit code, block/no-op decision, spool record shape) | the checkout's own `.claude/hooks/tests/coordination_hook_ports_smoke.py` parity legs — same external-to-this-plugin caveat as the row above |
@@ -920,11 +972,11 @@ shell string interpolation anywhere in the invocation path.
 
 ## Configuration surface
 
-Fourteen of the fifteen hooks are default-off; the fifteenth,
+Fifteen of the sixteen hooks are default-off; the sixteenth,
 `step_zero_reminder.py`, is unconditionally armed — installed means
 armed, no environment condition at all, since a silently disarmed
 awareness reminder is the failure this specific hook exists to prevent.
-Of the other fourteen: with `AGENT_SESSION_ID` unset, `check_messages_reminder.py`
+Of the other fifteen: with `AGENT_SESSION_ID` unset, `check_messages_reminder.py`
 and the wake waiter are silent no-ops; with `AGENT_SESSION_LABEL` unset,
 `role_binding_reminder.py` is a silent no-op; with `GIT_CONTROLLER_NAME`
 unset, the gate allows everything; with `AGENT_INSTANCE_ID` unset, the

@@ -57,6 +57,9 @@ from agent_messaging_plugin.schema import (  # noqa: E402
     get_peer_binding_schema,
     session_role_claim_external_id,
 )
+from agent_messaging_plugin.session_context_status_store import (  # noqa: E402
+    upsert_session_context_status,
+)
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     ManagedSessionSpec,
     backfill_registration,
@@ -71,10 +74,13 @@ from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
 from agent_messaging_plugin.session_sweep import (  # noqa: E402
     DEFAULT_REGISTRATION_BOUND_S,
     EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE,
+    NoticeLatch,
     SessionRoleClaimPruner,
     sweep_deadline_dependencies,
+    sweep_gauge_coverage,
     sweep_lane_closed_dependencies,
     sweep_overdue_sessions,
+    sweep_rotation_due_sessions,
     sweep_unregistered_spawning_sessions,
 )
 
@@ -1138,6 +1144,215 @@ def test_registration_marks_without_notify_when_registry_absent() -> None:
     _check(marked == 1, "an early-boot tick with no bridge still MARKS the row")
 
 
+# ---------------------------------------------------------------------------
+# L4a: sweep_rotation_due_sessions / sweep_gauge_coverage
+# ---------------------------------------------------------------------------
+
+
+def _gauge(state: StateManagementInterface, agent_instance_id: str, **over: object) -> None:
+    """Write a gauge row the way report_context_status would."""
+    kwargs: dict[str, object] = {
+        "agent_instance_id": agent_instance_id, "claude_session_id": "s1",
+        "model": "claude-sonnet-5", "current_tokens": 900_000, "ceiling": 1_000_000,
+        "measured_at": T0.isoformat(), "cache_cold": False,
+        "reporter_surface": "checkout", "reporter_generation": 2,
+    }
+    kwargs.update(over)
+    upsert_session_context_status(state, **kwargs)  # type: ignore[arg-type]
+
+
+def _wired() -> tuple[StateManagementInterface, PeerRegistry, BridgeSessionManager, str]:
+    state, reg, mgr = _state(), _peer_registry(), _bridge_manager()
+    _spawn_live(state, agent_instance_id="agi-steward")
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-steward"}},
+        {"agent_id": "claude_code"},
+    )
+    bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-steward")
+    _spawn_live(state, agent_instance_id="agi-worker", spawned_by_instance_id="agi-steward")
+    return state, reg, mgr, bridge_id
+
+
+def test_rotation_due_notice_carries_the_measured_number() -> None:
+    """The charter: never a bare 'you should rotate'."""
+    state, reg, mgr, bridge_id = _wired()
+    _gauge(state, "agi-worker")
+    n = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 1, "a session past the rotation threshold produces one notice")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    body = events[0].content if events else ""
+    _check(events and events[0].event_type == "rotation_due_notice",
+           "the event is typed rotation_due_notice, distinct from the overdue notice")
+    _check("900000" in body, "the notice carries the MEASURED token count, not a bare verdict")
+    _check("claude-sonnet-5" in body,
+           "the notice names the MODEL beside the band -- the bands are model-blind")
+
+
+def test_rotation_due_is_silent_below_the_threshold() -> None:
+    state, reg, mgr, bridge_id = _wired()
+    _gauge(state, "agi-worker", current_tokens=1_000)
+    n = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 0, "a session well under the threshold produces no notice")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(not events, "and nothing is delivered -- a notice that always fires is ignored")
+
+
+def test_rotation_due_flags_an_unattributable_reporter() -> None:
+    """A stale-copy row sends no cache state, so its band is the WARM DEFAULT
+    rather than a measurement. Presenting that as an urgent verdict is false
+    precision, so the notice says the reporter cannot be attributed."""
+    state, reg, mgr, bridge_id = _wired()
+    _gauge(state, "agi-worker", reporter_surface=None, reporter_generation=None)
+    sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
+    _, events = mgr.get(bridge_id).events_after(-1)
+    body = events[0].content if events else ""
+    _check("UNATTRIBUTABLE" in body,
+           "a row from a pre-attribution reporter is flagged, not silently trusted")
+    _check("provisional" in body,
+           "and the band is marked provisional rather than presented as measured")
+
+
+def test_gauge_coverage_catches_a_live_session_with_no_row() -> None:
+    """The signature measured 2026-08-16: hooks running, gauge write silently
+    failing. Neither the hook (it must swallow its own faults) nor the session
+    (it does not know) can report this; the sweep sees both facts."""
+    state, reg, mgr, bridge_id = _wired()  # agi-worker is LIVE with NO gauge row
+    n = sweep_gauge_coverage(state, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 1, "a live session with no gauge row is detected")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(events and events[0].event_type == "gauge_coverage_notice"
+           and "agi-worker" in events[0].content,
+           "the steward is told which session is dark")
+
+
+def test_gauge_coverage_is_silent_when_the_row_exists() -> None:
+    state, reg, mgr, bridge_id = _wired()
+    _gauge(state, "agi-worker")
+    n = sweep_gauge_coverage(state, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 0, "a session that IS reporting produces no coverage notice")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(not events, "and nothing is delivered")
+
+
+# ---------------------------------------------------------------------------
+# L4b composition: NoticeLatch — what makes the two legs SAFE to put on a tick
+# ---------------------------------------------------------------------------
+
+
+def test_rotation_due_notifies_once_per_episode() -> None:
+    """The composition guard. Unlike the overdue notice, rotation-due rides no
+    state edge: the gauge stays over the threshold until the session rotates,
+    so on a 300s tick an unlatched leg delivers the same notice every 5 minutes
+    forever. Repetition is not a smaller version of the warning -- it destroys
+    the channel the warning arrives on."""
+    state, reg, mgr, bridge_id = _wired()
+    _gauge(state, "agi-worker")
+    latch = NoticeLatch()
+    first = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
+    second = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
+    third = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
+    _check((first, second, third) == (1, 0, 0), "the condition persists; the notice does not")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(len(events) == 1, "exactly ONE event reached the steward across three ticks")
+
+
+def test_rotation_due_latch_rearms_when_the_session_rotates() -> None:
+    """One notice per EPISODE, not one per lifetime. A session that rotates and
+    later climbs back over the threshold is a NEW fact about the world, and
+    suppressing it would make the latch a mute button."""
+    state, reg, mgr, bridge_id = _wired()
+    _gauge(state, "agi-worker")
+    latch = NoticeLatch()
+    sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
+    _gauge(state, "agi-worker", current_tokens=1_000)  # rotated: back under the threshold
+    cleared = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
+    _gauge(state, "agi-worker", current_tokens=950_000)  # climbed again: a second episode
+    again = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
+    _check(cleared == 0, "no notice while the condition is clear")
+    _check(again == 1, "a SECOND episode notifies again -- the latch released on the clear")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(len(events) == 2, "two episodes, two events")
+
+
+def test_rotation_due_latch_does_not_swallow_an_undelivered_notice() -> None:
+    """Latch on DELIVERY, never on detection. If the notice could not be
+    delivered (no live steward binding this tick), latching it would let the
+    delivery failure silence the whole episode -- the failure mode where the
+    louder the outage, the quieter the alarm."""
+    state, reg, mgr = _state(), _peer_registry(), _bridge_manager()
+    _spawn_live(state, agent_instance_id="agi-steward")
+    _spawn_live(state, agent_instance_id="agi-worker", spawned_by_instance_id="agi-steward")
+    _gauge(state, "agi-worker")
+    latch = NoticeLatch()
+    undelivered = sweep_rotation_due_sessions(
+        state, peer_registry=reg, bridge_manager=mgr, latch=latch,
+    )
+    _check(undelivered == 0, "no live steward binding -- nothing delivered")
+    bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-steward")
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-steward"}},
+        {"agent_id": "claude_code"},
+    )
+    retried = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
+    _check(retried == 1, "the next tick RETRIES -- an undelivered notice was never latched")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(len(events) == 1, "and the steward gets it once, not never and not twice")
+
+
+def test_gauge_coverage_notifies_once_and_releases_on_recovery() -> None:
+    """Same discipline on the darkness notice. A dark session stays dark until
+    a person fixes it, so unlatched this repeats for the whole outage.
+
+    The re-arm is asserted through the latch's own state rather than by
+    staging a second outage: the ONLY way a gauge row goes missing again once
+    it exists is a deletion, and manufacturing one here would be testing a
+    fixture rather than the leg. What is genuinely reachable -- and what this
+    asserts -- is that recovery RELEASES the key, so a later outage is a fresh
+    notice instead of a permanent silence."""
+    state, reg, mgr, bridge_id = _wired()  # agi-worker LIVE, no gauge row
+    latch = NoticeLatch()
+    first = sweep_gauge_coverage(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
+    second = sweep_gauge_coverage(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
+    _check((first, second) == (1, 0), "one notice for one outage, not one per tick")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(len(events) == 1, "exactly ONE event across the outage's ticks")
+    _check(latch.suppressed("agi-worker"), "the key is latched while the outage holds")
+    _gauge(state, "agi-worker")  # reporting recovered
+    recovered = sweep_gauge_coverage(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
+    _check(recovered == 0, "nothing to say while it reports")
+    _check(
+        not latch.suppressed("agi-worker"),
+        "and recovery RELEASED the key -- a later outage notifies rather than being "
+        "suppressed by the first one",
+    )
+
+
+def test_latches_are_independent_per_notice_kind() -> None:
+    """Why the rider holds TWO latches rather than one shared set: the same
+    agent_instance_id can be both rotation-due and dark, and a shared latch
+    would let whichever notice fired first suppress the other kind entirely."""
+    latch = NoticeLatch()
+    _check(not latch.suppressed("agi-x"), "an unseen key is not suppressed")
+    latch.record_sent("agi-x")
+    _check(latch.suppressed("agi-x"), "a recorded key suppresses its repeat")
+    latch.retain_active({"agi-x"})
+    _check(latch.suppressed("agi-x"), "a still-active key stays latched")
+    latch.retain_active(set())
+    _check(not latch.suppressed("agi-x"), "a cleared condition releases the key")
+
+
+def test_l4a_legs_no_op_without_a_bridge() -> None:
+    """Same posture as sweep_overdue_sessions: an early-boot tick with no
+    bridge must not raise. Unlike the overdue sweep there is no state
+    transition to preserve here, so both legs simply return 0."""
+    state = _state()
+    _spawn_live(state, agent_instance_id="agi-worker", spawned_by_instance_id="agi-steward")
+    _check(sweep_rotation_due_sessions(state) == 0, "rotation-due leg no-ops with no bridge")
+    _check(sweep_gauge_coverage(state) == 0, "gauge-coverage leg no-ops with no bridge")
+
+
 def main() -> int:
     test_overdue_no_report_by_never_swept()
     test_overdue_marks_past_deadline_live_and_idle()
@@ -1177,6 +1392,19 @@ def main() -> int:
     test_registration_acknowledged_degraded_is_marked_but_says_so()
     test_registration_notifies_steward_with_distinct_event()
     test_registration_marks_without_notify_when_registry_absent()
+
+    test_rotation_due_notice_carries_the_measured_number()
+    test_rotation_due_is_silent_below_the_threshold()
+    test_rotation_due_flags_an_unattributable_reporter()
+    test_gauge_coverage_catches_a_live_session_with_no_row()
+    test_gauge_coverage_is_silent_when_the_row_exists()
+    test_l4a_legs_no_op_without_a_bridge()
+
+    test_rotation_due_notifies_once_per_episode()
+    test_rotation_due_latch_rearms_when_the_session_rotates()
+    test_rotation_due_latch_does_not_swallow_an_undelivered_notice()
+    test_gauge_coverage_notifies_once_and_releases_on_recovery()
+    test_latches_are_independent_per_notice_kind()
 
     print()
     print(f"PASSED: {_passed}")

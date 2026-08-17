@@ -321,17 +321,70 @@ content when `plugin.json`'s `version` is unchanged — `install` reports
 "already installed," `update` reports "already at the latest version," and
 in both cases the cache bytes are untouched. Only `claude plugin uninstall`
 followed by a fresh `claude plugin install` forces a real re-copy regardless
-of version. **`coordination-hooks/.claude-plugin/plugin.json`'s `version`
-has never moved past `0.1.0`** (confirmed at source): every shipped hook
-change to date has been dormant on any machine with a prior install, by
-construction, until that machine's operator runs an explicit
-uninstall-then-reinstall. **Named fix: bump `plugin.json`'s `version` on
-every shipped hook change**, as a step in the *release* procedure — a
-refresh the operator cannot trigger from their own side is not their step
-to own. Recovery today, without a version bump: `claude plugin uninstall
+of version. **Named fix: bump `plugin.json`'s `version` on every shipped
+hook change**, as a step in the *release* procedure — a refresh the operator
+cannot trigger from their own side is not their step to own. Recovery
+without a version bump: `claude plugin uninstall
 coordination-hooks@<marketplace-name> --scope local && claude plugin
 install coordination-hooks@<marketplace-name> --scope local` — the diff
 check above is what tells you whether this is actually needed.
+
+⚠ **SUPERSEDED, 2026-08-16.** An earlier revision of this section stated that
+`coordination-hooks/.claude-plugin/plugin.json`'s `version` "has never moved
+past `0.1.0`." That was true when measured on 2026-08-02 and is false now:
+the version-bump fix was adopted and has been followed diligently — **13
+bumps, `0.2.0` (2026-08-02) through `0.5.6` (2026-08-14)**, verified from
+commit history. Do not plan against the old claim.
+
+**The correction matters more than the date, because the bump discipline was
+impeccable and the machine was still two versions behind.** Measured
+2026-08-16 on the development host: `installed_plugins.json` pinned `0.5.4`
+with `lastUpdated` 2026-08-13, while the source manifest read `0.5.6` and the
+pinned `gitCommitSha` was **146 commits behind master**. An update *had* run
+on 08-13 and correctly picked up `0.5.4` — so the mechanism is proven to work
+on that host. Then two further bumps landed with no update behind them, and
+the diff check reported **five** stale hook files, not one.
+
+**A VERSION BUMP ARMS THE REFRESH; IT DOES NOT PERFORM IT.** Bumping only
+makes the next `claude plugin update` willing to re-copy. Somebody still has
+to run it. A release procedure that ends at the bump records an *armed*
+state as though it were a *fired* one — and the gap is silent, because the
+repo reads correct at every version while the installed process keeps
+executing old code. **Every shipped hook change therefore needs three
+steps, not one:**
+
+1. **BUMP** `plugin.json`'s `version` (release-side).
+2. **FIRE** the refresh on each affected host — `claude plugin update
+   coordination-hooks@<marketplace-name>`, or the uninstall-then-install
+   pair above when the version did not move.
+3. **VERIFY IT FIRED** — never infer it from step 1 or 2 completing:
+
+```bash
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+print([(e["version"], e.get("gitCommitSha")) for k,v in d["plugins"].items()
+       if k.startswith("coordination-hooks@") for e in v])' \
+  ~/.claude/plugins/installed_plugins.json
+```
+
+The reported `version` must match the source manifest, and the reported
+`gitCommitSha` must be the commit you expect to be running — check it with
+`git merge-base --is-ancestor <sha> master` plus a commit-count, not by
+reading the repo file you just edited. Then re-run the `diff -r` check above
+and require empty output. A bump whose version the install never picked up
+looks identical, from the repo side, to one it did.
+
+**Cut the new version AFTER the hook change lands, not before.** A version
+already bumped before the edit does not cover it: on 2026-08-16 the `0.5.6`
+bump (2026-08-14) predated two later commits that both modified the vendored
+hook, so a reinstall at `0.5.6` would have shipped a hook missing both. Check
+with `git log <bump-commit>..master -- <vendored-hook-path>` and require empty
+output before treating a version as covering.
+
+**Reinstall only from a clean tree.** When the marketplace source is a
+`directory` entry pointing at a working checkout — the common local
+arrangement — the install snapshots whatever the working tree contains at
+that moment, uncommitted and unrelated dirty files included. Confirm a clean
+tree first, or install from a source that cannot carry work in progress.
 
 ⚠ **Declarative `extraKnownMarketplaces` + `enabledPlugins` alone — the
 mechanism `01_hydration_runbook.md` currently relies on, with no explicit

@@ -56,6 +56,7 @@ from ananta.llm.session_ledger.schema import (  # noqa: E402
     TABLE_SOURCE,
     TABLE_TOOL_CALL,
 )
+from ananta.services.state_service.read_bounds import MAX_READ_ROWS  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -85,16 +86,49 @@ def _iso(seconds_before: int) -> str:
 # src-A (one canonical, one sibling), s3 -> src-B (canonical), s4 -> src-C
 # (canonical, no events). Events/tool_calls for the non-live session "s-del"
 # must be DROPPED (its row is absent from the live `sessions` read).
+#: Sessions on src-E. Above MAX_READ_ROWS so the per-source tool_call count must
+#: chunk; the fake refuses an over-cap `= ANY` exactly as the provider does, so an
+#: unchunked count fails rather than passing quietly.
+_BULK_SESSIONS = 150
+
 _SOURCES: list[dict[str, object]] = [
     {"id": "src-A", "source_kind": "claude_code", "root_uri": "/a"},
     {"id": "src-B", "source_kind": "codex", "root_uri": "/b"},
     {"id": "src-C", "source_kind": "zzz_other", "root_uri": "/c"},
+    # src-D has RUNNING BATCHES AND ZERO SESSIONS. It exists to pin a regression
+    # that a session-derived source list reintroduces: the row-walking code keyed
+    # batches off import_batch.source_id directly, so a source with batches but
+    # no sessions still got a tally. Deriving the source list from the sessions
+    # index silently drops it — and without src-D that mutation stays GREEN.
+    {"id": "src-D", "source_kind": "batches_only", "root_uri": "/d"},
+    # src-E holds MORE THAN MAX_READ_ROWS sessions so the tool_call count must
+    # CHUNK. Below the cap, an unchunked `= ANY` passes identically and the
+    # chunking is untested.
+    {"id": "src-E", "source_kind": "bulk", "root_uri": "/e"},
 ]
+# NOTE `created_at`: the paged session walk cursors on ``(created_at, id)``, so
+# every session row needs it. The pre-2026-08-16 fixture held FOUR sessions and
+# therefore never crossed a page boundary — the cursor was never used and the
+# missing column never noticed. Growing the fixture past the page size surfaced
+# it immediately, which is its own small argument for fixtures that page.
 _SESSIONS: list[dict[str, object]] = [
-    {"id": "s1", "source_id": "src-A", "canonical_external_session_id": None},
-    {"id": "s2", "source_id": "src-A", "canonical_external_session_id": "ext-x"},
-    {"id": "s3", "source_id": "src-B", "canonical_external_session_id": None},
-    {"id": "s4", "source_id": "src-C", "canonical_external_session_id": None},
+    {"id": "s1", "source_id": "src-A", "canonical_external_session_id": None,
+     "created_at": "2026-06-15T00:00:00.000001"},
+    {"id": "s2", "source_id": "src-A", "canonical_external_session_id": "ext-x",
+     "created_at": "2026-06-15T00:00:00.000002"},
+    {"id": "s3", "source_id": "src-B", "canonical_external_session_id": None,
+     "created_at": "2026-06-15T00:00:00.000003"},
+    {"id": "s4", "source_id": "src-C", "canonical_external_session_id": None,
+     "created_at": "2026-06-15T00:00:00.000004"},
+    *(
+        {
+            "id": f"sE{i:04d}",
+            "source_id": "src-E",
+            "canonical_external_session_id": None,
+            "created_at": f"2026-06-15T00:00:01.{i:06d}",
+        }
+        for i in range(_BULK_SESSIONS)
+    ),
 ]
 _EVENTS: list[dict[str, object]] = [
     {"id": "e1", "session_id": "s1", "content_blob_id": None},
@@ -107,6 +141,7 @@ _TOOL_CALLS: list[dict[str, object]] = [
     {"id": "t1", "session_id": "s1"},
     {"id": "t2", "session_id": "s3"},
     {"id": "t3", "session_id": "s-del"},  # dropped
+    *({"id": f"tE{i:04d}", "session_id": f"sE{i:04d}"} for i in range(_BULK_SESSIONS)),
 ]
 _IMPORT_BATCHES: list[dict[str, object]] = [
     {"id": "ib1", "source_id": "src-A", "status": "running",
@@ -115,9 +150,72 @@ _IMPORT_BATCHES: list[dict[str, object]] = [
      "polling_lease_token": None, "started_at": _iso(50)},
     {"id": "ib3", "source_id": "src-B", "status": "completed",
      "polling_lease_token": None, "started_at": _iso(999)},
+    {"id": "ib5", "source_id": "src-D", "status": "running",
+     "polling_lease_token": "tokD", "started_at": _iso(300)},
     {"id": "ib4", "source_id": "src-A", "status": "running",
      "polling_lease_token": "tok2", "started_at": _iso(200)},  # oldest
 ]
+
+
+def _op_matches(cell: object, spec: dict[str, object]) -> bool:
+    """One structured filter spec. ``gt`` is accepted and deferred: the event-fold
+    keyset passes ``{id: {op: gt}}`` and the caller applies it itself."""
+    op = spec.get("op")
+    if op == "is_null":
+        return cell is None
+    if op == "is_not_null":
+        return cell is not None
+    if op == "gt":
+        return True
+    raise AssertionError(f"fake does not implement op {op!r}")
+
+
+def _spec_matches(cell: object, spec: object) -> bool:
+    if isinstance(spec, dict):
+        return _op_matches(cell, spec)
+    if isinstance(spec, (list, tuple)):
+        return cell in spec
+    return cell == spec
+
+
+def _row_matches(row: dict[str, Any], filters: dict[str, object]) -> bool:
+    """One row against the census's filter grammar; fails loud on an unknown op."""
+    return all(
+        _spec_matches(row.get(key, 0 if key == "is_deleted" else None), spec)
+        for key, spec in filters.items()
+    )
+
+
+def _sort_key(row: dict[str, Any], cols: list[str]) -> tuple[str, ...]:
+    return tuple(str(row.get(col, "")) for col in cols)
+
+
+def _ordered_rows(
+    rows: list[dict[str, Any]],
+    filters: dict[str, object],
+    cols: list[str],
+    *,
+    include_deleted: bool,
+) -> list[dict[str, Any]]:
+    """Filtered + ordered rows, with the event-keyset ``{id: {op: gt}}`` applied.
+
+    That op is deferred out of ``_row_matches`` and applied here because it is a
+    CURSOR, not a predicate on the row's own value — treating it as an ordinary
+    filter would make every row match.
+    """
+    matched = sorted(
+        (
+            r for r in rows
+            if (include_deleted or int(cast("int", r.get("is_deleted", 0))) == 0)
+            and _row_matches(r, filters)
+        ),
+        key=lambda r: _sort_key(r, cols),
+    )
+    op = filters.get("id")
+    if isinstance(op, dict) and op.get("op") == "gt":
+        last = str(op["value"])
+        matched = [r for r in matched if str(r["id"]) > last]
+    return matched
 
 
 class _FakeReader:
@@ -136,13 +234,30 @@ class _FakeReader:
     def query(
         self, table: str, filters: dict[str, object],
     ) -> list[dict[str, object]]:
-        # Honor the is_deleted predicate the bounded reads pass (faithful to
-        # query_state; all fixtures are live so this is a pass-through here).
-        deleted = filters.get("is_deleted")
+        """Honour the FULL filter grammar the census uses, not just is_deleted.
+
+        It used to honour ``is_deleted`` alone and pass everything else through,
+        which was harmless while every read was a whole-table walk. It stopped
+        being harmless the moment the census started COUNTING with predicates
+        (2026-08-16): a fake that ignores ``{"session_id": [...]}`` returns the
+        whole table for every count, so per-source tallies come back identical
+        and wrong — and every count-related assertion would have been meaningless
+        while passing. Equality, ``= ANY`` and the is_null/is_not_null ops now
+        all apply.
+        """
+        for spec in filters.values():
+            if isinstance(spec, (list, tuple)) and len(spec) > MAX_READ_ROWS:
+                raise AssertionError(
+                    f"query.unbounded_read_over_cap: `= ANY` filter carried "
+                    f"{len(spec)} values against the {MAX_READ_ROWS}-row cap. "
+                    f"A membership read is bounded by the CALLER's list, so it "
+                    f"must be chunked — without this refusal an unchunked count "
+                    f"passes quietly and the chunking is untested."
+                )
         return [
             dict(row)
             for row in self._tables.get(table, [])
-            if deleted is None or row.get("is_deleted", 0) == deleted
+            if _row_matches(row, filters)
         ]
 
     def query_ordered(
@@ -152,16 +267,25 @@ class _FakeReader:
         filters: dict[str, object],
         order_by: list[list[str]],
         limit: int,
+        after: tuple[object, ...] | None = None,
+        include_deleted: bool = False,
     ) -> list[dict[str, object]]:
+        """Ordered page, honouring the ROW-VALUE ``after`` cursor.
+
+        ``after`` support was added 2026-08-16: without it a paged walk re-reads
+        page one forever and only stops when the ceiling fires. That went
+        unnoticed while the fixture held four sessions — nothing ever paged, so
+        the cursor was never used. Growing the fixture past the page size turned
+        a silently-unexercised code path into an immediate infinite loop, which
+        is the better failure of the two.
+        """
         cols = [pair[0] for pair in order_by]
-        rows = sorted(
-            self._tables.get(table, []),
-            key=lambda r: tuple(str(r.get(col, "")) for col in cols),
+        rows = _ordered_rows(
+            self._tables.get(table, []), filters, cols, include_deleted=include_deleted,
         )
-        op = filters.get("id")
-        if isinstance(op, dict) and op.get("op") == "gt":
-            last = str(op["value"])
-            rows = [r for r in rows if str(r["id"]) > last]
+        if after is not None:
+            cursor = tuple(str(v) for v in after)
+            rows = [r for r in rows if _sort_key(r, cols) > cursor]
         return [dict(row) for row in rows[:limit]]
 
 
@@ -189,12 +313,40 @@ class _StateServiceShim:
         return {"action_status": "completed", "data": {"records": rows},
                 "actions": [], "error": None}
 
+    def count(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Scalar COUNT(*) — what the census now uses instead of walking
+        __tool_call and __import_batch (2026-08-16 count-not-walk).
+
+        Present on the shim so ``test_real_method_clock_normalization`` still
+        drives the REAL ``census_source_rows`` through its real bindings; a shim
+        missing it would force that test onto a hand-wired path and stop
+        exercising ``read._census_count`` / ``_census_min_value`` at all.
+        """
+        rows = self._reader.query(
+            str(data["table"]), cast("dict[str, object]", data.get("filters") or {}),
+        )
+        return {"action_status": "completed", "data": {"result": {"value": len(rows)}},
+                "actions": [], "error": None}
+
+    def min_value(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+        column = str(data["column"])
+        rows = self._reader.query(
+            str(data["table"]), cast("dict[str, object]", data.get("filters") or {}),
+        )
+        values = [r[column] for r in rows if r.get(column) is not None]
+        return {"action_status": "completed",
+                "data": {"result": {"value": min(values) if values else None}},
+                "actions": [], "error": None}
+
     def query_ordered(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+        after_raw = data.get("after")
         rows = self._reader.query_ordered(
             str(data["table"]),
             filters=cast("dict[str, object]", data["filters"]),
             order_by=cast("list[list[str]]", data["order_by"]),
             limit=int(cast("int", data["limit"])),
+            after=tuple(cast("list[Any]", after_raw)) if after_raw is not None else None,
+            include_deleted=bool(data.get("include_deleted")),
         )
         return {"action_status": "completed", "data": {"records": rows},
                 "actions": [], "error": None}
@@ -231,22 +383,86 @@ def _walker(reader: _FakeReader) -> Any:
     class _Walk:
         def __init__(self) -> None:
             self.counts: dict[str, int] = {}
+            self.drained = False
 
         def __call__(
             self, table: str, filters: dict[str, Any], *, ceiling: int, reason: str,
         ) -> Any:
             self.counts[table] = self.counts.get(table, 0) + 1
             yield from (dict(row) for row in reader.query(table, {**filters, "is_deleted": 0}))
+            self.drained = True
 
     return _Walk()
 
 
-def _census(*, page_size: int) -> list[dict[str, object]]:
-    reader = _reader()
+def _aggregates(reader: _FakeReader, walker: Any) -> tuple[Any, Any]:
+    """``count`` / ``min_value`` seams over the fake — and an ORDERING TRIPWIRE.
+
+    Read-cap sweep, 2026-08-16 (lane-ak). ``build_census`` no longer READS
+    ``__tool_call`` (637,496 rows) or ``__import_batch`` (284,759); it counts
+    them. These seams stand in for the scalar aggregates.
+
+    The counter ALSO records whether any count happened before the session walk
+    had been drained. Counting a tool_call before the ``session_id -> source_id``
+    index exists silently attributes nothing and every per-source count comes
+    back zero — the same silent-empty-tallies failure the double-consumption bug
+    produced. ``build_census`` now makes that structurally impossible (the
+    counting methods belong to the object that owns the index), and
+    ``test_counts_cannot_precede_the_session_index`` asserts it rather than
+    trusting the structure to stay that way.
+    """
+
+    class _Aggregates:
+        def __init__(self) -> None:
+            self.count_calls: list[str] = []
+            self.min_calls: list[str] = []
+            self.counted_before_walk_drained = False
+
+        def count(self, table: str, filters: dict[str, Any]) -> int:
+            if not walker.drained:
+                self.counted_before_walk_drained = True
+            self.count_calls.append(table)
+            return len(reader.query(table, {**filters}))
+
+        def min_value(self, table: str, column: str, filters: dict[str, Any]) -> Any:
+            self.min_calls.append(table)
+            values = [
+                row[column]
+                for row in reader.query(table, {**filters})
+                if row.get(column) is not None
+            ]
+            return min(values) if values else None
+
+    agg = _Aggregates()
+    return agg.count, agg.min_value
+
+
+def _census_with(reader: _FakeReader, *, page_size: int = 100) -> list[dict[str, object]]:
+    """One census over an explicit reader, with all four seams wired."""
+    walker = _walker(reader)
+    count, min_value = _aggregates(reader, walker)
     return build_census(
         query=reader.query,
         query_ordered=reader.query_ordered,
-        walk=_walker(reader),
+        walk=walker,
+        count=count,
+        min_value=min_value,
+        now=_NOW,
+        page_size=page_size,
+        fingerprint_seeds=_SEEDS,
+    )
+
+
+def _census(*, page_size: int) -> list[dict[str, object]]:
+    reader = _reader()
+    walker = _walker(reader)
+    count, min_value = _aggregates(reader, walker)
+    return build_census(
+        query=reader.query,
+        query_ordered=reader.query_ordered,
+        walk=walker,
+        count=count,
+        min_value=min_value,
         now=_NOW,
         page_size=page_size,
         fingerprint_seeds=_SEEDS,
@@ -261,10 +477,16 @@ def test_per_source_tallies() -> None:
     rows = _census(page_size=100)
     by = _by_source(rows)
 
-    _check(len(rows) == 3, "one census row per live source")
+    # Five sources since 2026-08-16: src-D (batches, no sessions) and src-E
+    # (150 sessions) were added to make two mutations detectable — see
+    # _SOURCES. src-D in particular proves a source with NO sessions still
+    # gets a census row, which a session-derived source list would drop.
+    _check(len(rows) == 5, f"one census row per live source (got {len(rows)})")
     _check(
-        [str(r["source_id"]) for r in rows] == ["src-A", "src-B", "src-C"],
-        "rows ordered (source_kind, source_id): claude_code, codex, zzz_other",
+        [str(r["source_id"]) for r in rows]
+        == ["src-D", "src-E", "src-A", "src-B", "src-C"],
+        "rows ordered (source_kind, source_id): batches_only, bulk, claude_code, "
+        "codex, zzz_other",
     )
 
     a = by["src-A"]
@@ -354,13 +576,62 @@ def test_determinism_and_paging_invariance() -> None:
     )
 
 
+def test_source_with_batches_but_no_sessions_still_gets_a_tally() -> None:
+    """src-D has RUNNING BATCHES and ZERO SESSIONS.
+
+    The row-walking code keyed batches off ``import_batch.source_id`` directly,
+    so such a source got a tally. Deriving the source list from the sessions
+    index instead silently drops it — the census still renders, one source is
+    just missing its batch health.
+
+    The fixture alone does not catch that: src-D's DATA existing is not the same
+    as src-D's data being ASSERTED. This is the assertion.
+    """
+    by = _by_source(_census(page_size=100))
+    _check("src-D" in by, "src-D (no sessions) still has a census row")
+    d = by.get("src-D", {})
+    _check(
+        d.get("owned_running_batches") == 1,
+        f"src-D's running batch is tallied (got {d.get('owned_running_batches')}) "
+        f"— 0 here means the source list came from the sessions index",
+    )
+    _check(
+        d.get("session_count") == 0 and d.get("tool_call_count") == 0,
+        "and it correctly reports zero sessions / tool calls",
+    )
+
+
+def test_tool_call_count_chunks_past_the_cap() -> None:
+    """src-E holds more sessions than the cap, so the count MUST chunk.
+
+    The fake refuses an over-cap ``= ANY`` exactly as the provider does, so an
+    unchunked count raises rather than passing. Below the cap the two are
+    indistinguishable — which is why the fixture carries 150 sessions for one
+    source and not four.
+    """
+    by = _by_source(_census(page_size=100))
+    e = by.get("src-E", {})
+    _check(
+        e.get("session_count") == _BULK_SESSIONS,
+        f"src-E has all {_BULK_SESSIONS} sessions (got {e.get('session_count')})",
+    )
+    _check(
+        e.get("tool_call_count") == _BULK_SESSIONS,
+        f"src-E's {_BULK_SESSIONS} tool calls counted across chunk boundaries "
+        f"(got {e.get('tool_call_count')})",
+    )
+
+
 def test_fingerprint_order_independence() -> None:
     # The XOR fold must be order-independent: fold the SAME events split into
     # pages in one order vs the reverse → identical fingerprints.
     def fold(pages: list[list[dict[str, object]]]) -> _CensusAggregator:
+        # tool_calls / import_batches are no longer constructor inputs: they are
+        # counted, not read (2026-08-16 count-not-walk). The fingerprint fold
+        # never depended on them — only on the session index — so this test is
+        # unaffected beyond the signature.
         agg = _CensusAggregator(
-            sources=_SOURCES, sessions=_SESSIONS, tool_calls=_TOOL_CALLS,
-            import_batches=_IMPORT_BATCHES, fingerprint_seeds=_SEEDS,
+            sources=_SOURCES, sessions=_SESSIONS, fingerprint_seeds=_SEEDS,
         )
         for page in pages:
             agg.fold_event_page(page)
@@ -397,11 +668,7 @@ def test_fingerprint_distinguishes_content() -> None:
         }
     )
     mutated = _by_source(
-        build_census(
-            query=reader.query, query_ordered=reader.query_ordered,
-            walk=_walker(reader),
-            now=_NOW, page_size=100, fingerprint_seeds=_SEEDS,
-        )
+        _census_with(reader)
     )["src-A"]
     _check(
         base["fingerprint_a"] != mutated["fingerprint_a"],
@@ -435,40 +702,47 @@ def test_real_method_clock_normalization() -> None:
     )
 
 
-def test_census_streams_each_table_exactly_once() -> None:
-    """Each large table is walked ONCE, and the tallies survive being streamed.
+def test_session_walk_streams_exactly_once_and_the_big_tables_are_not_read() -> None:
+    """``__session`` is walked ONCE; ``__tool_call`` / ``__import_batch`` are COUNTED.
 
-    Read-cap sweep, 2026-08-16 (lane-ak). ``build_census`` used to read
-    ``session`` / ``tool_call`` / ``import_batch`` WHOLE through ``query`` —
-    measured 27,208 / 637,496 / 284,787 rows, and refused outright on the serving
-    release (``cap_rows: 100`` on ``session``), so ``census`` was dead rather than
-    merely at risk. They stream now.
+    Two repairs, pinned together because the second removed what the first fixed.
 
-    Streaming exposed a latent trap that lists had been hiding:
-    ``_CensusAggregator`` consumed ``sessions`` TWICE — once to build the
-    id->source index, once to tally. Harmless for a list; with a generator the
-    second pass sees an exhausted iterator and **every session tally silently
-    comes back empty, with no error**. The two passes are now one.
+    **Streaming (earlier wave).** ``_CensusAggregator`` consumed ``sessions``
+    TWICE — once to build the id->source index, once to tally. Harmless for a
+    list; with a generator the second pass sees an exhausted iterator and every
+    session tally silently comes back EMPTY, with no error. The two passes are
+    now one, asserted directly as walk-count == 1 rather than inferred from the
+    tallies being right.
 
-    This asserts the property directly (walk count == 1 per table) rather than
-    inferring it from the tallies being correct, because a future refactor could
-    reintroduce a second pass over a re-materialized list and leave the tallies
-    right while quietly discarding the memory guarantee.
+    **Count-not-walk (2026-08-16).** ``__tool_call`` (637,496 rows / 6,375 pages)
+    and ``__import_batch`` (284,759 / 2,848) were walked ONLY to be counted, so
+    they are no longer read at all — hence walk-count == 0 for both. Asserting
+    ZERO, not "fewer": a regression that reintroduced a walk would otherwise
+    hide behind correct-looking tallies.
     """
     reader = _reader()
     walker = _walker(reader)
+    count, min_value = _aggregates(reader, walker)
     rows = build_census(
         query=reader.query,
         query_ordered=reader.query_ordered,
         walk=walker,
+        count=count,
+        min_value=min_value,
         now=_NOW,
         page_size=100,
         fingerprint_seeds=_SEEDS,
     )
-    for table in (TABLE_SESSION, TABLE_TOOL_CALL, TABLE_IMPORT_BATCH):
+    _check(
+        walker.counts.get(TABLE_SESSION) == 1,
+        f"__session walked exactly once (got {walker.counts.get(TABLE_SESSION)})",
+    )
+    for table in (TABLE_TOOL_CALL, TABLE_IMPORT_BATCH):
         _check(
-            walker.counts.get(table) == 1,
-            f"{table} was walked exactly once (got {walker.counts.get(table)})",
+            walker.counts.get(table) is None,
+            f"{table} is NOT walked at all (got {walker.counts.get(table)}) — "
+            f"it is counted; a reintroduced walk must fail here, not hide behind "
+            f"a correct tally",
         )
     by = _by_source(rows)
     _check(
@@ -478,8 +752,58 @@ def test_census_streams_each_table_exactly_once() -> None:
     )
     _check(
         by["src-A"]["tool_call_count"] > 0,
-        "tool_call tallies survived streaming — they depend on the session index "
-        "being fully built BEFORE the tool_call stream is consumed",
+        "tool_call counts are attributed per source — they depend on the session "
+        "index being COMPLETE before any counting runs",
+    )
+
+
+def test_counts_cannot_precede_the_session_index() -> None:
+    """No count is issued before the session walk has been drained.
+
+    The ordering is now structural — the counting methods live on the object
+    that owns the ``session_id -> source_id`` index, so they cannot run before
+    it exists. This asserts it anyway, because "structural" is a property of
+    today's arrangement and a future refactor could hand the index in from
+    outside and restore the hazard.
+
+    Counting before the index is built attributes nothing: every per-source
+    count returns zero, the census still renders, and nothing raises. Same
+    silent-empty-tallies signature as the double-consumption bug.
+    """
+    reader = _reader()
+    walker = _walker(reader)
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.early = False
+
+        def count(self, table: str, filters: dict[str, Any]) -> int:
+            if not walker.drained:
+                self.early = True
+            return len(reader.query(table, {**filters}))
+
+        def min_value(self, table: str, column: str, filters: dict[str, Any]) -> Any:
+            values = [
+                r[column] for r in reader.query(table, {**filters})
+                if r.get(column) is not None
+            ]
+            return min(values) if values else None
+
+    rec = _Recorder()
+    build_census(
+        query=reader.query,
+        query_ordered=reader.query_ordered,
+        walk=walker,
+        count=rec.count,
+        min_value=rec.min_value,
+        now=_NOW,
+        page_size=100,
+        fingerprint_seeds=_SEEDS,
+    )
+    _check(
+        not rec.early,
+        "no count ran before the session walk was drained — the index is "
+        "complete before anything is attributed to a source",
     )
 
 

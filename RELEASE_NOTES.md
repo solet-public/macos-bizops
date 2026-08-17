@@ -4,6 +4,91 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-17 — Rotation notices, deploy-proof worker paths, and session listings that page
+
+No breaking changes for standard configurations. Context-status rows and the
+sweep's event stream gain new fields and event kinds (supersets of their
+previous shapes); consumers doing exact-shape equality on either must update.
+Update with the standard short form: `git pull --ff-only`, restart, wait for
+startup to finish (`05_seed_update_runbook.md` is the complete procedure).
+
+### Sessions are told when their context needs rotation
+
+Long-lived agent sessions used to discover an over-budget context only by
+symptom. The platform sweep now measures two conditions on its regular tick
+and says so:
+
+- **Rotation-due notices**: a session whose context gauge crosses its
+  rotation band gets a notice composed onto the sweep tick, **latched** — one
+  notice at condition onset, re-armed only when the condition clears, with an
+  honest bound of at most one repeat per platform restart. A wiring guard
+  fails loudly if the notice rider is present but unwired, so the feature
+  cannot silently un-ship.
+- **Gauge-coverage notices**: a live session with no context-gauge row at all
+  is itself reported — absence of the measurement is a condition, not a blind
+  spot.
+- **The operator seat is covered from the other side.** The one session the
+  sweep's delivery path cannot reach gets the same rotation-due notice from a
+  prompt-submit hook in the coordination-hooks plugin (now 0.5.9). The two
+  halves share provenance checks so a notice always names which surface
+  produced it.
+- **The gauge itself got honest**: each context-status row now names which of
+  five hook surfaces wrote it (checkout, vendored, release, cache, unknown)
+  and carries prompt-cache state, so rotation economics are measured rather
+  than guessed. A collapsed "unknown" surface from earlier releases resolves
+  into its real writer.
+
+### Long-running workers survive deploys
+
+Worker spawn used to pin the wake CLI and its registration sidecar to a path
+inside a **versioned release directory**. Blue-green deploys reap old
+releases, so every deploy silently broke every standing worker's wake path —
+no error in any log, the worker just went quiet. The worker CLI path is now
+expressed through the deployment's atomically-swapped `current` symlink at
+the single resolution choke point all surfaces inherit, left **unresolved**
+so it survives every future cutover, and the rewrite refuses during a
+mid-cutover version skew rather than guessing. This applies at spawn time:
+workers spawned before this release keep their versioned paths until
+respawned. A knowledge-base article ships the full contract, including how
+to read a live process's environment to confirm which form of the path it
+actually holds. Separately, the spawned solet subprocess's PATH now carries
+the wake CLI's own directory, closing a silent fail-open.
+
+### Session listings page instead of refusing
+
+On mature deployments, `list_sessions` read whole tables and collided with
+the 10,000-row read cap introduced in the previous release — refusing loudly
+with no filters, and on `source_kind` filters too. All fleet and
+session-source membership reads now page or bound themselves, and the census
+counts its two count-only tables instead of walking them. The read cap keeps
+its job; the callers stopped deserving to hit it.
+
+### Scheduler correctness across time zones and restarts
+
+Cron triggers are evaluated in UTC, and a trigger whose fire time fell inside
+a platform-down window now defers to its next window instead of erroring
+permanently at startup. A time-convention knowledge-base article ships with
+two worked incidents.
+
+### Gates that tell the truth
+
+The quality-gate suite now covers its own directory with the same linters it
+enforces; a gate that crashes is reported as a crash rather than rendered as
+a violation count; the secrets scanner no longer dies on a tracked absolute
+or escaping symlink; and a contributor-listing verb serializes its datetime
+fields with explicit offsets at the edge seam.
+
+### Content and identity hygiene
+
+Two shipped files carried reserved origin-identity tokens in prose; both are
+scrubbed, and the census that catches the class ran clean on both profiles at
+this mint. Shipped process-guidance citations that pointed at unshipped
+working files now cite process keys. The dual-home seed release procedure
+itself is now deterministic, so updates to both published homes of this seed
+are one procedure rather than two improvisations.
+
+---
+
 ## 2026-08-15 — Payload safety bounds, migration repairs, and workers that fail loud
 
 No breaking changes for standard configurations; one health endpoint's

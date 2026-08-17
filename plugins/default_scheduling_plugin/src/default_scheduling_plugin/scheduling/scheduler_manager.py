@@ -130,9 +130,17 @@ class SchedulerManager:
         if not self.scheduler:
             return
 
+        # `CronTrigger.from_crontab`'s docstring claims an unset `timezone`
+        # "defaults to scheduler timezone" — that is false at construction
+        # time: `CronTrigger.__init__` resolves `timezone=None` to
+        # `get_localzone()` (the HOST's local tz) immediately, never
+        # consulting this `BackgroundScheduler`'s own `timezone=UTC`
+        # config. Passing UTC explicitly here is the fix, not a style
+        # preference — measured 2026-08-16, see
+        # plugins/default_scheduling_plugin/tests/cron_utc_timezone_smoke.py.
         self.scheduler.add_job(
             func,
-            CronTrigger.from_crontab(cron_expression),
+            CronTrigger.from_crontab(cron_expression, timezone=datetime.UTC),
             id=job_id,
         )
 

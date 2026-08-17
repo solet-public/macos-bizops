@@ -33,10 +33,12 @@ from datetime import datetime, timedelta
 from functools import partial
 from typing import cast
 
+from ananta.core.domain.enums import ActionStatus
 from ananta.interfaces.state_management_interface import StateManagementInterface
 from ananta.llm.session_ledger.base import (
     SessionLedgerRepositoryBase,
     _naive_utc,
+    count_rows,
     walk_table,
 )
 from ananta.llm.session_ledger.read_support import (
@@ -50,6 +52,7 @@ from ananta.llm.session_ledger.read_support import (
     select_quiescent_sessions,
 )
 from ananta.llm.session_ledger.schema import (
+    NAMESPACE,
     TABLE_ACTIVE_LEASE,
     TABLE_EVENT,
     TABLE_SESSION,
@@ -100,6 +103,38 @@ _CENSUS_EVENT_PAGE_SIZE = 100
 # A fixture that cannot reach the page boundary cannot test the cursor, and a
 # green from such a fixture is worth nothing.
 _EVENT_PAGE_ROWS = 100
+
+
+def _census_count(
+    state: StateManagementInterface, table: str, filters: dict[str, object],
+) -> int:
+    """``count_rows`` with the state interface curried in — the census counter.
+
+    Free function bound with ``partial`` at the call site, like
+    :func:`_walk_census_table`: it needs nothing from the instance but the state
+    interface, and ``SessionLedgerReadMixin`` sits at the 500-LOC god-class bound.
+    """
+    return count_rows(state, table, filters)
+
+
+def _census_min_value(
+    state: StateManagementInterface, table: str, column: str, filters: dict[str, object],
+) -> object:
+    """``MIN(column)`` for the census's oldest-running-batch timestamp.
+
+    Returns the RAW scalar (naive datetime or naive ISO string — the F1 seam);
+    ``read_support._as_naive_datetime`` normalizes it. Deliberately not
+    normalized here, so the seam stays a thin transport and the type handling
+    lives next to the arithmetic that depends on it.
+    """
+    result = state.min_value(
+        NAMESPACE, {"table": table, "column": column, "filters": filters},
+    )
+    if result.get("action_status") != ActionStatus.COMPLETED.value:
+        return None
+    data = result.get("data")
+    inner = data.get("result") if isinstance(data, dict) else None
+    return inner.get("value") if isinstance(inner, dict) else None
 
 
 def _walk_census_table(
@@ -225,6 +260,8 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
             query=self._query,
             query_ordered=self._query_ordered,
             walk=partial(_walk_census_table, self._state),
+            count=partial(_census_count, self._state),
+            min_value=partial(_census_min_value, self._state),
             now=cast(datetime, _naive_utc(self._clock())),
             page_size=_CENSUS_EVENT_PAGE_SIZE,
             fingerprint_seeds=(_FINGERPRINT_SEED_A, _FINGERPRINT_SEED_B),
@@ -262,8 +299,9 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
         NOT yet repaired — wave 2b. Both explained at ``walk_sessions_page``.
         """
         return list_sessions_via_junction(
-            self._query,
             self._query_ordered,
+            partial(_walk_census_table, self._state),
+            self._query_membership_chunked,
             window=SessionWindow(
                 since=_naive_dt(since),
                 until=_naive_dt(until),

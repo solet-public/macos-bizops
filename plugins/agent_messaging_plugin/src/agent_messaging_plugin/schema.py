@@ -1018,6 +1018,105 @@ def get_session_context_status_schema() -> TableSchema:
                 not_null=True,
                 description="When the reporting hook computed this snapshot (its own clock).",
             ),
+            # CACHE STATE (2026-08-16). The economic rotation policy's cold
+            # trigger needs to know whether the prompt cache is live, and only
+            # the reporting hook can see that -- it reads the transcript, which
+            # no verb does. Without these columns the policy's cold branch
+            # exists in code and can never fire.
+            #
+            # All three describe THE MOST RECENT ASSISTANT CALL, the same call
+            # current_tokens is summed from. They are nullable because a report
+            # from a pre-2026-08-16 hook carries none of them, and a NULL here
+            # means "not reported", never "cache is warm" -- the read-back verb
+            # surfaces that distinction rather than defaulting it away.
+            "cache_read_tokens": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description=(
+                    "cache_read_input_tokens on the most recent assistant call. "
+                    "0 means that call read NOTHING from cache and paid full "
+                    "price; NULL means the reporting hook did not report it."
+                ),
+            ),
+            "cache_cold": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description=(
+                    "1 when the reporter classified the prompt cache as expired, "
+                    "0 warm, NULL not reported. Classified by "
+                    "rotation_thresholds.classify_cache_state, which EXCLUDES "
+                    "the first call after a /clear -- that call is cold by "
+                    "construction because the clear rewrites the prefix, and "
+                    "counting it would make every rotation recommend another."
+                ),
+            ),
+            "cache_overage_signature": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description=(
+                    "1 when REPEATED cold calls across sub-TTL gaps indicate the "
+                    "cache is not surviving its nominal window -- what usage "
+                    "overage looks like from outside, since the account state "
+                    "itself is not observable to this platform. 0 no, NULL not "
+                    "reported. A single cold call after a long idle gap is "
+                    "ordinary expiry and does NOT set this."
+                ),
+            ),
+            # REPORTER ATTRIBUTION (2026-08-16). Several COPIES of the
+            # reporting hook can be registered on the same event at once (the
+            # repo's own .claude/hooks copy and an INSTALLED plugin-cache copy
+            # both bind PostToolUse, and settings sources merge rather than
+            # override). They serialize on a shared throttle marker that
+            # carries no record of which copy wrote it, so exactly one copy
+            # serves each tick and NOTHING in the resulting row said which.
+            #
+            # That made a missing field ambiguous in a way no reader could
+            # resolve: absent cache state could mean the verbs are not
+            # deployed, OR that a stale copy served the tick. These two
+            # columns make a row attributable, on two INDEPENDENT axes --
+            # a current-generation hook running from the wrong surface and a
+            # stale-generation hook running from the right one are different
+            # failures, and one composite value would blur them.
+            #
+            # Nullable for the same reason as the cache columns above, and
+            # with more force: a reporter predating this widening sends
+            # neither, so NULL here positively identifies a pre-attribution
+            # reporter. Absence is the signal, not an absence of signal.
+            "reporter_surface": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "Which registered COPY of the reporting hook served this "
+                    "tick, as a path CLASS rather than a machine-specific "
+                    "path: 'checkout' for a hook under the repo's own "
+                    ".claude/hooks (including a subdirectory of it), "
+                    "'plugin_cache' for an installed plugin-cache copy, "
+                    "'vendored' for the in-repo vendored source an install "
+                    "copies FROM, 'release' for that same source inside a "
+                    "deployed release tree, and 'unknown' when the hook could "
+                    "not classify its own location. NULL means the reporter "
+                    "predates this column and is therefore a stale copy by "
+                    "construction. 'vendored'/'release' were added 2026-08-17 "
+                    "after a row was observed ALTERNATING between 'checkout' "
+                    "and 'unknown' on one session -- the shared-throttle race "
+                    "between two copies that both carry this field, which the "
+                    "original collapsed bucket could not name."
+                ),
+            ),
+            "reporter_generation": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description=(
+                    "The reporting hook's own content-generation constant, "
+                    "bumped in lockstep whenever its reporting content "
+                    "changes. Deliberately NOT a git sha -- a hook cannot "
+                    "know the commit it was copied from, and inferring one "
+                    "would promise precision the reporter does not have. "
+                    "Lets a reader tell a current copy from an older one "
+                    "that is still being served. NULL means the reporter "
+                    "predates this column."
+                ),
+            ),
         },
         indexes=[
             IndexDefinition(

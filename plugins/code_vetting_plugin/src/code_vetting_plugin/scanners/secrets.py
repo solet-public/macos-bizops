@@ -97,6 +97,26 @@ def _relativize(root: Path, path_field: str) -> str:
         return path_field
 
 
+def _extract_skipping_unsafe_links(archive: tarfile.TarFile, dest: Path) -> None:
+    """``extractall(dest, filter="data")``, but a rejected symlink is SKIPPED
+    rather than fatal.
+
+    ``filter="data"`` (PEP 706) rejects any absolute or destination-escaping
+    link target and raises, which kills the whole scan on one bad member
+    (measured live: a tracked absolute symlink dies the entire secrets pass).
+    A skipped symlink loses nothing for this scanner: gitleaks/trufflehog scan
+    file CONTENT, and a symlink carries none of its own — the file it points
+    at, if tracked, is a separate archive member scanned on its own merits.
+    """
+    data_filter = tarfile.data_filter
+    for member in archive.getmembers():
+        try:
+            filtered = data_filter(member, str(dest))
+        except tarfile.FilterError:
+            continue
+        archive.extract(filtered, dest)
+
+
 @contextmanager
 def _tracked_snapshot(tree: TargetTree) -> Generator[Path]:
     """Materialize the ENUMERATED tree into a temp dir for a directory scanner.
@@ -122,7 +142,7 @@ def _tracked_snapshot(tree: TargetTree) -> Generator[Path]:
             if completed.returncode != 0:
                 raise RuntimeError(f"git archive failed at {tree.root}: {completed.stderr.decode('utf-8', 'replace')[:200]}")
             with tarfile.open(fileobj=io.BytesIO(completed.stdout)) as archive:
-                archive.extractall(dest, filter="data")
+                _extract_skipping_unsafe_links(archive, dest)
         else:
             for rel in tree.all_files():
                 out = dest / rel

@@ -246,10 +246,13 @@ from .session_lifecycle_verbs import spawn_session as lifecycle_spawn_session
 from .session_lifecycle_verbs import terminate_session as lifecycle_terminate_session
 from .session_role_claim_store import delete_session_role_claim_if_still_holds
 from .session_sweep import (
+    NoticeLatch,
     SessionRoleClaimPruner,
     sweep_deadline_dependencies,
+    sweep_gauge_coverage,
     sweep_lane_closed_dependencies,
     sweep_overdue_sessions,
+    sweep_rotation_due_sessions,
     sweep_unregistered_spawning_sessions,
 )
 from .system_slots import (
@@ -739,6 +742,13 @@ class AgentMessagingPlugin(
         self._bridge_manager: BridgeSessionManager | None = None
         self._peer_registry: PeerRegistry | None = None
         self._session_role_claim_pruner: SessionRoleClaimPruner | None = None
+        # L4 rotation-surface latches (one per notice kind, never shared: the
+        # same agent_instance_id can legitimately be rotation-due AND dark, and
+        # one latch would let whichever fired first suppress the other).
+        # Process-lifetime scope by design — see NoticeLatch's docstring for
+        # the bound that buys.
+        self._rotation_due_latch: NoticeLatch = NoticeLatch()
+        self._gauge_coverage_latch: NoticeLatch = NoticeLatch()
         self._platform_surface: PlatformSurface | None = None
         # D-IF7/D-IF8 sidecar: per-bridge SessionInferenceProvider keyed
         # by agent_instance_id. Populated post-success in the stdio
@@ -3922,11 +3932,70 @@ class AgentMessagingPlugin(
                 required=True,
                 type=ParameterType.STRING,
             ),
+            "cache_read_tokens": ParameterMetadata(
+                description=(
+                    "cache_read_input_tokens on THE MOST RECENT ASSISTANT CALL — "
+                    "the same call current_tokens is summed from. 0 means that "
+                    "call read nothing from cache and paid full price. Omit if "
+                    "not measured; omission records NOT REPORTED, never 'warm'."
+                ),
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+            "cache_cold": ParameterMetadata(
+                description=(
+                    "True when the reporter classified the prompt cache as "
+                    "expired. The classification EXCLUDES the first call after "
+                    "a /clear — that call is cold by construction because the "
+                    "clear rewrites the prefix. Omit if not measured."
+                ),
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
+            "cache_overage_signature": ParameterMetadata(
+                description=(
+                    "True when REPEATED cold calls across sub-TTL gaps show the "
+                    "cache is not surviving its nominal window. A single cold "
+                    "call after a long idle gap is ordinary expiry and must NOT "
+                    "set this. Omit if not measured."
+                ),
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
+            "reporter_surface": ParameterMetadata(
+                description=(
+                    "Which registered COPY of the reporting hook is sending "
+                    "this, as a path class: 'checkout' (under the repo's own "
+                    ".claude/hooks, subdirectories included), 'plugin_cache' "
+                    "(an installed plugin-cache copy), 'vendored' (the in-repo "
+                    "source an install copies FROM), 'release' (that source "
+                    "inside a deployed release tree), or 'unknown' when the "
+                    "hook cannot classify its own location. Any other value is "
+                    "rejected before any write. Omit only if the reporter "
+                    "predates attribution."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "reporter_generation": ParameterMetadata(
+                description=(
+                    "The reporting hook's own content-generation constant, "
+                    "bumped in lockstep with its reporting content. NOT a git "
+                    "sha — a hook cannot know the commit it was copied from. "
+                    "Lets a reader tell a current copy from an older one that "
+                    "is still being served. Omit if not carried."
+                ),
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
         },
         output_type="object",
         output_description=(
             "maintenance-verbs M1 — overwrite the caller's own latest "
-            "context-status snapshot (shape (a) cache write)."
+            "context-status snapshot (shape (a) cache write), including the "
+            "optional cache-state fields the economic rotation policy's cold "
+            "branch reads and the reporter-attribution fields that say which "
+            "hook copy produced the row."
         ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -3958,6 +4027,11 @@ class AgentMessagingPlugin(
                 model=str(raw.get("model", "")),
                 current_tokens=int(raw.get("current_tokens", 0) or 0),
                 ceiling=int(raw.get("ceiling", 0) or 0),
+                cache_read_tokens=_opt_int(raw.get("cache_read_tokens")),
+                cache_cold=_opt_bool(raw.get("cache_cold")),
+                cache_overage_signature=_opt_bool(raw.get("cache_overage_signature")),
+                reporter_surface=_opt_str(raw.get("reporter_surface")),
+                reporter_generation=_opt_int(raw.get("reporter_generation")),
                 measured_at=str(raw.get("measured_at", "")),
             )
         except VerbError as exc:
@@ -3997,6 +4071,17 @@ class AgentMessagingPlugin(
                 ),
                 "rotation_due": ParameterMetadata(type=ParameterType.BOOLEAN),
                 "measured_at": ParameterMetadata(type=ParameterType.STRING),
+                # Cache state + derived band (2026-08-16). Declared here so the
+                # schema describes what the verb ACTUALLY returns; the fields
+                # shipped in the return dict ahead of this declaration.
+                "cache_read_tokens": ParameterMetadata(type=ParameterType.INTEGER),
+                "cache_cold": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "cache_overage_signature": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "rotation_band": ParameterMetadata(type=ParameterType.STRING),
+                "rotation_guidance": ParameterMetadata(type=ParameterType.STRING),
+                # Reporter attribution (2026-08-16): which hook copy wrote the row.
+                "reporter_surface": ParameterMetadata(type=ParameterType.STRING),
+                "reporter_generation": ParameterMetadata(type=ParameterType.INTEGER),
             },
         ),
     )
@@ -5148,6 +5233,66 @@ class AgentMessagingPlugin(
             self._run_session_lifecycle_sweep()
         except Exception:  # noqa: BLE001 — one rider's fault must not skip the others
             logger.exception("D1 session-lifecycle sweep FAULTED; sweeper continues")
+        try:
+            self._run_rotation_surface_sweep()
+        except Exception:  # noqa: BLE001 — one rider's fault must not skip the others
+            logger.exception("L4 rotation-surface sweep FAULTED; sweeper continues")
+
+    def _run_rotation_surface_sweep(self) -> None:
+        """L4 rotation-surface rider — the two notice legs that watch the
+        context gauge rather than the lifecycle ledger.
+
+        Separate from :meth:`_run_session_lifecycle_sweep` and separately
+        fault-isolated, because they answer a different question from a
+        different table: the D1 sweep reads ``managed_session`` deadlines and
+        MUTATES state (marking rows overdue, firing dependency edges), while
+        these two only READ (``session_context_status`` beside the lifecycle
+        row) and notify. A fault in a read-only notice leg must not cost the
+        tick its overdue marking, and vice versa.
+
+        ★ Composition is what makes L4 LIVE. Both legs landed unreachable
+        (a0a517afb / merge e883d3158): tested, and invoked by nothing, so they
+        ran never in production. Until this rider existed, "L4a delivers
+        notices" was a statement about capability, not about behaviour.
+
+        Both legs are latched (see :class:`NoticeLatch`) because neither
+        condition is an edge — a rotation-due session stays rotation-due until
+        it rotates, and a dark session stays dark until someone fixes it, so
+        unlatched they would re-deliver every tick for the duration.
+
+        ★ THE SEAT IS STILL NOT REACHED BY THIS. ``append_event`` lands on the
+        recipient's bridge and is read at that session's next turn, and
+        ``drive_on_delivery`` no-ops for an operator-launched seat (no
+        ``managed_session`` row, degenerate ``operator`` host driver). This
+        rider serves MANAGED WORKERS' stewards. The seat's own decision-point
+        surface is the ``UserPromptSubmit`` hook that consumes the
+        ``rotation_due_selfnotify`` marker — a different delivery path for the
+        same fact, deliberately not a second detection.
+        """
+        state_service = self._get_state_service()
+        if state_service is None:
+            return
+        due = sweep_rotation_due_sessions(
+            state_service,
+            peer_registry=self._peer_registry,
+            bridge_manager=self._bridge_manager,
+            latch=self._rotation_due_latch,
+        )
+        if due:
+            logger.info("L4 sweep: notified %d steward(s) of a rotation-due session", due)
+        dark = sweep_gauge_coverage(
+            state_service,
+            peer_registry=self._peer_registry,
+            bridge_manager=self._bridge_manager,
+            latch=self._gauge_coverage_latch,
+        )
+        if dark:
+            logger.warning(
+                "L4 sweep: %d LIVE session(s) have no context-gauge row — the "
+                "reporting path between hook tick and state write is failing "
+                "silently for them",
+                dark,
+            )
 
     def _run_session_lifecycle_sweep(self) -> None:
         """D1 platform sweep rider (§3.4/§6 rule 3, Architect ratification #3):
@@ -7222,6 +7367,52 @@ def _clamp_peer_inbox_limit(raw: object) -> int:
     if isinstance(raw, bool) or not isinstance(raw, int):
         return PEER_INBOX_DEFAULT_LIMIT
     return max(PEER_INBOX_MIN_LIMIT, min(raw, PEER_INBOX_MAX_LIMIT))
+
+
+def _opt_int(raw: object) -> int | None:
+    """An optional integer parameter: absent stays absent.
+
+    ``None`` must survive as ``None`` all the way to the column. Coercing it
+    to 0 would turn "the reporter did not measure the cache" into "the cache
+    read zero tokens", which is the strongest possible cold signal — an
+    un-upgraded reporter would start asserting a cold cache on every tick.
+
+    A non-numeric value is also treated as NOT REPORTED rather than coerced:
+    a caller sending junk has not measured anything either, and inventing a 0
+    from it would produce the same false cold signal by a different route.
+    """
+    if raw is None or isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_bool(raw: object) -> bool | None:
+    """An optional boolean parameter: absent stays absent, never False.
+
+    The inverse hazard to :func:`_opt_int` and just as silent: coercing None
+    to False would have every un-upgraded reporter assert a WARM cache it
+    never looked at.
+    """
+    return None if raw is None else bool(raw)
+
+
+def _opt_str(raw: object) -> str | None:
+    """An optional string parameter: absent stays absent, never "".
+
+    Same family as :func:`_opt_int`/:func:`_opt_bool`. Used for
+    ``reporter_surface``, where the hazard is specific: coercing None to ""
+    would store an empty surface that reads as "reported, but blank" rather
+    than "this reporter predates attribution", and the verb's surface
+    validation would then have to accept "" to avoid failing every
+    un-upgraded reporter — quietly re-admitting the unattributable row the
+    column exists to eliminate. A non-string is treated as NOT REPORTED
+    rather than stringified, so a caller bug cannot manufacture a surface
+    like "None" that passes for a real one.
+    """
+    return raw if isinstance(raw, str) and raw.strip() else None
 
 
 def _failure_result(*, code: str, message: str) -> dict[str, Any]:

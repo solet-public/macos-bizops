@@ -54,6 +54,7 @@ HOOK_KEYWORDS: dict[str, tuple[str, ...]] = {
     "git_controller_gate.py": ("git-mutation", "git-controller", "git controller"),
     "heartbeat_report_alive.py": ("heartbeat", "report_alive", "report-alive"),
     "rotation_due_watch.py": ("rotation-due", "rotation due"),
+    "rotation_due_notice.py": ("rotation-due notice", "rotation_due_notice"),
     "capture.py": ("memory-passthrough", "memory passthrough"),
     "session_context.py": ("memory-passthrough", "memory passthrough"),
     "drain.py": ("memory-passthrough", "memory passthrough"),
@@ -141,6 +142,12 @@ CONTENT_BEARING_WRITE_HOOKS = frozenset(
         # not a bare timestamp -- same CONTENT_BEARING class as capture.py's journal
         # entry, never MARKER_ONLY's narrower bare-timestamp claim.
         "capture_session_mapping.py",
+        # L4b (2026-08-17): rewrites the self-notify marker it just surfaced,
+        # stamping `surfaced_at` INTO the existing record so the latch and the
+        # record it latches cannot disagree. That carries the marker's content
+        # back out with it, so it is CONTENT_BEARING rather than MARKER_ONLY --
+        # the bare-timestamp claim would be false of it.
+        "rotation_due_notice.py",
     },
 )
 FILE_WRITE_CAPABLE_HOOKS = MARKER_ONLY_WRITE_HOOKS | CONTENT_BEARING_WRITE_HOOKS
@@ -183,6 +190,7 @@ _NUMBER_WORDS = {
     1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
     6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
     11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen",
+    16: "sixteen", 17: "seventeen", 18: "eighteen", 19: "nineteen", 20: "twenty",
 }
 
 # Shell metacharacters that must never appear in an exec-form argv. `${VAR}` is

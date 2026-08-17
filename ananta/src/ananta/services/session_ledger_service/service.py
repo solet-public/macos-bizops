@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ananta.llm.session_ledger.blob_adapter import SessionLedgerBlobAdapter
 from ananta.llm.session_ledger.event_embeddings import (
@@ -431,14 +431,34 @@ class SessionLedgerService(
         """W5.B §3.3 provenance projection wrapper.
 
         Delegates to the repository's CTE+ (vendor, external_session_id)
-        SELECT; passes the response envelope through unchanged. Per Codex
-        C3 the envelope carries three top-level fields plus the
-        ``contributors`` list (canonical-input + sibling-input + orphaned-
-        canonical cases handled in the repository layer).
+        SELECT. Per Codex C3 the envelope carries three top-level fields
+        plus the ``contributors`` list (canonical-input + sibling-input +
+        orphaned-canonical cases handled in the repository layer) — those
+        three top-level fields pass through unchanged, but each
+        contributor's ``first_event_at`` / ``last_event_at`` is serialized
+        here: the repository layer deliberately returns NAIVE datetimes
+        (matching the pre-migration raw ``_fetch_all`` return type — see
+        ``list_canonical_contributors_migration_smoke.py::
+        test_datetime_return_type_parsed_back``, a locked-in Python-internal
+        contract this wrapper must not disturb), but a raw ``datetime`` hits
+        the EDGE process's JSON envelope with no serialization step of its
+        own. ``_naive_utc_to_iso`` makes the naive-for-comparison (repository)
+        vs aware-for-output (this seam) split explicit rather than leaving a
+        caller to guess which one it has.
         """
-        return self._repository.list_canonical_contributors(
+        result = self._repository.list_canonical_contributors(
             session_id=session_id,
         )
+        contributors = cast("list[dict[str, Any]]", result["contributors"])
+        result["contributors"] = [
+            {
+                **row,
+                "first_event_at": _naive_utc_to_iso(cast("datetime", row["first_event_at"])),
+                "last_event_at": _naive_utc_to_iso(cast("datetime", row["last_event_at"])),
+            }
+            for row in contributors
+        ]
+        return result
 
     def get_import_status(self, batch_id: str) -> dict[str, Any]:
         row = self._repository.get_import_status(batch_id)
@@ -1750,6 +1770,20 @@ def _public_event_envelope(row: dict[str, Any]) -> dict[str, Any]:
         "vendor": row.get("session_vendor"),
         "source_kind": row.get("source_kind"),
     }
+
+
+def _naive_utc_to_iso(value: datetime) -> str:
+    """Naive-UTC ``datetime`` -> explicit-offset ISO string, for the EDGE
+    output seam.
+
+    Platform storage convention (service.py's own ``_normalize_event_at``
+    docstring): naive-stored timestamps ARE semantically UTC; this attaches
+    ``tzinfo=UTC`` (not ``astimezone`` — the value is already UTC, only
+    untagged) before ``.isoformat()``, so the output carries an explicit
+    ``+00:00`` rather than a bare naive isoformat (the defect class this
+    helper exists to close — see ``list_canonical_contributors``).
+    """
+    return value.replace(tzinfo=UTC).isoformat()
 
 
 def _parse_iso(s: str) -> datetime:

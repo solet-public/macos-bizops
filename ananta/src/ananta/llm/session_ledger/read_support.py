@@ -44,6 +44,7 @@ from ananta.llm.session_ledger.types import (
     SessionsOrderBy,
     SourceVendor,
 )
+from ananta.services.state_service.read_bounds import MAX_READ_ROWS
 
 RELOAD_SAFE = True
 
@@ -456,6 +457,34 @@ class _BatchTally:
     min_started: datetime | None = None
 
 
+def _as_naive_datetime(value: object) -> datetime | None:
+    """A ``min_value`` timestamp scalar as a NAIVE datetime, or ``None``.
+
+    The aggregate primitives return raw scalars with the same type-fidelity as a
+    row cell (the F1 TZ seam): a ``TIMESTAMP`` column yields a naive datetime,
+    while a JSON-serialized path yields a naive ISO string. Both normalize here,
+    because ``_batch_age_seconds`` subtracts this from a naive-UTC ``now`` and a
+    mixed-awareness subtraction raises.
+
+    NOTE a small, deliberate widening: the row-walking code this replaced parsed
+    ``started_at`` only when it was a ``str`` (``if isinstance(started, str)``),
+    so a datetime cell would have been skipped and the source would have reported
+    no oldest batch at all. Accepting both is intent-preserving — the intent is
+    plainly "the oldest running batch's start" — and is disclosed rather than
+    folded in silently.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo is None else (
+            value.astimezone(UTC).replace(tzinfo=None)
+        )
+    if isinstance(value, str) and value:
+        parsed = datetime.fromisoformat(value)
+        return parsed if parsed.tzinfo is None else parsed.astimezone(UTC).replace(tzinfo=None)
+    return None
+
+
 def _batch_age_seconds(batch: _BatchTally | None, now: datetime) -> int | None:
     """Whole-second age of the oldest running batch, or ``None`` when none run.
 
@@ -495,8 +524,6 @@ class _CensusAggregator:
         *,
         sources: list[dict[str, object]],
         sessions: Iterable[dict[str, object]],
-        tool_calls: Iterable[dict[str, object]],
-        import_batches: Iterable[dict[str, object]],
         fingerprint_seeds: tuple[int, int],
     ) -> None:
         self._sources = sources
@@ -516,9 +543,13 @@ class _CensusAggregator:
         # ORDERING IS LOAD-BEARING: ``_tally_tool_calls`` and ``fold_event_page``
         # both look rows up in ``_session_source``, so the session stream must be
         # fully drained before either runs.
+        self._sessions_by_source: dict[str, list[str]] = {}
         self._sessions = self._tally_sessions_and_index(sessions)
-        self._tool_calls = self._tally_tool_calls(tool_calls)
-        self._batches = self._tally_batches(import_batches)
+        # Filled by count_tool_calls_via / tally_batches_via, which CANNOT run
+        # before the index above exists because they are methods on the object
+        # that owns it. That is the point: the ordering used to be a comment.
+        self._tool_calls: dict[str, int] = {}
+        self._batches: dict[str, _BatchTally] = {}
         self._event_count: dict[str, int] = {}
         self._fingerprint_a: dict[str, int] = {}
         self._fingerprint_b: dict[str, int] = {}
@@ -533,8 +564,10 @@ class _CensusAggregator:
         """
         tally: dict[str, _SessionTally] = {}
         for row in sessions:
-            self._session_source[str(row["id"])] = str(row["source_id"])
-            entry = tally.setdefault(str(row["source_id"]), _SessionTally())
+            source_id = str(row["source_id"])
+            self._session_source[str(row["id"])] = source_id
+            self._sessions_by_source.setdefault(source_id, []).append(str(row["id"]))
+            entry = tally.setdefault(source_id, _SessionTally())
             entry.session_count += 1
             if row.get("canonical_external_session_id") is None:
                 entry.canonical_count += 1
@@ -542,36 +575,81 @@ class _CensusAggregator:
                 entry.sibling_count += 1
         return tally
 
-    def _tally_tool_calls(
-        self, tool_calls: Iterable[dict[str, object]],
-    ) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for row in tool_calls:
-            source_id = self._session_source.get(str(row["session_id"]))
-            if source_id is None:
-                continue
-            counts[source_id] = counts.get(source_id, 0) + 1
-        return counts
+    def count_tool_calls_via(self, count: _Counter) -> None:
+        """Per-source ``__tool_call`` counts, WITHOUT reading a tool_call row.
 
-    @staticmethod
-    def _tally_batches(
-        import_batches: Iterable[dict[str, object]],
-    ) -> dict[str, _BatchTally]:
-        tally: dict[str, _BatchTally] = {}
-        for row in import_batches:
-            entry = tally.setdefault(str(row["source_id"]), _BatchTally())
-            if row.get("status") != ImportBatchStatus.RUNNING.value:
+        Read-cap sweep, 2026-08-16 (lane-ak). This replaced a whole-table walk of
+        ``__tool_call`` — **637,496 rows, 6,375 pages** — that existed only to
+        increment a per-source counter. The rows were shipped across the process
+        boundary and then discarded; the caller needed the EFFECT, not the rows.
+
+        A tool_call carries ``session_id``, not ``source_id``, so the count is
+        keyed on each source's own session ids. Chunked at the cap because a
+        ``= ANY`` list is bounded by the caller's list, and one source holds
+        3,552 sessions (measured 2026-08-16).
+
+        **This is a method, not a free function taking the index, on purpose.**
+        It cannot run before ``_session_source`` is built, because it belongs to
+        the object that builds it. The ordering used to be a comment saying
+        "drain sessions first" — and a comment is what someone reorders.
+        """
+        for source_id, session_ids in self._sessions_by_source.items():
+            total = 0
+            for start in range(0, len(session_ids), MAX_READ_ROWS):
+                chunk = session_ids[start : start + MAX_READ_ROWS]
+                total += count(
+                    TABLE_TOOL_CALL, {"session_id": chunk, "is_deleted": 0},
+                )
+            self._tool_calls[source_id] = total
+
+    def tally_batches_via(self, count: _Counter, min_value: _MinValue) -> None:
+        """Per-source import-batch health, WITHOUT reading an import_batch row.
+
+        Replaced a whole-table walk of ``__import_batch`` — **284,759 rows, 2,848
+        pages** — that produced two counters and one minimum. Each is a scalar
+        aggregate the provider can compute directly, and each was verified
+        against the live ledger before this was written:
+
+            count(status=running, polling_lease_token IS NOT NULL)  -> owned_running
+            count(status=running, polling_lease_token IS NULL)      -> unclaimed_route
+            min(started_at) WHERE status=running                    -> min_started
+
+        The equivalence was cross-checked against a completed census run's own
+        output for the busiest source (94 owned-running, oldest batch 2026-07-09)
+        rather than assumed from the filter grammar.
+
+        ``__import_batch`` carries ``source_id`` directly, so unlike tool_calls
+        this needs no session join and no chunking.
+        """
+        # Iterate the SOURCE rows, not the sessions index. The row-walking code
+        # this replaced keyed batches off ``import_batch.source_id`` directly, so
+        # a source with running batches but NO sessions still got a tally.
+        # Deriving the source list from ``_sessions_by_source`` instead would
+        # silently drop exactly those sources — caught by the smoke's src-B/src-C
+        # cases, which is what they are for.
+        for source_row in self._sources:
+            source_id = str(source_row["id"])
+            running: dict[str, object] = {
+                "source_id": source_id,
+                "status": ImportBatchStatus.RUNNING.value,
+                "is_deleted": 0,
+            }
+            owned = count(
+                TABLE_IMPORT_BATCH,
+                {**running, "polling_lease_token": {"op": "is_not_null"}},
+            )
+            unclaimed = count(
+                TABLE_IMPORT_BATCH,
+                {**running, "polling_lease_token": {"op": "is_null"}},
+            )
+            if not owned and not unclaimed:
                 continue
-            if row.get("polling_lease_token") is not None:
-                entry.owned_running += 1
-            else:
-                entry.unclaimed_route += 1
-            started = row.get("started_at")
-            if isinstance(started, str) and started:
-                started_at = datetime.fromisoformat(started)
-                if entry.min_started is None or started_at < entry.min_started:
-                    entry.min_started = started_at
-        return tally
+            oldest = min_value(TABLE_IMPORT_BATCH, "started_at", running)
+            self._batches[source_id] = _BatchTally(
+                owned_running=owned,
+                unclaimed_route=unclaimed,
+                min_started=_as_naive_datetime(oldest),
+            )
 
     def fold_event_page(self, page: list[dict[str, object]]) -> None:
         """XOR-fold one page of live ``__event`` rows into the per-source fingerprint.
@@ -658,6 +736,45 @@ class _TableWalker(Protocol):
     ) -> Iterator[dict[str, object]]: ...
 
 
+class _Counter(Protocol):
+    """Scalar ``COUNT(*)`` seam — the no-rows-shipped read.
+
+    Added 2026-08-16 (lane-ak) so the census can COUNT the two tables it was only
+    ever counting. ``count`` materializes nothing, so it is outside the read cap
+    entirely and cannot be refused at any table size.
+    """
+
+    def __call__(self, table: str, filters: dict[str, object]) -> int: ...
+
+
+class _MinValue(Protocol):
+    """Scalar ``MIN(column)`` seam, for the oldest-running-batch timestamp."""
+
+    def __call__(
+        self, table: str, column: str, filters: dict[str, object],
+    ) -> object: ...
+
+
+class _MembershipReader(Protocol):
+    """The repository's chunked ``col = ANY(values)`` seam, as a callback.
+
+    Added 2026-08-16 (lane-ak, wave 2b). A membership read's result size is
+    bounded by the CALLER's list length, not by anything the query states — so
+    when that list comes from a whole-table scan it blows the row cap. Chunking
+    makes every query bounded BY CONSTRUCTION. The binding lives in ``read.py``
+    where ``base._query_membership_chunked`` is in scope.
+    """
+
+    def __call__(
+        self,
+        table: str,
+        *,
+        column: str,
+        values: list[str],
+        extra_filters: dict[str, object] | None = None,
+    ) -> list[dict[str, object]]: ...
+
+
 class _OrderedReader(Protocol):
     """The mixin's bound ``_query_ordered`` read seam, as a callback contract.
 
@@ -735,16 +852,20 @@ def build_census(
     query: _StateReader,
     query_ordered: _OrderedReader,
     walk: _TableWalker,
+    count: _Counter,
+    min_value: _MinValue,
     now: datetime,
     page_size: int,
     fingerprint_seeds: tuple[int, int],
 ) -> list[dict[str, object]]:
     """Compose the per-source ledger census — SQL-lockdown GAP-1 composition root.
 
-    Reads ``__source`` whole via ``query`` (21 rows, measured), **streams** the
-    three large tables via ``walk``, pages the ~1M-row ``__event`` scan via
-    ``query_ordered`` (:func:`fold_census_events`), folds everything in the
-    DB-free :class:`_CensusAggregator`, and returns the per-source rows. Operator
+    Reads ``__source`` whole via ``query`` (21 rows, measured), **streams**
+    ``__session`` via ``walk``, **counts** ``__tool_call`` and ``__import_batch``
+    with scalar aggregates instead of reading them at all, pages the ~2M-row
+    ``__event`` scan via ``query_ordered`` (:func:`fold_census_events`), folds
+    everything in the DB-free :class:`_CensusAggregator`, and returns the
+    per-source rows. Operator
     D1 ruling (2026-06-20): Python-fold + re-baseline, NO aggregate primitive.
     The read seams are dependency-injected (no held service reference), so this
     is the full census composition the mixin delegates to in one thin method —
@@ -759,11 +880,26 @@ def build_census(
     as a pagination job on the strength of its 637k-row ``tool_call`` read; it
     actually dies earlier, so it was unusable rather than merely at risk.
 
-    **Why streaming and not ``list()``.** Materializing the walks would clear the
-    cap and still hold ~950,000 rows on the shared process at once. The fold
+    **Why streaming and not ``list()``.** Materializing a walk would clear the
+    cap and still hold the whole table on the shared process at once. The fold
     needs every row but never needs two at the same time — so the rows stream and
     only the per-source tallies are retained. That is the same shape
     :func:`fold_census_events` already uses for events, one function below.
+
+    **2026-08-16, count-not-walk (lane-ak): CENSUS GOT 29% CHEAPER — IT IS NOT
+    FIXED.** ``__tool_call`` (637,496 rows / 6,375 pages) and ``__import_batch``
+    (284,759 / 2,848) were walked ONLY to be counted, so they became scalar
+    ``count`` / ``min_value`` calls: ~333 aggregate calls replacing 9,223 paged
+    round trips, and two more whole-table reads deleted on the needs-rows-or-
+    effect question. Measured budget: **30,267 -> 21,377 round trips (-29%)**.
+
+    **The floor is unchanged and is the real problem.** The ``__event`` fold
+    alone is 20,771 pages — **97% of what remains** — so this stays a
+    multi-minute call that parks the serial action queue while it runs. That
+    head-of-line behaviour is a filed platform-level issue, not something this
+    change addresses, and whether the per-source fingerprint must re-read ~2M
+    events on every census is an Architect-parked design question. Do not report
+    this verb as repaired.
 
     **Why ``walk`` and not a bespoke keyset.** Unlike ``list_sessions`` and the
     per-session event walk, this caller has NO required order — the tallies are
@@ -780,18 +916,13 @@ def build_census(
             ceiling=_CENSUS_SESSION_CEILING,
             reason="one row per ingested session (measured 27,208 on 2026-08-16).",
         ),
-        tool_calls=walk(
-            TABLE_TOOL_CALL, {},
-            ceiling=_CENSUS_TOOL_CALL_CEILING,
-            reason="one row per recorded tool call (measured 637,496 on 2026-08-16).",
-        ),
-        import_batches=walk(
-            TABLE_IMPORT_BATCH, {},
-            ceiling=_CENSUS_IMPORT_BATCH_CEILING,
-            reason="one row per import batch (measured 284,787 on 2026-08-16).",
-        ),
         fingerprint_seeds=fingerprint_seeds,
     )
+    # Both of these need the session index the constructor just built, and both
+    # are methods on the object that owns it — so the ordering cannot be got
+    # wrong by reordering these two lines.
+    aggregator.count_tool_calls_via(count)
+    aggregator.tally_batches_via(count, min_value)
     fold_census_events(
         aggregator,
         query_ordered=query_ordered,
@@ -1035,8 +1166,21 @@ def walk_sessions_page(
     return kept
 
 
+#: How many junction rows one ``source_kind`` may have before the walk refuses.
+#: NOT a claim the junction is small: measured 2026-08-16, ``claude_code_local``
+#: alone has 4,005 rows and the table holds 8,055. It is a claim about this call
+#: site — past this, the id list it produces is too large to be a useful filter
+#: and the query wants narrowing, not a longer walk.
+_JUNCTION_WALK_CEILING = 2_000_000
+
+#: Rows one chunk of group-membership ids may yield before the walk refuses.
+#: Unlike an id read this is NOT bounded by the chunk length — see
+#: :func:`_walk_membership_chunked`.
+_GROUP_MEMBER_WALK_CEILING = 2_000_000
+
+
 def _junction_canonical_ids(
-    query: _StateReader, source_kind: IngestSourceKind,
+    walk: _TableWalker, source_kind: IngestSourceKind,
 ) -> list[str]:
     """Canonical session ids whose group has a contributor of ``source_kind``.
 
@@ -1046,18 +1190,70 @@ def _junction_canonical_ids(
     a hit means the canonical's ``(vendor, external_session_id)`` group has ANY
     contributor of that kind, byte-equivalent to the pre-migration
     EXISTS-over-the-group.
+
+    Read-cap sweep wave 2b, 2026-08-16 (lane-ak). This was an unbounded
+    ``query_state``. **Measured: 4,005 rows for ``claude_code_local``** — and the
+    live refusal on the serving release names THIS table, ``session_source_kind``,
+    not ``session``, so it is the first thing ``list_sessions(source_kind=…)``
+    hits. It pages now.
+
+    The result is a set of ids with no meaningful order, so
+    ``bounded_read.iter_table_rows``' fixed cursor is the right tool — the same
+    reasoning that made it right for the census walks and wrong for the two
+    order-carrying walks. ``is_deleted`` is absent from the filter because the
+    paged walk applies it by default.
     """
     return [
         str(row["canonical_session_id"])
-        for row in query(
+        for row in walk(
             TABLE_SESSION_SOURCE_KIND,
-            {"source_kind": source_kind.value, "is_deleted": 0},
+            {"source_kind": source_kind.value},
+            ceiling=_JUNCTION_WALK_CEILING,
+            reason=(
+                "one junction row per (canonical session, contributor kind) "
+                "(measured 4,005 for claude_code_local, 8,055 total, 2026-08-16)."
+            ),
         )
     ]
 
 
+def _walk_membership_chunked(
+    walk: _TableWalker,
+    table: str,
+    *,
+    column: str,
+    values: list[str],
+    extra_filters: dict[str, object],
+    ceiling: int,
+    reason: str,
+) -> list[dict[str, object]]:
+    """A ``col = ANY(values)`` read that is bounded even when ``col`` is NOT unique.
+
+    ``base._query_membership_chunked`` chunks the VALUES list at the cap and says
+    a chunk "matches at most its own length". **That is true only for a UNIQUE
+    column.** For ``__session.id`` it holds. For ``external_session_id`` it does
+    not, and cannot: a canonical and its siblings deliberately SHARE that value,
+    so one chunk of 100 ids matched 200 rows and the read was refused — found by
+    this wave's smoke, whose fake enforces the cap the way the provider does.
+
+    So this chunks the values (bounding the ``= ANY`` parameter list) **and pages
+    each chunk** (bounding the rows). The row count is then independent of the
+    column's cardinality, which is the property the caller actually needs.
+
+    Chunk size is derived from the cap so the two cannot drift.
+    """
+    out: list[dict[str, object]] = []
+    for start in range(0, len(values), MAX_READ_ROWS):
+        chunk = values[start : start + MAX_READ_ROWS]
+        out.extend(
+            walk(table, {**extra_filters, column: chunk}, ceiling=ceiling, reason=reason)
+        )
+    return out
+
+
 def _read_full_group_membership(
-    query: _StateReader,
+    membership: _MembershipReader,
+    walk: _TableWalker,
     *,
     canonical_ids: list[str],
     vendor: SourceVendor | None,
@@ -1096,7 +1292,15 @@ def _read_full_group_membership(
     (the outer row's own columns, as the pre-migration EXISTS outer WHERE did);
     ``pairs`` handles group qualification.
     """
-    canonicals = query(TABLE_SESSION, {"id": canonical_ids, "is_deleted": 0})
+    # Wave 2b (2026-08-16, lane-ak): BOTH reads below are ``col = ANY(values)``
+    # whose result size is bounded by the CALLER's list, not by the query — and
+    # ``canonical_ids`` comes from the junction walk, measured at 4,005 for
+    # claude_code_local. Chunked at the cap, so each query is bounded BY
+    # CONSTRUCTION and the bound holds however long the list grows.
+    canonicals = membership(
+        TABLE_SESSION, column="id", values=canonical_ids,
+        extra_filters={"is_deleted": 0},
+    )
     if not canonicals:
         return []
     ext_ids = sorted({str(row["external_session_id"]) for row in canonicals})
@@ -1104,24 +1308,34 @@ def _read_full_group_membership(
         (str(row["vendor"]), str(row["external_session_id"]))
         for row in canonicals
     }
-    member_filters: dict[str, object] = {
-        "external_session_id": ext_ids,
-        "is_deleted": 0,
-    }
+    member_filters: dict[str, object] = {"is_deleted": 0}
     if project_path is not None:
         member_filters["project_path"] = project_path
     if vendor is not None:
         member_filters["vendor"] = vendor.value
+    # PAGED, not merely chunked: ``external_session_id`` is non-unique BY
+    # DESIGN — the canonical and every sibling share it — so a chunk of N ids
+    # matches well over N rows and input-chunking alone does not bound the read.
     return [
         row
-        for row in query(TABLE_SESSION, member_filters)
+        for row in _walk_membership_chunked(
+            walk, TABLE_SESSION,
+            column="external_session_id", values=ext_ids,
+            extra_filters={k: v for k, v in member_filters.items() if k != "is_deleted"},
+            ceiling=_GROUP_MEMBER_WALK_CEILING,
+            reason=(
+                "sessions sharing an external_session_id with a qualifying "
+                "canonical — one canonical plus its siblings per group."
+            ),
+        )
         if (str(row["vendor"]), str(row["external_session_id"])) in pairs
     ]
 
 
 def list_sessions_via_junction(
-    query: _StateReader,
     query_ordered: _OrderedReader,
+    walk: _TableWalker,
+    membership: _MembershipReader,
     *,
     window: SessionWindow,
     project_path: str | None,
@@ -1158,12 +1372,13 @@ def list_sessions_via_junction(
     the canonical-IS-NULL filter drops a non-canonical id).
     """
     if source_kind is not None and include_siblings:
-        canonical_ids = _junction_canonical_ids(query, source_kind)
+        canonical_ids = _junction_canonical_ids(walk, source_kind)
         if not canonical_ids:
             return []
         return select_sessions_page(
             _read_full_group_membership(
-                query,
+                membership,
+                walk,
                 canonical_ids=canonical_ids,
                 vendor=vendor,
                 project_path=project_path,
@@ -1194,33 +1409,33 @@ def list_sessions_via_junction(
             limit=limit,
         )
 
-    # ── source_kind path: STILL UNBOUNDED, deferred to wave 2b (2026-08-16) ──
+    # ── source_kind path — repaired in wave 2b (2026-08-16, lane-ak) ──
     #
-    # Not an oversight and not safe — it is a bigger repair than the default
-    # path and was split rather than rushed. Measured on the live ledger:
+    # This branch was over the cap TWICE, and the live refusal on the serving
+    # release named the FIRST of the two, which is why the junction is repaired
+    # first:
     #
     #   _junction_canonical_ids {source_kind=claude_code_local}  = 4,005 rows
-    #                           {source_kind=claude_code_history}=   941
-    #                           {source_kind=codex_local}        =   488
+    #   ...then `id = ANY(those 4,005)` on __session                (measured)
     #
-    # so this branch is over the 100-row cap TWICE: once on the junction read
-    # itself, and again on the ``id = ANY(canonical_ids)`` session read below,
-    # whose list is that same 4,005 ids. Repairing it means paginating the
-    # junction read and chunking the membership read at the cap — ``base.py``
-    # already has ``_query_membership_chunked`` for exactly that shape, but this
-    # module receives read seams as injected callables and cannot reach it, so
-    # the fix needs a threaded chunked reader and its own smoke.
+    # The junction read pages (see :func:`_junction_canonical_ids`); the id read
+    # below is chunked at the cap, so it is bounded BY CONSTRUCTION rather than
+    # by a promise about how many ids the junction returns.
     #
-    # The default path above (no ``source_kind``) is the one that is dead in
-    # production and is what this change fixes. This branch was already broken
-    # before the change and is no worse after it.
-    canonical_ids = _junction_canonical_ids(query, source_kind)
+    # The windows + sort + limit stay a Python fold here, unlike the default
+    # path's :func:`walk_sessions_page`. That is deliberate: this branch's
+    # candidate set is already restricted to the junction's ids, so it is bounded
+    # by that list rather than by the table — and a keyset walk cannot page an
+    # `= ANY` filter of arbitrary length anyway. The fold is over a set whose
+    # size the caller's own filter chose.
+    canonical_ids = _junction_canonical_ids(walk, source_kind)
     if not canonical_ids:
         return []
-    filters["id"] = canonical_ids
-    filters["is_deleted"] = 0
     return select_sessions_page(
-        query(TABLE_SESSION, filters),
+        membership(
+            TABLE_SESSION, column="id", values=canonical_ids,
+            extra_filters={**filters, "is_deleted": 0},
+        ),
         window=window,
         order_by=order_by,
         limit=limit,
@@ -1243,4 +1458,5 @@ __all__ = [
     "list_sessions_via_junction",
     "select_quiescent_sessions",
     "select_sessions_page",
+    "walk_sessions_page",
 ]

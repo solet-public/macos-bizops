@@ -1,5 +1,5 @@
 {
-  "description": "Coordination hooks: KB-first reminder, check-your-messages reminder, role-binding reminder, an opt-in idle-wake waiter, an opt-in git-mutation guard, a heartbeat report-alive hook, a rotation-due watch hook, the memory-passthrough capture/session-context pair, and two spawn-injected worker hooks (a headless tool-allowlist gate and a session-mapping capture) shipped here as a spawned worker's fallback copy, never wired into this manifest. Cadence ruling (2026-08-11): the KB-first and check-your-messages reminders fire on SessionStart (startup|resume|clear), not UserPromptSubmit, so they stop repeating every prompt turn -- this changes CADENCE ONLY; the 2026-08-01 ruling that KB-first is unconditionally armed (no environment gate) still stands and is unchanged by this move.",
+  "description": "Coordination hooks: KB-first reminder, check-your-messages reminder, role-binding reminder, an opt-in idle-wake waiter, an opt-in git-mutation guard, a heartbeat report-alive hook, a rotation-due watch hook, a rotation-due notice hook (rotation_due_notice.py) that surfaces the watch hook's own self-notify marker as prompt context for a session with no steward to notify, the memory-passthrough capture/session-context pair, and two spawn-injected worker hooks (a headless tool-allowlist gate and a session-mapping capture) shipped here as a spawned worker's fallback copy, never wired into this manifest. Cadence ruling (2026-08-11): the KB-first and check-your-messages reminders fire on SessionStart (startup|resume|clear), not UserPromptSubmit, so they stop repeating every prompt turn -- this changes CADENCE ONLY; the 2026-08-01 ruling that KB-first is unconditionally armed (no environment gate) still stands and is unchanged by this move.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -9,6 +9,17 @@
             "command": "python3",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/session_context.py"
+            ]
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/rotation_due_notice.py"
             ]
           }
         ]

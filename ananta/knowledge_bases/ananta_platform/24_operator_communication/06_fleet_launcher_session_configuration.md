@@ -8,7 +8,7 @@ Article Role: operations_reference
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-reference, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: How to change the base model, effort level, advisor model, and declared transport (MCP vs watch) for one named role in an operator's multi-session fleet launcher — where that launcher actually lives, the CLI flags and environment variables involved, the one verified-correct way to fully disable the advisor tool for a single session, where the fleet-wide default transport is declared and how a per-role launcher export overrides it, why solet launchers deny the structured-choice AskUserQuestion prompt by default and the per-launch override that lifts it, why spawn_session's tmux host driver carries that same deny (with its own allow_askuserquestion override) while headless needs none — the tool is inert there by construction, and how a long-running session clears its own context by delegating a helper session to type the clear command and the resume prompt into its own terminal surface.
+Embedding Description: How to change the base model, effort level, advisor model, and declared transport (MCP vs watch) for one named role in an operator's multi-session fleet launcher — where that launcher actually lives, the CLI flags and environment variables involved, the one verified-correct way to fully disable the advisor tool for a single session, where the fleet-wide default transport is declared and how a per-role launcher export overrides it, why solet launchers deny the structured-choice AskUserQuestion prompt by default and the per-launch override that lifts it, why spawn_session's tmux host driver carries that same deny (with its own allow_askuserquestion override) while headless needs none — the tool is inert there by construction, and how a long-running session clears its own context with no helper agent in the injection path — the operator types the clear command and the resume prompt, or the session runs a deterministic detached script that does only that.
 
 **When you need this**: an operator asks to change the model, effort level, advisor configuration, or transport for a named session role (a coordinator, a reviewer, an implementation lane, any role launched by a wrapper function); a session needs to know where that configuration actually lives before searching for it in the wrong place; a session needs to turn the advisor tool off for one role without touching the operator's global default; a session needs to know why one role talks over MCP while another talks over the watch transport, or wants to change which one a role uses; a session wants a spawn_session-spawned worker to be able to use AskUserQuestion (or wants to confirm why one can't); a session's context has grown long and it needs to clear itself and continue working without waiting for the operator.
 
@@ -158,48 +158,74 @@ consistency. There is no `plugin.yaml` policy knob for this, unlike
 fixes the global default outright, so the per-call override is the whole
 mechanism.
 
-## Clearing a session's own context — the delegated drive
+## Clearing a session's own context — no helper agent in the path
 
-A long-running session that needs to clear its own context cannot type `/clear` into
-itself — but it does not need to. The sanctioned mechanism is **delegation**: the
-session dispatches a helper session whose whole job is to drive the clearing session's
-own terminal surface. This uses only primitives every deployment already has (session
-spawning plus terminal injection), so it works identically in a managed corporate
-environment; it deliberately does not depend on any vendor remote-control capability,
-which such environments commonly disable.
+A long-running session that needs to clear its own context cannot type `/clear`
+into itself. The earlier answer here was **delegation** — dispatch a helper
+session whose whole job is to drive the clearing session's terminal. That answer
+is **withdrawn**.
 
-The procedure, from the clearing session's side:
+It was withdrawn because it worked once and was then refused twice, both times
+correctly. On 2026-08-15 and again on 2026-08-16 a dispatched helper declined to
+inject, on the grounds that a spawned worker typing into the operator-present
+seat is a seat-native capability act, and that the operator's authorization for
+it — having reached the helper *relayed through the seat* — is not evidence the
+helper can verify. A well-aligned worker should refuse an unverifiable consent
+claim. That is not a briefing defect to be written around; it means an agent
+with judgment does not belong in the injection path at all.
 
-1. **Checkpoint first.** Drain pending memory writes to the canonical store, bring the
-   working notes current, and make sure no other session is holding for a go-signal
-   that only this session can send. A clear at an unclean checkpoint loses exactly the
-   state that was not written down.
-2. **Write a resume handoff note** in the working-notes directory: what is in flight,
-   what the fresh context should read first, and the single next action.
-3. **Dispatch a helper session** (an inexpensive model tier suffices — the task is
-   mechanical) briefed to: locate the clearing session's surface (a terminal
-   multiplexer pane by session name, or a terminal window by its tty), inject the
-   literal `/clear`, verify it took by reading the surface back, then inject a short
-   resume prompt that points at the handoff note.
-4. **The second injection is the resume.** A cleared interactive session sits idle
-   until someone types a turn; the helper's resume prompt is that turn, so the cleared
-   session continues unattended without waiting for the operator.
+What replaces it keeps the judgment where it can be verified and takes it out of
+the mechanism entirely. Which of the two paths applies is decided by whether the
+operator is at the keyboard — a distinction learned the hard way, when a
+detached script's injected `/clear` landed inside the operator's own composer
+during a 2026-08-16 rotation.
 
-Two injection rules the helper must follow: send the text and the Enter key as
-separate actions and verify between them (a same-burst Enter can be swallowed), and
-keep the injected prompt short, pointing at the handoff note rather than carrying the
-content itself (long injected text can collapse into an unsent paste buffer).
+**Operator present — the operator types the two lines themselves.** No
+delegation, no capability question, no race, and no extra model tokens. This is
+the default.
 
-Two further traps, both observed in the first live proof of this procedure: if the
-clearing session is mid-turn when the injection lands, both injected texts sit in its
-pending-input queue until the turn ends, rather than executing; and when `/clear`
-finally executes from that queue it can consume the queued resume prompt along with
-itself, leaving the fresh session idle on an empty prompt line. The helper must
-therefore verify that the fresh session is actively processing the resume prompt —
-not merely that the clear took — and re-inject the resume prompt once if it is not.
-The session's durable identity and any role binding survive the clear; the live proof
-measured the same instance identity and an intact role binding on the far side, with
-no re-registration required.
+**Operator absent — the session runs a deterministic script, detached.** The
+script types two texts and stops; it cannot decline, improvise, or be talked
+into a third action, because it has no capacity for any of those. The platform
+ships one: `agent_messaging_plugin`'s `seat_rotation_helper.py`, a console
+one-shot rather than a verb precisely because it must outlive the turn that
+starts it. What ships is the ordering contract and the safety gates; the host
+driver is not universal, so a deployment without the relevant terminal bindings
+supplies its own or uses the operator-present path. The procedure from the
+clearing session's side:
+
+1. **Checkpoint first.** Drain pending memory writes to the canonical store,
+   bring the working notes current, and make sure no other session is holding
+   for a go-signal that only this session can send. A clear at an unclean
+   checkpoint loses exactly the state that was not written down.
+2. **Write a resume handoff note** in the working-notes directory: what is in
+   flight, what the fresh context should read first, and the single next action.
+3. **Confirm the operator's consent directly**, to this session, before the
+   script runs. Relayed consent is the thing the helpers refused to act on, and
+   a script cannot verify it either — it simply cannot notice, which is why the
+   check has to happen here.
+4. **Run the script detached.** A foreground run deadlocks: the session's own
+   turn must end before the queued `/clear` can execute, so it would wait on the
+   session it is clearing.
+5. **The script resolves its target under a 0/1/N gate** — exactly one matching
+   surface proceeds, zero or many abort before typing anything. This is refusal
+   by construction rather than by judgment, which is the only kind that is
+   deterministic.
+6. **It settles between the two injections.** Sending both at once lets `/clear`
+   consume the queued resume prompt, leaving a cleared session idle on an empty
+   prompt line with no error anywhere.
+
+Two injection rules the script follows, both of which any replacement must keep:
+send the text and the Enter key as separate actions (a same-burst Enter can be
+swallowed), and keep the injected prompt short, pointing at the handoff note
+rather than carrying the content inline (long injected text can collapse into an
+unsent paste buffer).
+
+Verification is self-evidencing: the fresh session either executes the resume
+prompt or it does not. If it does, it is by definition processing. If it does
+not, the operator sees an idle prompt and retypes it — a visible, recoverable
+failure rather than a silent one. The session's durable identity and any role
+binding survive the clear.
 
 ## Reference
 

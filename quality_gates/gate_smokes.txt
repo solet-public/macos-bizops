@@ -2060,6 +2060,13 @@ ananta/src/ananta/core/orchestration/tests/postgres_authorization_guard_smoke.py
 # --- §6.3 lead tranche (platform-invariant / cross-plugin-contract guards; interfaces_split = LED-01) ---
 ananta/tests/session_ledger_service/interfaces_split_no_god_class_smoke.py
 ananta/tests/session_ledger_service/parse_iso_timezone_smoke.py
+# list_canonical_contributors_serialization (2026-08-16, lane-fix-small-defects):
+# the service-layer wrapper serializes each contributor's first/last_event_at
+# to an explicit-offset ISO string at the EDGE seam, while the repository
+# layer underneath keeps its own locked-in naive-datetime return contract
+# (list_canonical_contributors_migration_smoke.py) untouched. Record:
+# workbench/2026-08-16_dispatch_brief_lane_fix_small_defects.md.
+ananta/tests/session_ledger_service/list_canonical_contributors_serialization_smoke.py
 ananta/tests/platform/process_registry_builder_wiring_smoke.py
 ananta/tests/platform/process_registry_merge_validator_smoke.py
 ananta/tests/platform/state_service_write_state_registration_smoke.py
@@ -2357,6 +2364,14 @@ plugins/agent_messaging_plugin/tests/forward_vertex_redrive_smoke.py
 # workbench/2026-07-20_w3a_plugin_birth_record.md.
 plugins/code_vetting_plugin/tests/l1_scanners_smoke.py
 plugins/code_vetting_plugin/tests/secrets_downgrade_smoke.py
+
+# self-vet defect B (2026-08-16, lane-fix-small-defects) — the secrets
+# scanner's git-target snapshot (_tracked_snapshot -> _extract_skipping_
+# unsafe_links) must not die on a tracked absolute/escaping symlink member;
+# red-first fixture plus a negative control (an ordinary repo with no
+# symlinks still extracts everything). Record: this repair's dispatch memo,
+# workbench/2026-08-16_dispatch_brief_lane_fix_small_defects.md.
+plugins/code_vetting_plugin/tests/secrets_symlink_extract_smoke.py
 
 # code_vetting_plugin verb surface (W3-A A2, 2026-07-20, Claude-B) — the two EDGE
 # verbs' (vet_codebase / scan_quality_guidelines) invariants that running the real
@@ -2766,6 +2781,42 @@ plugins/agent_messaging_plugin/tests/register_identity_retry_smoke.py
 # Hermetic -- shipped factory and shipped validator, no scheduler, no DB.
 plugins/default_scheduling_plugin/tests/ensure_kb_retrieval_audit_schedule_smoke.py
 
+# Cron UTC-compliance repair (2026-08-16 lane-utc-scheduler). SchedulerManager's
+# BackgroundScheduler is configured `timezone=datetime.UTC`, but `add_cron_job`
+# called `CronTrigger.from_crontab(cron_expression)` with no `timezone` kwarg --
+# APScheduler's CronTrigger.__init__ resolves an unset timezone to
+# get_localzone() (the HOST's local tz) at construction time, never consulting
+# the scheduler's own UTC config, despite from_crontab's docstring claiming it
+# defaults to the scheduler timezone. Measured: on the deploy host,
+# CronTrigger.from_crontab('30 7 * * *').timezone resolved to America/Vancouver,
+# a -25200s offset -- the same magnitude independently measured in the
+# peer_list.updated_at UTC-naive bug. The plugin's own KB doc claims "All cron
+# expressions use UTC timezone", making the doc part of the defect. Pins a
+# fixed non-UTC get_localzone() (not the host's real zone) so the assertion
+# stays meaningful on a UTC-local CI host. Covers both the live add_cron_job
+# call site and the restore_schedules path (same call site, delegated).
+# Hermetic -- real SchedulerManager/APScheduler, get_localzone patched, no DB.
+plugins/default_scheduling_plugin/tests/cron_utc_timezone_smoke.py
+
+# ActionExecutor-not-initialized deferred-fire repair (2026-08-16
+# lane-utc-scheduler, defect A). Reproduced from
+# profile/data/logs/2026-08-15_profile.log: sch-2n0h8hh6jp9te and three other
+# schedules fired during two separate blue-green swap startup windows, before
+# set_action_factory had run in the candidate process. The old code's
+# _mark_schedule_failed on this path persisted schedules.status=error, which
+# SchedulerManager.restore_schedules reads to SKIP the schedule on the very
+# next restart -- a one-shot write, not an ongoing firing loop, is what killed
+# sch-2n0h8hh6jp9te permanently. Pins BOTH halves of the fix: the fire-time
+# write must leave schedules.status untouched (universal job tracker gets
+# 'pending', an allowed asynchronous_jobs.status CHECK value, not 'failed'),
+# AND -- per explicit rider, since a shallower smoke could miss a regression
+# that only re-breaks restore -- the resulting schedule must actually SURVIVE
+# SchedulerManager.restore_schedules and get re-armed in APScheduler, not just
+# avoid the status write in isolation.
+# Hermetic -- real SchedulingPlugin/SchedulerManager, fake repository/tracker
+# doubles, no DB.
+plugins/default_scheduling_plugin/tests/action_executor_deferred_fire_smoke.py
+
 # The peer_inbox platform process (the PULL receive path for
 # sessions with no MCP and no live watcher) plus peer_holds_role's additive
 # delivery_route_attached. Gates the layer the process owns: caller-identity
@@ -2905,6 +2956,26 @@ plugins/agent_messaging_plugin/tests/rotation_thresholds_smoke.py
 # (known trap), so GC must hand-run the static gates on rotation_due_watch.py and
 # .claude/hooks/tests/rotation_due_watch_smoke.py directly; this line only registers
 # it with run_smokes.py's behavioral gate, which IS scope-independent.
+
+# L4b (2026-08-17, lane-l4b-rotation-surface) -- rotation_due_notice.py, the
+# UserPromptSubmit DELIVERY half for a session the sweep cannot reach. The sweep
+# notice lands on a STEWARD's bridge and drive_on_delivery no-ops for an
+# operator-launched session, so the one session whose rotation decision is the
+# expensive one was reached by nothing; this hook surfaces the self-notify marker
+# rotation_due_watch.py was already writing and nobody was reading.
+#
+# Pins: the EMPTY path (fired on every prompt) emits absolutely nothing; a marker
+# is surfaced once and then stamped, so it can never repeat; a marker keyed to
+# another session generation is not ours; the writer's temp-dir fallback root is
+# searched too; several markers still produce exactly ONE json object (two are not
+# two notices, they are unparseable stdout); an unstampable marker is still
+# DELIVERED; and -- the security leg -- a marker owned by another uid or
+# group/world-writable is REFUSED, because this hook's output enters a prompt and
+# its input lives where on a shared host anyone can write.
+#
+# Same .claude/hooks/ scope-regex trap as the sibling above: GC must hand-run the
+# static gates on .claude/hooks/rotation_due_notice.py and this test directly;
+# this line registers only the behavioural gate, which IS scope-independent.
 
 # rotation-systematization P4(b) (P4(a) ratification 2026-08-07, six bound
 # conditions) -- the idle-boundary seat watcher: poke/rotate precedence
@@ -3285,3 +3356,137 @@ ananta/tests/llm/session_ledger/list_sessions_m17_filters_smoke.py
 #
 # PURE UNIT, offline: in-memory reader + state shim over real ActionResult shapes.
 ananta/tests/llm/session_ledger/census_fold_smoke.py
+
+# read-cap sweep wave 2b, 2026-08-16 (lane-ak).
+#
+# session_kind_membership_smoke — pins list_sessions(source_kind=...), which was
+# over the 100-row cap TWICE: _junction_canonical_ids read __session_source_kind
+# whole (4,005 rows for claude_code_local, 8,055 total, MEASURED), and its output
+# then became `id = ANY(those 4,005)` on __session. The live refusal on the
+# serving release named session_source_kind — the FIRST of the two — which is why
+# the junction was repaired first.
+#
+# THE FAKE ENFORCES THE CAP, and that is the whole mechanism: it raises when an
+# `= ANY` filter carries more than MAX_READ_ROWS values, and when an unlimited
+# read returns more than MAX_READ_ROWS rows. Against a permissive fake an
+# unchunked read succeeds quietly and the smoke certifies the bug it exists to
+# catch. The refusal IS the test.
+#
+# That fake earned itself immediately: it caught a real defect in the first
+# version of the repair. base._query_membership_chunked claims "a chunk matches
+# at most its own length" — true only for a UNIQUE column. external_session_id is
+# non-unique BY DESIGN (a canonical and its siblings share it), so a 100-value
+# chunk returned 200 rows and was refused. That read is now chunked AND PAGED.
+#
+# Fixture size (120) is bounded on BOTH sides: above MAX_READ_ROWS so the walk
+# pages and the read chunks, and below list_sessions' own limit clamp of 200 so a
+# complete result is not truncated by the clamp. The first attempt used 250 and
+# the verb correctly returned 200 — indistinguishable from a lost chunk.
+#
+# PURE UNIT, offline: cap-enforcing in-memory state over real ActionResult shapes.
+ananta/tests/llm/session_ledger/session_kind_membership_smoke.py
+
+# read-cap sweep, managed_session fleet list, 2026-08-16 (lane-ak).
+#
+# managed_session_list_bound_smoke — pins list_managed_sessions, the ONE fleet
+# list behind plugin::agent_messaging_plugin::list_sessions. Its no-filter call
+# was MEASURED REFUSING on the serving release: query.unbounded_read_over_cap,
+# table managed_session, cap_rows 100, against 106 live rows. The ledger is
+# append-mostly and unpruned, so it crossed the bound by accumulating history —
+# a bound that fails as the fleet gets MORE use, same shape as the RUNNING
+# import-batch set repaired earlier in this sweep.
+#
+# Fixture is 250 rows at a 100-row page so the walk must page more than once;
+# the live table was 106, a near-miss, which is exactly why the refusal was a
+# surprise. It also pins the SOFT-DELETE OVERRIDE: the old code seeded
+# {is_deleted: 0} and let a caller's filters overwrite it, so is_deleted=1
+# returned soft-deleted rows. iter_table_rows expresses that as include_deleted,
+# so the request is TRANSLATED, not dropped — no in-repo caller uses it, but
+# list_sessions forwards arbitrary filters, so removing it silently would be a
+# behaviour change smuggled inside a bound fix.
+#
+# The fake ENFORCES the cap. Red-first calibrated: reverting to the pre-fix
+# unbounded read reproduces the LIVE production error verbatim
+# ("'managed_session' returned 250 rows against the 100-row cap"); a page-1-only
+# walk returns 100 of 250; dropping the override translation returns 250 instead
+# of 30 for is_deleted=1.
+#
+# PURE UNIT, offline: cap-enforcing in-memory state over real ActionResult shapes.
+plugins/agent_messaging_plugin/tests/managed_session_list_bound_smoke.py
+
+# F6/F7 gate repair (2026-08-16, lane-ai) — two defects in the gates themselves.
+#
+# 1. A gate that CRASHED was rendered as a gate that found VIOLATIONS: the
+#    aggregate mapped every unrecognised exit code to "BLOCKING", so radon_cc's
+#    RecursionError printed as "Blocking gate violations (radon_cc)" — complexity
+#    debt in the reader's own code, asserted about code nothing had measured.
+# 2. The scope walks were filesystem-based and reached vendored trees
+#    (18,321 .py under plugins/cosyvoice2_tts_plugin/src/.venv_cosyvoice).
+#
+# Pins the scope predicate from BOTH sides, because the first fix over-corrected
+# to tracked-only and produced a FALSE GREEN inside the hour — a brand-new
+# never-added smoke with a CC-12 went unmeasured while the aggregate reported
+# clean. So: a brand-new untracked file MUST be gated; a gitignored vendored
+# tree must NOT be. Fixing either direction alone is how this went wrong twice.
+#
+# Every assertion is mutation-calibrated: reverting the wrappers to rglob, the
+# scope to tracked-only, the classifier to "unknown exit = violation", or the
+# exit-code-before-traceback ordering each turns this smoke red, and the
+# negative control (a real violation still reads as a violation) stays green.
+#
+# PURE UNIT, offline: synthetic CompletedProcess objects + a tempdir; no
+# subprocess, no gate run, no timing dependence.
+quality_gates/tests/gate_crash_rendering_smoke.py
+
+# Context-gauge storage layer (2026-08-16, lane-ai) — the verbs behind the
+# rotation policy had NO plugin-side test at all before this. Their entire
+# coverage was two hook-side fakes scripting the response envelope
+# ({"status":"completed","result":{"data":{}}}), which assert nothing about
+# contents and therefore CANNOT go red when the interface widens — they just
+# keep passing. Widening safely required creating coverage, not updating it.
+#
+# Pins the tri-state contract that widening threatens: cache fields are
+# true / false / NOT REPORTED, and a reporter that omits them must never read
+# back as "cache is warm". Mutation-calibrated — coercing None to False in the
+# store, coercing it in the read-back, or dropping the cache view entirely
+# (the pre-widening shape) each turn this smoke red.
+#
+# Also pins that rotation_band is DERIVED at read time from the live policy
+# constants rather than stored, so a threshold change never needs a backfill.
+#
+# PURE UNIT, offline: a recording state double, no database, no bridge.
+plugins/agent_messaging_plugin/tests/context_status_verbs_smoke.py
+
+# release-pointer stability (2026-08-17, lane-release-pointer) — the spawn-env
+# half of deploy survival. Every spawn surface pinned the solet CLI into a
+# VERSIONED release dir (AGENT_WAKE_CLI, the PATH prepend, and the long-lived
+# `solet watch` registration sidecar's argv[0]), and a deploy REAPS old
+# releases, so one cutover dangled every long-running worker's CLI at once —
+# silently, because each consumer is non-fatal by design. Measured twice
+# (lane-ai dark both ways across two deploys, 2026-08-16).
+#
+# Pins that the resolved path is expressed through the atomically-swapped
+# `current` pointer, and — the leg that matters — that the pointer lands
+# UNRESOLVED: a rewrite that calls Path.resolve() still names a real file
+# TODAY, so every ordinary liveness check stays green while the version pin
+# survives untouched. The suite asserts the release id is textually ABSENT
+# from what reaches the environment, which is the only form that mutation
+# cannot pass.
+#
+# Includes a DEPLOY-SWAP SIMULATION leg (old release dir removed, pointer
+# moved) that re-stats AND re-executes the worker's pre-deploy env, plus a
+# negative control proving the simulation really reaped something. Also pins
+# the two refusals — mid-cutover version skew, and a pointer whose target was
+# reaped — and the Repair-4 non-regression that a dangling pointer never
+# breaks a session that would otherwise resolve solet from PATH, and never
+# raises.
+#
+# Mutation-calibrated, 5 named mutations each verified RED: no-op rewrite;
+# Path.resolve() re-pin; skew check dropped; stat/exec guard dropped;
+# stabilization applied at expose_worker_cli only (which leaves the sidecar
+# and worker_path pinned, i.e. registration still dies on deploy).
+#
+# PURE UNIT, offline: a synthetic release layout in a temp dir with real
+# symlinks and executable stubs. No tmux server, bridge, database, network,
+# deploy, or model turn.
+plugins/agent_messaging_plugin/tests/release_pointer_stability_smoke.py

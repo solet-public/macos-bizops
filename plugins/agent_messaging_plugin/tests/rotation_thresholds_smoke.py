@@ -23,6 +23,7 @@ Run:
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -183,6 +184,164 @@ def test_rotate_threshold_is_margined_below_cache_ttl_floor() -> None:
     )
 
 
+def test_h_is_the_sum_of_its_measured_parts() -> None:
+    """H is composed, not asserted. If someone edits one part and not the
+    total, this catches it -- the failure mode for a constant whose value is
+    a measurement rather than a choice."""
+    _check(
+        rt.POLICY_H_TOKENS == rt.POLICY_H_BOOT_TOKENS + rt.POLICY_H_REHYDRATION_TOKENS,
+        "H equals boot payload + incremental rehydration, not an independent number",
+    )
+    _check(rt.POLICY_H_TOKENS == 110_702, "H is the measured 110,702 (2026-08-16)")
+
+
+def test_warm_bands_are_ordered_and_exhaustive() -> None:
+    """Every warm size lands in exactly one band, and the boundaries ascend.
+    An unordered band table silently swallows a whole range."""
+    _check(
+        rt.WARM_BAND_KEEP_WORKING_TOKENS
+        < rt.WARM_BAND_TASK_BOUNDARY_TOKENS
+        < rt.WARM_BAND_SAFE_CHECKPOINT_TOKENS,
+        "warm band boundaries ascend",
+    )
+    seen = {rt.rotation_band(n, cache_cold=False)[0]
+            for n in (0, 149_999, 150_000, 199_999, 200_000, 299_999, 300_000, 10**7)}
+    _check(
+        seen == {"warm_keep", "warm_task_boundary", "warm_safe_checkpoint", "warm_immediate"},
+        "every warm size resolves to exactly one of the four bands",
+    )
+
+
+def test_band_boundaries_are_inclusive_where_the_policy_says_so() -> None:
+    """The crossing tick is the one that matters: a >-only comparison misses
+    the exact boundary, which is the same defect this file already guards for
+    is_rotation_due."""
+    _check(rt.rotation_band(149_999, cache_cold=False)[0] == "warm_keep",
+           "just under 150K still keeps working")
+    _check(rt.rotation_band(150_000, cache_cold=False)[0] == "warm_task_boundary",
+           "exactly 150K has crossed into the task-boundary band")
+    _check(rt.rotation_band(300_000, cache_cold=False)[0] == "warm_immediate",
+           "exactly 300K rotates immediately, not at the next checkpoint")
+
+
+def test_cold_is_a_different_question_not_a_stricter_band() -> None:
+    """Cold compares against H, not against the warm bands. A context that
+    would 'keep working' warm can still be worth rotating cold, and one that
+    would rotate warm can be NOT worth rotating cold -- the asymmetry is the
+    point, and collapsing cold into 'a stricter warm' loses it."""
+    _check(rt.rotation_band(90_000, cache_cold=True)[0] == "cold_below_h",
+           "cold and under H -> keep working; a clear would cost more than it saves")
+    _check(rt.rotation_band(250_000, cache_cold=True)[0] == "cold_above_h",
+           "cold and over H -> rotate")
+    _check(rt.rotation_band(90_000, cache_cold=False)[0] == "warm_keep",
+           "the same 90K warm is also keep -- but for a different reason")
+    _check(rt.rotation_band(250_000, cache_cold=False)[0] == "warm_safe_checkpoint",
+           "the same 250K warm waits for a safe checkpoint rather than rotating now")
+    # THE DISCRIMINATING VALUE. 90K and 250K cannot tell "compares against H"
+    # apart from "compares against the 150K warm band" -- both thresholds sort
+    # them identically, so those assertions pass under a cold-is-just-stricter-
+    # warm implementation. Only a value BETWEEN H (110,702) and 150,000
+    # separates the two, which is the whole claim this test exists to make.
+    # Found by mutation: without this line the test was blind to exactly the
+    # collapse it is named after.
+    _check(rt.WARM_BAND_KEEP_WORKING_TOKENS > rt.POLICY_H_TOKENS,
+           "H sits BELOW the first warm band -- there is a range that separates them")
+    _check(rt.rotation_band(120_000, cache_cold=True)[0] == "cold_above_h",
+           "120K cold is ABOVE H -> rotate, even though 120K warm would keep working")
+    _check(rt.rotation_band(120_000, cache_cold=False)[0] == "warm_keep",
+           "120K warm keeps working -- the same size, opposite verdicts by cache state")
+
+
+def test_clearing_wins_needs_calls_to_amortise_over() -> None:
+    """C > H + 20H/N. With no calls after the clear the rewrite is never
+    amortised, so a clear cannot win no matter how large C is -- the guard
+    against 'rotate at the very end of the work', which pays the rewrite and
+    then throws it away."""
+    _check(not rt.clearing_wins(10_000_000, 0),
+           "N=0 -> clearing never wins, however large the context")
+    _check(not rt.clearing_wins(10_000_000, -3), "negative N is refused too")
+    _check(rt.clearing_wins(559_000, 50),
+           "the 559K case with 50 calls ahead: clearing wins")
+    _check(not rt.clearing_wins(120_000, 2),
+           "modest context with only 2 calls ahead: clearing loses")
+
+
+def test_the_superseded_fraction_survives_as_a_hint_only() -> None:
+    """ROTATION_THRESHOLD_FRACTION is deliberately KEPT -- the verb still emits
+    it. This pins that it was not silently repurposed as the policy: it is a
+    fraction, the policy is absolute token counts, and the two must not drift
+    into each other."""
+    _check(isinstance(rt.ROTATION_THRESHOLD_FRACTION, float),
+           "the legacy hint is still a FRACTION, not a token count")
+    _check(rt.ROTATION_THRESHOLD_FRACTION == 0.5, "the hint is unchanged at 0.5")
+    _check(isinstance(rt.WARM_BAND_KEEP_WORKING_TOKENS, int)
+           and rt.WARM_BAND_KEEP_WORKING_TOKENS > 1_000,
+           "the policy bands are absolute token counts, not fractions")
+
+
+def _call(offset_s: float, *, cold: bool, base: datetime) -> rt.AssistantCall:
+    return rt.AssistantCall(
+        at=base + timedelta(seconds=offset_s),
+        cache_read_tokens=0 if cold else 150_000,
+    )
+
+
+def test_post_clear_rewrite_is_not_evidence_of_a_cold_cache() -> None:
+    """The dangerous one. A clear rewrites the prefix, so the first call after
+    it is cold BY CONSTRUCTION. Counting it makes every rotation immediately
+    recommend another rotation."""
+    base = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+    st = rt.classify_cache_state(
+        [_call(1, cold=True, base=base)], base + timedelta(seconds=2), cleared_at=base)
+    _check(not st.cold, "the post-clear rewrite alone is NOT a cold cache")
+    st = rt.classify_cache_state(
+        [_call(1, cold=True, base=base), _call(2, cold=False, base=base)],
+        base + timedelta(seconds=3), cleared_at=base)
+    _check(not st.cold, "post-clear rewrite then a warm call -> warm")
+
+
+def test_isolated_cold_call_is_the_resolved_idle_case() -> None:
+    base = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+    st = rt.classify_cache_state(
+        [_call(0, cold=False, base=base), _call(7200, cold=True, base=base)],
+        base + timedelta(seconds=7210), cleared_at=None)
+    _check(not st.cold and not st.overage_signature,
+           "ONE cold call after a long gap = idle case resolved, warm bands apply")
+
+
+def test_repeated_cold_calls_across_short_gaps_are_the_overage_signature() -> None:
+    base = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+    st = rt.classify_cache_state(
+        [_call(0, cold=False, base=base), _call(60, cold=True, base=base),
+         _call(120, cold=True, base=base)],
+        base + timedelta(seconds=130), cleared_at=None)
+    _check(st.cold and st.overage_signature,
+           "TWO cold calls across sub-TTL gaps = overage signature")
+
+
+def test_ttl_lapse_is_caught_even_when_the_last_call_read_cache() -> None:
+    """The robustness half. cache_read==0 is structurally blind to a PARTIAL
+    cache read after the TTL lapsed; the age comparison is not."""
+    base = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+    st = rt.classify_cache_state(
+        [_call(0, cold=False, base=base)], base + timedelta(seconds=4000), cleared_at=None)
+    _check(st.cold and not st.overage_signature,
+           "past the TTL -> cold, even though that call read cache fine")
+
+
+def test_transcript_parser_refuses_a_naive_timestamp() -> None:
+    """Transcript stamps are AWARE (...Z); the peer registry's are NAIVE UTC.
+    One helper for both is the 25,200-second failure, so this parser refuses
+    rather than assuming."""
+    try:
+        rt.parse_transcript_timestamp("2026-08-16T19:12:13.529245")  # the REGISTRY shape
+        _check(False, "a naive timestamp is REFUSED, never assumed to be UTC")
+    except rt.TimestampAwarenessError:
+        _check(True, "a naive timestamp is REFUSED, never assumed to be UTC")
+    _check(rt.parse_transcript_timestamp("2026-08-16T20:04:13.422Z").tzinfo is not None,
+           "an aware Z timestamp parses")
+
+
 def main() -> int:
     print("=== rotation_thresholds smoke ===")
     test_table_carries_exactly_the_seat_confirmed_keys()
@@ -195,6 +354,17 @@ def main() -> int:
     test_watch_threshold_constants_match_ratified_values()
     test_poke_threshold_is_strictly_below_rotate_threshold()
     test_rotate_threshold_is_margined_below_cache_ttl_floor()
+    test_h_is_the_sum_of_its_measured_parts()
+    test_warm_bands_are_ordered_and_exhaustive()
+    test_band_boundaries_are_inclusive_where_the_policy_says_so()
+    test_cold_is_a_different_question_not_a_stricter_band()
+    test_clearing_wins_needs_calls_to_amortise_over()
+    test_the_superseded_fraction_survives_as_a_hint_only()
+    test_post_clear_rewrite_is_not_evidence_of_a_cold_cache()
+    test_isolated_cold_call_is_the_resolved_idle_case()
+    test_repeated_cold_calls_across_short_gaps_are_the_overage_signature()
+    test_ttl_lapse_is_caught_even_when_the_last_call_read_cache()
+    test_transcript_parser_refuses_a_naive_timestamp()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

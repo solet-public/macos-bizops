@@ -368,6 +368,15 @@ class SessionLedgerRepositoryBase:
         bounded BY CONSTRUCTION — a chunk matches at most its own length — so
         this needs no ``unbounded`` opt-in and holds however large the caller's
         list grows. Chunk size is DERIVED from the cap so the two cannot drift.
+
+        **"A chunk matches at most its own length" holds ONLY for a UNIQUE
+        ``column``** (2026-08-16, lane-ak). For a non-unique one it is false and
+        the read is still refused: ``__session.external_session_id`` is shared by
+        a canonical and every sibling BY DESIGN, and a 100-value chunk of those
+        returned 200 rows against the 100-row cap. Chunking bounds the ``= ANY``
+        parameter list; it does not bound the RESULT unless one value maps to at
+        most one row. A non-unique column needs chunk-AND-page — see
+        ``read_support._walk_membership_chunked``.
         """
         if not values:
             return []

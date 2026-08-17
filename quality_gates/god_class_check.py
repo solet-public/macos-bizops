@@ -51,6 +51,8 @@ Exit codes:
   0 — no god classes detected
   2 — one or more god classes detected
   64 — usage error (bad arguments / non-existent paths)
+  70 — GATE CRASH: the analyser raised, so no verdict exists for the tree.
+       A crash is NOT a violation count; see `gate_scope.GateCrashError`.
 
 Output: human-readable lines on stdout, structured one-finding-per-line:
   GOD CLASS: <path>:<lineno> <class_name>: <metric>=<value> (>limit), ...
@@ -69,6 +71,12 @@ import importlib.util
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+from gate_scope import (
+    GATE_CRASH_EXIT,
+    GateCrashError,
+    repo_python_files,
+)
 
 _module_path_cache: dict[str, Path | None] = {}
 _abstract_name_cache: dict[Path, frozenset[str]] = {}
@@ -368,6 +376,8 @@ def _scan(path: Path, thresholds: Thresholds, raw: bool) -> list[Finding]:
     except SyntaxError as exc:
         print(f"WARN: syntax error in {path}: {exc}", file=sys.stderr)
         return []
+    except Exception as exc:  # noqa: BLE001 — any analyser failure is a non-verdict
+        raise GateCrashError(path, f"{type(exc).__name__} in ast.parse: {exc}") from exc
     import_map = {} if raw else _build_import_map(tree)
     findings: list[Finding] = []
     for node in ast.walk(tree):
@@ -380,13 +390,24 @@ def _scan(path: Path, thresholds: Thresholds, raw: bool) -> list[Finding]:
 
 
 def _expand_targets(raw_paths: list[str]) -> list[Path]:
+    """Resolve CLI path arguments to concrete `.py` files.
+
+    A DIRECTORY expands to its in-repo `.py` files only (tracked, or
+    untracked and not ignored). Measured
+    2026-08-16: a bare run over `plugins/cosyvoice2_tts_plugin` reached
+    18,321 files in `src/.venv_cosyvoice`, reported sympy's C-grade
+    functions as this repo's findings, and then crashed on one of them.
+
+    A file named EXPLICITLY is always scanned, in-repo or not — the caller
+    asked for that path by name, and a brand-new file is the normal case.
+    """
     out: list[Path] = []
     for raw in raw_paths:
         p = Path(raw)
         if not p.exists():
             continue
         if p.is_dir():
-            out.extend(sorted(p.rglob("*.py")))
+            out.extend(repo_python_files(p))
         elif p.suffix == ".py":
             out.append(p)
     return out
@@ -503,14 +524,22 @@ def main(argv: list[str]) -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 64
 
-    targets = _expand_targets(args.paths)
-    if not targets:
-        print("ERROR: no Python files to scan from given paths.", file=sys.stderr)
-        return 64
-
-    findings: list[Finding] = []
-    for target in targets:
-        findings.extend(_scan(target, thresholds, args.raw))
+    try:
+        targets = _expand_targets(args.paths)
+        if not targets:
+            print("ERROR: no Python files to scan from given paths.", file=sys.stderr)
+            return 64
+        findings: list[Finding] = []
+        for target in targets:
+            findings.extend(_scan(target, thresholds, args.raw))
+    except GateCrashError as crash:
+        print(f"GATE-CRASH: {crash}", file=sys.stderr)
+        print(
+            "No verdict was produced. This is NOT a violation count: the "
+            "analyser aborted, so this run measured nothing about the tree.",
+            file=sys.stderr,
+        )
+        return GATE_CRASH_EXIT
 
     _print_findings(findings, allowlist)
     return _summarize(findings, allowlist, allowlist_active, len(targets))

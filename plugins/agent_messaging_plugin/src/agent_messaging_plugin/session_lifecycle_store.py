@@ -53,6 +53,7 @@ from ananta.llm.agent_messaging.state_results import (
     require_records,
     require_updated,
 )
+from ananta.services.state_service.bounded_read import iter_table_rows
 
 from .schema import (
     LIFECYCLE_LIVE,
@@ -73,6 +74,19 @@ logger = logging.getLogger(__name__)
 
 _COL_AGENT_INSTANCE_ID = "agent_instance_id"
 _COL_IS_DELETED = "is_deleted"
+
+#: Rows :func:`list_managed_sessions` will walk before refusing. NOT a claim that
+#: the fleet ledger is small — it is one row per managed session ever spawned and
+#: nothing prunes it, which is exactly how it crossed the 100-row cap (measured
+#: 106 live rows, 2026-08-16). It is a claim about this call site: a fleet list
+#: that has walked a million rows is not a list anyone can read, and the caller
+#: wants a filter rather than a longer walk.
+_MANAGED_SESSION_WALK_CEILING = 1_000_000
+
+_MANAGED_SESSION_CEILING_REASON = (
+    "one row per managed session ever spawned; the ledger is append-mostly and "
+    "is not pruned (106 live rows measured 2026-08-16)."
+)
 _COL_LIFECYCLE_STATE = "lifecycle_state"
 
 # Single source of truth (session_lifecycle_verbs.py's _rearm_report_by
@@ -343,14 +357,50 @@ def list_managed_sessions(
     state: StateManagementInterface, filters: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """All live ``managed_session`` rows matching ``filters`` (class/lane/
-    state/host — §4 ``list_sessions``, the ONE fleet list)."""
-    query_filters: dict[str, Any] = {_COL_IS_DELETED: 0}
-    query_filters.update(filters or {})
-    result = state.query_state(
-        AGENT_ROLE_BINDING_NAMESPACE,
-        {"table": TABLE_MANAGED_SESSION, "filters": query_filters},
+    state/host — §4 ``list_sessions``, the ONE fleet list).
+
+    Read-cap sweep, 2026-08-16 (lane-ak). This was an unbounded ``query_state``
+    over the whole fleet ledger. **Measured on the serving release: the no-filter
+    call REFUSES** —
+
+        code: query.unbounded_read_over_cap
+        table: managed_session, cap_rows: 100   (106 live rows)
+
+    — so ``list_sessions`` with no filters, the plugin's ONE fleet list, was
+    broken for its own default call. The ledger is append-mostly and nothing
+    prunes it, so it crossed the cap by accumulating history rather than by
+    anything being wrong: the same shape as the RUNNING import-batch set, and a
+    bound that fails as the fleet gets more use.
+
+    It pages now. A caller's equality filters are pushed down unchanged, so a
+    filtered call costs no more than before; only the unfiltered one changes.
+
+    The soft-delete override is PRESERVED rather than dropped. This function
+    seeded ``{is_deleted: 0}`` and let ``filters`` overwrite it, so a caller
+    asking for ``is_deleted: 1`` got soft-deleted rows. ``iter_table_rows``
+    expresses that as ``include_deleted`` instead — and passing both an explicit
+    ``is_deleted`` filter and the default is the documented way to get this
+    wrong — so the request is translated, not discarded. No in-repo caller uses
+    the override today, but ``list_sessions`` forwards arbitrary filters, so it
+    is reachable and silently changing it would be a behaviour change smuggled
+    inside a bound fix.
+    """
+    query_filters: dict[str, Any] = dict(filters or {})
+    requested_is_deleted = query_filters.pop(_COL_IS_DELETED, 0)
+    include_deleted = requested_is_deleted != 0
+    if include_deleted:
+        query_filters[_COL_IS_DELETED] = requested_is_deleted
+    return list(
+        iter_table_rows(
+            state,
+            namespace=AGENT_ROLE_BINDING_NAMESPACE,
+            table=TABLE_MANAGED_SESSION,
+            filters=query_filters,
+            ceiling=_MANAGED_SESSION_WALK_CEILING,
+            reason=_MANAGED_SESSION_CEILING_REASON,
+            include_deleted=include_deleted,
+        )
     )
-    return require_records(result)
 
 
 _SPAWN_AGENT_SESSION_ID_PREFIX = "ases-"
