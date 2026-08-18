@@ -1214,6 +1214,69 @@ def test_rotation_due_is_silent_below_the_threshold() -> None:
     _check(not events, "and nothing is delivered -- a notice that always fires is ignored")
 
 
+def test_the_saturated_band_below_the_fraction_now_reaches_the_steward() -> None:
+    """GAU-08 at the L4a leg: 300,000 on a 1M ceiling was SKIPPED.
+
+    This leg used to gate on `fraction < ROTATION_THRESHOLD_FRACTION`, so it
+    said nothing to a steward about a session sitting in `warm_immediate` --
+    the most urgent band the policy has -- for the entire 200,000 tokens
+    between where that band saturates and where 0.5 of a 1M ceiling arrives.
+    300,000 is the first token of that range, chosen over a midpoint because
+    an off-by-one at the band edge is the mutation a midpoint cannot catch.
+    """
+    state, reg, mgr, bridge_id = _wired()
+    _gauge(state, "agi-worker", current_tokens=300_000, model="claude-opus-5")
+    n = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 1, "300,000 on a 1M ceiling now produces a notice (it produced none "
+                   "while this leg decided on the fraction alone)")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    body = events[0].content if events else ""
+    _check("band=warm_immediate" in body,
+           "and the notice names warm_immediate -- the band that fired it")
+    _check("0.300" in body,
+           "...beside the fraction 0.300, which is BELOW the 0.5 hint: the two "
+           "numbers now appear together without contradicting the decision")
+
+
+def test_consumer_4_prose_names_an_axis_the_decision_actually_used() -> None:
+    """CONFIRMED, NOT ASSUMED -- and the answer is PARTIAL, so it is recorded
+    as partial.
+
+    `_rotation_prose` always printed the BAND while `_rotation_due_row`
+    decided on the FRACTION: the notice named an axis its decision had not
+    used. The ruling for GAU-08 asked whether making the decision a union
+    fixes that for free. Measured here rather than reasoned about:
+
+    * IT DOES for the band-fired case -- the 300,000 row above fires BECAUSE
+      the band is actionable and the prose names that same band. Decision and
+      prose are on one axis.
+    * IT DOES NOT for the fraction-fired case, asserted below. On a small
+      ceiling the fraction fires while the model-blind band is still
+      `warm_keep`, so the steward gets a notice typed `rotation_due_notice`
+      whose body reads "keep working".
+
+    That second case is PRE-EXISTING and UNCHANGED by the union: it fired the
+    same way, with the same prose, before this landing -- the union neither
+    created it nor made it more frequent, which is why it is pinned here as
+    known current behaviour rather than fixed inside a change whose ruling
+    scoped it to the predicate. Pinned rather than merely written down so it
+    cannot be "fixed" by accident and go unnoticed, and so the next lane to
+    pick it up starts from a measurement.
+    """
+    state, reg, mgr, bridge_id = _wired()
+    _gauge(state, "agi-worker", current_tokens=100_000, ceiling=200_000,
+           model="claude-haiku-4-5")
+    n = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 1, "a small-ceiling session at its own halfway point is notified -- "
+                   "the fraction term keeps this reachable where the bands cannot")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    body = events[0].content if events else ""
+    _check("band=warm_keep" in body,
+           "RESIDUAL (pre-existing, not introduced by the union): the notice that "
+           "fired on the FRACTION still prints the keep-working BAND, so this one "
+           "case still names an axis the decision did not use")
+
+
 def test_rotation_due_flags_an_unattributable_reporter() -> None:
     """A stale-copy row sends no cache state, so its band is the WARM DEFAULT
     rather than a measurement. Presenting that as an urgent verdict is false
@@ -1671,6 +1734,8 @@ def main() -> int:
 
     test_rotation_due_notice_carries_the_measured_number()
     test_rotation_due_is_silent_below_the_threshold()
+    test_the_saturated_band_below_the_fraction_now_reaches_the_steward()
+    test_consumer_4_prose_names_an_axis_the_decision_actually_used()
     test_rotation_due_flags_an_unattributable_reporter()
     test_gauge_coverage_catches_a_live_session_with_no_row()
     test_gauge_coverage_is_silent_when_the_row_exists()

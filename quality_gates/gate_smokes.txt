@@ -2158,6 +2158,23 @@ plugins/agent_messaging_plugin/tests/role_binding_store_smoke.py
 # for backtick-quoted repo-path citations, verdicts DEAD/UNPARSEABLE against
 # the bundle's own census, tolerance-file-aware. Wired into
 # validate_and_seal_seed_bundle's checks tuple, seal-time, before any git op.
+# shipped_doc_lint / shipped_doc_gate (GTE-10, 2026-08-18): the SAME two
+# shipped-content checks, run bundle-free over a checkout so they reach the
+# PRE-COMMIT battery instead of only seal time. Fixture-driven git checkouts,
+# never absence-driven. Red-first on the two citations that actually stopped
+# the 2026-08-18 publish, plus the tolerated-debt ratchet in all three of its
+# directions and the born-clone declared-skip path (a checkout with no seed
+# manifest exits 0 and SAYS it measured nothing).
+#
+# Mutation-calibrated, 9 named mutations each verified RED: per-profile census
+# collapsed to a union; --others dropped from the file enumerator;
+# --exclude-standard dropped; reserved-identity reverted to first-match;
+# ratchet stops blocking on shrink; undeclared profile treated as fine;
+# blocking findings stop blocking; the skip banner loses its text; the
+# tolerance partition ignores the allowlist.
+#
+# PURE UNIT, offline: temp `git init` checkouts with a fixture manifest and
+# bundles file. No live platform, database, network, bundle assemble, or seal.
 # seed_factory_plugin CONTRIBUTOR-POLICY coherence gate (R5, 2026-08-15): the
 # published seed shipped five issue forms alongside a CONTRIBUTING.md refusing
 # issue reports, contradicted by its own public issue history. Seal-time,

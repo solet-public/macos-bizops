@@ -1,0 +1,38 @@
+# Shipped-document gate (GTE-10) — declared TOLERATED-citation counts, one line
+# per capability profile: `<profile> <count>`; '#' starts a comment.
+#
+# WHAT THESE NUMBERS ARE. The count of cited-path findings in that profile's
+# shipped markdown whose `(check_id, citing_file::citation)` key is already
+# registered in `quality_gates/cited_path_gate_allowlist.txt`. Blocking findings
+# are counted separately and must always be zero; these are the tolerated ones,
+# which by design do NOT trip a blocking count. That is exactly why they need a
+# declared baseline: findings are appended PER OCCURRENCE and never deduped per
+# key, so one more backticked mention of an already-registered dead citation
+# grows this number while every blocking check stays green. On 2026-08-18 that
+# is precisely how a landing added debt in a shipped runbook (2 -> 3 backticked
+# occurrences of one registered citation) without moving any BLOCKING count.
+#
+# WHY THEY ARE HERE AND NOT IN THE ALLOWLIST. The allowlist staying
+# byte-untouched across a landing is the evidence that findings were remediated
+# rather than silenced into tolerance. Declaring counts in a separate file keeps
+# that evidence readable.
+#
+# WHEN A NUMBER MOVES. The gate blocks on ANY drift, in either direction. If it
+# GREW, de-path the new occurrence — do not widen the allowlist. If it SHRANK,
+# you remediated tracked debt: lower the number here in the SAME commit, so the
+# register keeps describing the tree that exists. An undeclared profile is
+# blocking too; a missing declaration must never read as "no ratchet".
+#
+# WHY THESE DIFFER FROM THE SEAL'S NUMBERS BY EXACTLY ONE. This gate measures a
+# checkout, not an assembled bundle, so it cannot see the four files assemble
+# GENERATES into the bundle root. One of them, the generated `README.md`,
+# carries one tolerated citation. Seal-time counts are therefore 120/167/127
+# against the 119/166/126 declared here — a constant, fully attributed offset,
+# not drift. See `seed_factory_plugin/shipped_surface.py` for the proof that the
+# same absence cannot produce a false finding.
+#
+# Measured at 4fc06b84b (2026-08-18).
+
+macos_free_minimal 119
+bizops_standard    166
+macos_samantha     126

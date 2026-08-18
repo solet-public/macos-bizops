@@ -53,6 +53,13 @@ DEFAULT_CONSERVATIVE_CEILING: int = 100_000
 # DEFAULT_CONSERVATIVE_CEILING fallback) at which the rotation-due hook
 # (P2 slice B) reports to the steward. 0.5 per the brief's own standing
 # framing ("first slice boundary past ~50% of context").
+#
+# SINCE GAU-08 (2026-08-18) THIS IS ONE TERM OF TWO, not the whole predicate.
+# `is_rotation_due` is the UNION of this fraction and an actionable economics
+# band -- see `is_rotation_due_for_ceiling` for why neither half alone is
+# correct. This term is what keeps the predicate reachable on a SMALL-ceiling
+# model, whose window the model-blind bands do not fit; it is not vestigial
+# and removing it makes rotation-due strictly later on every such model.
 ROTATION_THRESHOLD_FRACTION: float = 0.5
 
 # ---------------------------------------------------------------------------
@@ -289,17 +296,51 @@ def resolve_ceiling(model: str) -> int:
     return MODEL_CONTEXT_CEILINGS.get(model, DEFAULT_CONSERVATIVE_CEILING)
 
 
-def is_rotation_due(*, model: str, current_tokens: int) -> bool:
-    """``True`` once ``current_tokens`` crosses ``ROTATION_THRESHOLD_
-    FRACTION`` of ``model``'s resolved ceiling (:func:`resolve_ceiling`).
-    Pure comparison -- the caller (P2 slice B's hook) supplies
-    ``current_tokens`` from its own live transcript-usage read; this
-    function makes no I/O call of its own."""
-    ceiling = resolve_ceiling(model)
-    return current_tokens >= ceiling * ROTATION_THRESHOLD_FRACTION
+def is_rotation_due(
+    *, model: str, current_tokens: int, cache_cold: bool | None = None,
+) -> bool:
+    """``True`` when either rotation axis says rotate, against ``model``'s
+    resolved ceiling (:func:`resolve_ceiling`).
+
+    The model-taking entry point onto :func:`is_rotation_due_for_ceiling`,
+    which carries the definition and the whole of the reasoning. Use this form
+    when a model name is all you hold -- the P2 slice B hook measures a live
+    transcript and has no stored row to read a ceiling from. A caller that
+    ALREADY has a ceiling (any stored gauge row) must call the core directly,
+    so that its decision and any fraction it goes on to print are computed
+    against the same denominator.
+
+    Pure comparison -- ``current_tokens`` and ``cache_cold`` both come from the
+    caller's own measurement; this function makes no I/O call of its own.
+
+    ``cache_cold`` DEFAULTS TO ``None``, and the default is not a convenience.
+    ``None`` is a real value in this domain -- "nobody measured the cache
+    state" -- and it is exactly what an omitted argument means, so the default
+    states a fact rather than substituting for one. That matters because this
+    function has callers THIS REPOSITORY CANNOT EDIT: the rotation hook exists
+    in a third, installed plugin-cache copy (GAU-04) which resolves
+    ``rotation_thresholds`` out of the live checkout while carrying its own
+    frozen call site. Measured 2026-08-18: seven such copies are on this
+    machine, the marketplace plugin is enabled in the user's settings, and
+    every one of them calls ``is_rotation_due(model=..., current_tokens=...)``.
+    A required keyword would have turned each of their ticks into a TypeError
+    -- a live break in a copy no landing here can reach.
+
+    So the default is also what carries the fix ACROSS that boundary: a frozen
+    copy that cannot be updated still gets the union, because the union lives
+    behind the signature it already calls. It gets the band half and the
+    conservative warm reading of a cache state it never sends, which is
+    strictly better than the fraction-only answer it gets today.
+    """
+    return is_rotation_due_for_ceiling(
+        ceiling=resolve_ceiling(model),
+        current_tokens=current_tokens,
+        cache_cold=cache_cold,
+    )
 
 
 __all__ = [
+    "ACTIONABLE_BAND_RANK",
     "CACHE_READ_MULTIPLIER",
     "CACHE_WRITE_MULTIPLIER_1H",
     "CACHE_WRITE_MULTIPLIER_5M",
@@ -308,9 +349,12 @@ __all__ = [
     "CAPACITY_BAND_APPROACHING_FRACTION",
     "CAPACITY_BAND_CRITICAL_FRACTION",
     "DEFAULT_CONSERVATIVE_CEILING",
+    "RotationDueVerdict",
     "RotationVerdict",
+    "band_is_actionable",
     "break_even_horizon",
     "capacity_band",
+    "rotation_due_verdict",
     "rotation_surface_verdict",
     "write_premium_multiplier",
     "IDLE_POKE_THRESHOLD_SECONDS",
@@ -320,6 +364,7 @@ __all__ = [
     "ROTATION_THRESHOLD_FRACTION",
     "WATCH_POLL_INTERVAL_SECONDS",
     "is_rotation_due",
+    "is_rotation_due_for_ceiling",
     "resolve_ceiling",
 ]
 
@@ -633,6 +678,148 @@ _BAND_URGENCY: dict[str, int] = {
     "capacity_critical": 3,
     "warm_immediate": 3,
 }
+
+
+# The urgency rank at which a band stops saying "keep working" and starts
+# asking for a rotation of some kind. `warm_task_boundary` and
+# `capacity_approaching` both sit here: "rotate at the next boundary" is still
+# a request to rotate, and a predicate that fired only on the TOP rank would
+# have re-created GAU-08 exactly one band lower -- silent through the whole
+# 200,000-300,000 stretch instead of the whole 300,000-500,000 one.
+ACTIONABLE_BAND_RANK: int = 1
+
+
+def band_is_actionable(band: str) -> bool:
+    """Whether ``band`` asks for a rotation at all, as against keeping work.
+
+    Derived from :data:`_BAND_URGENCY` rather than from a second list of band
+    names. A hand-kept "these ones count" set would be a copy of that map with
+    nothing forcing the two to agree, and its failure mode is SILENT: a band
+    added to the map and forgotten here would simply never make a session
+    rotation-due, which is the same shape of quiet gap this function exists to
+    close.
+
+    An unranked band name raises ``KeyError`` deliberately. A band this module
+    has not ranked is one whose urgency nobody has decided, and answering "not
+    actionable" for it would be a guess in the quiet direction -- the exact
+    direction this whole landing is correcting.
+    """
+    return _BAND_URGENCY[band] >= ACTIONABLE_BAND_RANK
+
+
+def is_rotation_due_for_ceiling(
+    *, ceiling: int, current_tokens: int, cache_cold: bool | None,
+) -> bool:
+    """THE ROTATION-DUE PREDICATE (GAU-08, ruled 2026-08-18): the ECONOMICS
+    BAND is actionable, OR ``current_tokens`` has crossed
+    :data:`ROTATION_THRESHOLD_FRACTION` of ``ceiling``.
+
+    A UNION, and both halves are load-bearing. Neither alone is correct, and
+    each is wrong for the reason the other is right.
+
+    WHY NOT THE FRACTION ALONE -- the defect this replaces. The economics
+    bands are ABSOLUTE token counts and saturate at ``warm_immediate`` at
+    300,000; the fraction hint does not cross 0.5 of a 1M ceiling until
+    500,000. So for 200,000 tokens the most urgent band this policy has
+    coexisted with ``rotation_due=False``, and that is not a corner: measured
+    2026-08-18 across the live fleet, the field read False on EVERY session at
+    EVERY value any of them occupied that day (219,974 / 195,778 / 226,257).
+    It was false throughout the entire range in which anyone actually works.
+
+    WHY NOT THE BAND ALONE -- the decoy, and the reason this is a union rather
+    than a rename. The bands are MODEL-BLIND while this predicate is
+    model-AWARE through its ceiling. On a 200,000-token window the first
+    actionable band arrives at 150,000, i.e. 75% of the window, so a pure-band
+    rule returns False at 100,000 -- that model's own halfway point, and
+    precisely what the fraction hint exists to catch. It would have made
+    rotation-due strictly LATER on every small-ceiling model while looking
+    like a clean improvement on the 1M models it would have been tested on.
+
+    MONOTONE BY CONSTRUCTION: a strict superset of the fraction rule it
+    replaces, so no session that was served a notice before can lose one. That
+    is what makes it landable on a live shared surface with no migration and
+    no backfill of stored rows.
+
+    THE ECONOMICS BAND, NOT THE EFFECTIVE ONE. Folding in the capacity axis
+    looks more complete and buys nothing: :data:`CAPACITY_BAND_APPROACHING_
+    FRACTION` (0.75) is above :data:`ROTATION_THRESHOLD_FRACTION` (0.5) and
+    both are fractions of the same denominator, so the fraction term has
+    already fired everywhere capacity could, on every ceiling. That is a
+    CONDITIONAL fact rather than a permanent one -- it holds only while that
+    inequality does -- so it is pinned by a test rather than left here, where
+    it could rot silently if anyone lowered the capacity fraction.
+
+    NO ``overage`` ARGUMENT, and its absence is checked rather than assumed:
+    :func:`rotation_band` takes one, but it reaches only ``_horizon_prose``,
+    the break-even horizon quoted INSIDE the guidance string, and never the
+    band NAME. Since this decides on the name, a collapsed cache TTL cannot
+    move the verdict.
+
+    ``cache_cold=None`` means NOT MEASURED and is treated exactly as warm. It
+    is never promoted to cold: a reporter predating cache attribution sends no
+    cache state, and reading its absence as cold would make a session in the
+    110,702-150,000 window due on the strength of a field nobody wrote -- a
+    measurement manufactured out of a gap. The delivered notice already
+    carries that caveat in words (see ``_rotation_prose``).
+
+    A non-positive ``ceiling`` is REFUSED rather than defaulted, the same
+    posture :func:`capacity_band` states for itself and for the same reason:
+    inventing one here would decide whether a live session is told to rotate
+    using a window size nobody measured.
+    """
+    return rotation_due_verdict(
+        ceiling=ceiling, current_tokens=current_tokens, cache_cold=cache_cold,
+    ).due
+
+
+@dataclass(frozen=True)
+class RotationDueVerdict:
+    """The rotation-due answer TOGETHER WITH which axis produced it.
+
+    Exists so that a notice can say WHY it fired without restating the rule.
+    The hook's notice previously read ``threshold_fraction=0.5 (crossed at
+    30.0% of ceiling)`` -- a sentence that refutes itself, and one that the
+    union turns from unreachable into the common case, since the entire
+    actionable 300,000-500,000 range on a 1M ceiling fires on the band with
+    the fraction hint uncrossed. The obvious repair is to recompute
+    ``current_tokens >= ceiling * ROTATION_THRESHOLD_FRACTION`` in the prose
+    builder, and that is the trap: it puts a second copy of the rule in a
+    second file, so a later edit to the comparison would desynchronise the
+    notice from the decision it describes and nothing would say so. Returning
+    the decomposition keeps ONE evaluation of each term and lets every caller
+    read the parts it needs.
+    """
+
+    due: bool
+    band: str
+    band_actionable: bool
+    fraction: float
+    fraction_crossed: bool
+
+
+def rotation_due_verdict(
+    *, ceiling: int, current_tokens: int, cache_cold: bool | None,
+) -> RotationDueVerdict:
+    """Both terms of the union, evaluated once each, plus their disjunction.
+
+    :func:`is_rotation_due_for_ceiling` is this function's ``due`` field and
+    carries the reasoning for the definition; this is the form to call when
+    the caller must also SAY which axis fired.
+    """
+    if ceiling <= 0:
+        raise ValueError(
+            f"rotation_due_verdict needs a positive ceiling, got {ceiling}",
+        )
+    band, _ = rotation_band(current_tokens, cache_cold=bool(cache_cold))
+    actionable = band_is_actionable(band)
+    crossed = current_tokens >= ceiling * ROTATION_THRESHOLD_FRACTION
+    return RotationDueVerdict(
+        due=actionable or crossed,
+        band=band,
+        band_actionable=actionable,
+        fraction=current_tokens / ceiling,
+        fraction_crossed=crossed,
+    )
 
 
 @dataclass(frozen=True)

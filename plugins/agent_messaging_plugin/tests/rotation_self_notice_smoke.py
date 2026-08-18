@@ -18,7 +18,9 @@ Run:
 
 from __future__ import annotations
 
+import logging
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -173,19 +175,51 @@ def test_the_300k_to_500k_blind_spot_is_covered() -> None:
     False because 0.35 < 0.5. A leg gated on the fraction is SILENT here, and
     this is the range in which the 2026-08-17 seat burned its 300K.
 
-    "This count would also be 1 if the leg keyed on the fraction" -- no: the
-    second assertion pins `is_rotation_due` False at the same input, so the two
-    instruments are shown to DISAGREE and the leg is shown to follow the band.
-    Without that second line this test could not tell the two designs apart.
+    "This count would also be 1 if the leg keyed on the fraction" -- no, but
+    THE INPUT THAT PROVED IT HAS MOVED (GAU-08, 2026-08-18). This test used to
+    pin `is_rotation_due` False at this same 350,000 and rest on the two
+    instruments disagreeing there. The union fixed `rotation_due`, so they now
+    AGREE at 350,000 and that input can no longer tell a band-keyed leg from a
+    rotation_due-keyed one. Leaving the old assertion would have left a test
+    whose name still claimed a discrimination it had quietly stopped making --
+    so the discriminator is re-established below on the one population where
+    the two predicates still diverge, rather than deleted.
+
+    They diverge on a SMALL CEILING, and only there. On a 1M ceiling the union
+    reduces to the band (0.5 of 1M is 500,000, already deep inside
+    `warm_immediate`). On a 200,000-token window the fraction fires at 100,000
+    while the model-blind bands still say `warm_keep` -- so a leg keyed on
+    `rotation_due` would notify there and a band-keyed leg must stay SILENT.
+    That is now the assertion carrying this test's name.
     """
     counts, bridges = _sweep([_row(current_tokens=350_000)])
     _check(counts.notified == 1 and counts.unroutable == 0,
            "350K on a 1M ceiling notifies (the band says warm_immediate)")
-    _check(not rt.is_rotation_due(model="claude-opus-5", current_tokens=350_000),
-           "...and `rotation_due` is False at that same 350K -- the two "
-           "instruments disagree, and the leg follows the BAND")
+    _check(rt.is_rotation_due(model="claude-opus-5", current_tokens=350_000,
+                              cache_cold=False),
+           "...and since GAU-08 `rotation_due` AGREES at that same 350K -- the "
+           "gap this test was written against is closed, which is why it can no "
+           "longer be the discriminator")
     _check("warm_immediate" in _first_prose(bridges),
            "the delivered notice names the band it fired on")
+
+    # ★ THE SURVIVING DISCRIMINATOR. rotation_due is True here and the band is
+    # not actionable, so a leg keyed on rotation_due notifies and a band-keyed
+    # leg does not. Nothing else in this file separates the two designs any
+    # more.
+    small_counts, small_bridges = _sweep([
+        _row(current_tokens=100_000, ceiling=200_000, model="claude-haiku-4-5"),
+    ])
+    _check(rt.is_rotation_due(model="claude-haiku-4-5", current_tokens=100_000,
+                              cache_cold=False),
+           "100K on a 200K ceiling IS rotation-due -- it is that model's own "
+           "halfway point, and the union keeps the fraction reachable there")
+    _check(rt.rotation_band(100_000, cache_cold=False)[0] == "warm_keep",
+           "...while the model-blind economics band there is still warm_keep")
+    _check(small_counts.notified == 0 and small_bridges.appended == [],
+           "...and the leg stays SILENT -- nothing counted AND nothing appended "
+           "to any bridge: it follows the BAND, not rotation_due. A leg keyed on "
+           "rotation_due would have notified this session")
 
 
 def test_a_carry_on_verdict_says_nothing_at_all() -> None:
@@ -670,6 +704,217 @@ def test_a_delivery_fault_is_not_reported_as_a_routing_gap() -> None:
            "fault")
 
 
+# ---------------------------------------------------------------------------
+# GAU-02 -- the rider's own REACHABLE ALL-CLEAR.
+#
+# The three legs above report only when they have something to report, so a
+# healthy tick that finds nobody is byte-for-byte identical in the log to a
+# rider that never ran at all -- and the natural reading of that silence,
+# especially on the first tick after a deploy, is "the landing failed". This is
+# not an edge case: SELF_NOTICE_STALENESS_S excludes any session quiet for an
+# hour, so ALL-ZERO IS THE NORMAL OVERNIGHT CASE. It cost a live verification
+# twenty minutes on 2026-08-18, where "never ran", "ran and found nobody" and
+# "ran, every leg healthy" were indistinguishable silences and the discriminator
+# had to come from outside the instrument entirely.
+#
+# These tests are the reachable all-clear for the leg AND for the rider, which
+# is the widened GAU-02 scope: the L4c early return was only the half that was
+# found first.
+# ---------------------------------------------------------------------------
+
+
+class _ListHandler(logging.Handler):
+    """Captures emitted LogRecords so a smoke can prove a path LOGGED, not stayed silent."""
+
+    def __init__(self, sink: list[logging.LogRecord]) -> None:
+        super().__init__()
+        self._sink = sink
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._sink.append(record)
+
+
+def _records_from(emit: Callable[[], None]) -> list[logging.LogRecord]:
+    """Run `emit` with a handler on the plugin logger and return what it logged.
+
+    Forces `propagate` and a permissive level for the duration: a smoke that
+    measured "nothing was logged" because the logger was configured off
+    elsewhere in the process would be a false green on exactly the property
+    under test -- silence is the defect here, so silence must never be the
+    test's own default outcome.
+    """
+    records: list[logging.LogRecord] = []
+    handler = _ListHandler(records)
+    plugin_logger = logging.getLogger("agent_messaging_plugin.plugin")
+    previous_level = plugin_logger.level
+    plugin_logger.addHandler(handler)
+    plugin_logger.setLevel(logging.DEBUG)
+    try:
+        emit()
+    finally:
+        plugin_logger.removeHandler(handler)
+        plugin_logger.setLevel(previous_level)
+    return records
+
+
+def test_an_all_zero_sweep_still_says_the_leg_ran() -> None:
+    """★ CATCHES: GAU-02 -- the early return that makes a healthy leg silent.
+
+    The assertion is on the OBSERVABLE (a record was emitted), not on the
+    absence of a `return` statement in the source: a behavioural property
+    cannot be enumerated by reading the code that is supposed to have it.
+    """
+    records = _records_from(
+        lambda: AgentMessagingPlugin._log_self_notice_counts(rsn.SelfNoticeCounts()),  # noqa: SLF001
+    )
+    _check(
+        len(records) == 1,
+        f"an all-zero L4c result emits exactly ONE line (got {len(records)}) -- "
+        "a healthy leg that found nobody must not be indistinguishable from a "
+        "leg that never ran",
+    )
+    if not records:
+        return
+    message = records[0].getMessage()
+    _check(
+        "0" in message and "notified" in message,
+        f"...and that line PRINTS ITS DENOMINATORS rather than merely "
+        f"asserting health -- got: {message!r}",
+    )
+
+
+def test_the_non_zero_line_is_unchanged_by_the_zero_case_fix() -> None:
+    """★ CATCHES: buying the all-zero heartbeat by rewriting the line that
+    already worked. The non-zero wording is what the 2026-08-18 verification
+    quoted verbatim into a report, and all three counts must still be named
+    separately -- `unroutable` and `undeliverable` have different causes and
+    different owners, and collapsing them would re-attribute every transport
+    fault to the join gap.
+    """
+    records = _records_from(
+        lambda: AgentMessagingPlugin._log_self_notice_counts(  # noqa: SLF001
+            rsn.SelfNoticeCounts(notified=4, unroutable=2, undeliverable=1),
+        ),
+    )
+    _check(len(records) == 1, f"a non-zero L4c result still emits ONE line (got {len(records)})")
+    if not records:
+        return
+    message = records[0].getMessage()
+    _check(
+        "4 session(s) notified" in message
+        and "2 unroutable" in message
+        and "1 undeliverable" in message,
+        f"...naming all three counts separately, as before -- got: {message!r}",
+    )
+
+
+def test_a_healthy_tick_of_the_whole_rider_is_not_silent() -> None:
+    """★ CATCHES: the widened GAU-02 -- the rider level, not just the L4c leg.
+
+    `_run_rotation_surface_sweep` logs only on faults, so with every leg healthy
+    and empty the ENTIRE rider produced no output. This drives the REAL rider
+    with all three legs stubbed to a clean empty result and asserts the tick
+    announces itself. Without this, a quiet period and a dead rider are the same
+    observation.
+    """
+    import agent_messaging_plugin.plugin as plugin_mod
+
+    p_due = plugin_mod.sweep_rotation_due_sessions
+    p_dark = plugin_mod.sweep_gauge_coverage
+    p_self = plugin_mod.sweep_rotation_self_notice
+    plugin_mod.sweep_rotation_due_sessions = lambda *a, **k: 0  # type: ignore[assignment]
+    plugin_mod.sweep_gauge_coverage = lambda *a, **k: 0  # type: ignore[assignment]
+    plugin_mod.sweep_rotation_self_notice = lambda *a, **k: rsn.SelfNoticeCounts()  # type: ignore[assignment]
+    fake_self = SimpleNamespace(
+        _log_self_notice_counts=AgentMessagingPlugin._log_self_notice_counts,  # noqa: SLF001
+        _get_state_service=lambda: object(),
+        _peer_registry=object(),
+        _bridge_manager=object(),
+        _rotation_due_latch=object(),
+        _gauge_coverage_latch=object(),
+        _rotation_self_latch=rsn.BandEdgeLatch(),
+    )
+    try:
+        records = _records_from(
+            lambda: AgentMessagingPlugin._run_rotation_surface_sweep(cast("Any", fake_self)),  # noqa: SLF001
+        )
+    finally:
+        plugin_mod.sweep_rotation_due_sessions = p_due  # type: ignore[assignment]
+        plugin_mod.sweep_gauge_coverage = p_dark  # type: ignore[assignment]
+        plugin_mod.sweep_rotation_self_notice = p_self  # type: ignore[assignment]
+
+    messages = [r.getMessage() for r in records]
+    swept = [m for m in messages if "rotation surface" in m.lower()]
+    _check(
+        bool(swept),
+        "a healthy all-zero tick of the WHOLE rider emits a 'rotation surface "
+        f"swept' line -- got {messages!r}",
+    )
+    if not swept:
+        return
+    _check(
+        all(leg in swept[0] for leg in ("L4a", "L4b", "L4c")),
+        f"...and that line NAMES WHICH LEGS RAN, so a rider that lost a leg is "
+        f"distinguishable from one that ran them all -- got: {swept[0]!r}",
+    )
+
+
+def test_a_faulted_leg_is_named_in_the_all_clear_rather_than_omitted() -> None:
+    """★ CATCHES: an all-clear that quietly shrinks when a leg dies.
+
+    This is the assertion that decides whether the rider line is worth having.
+    A summary built only from legs that SUCCEEDED reports "rotation surface
+    swept" with one leg missing and looks healthy at a glance -- the same
+    silence GAU-02 is about, moved into the line that was supposed to close it.
+    Every leg is isolated (a fault in one does not skip the others), so a
+    faulted leg is exactly the case where the tick continues and the reader
+    most needs to be told.
+    """
+    import agent_messaging_plugin.plugin as plugin_mod
+
+    def _boom(*args: object, **kwargs: object) -> int:
+        raise RuntimeError("leg fault -- must still be NAMED in the all-clear")
+
+    p_due = plugin_mod.sweep_rotation_due_sessions
+    p_dark = plugin_mod.sweep_gauge_coverage
+    p_self = plugin_mod.sweep_rotation_self_notice
+    plugin_mod.sweep_rotation_due_sessions = lambda *a, **k: 0  # type: ignore[assignment]
+    plugin_mod.sweep_gauge_coverage = _boom  # type: ignore[assignment]
+    plugin_mod.sweep_rotation_self_notice = lambda *a, **k: rsn.SelfNoticeCounts()  # type: ignore[assignment]
+    fake_self = SimpleNamespace(
+        _log_self_notice_counts=AgentMessagingPlugin._log_self_notice_counts,  # noqa: SLF001
+        _get_state_service=lambda: object(),
+        _peer_registry=object(),
+        _bridge_manager=object(),
+        _rotation_due_latch=object(),
+        _gauge_coverage_latch=object(),
+        _rotation_self_latch=rsn.BandEdgeLatch(),
+    )
+    try:
+        records = _records_from(
+            lambda: AgentMessagingPlugin._run_rotation_surface_sweep(cast("Any", fake_self)),  # noqa: SLF001
+        )
+    finally:
+        plugin_mod.sweep_rotation_due_sessions = p_due  # type: ignore[assignment]
+        plugin_mod.sweep_gauge_coverage = p_dark  # type: ignore[assignment]
+        plugin_mod.sweep_rotation_self_notice = p_self  # type: ignore[assignment]
+
+    swept = [r.getMessage() for r in records if "rotation surface" in r.getMessage().lower()]
+    _check(bool(swept), "the all-clear line is emitted even when a leg faulted")
+    if not swept:
+        return
+    _check(
+        "L4b=FAULTED" in swept[0],
+        f"...and the FAULTED leg is NAMED in it rather than dropped, so the "
+        f"line cannot shrink silently -- got: {swept[0]!r}",
+    )
+    _check(
+        "L4a" in swept[0] and "L4c" in swept[0],
+        f"...while the healthy legs still report their own counts alongside it "
+        f"-- got: {swept[0]!r}",
+    )
+
+
 def main() -> int:
     print("rotation self-notice (L4c) smoke\n")
     test_the_300k_to_500k_blind_spot_is_covered()
@@ -690,6 +935,10 @@ def main() -> int:
     test_measured_at_reads_back_naive_and_is_still_compared_correctly()
     test_a_delivery_fault_is_not_reported_as_a_routing_gap()
     test_the_rider_actually_invokes_this_leg()
+    test_an_all_zero_sweep_still_says_the_leg_ran()
+    test_the_non_zero_line_is_unchanged_by_the_zero_case_fix()
+    test_a_healthy_tick_of_the_whole_rider_is_not_silent()
+    test_a_faulted_leg_is_named_in_the_all_clear_rather_than_omitted()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

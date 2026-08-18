@@ -352,17 +352,68 @@ def sum_context_tokens(usage: dict[str, Any]) -> int:
 
 def build_notification_content(
     *, agent_instance_id: str, session_label: str, model: str,
-    current_tokens: int, ceiling: int, threshold_fraction: float,
+    current_tokens: int, ceiling: int, band: str, band_actionable: bool,
+    threshold_fraction: float, fraction_crossed: bool,
 ) -> str:
     """Identity-in-content, per this fleet's own measured trap (names
     route, content binds) -- the subject session's identity is embedded as
-    text, never left to the transport's sender-identity field alone."""
+    text, never left to the transport's sender-identity field alone.
+
+    NAMES THE AXIS IT FIRED ON (GAU-08, 2026-08-18). This notice used to read
+    ``threshold_fraction=0.5 (crossed at 30.0% of ceiling)`` -- a sentence
+    that refutes itself, claiming a 0.5 threshold was crossed at 0.30. That
+    was unreachable while ``rotation_due`` was the fraction alone, because the
+    fraction was the only thing that could fire it. The union makes it the
+    COMMON case: on a 1M ceiling the whole actionable 300,000-500,000 range
+    fires on the BAND with the fraction hint uncrossed, so every notice in the
+    range this landing exists to serve would have contradicted itself in its
+    own headline.
+
+    ``band_actionable`` and ``fraction_crossed`` are PASSED IN, never
+    recomputed here. Rebuilding ``current_tokens >= ceiling * threshold`` in
+    this function would put a second copy of the rotation-due rule in a second
+    file, and the two would drift the first time either was edited -- with the
+    notice, not the decision, being the one that lied. They come from
+    ``rotation_thresholds.rotation_due_verdict``, which evaluates each term
+    exactly once.
+    """
+    if band_actionable and fraction_crossed:
+        because = (
+            f"BOTH axes agree -- the economics band is {band!r}, and "
+            f"{current_tokens:,} is at or past {threshold_fraction:.0%} of the "
+            f"{ceiling:,}-token ceiling"
+        )
+    elif band_actionable:
+        because = (
+            f"the ECONOMICS BAND is {band!r}. That band is an ABSOLUTE token "
+            f"count, not a share of the window, which is why it fires at "
+            f"{current_tokens / ceiling:.1%} of the ceiling -- the "
+            f"{threshold_fraction:.0%} fraction hint is NOT crossed here and is "
+            f"not what triggered this"
+        )
+    elif fraction_crossed:
+        because = (
+            f"{current_tokens:,} is at or past {threshold_fraction:.0%} of this "
+            f"model's {ceiling:,}-token ceiling, while the model-blind economics "
+            f"band is still {band!r} -- on a ceiling this small the bands do not "
+            f"fit the window and the fraction is what fires first"
+        )
+    else:
+        # UNREACHABLE from `_check_and_notify`, which returns before building a
+        # notice when neither axis fired. Raised rather than papered over with
+        # a vague "rotation is due": a notice that cannot say why it exists is
+        # a notice whose reader has to guess, and this whole change is about
+        # not making them.
+        raise ValueError(
+            f"build_notification_content called with NEITHER axis firing "
+            f"(band={band!r}, current_tokens={current_tokens}, ceiling={ceiling}) "
+            f"-- there is no rotation-due reason to state",
+        )
     return (
-        f"IMPORTANT: rotation-due threshold crossed for agent_instance_id="
+        f"IMPORTANT: rotation due for agent_instance_id="
         f"{agent_instance_id!r} session_label={session_label!r}. "
-        f"model={model!r} current_tokens={current_tokens} ceiling={ceiling} "
-        f"threshold_fraction={threshold_fraction} "
-        f"(crossed at {current_tokens / ceiling:.1%} of ceiling). "
+        f"model={model!r} current_tokens={current_tokens} ceiling={ceiling}. "
+        f"DUE BECAUSE {because}. "
         "This is a MEASURED SIGNAL, not an action -- rotation timing stays "
         "a steward/seat decision; nothing was cleared or rotated."
     )
@@ -934,7 +985,8 @@ def _resolve_usage(transcript_path: str) -> tuple[str, int, Any] | None:
 
 def _check_and_notify(
     *, marker_dir: str, agent_instance_id: str, claude_session_id: str,
-    latch_path: Path, model: str, current_tokens: int, rotation_thresholds: Any,
+    latch_path: Path, model: str, current_tokens: int, cache_cold: Any,
+    rotation_thresholds: Any,
 ) -> None:
     """The threshold-and-notify half of a firing (post throttle/latch
     gating) -- split out of :func:`main` to keep it a straight-line
@@ -942,8 +994,23 @@ def _check_and_notify(
     :func:`_resolve_usage`) rather than a transcript path -- this is the
     LATCH-GATED half (``main`` never calls it once the latch exists for this
     session generation), so it must not be where the cache report lives;
-    that runs unconditionally in :func:`main` before the latch check."""
-    if not rotation_thresholds.is_rotation_due(model=model, current_tokens=current_tokens):
+    that runs unconditionally in :func:`main` before the latch check.
+
+    ``cache_cold`` is the tri-state ``True``/``False``/``None`` that
+    :func:`_cache_arguments` already measured for the unconditional cache
+    report, threaded through rather than re-derived: it is the SECOND input to
+    the rotation-due decision since GAU-08 (a cold cache above H is due at a
+    size a warm one is not), and reading the transcript twice per tick to
+    recover a value this tick already has would be both slower and a second
+    chance to disagree with itself. ``None`` means NOT MEASURED and is treated
+    as warm by the predicate -- never promoted to cold.
+    """
+    verdict = rotation_thresholds.rotation_due_verdict(
+        ceiling=rotation_thresholds.resolve_ceiling(model),
+        current_tokens=current_tokens,
+        cache_cold=cache_cold,
+    )
+    if not verdict.due:
         return
 
     content = build_notification_content(
@@ -952,7 +1019,10 @@ def _check_and_notify(
         model=model,
         current_tokens=current_tokens,
         ceiling=rotation_thresholds.resolve_ceiling(model),
+        band=verdict.band,
+        band_actionable=verdict.band_actionable,
         threshold_fraction=rotation_thresholds.ROTATION_THRESHOLD_FRACTION,
+        fraction_crossed=verdict.fraction_crossed,
     )
     delivered = _deliver_notification(
         agent_instance_id=agent_instance_id, claude_session_id=claude_session_id,
@@ -983,11 +1053,16 @@ def main() -> int:
     # notify. session_context_status must answer for a session nowhere near
     # rotation-due too, and must keep refreshing after the one-time notify has
     # already latched for this session generation.
+    # Hoisted to a local so the SAME measurement serves the report and the
+    # rotation-due decision below. Measured once per tick: `_cache_arguments`
+    # re-reads and re-parses the whole transcript, and two reads could not only
+    # cost twice, they could disagree if a call landed between them.
+    cache_arguments = _cache_arguments(transcript_path, rotation_thresholds)
     _report_context_status(
         agent_instance_id=agent_instance_id, claude_session_id=claude_session_id,
         model=model, current_tokens=current_tokens,
         ceiling=rotation_thresholds.resolve_ceiling(model),
-        cache_arguments=_cache_arguments(transcript_path, rotation_thresholds),
+        cache_arguments=cache_arguments,
     )
 
     latch_path = _latch_marker_path(marker_dir, agent_instance_id, claude_session_id)
@@ -997,7 +1072,12 @@ def main() -> int:
     _check_and_notify(
         marker_dir=marker_dir, agent_instance_id=agent_instance_id,
         claude_session_id=claude_session_id, latch_path=latch_path,
-        model=model, current_tokens=current_tokens, rotation_thresholds=rotation_thresholds,
+        model=model, current_tokens=current_tokens,
+        # `.get` returns None when the cache state could not be measured at all
+        # -- `_cache_arguments` returns {} in that case precisely so the absence
+        # stays visible instead of arriving as a fabricated False.
+        cache_cold=cache_arguments.get("cache_cold"),
+        rotation_thresholds=rotation_thresholds,
     )
     return 0
 

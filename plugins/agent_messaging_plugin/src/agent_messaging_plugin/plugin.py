@@ -5620,6 +5620,15 @@ class AgentMessagingPlugin(
         # independent read-only notices about three different conditions, and
         # there is no reading of this rider's purpose on which one leg's fault
         # should cost another leg its delivery.
+        # ★ GAU-02: every leg records its own outcome here, healthy or not, so
+        # the rider can emit ONE all-clear line at the end naming which legs
+        # actually ran. Before this the rider logged only on faults and only on
+        # non-zero results, which made a healthy quiet tick byte-identical to a
+        # rider that never ran — and "never ran" is the reading a reader
+        # defaults to. Collected as text rather than counts because a FAULTED
+        # leg has no count to report and must still appear in the line; a leg
+        # missing from it would otherwise read as healthy-and-quiet.
+        legs: list[str] = []
         try:
             due = sweep_rotation_due_sessions(
                 state_service,
@@ -5629,7 +5638,9 @@ class AgentMessagingPlugin(
             )
         except Exception:  # noqa: BLE001 — one leg's fault must not skip the others
             logger.exception("L4a rotation-due leg FAULTED; rider continues")
+            legs.append("L4a=FAULTED")
         else:
+            legs.append(f"L4a={due} steward(s) notified")
             if due:
                 logger.info(
                     "L4 sweep: notified %d steward(s) of a rotation-due session", due,
@@ -5643,7 +5654,9 @@ class AgentMessagingPlugin(
             )
         except Exception:  # noqa: BLE001 — one leg's fault must not skip the others
             logger.exception("L4b gauge-coverage leg FAULTED; rider continues")
+            legs.append("L4b=FAULTED")
         else:
+            legs.append(f"L4b={dark} session(s) with no gauge row")
             if dark:
                 logger.warning(
                     "L4 sweep: %d LIVE session(s) past the startup grace have no "
@@ -5668,8 +5681,24 @@ class AgentMessagingPlugin(
             )
         except Exception:  # noqa: BLE001 — one leg's fault must not skip the others
             logger.exception("L4c self-notice leg FAULTED; rider continues")
+            legs.append("L4c=FAULTED")
         else:
+            legs.append(
+                f"L4c={counts.notified} notified/{counts.unroutable} unroutable/"
+                f"{counts.undeliverable} undeliverable",
+            )
             self._log_self_notice_counts(counts)
+        # ★ The rider's REACHABLE ALL-CLEAR. Emitted unconditionally, after
+        # every leg, INCLUDING the all-zero tick that is the normal overnight
+        # case — that is the whole point. "Did the rotation surface sweep?" was
+        # unanswerable from the logs for twenty minutes during the 2026-08-18
+        # post-deploy verification, because a rider that never ran, one that ran
+        # and found nobody, and one whose every leg was healthy all produced
+        # byte-identical silence, and the discriminator had to be found outside
+        # the instrument entirely. INFO, not DEBUG: a signal only reachable by
+        # raising the log level is not reachable on the tick a reader is
+        # actually asking about.
+        logger.info("rotation surface swept: %s", "; ".join(legs))
 
     @staticmethod
     def _log_self_notice_counts(counts: SelfNoticeCounts) -> None:
@@ -5688,6 +5717,21 @@ class AgentMessagingPlugin(
         did, would have attributed every delivery fault to the join gap.
         """
         if not (counts.notified or counts.unroutable or counts.undeliverable):
+            # ★ GAU-02, the half found first. This used to `return` and log
+            # NOTHING, which made a healthy leg that found nobody identical in
+            # the log to a leg that never ran. All-zero is not an edge case
+            # here: SELF_NOTICE_STALENESS_S excludes any session quiet for an
+            # hour, so it is the normal overnight state of a small fleet. The
+            # line states the denominators rather than merely asserting health,
+            # for the same reason the non-zero line below names all three
+            # counts — a zero that prints what it counted is the only kind a
+            # reader can trust.
+            logger.info(
+                "L4c sweep: 0 session(s) notified, 0 unroutable, 0 undeliverable "
+                "— the leg RAN and had no eligible subject (every gauge row was "
+                "stale, below band, or already latched for this episode); this "
+                "is the expected quiet-fleet result, not a failure",
+            )
             return
         logger.info(
             "L4c sweep: %d session(s) notified of their own context band; "

@@ -1440,10 +1440,16 @@ def _rotation_due_row(
     or ``None`` when this session is not rotation-due.
 
     Every ``None`` here is a distinct, deliberate skip rather than a failure:
-    no steward to notify, no gauge row yet, an unusable ceiling, or simply
-    below the threshold. Split out of the sweep loop so the loop reads as
-    "for each session, notify if due" and the decision of what counts as DUE
+    no steward to notify, no gauge row yet, an unusable ceiling, or not
+    rotation-due on either axis. Split out of the sweep loop so the loop reads
+    as "for each session, notify if due" and the decision of what counts as DUE
     lives in one place.
+
+    That decision is DELEGATED, never restated here. It was a local
+    ``fraction < ROTATION_THRESHOLD_FRACTION`` comparison until GAU-08, which
+    is how this leg came to hold its own private copy of a rule that had moved
+    -- the fix belonged in the predicate, and a second copy of it here would
+    have re-opened the same gap the moment either changed again.
     """
     agent_instance_id = str(row.get("agent_instance_id") or "")
     spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
@@ -1457,11 +1463,18 @@ def _rotation_due_row(
     if ceiling <= 0:
         return None
     fraction = current / ceiling
-    if fraction < rotation_thresholds.ROTATION_THRESHOLD_FRACTION:
+    # Derived ONCE and used for BOTH the verdict and the band that rides into
+    # the notice, so `_rotation_prose` cannot name a band the decision did not
+    # use. Before GAU-08 this leg DECIDED on the fraction and PRINTED the band,
+    # which meant a 1M-ceiling session anywhere in 300,000-500,000 was skipped
+    # while sitting in the saturated `warm_immediate` band the notice would
+    # have quoted.
+    cache_cold = bool(gauge.get("cache_cold"))
+    if not rotation_thresholds.is_rotation_due_for_ceiling(
+        ceiling=ceiling, current_tokens=current, cache_cold=cache_cold,
+    ):
         return None
-    band, guidance = rotation_thresholds.rotation_band(
-        current, cache_cold=bool(gauge.get("cache_cold")),
-    )
+    band, guidance = rotation_thresholds.rotation_band(current, cache_cold=cache_cold)
     enriched = dict(gauge)
     enriched.update(
         {"fraction": fraction, "rotation_band": band, "rotation_guidance": guidance},

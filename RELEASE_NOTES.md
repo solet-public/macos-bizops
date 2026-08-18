@@ -4,6 +4,72 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-18 — Rotation notices that fire when they are needed, a sweep that reports a healthy tick, and shipped-document checks you can run before committing
+
+**Additive for every configuration.** A notice that could stay silent exactly
+when it was most needed now fires; a sweep line that said nothing on a healthy
+tick now says something; and checks that could only run against an assembled
+bundle can now also run against a checkout. No envelope shrinks, and nothing
+that worked before stops working.
+
+Update with the standard short form: pull fast-forward only, restart, and wait
+for startup to finish. The seed update runbook carries the complete procedure.
+
+### A rotation-due notice now fires on either axis, and names the one that fired
+
+Rotation urgency is measured two ways: an absolute token count, and a fraction
+of the model's own context ceiling. The notice fired on the fraction alone, so a
+session sitting in the most urgent absolute band could still be told it was not
+due. On a large ceiling that is not a corner case — the absolute bands are
+reached long before half the window is gone, so the most urgent band this policy
+has could coexist with a not-due reading.
+
+The predicate is now the union of the two axes: the notice fires when the
+absolute band is actionable or the fraction threshold is crossed, and it names
+which axis fired, so the reading is something you can act on rather than a bare
+flag.
+
+The new predicate is a strict superset of the one it replaces. No session that
+would have been served a notice stops receiving one, and no stored row needs
+rewriting. Narrow-ceiling models gain the most: on a small window the first
+actionable absolute band arrives well past that model's own halfway point, so
+the previous rule was strictly later there.
+
+### The rotation-surface sweep now reports a healthy tick instead of staying silent
+
+A tick on which every leg was healthy produced no output at all. That made
+"never ran", "ran and found nobody", and "ran, and every leg was healthy" into
+byte-identical silences. The all-healthy case is not an edge case: sessions
+quiet for an hour are excluded from the surface by design, so it is the ordinary
+overnight state of a small deployment.
+
+Each tick now emits a line naming every leg and its result, and the empty case
+prints the denominators it measured over and says the leg ran and found no
+eligible subject. Legs that faulted are named too — a summary built only from
+the legs that succeeded would shrink silently and reproduce the same defect one
+level up.
+
+### The shipped-document checks now run before a commit, not only at seal time
+
+The citation check and the reserved-identity scan both took an assembled bundle,
+so neither could run until a bundle existed. "Run the shipped-document checks
+before handing off" was therefore an instruction that could not be followed.
+
+Both now also run against what a checkout would ship, derived from the same
+manifest the assembler reads, through the same grammars the seal-time checks
+use. Nothing about how a citation is extracted, classified, resolved, or
+tolerated is restated in a second place: a check with two implementations is two
+different checks wearing one name, and the day they disagree is the day the
+weaker one is believed.
+
+Citations are measured per profile, because which plugins a bundle selects
+decides what its citations resolve against; the reserved-identity scan is
+measured over the union, because it has no such census. The tolerated-count
+comparison blocks on drift in either direction, and the tolerance file itself
+stays untouched — what keeps the count where it is should be remediation, not
+silencing. A born clone ships this check but not the assembler, so it detects
+that it has nothing to mint and prints a declared skip instead of failing.
+
 ## 2026-08-17 (second update) — Worker paths that survive a deploy, a preflight that checks the code it is about to run, and lifetimes that surface
 
 **One breaking change, and it is narrow.** On a host whose organisation-managed

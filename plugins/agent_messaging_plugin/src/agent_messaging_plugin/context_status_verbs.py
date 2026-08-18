@@ -342,6 +342,13 @@ def session_context_status(
     current_tokens = int(row.get("current_tokens") or 0)
     ceiling = int(row.get("ceiling") or 0) or rotation_thresholds.DEFAULT_CONSERVATIVE_CEILING
     fraction = current_tokens / ceiling if ceiling else 0.0
+    # Derived ONCE and reused for both the verdict and the reported band. The
+    # two used to be computed independently — `rotation_due` from the fraction
+    # here, the band inside `_cache_view` — which is how this verb came to
+    # publish `rotation_due=False` beside `rotation_band=warm_immediate` on the
+    # same row (GAU-08). Sharing the derivation makes the two fields agree by
+    # construction rather than by both being edited together.
+    cache_view = _cache_view(row, current_tokens)
     return {
         "resolved": True,
         "resolution_error": None,
@@ -352,10 +359,18 @@ def session_context_status(
         "ceiling": ceiling,
         "fraction": fraction,
         "per_prompt_carriage_estimate_tokens": round(current_tokens * CACHE_READ_COST_FRACTION),
-        "rotation_due": fraction >= rotation_thresholds.ROTATION_THRESHOLD_FRACTION,
+        # THE UNION (GAU-08): an actionable economics band OR the fraction hint.
+        # Decided against the STORED `ceiling` — the same denominator `fraction`
+        # above is computed from and that this verb publishes — so the verdict
+        # and the number a reader checks it against can never disagree.
+        "rotation_due": rotation_thresholds.is_rotation_due_for_ceiling(
+            ceiling=ceiling,
+            current_tokens=current_tokens,
+            cache_cold=cache_view["cache_cold"],
+        ),
         "measured_at": str(row.get("measured_at") or ""),
         **_routing_view(row),
-        **_cache_view(row, current_tokens),
+        **cache_view,
         **_reporter_view(row),
     }
 
