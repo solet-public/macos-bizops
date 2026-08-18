@@ -139,6 +139,19 @@ report it.
    Skip this step when the role equals the launch label (the SessionStart
    re-claim case) — the file already says the right thing.
 
+   **This patch is the last lock-step action of a completed claim from steps
+   1–3 above, never a standalone act.** Writing this label without a
+   preceding successful claim does not work around a blocked claim — it
+   forges the lock-step invariant this step exists to preserve: a git-mutation
+   gate that reads this file checks for the label only, so a label written
+   without its claim looks identical to one earned by a real claim while
+   holding none of the protection (the platform-side singleton lock, the loud
+   refusal on a second live claim) that makes holding the role mean anything.
+   If steps 1–3 failed or the declared transport was unavailable, that is the
+   "declared path's mechanism is missing or fails" case from the transport
+   selection guidance above — the correct response is still to surface the
+   error and stop, not to reach this step anyway.
+
 5. Report in one short sentence: which role this session now holds, over
    which transport, and whether it was a fresh claim, a refresh, or a
    displacement (displacement from a stale binding is normal after a restart

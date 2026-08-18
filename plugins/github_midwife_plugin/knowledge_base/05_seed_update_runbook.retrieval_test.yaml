@@ -26,6 +26,9 @@ target_queries:
   - "git remote set-url origin after the seed changes home"
   - "my clone says already up to date but new releases exist"
   - "mandatory homunculus to solet migration before restarting"
+  - "how do I know when a new seed release has been published"
+  - "subscribe to seed repository releases on GitHub to get notified of updates"
+  - "seed moved to a new repository and I stopped getting release notifications"
 min_rank: 3
 
 forbidden_queries:

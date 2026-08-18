@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -35,15 +37,20 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
+from agent_messaging_plugin import headless_adapter  # noqa: E402
 from agent_messaging_plugin.headless_adapter import (  # noqa: E402
+    _ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY,
+    _HEADLESS_DENIED_TOOLS,
     _MANAGED_SETTINGS_PATHS,
     _WORKER_INJECTED_HOOK_FILENAMES,
     HeadlessHostDriver,
     WorkerHookResolutionError,
+    _managed_policy_voids_permission_rules,
     _resolve_default_cwd,
     _resolve_worker_hook_path,
     _resolve_worker_hook_paths,
     _StreamJsonDriverChannel,
+    _warn_permission_denies_inert,
 )
 from agent_messaging_plugin.session_hosts import HostCannotSpawnError  # noqa: E402
 
@@ -1334,6 +1341,306 @@ def test_capability_report_shape() -> None:
         _check(report.get("topology") == "subprocess", "capability_report names the topology")
 
 
+# --- §45.1 (#17): the SECOND managed-policy key -----------------------------
+#
+# Every leg below drives the reader with a POPULATED fixture file, for the
+# reason already stated on _write_policy: there is no managed policy on this
+# machine, so an absent-file probe verifies nothing about the populated case
+# and a green from one would be a success path that never ran.
+
+
+@contextlib.contextmanager
+def _captured_warnings() -> Iterator[list[logging.LogRecord]]:
+    """Records WARNING records emitted by the adapter under test.
+
+    Needed because §45.1's whole posture is warn-rather-than-refuse: the
+    observable is the log line, so a test that only asserted "verify_config
+    returned no remedy" would pass identically against a build that detected
+    nothing at all. That is the difference between proving the warn path and
+    proving the absence of a refusal.
+    """
+    records: list[logging.LogRecord] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    sink = _Sink(level=logging.WARNING)
+    target = logging.getLogger(headless_adapter.__name__)
+    target.addHandler(sink)
+    previous = target.level
+    target.setLevel(logging.WARNING)
+    try:
+        yield records
+    finally:
+        target.removeHandler(sink)
+        target.setLevel(previous)
+
+
+@contextlib.contextmanager
+def _default_policy_paths(paths: tuple[Path, ...]) -> Iterator[None]:
+    """Point the MODULE-LEVEL default search list at a fixture.
+
+    capability_report() and spawn() deliberately read the module constant
+    rather than an injected tuple, because in production the question is
+    always "what policy is in force on THIS host". That leaves this patch as
+    the only way to exercise their populated case; verify_config keeps its own
+    managed_settings_paths seam and does not need it.
+    """
+    original = headless_adapter._MANAGED_SETTINGS_PATHS
+    headless_adapter._MANAGED_SETTINGS_PATHS = paths
+    try:
+        yield
+    finally:
+        headless_adapter._MANAGED_SETTINGS_PATHS = original
+
+
+def test_permissions_inert_policy_warns_and_never_refuses() -> None:
+    """The §45.1 shape: allowManagedPermissionRulesOnly voids every
+    user/project deny, and this driver says so LOUDLY while still spawning.
+
+    Would catch: adding the key to the reader but giving it the refusal
+    posture (a remedy would appear), and adding the refusal-shaped code path
+    without the log line (records would be empty). This number would also be
+    this number if the reader matched on the key's PRESENCE rather than on
+    the value True -- test_permissions_inert_requires_literal_true is the leg
+    that excludes that.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {_ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY: True},
+        )
+        _check(
+            driver.verify_config(transport="watch", managed_settings_paths=(policy,)) == [],
+            "a permissions-inert policy is NOT a spawn refusal (warn, not refuse)",
+        )
+        _check(
+            _managed_policy_voids_permission_rules((policy,)) == policy,
+            "but the prover does detect it, so the empty remedy list is a "
+            "decision rather than a blind spot",
+        )
+        with _captured_warnings() as records:
+            returned = _warn_permission_denies_inert(
+                (policy,), agent_instance_id="agi-fixture", host="headless",
+                denied_tools=_HEADLESS_DENIED_TOOLS,
+            )
+        _check(returned == policy, "the warn helper reports which file it fired on")
+        _check(len(records) == 1, f"exactly one warning is emitted (got {len(records)})")
+        text = records[0].getMessage() if records else ""
+        _check(str(policy) in text, "the warning names the policy file it read")
+        _check(
+            _ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY in text,
+            "and names the offending key, so the operator can find it",
+        )
+        _check(
+            all(tool in text for tool in _HEADLESS_DENIED_TOOLS),
+            "and enumerates the denies that are now inert on this host",
+        )
+        _check(
+            "hygiene" in text and "security control" in text,
+            "and frames the loss honestly -- a deny a local policy can switch "
+            "off was never a boundary, so this must not read as a breach",
+        )
+
+
+def test_permissions_inert_and_hooks_keys_are_independent() -> None:
+    """Both keys in ONE file: the hooks key refuses, the permissions key
+    warns, and neither answer is contaminated by the other.
+
+    Would catch: a shared prover that returned on the first key it matched, or
+    a refusal list that grew a second entry for the permissions key.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {
+                "strictPluginOnlyCustomization": ["hooks"],
+                _ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY: True,
+            },
+        )
+        remedies = driver.verify_config(
+            transport="watch", managed_settings_paths=(policy,),
+        )
+        _check(
+            len(remedies) == 1 and "strictPluginOnlyCustomization" in remedies[0],
+            f"exactly ONE remedy, the hooks one (got {remedies!r})",
+        )
+        _check(
+            _managed_policy_voids_permission_rules((policy,)) == policy,
+            "and the permissions key is still detected in the same file",
+        )
+
+
+def test_hooks_key_alone_leaves_permission_denies_operative() -> None:
+    """The discriminating leg in the other direction: §43.1's policy shape
+    must NOT report permissions as inert. Without this, a prover that fired on
+    the mere presence of a managed policy would look correct."""
+    with tempfile.TemporaryDirectory() as tmp:
+        policy = _write_policy(
+            Path(tmp) / "managed-settings.json",
+            {"strictPluginOnlyCustomization": ["hooks"]},
+        )
+        _check(
+            _managed_policy_voids_permission_rules((policy,)) is None,
+            "a hooks-stripping policy says nothing about permission rules",
+        )
+
+
+def test_permissions_inert_key_alone_is_not_a_hooks_remedy() -> None:
+    """And §45.1's policy shape must not start refusing spawns for §43.1's
+    reason -- the adopter's machine carries both keys, so a prover that
+    conflated them would refuse for the wrong stated cause."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {_ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY: True},
+        )
+        _check(
+            driver.verify_config(transport="watch", managed_settings_paths=(policy,)) == [],
+            "the permissions key alone produces no hooks remedy",
+        )
+
+
+def test_permissions_inert_requires_literal_true() -> None:
+    """``1 == True`` in Python, so a ``== True`` implementation would fire on
+    an integer 1 and on any truthy value. The flag is documented as a boolean;
+    treating ``"false"``/``1``/``[]`` as evidence the organisation set it is
+    the silent fallback this repository forbids.
+
+    This is the leg that makes the warn path's green mean something: without
+    it, the same number would appear for a reader that matched on the key's
+    presence alone.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        for index, value in enumerate([False, 1, "true", "false", [], {}, None]):
+            policy = _write_policy(
+                tmp_dir / f"policy-{index}.json",
+                {_ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY: value},
+            )
+            _check(
+                _managed_policy_voids_permission_rules((policy,)) is None,
+                f"{value!r} is not the boolean true and must not fire",
+            )
+        exact = _write_policy(
+            tmp_dir / "policy-true.json",
+            {_ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY: True},
+        )
+        _check(
+            _managed_policy_voids_permission_rules((exact,)) == exact,
+            "and the reachable all-clear: literal true DOES fire, so the legs "
+            "above are not all passing for the trivial reason",
+        )
+
+
+def test_permissions_inert_malformed_file_fails_open() -> None:
+    """Same fail-open-loudly posture as the hooks prover, for the same
+    evidential reason: an unparseable policy file is not evidence that
+    permission rules were voided."""
+    with tempfile.TemporaryDirectory() as tmp:
+        policy = Path(tmp) / "managed-settings.json"
+        policy.write_text("{not json at all", encoding="utf-8")
+        with _captured_warnings() as records:
+            result = _managed_policy_voids_permission_rules((policy,))
+        _check(result is None, "a malformed policy file fails OPEN, never fires")
+        _check(
+            len(records) == 1 and "could not be read" in records[0].getMessage(),
+            "and fails open LOUDLY -- a silent skip would be a third silence",
+        )
+
+
+def test_permissions_inert_non_dict_top_level_is_silent() -> None:
+    """A policy file whose top level is a list (or a bare scalar) parses fine
+    and has no keys at all. Without this leg a ``raw.get`` on a list would
+    raise AttributeError at spawn time rather than skipping the file."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        for index, body in enumerate([["hooks"], "allowManagedPermissionRulesOnly", 7]):
+            policy = _write_policy(tmp_dir / f"policy-{index}.json", body)
+            _check(
+                _managed_policy_voids_permission_rules((policy,)) is None,
+                f"a non-dict top level ({body!r}) is skipped, not an exception",
+            )
+
+
+def test_capability_report_answers_permission_state_without_spawning() -> None:
+    """Q1 descoped the ledger record, which makes this the ONLY surface that
+    answers "are permission denies operative on this host?" in advance. Driven
+    against a populated fixture through the module default, because that is
+    what capability_report actually reads -- a green obtained with no file
+    present would be the absent-file probe again.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        clean = driver.capability_report()
+        _check(
+            clean.get("permission_denies") == list(_HEADLESS_DENIED_TOOLS),
+            "the report names the denies this driver injects",
+        )
+        _check(
+            clean.get("permission_denies_operative") is True
+            and clean.get("permission_policy_path") is None,
+            "on a host with no managed policy the denies are operative",
+        )
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {_ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY: True},
+        )
+        with _default_policy_paths((policy,)):
+            inert = driver.capability_report()
+        _check(
+            inert.get("permission_denies_operative") is False,
+            "and a flagged host reports them as NOT operative",
+        )
+        _check(
+            inert.get("permission_policy_path") == str(policy),
+            "naming the file, so the answer is actionable without a spawn",
+        )
+
+
+def test_spawn_warns_on_a_permissions_inert_host_and_still_spawns() -> None:
+    """End to end through spawn(): the warning fires and the spawn SUCCEEDS.
+
+    This is the leg that would catch the posture being flipped later. A test
+    that only called the helper directly would stay green if someone wired the
+    detector into verify_config's remedy list instead.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(
+            tmp_dir, popen_fn=lambda *a, **k: _FakeProc(pid=4242),
+        )
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {_ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY: True},
+        )
+        with _default_policy_paths((policy,)), _captured_warnings() as records:
+            host_ref = driver.spawn(
+                {"agent_instance_id": "agi-inert", "transport": "watch"},
+            )
+        _check(host_ref == "4242", "the spawn PROCEEDS on a permissions-inert host")
+        inert_warnings = [
+            r for r in records if "PERMISSION DENIES INERT" in r.getMessage()
+        ]
+        _check(
+            len(inert_warnings) == 1,
+            f"and emits exactly one inert-permissions warning (got "
+            f"{len(inert_warnings)})",
+        )
+        _check(
+            "headless" in inert_warnings[0].getMessage() if inert_warnings else False,
+            "which names the host whose denies were dropped",
+        )
+
+
 def main() -> int:
     test_resolve_default_cwd_prefers_app_home_git_checkout()
     test_resolve_default_cwd_falls_back_when_app_home_unset()
@@ -1351,6 +1658,15 @@ def main() -> int:
     test_managed_policy_acknowledged_degraded_proceeds()
     test_managed_policy_malformed_file_fails_open()
     test_managed_policy_absent_file_is_silent()
+    test_permissions_inert_policy_warns_and_never_refuses()
+    test_permissions_inert_and_hooks_keys_are_independent()
+    test_hooks_key_alone_leaves_permission_denies_operative()
+    test_permissions_inert_key_alone_is_not_a_hooks_remedy()
+    test_permissions_inert_requires_literal_true()
+    test_permissions_inert_malformed_file_fails_open()
+    test_permissions_inert_non_dict_top_level_is_silent()
+    test_capability_report_answers_permission_state_without_spawning()
+    test_spawn_warns_on_a_permissions_inert_host_and_still_spawns()
     test_verify_config_mcp_config_required_only_for_mcp_transport()
     test_verify_config_accepts_a_per_spawn_permission_mode_override()
     test_spawn_refuses_when_unconfigured()

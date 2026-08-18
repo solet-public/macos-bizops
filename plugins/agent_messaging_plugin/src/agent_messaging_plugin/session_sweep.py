@@ -171,6 +171,65 @@ EVENT_ROTATION_DUE_NOTICE = "rotation_due_notice"
 # to catch, so building it that way would put the bug inside its own alarm.
 EVENT_GAUGE_COVERAGE_NOTICE = "gauge_coverage_notice"
 
+# Minimum age a LIVE row must reach before its missing gauge row counts as
+# DARKNESS rather than STARTUP (R4 lane, 2026-08-17).
+#
+# Measured cost of not having this: at 16:33:11Z the gauge leg fired for four
+# sessions with the prose "the reporting path ... is failing SILENTLY". All four
+# were ~2 minutes old, had simply not completed a first reporting tick, and every
+# one of them reported normally minutes later. The alarm was false four times in
+# its first live wave.
+#
+# A newly LIVE session is dark BY CONSTRUCTION until its first hook tick lands,
+# so without an age predicate every spawn wave manufactures one false alarm per
+# lane. The latch cannot absorb this: each wave is a new episode with new keys,
+# so the suppression that stops a repeat does nothing about a fresh false
+# positive. That makes it a code fix, not a tuning question — and the harm is the
+# one NoticeLatch's own docstring names, a channel the reader learns to skim.
+#
+# THE COST OF THE FIX, STATED: a genuinely broken session is now surfaced up to
+# this many seconds later than before. That is the trade — latency for precision
+# — and it is cheap in the direction that matters, because the outage this leg
+# was built for ran for an unknown number of HOURS before a person found it.
+GAUGE_COVERAGE_GRACE_S: float = 300.0
+
+# R4 (2026-08-17): the TTL leg. A spawn's ttl_seconds became expires_at on the
+# row and NOTHING EVER READ IT — measured, not assumed: three touch points in
+# this plugin (the column, one write at spawn, one output-schema entry) and zero
+# readers. A config knob that is never enforced is decoration, and the decoration
+# had a price: on 2026-08-17 lane TTLs expired at ~07:25Z, a lane self-reported
+# past-TTL at 07:37Z asking for a retirement decision, and no actor existed to
+# take it until 12:13Z while another past-TTL lane held WIP dirty in the shared
+# tree and blocked a deploy for that whole window.
+#
+# WHICH CLOCK, AND WHY IT IS NOT report_by. These are two clocks with different
+# owners that must not be reconciled:
+#   * report_by ADVANCES — written at spawn, re-armed by _rearm_report_by on
+#     every report_alive/drive_session, and read by sweep_overdue_sessions. It
+#     answers "is this session still alive".
+#   * expires_at IS FROZEN — written once as spawn + ttl_seconds, never re-armed.
+#     It answers "was this session supposed to be finished by now".
+# That difference is the whole explanation for rows whose report_by is LATER than
+# their expires_at (observed: expires_at 06:51:44Z against report_by 12:54:12Z) —
+# it is the arithmetic of one clock that advances against one that does not, not
+# an anomaly.
+#
+# So TTL expiry reads expires_at and ONLY expires_at. Keying it on report_by
+# would make TTL structurally unreachable for exactly the sessions it exists to
+# catch: a healthy, chatty lane re-arms report_by forever and would never expire.
+# TTL on the wrong clock is not merely inaccurate — it is inert in precisely the
+# case it exists for.
+#
+# NOTICE, NOT REAPER, and that is a ruling rather than a default. Auto-retiring
+# at TTL was considered and refused: _mark_one_spawning_orphaned already
+# litigated this exact question on 2026-08-13, when it stopped reaping
+# past-deadline rows whose host was observed alive because "a spawning row past
+# its deadline whose host process is observed alive is not an orphaned spawn — it
+# is a live session whose registration never completed". A TTL-overdue lane
+# holding a landing is the same shape: alive, working, and about to be killed by
+# a clock. The platform NOTICES; a human-or-seat DECIDES.
+EVENT_TTL_OVERDUE_NOTICE = "ttl_overdue_notice"
+
 # Distinct from EVENT_SESSION_OVERDUE_NOTICE so a receiver can tell the two
 # classes apart: "went quiet" (overdue, may self-heal) vs "never came up"
 # (spawning row past its deadline, terminated outright — see sweep_overdue_
@@ -1221,21 +1280,46 @@ def _rotation_due_sessions(
     return found
 
 
+def _within_startup_grace(row: dict[str, Any], *, clock: datetime) -> bool:
+    """Whether this LIVE row is still too YOUNG for a missing gauge row to mean
+    anything (see :data:`GAUGE_COVERAGE_GRACE_S`).
+
+    ``last_transition_at`` is the row's move INTO ``live``, which is the moment
+    from which a first reporting tick becomes possible at all.
+
+    The fail-toward direction is the opposite of
+    :func:`_spawn_alive_patience_exhausted`'s, deliberately, because the two
+    predicates guard opposite things. There, an unanswerable probe must fall back
+    to the established reap. Here, the grace is an EXCEPTION to an alarm, so it
+    may only apply on positive evidence that the row is young: a row with no
+    parseable transition timestamp is NOT granted grace and is still reported.
+    Suppressing an alarm on a timestamp we could not read is how a detector goes
+    quiet for a reason nobody chose.
+    """
+    became_live = _parse_iso(row.get("last_transition_at"))
+    if became_live is None:
+        return False
+    return (clock - became_live).total_seconds() < GAUGE_COVERAGE_GRACE_S
+
+
 def _gauge_dark_session(
-    state: StateManagementInterface, row: dict[str, Any],
+    state: StateManagementInterface, row: dict[str, Any], *, clock: datetime,
 ) -> tuple[str, str] | None:
     """``(agent_instance_id, steward_instance_id)`` when this LIVE row has no
     gauge row at all, else ``None``.
 
     Same "every ``None`` is a deliberate skip" idiom as
-    :func:`_rotation_due_row`: no identity, no steward to tell, or a session
-    that is reporting perfectly well.
+    :func:`_rotation_due_row`: no identity, no steward to tell, a session that is
+    reporting perfectly well — or, since the R4 lane, one that has not yet had
+    time to report at all (:func:`_within_startup_grace`).
     """
     agent_instance_id = str(row.get("agent_instance_id") or "")
     spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
     if not agent_instance_id or not spawner_instance_id:
         return None
     if read_session_context_status(state, agent_instance_id) is not None:
+        return None
+    if _within_startup_grace(row, clock=clock):
         return None
     return agent_instance_id, spawner_instance_id
 
@@ -1294,14 +1378,21 @@ def _notify_rotation_due(
     inherits its posture: a delivery fault must never raise back into the sweep
     loop or block the OTHER rows in this tick.
 
-    ★ THIS DOES NOT REACH AN OPERATOR-PRESENT SEAT, and that is structural
-    rather than a gap to fix here. ``append_event`` lands on the recipient's
-    bridge and is read when that session next takes a turn; ``drive_on_delivery``
-    no-ops for exactly this case (a session with no ``managed_session`` row --
-    an ordinary operator-launched seat -- and again for the degenerate
-    ``operator`` host driver). So this leg serves MANAGED WORKERS. The seat is
-    served by a separate surface that can reach it at a decision point, and
-    until that lands this notice fires into a void for seats.
+    ★ THIS LEG STILL DOES NOT REACH AN OPERATOR-PRESENT SEAT, and that is
+    structural rather than a gap to fix HERE. It is reached from
+    ``spawned_by_instance_id`` on a ``managed_session`` row; a seat has neither.
+    ``drive_on_delivery`` also no-ops for exactly this case (no
+    ``managed_session`` row, degenerate ``operator`` host driver). So this leg
+    serves MANAGED WORKERS' stewards and that is the whole of its job.
+
+    WHAT CHANGED 2026-08-17, so the next reader does not build around a
+    limitation that has since been covered elsewhere: the sentence that used to
+    end this docstring said the seat "is served by a separate surface... and
+    until that lands this notice fires into a void for seats." That surface has
+    landed — :func:`sweep_rotation_self_notice`, the third leg on the same
+    rider, which scans the gauge table directly and appends to the measured
+    session's own bridge. The void is closed, but it was closed BESIDE this
+    function, not inside it. Nothing about this leg's own reach changed.
     """
     binding = _resolve_steward_binding(
         state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
@@ -1314,11 +1405,20 @@ def _notify_rotation_due(
         )
         return False
     meta: dict[str, object] = {"flow_id": f"rotation-due-{agent_instance_id}"}
+    # Composed OUTSIDE the try for the same reason as _notify_ttl_overdue's —
+    # and this one was found by that fix's blast radius, not by a separate
+    # investigation. The guard below is for DELIVERY faults; with the prose
+    # inside it, a bug in _rotation_prose (which does arithmetic on stored gauge
+    # values) would be caught by the same broad `except Exception`, logged as
+    # "append failed", and the notice would silently vanish while the log named
+    # the wrong cause. A notice family whose whole purpose is to be the thing
+    # that speaks up must not be able to eat its own message bug.
+    prose = _rotation_prose(agent_instance_id, row)
     try:
         bridge_manager.append_event(
             binding.bridge_id,
             EVENT_ROTATION_DUE_NOTICE,
-            _rotation_prose(agent_instance_id, row),
+            prose,
             meta,
         )
     except Exception:  # noqa: BLE001 — best-effort notify, never fails the sweep
@@ -1444,10 +1544,11 @@ def _notify_gauge_coverage(
     prose = (
         f"gauge_coverage_notice: {agent_instance_id} is LIVE (report_alive is "
         "landing, so its hooks are running) but has NO session_context_status "
-        "row at all — the reporting path between the hook's tick and the "
-        "state write is failing SILENTLY. The reporting hook is non-fatal by "
-        "design and warns only to stderr, so it cannot surface this itself. "
-        "Check that session's solet invocation and its environment."
+        "row at all, and it is past the startup grace, so this is not a session "
+        "that simply has not reported yet. The likeliest cause is a reporting "
+        "path failing between the hook's tick and the state write — the hook is "
+        "non-fatal by design and warns only to stderr, so it cannot surface that "
+        "itself. Check that session's solet invocation and its environment."
     )
     try:
         bridge_manager.append_event(
@@ -1466,6 +1567,7 @@ def _notify_gauge_coverage(
 def sweep_gauge_coverage(
     state: StateManagementInterface,
     *,
+    now: datetime | None = None,
     peer_registry: PeerRegistry | None = None,
     bridge_manager: BridgeSessionManager | None = None,
     latch: NoticeLatch | None = None,
@@ -1497,14 +1599,20 @@ def sweep_gauge_coverage(
     would repeat every tick for the whole outage. The latch releases the key
     when a gauge row appears, which makes a RELAPSE (reporting recovered, then
     broke again) a fresh notice rather than a silence.
+
+    A row younger than :data:`GAUGE_COVERAGE_GRACE_S` is skipped: it is dark
+    because it is NEW, not because anything is broken. The latch cannot cover
+    that case — every spawn wave is a fresh episode with fresh keys — so the
+    grace is a predicate here rather than a suppression there.
     """
     if peer_registry is None or bridge_manager is None:
         return 0
+    clock = now or datetime.now(UTC)
     gate = _latch_or_transient(latch)
     notified = 0
     dark: set[str] = set()
     for row in _managed_sessions_in_state(state, "live"):
-        pair = _gauge_dark_session(state, row)
+        pair = _gauge_dark_session(state, row, clock=clock)
         if pair is None:
             continue
         agent_instance_id, spawner_instance_id = pair
@@ -1521,14 +1629,195 @@ def sweep_gauge_coverage(
     return notified
 
 
+def _ttl_overdue_session(
+    row: dict[str, Any], *, clock: datetime,
+) -> tuple[str, str, datetime] | None:
+    """``(agent_instance_id, steward_instance_id, expires_at)`` when this row is
+    past its TTL, else ``None``.
+
+    Every ``None`` is a deliberate skip, and the second one is the load-bearing
+    one: **a row with no ``expires_at`` has no TTL, and no TTL is not an
+    expiry.** ``expires_at`` is written only when the spawn actually requested
+    ``ttl_seconds``, so an absent value means "unbounded by request", never
+    "expired at the epoch". Reading it as an expiry would fire this notice on
+    every operator-launched and ad-hoc row in the ledger the first time it ran.
+    """
+    agent_instance_id = str(row.get("agent_instance_id") or "")
+    spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
+    if not agent_instance_id or not spawner_instance_id:
+        return None
+    expires_at = _parse_iso(row.get("expires_at"))
+    if expires_at is None or expires_at >= clock:
+        return None
+    return agent_instance_id, spawner_instance_id, expires_at
+
+
+def _ttl_prose(
+    agent_instance_id: str, row: dict[str, Any], *, expires_at: datetime, clock: datetime,
+) -> str:
+    """The notice text: the MEASURED overdue duration, and BOTH clocks named.
+
+    Naming both is not padding. A reader who sees only "past TTL" on a row whose
+    ``report_by`` is hours LATER will reasonably conclude the notice is buggy —
+    that is the exact confusion the two-clock split produces — so the text says
+    which clock fired and which one did not, every time.
+    """
+    overdue_s = int((clock - expires_at).total_seconds())
+    hours, minutes = divmod(overdue_s // 60, 60)
+    report_by = _parse_iso(row.get("report_by"))
+    report_by_note = (
+        f"Its report_by is {report_by.isoformat()}"
+        if report_by is not None
+        else "It carries no report_by"
+    )
+    return (
+        f"ttl_overdue_notice: {agent_instance_id} (lane_id={row.get('lane_id')!r}) "
+        f"is PAST ITS TTL by {hours}h{minutes:02d}m — expires_at "
+        f"{expires_at.isoformat()}, now {clock.isoformat()}. This is the TTL "
+        "clock (expires_at, frozen at spawn+ttl_seconds), NOT the report-or-die "
+        f"clock. {report_by_note}, which is re-armed on every report and so can "
+        "sit LATER than expires_at without contradicting it — a session that is "
+        "reporting healthily is exactly the kind that overruns its TTL. "
+        "NOTHING HAS BEEN DONE TO THIS SESSION: it has not been reaped, parked, "
+        "or reprioritised, and it will keep working until someone decides. "
+        "Decide explicitly — extend it, let it finish, or terminate_session it. "
+        "Note it may be mid-landing or holding for a ruling, so check before "
+        "terminating."
+    )
+
+
+def _notify_ttl_overdue(
+    *,
+    state: StateManagementInterface,
+    peer_registry: PeerRegistry,
+    bridge_manager: BridgeSessionManager,
+    row: dict[str, Any],
+    agent_instance_id: str,
+    spawner_instance_id: str,
+    expires_at: datetime,
+    clock: datetime,
+) -> bool:
+    """Best-effort steward notice for one TTL-overdue session.
+
+    Same resolve-then-append posture as every sibling notice: an unreachable
+    steward warns and returns False rather than raising into the sweep loop, so
+    one bad binding never costs the other rows their notice.
+    """
+    binding = _resolve_steward_binding(
+        state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
+    )
+    if binding is None:
+        logger.warning(
+            "session %s is past its TTL: steward %s not resolvable to a live "
+            "binding — notice not delivered",
+            agent_instance_id, spawner_instance_id,
+        )
+        return False
+    # Composed OUTSIDE the try on purpose: the guard below exists for DELIVERY
+    # faults (an unreachable bridge), and a broad except around the prose too
+    # would silently convert a bug in the message into "append failed" — the
+    # notice would vanish and the log would name the wrong cause. Found by
+    # mutation: a mutant that fed this an absent expires_at survived precisely
+    # because its TypeError was being swallowed as a delivery fault.
+    prose = _ttl_prose(agent_instance_id, row, expires_at=expires_at, clock=clock)
+    try:
+        bridge_manager.append_event(
+            binding.bridge_id,
+            EVENT_TTL_OVERDUE_NOTICE,
+            prose,
+            {"flow_id": f"ttl-overdue-{agent_instance_id}"},
+        )
+    except Exception:  # noqa: BLE001 — best-effort notify, never fails the sweep
+        logger.warning(
+            "session %s ttl-overdue notice append failed",
+            agent_instance_id, exc_info=True,
+        )
+        return False
+    drive_on_delivery(
+        state, recipient_agent_instance_id=spawner_instance_id,
+        sender_label=EVENT_TTL_OVERDUE_NOTICE,
+    )
+    return True
+
+
+def sweep_ttl_overdue_sessions(
+    state: StateManagementInterface,
+    *,
+    now: datetime | None = None,
+    peer_registry: PeerRegistry | None = None,
+    bridge_manager: BridgeSessionManager | None = None,
+    latch: NoticeLatch | None = None,
+) -> int:
+    """R4 — notify stewards of sessions that have outlived their declared TTL.
+
+    See :data:`EVENT_TTL_OVERDUE_NOTICE` for why this reads ``expires_at`` and
+    only ``expires_at``, and why the remedy is a notice rather than a reaper.
+
+    Scans ``live`` and ``idle`` — the two states in which a session is still
+    consuming its lane and can still act on the news. Deliberately NOT
+    ``spawning``: a row that never came up is already owned by two other legs
+    with different remedies (:func:`sweep_overdue_sessions`' spawning leg and
+    :func:`sweep_unregistered_spawning_sessions`), and a third notice about the
+    same row would be noise about a fact already reported. Equally deliberately
+    not ``overdue``/``parked``/``terminated``: those rows have already been
+    surfaced or resolved, and TTL is not the interesting thing about them.
+
+    **Latched** (:class:`NoticeLatch`), and the reason is sharper here than for
+    the sibling legs. TTL-overdue is not merely a non-edge — it is a condition
+    that can NEVER clear on its own, because ``expires_at`` is frozen and the
+    clock only moves one way. Unlatched, this would re-deliver every tick, for
+    every past-TTL row, forever. Its own latch instance, never shared: one
+    session can be TTL-overdue AND rotation-due AND dark at once, and a shared
+    set would let whichever fired first mute the other two.
+
+    The latch releases when the row leaves live/idle (``retain_active``), which
+    is the correct and only re-arm: a session that is retired and then somehow
+    live again is a new episode worth a new notice.
+
+    Returns the count actually notified. Notification requires both a peer
+    registry and a bridge manager; absent either this returns 0 without raising,
+    matching every sibling sweep's early-boot posture.
+    """
+    if peer_registry is None or bridge_manager is None:
+        return 0
+    clock = now or datetime.now(UTC)
+    gate = _latch_or_transient(latch)
+    notified = 0
+    overdue: set[str] = set()
+    for lifecycle_state in (LIFECYCLE_LIVE, LIFECYCLE_IDLE):
+        for row in _managed_sessions_in_state(state, lifecycle_state):
+            found = _ttl_overdue_session(row, clock=clock)
+            if found is None:
+                continue
+            agent_instance_id, spawner_instance_id, expires_at = found
+            overdue.add(agent_instance_id)
+            if gate.suppressed(agent_instance_id):
+                continue
+            if _notify_ttl_overdue(
+                state=state, peer_registry=peer_registry, bridge_manager=bridge_manager,
+                row=row, agent_instance_id=agent_instance_id,
+                spawner_instance_id=spawner_instance_id,
+                expires_at=expires_at, clock=clock,
+            ):
+                notified += 1
+                gate.record_sent(agent_instance_id)
+    gate.retain_active(overdue)
+    return notified
+
+
+# ---------------------------------------------------------------------------
+
+
 __all__ = [
     "DEFAULT_PRUNE_GRACE_WINDOW_S",
     "DEFAULT_REGISTRATION_BOUND_S",
+    "GAUGE_COVERAGE_GRACE_S",
     "EVENT_GAUGE_COVERAGE_NOTICE",
     "EVENT_ROTATION_DUE_NOTICE",
     "EVENT_SESSION_DEPENDENCY_WAKE",
     "EVENT_SESSION_OVERDUE_NOTICE",
     "EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE",
+    "EVENT_TTL_OVERDUE_NOTICE",
     "NoticeLatch",
     "SessionRoleClaimPruner",
     "sweep_deadline_dependencies",
@@ -1536,5 +1825,6 @@ __all__ = [
     "sweep_lane_closed_dependencies",
     "sweep_overdue_sessions",
     "sweep_rotation_due_sessions",
+    "sweep_ttl_overdue_sessions",
     "sweep_unregistered_spawning_sessions",
 ]

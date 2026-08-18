@@ -4,6 +4,362 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-17 (second update) — Worker paths that survive a deploy, a preflight that checks the code it is about to run, and lifetimes that surface
+
+**One breaking change, and it is narrow.** On a host whose organisation-managed
+Claude Code policy strips hooks from non-plugin sources, tmux-hosted spawns that
+previously succeeded now fail. That is the first item below, with the flag that
+opts back in. Everything else is additive for standard configurations.
+
+Envelopes grow fields — supersets of their previous shapes — in four places: the
+cutover preflight probe, the headless host driver's `capability_report()`, the
+tmux host driver's `capability_report()`, and `session_context_status`. Two new
+notice kinds appear on the platform sweep's tick: `ttl_overdue_notice`, addressed
+to a session's steward, and `rotation_self_notice`, addressed to the measured
+session itself on its own bridge. Consumers doing exact-shape equality on any of
+those must update. Update with the standard short form: `git pull --ff-only`,
+restart, wait for startup to finish (`05_seed_update_runbook.md` is the complete
+procedure).
+
+This is the second release of the day. It is mostly repair work, and two of
+the items below repair things the *previous* release announced — the notes
+say so explicitly rather than re-announcing them as new.
+
+### A spawn that would produce a hookless worker now fails on the tmux host too (#8)
+
+**This is the one breaking change in this release, and it is worth reading even
+if you think it does not apply to you.**
+
+An organisation-managed Claude Code policy that lists `hooks` inside
+`strictPluginOnlyCustomization` strips hooks from every non-plugin source. The
+platform injects its worker hooks through exactly such a source — the
+`--settings` blob each spawn driver passes to Claude Code — so on such a host a
+spawned worker runs none of them. It never registers, never heartbeats, and never
+captures its session mapping, while leaving a ledger row that looks perfectly
+alive.
+
+A refusal for precisely this already shipped: the 2026-08-15 notes announced that
+"a spawn preflight refuses a host whose managed policy strips hooks," naming no
+host. It was wired into the **headless** driver only. The tmux driver kept
+spawning. If you read that sentence as covering your tmux spawns, it did not, and
+this is the correction.
+
+That gap mattered more than the fix that closes it. tmux is the swap-durable
+host — the one this platform's own spawn documentation tells you to prefer for
+any worker expected to outlive a release — so the refusal was absent from the
+host most likely to be carrying long-lived workers.
+
+Both drivers now run the same preflight. **On an affected host, a tmux spawn that
+succeeded before this update fails after it**, with `host_cannot_spawn` naming the
+policy file and the offending key. If that is your configuration and you want the
+spawn anyway, the escape hatch is unchanged from the headless host: set
+`degraded_hooks_acknowledged` on the spawn. It is accepted, it is logged loudly as
+a degraded spawn, and it is recorded on the ledger row — you get the hookless
+worker, and the choice stays legible afterwards from either surface.
+
+If you have no managed policy, or your managed policy does not list `hooks` under
+that key, nothing changes for you: the preflight finds nothing and the spawn
+proceeds exactly as before.
+
+### A managed policy that switches your permission denies off now says so (#17)
+
+The same managed policy file carries a sibling key,
+`allowManagedPermissionRulesOnly`. Set to `true`, it makes Claude Code honour only
+the permission rules written inside the managed file itself: user-level and
+project-level allow/ask/deny rules do not apply at all, in any permission mode.
+Every `permissions.deny` this deployment ships — the launcher overlay, both spawn
+drivers' `--settings` blobs, and the checkout's own project-scope settings — is
+therefore dropped before permission evaluation on such a host. Nothing local said
+so. The key was already sitting in the object the hooks preflight parsed; the
+detector built for that report was one sibling key short of seeing this one.
+
+Both drivers now warn at spawn time, naming the policy file, the key, and the
+exact deny list that is inert on that host. Both `capability_report()`s answer the
+same question without spawning anything: `permission_denies_operative` is `false`
+when a policy voids the rules, and `permission_policy_path` names the file that
+did it. The deny list itself is reported alongside them, under `permission_denies`
+on the headless host and `permission_denies_default` on tmux — the names differ
+because the tmux list varies per spawn, so that report can only honestly describe
+the default rather than claim to know what a given spawn will deny. The policy is
+re-read on every call rather than cached at construction: a managed file can be
+pulled remotely at any time, and a cached answer would go stale in the one
+direction that reports a lost guardrail as still present.
+
+**It warns; it does not refuse — deliberately the opposite posture from the hooks
+key, and the asymmetry is the point.** A hooks-stripped worker never registers and
+never heartbeats, so that spawn produces nothing usable at all and refusing it
+costs you nothing. A permissions-inert worker registers, heartbeats, and does its
+work; refusing it would trade your entire fleet capability for a guardrail that
+was never load-bearing, on a policy you very likely have no authority to change.
+There is deliberately **no** `degraded_permissions_acknowledged` flag either: an
+opt-in that every single spawn on an affected machine would always have to pass
+goes reflexive within a day and stops carrying information.
+
+Stated plainly, because it governs how much this is worth to you:
+`permissions.deny` is a hygiene guardrail, not a security control. A deny that a
+local policy file can switch off was never a boundary. The defect being fixed here
+is the **silence**, not a bypass.
+
+### A session is now told its own context size
+
+The context gauge was measured continuously and surfaced only when an operator
+typed. A session running on its own was therefore never shown its own number, and
+the one surface that would have told it was silent exactly when it mattered. Two
+context overruns had been recorded as discipline failures; they were delivery
+failures.
+
+A third leg on the sweep's rotation surface now delivers a session's own
+measurement to that session, as a `rotation_self_notice` on its own bridge. It is
+a separate event kind from the steward-facing `ttl_overdue_notice` and
+`rotation_due_notice` rather than a reuse of either, because those are written in
+the third person about somebody else's session and this one is written in the
+second person about yours — sharing a name would leave anyone filtering on it
+unable to tell which they were reading.
+
+Two properties of it are load-bearing rather than incidental:
+
+- **It notices; it never acts.** The leg appends to the session's bridge and does
+  not drive the session's host. Driving injects a turn, and no automated surface
+  belongs in the injection path for a context clear. The notice therefore surfaces
+  at the session's next natural boundary instead of interrupting work in flight.
+- **It keys on the capacity band, not on the rotation-due threshold.** Those two
+  are not the same line: on a large context ceiling the due threshold sits well
+  above where the bands saturate, which left a wide window in which a session was
+  demonstrably too full and nothing said anything. Repetition of the same band to
+  the same session is floored so it cannot become chatter, but crossing into a new
+  band notifies on the very next tick — a band change is new information, and
+  delaying it would reintroduce, in miniature, the reporting lag the leg exists to
+  remove.
+
+**`session_context_status` grows one field, `agent_session_id`.** It carries the
+session's stable id so a caller can *reach* the session rather than merely
+describe it — which is what the notice above needs in order to arrive at a worker
+whose bridge is held under a different id from the one its gauge row is keyed on.
+A `null` there means the row was written by a reporter that predates the column —
+**not** that the session has no bridge. Those two readings must not be collapsed:
+the first is a coverage gap that heals by itself as reporters upgrade, and the
+second would be a live routing failure worth waking somebody for. The column is
+nullable by design; that tri-state is the whole point of it, and it is also what
+makes the migration a non-event on an existing installation.
+
+### Long-running workers survive a deploy — completing what the last release started
+
+The previous release said worker CLI paths were expressed through the
+deployment's atomically-swapped `current` symlink so they survive a cutover.
+That was true of the rewrite and not true of the result: all four spawn
+adapters resolved the path **once, in their constructor**, and stored it. The
+answer is a function of mutable filesystem state — what `current` points at —
+so caching it froze whatever the filesystem happened to say at process
+startup.
+
+The failure needs no error to occur and produces none. If a platform process
+starts inside the window between a release being materialized and cutover
+flipping `current` onto it, the resolver correctly *refuses* to rewrite (a
+worker must never be silently redirected onto a version its spawner is not
+running) — and the cached refusal then applies to every worker that process
+ever spawns. Measured: a worker spawned nearly three hours after the flip
+still carried a versioned path, while a fresh resolution in the same release
+returned the stable one. Because a deploy reaps old releases and every
+consumer of those values degrades silently by design, the next cutover would
+have dangled every long-running worker's wake path at once, quietly.
+
+Resolution now happens **per spawn**. The resolver ranks two candidates rather
+than picking a strategy, because naive re-resolution is not strictly better
+than the cache: after a cutover away from the running release plus a reap, a
+fresh resolution returns the construction-time versioned path — one that has
+just been deleted — and the cache survived precisely that case. So: prefer the
+fresh answer; fall back to the stabilized one only when the fresh answer no
+longer stats as an executable and the fallback does; if neither is usable,
+return the fresh value so every caller's existing degradation contract is
+unchanged. All four adapters were fixed together — they carried the identical
+defect, and fixing only the one that was measured would have left three dead.
+
+### The deploy preflight validates with the code it is about to run
+
+The zero-downtime cutover preflight validated the deployment root manifest
+using code the **outgoing** process had resolved at its own last start. So it
+refused demonstrably valid manifests immediately after an update — that is,
+it was self-defeating in exactly the situation the code-pickup path exists
+for. Reproduced byte-for-byte against a pre-rename package, including a footer
+current code cannot emit.
+
+The check now runs inside the fresh-source probe, under the **candidate**
+release's own interpreter with fresh modules — the mechanism already built for
+this defect class for the plugin-manifest preflight, which this gate had never
+been migrated onto. It had to *move* rather than be re-pointed, because the
+candidate does not exist until the swap materializes it, which happens after
+the old call site.
+
+Refusal classification is deliberately unchanged: a drift refusal stays a
+plain failure with a drift reason code, and is **not** reclassified as a probe
+failure — the core routes on that status to roll manifest bytes back, and
+root-manifest drift is a property of the deployment root rather than of the
+bytes being applied. The probe envelope gains `capabilities` and `checks_run`,
+and the runner discriminates on that **positive self-assertion, never on
+absence**, so "this probe predates the contract" (permitted, logged as
+degraded) stays distinguishable from "advertised the check but did not run it"
+(refused loudly). Additive in both directions across a version-mixed cutover.
+
+**Disclosed limitation — this fix cannot govern the cutover that carries it.**
+The outgoing side drives a cutover, and the outgoing side is the release you
+are replacing. So on the **first** cut after taking this update, the *old*
+in-process gate runs, with exactly the stale-code problem described above; the
+new gate takes effect on the **second** cut. The hazard is one of
+interpretation and it runs both ways: a green first cut does not demonstrate
+that the new gate works, because it will not have run; and a refusal on the
+first cut is not evidence that this update broke your deploy — it is the old
+gate's last appearance, and the correct response is to cut again rather than
+to roll back.
+
+### Sessions that overrun their declared lifetime now say so
+
+A spawned session's requested time-to-live was recorded at spawn and then
+**nothing ever read it** — three touch points, zero readers. A declared
+lifetime that no surface enforces is a comment. The platform sweep now reads
+it and reports overruns as a latched notice on its regular tick.
+
+- It keys on the frozen expiry, **not** on the liveness deadline. The
+  liveness deadline is re-armed by ordinary activity, so keying on it would
+  make TTL structurally unreachable for exactly the sessions that overrun —
+  a healthy, chatty session re-arms forever. A session that requested no TTL
+  is skipped: no TTL is not an expiry.
+- **It notices; it never reaps.** Auto-retirement was considered and refused
+  on in-repo precedent — an earlier sweep leg stopped reaping observed-alive
+  rows for the same reason. The notice latches on its own latch, never a
+  shared one, so a session can be TTL-overdue *and* rotation-due *and* dark
+  without any of those suppressing the others.
+- **The gauge-coverage alarm stopped crying wolf.** That leg had no age
+  predicate, so every spawn wave manufactured one false "the reporting path
+  is failing silently" alarm per freshly-spawned session. It now has a
+  startup grace and states the observed mismatch instead of asserting a
+  diagnosis. It fails *toward* reporting: a row whose age cannot be read gets
+  no grace, because a grace is an exception to an alarm and must require
+  positive evidence.
+- **A notice whose own message had a bug used to vanish.** Both notice legs
+  composed their prose *inside* the try block guarding delivery, so a defect
+  in the message was caught, logged as a delivery fault, and the notice
+  disappeared. Prose is now composed outside that block. This was found by a
+  test mutation that survived — because the error it should have raised was
+  being swallowed.
+
+### An authorization now outlives the session that was holding it
+
+A pending authorization was seat state that lived nowhere durable: if the
+session holding it rotated without writing it down, the obligation was simply
+gone. This release adds a durable held-authorization queue — a table, a state
+layer, and three verbs to record, list and retire entries — so a refusal that
+is waiting on a first-party confirmation is recorded at the moment of refusal
+and retired when the confirmation arrives. There is no silent expiry;
+staleness stays visible through the creation timestamp rather than being
+cleaned up behind your back.
+
+**Disclosed gap — the verbs ship, the procedure that calls them does not.**
+The queue landed platform-complete: table, verbs, and their process
+definitions are all in this release. The caller side is a *procedure* — prose
+that an agent follows when it declines a request it cannot verify first-party
+— and that procedure lives in a repository-local skill file that this seed
+does not ship. The seed ships exactly two skill templates, and a
+git-controller-commit template is not among them; the manifest carries no
+skills or commands directory at all. So on an adopter's machine these verbs
+arrive as capability with no shipped procedure of any kind that calls them.
+They are usable directly, and they are not yet wired into anything you
+receive. Packaging that procedure is not in this release.
+
+### A born clone installs the gate toolchain it needs
+
+The publication gate births a throwaway clone of a candidate seed and runs its
+shipped test register inside it. That throwaway's environment never installed
+the gate toolchain, so the shipped complexity and maintainability wrappers
+failed to import in **every** born clone. The gate's birth step now installs
+the declared toolchain requirements file and fails loudly if that install
+fails, and the smoke that exercises those wrappers had its
+tolerate-the-absence guard removed — the toolchain is now asserted in-clone
+rather than skipped. The requirements are declared separately from platform
+runtime dependencies, deliberately: the platform boots without them, and
+conflating the two is what hid this.
+
+### The rename skill refuses a standalone label patch
+
+Reported by an adopter, and the report was about a proposal rather than an
+outage — which is the useful kind to catch. Their supervising agent observed
+that the git-mutation gate reads only a local session-label file, and proposed
+patching that file directly to satisfy the gate after a role claim's transport
+had failed. That produces a session which *looks* like the claimed role to the
+gate while holding none of the actual protection: the platform-side single-
+holder claim is skipped entirely, so two sessions could hold the same name
+with nothing refusing.
+
+Both shipping copies of the rename skill now state the prohibition explicitly
+at the local-label step: patching the label is the last lock-step action of a
+**completed** platform claim, never a standalone act, and a failed claim is
+answered by the skill's existing guidance — surface the error and stop, do not
+reach the label step anyway. The two copies were confirmed to be the complete
+shipping footprint by a whole-repository search for the skill's own body text,
+correcting an earlier claim that a third vendored copy existed.
+
+### The update runbook now says how you learn a release exists
+
+The seed-update runbook opened by assuming you already knew a newer release
+had been published, with no step anywhere saying how you would find that out.
+A subscribe instruction did exist, but it was framed around feedback
+notifications and buried past the update sequence rather than presented as
+this runbook's trigger.
+
+There is now a "How you learn a new release exists" section immediately after
+"When to use this runbook": subscribe to the seed repository's releases
+(Watch → Custom → Releases); a re-mint publishes as a dated release carrying
+its notes; that notification is the trigger. The moved-home interaction is
+wired directly into the step where it bites — an existing subscription does
+**not** follow a repository move and goes silent from the old location the
+moment the move takes effect, so re-subscribing at the new home is part of
+that step rather than an afterthought.
+
+### Smaller items
+
+- **A seat's running log has a stated convention.** What such a log must
+  contain previously existed only by example, which is how an obligation
+  recorded in one goes missing when the session rotates. It is now written
+  down as a knowledge-base article.
+- **A gate invocation pins its environment.** One shipped gate step ran a
+  smoke whose negative control cleared the current environment variable but
+  not its pre-rename predecessor, so a stale variable left over in a shell
+  could fail the gate even when the current one was set correctly. Both
+  shipping copies of that invocation now clear the legacy variable
+  explicitly. Traced to the single affected step by mechanism rather than
+  applied blanket-wise.
+
+### What this release covers
+
+Not everything in this release's range is described above. The omissions are
+named here rather than quietly dropped, so you can tell an absence from an
+oversight.
+
+**A repair you never needed.** Work in this range fixed a fault that existed
+only between two publications and never reached a released seed. Describing it
+would tell you about a problem your installation never had, and send you hunting
+for symptoms that cannot be there. You receive the working version as the first
+version.
+
+**Changes that reach you as nothing at all.** The notes' own commits, which
+cannot describe themselves; and a documentation landing confined to a directory
+this seed never copies, which ships you zero bytes.
+
+**A change that does reach you, and fixes something that was broken.** A setup
+step in the Schwab hydration guidance used to point at a script that this seed
+does not ship — so the instruction resolved for its author and resolved to
+nothing for you. It now states the requirement directly: seed the client secret
+by reading it at an interactive prompt, never through a command an agent
+composes, so the value reaches no echo, no argv and no shell history. If you
+ever followed that step and could not find the file it named, that is why.
+
+The range itself is measured from the commit the **previously published** seed
+was assembled from, not from the platform release that happened to be running
+while this one was built. Those are different boundaries, and the running
+release's would have re-announced work you already received in the previous
+update.
+
+---
+
 ## 2026-08-17 — Rotation notices, deploy-proof worker paths, and session listings that page
 
 No breaking changes for standard configurations. Context-status rows and the

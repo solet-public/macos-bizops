@@ -139,6 +139,12 @@ from typing import Any
 
 _MARKER_DIR_ENV = "AGENT_HEARTBEAT_MARKER_DIR"
 _INSTANCE_ID_ENV = "AGENT_INSTANCE_ID"
+# The session's STABLE id, distinct from the instance id above and NOT
+# derivable from it. It is what makes a gauge row routable: the row keys on
+# the LEDGER instance id while a watcher-held session's live bridge binding
+# keys on its WATCH id, and only this value joins the two through the
+# registry. See the schema column of the same name.
+_SESSION_ID_ENV = "AGENT_SESSION_ID"
 _SESSION_LABEL_ENV = "AGENT_SESSION_LABEL"
 _PROJECT_DIR_ENV = "CLAUDE_PROJECT_DIR"
 
@@ -179,7 +185,14 @@ _PEER_LIST_PROCESS_KEY = "plugin::agent_messaging_plugin::peer_list"
 #     generation 1 with surface 'unknown' is therefore AMBIGUOUS by
 #     construction -- it may be any of the three surfaces this generation
 #     learned to tell apart -- and a row reading generation 2 is not.
-_REPORTER_GENERATION = 2
+# 3 = the routing join (2026-08-18): this generation reports
+#     `agent_session_id`, which is what makes a watcher-held worker reachable
+#     from its own gauge row. A row reading generation <= 2 carries NULL there
+#     and is UNROUTABLE FOR A KNOWN, BENIGN REASON -- a stale reporter, not a
+#     dead session. That distinction only exists because this constant was
+#     bumped; without it, a NULL join could not be told apart from a session
+#     that genuinely failed to route.
+_REPORTER_GENERATION = 3
 # Staleness bound for the seat's registry row. Basis (measured 2026-08-16 over
 # 6 live rows): heartbeat ages were 3s / 11s median / 163s stalest, so this is
 # ~1.8x the stalest observed and comfortably above this hook's own 60s poll.
@@ -786,6 +799,25 @@ def _cache_arguments(
     }
 
 
+def _session_id_argument() -> dict[str, Any]:
+    """The stable session id, or ``{}`` when this session has none.
+
+    ``{}`` IS THE POINT, exactly as in :func:`_cache_arguments`: omitting the
+    key records NOT REPORTED, which the column stores as NULL. Sending ``""``
+    instead would assert an empty session id -- a value the registry resolves
+    to "no match", making a reporter that never had one indistinguishable from
+    a session that genuinely could not be routed.
+
+    This value is read from the environment and passed through UNMODIFIED. It
+    is never constructed from ``$AGENT_INSTANCE_ID``, even though the launcher
+    currently derives one from the other: that is the launcher's convention,
+    and reconstructing it here would put a copy of that convention in a second
+    place that has no way to learn when it changes.
+    """
+    agent_session_id = os.environ.get(_SESSION_ID_ENV, "").strip()
+    return {"agent_session_id": agent_session_id} if agent_session_id else {}
+
+
 def _reporter_arguments() -> dict[str, Any]:
     """Which COPY of this hook is speaking, on the two axes a reader needs.
 
@@ -876,6 +908,7 @@ def _report_context_status(
             "ceiling": ceiling,
             "measured_at": datetime.now(UTC).isoformat(),
             **cache_arguments,
+            **_session_id_argument(),
             **_reporter_arguments(),
         },
     )

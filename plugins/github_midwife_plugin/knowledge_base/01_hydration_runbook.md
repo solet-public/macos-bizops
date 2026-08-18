@@ -240,6 +240,35 @@ file the user owns. Two overrides, tell the user both exist:
 Codex has no equivalent structured-choice tool, so the Codex launcher renders
 without an overlay — that asymmetry is correct, not an omission.
 
+⚠️ **Precondition — tell the user this while you are rendering the overlay, not
+after they report the picker firing.** This mechanism is wholly inoperative on
+a machine whose enterprise-managed Claude Code policy sets
+`"allowManagedPermissionRulesOnly": true`. Under that flag Claude Code honours
+only the permission rules inside the managed settings file itself; user- and
+project-level `allow`/`ask`/`deny` rules do not apply at all, in every
+permission mode. Both the overlay above and any deny in the user's own
+`~/.claude/settings.json` are dropped before permission evaluation, and
+**nothing announces it** — the picker simply fires as though no deny existed.
+Adopter-reported (§45.1), confirmed against Claude Code's own permissions
+documentation. It is not a stale-session effect: permission settings reload
+live in-session, so it reproduces in a brand-new session.
+
+The same flag silently voids **three other denies** in a hydrated deployment,
+which an operator reading only this section would not learn: the `Agent`/`Task`
+deny in every spawned tmux worker (`tmux_adapter.py`, which also carries
+`AskUserQuestion`), the same deny in every spawned headless worker
+(`headless_adapter.py`), and the project-scope `<clone>/.claude/settings.json`
+deny in the clone itself. That prohibition still holds at the instruction
+layer (the rendered `CLAUDE.md`), so it degrades from two layers to one, not
+to zero.
+
+Frame it as hygiene, never as a security control: a deny that a local policy
+file can switch off was never a boundary. The problem is the silence, not a
+bypass. Both spawn host drivers detect the flag and log it loudly at spawn
+time — they do not refuse — and either driver's `capability_report()` answers
+the question without spawning anything, via `permission_denies_operative` and
+`permission_policy_path`.
+
 **Install the stock-Codex plugin through Codex, not by copying cache state.**
 After rendering `.agents/plugins/marketplace.json`, run these from a normal
 shell with `<clone>` and `<marketplace-name>` replaced by the exact rendered
@@ -689,6 +718,15 @@ Then, that the no-MCP command and session tooling work:
 - `~/.claude/settings.json` parses as JSON and contains exactly one `extraKnownMarketplaces` entry keyed to the rendered marketplace name (pointing at `<clone>` as a `directory` source) and exactly one `enabledPlugins.coordination-hooks@<marketplace-name>: true` entry — the session hooks moved into that plugin (Step 2), so this file no longer carries them and its own `hooks/hooks.json` roster is what determines which hooks execute, not a literal env-var-keyed command string here; `~/.claude/skills/rename/SKILL.md` and `~/.claude/skills/feedback/SKILL.md` both exist.
 - `gh --version` answers, unless the operator declined the Step 2 GitHub CLI offer — the `/feedback` skill's filing path is `gh issue create --web`, and a recorded decline is the only passing state other than presence.
 - `<clone>/client/claude-session-overlay.json` exists, parses as JSON, and contains exactly the `AskUserQuestion` permissions deny; the rendered `claude-<name>` launcher carries the `--settings` overlay flag gated on `SOLET_ALLOW_ASKUSERQUESTION` — both halves, because an overlay file without the flag (or the reverse) is the prohibition in name only.
+- **The machine carries no managed policy that voids the deny.** Check the four canonical locations, remote-pulled first — on a machine that has that one, the system paths may not exist at all, so checking only the system paths reports "no managed policy" on exactly the deployments where one is in force:
+  ```bash
+  for f in ~/.claude/remote-settings.json \
+           "/Library/Application Support/ClaudeCode/managed-settings.json" \
+           /etc/claude-code/managed-settings.json; do
+    [ -f "$f" ] && echo "== $f" && grep -o 'allowManagedPermissionRulesOnly[^,}]*' "$f"
+  done
+  ```
+  No output means no managed policy is in force and the deny is live. `allowManagedPermissionRulesOnly: true` in the output means **this deny, and every other `permissions.deny` in the deployment, is inert on this machine** — record it and tell the user, because there is no local signal at run time and the only place a deny is honoured is that file's own `permissions.deny`, which their organisation administers rather than they do. This is a passing state for hydration: nothing is misconfigured, the mechanism simply does not apply here, and a discovered-later version of this fact costs an adopter a support round (§45.1 is exactly that round).
 - `~/.claude/plugins/installed_plugins.json` names `coordination-hooks@<marketplace-name>` with an `installPath` that **exists on disk** — `ls` it, do not stop at the JSON parsing. A present JSON entry with a missing path is the exact broken-but-registered state the install step's CLI commands exist to prevent; a JSON-only check would report this as passing.
 - The UserPromptSubmit hook in that session points the agent at `<name> call`, not MCP.
 - A bare `claude` session in an unrelated directory starts with no hook errors and no injected solet context (the label guard covers both hooks).

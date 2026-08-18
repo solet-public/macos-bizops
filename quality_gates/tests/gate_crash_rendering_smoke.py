@@ -43,28 +43,16 @@ if str(_GATE_DIR) not in sys.path:
 
 import code_quality_check as cqc  # noqa: E402
 import god_class_check  # noqa: E402
+import radon_cc_check  # noqa: E402
+import radon_mi_check  # noqa: E402
 
-
-def _import_wrappers() -> tuple[tuple[ModuleType, ...], str | None]:
-    """Import the gate wrappers; degrade explicitly where radon is absent.
-
-    The radon wrappers need the `radon` package, which is gate-toolchain
-    tooling, not a platform dependency — no shipped package declares it, so
-    a born clone's venv legitimately lacks it. The wrapper properties they
-    share with god_class_check (directory expansion, crash contract) stay
-    asserted through god_class_check everywhere; the radon-specific
-    instances are asserted wherever radon is importable (every checkout
-    gate run).
-    """
-    try:
-        import radon_cc_check
-        import radon_mi_check
-    except ModuleNotFoundError as exc:
-        return (god_class_check,), str(exc)
-    return (god_class_check, radon_cc_check, radon_mi_check), None
-
-
-_WRAPPERS, _RADON_ABSENT = _import_wrappers()
+# `radon` is gate-toolchain tooling declared in `quality_gates/requirements.txt`
+# (R9, 2026-08-17). Every environment this smoke runs in — checkout venv, and a
+# born clone since `birth_throwaway` installs that file — is required to have it;
+# a ModuleNotFoundError here is a real toolchain-install defect, not a condition
+# to degrade around. Import unguarded so the radon wrappers are asserted, not
+# skipped.
+_WRAPPERS: tuple[ModuleType, ...] = (god_class_check, radon_cc_check, radon_mi_check)
 
 _TRACEBACK = (
     "Traceback (most recent call last):\n"
@@ -290,10 +278,6 @@ def test_wrappers_expose_the_crash_contract() -> None:
 
 def main() -> int:
     print("Gate-crash rendering + tracked-scope smoke\n")
-    if _RADON_ABSENT is not None:
-        print(f"NOTE: radon unavailable ({_RADON_ABSENT}) — wrapper legs run "
-              f"against god_class_check only; radon-specific instances are "
-              f"asserted where the gate toolchain is installed\n")
     for test in (
         test_crash_is_not_rendered_as_a_violation,
         test_dedicated_crash_exit_code,

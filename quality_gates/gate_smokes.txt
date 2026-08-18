@@ -332,6 +332,19 @@ plugins/agent_messaging_plugin/tests/session_claude_mapping_store_smoke.py
 # that the function exists unwired.
 plugins/agent_messaging_plugin/tests/session_claude_mapping_ingest_smoke.py
 
+# R1 held-authorization queue (2026-08-17, seat GO ruling) --
+# held_authorization_store.py: the mechanically-enumerable "what is blocked
+# on <role>?" backstop for a peer commit request Git-Controller refused for
+# lack of a first-party authorization -- the platform-side counterpart to
+# the OBLIGATIONS running-log slot. Proves the two properties the design
+# leans on: the open-only default (retired_at IS NULL) correctly excludes a
+# retired entry via the {"op": "is_null"} filter grammar, not a bare-None
+# false-negative that would match zero rows silently forever; and a second
+# retire call on an already-retired entry is a no-op (False, zero rows
+# affected) that never overwrites the first retirement's reason/provenance
+# -- load-bearing for a queue whose whole purpose is accountability.
+plugins/agent_messaging_plugin/tests/held_authorization_store_smoke.py
+
 # T1 S3 (2026-08-05, seat's design ruling) — budget_report.py, the new
 # plugin::agent_messaging_plugin::budget_report verb (full create-process
 # discipline). FIRST cross-plugin state read of its kind in this codebase:
@@ -1066,6 +1079,13 @@ ananta/tests/core/substrate_contracts/refresh_verb_result_contract_smoke.py
 # defers at the L1 call site ONLY (probe + shared function still reject).
 plugins/macos_self_deployment_plugin/tests/preflight_probe_harness_smoke.py
 plugins/macos_self_deployment_plugin/tests/probe_gate_orchestrator_smoke.py
+# §46.1: the F1 root-manifest gate moved out of the outgoing process (where it
+# validated against that process's own stale imports) into the L2 probe, under
+# the candidate's interpreter. Pins the three-state capability discriminator and
+# that the refusal classification (FAILED/root_manifest_drift) is UNCHANGED —
+# status is what core routes on, so flattening it would switch manifest rollback
+# on for root-manifest refusals as a side effect.
+plugins/macos_self_deployment_plugin/tests/root_manifest_probe_gate_smoke.py
 ananta/tests/lifecycle_management_service/preflight_probe_cache_poison_smoke.py
 ananta/tests/lifecycle_management_service/preflight_probe_release_context_smoke.py
 ananta/tests/lifecycle_management_service/apply_manifest_probe_rollback_smoke.py
@@ -2946,6 +2966,42 @@ plugins/agent_messaging_plugin/tests/seat_rotation_helper_smoke.py
 # rotation_thresholds' declared ceiling table (ships empty per ruling), conservative
 # fallback for any unmatched model, and the 50%-threshold boundary comparison.
 plugins/agent_messaging_plugin/tests/rotation_thresholds_smoke.py
+
+# L4c self-notice leg (2026-08-17) -- the rotation surface's third leg, which
+# reaches the MEASURED SESSION ITSELF rather than its steward. Pins: the
+# 300K-500K blind spot (band-keyed, not `rotation_due`-keyed -- the two
+# instruments provably disagree there); band-EDGE latching so an escalation is
+# never suppressed by the milder notice that preceded it; the 20-minute floor
+# as a repeat bound rather than a period; the coverage gap counted as a number
+# rather than swallowed; the capacity band firing early on an unrecognised
+# model (fail-safe, never fail-open); tier-invariance of the break-even; the
+# overage TTL moving the threshold DOWN; one horizon per notice, not two; and
+# -- with drive_on_delivery replaced by a landmine -- that nothing on this
+# path can inject a turn into the session it is notifying.
+plugins/agent_messaging_plugin/tests/rotation_self_notice_smoke.py
+
+# L4c ROUTING JOIN (2026-08-18) -- the `agent_session_id` column that makes a
+# watcher-held worker reachable from its own gauge row. A SEPARATE file from the
+# suite above on purpose: that one passes green and UNCHANGED against a build in
+# which this join is dead code, because it tests the leg's decisions against a
+# fake registry that resolves by instance id alone. The join is a WIRING fact,
+# so everything here drives a REAL PeerRegistry over a real peer_binding store
+# and a REAL BridgeSessionManager, and asserts on an event that really landed on
+# a bridge. Pins: delivery to a session whose gauge row and live binding are
+# keyed on DIFFERENT ids; the paired control (same scenario, join NULL ->
+# unroutable, nothing delivered) without which every delivery is equally
+# explained by "the instance lookup happened to work"; that a session id is
+# RESOLVED through the registry and never rebuilt from the ledger id, proven by
+# a decoy binding registered under exactly the value a reconstructor would build
+# -- so a deriving build MISROUTES rather than merely failing; that the join is
+# never mandatory, so a bridge-held seat still resolves on its own key; NULL
+# preserved as NOT REPORTED at every boundary; a duplicate session-id binding
+# failing loud rather than being counted as a coverage gap; the reporting hook
+# actually SENDING the field, in BOTH repo copies, at an AGREEING generation
+# (compared, never hardcoded, so an honest future bump does not red); and the
+# plugin.py raw.get mapping not silently dropping it -- the joint at which the
+# whole landing can be declared, stored, resolved and still write NULL forever.
+plugins/agent_messaging_plugin/tests/rotation_self_notice_join_smoke.py
 
 # rotation-systematization P2 slice B (ruling 2, ratified 2026-08-07) -- the
 # rotation_due_watch.py PostToolUse hook: threshold fires with identity-in-content /

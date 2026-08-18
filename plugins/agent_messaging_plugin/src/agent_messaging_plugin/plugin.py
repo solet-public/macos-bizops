@@ -148,6 +148,15 @@ from .constants import (
 )
 from .context_status_verbs import report_context_status as lifecycle_report_context_status
 from .context_status_verbs import session_context_status as lifecycle_session_context_status
+from .held_authorization_verbs import (
+    list_held_authorizations as lifecycle_list_held_authorizations,
+)
+from .held_authorization_verbs import (
+    record_held_authorization as lifecycle_record_held_authorization,
+)
+from .held_authorization_verbs import (
+    retire_held_authorization as lifecycle_retire_held_authorization,
+)
 from .http_routes import register_routes
 from .mcp_streamable import (
     BearerVerifier,
@@ -206,6 +215,11 @@ from .role_claim import (
 )
 from .role_class_backfill import backfill_role_class
 from .role_message_consumed_backfill import backfill_role_message_consumed
+from .rotation_self_notice import (
+    BandEdgeLatch,
+    SelfNoticeCounts,
+    sweep_rotation_self_notice,
+)
 from .route_activity import make_model_activity_middleware
 from .schema import (
     get_agent_role_binding_schema_definition,
@@ -253,6 +267,7 @@ from .session_sweep import (
     sweep_lane_closed_dependencies,
     sweep_overdue_sessions,
     sweep_rotation_due_sessions,
+    sweep_ttl_overdue_sessions,
     sweep_unregistered_spawning_sessions,
 )
 from .system_slots import (
@@ -749,6 +764,16 @@ class AgentMessagingPlugin(
         # the bound that buys.
         self._rotation_due_latch: NoticeLatch = NoticeLatch()
         self._gauge_coverage_latch: NoticeLatch = NoticeLatch()
+        # L4c keys on (session, BAND) rather than on the session alone, so a
+        # NoticeLatch cannot serve it -- see BandEdgeLatch's docstring for why
+        # the difference is a correctness one and not a refinement.
+        self._rotation_self_latch: BandEdgeLatch = BandEdgeLatch()
+        # R4 TTL latch — a THIRD independent instance for the same reason, and
+        # the strongest case of the three: one session can be TTL-overdue AND
+        # rotation-due AND dark simultaneously. Unlike the other two, this
+        # condition can never clear on its own (expires_at is frozen, the clock
+        # only advances), so an unlatched leg would notify every tick forever.
+        self._ttl_overdue_latch: NoticeLatch = NoticeLatch()
         self._platform_surface: PlatformSurface | None = None
         # D-IF7/D-IF8 sidecar: per-bridge SessionInferenceProvider keyed
         # by agent_instance_id. Populated post-success in the stdio
@@ -1761,6 +1786,40 @@ class AgentMessagingPlugin(
             # Read-only (issues no writes) -- always safe to retry.
             "session_context_status": EdgeProcessDefinition(
                 name="session_context_status",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # R1 held-authorization queue (2026-08-17). NOT retryable: an
+            # unconditional INSERT per call -- a retry after a transient
+            # dispatch fault whose actual write already landed would create a
+            # genuine SECOND open entry for the same refusal, not merely a
+            # spurious error. list/retire are read-only / predicated,
+            # respectively, so they retry safely; record does not.
+            "record_held_authorization": EdgeProcessDefinition(
+                name="record_held_authorization",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            # Read-only (issues no writes) -- always safe to retry.
+            "list_held_authorizations": EdgeProcessDefinition(
+                name="list_held_authorizations",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # Predicated on retired_at IS NULL -- a retry after a successful
+            # prior call just re-raises entry_not_found_or_already_retired
+            # rather than double-acting, so it is safe to retry.
+            "retire_held_authorization": EdgeProcessDefinition(
+                name="retire_held_authorization",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(
                 ),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
@@ -3988,6 +4047,22 @@ class AgentMessagingPlugin(
                 required=False,
                 type=ParameterType.INTEGER,
             ),
+            "agent_session_id": ParameterMetadata(
+                description=(
+                    "The reporting session's STABLE $AGENT_SESSION_ID — the "
+                    "ROUTING JOIN. This row keys on the reporter's LEDGER "
+                    "instance id, but a watcher-held worker's live bridge "
+                    "binding keys on its WATCH id, so without this a consumer "
+                    "holding the row cannot reach the session that wrote it. "
+                    "Pass the value VERBATIM; never rebuild it from "
+                    "agent_instance_id, whose current 'ases-' + ledger-id "
+                    "relationship is one launcher's convention and not a join. "
+                    "Omit if the reporter has no session id — omission records "
+                    "NOT REPORTED, never 'this session has no bridge'."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
         },
         output_type="object",
         output_description=(
@@ -4032,6 +4107,7 @@ class AgentMessagingPlugin(
                 cache_overage_signature=_opt_bool(raw.get("cache_overage_signature")),
                 reporter_surface=_opt_str(raw.get("reporter_surface")),
                 reporter_generation=_opt_int(raw.get("reporter_generation")),
+                agent_session_id=_opt_str(raw.get("agent_session_id")),
                 measured_at=str(raw.get("measured_at", "")),
             )
         except VerbError as exc:
@@ -4082,6 +4158,9 @@ class AgentMessagingPlugin(
                 # Reporter attribution (2026-08-16): which hook copy wrote the row.
                 "reporter_surface": ParameterMetadata(type=ParameterType.STRING),
                 "reporter_generation": ParameterMetadata(type=ParameterType.INTEGER),
+                # The routing join (2026-08-18): null means the reporter
+                # predates the column, NOT that the session has no bridge.
+                "agent_session_id": ParameterMetadata(type=ParameterType.STRING),
             },
         ),
     )
@@ -4101,6 +4180,202 @@ class AgentMessagingPlugin(
         try:
             result = lifecycle_session_context_status(
                 state_service, agent_instance_id=str(raw.get("agent_instance_id", "")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="record_held_authorization",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "requesting_peer": ParameterMetadata(
+                description="The role or instance whose commit request was refused.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "owed_by_role": ParameterMetadata(
+                description=(
+                    "The seat/coordinator role expected to send the first-party "
+                    "authorization this refusal is waiting on."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "branch_or_request_ref": ParameterMetadata(
+                description="Proposed branch name or other stable request identifier.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "reason": ParameterMetadata(
+                description="Why the request was refused (e.g. the unverifiable citation).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "R1 held-authorization queue — record one open entry. Convention "
+            "(not enforced): Git-Controller calls this at refusal time, never "
+            "the requesting peer, so the entry exists mechanically regardless "
+            "of any seat's memory."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="record_held_authorization outcome",
+            properties={
+                "entry_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def record_held_authorization(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """R1 held-authorization queue — plain state insert of one refusal
+        event. No caller-identity check (seat ruling 2026-08-17):
+        capability first, lockdown only after usage data; the convention is
+        documented, not mechanically enforced."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            result = lifecycle_record_held_authorization(
+                state_service,
+                requesting_peer=str(raw.get("requesting_peer", "")),
+                owed_by_role=str(raw.get("owed_by_role", "")),
+                branch_or_request_ref=str(raw.get("branch_or_request_ref", "")),
+                reason=str(raw.get("reason", "")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="list_held_authorizations",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "owed_by_role": ParameterMetadata(
+                description="Filter to entries owed by this role. Omit for all roles.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "requesting_peer": ParameterMetadata(
+                description="Filter to entries requested by this peer. Omit for all peers.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "include_retired": ParameterMetadata(
+                description="Include already-retired entries. Default false (open only).",
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "R1 held-authorization queue — the 'what is blocked on <role>?' "
+            "answer for a freshly-booted session with no memory of a prior "
+            "seat. Open entries only unless include_retired is set. Read-only."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="list_held_authorizations outcome",
+            properties={
+                "entries": ParameterMetadata(type=ParameterType.LIST),
+                "count": ParameterMetadata(type=ParameterType.INTEGER),
+            },
+        ),
+    )
+    def list_held_authorizations(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """R1 held-authorization queue — trivial state read, no side effects.
+        Never filters by staleness itself (no silent TTL in this queue) —
+        `created_at` is returned as-is so the caller judges age directly."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            result = lifecycle_list_held_authorizations(
+                state_service,
+                owed_by_role=_opt_str(raw.get("owed_by_role")),
+                requesting_peer=_opt_str(raw.get("requesting_peer")),
+                include_retired=bool(_opt_bool(raw.get("include_retired")) or False),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="retire_held_authorization",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "entry_id": ParameterMetadata(
+                description="The entry to retire (its id from record/list_held_authorizations).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "retired_reason": ParameterMetadata(
+                description="e.g. 'authorized', 'superseded', 'withdrawn'.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "retired_by": ParameterMetadata(
+                description="Role or instance calling this verb.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "retired_at": ParameterMetadata(
+                description="ISO-8601 timestamp of the retirement.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "R1 held-authorization queue — retire one entry. Convention (not "
+            "enforced): Git-Controller retires on receiving the matching "
+            "first-party authorization; the owed_by_role holder may also "
+            "retire directly. No silent TTL — every retirement is explicit."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="retire_held_authorization outcome",
+            properties={
+                "entry_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def retire_held_authorization(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """R1 held-authorization queue — predicated state update
+        (`retired_at IS NULL` -> set), so a double-retire is a loud
+        `entry_not_found_or_already_retired` rather than a silent
+        overwrite of an earlier retirement's provenance."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            result = lifecycle_retire_held_authorization(
+                state_service,
+                entry_id=str(raw.get("entry_id", "")),
+                retired_reason=str(raw.get("retired_reason", "")),
+                retired_by=str(raw.get("retired_by", "")),
+                retired_at=str(raw.get("retired_at", "")),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -5237,6 +5512,54 @@ class AgentMessagingPlugin(
             self._run_rotation_surface_sweep()
         except Exception:  # noqa: BLE001 — one rider's fault must not skip the others
             logger.exception("L4 rotation-surface sweep FAULTED; sweeper continues")
+        try:
+            self._run_ttl_surface_sweep()
+        except Exception:  # noqa: BLE001 — one rider's fault must not skip the others
+            logger.exception("R4 TTL-surface sweep FAULTED; sweeper continues")
+
+    def _run_ttl_surface_sweep(self) -> None:
+        """R4 TTL-surface rider — the notice leg that watches the DECLARED
+        LIFETIME of a session rather than its liveness or its context gauge.
+
+        Its own rider, separately fault-isolated, on its own axis — and the axis
+        is why it is not folded into either neighbour rather than a matter of
+        taste. :meth:`_run_rotation_surface_sweep` separates itself from D1 on
+        "reads the gauge and only notifies" vs "reads lifecycle deadlines and
+        MUTATES". This leg sits across that split: it reads the LIFECYCLE ledger
+        like D1, but only NOTIFIES like L4, so neither existing rider's stated
+        rationale covers it. Adding it to one of them would mean weakening a
+        docstring to admit a member its reasoning does not reach, which is how a
+        rationale rots into decoration. A third rider keeps all three honest, and
+        buys the property that matters anyway: a TTL fault must not cost the
+        gauge leg its tick, or vice versa.
+
+        Its axis, stated so the next reader does not have to infer it: **this
+        rider answers "was this session supposed to be finished by now", a
+        question about the spawn's declared intent, which no other leg asks.**
+        D1 asks whether a session is still alive; L4 asks whether it is getting
+        expensive or has gone dark.
+
+        NOTICE, NEVER REAP — see :data:`EVENT_TTL_OVERDUE_NOTICE`. The platform
+        observes that a lane has outlived its declared TTL; a human-or-seat
+        decides what to do about it. A TTL-overdue lane is frequently one that is
+        mid-landing or holding for a ruling, and reaping it on a timer is a
+        failure this codebase has already paid for once.
+        """
+        state_service = self._get_state_service()
+        if state_service is None:
+            return
+        expired = sweep_ttl_overdue_sessions(
+            state_service,
+            peer_registry=self._peer_registry,
+            bridge_manager=self._bridge_manager,
+            latch=self._ttl_overdue_latch,
+        )
+        if expired:
+            logger.warning(
+                "R4 sweep: notified %d steward(s) of a session past its declared "
+                "TTL (expires_at); nothing was reaped — the decision is theirs",
+                expired,
+            )
 
     def _run_rotation_surface_sweep(self) -> None:
         """L4 rotation-surface rider — the two notice legs that watch the
@@ -5260,39 +5583,122 @@ class AgentMessagingPlugin(
         it rotates, and a dark session stays dark until someone fixes it, so
         unlatched they would re-deliver every tick for the duration.
 
-        ★ THE SEAT IS STILL NOT REACHED BY THIS. ``append_event`` lands on the
-        recipient's bridge and is read at that session's next turn, and
-        ``drive_on_delivery`` no-ops for an operator-launched seat (no
-        ``managed_session`` row, degenerate ``operator`` host driver). This
-        rider serves MANAGED WORKERS' stewards. The seat's own decision-point
-        surface is the ``UserPromptSubmit`` hook that consumes the
-        ``rotation_due_selfnotify`` marker — a different delivery path for the
-        same fact, deliberately not a second detection.
+        ★ THE SEAT IS NOW REACHED — BY THE THIRD LEG, AND ONLY BY IT. This
+        paragraph used to say the seat was not reachable from this rider at
+        all, and until 2026-08-17 that was true: the first two legs enumerate
+        ``managed_session``, which structurally has no row for an
+        operator-launched seat, and they notify a STEWARD resolved from
+        ``spawned_by_instance_id``, which a seat does not have either. Both
+        remain true OF THOSE TWO LEGS — do not read this correction as making
+        them seat-capable.
+
+        What changed is that ``sweep_rotation_self_notice`` scans
+        ``session_context_status`` directly (no FK to the lifecycle ledger, so
+        ``host=operator`` rows are representable) and appends to the measured
+        session's OWN bridge instead of a steward's. The seat's
+        ``UserPromptSubmit`` marker path still exists and is still the right
+        surface for a session an operator is actively typing at; it is not a
+        second detection, and it is not a substitute for this leg. It fires on
+        the operator's prompt, so it is silent during exactly the autonomous
+        runs in which context grows — which is the gap the third leg closes and
+        the reason it delivers on the tick instead.
         """
         state_service = self._get_state_service()
         if state_service is None:
             return
-        due = sweep_rotation_due_sessions(
-            state_service,
-            peer_registry=self._peer_registry,
-            bridge_manager=self._bridge_manager,
-            latch=self._rotation_due_latch,
-        )
-        if due:
-            logger.info("L4 sweep: notified %d steward(s) of a rotation-due session", due)
-        dark = sweep_gauge_coverage(
-            state_service,
-            peer_registry=self._peer_registry,
-            bridge_manager=self._bridge_manager,
-            latch=self._gauge_coverage_latch,
-        )
-        if dark:
-            logger.warning(
-                "L4 sweep: %d LIVE session(s) have no context-gauge row — the "
-                "reporting path between hook tick and state write is failing "
-                "silently for them",
-                dark,
+        # ★ PER-LEG FAULT ISOLATION (added 2026-08-17 with the third leg).
+        # Until then the three legs shared one fault domain: the rider as a
+        # whole is wrapped by `_on_sweep_tick`, but nothing stood between one
+        # leg and the next, so a fault in the FIRST leg skipped every leg after
+        # it for that tick — silently, since the tick's handler logs the rider
+        # and not the leg. Found by the third leg's own reachability guard,
+        # which drives this method with the steward legs raising and asserts
+        # the self-notice leg still runs; it did not.
+        #
+        # This widens isolation for the two pre-existing legs as well as the
+        # new one. That is deliberate rather than incidental: these are three
+        # independent read-only notices about three different conditions, and
+        # there is no reading of this rider's purpose on which one leg's fault
+        # should cost another leg its delivery.
+        try:
+            due = sweep_rotation_due_sessions(
+                state_service,
+                peer_registry=self._peer_registry,
+                bridge_manager=self._bridge_manager,
+                latch=self._rotation_due_latch,
             )
+        except Exception:  # noqa: BLE001 — one leg's fault must not skip the others
+            logger.exception("L4a rotation-due leg FAULTED; rider continues")
+        else:
+            if due:
+                logger.info(
+                    "L4 sweep: notified %d steward(s) of a rotation-due session", due,
+                )
+        try:
+            dark = sweep_gauge_coverage(
+                state_service,
+                peer_registry=self._peer_registry,
+                bridge_manager=self._bridge_manager,
+                latch=self._gauge_coverage_latch,
+            )
+        except Exception:  # noqa: BLE001 — one leg's fault must not skip the others
+            logger.exception("L4b gauge-coverage leg FAULTED; rider continues")
+        else:
+            if dark:
+                logger.warning(
+                    "L4 sweep: %d LIVE session(s) past the startup grace have no "
+                    "context-gauge row — likeliest cause is the reporting path "
+                    "between hook tick and state write failing silently for them",
+                    dark,
+                )
+        # L4c is fault-isolated INSIDE the rider rather than promoted to a
+        # fourth rider. Its axis is this rider's axis exactly — same table,
+        # read-only, same question ("is this session getting expensive") — so a
+        # separate rider would force this docstring to explain why one question
+        # lives in two places, which is the rationale-rot the R4 rider's
+        # docstring warns about. What a shared rider does NOT give away for
+        # free is isolation, so it is taken explicitly here: a self-notice
+        # fault must not cost the two steward legs their tick, or vice versa.
+        try:
+            counts = sweep_rotation_self_notice(
+                state_service,
+                peer_registry=self._peer_registry,
+                bridge_manager=self._bridge_manager,
+                latch=self._rotation_self_latch,
+            )
+        except Exception:  # noqa: BLE001 — one leg's fault must not skip the others
+            logger.exception("L4c self-notice leg FAULTED; rider continues")
+        else:
+            self._log_self_notice_counts(counts)
+
+    @staticmethod
+    def _log_self_notice_counts(counts: SelfNoticeCounts) -> None:
+        """ALL THREE counts, always, and never one without the others.
+
+        A count of failures alone reads identically to a healthy run, and a
+        count of successes alone hides the leg's own blind spot. A zero that
+        prints its denominator is the only kind a reader can trust.
+
+        The two failure counts are reported SEPARATELY because they have
+        different causes and different owners: `unroutable` is the known
+        watch-id join gap (a worker's gauge row is keyed on its ledger id while
+        its binding is keyed on its watch id), while `undeliverable` is a live
+        binding whose append raised — a transport fault, already logged at
+        WARNING with a traceback. Naming only the first, as an earlier draft
+        did, would have attributed every delivery fault to the join gap.
+        """
+        if not (counts.notified or counts.unroutable or counts.undeliverable):
+            return
+        logger.info(
+            "L4c sweep: %d session(s) notified of their own context band; "
+            "%d unroutable (gauge row present, and neither its own key nor its "
+            "stored agent_session_id join resolves to a live binding — since "
+            "2026-08-18 this means a row written by a reporter predating the "
+            "join column, and it should decay to 0 as reporters upgrade); "
+            "%d undeliverable (binding resolved, append raised — see the "
+            "WARNING above for each)",
+            counts.notified, counts.unroutable, counts.undeliverable,
+        )
 
     def _run_session_lifecycle_sweep(self) -> None:
         """D1 platform sweep rider (§3.4/§6 rule 3, Architect ratification #3):

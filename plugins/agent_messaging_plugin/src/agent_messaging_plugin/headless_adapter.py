@@ -76,10 +76,14 @@ from typing import TYPE_CHECKING, Any
 
 from .authority_contract import render_authority_delegation_contract
 from .schema import CAPTURE_SOURCE_INIT_EVENT
-from .solet_cli import expose_worker_cli, resolve_solet_bin, watch_sidecar_argv
+from .solet_cli import (
+    WakeCliResolver,
+    expose_worker_cli,
+    watch_sidecar_argv,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -165,18 +169,44 @@ _MANAGED_SETTINGS_PATHS: tuple[Path, ...] = (
 )
 _STRICT_PLUGIN_ONLY_KEY = "strictPluginOnlyCustomization"
 _STRICT_PLUGIN_ONLY_HOOKS = "hooks"
+# §45.1 (#17, 2026-08-17) — THE SECOND KEY IN THE SAME PARSED OBJECT.
+#
+# ``allowManagedPermissionRulesOnly: true`` makes Claude Code honour only the
+# permission rules written inside the managed settings file itself: user- and
+# project-level allow/ask/deny rules do not apply AT ALL, in every permission
+# mode. Every ``permissions.deny`` this repository ships is therefore dropped
+# before permission evaluation on such a host, with no local signal — the
+# denies simply never participate. The adopter established this against Claude
+# Code's own permissions documentation rather than inferring it, and ruled out
+# the stale-session hypothesis (permission settings reload live in-session, so
+# it reproduces identically in a brand-new session).
+#
+# This key was ALREADY in the dict the reader below parses for §43.1. The
+# detector we built in response to that report was one sibling key short of
+# detecting this one; adding it here, rather than in a new reader, is the
+# point.
+_ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY = "allowManagedPermissionRulesOnly"
+# Single source of truth for the deny list this driver's ``--settings`` blob
+# emits, so the inert-permissions warning below can never name a different set
+# of tools than the one actually denied.
+_HEADLESS_DENIED_TOOLS: tuple[str, ...] = ("Agent", "Task")
 
 
-def _managed_policy_strips_hooks(paths: tuple[Path, ...]) -> Path | None:
-    """The first policy file that declares hooks plugin-only, or ``None``.
+def _iter_managed_policies(
+    paths: tuple[Path, ...],
+) -> Iterator[tuple[Path, dict[str, Any]]]:
+    """Every readable managed policy in ``paths``, parsed, in search order.
 
     FAILS OPEN on an unreadable or malformed file, loudly. Refusing every
     spawn because a policy file could not be parsed would be a worse failure
-    than the one this guards, and it would be a refusal we cannot actually
-    justify — an unparseable file is not evidence that hooks are stripped.
+    than the ones this guards, and it would be a refusal we cannot actually
+    justify — an unparseable file is not evidence that anything was stripped.
     The registration watchdog (``session_sweep``) is the backstop that catches
-    the consequence whatever the cause, so this narrow prover does not need to
-    guess.
+    the hooks consequence whatever the cause, so these narrow provers do not
+    need to guess.
+
+    Shared by both provers below so the two can never disagree about which
+    files are in force, in what order, or how a bad one is handled.
     """
     for path in paths:
         try:
@@ -186,16 +216,135 @@ def _managed_policy_strips_hooks(paths: tuple[Path, ...]) -> Path | None:
         except (OSError, ValueError):
             logger.warning(
                 "managed-settings preflight: %s exists but could not be read or "
-                "parsed — proceeding WITHOUT this check (an unparseable policy "
-                "file is not evidence that hooks are stripped)", path, exc_info=True,
+                "parsed — proceeding WITHOUT these checks (an unparseable policy "
+                "file is not evidence that anything is stripped)", path, exc_info=True,
             )
             continue
         if not isinstance(raw, dict):
             continue
+        yield path, raw
+
+
+def _managed_policy_strips_hooks(paths: tuple[Path, ...]) -> Path | None:
+    """The first policy file that declares hooks plugin-only, or ``None``."""
+    for path, raw in _iter_managed_policies(paths):
         strict = raw.get(_STRICT_PLUGIN_ONLY_KEY)
         if isinstance(strict, list) and _STRICT_PLUGIN_ONLY_HOOKS in strict:
             return path
     return None
+
+
+def _managed_policy_voids_permission_rules(paths: tuple[Path, ...]) -> Path | None:
+    """The first policy file that switches off non-managed permission rules.
+
+    Matches ``True`` and nothing else. The flag is documented as a boolean, so
+    a truthy non-boolean (``"false"``, ``1``, ``[]``) is not evidence that the
+    organisation set it — and guessing at a shape upstream does not define is
+    exactly the silent fallback this repository forbids. Note ``1 == True`` in
+    Python, so this comparison must stay an identity check.
+    """
+    for path, raw in _iter_managed_policies(paths):
+        if raw.get(_ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY) is True:
+            return path
+    return None
+
+
+def _permission_state_report(
+    denied_tools: tuple[str, ...], *, denies_key: str,
+) -> dict[str, object]:
+    """The §45.1 permission-state keys both drivers' capability reports carry.
+
+    Module-level and shared: the two reports must answer the same question the
+    same way, and both driver classes sit within a handful of lines of the
+    god-class LOC ceiling, so this cannot live in either class body.
+
+    Live-probed rather than cached. A managed policy can be pulled remotely at
+    any time, so a value resolved once at construction would go stale in
+    exactly the direction that reports a lost guardrail as still present.
+    """
+    inert_policy = _managed_policy_voids_permission_rules(_MANAGED_SETTINGS_PATHS)
+    return {
+        denies_key: list(denied_tools),
+        "permission_denies_operative": inert_policy is None,
+        "permission_policy_path": str(inert_policy) if inert_policy else None,
+    }
+
+
+def _headless_capability_report() -> dict[str, object]:
+    """Pure function over module constants, no ``self`` needed — module-level
+    for the same god-class-ceiling reason ``_tmux_hook_settings_json`` is."""
+    return {
+        "host": "headless",
+        "topology": "subprocess",
+        "inspectable_via": ["transcript"],
+        "attach_hint": "driver process holds the stdin/stdout stream-json channel",
+        **_permission_state_report(_HEADLESS_DENIED_TOOLS, denies_key="permission_denies"),
+    }
+
+
+def _warn_permission_denies_inert(
+    paths: tuple[Path, ...],
+    *,
+    agent_instance_id: str,
+    host: str,
+    denied_tools: tuple[str, ...],
+) -> Path | None:
+    """Loud notice that this host drops the driver's ``permissions.deny``.
+
+    WARN, NOT REFUSE — deliberately the OPPOSITE posture from
+    :func:`_managed_policy_remedy`, and the discriminator is whether the
+    spawn's own contract survives.
+
+    A hooks-stripped worker never registers, never heartbeats and is
+    unaddressable by role: the spawn produces nothing usable and leaves a
+    ledger row that looks live. Refusing costs the operator a worker they were
+    never going to get.
+
+    A permissions-inert worker registers, heartbeats, answers by role and does
+    its work. What it loses is a hygiene guardrail — and a deny that a local
+    policy can switch off was never a boundary, so this earns no security
+    credit and must not be described as one. The finding is the SILENCE.
+    Refusing here would trade the entire fleet capability for a guardrail that
+    was never load-bearing, on a machine whose managed policy the operator has
+    no authority to change; a refusal with no reachable remedy is a wall, not a
+    gate. Enforcement of this repository's Agent/Task prohibition also degrades
+    from two layers to one, not to zero: the instruction layer (``CLAUDE.md``,
+    and ``CLAUDE.md.template`` for adopters) still carries it.
+
+    There is deliberately NO acknowledgement flag matching
+    ``degraded_hooks_acknowledged``. That flag works because accepting
+    hooks-degraded operation is a real choice an operator can make once and
+    mean. Here there is no fix available to the operator at all, so an opt-in
+    every spawn on the affected machine must always pass is ceremony that
+    stops carrying information within a day.
+
+    ``denied_tools`` is the calling host's OWN list because the two differ: the
+    tmux driver denies ``AskUserQuestion`` as well, and the headless driver
+    does not (its stream-json mode never enumerates that tool, so the deny
+    would be inert there for an unrelated reason).
+    """
+    policy_path = _managed_policy_voids_permission_rules(paths)
+    if policy_path is None:
+        return None
+    denied = ", ".join(denied_tools)
+    logger.warning(
+        "PERMISSION DENIES INERT: the managed Claude Code policy at %s sets "
+        "%s=true, under which user- and project-level allow/ask/deny rules do "
+        "not apply at all — only rules inside the managed file itself are "
+        "honoured. The %s driver's --settings deny of [%s] is therefore dropped "
+        "before permission evaluation for %s, and Claude Code emits no signal "
+        "of its own when this happens. The spawn PROCEEDS: this worker still "
+        "registers, heartbeats and is addressable, and permissions.deny is a "
+        "hygiene guardrail rather than a security control. What is lost is "
+        "config-layer enforcement of this repository's Agent/Task prohibition; "
+        "the instruction layer still carries it. The only place a deny is "
+        "honoured on this host is the managed file's own permissions.deny — "
+        "adding [%s] there is the fix, and it belongs to whoever administers "
+        "that file.",
+        policy_path, _ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY, host, denied,
+        agent_instance_id, denied,
+    )
+    return policy_path
 
 
 def _claude_bin_remedy(claude_bin: str) -> str | None:
@@ -286,6 +435,23 @@ def _resolve_local_label(spec: Mapping[str, object], *, agent_instance_id: str) 
         str(spec.get("local_name") or "")
         or str(spec.get("lane_id") or "")
         or agent_instance_id
+    )
+
+
+def _announce_managed_policy(
+    degraded_ok: bool, *, agent_instance_id: str, host: str,
+    denied_tools: tuple[str, ...],
+) -> None:
+    """Both spawn-time managed-policy announcements, in one call.
+
+    Shared by both host drivers so neither can grow one announcement and not
+    the other, and module-level because both driver classes are within a few
+    lines of the god-class ceiling.
+    """
+    _log_degraded_spawn(degraded_ok, agent_instance_id=agent_instance_id)
+    _warn_permission_denies_inert(
+        _MANAGED_SETTINGS_PATHS, agent_instance_id=agent_instance_id,
+        host=host, denied_tools=denied_tools,
     )
 
 
@@ -705,7 +871,8 @@ class HeadlessHostDriver:
         )
         # Wake CLI BINARY (never solet_name). Unresolvable is non-fatal here
         # -- see _arm_watcher / _spawn_env for why it degrades, not refuses.
-        self._solet_bin = resolve_solet_bin(solet_bin)
+        # R11 (2026-08-17): resolved per read, never once here — see below.
+        self._cli_resolver = WakeCliResolver(solet_bin)
         self._permission_mode = (
             permission_mode if permission_mode is not None
             else os.environ.get(_ENV_PERMISSION_MODE) or ""
@@ -728,6 +895,13 @@ class HeadlessHostDriver:
         self._grace_seconds = grace_seconds
         self._lock = RLock()
         self._processes: dict[str, _TrackedHeadlessProcess] = {}
+
+    @property
+    def _solet_bin(self) -> str:
+        """Wake CLI, resolved FRESH per read — never cache it (R11, 2026-08-17).
+        Rationale, ranked cases, residual: :class:`~.solet_cli.WakeCliResolver`.
+        """
+        return self._cli_resolver.resolve()
 
     def verify_config(
         self,
@@ -778,12 +952,7 @@ class HeadlessHostDriver:
         return [remedy for remedy in candidates if remedy is not None]
 
     def capability_report(self) -> dict[str, object]:
-        return {
-            "host": "headless",
-            "topology": "subprocess",
-            "inspectable_via": ["transcript"],
-            "attach_hint": "driver process holds the stdin/stdout stream-json channel",
-        }
+        return _headless_capability_report()
 
     def _spawn_env(
         self, *, agent_instance_id: str, agent_session_id: str, label: str,
@@ -902,7 +1071,7 @@ class HeadlessHostDriver:
         role_binding_hook_path = resolved_hooks["role_binding_reminder.py"]
         settings = {
             "permissions": {
-                "deny": ["Agent", "Task"],
+                "deny": list(_HEADLESS_DENIED_TOOLS),
             },
             "hooks": {
                 "PreToolUse": [
@@ -1067,7 +1236,10 @@ class HeadlessHostDriver:
                 "driver cannot register the spawned process under the "
                 "ledger's identity without it.",
             )
-        _log_degraded_spawn(degraded_ok, agent_instance_id=agent_instance_id)
+        _announce_managed_policy(
+            degraded_ok, agent_instance_id=agent_instance_id,
+            host="headless", denied_tools=_HEADLESS_DENIED_TOOLS,
+        )
         label = _resolve_local_label(spec, agent_instance_id=agent_instance_id)
         # Minted exactly ONCE, here — never re-derived elsewhere (two
         # evaluations of an identity expression is two identities).

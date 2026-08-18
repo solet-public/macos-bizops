@@ -92,6 +92,7 @@ def report_context_status(
     cache_overage_signature: bool | None = None,
     reporter_surface: str | None = None,
     reporter_generation: int | None = None,
+    agent_session_id: str | None = None,
 ) -> dict[str, Any]:
     """Overwrite the caller's own latest context-status snapshot. The caller
     (today: `rotation_due_watch.py`, extended) already did the local
@@ -115,6 +116,26 @@ def report_context_status(
     unattributable, and an absent cache field cannot be told apart from a
     stale copy having served that tick. Omitting them records a
     pre-attribution reporter, which is a positive finding, not missing data.
+
+    `agent_session_id` is OPTIONAL and is the ROUTING JOIN (2026-08-18): the
+    reporter's own stable `$AGENT_SESSION_ID`, stored so a consumer holding
+    this row can reverse-resolve the session's live bridge binding through
+    `peer_registry.resolve_by_agent_session_id`. Without it, a watcher-held
+    worker is unreachable from its own gauge row -- the row keys on the LEDGER
+    id and the binding keys on the WATCH id. Omitting it records NOT REPORTED,
+    never "this session has no bridge".
+
+    ★ UNLIKE `reporter_surface`, THIS FIELD IS NOT VALIDATED AGAINST AN
+    ALLOWLIST, and that difference is deliberate. The surface allowlist is why
+    that widening had to land and deploy ALONE, ahead of any reporter emitting
+    it: a reporter upgrading first would have had every report REFUSED, turning
+    an attribution gap into a total reporting outage. This field has no such
+    edge -- MEASURED 2026-08-18 against the live pre-change verb, which
+    accepted an undeclared `agent_session_id` and returned `recorded` while
+    ignoring it. So both deploy orders degrade to NULL and neither loses a row,
+    and this landing carries NO ordering constraint. Recorded because the
+    precedent sitting a few lines above says the opposite, and a reader is
+    entitled to assume it binds here too.
 
     Errors: `missing_argument` (any of the five required fields empty/absent
     — fast-fail before any write), `negative_tokens` (a reported value that
@@ -163,6 +184,7 @@ def report_context_status(
         cache_overage_signature=cache_overage_signature,
         reporter_surface=reporter_surface,
         reporter_generation=reporter_generation,
+        agent_session_id=agent_session_id,
     )
     return {"status": "recorded"}
 
@@ -201,6 +223,33 @@ def _cache_view(row: dict[str, Any], current_tokens: int) -> dict[str, Any]:
         "cache_overage_signature": _tri_state(row.get("cache_overage_signature")),
         "rotation_band": band,
         "rotation_guidance": guidance,
+    }
+
+
+def _routing_view(row: dict[str, Any]) -> dict[str, Any]:
+    """How to REACH this session, as opposed to how to describe it.
+
+    Extracted rather than inlined beside its neighbours, and rather than
+    allowlisted: adding this field inline took `session_context_status` to
+    cyclomatic complexity 11, one over the gate. The file already answers that
+    shape with `_cache_view`/`_reporter_view`, so this is the existing idiom
+    rather than a new one -- and an allowlist entry would have frozen the
+    complexity at the ceiling and handed the wall to whoever edits this verb
+    next, which is the failure mode the L4c extraction was made to avoid.
+
+    NOT `str(... or "")` like its neighbours in the caller: that idiom maps
+    NULL to `""` and would erase the NOT-REPORTED state this column exists to
+    carry. `resolve_by_agent_session_id` returns None for an empty string, so
+    the collapse is invisible in the outcome -- a reporter that never sent a
+    session id would become indistinguishable from a session that genuinely
+    could not be routed, which is precisely the discrimination the L4c counts
+    depend on.
+    """
+    agent_session_id = row.get("agent_session_id")
+    return {
+        "agent_session_id": (
+            None if agent_session_id is None else str(agent_session_id)
+        ),
     }
 
 
@@ -250,6 +299,13 @@ def session_context_status(
     latest write survives here, so `null` cache state next to a stale or
     absent reporter means "a stale copy served this tick", which is a
     different fact — and a different fix — from "the verbs are undeployed".
+
+    `agent_session_id` is the session's stable id, for callers that need to
+    REACH the session rather than merely describe it. `null` means the
+    reporter predates the column, NOT that the session has no bridge. Those
+    must not be collapsed: the first is a coverage gap that heals on the next
+    deploy, the second would be a live routing failure worth paging someone
+    about.
     """
     if not agent_instance_id.strip():
         raise VerbError(
@@ -281,6 +337,7 @@ def session_context_status(
             "rotation_guidance": None,
             "reporter_surface": None,
             "reporter_generation": None,
+            "agent_session_id": None,
         }
     current_tokens = int(row.get("current_tokens") or 0)
     ceiling = int(row.get("ceiling") or 0) or rotation_thresholds.DEFAULT_CONSERVATIVE_CEILING
@@ -297,6 +354,7 @@ def session_context_status(
         "per_prompt_carriage_estimate_tokens": round(current_tokens * CACHE_READ_COST_FRACTION),
         "rotation_due": fraction >= rotation_thresholds.ROTATION_THRESHOLD_FRACTION,
         "measured_at": str(row.get("measured_at") or ""),
+        **_routing_view(row),
         **_cache_view(row, current_tokens),
         **_reporter_view(row),
     }

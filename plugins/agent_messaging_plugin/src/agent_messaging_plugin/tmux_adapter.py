@@ -83,7 +83,10 @@ from typing import Any
 
 from .headless_adapter import (
     WorkerHookResolutionError,
+    _announce_managed_policy,
     _authority_system_prompt,
+    _managed_policy_remedy,
+    _permission_state_report,
     _pid_alive,
     _resolve_heartbeat_marker_dir,
     _resolve_local_label,
@@ -91,7 +94,11 @@ from .headless_adapter import (
     _resolve_worker_hook_paths,
     _sigterm_then_kill,
 )
-from .solet_cli import expose_worker_cli, resolve_solet_bin, watch_sidecar_argv
+from .solet_cli import (
+    WakeCliResolver,
+    expose_worker_cli,
+    watch_sidecar_argv,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -558,6 +565,133 @@ def _sigterm_then_kill_process_group(pgid: int, grace_seconds: float) -> None:
         logger.error("SIGKILL denied for tmux pane process group pgid=%d", pgid)
 
 
+# 2026-08-17, found while working §45.1 (#17); a bounded scope addition,
+# authorized separately from §45.1 and separable from it.
+#
+# The W4A managed-policy preflight shipped for #8 §43.1 was wired into
+# ``HeadlessHostDriver.verify_config`` ONLY. This driver duplicated the
+# claude-launch checks and omitted that one, so the refusal §43.1 asked for was
+# never performed on the tmux host — the host ``spawn_session``'s own
+# documentation tells adopters to PREFER for any worker expected to outlive a
+# release, because it is the swap-durable one. #8's own diagnosis named
+# ``tmux_adapter.py`` explicitly alongside ``headless_adapter.py``; the fix
+# covered one of the two files the report named.
+#
+# A managed policy that strips non-plugin hooks strips them from THIS driver's
+# ``--settings`` blob exactly as it does from the headless driver's, so there
+# was never a reason for the two to differ: the omission was a gap, not a
+# decision. The remedy TEXT is the headless one verbatim (imported, never
+# restated) so the two hosts can never drift.
+#
+# This is a behaviour change to §43.1's REFUSAL, not to §45.1's warning.
+def _claude_launch_remedies(
+    *, claude_bin: str, solet_name: str, permission_mode: str | None,
+    driver_permission_mode: str, transport: str | None, driver_transport: str,
+    mcp_config_path: Path,
+) -> list[str]:
+    """The underlying-``claude``-launch checks, shared with the headless
+    driver's own :meth:`verify_config` — a tmux-hosted pane still launches a
+    real ``claude`` process.
+
+    Module-level, taking the driver's resolved values as arguments rather than
+    reading ``self``: this is a pure function over them, and
+    :class:`TmuxHostDriver` sits close enough to the god-class LOC ceiling that
+    a method this size crowds out the next legitimate addition. Same reason
+    :func:`_tmux_hook_settings_json` is module-level. Behaviour is unchanged —
+    every remedy string and every condition below is verbatim what the method
+    it replaced produced.
+    """
+    remedies: list[str] = []
+    if not (claude_bin and os.access(claude_bin, os.X_OK)):
+        remedies.append(
+            f"no executable 'claude' binary found (checked PATH via "
+            f"shutil.which, then {claude_bin!r}) — install Claude "
+            "Code or pass claude_bin explicitly.",
+        )
+    if not solet_name:
+        remedies.append(
+            "SOLET_NAME is not set — the spawned session cannot "
+            "discover its bridge port without it.",
+        )
+    if not (permission_mode or driver_permission_mode):
+        remedies.append(
+            f"no permission mode configured (neither a per-spawn override nor "
+            f"{_ENV_PERMISSION_MODE} is set) — an unattended tmux-hosted worker "
+            "needs an explicit operator-ruled posture; this driver never "
+            "defaults to bypass.",
+        )
+    resolved_transport = transport if transport is not None else (driver_transport or "watch")
+    if resolved_transport == "mcp" and not mcp_config_path.exists():
+        remedies.append(
+            f"no MCP config found at {mcp_config_path} — required because "
+            "the resolved transport is 'mcp' (a real MCP bridge config must "
+            "exist and is passed verbatim to --mcp-config); 'watch' transport "
+            "spawns with an inline empty MCP config and never reads this file, "
+            "so switching FLEET_SESSION_HOST/transport to 'watch' (the charter "
+            "default) also satisfies this remedy without creating the file.",
+        )
+    return remedies
+
+
+def _managed_policy_remedies(
+    managed_settings_paths: tuple[Path, ...] | None,
+    *,
+    degraded_hooks_acknowledged: bool,
+) -> list[str]:
+    """The hooks-stripping refusal as a splattable list (empty means clean)."""
+    remedy = _managed_policy_remedy(
+        managed_settings_paths,
+        degraded_hooks_acknowledged=degraded_hooks_acknowledged,
+    )
+    return [] if remedy is None else [remedy]
+
+
+def _tmux_capability_report() -> dict[str, object]:
+    """Pure function over module constants, no ``self`` needed — module-level
+    for the same god-class-ceiling reason :func:`_tmux_hook_settings_json` is.
+
+    ``permission_denies_default`` reports the DEFAULT deny list: the per-spawn
+    ``allow_askuserquestion`` escape hatch is not visible from here, so naming
+    it as this spawn's list would be a claim this function cannot make.
+    """
+    return {
+        "host": "tmux",
+        "topology": "detached-session",
+        "inspectable_via": ["tmux attach -t <host_ref>", "tmux -CC attach -t <host_ref>"],
+        "attach_hint": (
+            "detached tmux session; attach directly or via iTerm2 'tmux -CC attach "
+            "-t <host_ref>' for native-window presentation (documented separately, "
+            "not automated by this driver)"
+        ),
+        **_permission_state_report(
+            _tmux_denied_tools(allow_askuserquestion=False),
+            denies_key="permission_denies_default",
+        ),
+    }
+
+
+def _tmux_denied_tools(*, allow_askuserquestion: bool) -> tuple[str, ...]:
+    """The deny list this driver's ``--settings`` blob emits.
+
+    A function rather than a constant because ``AskUserQuestion``'s presence is
+    per-spawn, and a single source of truth because §45.1's inert-permissions
+    warning names this list back to the operator: a warning that enumerates a
+    different set of tools than the blob actually denies would be worse than
+    no warning, since it would be believed.
+    """
+    deny = ["Agent", "Task"]
+    if not allow_askuserquestion:
+        deny.append("AskUserQuestion")
+    return tuple(deny)
+
+
+def _tmux_denied_tools_for(spec: Mapping[str, object]) -> tuple[str, ...]:
+    """This spawn's deny list, resolved from its spec."""
+    return _tmux_denied_tools(
+        allow_askuserquestion=bool(spec.get("allow_askuserquestion")),
+    )
+
+
 def _tmux_hook_settings_json(
     *,
     allowlist_hook_path: Path,
@@ -589,12 +723,9 @@ def _tmux_hook_settings_json(
     (``SpawnSessionRequest.allow_askuserquestion``, mirrors the seed
     launcher's ``SOLET_ALLOW_ASKUSERQUESTION=1``); ``False`` (the default)
     keeps the deny on."""
-    deny = ["Agent", "Task"]
-    if not allow_askuserquestion:
-        deny.append("AskUserQuestion")
     settings = {
         "permissions": {
-            "deny": deny,
+            "deny": list(_tmux_denied_tools(allow_askuserquestion=allow_askuserquestion)),
         },
         "hooks": {
             "PreToolUse": [
@@ -680,7 +811,9 @@ class TmuxHostDriver:
             claude_bin, "claude", str(Path.home() / ".local" / "bin" / "claude"),
         )
         self._solet_name = _resolve_str(solet_name, "SOLET_NAME")
-        self._solet_bin = resolve_solet_bin(solet_bin)
+        # R11 (2026-08-17): resolve the wake CLI per read, never once here.
+        # See the `_solet_bin` property and WakeCliResolver's own note.
+        self._cli_resolver = WakeCliResolver(solet_bin)
         self._permission_mode = _resolve_str(permission_mode, _ENV_PERMISSION_MODE)
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
         # mirrors headless_adapter.HeadlessHostDriver's own floor exactly --
@@ -700,6 +833,29 @@ class TmuxHostDriver:
         self._confirm_timeout_seconds = confirm_timeout_seconds
         self._confirm_poll_interval_seconds = confirm_poll_interval_seconds
         self._sleep_fn = sleep_fn
+
+    @property
+    def _solet_bin(self) -> str:
+        """The wake CLI, resolved FRESH on every read (R11, 2026-08-17).
+
+        This used to be resolved once in ``__init__`` and stored. The answer
+        depends on the ``current`` symlink's target, which cutover moves under a
+        long-lived process, so a single evaluation is a snapshot of filesystem
+        state masquerading as a constant. Resolving during a cutover skew window
+        correctly declines to rewrite; caching that decline pinned every
+        subsequent spawn to a reapable versioned directory for the process's
+        whole life. Full account in :func:`resolve_solet_bin`.
+
+        KNOWN, BOUNDED RESIDUAL: this resolves per READ, not per spawn, and
+        :meth:`spawn` reads it twice (env pairs, then the pane command). A
+        cutover landing between those two reads yields one stable and one
+        versioned path. Both name a valid executable at the instant they are
+        read, so the worst case is a mixed-but-working spawn — against the
+        pre-fix guarantee of permanent staleness. Resolving once per spawn and
+        threading the value down is the exactly-correct granularity and is
+        recorded as a follow-up, deliberately not folded into this landing.
+        """
+        return self._cli_resolver.resolve()
 
     def _tmux_binary_remedies(self) -> list[str]:
         """Split out of :meth:`verify_config` to keep it under the radon cc
@@ -733,49 +889,18 @@ class TmuxHostDriver:
             )
         return remedies
 
-    def _claude_launch_remedies(
-        self, *, permission_mode: str | None, transport: str | None,
-    ) -> list[str]:
-        """Split out of :meth:`verify_config` to keep it under the radon cc
-        threshold — the same underlying-``claude``-launch checks
-        :meth:`HeadlessHostDriver.verify_config` makes, since a tmux-hosted
-        pane still launches a real ``claude`` process."""
-        remedies: list[str] = []
-        if not (self._claude_bin and os.access(self._claude_bin, os.X_OK)):
-            remedies.append(
-                f"no executable 'claude' binary found (checked PATH via "
-                f"shutil.which, then {self._claude_bin!r}) — install Claude "
-                "Code or pass claude_bin explicitly.",
-            )
-        if not self._solet_name:
-            remedies.append(
-                "SOLET_NAME is not set — the spawned session cannot "
-                "discover its bridge port without it.",
-            )
-        if not (permission_mode or self._permission_mode):
-            remedies.append(
-                f"no permission mode configured (neither a per-spawn override nor "
-                f"{_ENV_PERMISSION_MODE} is set) — an unattended tmux-hosted worker "
-                "needs an explicit operator-ruled posture; this driver never "
-                "defaults to bypass.",
-            )
-        resolved_transport = transport if transport is not None else (self._transport or "watch")
-        if resolved_transport == "mcp" and not self._mcp_config_path.exists():
-            remedies.append(
-                f"no MCP config found at {self._mcp_config_path} — required because "
-                "the resolved transport is 'mcp' (a real MCP bridge config must "
-                "exist and is passed verbatim to --mcp-config); 'watch' transport "
-                "spawns with an inline empty MCP config and never reads this file, "
-                "so switching FLEET_SESSION_HOST/transport to 'watch' (the charter "
-                "default) also satisfies this remedy without creating the file.",
-            )
-        return remedies
-
     def verify_config(
         self, *, permission_mode: str | None = None, transport: str | None = None,
+        degraded_hooks_acknowledged: bool = False,
+        managed_settings_paths: tuple[Path, ...] | None = None,
     ) -> list[str]:
         """Config-time, fail-closed remedies (§5) — empty means ready to
         spawn.
+
+        ``degraded_hooks_acknowledged``/``managed_settings_paths`` carry the
+        same meaning and the same fixture-injection purpose as their headless
+        counterparts; :func:`_managed_policy_remedies`' module-level note above
+        it records why this host grew them on 2026-08-17.
 
         ``transport`` is a per-spawn override, same shape and same reason as
         the one :meth:`HeadlessHostDriver.verify_config` grew for Dax Part 36
@@ -795,22 +920,21 @@ class TmuxHostDriver:
         :meth:`spawn` would actually take."""
         return [
             *self._tmux_binary_remedies(),
-            *self._claude_launch_remedies(
-                permission_mode=permission_mode, transport=transport,
+            *_claude_launch_remedies(
+                claude_bin=self._claude_bin, solet_name=self._solet_name,
+                permission_mode=permission_mode,
+                driver_permission_mode=self._permission_mode,
+                transport=transport, driver_transport=self._transport,
+                mcp_config_path=self._mcp_config_path,
+            ),
+            *_managed_policy_remedies(
+                managed_settings_paths,
+                degraded_hooks_acknowledged=degraded_hooks_acknowledged,
             ),
         ]
 
     def capability_report(self) -> dict[str, object]:
-        return {
-            "host": "tmux",
-            "topology": "detached-session",
-            "inspectable_via": ["tmux attach -t <host_ref>", "tmux -CC attach -t <host_ref>"],
-            "attach_hint": (
-                "detached tmux session; attach directly or via iTerm2 'tmux -CC attach "
-                "-t <host_ref>' for native-window presentation (documented separately, "
-                "not automated by this driver)"
-            ),
-        }
+        return _tmux_capability_report()
 
     def _spawn_command(
         self, spec: Mapping[str, object], *, transport: str, label: str,
@@ -918,9 +1042,11 @@ class TmuxHostDriver:
         # existence gate, transport-scoped since Dax Part 36 §36.3), _env_pairs
         # (FLEET_TRANSPORT) and _spawn_command (the MCP-config argv posture).
         transport = self._resolve_transport(spec)
+        degraded_ok = bool(spec.get("degraded_hooks_acknowledged"))
         remedies = self.verify_config(
             permission_mode=str(spec.get("permission_mode") or ""),
             transport=transport,
+            degraded_hooks_acknowledged=degraded_ok,
         )
         if remedies:
             raise HostCannotSpawnError("; ".join(remedies))
@@ -931,6 +1057,10 @@ class TmuxHostDriver:
                 "cannot register the spawned session under the ledger's "
                 "identity without it.",
             )
+        _announce_managed_policy(
+            degraded_ok, agent_instance_id=agent_instance_id, host="tmux",
+            denied_tools=_tmux_denied_tools_for(spec),
+        )
         # W6 (#13 §44.3): shared with the headless driver so the two can never
         # disagree about what a worker is called. The tmux session name derives
         # from it, so a role-named spawn gets a role-named session for free.

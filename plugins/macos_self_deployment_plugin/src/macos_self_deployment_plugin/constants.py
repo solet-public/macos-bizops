@@ -8,6 +8,7 @@ code stays free of magic strings.
 from __future__ import annotations
 
 from enum import StrEnum
+from pathlib import Path
 from typing import Final
 
 from ananta.core.runtime import (
@@ -379,3 +380,22 @@ def opposite_color(token: str) -> str:
         return COLOR_BLUE
     msg = f"opposite_color called with non-color token {token!r}"
     raise ValueError(msg)
+
+
+def resolve_project_root(app_home: Path) -> Path:
+    """Walk one level up from ``<APP_HOME>`` to the repo root.
+
+    Convention: ``<repo_root>/profile`` is ``APP_HOME``. Fall back to
+    ``app_home`` itself if the parent doesn't contain a recognisable
+    project marker — fast-fail surfaces the misconfiguration at smoke
+    time rather than papering over it.
+
+    Lives here rather than in :mod:`swap_orchestrator` because the probe
+    runner needs the SAME derivation to tell the candidate's interpreter
+    which root to classify, and the orchestrator already imports the
+    runner — one definition, two callers, no drift surface.
+    """
+    candidate = app_home.parent
+    if (candidate / "pyproject.toml").is_file() or (candidate / "ananta").is_dir():
+        return candidate
+    return app_home

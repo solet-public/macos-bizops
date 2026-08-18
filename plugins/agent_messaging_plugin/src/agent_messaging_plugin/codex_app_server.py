@@ -32,7 +32,7 @@ from .headless_adapter import (
     _resolve_default_cwd,
     _sigterm_then_kill,
 )
-from .solet_cli import resolve_solet_bin as _resolve_solet_bin
+from .solet_cli import WakeCliResolver
 
 
 @dataclass(slots=True)
@@ -119,7 +119,9 @@ class CodexAppServerHostDriver:
             codex_bin if codex_bin is not None
             else shutil.which("codex") or str(Path.home() / ".local" / "bin" / "codex")
         )
-        self._solet_bin = _resolve_solet_bin(solet_bin)
+        # R11 (2026-08-17): UNRESOLVED override; resolved per read by the
+        # `_solet_bin` property. See resolve_solet_bin's own note.
+        self._cli_resolver = WakeCliResolver(solet_bin)
         self._solet_name = (
             solet_name if solet_name is not None
             else os.environ.get("SOLET_NAME", "")
@@ -132,6 +134,20 @@ class CodexAppServerHostDriver:
         self._grace_seconds = grace_seconds
         self._lock = threading.RLock()
         self._processes: dict[str, _TrackedCodexProcess] = {}
+
+    @property
+    def _solet_bin(self) -> str:
+        """The wake CLI, resolved FRESH on every read (R11, 2026-08-17).
+
+        Was resolved once in ``__init__``, caching a snapshot of the ``current``
+        symlink's target — mutable state that cutover moves under a long-lived
+        process — and thereby pinning every later spawn into a reapable versioned
+        release directory. Full account in :func:`resolve_solet_bin`.
+
+        Per READ rather than per spawn; the bounded residual is documented on
+        ``TmuxHostDriver._solet_bin`` and applies identically here.
+        """
+        return self._cli_resolver.resolve()
 
     @property
     def _config_path(self) -> Path:

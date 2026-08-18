@@ -74,17 +74,33 @@ from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
 from agent_messaging_plugin.session_sweep import (  # noqa: E402
     DEFAULT_REGISTRATION_BOUND_S,
     EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE,
+    GAUGE_COVERAGE_GRACE_S,
     NoticeLatch,
     SessionRoleClaimPruner,
+    _notify_rotation_due,
     sweep_deadline_dependencies,
     sweep_gauge_coverage,
     sweep_lane_closed_dependencies,
     sweep_overdue_sessions,
     sweep_rotation_due_sessions,
+    sweep_ttl_overdue_sessions,
     sweep_unregistered_spawning_sessions,
 )
 
 T0 = datetime(2026, 8, 3, 12, 0, 0, tzinfo=UTC)
+
+
+def _past_grace() -> datetime:
+    """A clock far enough past the fixtures' spawn time that the gauge leg's
+    startup grace no longer applies.
+
+    The fixtures create rows at the REAL wall clock, so this is derived from
+    ``datetime.now`` rather than from :data:`T0`. Every gauge-coverage test
+    passes this explicitly: after the R4 lane added the grace, "this session is
+    dark" is a claim about a session that has HAD TIME to report, and a test
+    that does not say how old its row is no longer states its own precondition.
+    """
+    return datetime.now(UTC) + timedelta(seconds=GAUGE_COVERAGE_GRACE_S + 60)
 
 _passed = 0
 _failed: list[str] = []
@@ -1218,7 +1234,9 @@ def test_gauge_coverage_catches_a_live_session_with_no_row() -> None:
     failing. Neither the hook (it must swallow its own faults) nor the session
     (it does not know) can report this; the sweep sees both facts."""
     state, reg, mgr, bridge_id = _wired()  # agi-worker is LIVE with NO gauge row
-    n = sweep_gauge_coverage(state, peer_registry=reg, bridge_manager=mgr)
+    n = sweep_gauge_coverage(
+        state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr,
+    )
     _check(n == 1, "a live session with no gauge row is detected")
     _, events = mgr.get(bridge_id).events_after(-1)
     _check(events and events[0].event_type == "gauge_coverage_notice"
@@ -1229,10 +1247,79 @@ def test_gauge_coverage_catches_a_live_session_with_no_row() -> None:
 def test_gauge_coverage_is_silent_when_the_row_exists() -> None:
     state, reg, mgr, bridge_id = _wired()
     _gauge(state, "agi-worker")
-    n = sweep_gauge_coverage(state, peer_registry=reg, bridge_manager=mgr)
+    n = sweep_gauge_coverage(
+        state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr,
+    )
     _check(n == 0, "a session that IS reporting produces no coverage notice")
     _, events = mgr.get(bridge_id).events_after(-1)
     _check(not events, "and nothing is delivered")
+
+
+# ---------------------------------------------------------------------------
+# R4 change 1: the gauge leg's STARTUP GRACE
+# ---------------------------------------------------------------------------
+
+
+def test_gauge_coverage_grants_a_newly_live_session_its_startup_grace() -> None:
+    """The false alarm this fixes, measured live 2026-08-17T16:33:11Z.
+
+    Four lanes ~2 minutes old were reported as "the reporting path is failing
+    SILENTLY". All four were merely NEW — they had not completed a first
+    reporting tick — and every one reported normally minutes later. A newly LIVE
+    session is dark by construction until its first tick, so without this
+    predicate every spawn wave manufactures one false alarm per lane.
+
+    The latch cannot substitute for it: each wave is a fresh episode with fresh
+    keys, so suppression of a REPEAT does nothing about a fresh false POSITIVE.
+    """
+    state, reg, mgr, bridge_id = _wired()  # agi-worker LIVE, no gauge row, born now
+    n = sweep_gauge_coverage(
+        state, now=datetime.now(UTC), peer_registry=reg, bridge_manager=mgr,
+    )
+    _check(n == 0, "a just-born live session is NOT called dark")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(not events, "and its steward is not woken about it")
+
+
+def test_gauge_coverage_still_fires_once_the_grace_expires() -> None:
+    """The other half, and the one that keeps the grace from being a mute
+    button: the SAME row, still dark, is reported once it has had time."""
+    state, reg, mgr, bridge_id = _wired()
+    early = sweep_gauge_coverage(
+        state, now=datetime.now(UTC), peer_registry=reg, bridge_manager=mgr,
+    )
+    late = sweep_gauge_coverage(
+        state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr,
+    )
+    _check((early, late) == (0, 1), "silent while young, reported once aged")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(len(events) == 1, "exactly one notice, delivered on the later tick")
+    _check(
+        "startup grace" in events[0].content,
+        "and the prose says it is past the grace, so the reader knows this is "
+        "not simply a session that has not reported yet",
+    )
+
+
+def test_gauge_coverage_does_not_grant_grace_on_an_unreadable_timestamp() -> None:
+    """The fail-toward direction, stated because it is the opposite of
+    _spawn_alive_patience_exhausted's and a reader will expect that one.
+
+    The grace is an EXCEPTION to an alarm, so it may only apply on positive
+    evidence that the row is young. A row whose transition timestamp cannot be
+    read is still reported — suppressing an alarm on a timestamp nobody could
+    parse is how a detector goes quiet for a reason nobody chose.
+    """
+    state, reg, mgr, _bridge_id = _wired()
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-worker"}},
+        {"last_transition_at": ""},
+    )
+    n = sweep_gauge_coverage(
+        state, now=datetime.now(UTC), peer_registry=reg, bridge_manager=mgr,
+    )
+    _check(n == 1, "an unreadable age does NOT buy silence")
 
 
 # ---------------------------------------------------------------------------
@@ -1313,20 +1400,209 @@ def test_gauge_coverage_notifies_once_and_releases_on_recovery() -> None:
     notice instead of a permanent silence."""
     state, reg, mgr, bridge_id = _wired()  # agi-worker LIVE, no gauge row
     latch = NoticeLatch()
-    first = sweep_gauge_coverage(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
-    second = sweep_gauge_coverage(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
+    aged = _past_grace()
+    first = sweep_gauge_coverage(
+        state, now=aged, peer_registry=reg, bridge_manager=mgr, latch=latch,
+    )
+    second = sweep_gauge_coverage(
+        state, now=aged, peer_registry=reg, bridge_manager=mgr, latch=latch,
+    )
     _check((first, second) == (1, 0), "one notice for one outage, not one per tick")
     _, events = mgr.get(bridge_id).events_after(-1)
     _check(len(events) == 1, "exactly ONE event across the outage's ticks")
     _check(latch.suppressed("agi-worker"), "the key is latched while the outage holds")
     _gauge(state, "agi-worker")  # reporting recovered
-    recovered = sweep_gauge_coverage(state, peer_registry=reg, bridge_manager=mgr, latch=latch)
+    recovered = sweep_gauge_coverage(
+        state, now=aged, peer_registry=reg, bridge_manager=mgr, latch=latch,
+    )
     _check(recovered == 0, "nothing to say while it reports")
     _check(
         not latch.suppressed("agi-worker"),
         "and recovery RELEASED the key -- a later outage notifies rather than being "
         "suppressed by the first one",
     )
+
+
+# ---------------------------------------------------------------------------
+# R4 change 3: a notice must not be able to swallow its own message bug
+# ---------------------------------------------------------------------------
+
+
+def test_a_broken_notice_message_surfaces_instead_of_being_swallowed() -> None:
+    """Found by M5's blast radius, not by a separate investigation.
+
+    Both notice legs composed their prose as an ARGUMENT INSIDE the try that
+    guards ``append_event``. That guard exists for DELIVERY faults, but a broad
+    ``except Exception`` around the prose too means a bug in the message itself
+    is caught, logged as "append failed", and the notice silently vanishes while
+    the log names the wrong cause. In a notice family whose entire purpose is to
+    be the thing that speaks up, that is the fail-open shape these legs exist to
+    catch, living inside the alarm.
+
+    ``_rotation_prose`` formats ``fraction`` with ``:.3f``, so an enriched row
+    without it raises. With the prose composed outside the try, that surfaces.
+    Swallowing it would return False and report zero — indistinguishable from an
+    unreachable steward.
+    """
+    state, reg, mgr, _bridge_id = _wired()
+    raised = False
+    try:
+        _notify_rotation_due(
+            state=state, peer_registry=reg, bridge_manager=mgr,
+            row={},  # no 'fraction' -> _rotation_prose raises
+            agent_instance_id="agi-worker", spawner_instance_id="agi-steward",
+        )
+    except (TypeError, ValueError):
+        raised = True
+    _check(raised, "a broken notice MESSAGE surfaces rather than being reported "
+                   "as a delivery failure")
+
+
+# ---------------------------------------------------------------------------
+# R4 change 2: the TTL leg — expires_at was declared and NEVER READ
+# ---------------------------------------------------------------------------
+
+
+def _expire(state: StateManagementInterface, agent_instance_id: str, when: datetime) -> None:
+    """Set a row's expires_at, which insert_managed_session only writes when the
+    spawn requested ttl_seconds."""
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": agent_instance_id}},
+        {"expires_at": when.isoformat()},
+    )
+
+
+def test_ttl_overdue_notifies_the_steward() -> None:
+    """R4's whole point: expires_at had three touch points in the plugin (the
+    column, one write at spawn, one output-schema entry) and ZERO readers. A
+    knob that is never enforced is decoration, and the decoration cost a lane
+    ~4h40m of nobody being told."""
+    state, reg, mgr, bridge_id = _wired()
+    _expire(state, "agi-worker", T0 - timedelta(hours=2))
+    n = sweep_ttl_overdue_sessions(
+        state, now=T0, peer_registry=reg, bridge_manager=mgr,
+    )
+    _check(n == 1, "a past-TTL live session is detected")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(
+        events and events[0].event_type == "ttl_overdue_notice",
+        "delivered under its own event type, distinguishable from the other notices",
+    )
+    _check("agi-worker" in events[0].content, "and it names the session")
+
+
+def test_ttl_notice_names_both_clocks_and_the_measured_overdue() -> None:
+    """The two-clock confusion is the failure mode this text exists to prevent.
+
+    A row can be past expires_at while its report_by sits HOURS LATER, because
+    report_by is re-armed on every report and expires_at is frozen at spawn. A
+    reader who sees only "past TTL" on such a row concludes the notice is buggy.
+    """
+    state, reg, mgr, bridge_id = _wired()
+    _expire(state, "agi-worker", T0 - timedelta(hours=2, minutes=30))
+    sweep_ttl_overdue_sessions(state, now=T0, peer_registry=reg, bridge_manager=mgr)
+    _, events = mgr.get(bridge_id).events_after(-1)
+    body = events[0].content
+    _check("2h30m" in body, "the MEASURED overdue duration, not a bare 'past TTL'")
+    _check("expires_at" in body and "report_by" in body, "BOTH clocks are named")
+    _check(
+        "NOTHING HAS BEEN DONE" in body,
+        "and it says plainly that nothing was reaped — the platform notices, "
+        "the steward decides",
+    )
+
+
+def test_ttl_silent_for_a_row_that_never_requested_a_ttl() -> None:
+    """The load-bearing skip. expires_at is written ONLY when the spawn asked
+    for ttl_seconds, so an absent value means 'unbounded by request' — never
+    'expired at the epoch'. Read the other way, this leg would have fired on
+    every operator-launched and ad-hoc row in the ledger on its first tick."""
+    state, reg, mgr, bridge_id = _wired()  # agi-worker has NO expires_at
+    n = sweep_ttl_overdue_sessions(
+        state, now=T0 + timedelta(days=3650), peer_registry=reg, bridge_manager=mgr,
+    )
+    _check(n == 0, "no TTL requested is not an expiry, even ten years on")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(not events, "and nothing is delivered")
+
+
+def test_ttl_silent_before_the_deadline() -> None:
+    state, reg, mgr, _bridge_id = _wired()
+    _expire(state, "agi-worker", T0 + timedelta(hours=1))
+    n = sweep_ttl_overdue_sessions(
+        state, now=T0, peer_registry=reg, bridge_manager=mgr,
+    )
+    _check(n == 0, "a session inside its TTL is not notified about")
+
+
+def test_ttl_reads_expires_at_and_not_report_by() -> None:
+    """The clock choice, asserted rather than described.
+
+    A lane that keeps reporting re-arms report_by forever. If this leg read
+    report_by, TTL would be structurally unreachable for exactly the sessions it
+    exists to catch — inert in precisely the case it was built for. So: a row
+    whose report_by is far in the FUTURE and whose expires_at is in the PAST
+    must still fire.
+    """
+    state, reg, mgr, _bridge_id = _wired()
+    _expire(state, "agi-worker", T0 - timedelta(hours=6))
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-worker"}},
+        {"report_by": (T0 + timedelta(hours=6)).isoformat()},
+    )
+    n = sweep_ttl_overdue_sessions(
+        state, now=T0, peer_registry=reg, bridge_manager=mgr,
+    )
+    _check(n == 1, "a healthy, chatty, past-TTL lane still expires")
+
+
+def test_ttl_notifies_once_per_episode() -> None:
+    """Latched, and the case is stronger here than for the L4 legs: TTL-overdue
+    can NEVER clear on its own, because expires_at is frozen and the clock only
+    advances. Unlatched, this notifies every tick forever."""
+    state, reg, mgr, bridge_id = _wired()
+    _expire(state, "agi-worker", T0 - timedelta(hours=2))
+    latch = NoticeLatch()
+    first = sweep_ttl_overdue_sessions(
+        state, now=T0, peer_registry=reg, bridge_manager=mgr, latch=latch,
+    )
+    second = sweep_ttl_overdue_sessions(
+        state, now=T0 + timedelta(minutes=5), peer_registry=reg,
+        bridge_manager=mgr, latch=latch,
+    )
+    _check((first, second) == (1, 0), "one notice per episode, not one per tick")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(len(events) == 1, "exactly ONE event across both ticks")
+    _check(latch.suppressed("agi-worker"), "the key stays latched while it holds")
+
+
+def test_ttl_latch_does_not_swallow_an_undelivered_notice() -> None:
+    """Latched on DELIVERY, never on detection — an outage must not silence its
+    own alarm. With no resolvable steward the notice cannot be delivered, so the
+    key must stay un-latched and retry on the next tick."""
+    state, reg, mgr, _bridge_id = _wired()
+    _spawn_live(state, agent_instance_id="agi-orphan", spawned_by_instance_id="agi-nobody")
+    _expire(state, "agi-orphan", T0 - timedelta(hours=1))
+    latch = NoticeLatch()
+    n = sweep_ttl_overdue_sessions(
+        state, now=T0, peer_registry=reg, bridge_manager=mgr, latch=latch,
+    )
+    _check(n == 0, "an unresolvable steward means nothing was delivered")
+    _check(
+        not latch.suppressed("agi-orphan"),
+        "and an undelivered notice is NOT latched — the next tick retries",
+    )
+
+
+def test_ttl_leg_no_ops_without_a_bridge() -> None:
+    """Early-boot posture, matching every sibling: no registry/manager means
+    return 0, never raise."""
+    state = _state()
+    _spawn_live(state, agent_instance_id="agi-worker", spawned_by_instance_id="agi-steward")
+    _expire(state, "agi-worker", T0 - timedelta(hours=1))
+    _check(sweep_ttl_overdue_sessions(state, now=T0) == 0, "TTL leg no-ops with no bridge")
 
 
 def test_latches_are_independent_per_notice_kind() -> None:
@@ -1399,6 +1675,21 @@ def main() -> int:
     test_gauge_coverage_catches_a_live_session_with_no_row()
     test_gauge_coverage_is_silent_when_the_row_exists()
     test_l4a_legs_no_op_without_a_bridge()
+
+    test_gauge_coverage_grants_a_newly_live_session_its_startup_grace()
+    test_gauge_coverage_still_fires_once_the_grace_expires()
+    test_gauge_coverage_does_not_grant_grace_on_an_unreadable_timestamp()
+
+    test_a_broken_notice_message_surfaces_instead_of_being_swallowed()
+
+    test_ttl_overdue_notifies_the_steward()
+    test_ttl_notice_names_both_clocks_and_the_measured_overdue()
+    test_ttl_silent_for_a_row_that_never_requested_a_ttl()
+    test_ttl_silent_before_the_deadline()
+    test_ttl_reads_expires_at_and_not_report_by()
+    test_ttl_notifies_once_per_episode()
+    test_ttl_latch_does_not_swallow_an_undelivered_notice()
+    test_ttl_leg_no_ops_without_a_bridge()
 
     test_rotation_due_notifies_once_per_episode()
     test_rotation_due_latch_rearms_when_the_session_rotates()
