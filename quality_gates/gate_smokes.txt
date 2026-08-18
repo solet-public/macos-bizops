@@ -232,6 +232,15 @@ plugins/agent_messaging_plugin/tests/role_reconnect_self_refresh_smoke.py
 # Offline (env-var unit scope).
 plugins/agent_messaging_plugin/tests/session_id_carrier_chain_smoke.py
 
+# R2 fix (2026-08-18): the managed-spawn session-id guard in
+# mcp_bridge.__main__ — a managed MCP bridge spawn (injected AGENT_INSTANCE_ID)
+# with no resolved AGENT_SESSION_ID now dies loud instead of silently
+# persisting a peer_binding row that peer_holds_role/peer_claim_role can
+# never confirm. Pins both discriminators: the managed+empty case raises, the
+# documented interactive/un-managed degrade (self-minted instance id) is
+# unaffected. Offline (pure-function unit scope, no live bridge).
+plugins/agent_messaging_plugin/tests/managed_bridge_session_id_guard_smoke.py
+
 # Role-model v4 SLICE A (additive foundation) — the two fresh tables (`role`
 # entity + discriminated `role_binding`, holder_kind session|inference_provider,
 # nullable identity cols + holder_identity/properties JSON + claim_epoch), the v4
@@ -3181,9 +3190,11 @@ plugins/agent_messaging_plugin/tests/job_completion_delivery_smoke.py
 # fixtures ADVANCE (a real over-bound string, a real over-cap record set) rather
 # than asserting on constants, and every guard here was red-mutated: disabling
 # the enqueue check, parsing before measuring, restoring the unbounded read,
-# flipping the liveness conjunction to OR, and requeueing an oversized orphan
-# each turn exactly the check that names that property red. Offline by
-# construction: pure functions and a spy, no solet, no database.
+# restoring the queue-depth gate on the liveness alarm (GAU-10, 2026-08-18 --
+# the gate suppressed the alarm forever on a freeze that began at depth 0,
+# since only the poller being killed could ever unstick it), and requeueing an
+# oversized orphan each turn exactly the check that names that property red.
+# Offline by construction: pure functions and a spy, no solet, no database.
 ananta/tests/core/actions/oversized_payload_guard_smoke.py
 
 # migrate_to_solet LaunchAgent OWNERSHIP — both directions, because each alone

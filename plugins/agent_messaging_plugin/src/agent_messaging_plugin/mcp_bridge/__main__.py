@@ -567,6 +567,44 @@ def _resolve_agent_session_id(agent_id: str) -> str:
     return ""
 
 
+def _enforce_session_id_for_managed_registration(
+    *, agent_instance_id_injected: bool, agent_session_id: str,
+) -> None:
+    """Fail loud rather than register a managed spawn with an empty session id.
+
+    A managed spawner (``macos_coding_agent_session_plugin``'s
+    ``bridge_tracker``, v10 Control #2.D) injects a caller-chosen
+    ``AGENT_INSTANCE_ID`` so the registry replaces this subprocess's binding
+    in place across reconnects — but that injection path forwards no
+    ``AGENT_SESSION_ID`` alongside it (``default_spawn`` copies ITS OWN
+    process env, never the calling session's), so ``_resolve_agent_session_id``
+    deterministically reads the long-running solet server's own environment —
+    never the managed session's — and resolves ``""``. Registering that
+    silently persists a ``peer_binding`` row that ``peer_holds_role`` /
+    ``peer_claim_role`` can never confirm for this instance id (R2 — measured
+    live, 2026-08-18: a spawned worker's LEDGER-id row carried an empty
+    ``agent_session_id`` while its WATCH-id row, registered through the
+    separate CLI path, was correctly populated).
+
+    The degrade-to-empty stays intentional and untouched for a genuinely
+    interactive/un-managed bridge (``agent_instance_id_injected`` is ``False``
+    there, e.g. the operator ``.mcp.json`` path with a self-minted instance
+    id) — this check narrows to the managed case only, mirroring
+    :func:`agent_messaging_plugin.env_contract.enforce_no_legacy_agent_env`'s
+    fail-loud convention.
+    """
+    if agent_instance_id_injected and not agent_session_id:
+        msg = (
+            "managed MCP bridge spawn: AGENT_INSTANCE_ID was injected by a "
+            "managed spawner but no AGENT_SESSION_ID carrier resolved — "
+            "registering would silently write a peer_binding row that "
+            "peer_holds_role/peer_claim_role can never confirm for this "
+            "instance id (R2). Fix the spawner to also inject "
+            "AGENT_SESSION_ID alongside AGENT_INSTANCE_ID."
+        )
+        raise RuntimeError(msg)
+
+
 async def _discover_port(solet_name: str) -> int:
     """Poll the runtime port file until the solet has written it."""
     attempt = 0
@@ -727,7 +765,10 @@ async def _run() -> None:
     # spawner (macos bridge_tracker sets it per session) keeps a STABLE
     # agent_instance_id across bridge reconnects — the registry replaces in
     # place instead of accreting a fresh id every reconnect. Absent (operator
-    # .mcp.json path) → mint a durable id as before.
+    # .mcp.json path) → mint a durable id as before. Recorded here (rather
+    # than re-derived) because it is also the discriminator the R2 guard below
+    # uses to tell a managed spawn from a genuinely interactive one.
+    agent_instance_id_injected = bool(os.environ.get(AGENT_INSTANCE_ID_ENV))
     agent_instance_id = (
         os.environ.get(AGENT_INSTANCE_ID_ENV)
         or _generate_agent_instance_id()
@@ -739,12 +780,20 @@ async def _run() -> None:
     # prefers its own CODEX_THREAD_ID then AGENT_SESSION_ID; every other kind
     # uses AGENT_SESSION_ID only and never adopts CODEX_THREAD_ID (the CAS
     # filters on agent_session_id alone, so cross-agent adoption would re-point
-    # the wrong session's roles). Absent all → "" → the CAS fails closed to
-    # explicit re-claim (= no worse than today; server logs S1.5). Any carrier
-    # MUST be a per-logical-session id (a launcher-minted UUID, or Codex's own
-    # thread id) — NEVER derived from parent_pid (shared across app-hosted
-    # siblings).
+    # the wrong session's roles). Any carrier MUST be a per-logical-session id
+    # (a launcher-minted UUID, or Codex's own thread id) — NEVER derived from
+    # parent_pid (shared across app-hosted siblings). Absent all, for a
+    # genuinely interactive/un-managed bridge → "" → the CAS fails closed to
+    # explicit re-claim (server logs S1.5); for a MANAGED spawn (injected
+    # instance id) the same emptiness is no longer tolerated — see the R2
+    # guard immediately below, which fails loud instead (2026-08-18: this
+    # combination measurably persisted a peer_binding row that
+    # peer_holds_role/peer_claim_role can never confirm).
     agent_session_id = _resolve_agent_session_id(agent_id)
+    _enforce_session_id_for_managed_registration(
+        agent_instance_id_injected=agent_instance_id_injected,
+        agent_session_id=agent_session_id,
+    )
     session_label = _compute_session_label(agent_id)
     session_role = _compute_session_role(session_label)
     parent_pid = os.getppid()

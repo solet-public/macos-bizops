@@ -1,9 +1,13 @@
 """In-process liveness signal for the action dispatch path (D5).
 
 During the 2026-08-15 outage ``solet health`` reported ``healthy`` for the
-entire 3h20m freeze, and every observer on the fleet was misled by it —
-including the blue/green supervisor, which is health-gated and therefore
-declined to replace a solet that was wedged but still answering.
+entire 3h20m freeze, and every observer on the fleet was misled by it. (That
+history is about the observers, not about deploy gating: this checkout's
+blue-green swap paths — local router and AWS ALB/ECS alike — never consult
+this endpoint's body during warmup, only the unrelated ``readiness_probe``
+closure's 200-vs-503 split; see GAU-10 investigation notes in
+``workbench/2026-08-18_gau10_stall_boolean_report_lane_gau10.md``. Do not
+read the paragraph below as a description of current deploy wiring.)
 
 Lane AA established the subtlety that decides this module's design: **health
 was not lying.** It was truthfully measuring a genuinely-alive half of a
@@ -27,21 +31,24 @@ Because the poller and the bridge's uvicorn share one process, a poller that is
 starved of the GIL simply stops updating these values while the probe keeps
 serving — the age grows, which is precisely the signal that was missing.
 
-## The alarm is a CONJUNCTION, and that is not a detail
+## The alarm is STALE POLL AGE ALONE (GAU-10, 2026-08-18)
 
-Neither number is diagnostic alone:
+``poll_age_seconds`` on its own is the whole signal. It does not false-alarm
+on an idle platform because :meth:`ActionPathLiveness.record_poll_cycle` is
+called at the end of **every** poll cycle, including empty ones (see its own
+docstring and ``ActionQueuePoller._poll_once``) — an idle-but-alive poller
+keeps age fresh forever, so ``age > threshold`` already means "the poller
+stopped completing cycles," not "the platform is quiet."
 
-* ``poll_age_seconds`` alone **false-alarms every quiet night** — an idle
-  platform legitimately goes long stretches without dispatching anything.
-* ``queued_depth`` alone **false-greens** — the queue was nearly empty at the
-  moment the 2026-08-15 freeze began, and depth only grew later.
-
-A stalled action path is *stale poll age* **AND** *work waiting to be done*.
-:attr:`ActionPathLiveness.stalled` computes that conjunction so the derived
-condition ships with the numbers. Reporting the two figures side by side and
-trusting the reader to combine them correctly is exactly what the old health
-probe did to us — it published true facts and left the fatal inference to a
-human at 2 a.m.
+This module used to gate the alarm on ``queued_depth > 0`` as well, reasoning
+that depth alone false-greens on a freeze that begins at an idle moment. That
+reasoning is true but pointed the fix the wrong way: ``last_observed_queue_depth``
+is written only by the same poller whose death the alarm exists to detect, so a
+freeze that begins at depth 0 pinned depth at 0 forever and the conjunction
+could **never** fire — exactly the failure GAU-10 measured live (stale age with
+an empty queue, reported not-stalled). Depth is still published in
+:meth:`ActionPathLiveness.snapshot` as corroborating context, but it no longer
+gates the verdict.
 """
 
 from __future__ import annotations
@@ -50,10 +57,10 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-# A poll cycle that has not completed for this long, while work is queued,
-# means the dispatch path is not running. Generous relative to the default 1 s
-# poll interval: the point is to catch a total freeze in minutes rather than
-# hours, not to flag a slow cycle.
+# A poll cycle that has not completed for this long means the dispatch path
+# is not running. Generous relative to the default 1 s poll interval: the
+# point is to catch a total freeze in minutes rather than hours, not to flag
+# a slow cycle.
 DEFAULT_STALL_THRESHOLD_SECONDS = 120.0
 
 
@@ -117,15 +124,19 @@ class ActionPathLiveness:
     def stalled(
         self, *, threshold_seconds: float = DEFAULT_STALL_THRESHOLD_SECONDS
     ) -> bool:
-        """True when the dispatch path is stale AND work is waiting.
+        """True when the dispatch path has gone stale.
 
-        The conjunction is the whole point — see the module docstring. Depth
-        alone false-greens; age alone false-alarms on an idle platform.
+        Stale poll age alone is diagnostic — see the module docstring
+        (GAU-10). ``record_poll_cycle`` stamps every cycle including empty
+        ones, so an idle-but-alive poller keeps age fresh; age past the
+        threshold already means the poller stopped completing cycles.
+        ``last_observed_queue_depth`` does not gate this: it is written only
+        by the poller whose death this method exists to detect, so a freeze
+        that begins at depth 0 would pin depth at 0 forever and could never
+        be used as a gate without silencing exactly the freeze it is meant to
+        catch.
         """
-        return (
-            self.poll_age_seconds() > threshold_seconds
-            and self.last_observed_queue_depth > 0
-        )
+        return self.poll_age_seconds() > threshold_seconds
 
     def snapshot(
         self, *, threshold_seconds: float = DEFAULT_STALL_THRESHOLD_SECONDS
@@ -133,8 +144,8 @@ class ActionPathLiveness:
         """Render the liveness view for a health probe.
 
         Ships the derived ``action_path_stalled`` verdict alongside the raw
-        numbers so a consumer does not have to re-derive the conjunction (and
-        get it wrong) to know whether the action path is alive.
+        numbers so a consumer does not have to re-derive the stale-age check
+        (and get it wrong) to know whether the action path is alive.
         """
         return {
             "action_path_stalled": self.stalled(threshold_seconds=threshold_seconds),

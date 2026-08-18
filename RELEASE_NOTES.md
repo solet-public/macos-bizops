@@ -4,6 +4,73 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-18 (second update) — A stall alarm that can actually fire, and a bridge registration that refuses to start broken
+
+**One narrow breaking change, and it is deliberate.** A managed spawn that was
+previously accepted while being silently unusable now refuses to start, with an
+error naming what to fix. The other item is a correction to a health verdict
+that could not report the condition it existed to report. No envelope shrinks,
+and no stored row needs rewriting.
+
+Update with the standard short form: pull fast-forward only, restart, and wait
+for startup to finish. The seed update runbook carries the complete procedure.
+
+### The action-path stall verdict no longer suppresses itself
+
+The health report publishes a derived verdict for whether the action dispatch
+path has stopped, alongside the two numbers behind it: how long it has been
+since a poll cycle completed, and how many rows were waiting at that last
+cycle. The verdict required both to be true at once — a stale poll age, and
+work waiting to be done.
+
+The second half of that pair defeats the first. The waiting-work figure is
+written only by the very poller whose death the verdict exists to detect, so a
+freeze that begins while the queue happens to be empty pins that figure at zero
+for as long as the freeze lasts. The condition could then never be met, and the
+report kept saying healthy: stale age, empty queue, not stalled. That was
+observed live on a running deployment, not inferred from reading the code.
+
+The verdict is now the stale poll age alone. This does not reintroduce a false
+alarm on a quiet deployment, and the reason is structural rather than a matter
+of tuning: the poll timestamp is stamped at the end of every cycle, including
+cycles that found nothing to do, so an idle-but-alive poller keeps it fresh
+indefinitely. An age past the threshold therefore already means that cycles
+stopped completing, not that nothing was queued. The waiting-work figure is
+still published as corroborating context; it no longer gates the answer.
+
+If you have anything keying on that verdict, expect it to begin reporting the
+condition it was always meant to report. Nothing that previously reported a
+stall stops doing so, and the threshold is unchanged.
+
+### A managed bridge spawn now refuses rather than registering a binding nobody can confirm
+
+When a managed spawner starts a message-bridge subprocess for a session, it
+injects a stable instance identifier so the registry replaces that session's
+binding in place across reconnects instead of accreting a new one each time. It
+does not pass a session identifier alongside it, and the subprocess cannot
+recover one from its own environment — that environment belongs to the
+long-running service, not to the session being spawned.
+
+The registration went ahead anyway, with the session identifier left empty. The
+row it wrote looks present and is unusable: the check that asks whether a
+session holds a role, and the call that claims one, both resolve through that
+field, so neither can ever confirm anything for that instance. A session in
+that state is told it holds no role while its messages route to it correctly —
+a self-check that structurally cannot agree with what is actually happening.
+
+That combination is now refused before anything is written, with an error that
+names the missing carrier and what has to supply it. This is the breaking half
+of the release: a spawner that omits the session identifier fails at startup
+instead of appearing to work. The failure is the point, because the previous
+outcome was a registration that could not be diagnosed from either side of it.
+
+The deliberate empty-identifier path for a genuinely interactive bridge, started
+by hand rather than by a managed spawner, is untouched. The two cases are told
+apart by whether an instance identifier was injected, which only a managed
+spawner does. The read side and the preserve-on-empty registration behaviour
+are unchanged as well: this closes the fault where it was created rather than
+compensating for it where it was noticed.
+
 ## 2026-08-18 — Rotation notices that fire when they are needed, a sweep that reports a healthy tick, and shipped-document checks you can run before committing
 
 **Additive for every configuration.** A notice that could stay silent exactly
