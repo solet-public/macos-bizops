@@ -31,6 +31,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 import os
 import shlex
 import shutil
@@ -38,6 +39,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +47,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
+from agent_messaging_plugin import headless_adapter  # noqa: E402
 from agent_messaging_plugin.headless_adapter import (  # noqa: E402
+    _ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY,
     _WORKER_INJECTED_HOOK_FILENAMES,
 )
 from agent_messaging_plugin.session_hosts import HostCannotSpawnError  # noqa: E402
@@ -60,6 +64,7 @@ from agent_messaging_plugin.tmux_adapter import (  # noqa: E402
     _parse_tmux_version,
     _provider_ignores_dev_channels,
     _sanitize_session_name,
+    _tmux_denied_tools,
     _TmuxSendKeysDriverChannel,
 )
 
@@ -1432,6 +1437,264 @@ def test_real_tmux_terminate_is_idempotent_on_already_dead_session() -> None:
     _check(not raised, "terminate() on an already-dead/nonexistent session is a no-op, never raises")
 
 
+# --- managed-policy preflight on the tmux host ------------------------------
+#
+# Fixture-driven for the reason headless_adapter_smoke.py's own block states:
+# there is no managed policy file on this machine, so an absent-file probe
+# verifies nothing about the populated case.
+
+
+def _write_policy(path: Path, body: object) -> Path:
+    path.write_text(json.dumps(body), encoding="utf-8")
+    return path
+
+
+@contextlib.contextmanager
+def _captured_warnings() -> Iterator[list[logging.LogRecord]]:
+    """Records WARNING records from the module the warn helper logs through.
+
+    The helper lives in ``headless_adapter`` and is imported here, so its
+    records carry THAT module's logger name even on a tmux spawn -- asserting
+    against ``tmux_adapter``'s logger would produce an empty list and a green
+    that means nothing.
+    """
+    records: list[logging.LogRecord] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    sink = _Sink(level=logging.WARNING)
+    target = logging.getLogger("agent_messaging_plugin.headless_adapter")
+    target.addHandler(sink)
+    previous = target.level
+    target.setLevel(logging.WARNING)
+    try:
+        yield records
+    finally:
+        target.removeHandler(sink)
+        target.setLevel(previous)
+
+
+@contextlib.contextmanager
+def _default_policy_paths(paths: tuple[Path, ...]) -> Iterator[None]:
+    """Point the default search list at a fixture.
+
+    Patched on ``headless_adapter`` ALONE, and that is load-bearing rather than
+    incidental: this driver reaches the policy files only through helpers that
+    live in that module and read its globals, so the default path list has
+    exactly one binding. An earlier version of this helper also patched a
+    ``tmux_adapter._MANAGED_SETTINGS_PATHS`` -- which no longer exists, and
+    whose absence is what proves the single-binding property.
+    """
+    original = headless_adapter._MANAGED_SETTINGS_PATHS
+    headless_adapter._MANAGED_SETTINGS_PATHS = paths
+    try:
+        yield
+    finally:
+        headless_adapter._MANAGED_SETTINGS_PATHS = original
+
+
+def test_tmux_managed_policy_hooks_plugin_only_refuses_spawn() -> None:
+    """★ REGRESSION GUARD FOR THE GAP ITSELF (2026-08-17).
+
+    The W4A preflight shipped for #8 §43.1 was wired into
+    ``HeadlessHostDriver.verify_config`` ONLY. This driver duplicated the
+    claude-launch checks and omitted it, so the refusal that report asked for
+    was never performed on the tmux host -- the SWAP-DURABLE host
+    ``spawn_session``'s own documentation tells adopters to prefer. #8 named
+    ``tmux_adapter.py`` explicitly in its diagnosis; the fix covered one of the
+    two files it named.
+
+    Would catch: exactly that omission. Before the wiring this leg's
+    verify_config returned ``[]``. This number would also be this number if
+    the remedy text drifted from the headless one -- which is why the
+    assertions below check the key, the file and the escape hatch by name
+    rather than merely counting remedies.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {"strictPluginOnlyCustomization": ["hooks"]},
+        )
+        remedies = driver.verify_config(
+            transport="watch", managed_settings_paths=(policy,),
+        )
+        _check(
+            len(remedies) == 1,
+            f"the TMUX driver now refuses a hooks-stripping host too "
+            f"(got {remedies!r})",
+        )
+        text = remedies[0] if remedies else ""
+        _check(
+            "strictPluginOnlyCustomization" in text and str(policy) in text,
+            "naming the offending key AND the file it read it from",
+        )
+        _check(
+            "degraded_hooks_acknowledged" in text,
+            "and the escape hatch, so the refusal is actionable",
+        )
+
+
+def test_tmux_managed_policy_acknowledged_degraded_proceeds() -> None:
+    """The opt-out reaches this host too -- otherwise the new refusal would be
+    unescapable on tmux while escapable on headless."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {"strictPluginOnlyCustomization": ["hooks"]},
+        )
+        _check(
+            driver.verify_config(
+                transport="watch", managed_settings_paths=(policy,),
+                degraded_hooks_acknowledged=True,
+            ) == [],
+            "an acknowledged-degraded tmux spawn is allowed through the preflight",
+        )
+
+
+def test_tmux_managed_policy_without_hooks_key_is_not_a_remedy() -> None:
+    """The discriminating leg: a managed policy that restricts something else
+    must not refuse. Without it the new wiring would fire on the mere presence
+    of a policy file, which would be a far larger behaviour change than the
+    one authorized."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {
+                "strictPluginOnlyCustomization": ["mcpServers"],
+                _ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY: True,
+            },
+        )
+        _check(
+            driver.verify_config(transport="watch", managed_settings_paths=(policy,)) == [],
+            "neither a non-hooks strict list nor the §45.1 permissions key "
+            "refuses a tmux spawn",
+        )
+
+
+def test_tmux_managed_policy_malformed_file_fails_open() -> None:
+    """Same fail-open-loudly posture as the headless host, inherited by
+    importing the same prover rather than restating it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        policy = tmp_dir / "managed-settings.json"
+        policy.write_text("{not json at all", encoding="utf-8")
+        _check(
+            driver.verify_config(transport="watch", managed_settings_paths=(policy,)) == [],
+            "a malformed policy file fails OPEN on tmux too, never blocks",
+        )
+
+
+def test_tmux_denied_tools_is_the_settings_blob_source_of_truth() -> None:
+    """§45.1's warning names the deny list back to the operator, so the list
+    it names and the list the --settings blob emits must be the same object.
+
+    Would catch: a later edit that appends a tool to the blob's literal while
+    leaving the warning's source untouched -- the warning would then be
+    confidently wrong, which is worse than absent because it would be
+    believed.
+    """
+    calls: list[list[str]] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
+        driver.spawn({"agent_instance_id": "agi-denysrc"})
+        new_session_call = next(c for c in calls if "new-session" in c)
+        claude_argv = _extract_claude_argv_from_pane_command(new_session_call[-1])
+        settings_json = json.loads(claude_argv[claude_argv.index("--settings") + 1])
+        _check(
+            settings_json["permissions"]["deny"]
+            == list(_tmux_denied_tools(allow_askuserquestion=False)),
+            "the blob's deny list IS _tmux_denied_tools' output, not a parallel "
+            "literal that could drift from it",
+        )
+        _check(
+            "AskUserQuestion" in _tmux_denied_tools(allow_askuserquestion=False)
+            and "AskUserQuestion" not in _tmux_denied_tools(allow_askuserquestion=True),
+            "and the escape hatch still moves it -- the shared helper did not "
+            "flatten the per-spawn condition into a constant",
+        )
+
+
+def test_tmux_spawn_warns_on_a_permissions_inert_host_and_still_spawns() -> None:
+    """§45.1 on the host where it bites hardest: this is the only Claude
+    runtime host where AskUserQuestion's blocking picker can actually render,
+    so the warning must name that tool specifically -- the headless driver's
+    warning does not, and a shared message that named the same tools on both
+    would be wrong on one of them.
+
+    Would catch: the warn call being omitted from this driver's spawn(), or
+    being wired with the headless deny list.
+    """
+    calls: list[list[str]] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir, run_fn=_confirm_flow_run_fn(calls))
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {_ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY: True},
+        )
+        with _default_policy_paths((policy,)), _captured_warnings() as records:
+            # Deliberately carries NO 'tmux' substring. The first version of
+            # this leg used 'agi-tmux-inert', and the message interpolates the
+            # instance id -- so the host assertion below passed against a
+            # mutant that named the WRONG host. An instrument blind to the
+            # question confirms nothing; the id is part of the instrument.
+            host_ref = driver.spawn({"agent_instance_id": "agi-inert-host"})
+        _check(bool(host_ref), "the tmux spawn PROCEEDS on a permissions-inert host")
+        inert = [r for r in records if "PERMISSION DENIES INERT" in r.getMessage()]
+        _check(len(inert) == 1, f"exactly one inert-permissions warning (got {len(inert)})")
+        text = inert[0].getMessage() if inert else ""
+        _check(
+            "The tmux driver's" in text,
+            "the warning names THIS host, not the headless one",
+        )
+        _check(
+            "AskUserQuestion" in text,
+            "and names AskUserQuestion, which is inert only on this host and is "
+            "the tool the adopter's own §45.1 report is about",
+        )
+
+
+def test_tmux_capability_report_answers_permission_state_without_spawning() -> None:
+    """With the ledger record descoped, this is the only surface that answers
+    "are permission denies operative on this host?" in advance. Driven against
+    a populated fixture through the module default, because that is what
+    capability_report actually reads."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        driver = _configured_driver(tmp_dir)
+        clean = driver.capability_report()
+        _check(
+            clean.get("permission_denies_default")
+            == list(_tmux_denied_tools(allow_askuserquestion=False)),
+            "the report names this driver's default deny list",
+        )
+        _check(
+            clean.get("permission_denies_operative") is True
+            and clean.get("permission_policy_path") is None,
+            "no managed policy -> denies operative",
+        )
+        policy = _write_policy(
+            tmp_dir / "managed-settings.json",
+            {_ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY: True},
+        )
+        with _default_policy_paths((policy,)):
+            inert = driver.capability_report()
+        _check(
+            inert.get("permission_denies_operative") is False
+            and inert.get("permission_policy_path") == str(policy),
+            "and a flagged host reports them NOT operative, naming the file",
+        )
+
+
 def main() -> int:
     # Provider-marker hygiene (§39.1/§40.1): every pre-existing leg below was
     # written when the dev-channels flag was unconditional, so each one
@@ -1443,6 +1706,13 @@ def main() -> int:
     # _effective_env_marker.
     for marker in _THIRD_PARTY_PROVIDER_ENV_MARKERS:
         os.environ.pop(marker, None)
+    test_tmux_managed_policy_hooks_plugin_only_refuses_spawn()
+    test_tmux_managed_policy_acknowledged_degraded_proceeds()
+    test_tmux_managed_policy_without_hooks_key_is_not_a_remedy()
+    test_tmux_managed_policy_malformed_file_fails_open()
+    test_tmux_denied_tools_is_the_settings_blob_source_of_truth()
+    test_tmux_spawn_warns_on_a_permissions_inert_host_and_still_spawns()
+    test_tmux_capability_report_answers_permission_state_without_spawning()
     test_parse_tmux_version()
     test_sanitize_session_name()
     test_verify_config_remedies_are_independent()

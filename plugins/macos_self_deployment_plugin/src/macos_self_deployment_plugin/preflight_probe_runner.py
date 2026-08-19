@@ -45,7 +45,10 @@ from typing import Any, Final, TypeGuard
 
 from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
 
-from macos_self_deployment_plugin.constants import ENV_SOLET_NAME
+from macos_self_deployment_plugin.constants import (
+    ENV_SOLET_NAME,
+    resolve_project_root,
+)
 from macos_self_deployment_plugin.release_manager import CandidatePaths
 
 PROBE_MODULE: Final[str] = (
@@ -63,6 +66,17 @@ _ENV_RELEASE_ID: Final[str] = "SOLET_RELEASE_ID"
 _FAILING_STEP_HARNESS: Final[str] = "harness"
 _STDOUT_CAP_BYTES: Final[int] = 262_144
 _DETAIL_TAIL_CHARS: Final[int] = 2_000
+
+#: §46.1 — the root-manifest gate now runs INSIDE the probe, under the
+#: candidate's interpreter. These mirror ``preflight_probe``'s tokens; they
+#: are duplicated rather than imported because this module runs in the
+#: OUTGOING process, whose ``ananta`` import is exactly the stale anchor the
+#: fix exists to stop trusting.
+CHECK_ROOT_MANIFEST: Final[str] = "root_manifest"
+_STDIN_KEY_REPO_ROOT: Final[str] = "repo_root"
+_ENVELOPE_KEY_CAPABILITIES: Final[str] = "capabilities"
+_ENVELOPE_KEY_CHECKS_RUN: Final[str] = "checks_run"
+PROBE_ERROR_CHECK_SKIPPED: Final[str] = "ProbeCheckSkipped"
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,19 +178,37 @@ def _run_probe(
         log_path, exit_code=exit_code,
         stdout_bytes=stdout_bytes, stderr_bytes=stderr_bytes,
     )
-    return _classify(
+    outcome = _classify(
         exit_code=exit_code,
         stdout_bytes=stdout_bytes,
         stderr_bytes=stderr_bytes,
         release_id=candidate.release_id,
     )
+    if outcome.payload.get(CHECK_ROOT_MANIFEST) == ROOT_CHECK_UNSUPPORTED:
+        logger.warning(
+            "DEGRADED: candidate release %s predates the root-manifest probe "
+            "contract — the F1 gate did NOT run for this cutover. Permitted "
+            "(an older target cannot echo a capability it does not have); the "
+            "gate resumes on the next cutover whose target carries it.",
+            candidate.release_id,
+        )
+    return outcome
 
 
 def _manifest_from_disk(app_home: Path) -> dict[str, Any]:
-    """Build the probe's stdin manifest from the on-disk source of truth."""
+    """Build the probe's stdin payload from the on-disk source of truth.
+
+    ``repo_root`` rides along so the candidate's interpreter classifies the
+    LIVE deployment root (§46.1). Additive and safe across a version-mixed
+    cutover in both directions: an older probe's ``_extract_plugin_names``
+    reads only ``plugins`` and ignores every other key.
+    """
     plugin_set = load_manifest_plugin_set(app_home)
     plugins: Iterable[str] = sorted(plugin_set) if plugin_set is not None else ()
-    return {"plugins": list(plugins)}
+    return {
+        "plugins": list(plugins),
+        _STDIN_KEY_REPO_ROOT: str(resolve_project_root(app_home).resolve()),
+    }
 
 
 def _kill_process_group(proc: subprocess.Popen[bytes]) -> None:
@@ -250,16 +282,59 @@ def _parse_envelope(stdout_bytes: bytes) -> dict[str, Any] | None:
     return parsed
 
 
+ROOT_CHECK_RAN: Final[str] = "ran"
+ROOT_CHECK_UNSUPPORTED: Final[str] = "unsupported_by_probe"
+ROOT_CHECK_SKIPPED: Final[str] = "skipped"
+
+
+def _root_manifest_check_state(envelope: dict[str, Any]) -> str:
+    """Which of the three root-manifest outcomes this envelope reports.
+
+    Discriminates on the probe's POSITIVE self-assertion (``capabilities``),
+    never on the absence of ``checks_run`` — absence cannot tell a version
+    gap from a skipped check, and a bound that cannot tell those apart is a
+    bound in name only.
+
+    * ``UNSUPPORTED`` — the probe does not advertise the check. Expected
+      whenever the cutover target predates this contract; permitted, and
+      recorded rather than swallowed.
+    * ``SKIPPED`` — the probe advertises the check and did not run it. A
+      version gap cannot produce this; it is an inconsistency and the caller
+      refuses on it.
+    * ``RAN`` — advertised and executed.
+    """
+    capabilities = envelope.get(_ENVELOPE_KEY_CAPABILITIES)
+    if not isinstance(capabilities, list) or CHECK_ROOT_MANIFEST not in capabilities:
+        return ROOT_CHECK_UNSUPPORTED
+    checks_run = envelope.get(_ENVELOPE_KEY_CHECKS_RUN)
+    if not isinstance(checks_run, list) or CHECK_ROOT_MANIFEST not in checks_run:
+        return ROOT_CHECK_SKIPPED
+    return ROOT_CHECK_RAN
+
+
 def _classify_envelope(
     *, exit_code: int, envelope: dict[str, Any], release_id: str,
 ) -> ProbeOutcome:
     """Exit code and envelope must AGREE (A5b); disagreement is envelope error."""
+    root_check = _root_manifest_check_state(envelope)
+    if root_check == ROOT_CHECK_SKIPPED:
+        return _error_outcome(
+            error_class=PROBE_ERROR_CHECK_SKIPPED,
+            detail=(
+                f"probe advertises the {CHECK_ROOT_MANIFEST!r} capability but "
+                f"did not report it in {_ENVELOPE_KEY_CHECKS_RUN!r} "
+                f"({envelope.get(_ENVELOPE_KEY_CHECKS_RUN)!r}) — refusing to "
+                "treat an unrun gate as a passed one."
+            ),
+            release_id=release_id,
+        )
     ok_flag = envelope.get("ok")
     if exit_code == PROBE_EXIT_OK and ok_flag is True:
         return ProbeOutcome(ok=True, payload={
             "ok": True,
             "duration_ms": envelope.get("duration_ms"),
             "release_id": release_id,
+            CHECK_ROOT_MANIFEST: root_check,
         })
     failures = envelope.get("failures")
     if (
@@ -275,6 +350,7 @@ def _classify_envelope(
             "failures": failures,
             "release_id": release_id,
             "duration_ms": envelope.get("duration_ms"),
+            CHECK_ROOT_MANIFEST: root_check,
         })
     return _error_outcome(
         error_class=PROBE_ERROR_ENVELOPE,
@@ -312,13 +388,18 @@ def _error_outcome(
 
 
 __all__ = [
+    "CHECK_ROOT_MANIFEST",
     "EXPECTED_PROBE_VERSION",
+    "PROBE_ERROR_CHECK_SKIPPED",
     "PROBE_ERROR_ENVELOPE",
     "PROBE_ERROR_HARNESS",
     "PROBE_ERROR_TIMEOUT",
     "PROBE_EXIT_OK",
     "PROBE_EXIT_PREFLIGHT_FAILURES",
     "PROBE_MODULE",
+    "ROOT_CHECK_RAN",
+    "ROOT_CHECK_SKIPPED",
+    "ROOT_CHECK_UNSUPPORTED",
     "ProbeOutcome",
     "run_preflight_probe",
 ]

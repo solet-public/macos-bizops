@@ -158,6 +158,64 @@ def test_band_is_derived_at_read_time_not_stored() -> None:
            "the SAME 250K cold derives a different band -- cache state changes the verdict")
 
 
+def test_rotation_due_and_the_band_can_no_longer_contradict_each_other() -> None:
+    """GAU-08 at the PRODUCER. Every reader of this verb inherited its answer.
+
+    The verb published `rotation_due` from the fraction and `rotation_band`
+    from the policy bands, independently. On a 1M ceiling the bands saturate
+    at `warm_immediate` at 300,000 and the fraction does not reach 0.5 until
+    500,000, so for 200,000 tokens this verb returned, on the SAME row, the
+    most urgent band it has beside `rotation_due=False` -- and any operator or
+    lane reading the field rather than the band inherited the quiet answer.
+    Measured across the live fleet on 2026-08-18: the field read False on
+    every session at every value any of them occupied that day.
+
+    Both fields are asserted on the SAME response object. Reading them from
+    two separate calls could pass while the verb still derived them from
+    different inputs, which is the defect itself.
+    """
+    state = _RecordingState()
+    _report(state, current_tokens=300_000, cache_cold=False)
+    row = session_context_status(state, agent_instance_id="agi-test")
+    _check(row["rotation_band"] == "warm_immediate",
+           "300K warm is the most urgent band the policy has")
+    _check(row["rotation_due"] is True,
+           "...and rotation_due on the SAME row now agrees with it")
+    _check(row["fraction"] < rotation_thresholds.ROTATION_THRESHOLD_FRACTION,
+           "...while the fraction (0.300) is still BELOW the 0.5 hint -- so the "
+           "True cannot be coming from the fraction term, which is what makes this "
+           "a test of the union rather than of a moved threshold")
+
+
+def test_the_verdict_is_decided_on_the_ceiling_the_row_publishes() -> None:
+    """The decision and the printed denominator are the SAME number.
+
+    `rotation_due` is computed against the row's STORED `ceiling` -- the one
+    this response also publishes and that `fraction` is derived from -- not
+    against `resolve_ceiling(model)`. If those two ever disagree (a ceiling
+    table edited after a row was written, or a model string this build does
+    not know), deciding on one while printing the other would attach a true
+    number to the wrong noun: a reader could check the arithmetic, find it
+    inconsistent, and be right.
+
+    Forced apart deliberately here with a model name no ceiling table has, so
+    `resolve_ceiling` would answer 100,000 while the row says 1,000,000.
+    """
+    state = _RecordingState()
+    _report(state, current_tokens=60_000, ceiling=1_000_000,
+            model="a-model-no-table-has", cache_cold=False)
+    row = session_context_status(state, agent_instance_id="agi-test")
+    _check(rotation_thresholds.resolve_ceiling("a-model-no-table-has")
+           == rotation_thresholds.DEFAULT_CONSERVATIVE_CEILING,
+           "the model is genuinely unknown, so the two ceilings really do differ")
+    _check(row["ceiling"] == 1_000_000, "the row publishes its STORED ceiling")
+    _check(row["fraction"] == 0.06, "and its fraction is derived from that ceiling")
+    _check(row["rotation_due"] is False,
+           "rotation_due follows the STORED ceiling too: 0.06 is under the hint and "
+           "60,000 is warm_keep. Deciding on resolve_ceiling(model) instead would "
+           "have called this row DUE at 0.6 of a ceiling the response never showed")
+
+
 def test_unresolved_shape_carries_the_same_keys() -> None:
     """`resolved: false` is a legitimate, expected answer, so a caller must be
     able to read the same keys without a KeyError. A shape that differs
@@ -325,6 +383,8 @@ def main() -> int:
         test_cache_fields_are_tri_state_not_boolean,
         test_reported_cache_state_survives_including_the_falsy_values,
         test_band_is_derived_at_read_time_not_stored,
+        test_rotation_due_and_the_band_can_no_longer_contradict_each_other,
+        test_the_verdict_is_decided_on_the_ceiling_the_row_publishes,
         test_unresolved_shape_carries_the_same_keys,
         test_policy_constants_are_the_live_ones,
         test_reporter_attribution_round_trips,

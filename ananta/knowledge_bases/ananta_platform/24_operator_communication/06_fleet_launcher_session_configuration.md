@@ -106,6 +106,40 @@ not). The session launcher passes
 `{"permissions": {"deny": ["AskUserQuestion"]}}`. Settings sources merge, so
 the deny unions into the session without editing any file the user owns.
 
+⚠️ **Precondition — this mechanism is wholly inoperative on a machine whose
+enterprise-managed Claude Code policy sets
+`"allowManagedPermissionRulesOnly": true`.** Under that flag Claude Code
+honours only the permission rules written inside the managed settings file
+itself: user- and project-level `allow`/`ask`/`deny` rules do not apply at
+all, in every permission mode including `bypassPermissions`, and deny rules
+are no exception. Both the operator's own `~/.claude/settings.json` entry and
+the launcher's `--settings` overlay are therefore dropped before permission
+evaluation is ever reached — and **nothing announces it**. The picker simply
+fires as though no deny existed. Adopter-reported (§45.1), confirmed against
+Claude Code's own permissions documentation rather than inferred, and
+distinct from a stale-session effect: permission settings reload live
+in-session, so this reproduces identically in a brand-new session.
+
+**How an operator checks their own machine.** Look for a managed policy at
+`~/.claude/remote-settings.json` (a remotely-pulled policy; check this one
+first — on a machine that has it, the system paths below may not exist at
+all), `/Library/Application Support/ClaudeCode/managed-settings.json` on
+macOS, `/etc/claude-code/managed-settings.json` on Linux, or
+`C:\ProgramData\ClaudeCode\managed-settings.json` on Windows. If one exists
+and carries `allowManagedPermissionRulesOnly: true`, every deny below is
+inert on that machine, and the only place a deny is honoured is that file's
+own `permissions.deny` — which is administered by the organisation, not by
+the operator. The spawn drivers detect this and say so loudly at spawn time
+(they do not refuse; see the enforcement section below), and either host
+driver's `capability_report()` answers the same question without spawning
+anything, via `permission_denies_operative` and `permission_policy_path`.
+
+**Do not treat this as a defeated security control.** `permissions.deny` is a
+hygiene guardrail; a deny that a local policy file can switch off was never a
+boundary. The defect this precondition documents is the **silence** — a
+documented, doubly-configured deny that does nothing and says nothing — not a
+bypassed protection.
+
 **Overrides, in order of reach:**
 
 - One attended session: `SOLET_ALLOW_ASKUSERQUESTION=1 claude-<name> <label>`
@@ -129,6 +163,24 @@ The seed launcher's `--settings` overlay above covers operator-launched
 entirely (`session_hosts.py`'s host drivers, not the seed launcher), so the
 overlay never reaches them — this needed its own enforcement site, decided
 2026-08-14.
+
+**Where `permissions.deny` is used in this deployment — all four sites, because
+the precondition above voids every one of them at once.** An operator who reads
+only the launcher section above will not learn that their spawned workers are
+affected too:
+
+| # | Site | Deny list | Reaches |
+|---|---|---|---|
+| 1 | the launcher's `--settings` overlay (rendered from `claude_session_overlay.json.template`, flag from `claude_launcher.template`) | `AskUserQuestion` | operator-launched `claude-<name>` sessions |
+| 2 | `tmux_adapter.py`'s generated `--settings` | `Agent`, `Task`, `AskUserQuestion` | every spawned tmux worker |
+| 3 | `headless_adapter.py`'s generated `--settings` | `Agent`, `Task` | every spawned headless worker |
+| 4 | the checkout's own project-scope `<checkout>/.claude/settings.json` | `Agent`, `Task` | anything running with `--setting-sources project` in that checkout |
+
+Sites 2–4 carry this deployment's Agent/Task prohibition. On a machine with
+`allowManagedPermissionRulesOnly: true` that prohibition loses its config
+layer for every spawned worker, silently — the instruction layer (`CLAUDE.md`
+and the rendered `CLAUDE.md` in an adopter clone) still carries it, so the
+enforcement degrades from two layers to one rather than to zero.
 
 **Only the `tmux` host driver carries the deny.** It launches a real
 interactive `claude` CLI (a detached tmux pane, driven by keystrokes) — the

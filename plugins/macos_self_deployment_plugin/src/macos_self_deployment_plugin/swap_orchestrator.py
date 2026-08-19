@@ -33,8 +33,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from ananta.core.root_manifest import MANIFEST_FILENAME, classify_root_entries
-from ananta.core.root_manifest.report import format_report
 from ananta.core.runtime import get_runtime_dir
 from ananta.interfaces.lifecycle_result_types import RestartResult, RestartStatus
 
@@ -54,8 +52,10 @@ from macos_self_deployment_plugin.constants import (
     RestartReasonCode,
     is_valid_color,
     opposite_color,
+    resolve_project_root,
 )
 from macos_self_deployment_plugin.preflight_probe_runner import (
+    CHECK_ROOT_MANIFEST,
     PROBE_ERROR_HARNESS,
     ProbeOutcome,
 )
@@ -208,23 +208,47 @@ def _contained_probe_outcome(
         })
 
 
-def _preflight_root_manifest(
-    *, reason: str, expected_etag: str, app_home: Path, logger: logging.Logger,
+def _root_manifest_restart_result(
+    outcome: ProbeOutcome, *, reason: str, expected_etag: str,
+    logger: logging.Logger,
 ) -> RestartResult | None:
-    """F1 cutover gate.  Returns a FAILED RestartResult on BLOCKING drift
-    or schema violation; ``None`` to proceed.
+    """F1 drift found by the probe → the F1 classification, not the probe's.
 
-    No-op when ``root_manifest.yaml`` is absent (early-cycle bootstrap
-    window — F1 IMPL has not landed at every solet yet).
+    ``None`` when this rejection is not root-manifest drift.
+
+    §46.1 moved WHERE this gate executes (the outgoing process's stale
+    imports → the candidate's own interpreter) and deliberately changed
+    NOTHING about what a refusal means. That distinction is load-bearing
+    and is why this function exists:
+
+    * ``status`` is what core actually routes on —
+      ``PROBE_FAILED`` triggers the manifest-bytes rollback, ``FAILED``
+      does not. Root-manifest drift is a property of the DEPLOYMENT ROOT,
+      not of the manifest bytes being applied; rolling those bytes back
+      because the repo root carries a stray entry would punish the wrong
+      artifact. It stays ``FAILED`` — system unchanged, coherent,
+      retryable — exactly as it was before the move.
+    * ``reason_code`` is reported rather than routed on, and is preserved
+      for observability: an operator keeps seeing ``root_manifest_drift``
+      instead of a generic ``probe_rejected``.
+
+    Letting either flatten into the probe's own classification would have
+    changed live behaviour as a side effect of a bug fix.
     """
-    repo_root = _resolve_project_root(app_home).resolve()
-    manifest_path = repo_root / MANIFEST_FILENAME
-    if not manifest_path.is_file():
+    failures = outcome.payload.get("failures")
+    if not isinstance(failures, list):
         return None
-    classification = classify_root_entries(manifest_path, repo_root)
-    if not classification.has_blocking_violations:
+    drift = next(
+        (
+            failure for failure in failures
+            if isinstance(failure, dict)
+            and failure.get("check") == CHECK_ROOT_MANIFEST
+        ),
+        None,
+    )
+    if drift is None:
         return None
-    envelope = format_report(classification, severity="BLOCKING")
+    envelope = str(drift.get("message", ""))
     logger.warning("cutover preflight refused green spawn:\n%s", envelope)
     return build_failed_result(
         status=RestartStatus.FAILED,
@@ -240,7 +264,16 @@ def _probe_failed_restart_result(
     outcome: ProbeOutcome, *, reason: str, expected_etag: str,
     logger: logging.Logger,
 ) -> RestartResult:
-    """Typed PROBE_FAILED result carrying the rejection payload."""
+    """Typed PROBE_FAILED result carrying the rejection payload.
+
+    EXCEPT for root-manifest drift, which keeps its own classification —
+    see :func:`_root_manifest_restart_result`.
+    """
+    root_manifest_failure = _root_manifest_restart_result(
+        outcome, reason=reason, expected_etag=expected_etag, logger=logger,
+    )
+    if root_manifest_failure is not None:
+        return root_manifest_failure
     error_class = outcome.payload.get("error_class")
     detail = outcome.payload.get("detail")
     logger.error(
@@ -393,20 +426,6 @@ def default_spawn(
         },
     )
     return proc.pid
-
-
-def _resolve_project_root(app_home: Path) -> Path:
-    """Walk one level up from ``<APP_HOME>`` to the repo root.
-
-    Convention: ``<repo_root>/profile`` is ``APP_HOME``. Fall back to
-    ``app_home`` itself if the parent doesn't contain a recognisable
-    project marker — fast-fail surfaces the misconfiguration at smoke
-    time rather than papering over it.
-    """
-    candidate = app_home.parent
-    if (candidate / "pyproject.toml").is_file() or (candidate / "ananta").is_dir():
-        return candidate
-    return app_home
 
 
 def _derive_next_color(
@@ -562,16 +581,15 @@ class SwapOrchestrator:
         if dry_run:
             return self._dry_run_envelope(reason, expected_etag, self_color)
 
-        # F1 cutover preflight — refuse to spawn green on root-manifest drift
-        # (design memo §6.1).  REPO_ROOT is derived from app_home (canonical
-        # layout: <repo_root>/profile/...); ties to a parameter rather than
-        # process cwd for robustness.
-        preflight_failure = _preflight_root_manifest(
-            reason=reason, expected_etag=expected_etag, app_home=app_home,
-            logger=self._logger,
-        )
-        if preflight_failure is not None:
-            return preflight_failure
+        # F1 cutover preflight — refuses to spawn green on root-manifest drift
+        # (design memo §6.1) — no longer runs HERE. §46.1: validating in this
+        # process validated against whatever it imported at its own last
+        # start, so it refused valid manifests right after an update. It now
+        # runs inside the L2 fresh-source probe under the CANDIDATE's
+        # interpreter (see _prepare_swap). The candidate does not exist yet at
+        # this point in the sequence, which is why the gate had to move rather
+        # than be re-pointed. Its refusal classification is unchanged —
+        # see _root_manifest_restart_result.
 
         # Confirm self is the active color and materialize + schema-preflight
         # the candidate — all BEFORE any spawn (§4.5/§4.7/§3). A failure here
@@ -811,7 +829,7 @@ class SwapOrchestrator:
         snapshot_fn = build_schema_snapshot_fn(
             solet_name=self._solet_name,
             app_home=app_home,
-            source_root=_resolve_project_root(app_home),
+            source_root=resolve_project_root(app_home),
         )
         try:
             candidate = self._release_manager.build_candidate(

@@ -53,6 +53,13 @@ DEFAULT_CONSERVATIVE_CEILING: int = 100_000
 # DEFAULT_CONSERVATIVE_CEILING fallback) at which the rotation-due hook
 # (P2 slice B) reports to the steward. 0.5 per the brief's own standing
 # framing ("first slice boundary past ~50% of context").
+#
+# SINCE GAU-08 (2026-08-18) THIS IS ONE TERM OF TWO, not the whole predicate.
+# `is_rotation_due` is the UNION of this fraction and an actionable economics
+# band -- see `is_rotation_due_for_ceiling` for why neither half alone is
+# correct. This term is what keeps the predicate reachable on a SMALL-ceiling
+# model, whose window the model-blind bands do not fit; it is not vestigial
+# and removing it makes rotation-due strictly later on every such model.
 ROTATION_THRESHOLD_FRACTION: float = 0.5
 
 # ---------------------------------------------------------------------------
@@ -66,21 +73,91 @@ ROTATION_THRESHOLD_FRACTION: float = 0.5
 # function of how many tokens are in the window, not of how full the window is.
 # The unit is the MODEL CALL, not the operator prompt: the superseded
 # "~80k token-equivalents per prompt" arithmetic priced the wrong event.
-# KNOWN LIMITATION, recorded 2026-08-16 rather than left for a reader to
-# discover: THESE BANDS ARE MODEL-BLIND, and the numbers were derived from
-# Fable-tier input economics. A cheaper tier carries the same context for
-# roughly an order of magnitude less, so applying these bands to it reports
-# urgency that the actual cost does not justify -- observed live, when a
-# sonnet session at 224,840 tokens was read as past-200K-rotate-now.
-# `rotation_band()` takes no model argument today. The stored row DOES carry
-# `model`, so a model-aware refinement is available and is deliberately NOT
-# in this landing: either scale the bands by tier, or state these as
-# Fable-seat policy and give cheaper tiers their own rule. Until then, read
-# a band on a cheap-tier session as hygiene rather than urgency.
+# THESE BANDS ARE TIER-INVARIANT, AND THE PARAGRAPH THAT USED TO STAND HERE
+# SAID THE OPPOSITE. Recording the withdrawn reasoning rather than only the
+# conclusion, because a comment that states just the new answer invites the
+# next reader to "fix" it back to the old one.
+#
+# WHAT IT USED TO SAY (2026-08-16 -> 2026-08-17): that the bands were
+# MODEL-BLIND, derived from Fable-tier economics, and that a cheaper tier
+# carrying the same context for roughly an order of magnitude less meant the
+# bands overstated urgency for it -- citing a live observation, a sonnet
+# session at 224,840 tokens read as past-200K-rotate-now. It named two fixes
+# (scale the bands by tier, or declare them seat-tier policy) and shipped
+# neither.
+#
+# THE OBSERVATION WAS REAL. THE INFERENCE FROM IT WAS WRONG. Two different
+# questions were fused:
+#   1. WOULD A CLEAR PAY FOR ITSELF?  -- TIER-INVARIANT.
+#   2. HOW MANY DOLLARS ARE AT STAKE? -- tier-dependent.
+# The bands answer (1), and they answer it correctly for every model. What
+# read wrong on that sonnet session was the IMPERATIVE attached to the band
+# ("rotate immediately"), which is a claim about (2). The tier-wrong thing was
+# never the number; it was the adjective. See `rotation_band`'s guidance
+# strings, which now state the break-even fact rather than an order.
+#
+# WHY (1) IS TIER-INVARIANT -- the derivation, in four lines. Let p be THIS
+# model's base input price. Over the next N calls:
+#     keep working: cost_A = N * C * CACHE_READ_MULTIPLIER * p
+#     clear now:    cost_B = H * CACHE_WRITE_MULTIPLIER_1H * p
+#                          + N * H * CACHE_READ_MULTIPLIER * p
+#     cost_B < cost_A  <=>  2pH + 0.1pNH < 0.1pNC
+#     divide by 0.1pN  <=>  C > H + 20H/N
+# p CANCELS EXACTLY. That is the whole argument, and it is also where the 20
+# comes from: CACHE_WRITE_PREMIUM_MULTIPLIER = 2.0 / 0.1, a RATIO OF TWO
+# MULTIPLIERS, not a price. **A ratio of two multipliers on the same base
+# price cannot carry a tier.** Vendor source for both multipliers, checked
+# rather than recalled: cache reads cost ~0.1x base input price, cache writes
+# 1.25x at 5-minute TTL and 2x at 1-hour TTL -- stated once, as multipliers on
+# that model's own base input price, with no per-model variation.
+#
+# SO SCALING THE BANDS BY TIER WOULD BREAK THEM. It would have told that same
+# sonnet session at 224,840 to keep working, suppressing a signal that was
+# arithmetically correct -- a failure in the expensive direction, and the exact
+# one this surface exists to prevent. A tier-scaling scheme must also classify
+# every model into a price tier, so an unclassified model is guessed or
+# defaulted, and a "cheap" default is silently quiet: a fail-OPEN mode that a
+# scheme with no tiers cannot have.
+#
+# THE GENUINE MODEL-DEPENDENCE IS CAPACITY, NOT PRICE, and it is on its own
+# axis -- see CAPACITY_BAND_* below. claude-haiku-4-5's ceiling is 200,000, so
+# these three bands sit at 75% / 100% / 150% of its window and the 300K band is
+# unreachable: the session runs out of room first. That is what a small-ceiling
+# model needs protecting from, and it has nothing to do with what its tokens
+# cost.
+#
+# THE ONE THING IN THE FORMULA THAT LEGITIMATELY VARIES IS CACHE TTL, not
+# model -- see CACHE_WRITE_PREMIUM_MULTIPLIER_OVERAGE.
 WARM_BAND_KEEP_WORKING_TOKENS: int = 150_000      # under this: keep working
 WARM_BAND_TASK_BOUNDARY_TOKENS: int = 200_000     # 150-200K: next natural boundary
 WARM_BAND_SAFE_CHECKPOINT_TOKENS: int = 300_000   # over 200K: first safe checkpoint
                                                   # over 300K: immediately
+
+# ---------------------------------------------------------------------------
+# CAPACITY BANDS (2026-08-17). The genuine model-dependence, on its own axis.
+#
+# The warm bands above ask "would a clear pay for itself" -- a question about
+# ECONOMICS, answered in absolute tokens, identical on every model. These ask
+# "is this session about to run out of room" -- a question about CAPACITY,
+# answered as a fraction of the model's own declared ceiling. A session can be
+# in trouble for either reason independently, so they are separate bands rather
+# than one blended number, and the notice names which one fired.
+#
+# Chosen so that on a 1M-ceiling model capacity NEVER binds before economics:
+# 0.75 of 1,000,000 is 750,000, far past the 300K point at which the warm bands
+# already saturate at "rotate immediately". On claude-haiku-4-5 (ceiling
+# 200,000) it binds at 150,000 / 180,000, which is exactly the range the warm
+# bands cannot serve -- their 300K step is unreachable inside a 200K window.
+#
+# FAIL-SAFE COMES FREE, and in the right direction. An unrecognised model
+# already resolves to DEFAULT_CONSERVATIVE_CEILING = 100,000 (see
+# `resolve_ceiling`), so it trips capacity_approaching at 75,000 -- EARLIER
+# than any warm band. An unknown model is therefore loud, never quiet. This is
+# the same discipline `resolve_ceiling` states for itself, and it is the reason
+# capacity is expressed as a fraction while economics is expressed in absolute
+# tokens: a fraction inherits the conservative ceiling automatically.
+CAPACITY_BAND_APPROACHING_FRACTION: float = 0.75
+CAPACITY_BAND_CRITICAL_FRACTION: float = 0.90
 
 # H -- the post-rotation prefix a `/clear` re-writes, and the quantity the
 # cold-cache rule compares against. MEASURED 2026-08-16
@@ -98,12 +175,53 @@ POLICY_H_BOOT_TOKENS: int = 42_873
 POLICY_H_REHYDRATION_TOKENS: int = 67_829
 POLICY_H_TOKENS: int = POLICY_H_BOOT_TOKENS + POLICY_H_REHYDRATION_TOKENS  # 110,702
 
+# The two vendor cache multipliers the break-even is built from. Both are
+# multipliers on THAT MODEL'S OWN base input price, uniform across models --
+# which is precisely why the ratio below carries no tier. Sourced from the
+# vendor's prompt-caching pricing reference (checked 2026-08-17, not recalled):
+# "Cache reads cost ~0.1x base input price. Cache writes cost 1.25x for
+# 5-minute TTL, 2x for 1-hour TTL."
+#
+# They are named constants rather than inlined digits so the premium below is
+# visibly a QUOTIENT OF TWO SOURCED FACTS rather than a magic number. The old
+# bare `20` was correct and unexplainable; a reader had no way to tell whether
+# it was measured, ratified, or guessed.
+CACHE_READ_MULTIPLIER: float = 0.1
+CACHE_WRITE_MULTIPLIER_1H: float = 2.0
+CACHE_WRITE_MULTIPLIER_5M: float = 1.25
+
 # Break-even multiplier for `C > H + (CACHE_WRITE_PREMIUM_MULTIPLIER * H) / N`.
-# A clear re-writes the whole prefix at roughly 2x base input under the 1-hour
-# cache-write premium, and that write is amortised over the N calls that follow
-# it -- so a rotation pays for itself only when the carried context C is large
-# enough relative to what the rewrite costs.
+# A clear re-writes the whole prefix at the 1-hour cache-write premium, and that
+# write is amortised over the N calls that follow it -- so a rotation pays for
+# itself only when the carried context C is large enough relative to what the
+# rewrite costs. = CACHE_WRITE_MULTIPLIER_1H / CACHE_READ_MULTIPLIER = 20.
+#
+# Kept as an int rather than computed from the two floats above: it is a
+# ratified policy input, and 2.0/0.1 in IEEE-754 is 19.999999999999996, which
+# would move every derived threshold by a few tokens for no reason anyone could
+# later explain. The equality is asserted at import instead (see below), so the
+# constant cannot drift out of agreement with its own derivation silently.
 CACHE_WRITE_PREMIUM_MULTIPLIER: int = 20
+
+# THE SAME BREAK-EVEN UNDER A COLLAPSED CACHE TTL. This is the ONE quantity in
+# the formula that legitimately varies -- and it varies with cache TTL, never
+# with model tier.
+#
+#   1-hour TTL:   write 2.0x  / read 0.1x  -> 20
+#   5-minute TTL: write 1.25x / read 0.1x  -> 12.5
+#
+# Same cancellation, different ratio. A LOWER multiplier means a LOWER
+# threshold, so under a collapsed TTL clearing wins SOONER, not later: at
+# N = 25 the break-even is ~166,000 rather than ~199,000.
+#
+# This is not hypothetical. The prompt-cache TTL collapses to ~5 minutes while
+# an account is in usage overage (OVERAGE_TTL_SECONDS below), and
+# `classify_cache_state` ALREADY DETECTS THAT and already returns
+# `overage_signature` as a field distinct from `cold`. The measurement existed
+# and nothing consumed it for this purpose until 2026-08-17.
+CACHE_WRITE_PREMIUM_MULTIPLIER_OVERAGE: float = (
+    CACHE_WRITE_MULTIPLIER_5M / CACHE_READ_MULTIPLIER
+)
 
 # Prompt-cache lifetimes. The policy's words are "idle" and "in usage overage";
 # the code measures CACHE EXPIRY, because overage MANIFESTS as cache expiry and
@@ -178,18 +296,67 @@ def resolve_ceiling(model: str) -> int:
     return MODEL_CONTEXT_CEILINGS.get(model, DEFAULT_CONSERVATIVE_CEILING)
 
 
-def is_rotation_due(*, model: str, current_tokens: int) -> bool:
-    """``True`` once ``current_tokens`` crosses ``ROTATION_THRESHOLD_
-    FRACTION`` of ``model``'s resolved ceiling (:func:`resolve_ceiling`).
-    Pure comparison -- the caller (P2 slice B's hook) supplies
-    ``current_tokens`` from its own live transcript-usage read; this
-    function makes no I/O call of its own."""
-    ceiling = resolve_ceiling(model)
-    return current_tokens >= ceiling * ROTATION_THRESHOLD_FRACTION
+def is_rotation_due(
+    *, model: str, current_tokens: int, cache_cold: bool | None = None,
+) -> bool:
+    """``True`` when either rotation axis says rotate, against ``model``'s
+    resolved ceiling (:func:`resolve_ceiling`).
+
+    The model-taking entry point onto :func:`is_rotation_due_for_ceiling`,
+    which carries the definition and the whole of the reasoning. Use this form
+    when a model name is all you hold -- the P2 slice B hook measures a live
+    transcript and has no stored row to read a ceiling from. A caller that
+    ALREADY has a ceiling (any stored gauge row) must call the core directly,
+    so that its decision and any fraction it goes on to print are computed
+    against the same denominator.
+
+    Pure comparison -- ``current_tokens`` and ``cache_cold`` both come from the
+    caller's own measurement; this function makes no I/O call of its own.
+
+    ``cache_cold`` DEFAULTS TO ``None``, and the default is not a convenience.
+    ``None`` is a real value in this domain -- "nobody measured the cache
+    state" -- and it is exactly what an omitted argument means, so the default
+    states a fact rather than substituting for one. That matters because this
+    function has callers THIS REPOSITORY CANNOT EDIT: the rotation hook exists
+    in a third, installed plugin-cache copy (GAU-04) which resolves
+    ``rotation_thresholds`` out of the live checkout while carrying its own
+    frozen call site. Measured 2026-08-18: seven such copies are on this
+    machine, the marketplace plugin is enabled in the user's settings, and
+    every one of them calls ``is_rotation_due(model=..., current_tokens=...)``.
+    A required keyword would have turned each of their ticks into a TypeError
+    -- a live break in a copy no landing here can reach.
+
+    So the default is also what carries the fix ACROSS that boundary: a frozen
+    copy that cannot be updated still gets the union, because the union lives
+    behind the signature it already calls. It gets the band half and the
+    conservative warm reading of a cache state it never sends, which is
+    strictly better than the fraction-only answer it gets today.
+    """
+    return is_rotation_due_for_ceiling(
+        ceiling=resolve_ceiling(model),
+        current_tokens=current_tokens,
+        cache_cold=cache_cold,
+    )
 
 
 __all__ = [
+    "ACTIONABLE_BAND_RANK",
+    "CACHE_READ_MULTIPLIER",
+    "CACHE_WRITE_MULTIPLIER_1H",
+    "CACHE_WRITE_MULTIPLIER_5M",
+    "CACHE_WRITE_PREMIUM_MULTIPLIER",
+    "CACHE_WRITE_PREMIUM_MULTIPLIER_OVERAGE",
+    "CAPACITY_BAND_APPROACHING_FRACTION",
+    "CAPACITY_BAND_CRITICAL_FRACTION",
     "DEFAULT_CONSERVATIVE_CEILING",
+    "RotationDueVerdict",
+    "RotationVerdict",
+    "band_is_actionable",
+    "break_even_horizon",
+    "capacity_band",
+    "rotation_due_verdict",
+    "rotation_surface_verdict",
+    "write_premium_multiplier",
     "IDLE_POKE_THRESHOLD_SECONDS",
     "IDLE_ROTATE_THRESHOLD_SECONDS",
     "MODEL_CONTEXT_CEILINGS",
@@ -197,12 +364,25 @@ __all__ = [
     "ROTATION_THRESHOLD_FRACTION",
     "WATCH_POLL_INTERVAL_SECONDS",
     "is_rotation_due",
+    "is_rotation_due_for_ceiling",
     "resolve_ceiling",
 ]
 
 
-def rotation_band(current_tokens: int, *, cache_cold: bool) -> tuple[str, str]:
+def rotation_band(
+    current_tokens: int, *, cache_cold: bool, overage: bool = False,
+) -> tuple[str, str]:
     """``(band, guidance)`` for a measured context size and cache state.
+
+    ``overage`` selects the cache-TTL premium the guidance's stated horizon is
+    computed from, and it exists to stop ONE quantity being reported as TWO
+    NUMBERS. The guidance string embeds the break-even horizon; a caller that
+    also reports :func:`break_even_horizon` itself would otherwise print the
+    overage-aware figure beside this string's nominal one, and two sources that
+    can disagree about the same fact teach the reader to trust neither. Found
+    exactly that way, in a rendered notice reading "~4 more calls" on one line
+    and "~3" on the next. Keyword-only and defaulting False so every
+    pre-2026-08-17 caller keeps the 1-hour behaviour it was written against.
 
     The COLD branch is not a stricter version of the warm bands, it is a
     different question. Warm, the carried context is cheap to re-read and the
@@ -223,28 +403,150 @@ def rotation_band(current_tokens: int, *, cache_cold: bool) -> tuple[str, str]:
             f"({POLICY_H_TOKENS:,}) -- keep working, a clear would cost more "
             "than it saves"))
     if current_tokens < WARM_BAND_KEEP_WORKING_TOKENS:
-        return ("warm_keep", "keep working")
+        return ("warm_keep", (
+            f"keep working -- at {current_tokens:,} a clear would not pay for "
+            f"itself unless you still had "
+            f"{_horizon_prose(current_tokens, overage=overage)} to make"))
     if current_tokens < WARM_BAND_TASK_BOUNDARY_TOKENS:
-        return ("warm_task_boundary", "rotate at the next natural task boundary")
+        return ("warm_task_boundary", (
+            f"rotate at the next natural task boundary -- at {current_tokens:,} "
+            f"a clear pays for itself with as few as "
+            f"{_horizon_prose(current_tokens, overage=overage)} left to make"))
     if current_tokens < WARM_BAND_SAFE_CHECKPOINT_TOKENS:
-        return ("warm_safe_checkpoint", "rotate at the first safe checkpoint")
-    return ("warm_immediate",
-            "rotate immediately -- finish only the in-flight tool action")
+        return ("warm_safe_checkpoint", (
+            f"rotate at the first safe checkpoint -- at {current_tokens:,} "
+            f"a clear pays for itself with as few as "
+            f"{_horizon_prose(current_tokens, overage=overage)} left to make"))
+    # The ratified instruction for this band is kept VERBATIM and leads the
+    # string. The 2026-08-17 reframe attaches each band's justification to it;
+    # it does not soften what any band asks for, and this is the band where
+    # softening would cost the most -- an earlier draft of that reframe
+    # accidentally restated the safe-checkpoint action here, collapsing two
+    # bands that ask for different things into one.
+    return ("warm_immediate", (
+        f"rotate immediately -- finish only the in-flight tool action; at "
+        f"{current_tokens:,} a clear pays for itself with as few as "
+        f"{_horizon_prose(current_tokens, overage=overage)} left to make"))
 
 
-def clearing_wins(current_tokens: int, expected_calls_after: int) -> bool:
-    """``C > H + 20H/N`` -- whether a clear pays for itself.
+def write_premium_multiplier(*, overage: bool) -> float:
+    """The break-even multiplier for the cache TTL currently in force.
+
+    THE ONLY QUANTITY IN THE BREAK-EVEN THAT LEGITIMATELY VARIES. It varies
+    with cache TTL, never with model tier -- see the derivation beside
+    :data:`CACHE_WRITE_PREMIUM_MULTIPLIER_OVERAGE`. ``overage`` is the
+    ``overage_signature`` :func:`classify_cache_state` already measures: while
+    an account is in usage overage the prompt-cache TTL collapses to ~5
+    minutes, and the cheaper write premium that comes with it makes clearing
+    win SOONER (12.5 rather than 20), not later.
+    """
+    if overage:
+        return CACHE_WRITE_PREMIUM_MULTIPLIER_OVERAGE
+    return float(CACHE_WRITE_PREMIUM_MULTIPLIER)
+
+
+def clearing_wins(
+    current_tokens: int, expected_calls_after: int, *, overage: bool = False,
+) -> bool:
+    """``C > H + kH/N`` -- whether a clear pays for itself.
 
     ``expected_calls_after`` is N, the calls the rewritten prefix will be
     amortised over. N <= 0 means the rewrite is never amortised, so a clear
     cannot win regardless of how large C is.
+
+    ``k`` is :func:`write_premium_multiplier` -- 20 at the nominal 1-hour cache
+    TTL, 12.5 when ``overage`` says the TTL has collapsed to ~5 minutes.
+    ``overage`` is keyword-only and defaults to False so every pre-2026-08-17
+    caller keeps the exact 1-hour behaviour it was written against.
+
+    THE PRICE PER TOKEN DOES NOT APPEAR because it cancels. Both sides of the
+    comparison are the same model's base input price times a fixed multiplier,
+    so this is tier-invariant -- see the ECONOMIC ROTATION POLICY block above
+    for the four-line derivation and for the tier-scaling proposal it retired.
     """
     if expected_calls_after <= 0:
         return False
     threshold = POLICY_H_TOKENS + (
-        CACHE_WRITE_PREMIUM_MULTIPLIER * POLICY_H_TOKENS
+        write_premium_multiplier(overage=overage) * POLICY_H_TOKENS
     ) / expected_calls_after
     return current_tokens > threshold
+
+
+def break_even_horizon(current_tokens: int, *, overage: bool = False) -> float | None:
+    """``N = kH/(C-H)`` -- the horizon at which a clear starts paying for itself.
+
+    The INVERSE of :func:`clearing_wins`, and the number that lets a notice
+    carry its own justification: not "rotate, you are over 300,000" but "at
+    300,000 a clear pays for itself even with only ~12 calls left to make". A
+    threshold that states the horizon it was derived from is one a reader can
+    argue with, which is what stops it becoming furniture.
+
+    ``None`` when ``current_tokens <= H``: below the prefix a clear would
+    rewrite there is no horizon at which clearing wins, however long you run.
+    That is a genuinely different answer from a large N, so it is a distinct
+    return value rather than ``inf`` -- callers must say "never", not "a lot".
+    """
+    if current_tokens <= POLICY_H_TOKENS:
+        return None
+    return (
+        write_premium_multiplier(overage=overage) * POLICY_H_TOKENS
+    ) / (current_tokens - POLICY_H_TOKENS)
+
+
+def _horizon_prose(current_tokens: int, *, overage: bool) -> str:
+    """:func:`break_even_horizon` as a bare phrase a band can frame itself.
+
+    Deliberately carries NO framing word of its own. N is the MINIMUM remaining
+    calls at which a clear starts winning, so the same number reads in opposite
+    directions either side of a band edge: below `warm_keep`'s edge it is a bar
+    you have not cleared ("you would need ~56 still to make"), above it a bar
+    you have ("it pays off with as few as ~9 left"). An earlier draft baked
+    "only" in here and made the keep-working band argue for rotating.
+    """
+    horizon = break_even_horizon(current_tokens, overage=overage)
+    if horizon is None:
+        return (
+            f"no number of calls -- it is under H ({POLICY_H_TOKENS:,}), the "
+            "prefix a clear would rewrite"
+        )
+    return f"~{horizon:.0f} more call(s)"
+
+
+def capacity_band(current_tokens: int, ceiling: int) -> tuple[str, str]:
+    """``(band, guidance)`` for how FULL the window is, as distinct from how
+    expensive it is.
+
+    A different question from :func:`rotation_band` on a different axis, which
+    is why it is a separate function rather than another branch inside that
+    one. The warm bands ask whether a clear pays for itself -- absolute tokens,
+    identical on every model. This asks whether the session is about to run out
+    of room -- a fraction of the model's OWN ceiling, and the only part of this
+    module where the model legitimately changes the answer.
+
+    Both bands are unreachable-before-economics on a 1M ceiling by
+    construction, and both bind early on a small or unrecognised one. See the
+    CAPACITY BANDS block above for why those two facts are the same fact.
+
+    A non-positive ``ceiling`` is refused rather than defaulted: it means the
+    caller has no ceiling, and inventing one here would silently answer a
+    capacity question with a number nobody measured.
+    """
+    if ceiling <= 0:
+        raise ValueError(f"capacity_band needs a positive ceiling, got {ceiling}")
+    fraction = current_tokens / ceiling
+    if fraction >= CAPACITY_BAND_CRITICAL_FRACTION:
+        return ("capacity_critical", (
+            f"{current_tokens:,} is {fraction:.0%} of this model's "
+            f"{ceiling:,}-token window -- rotate ahead of new work: this is "
+            "room running out, which no amount of cache economics offsets"))
+    if fraction >= CAPACITY_BAND_APPROACHING_FRACTION:
+        return ("capacity_approaching", (
+            f"{current_tokens:,} is {fraction:.0%} of this model's "
+            f"{ceiling:,}-token window -- rotate at the next task boundary "
+            "while there is still room to finish one"))
+    return ("capacity_ok", (
+        f"{current_tokens:,} is {fraction:.0%} of this model's "
+        f"{ceiling:,}-token window -- room is not the constraint"))
 
 
 class TimestampAwarenessError(ValueError):
@@ -349,3 +651,257 @@ def classify_cache_state(
     if scored[-1].was_cold:
         return CacheState(False, False, "one cold call, cache re-warmed since -- warm bands apply")
     return CacheState(False, False, "cache is warm")
+
+
+# ---------------------------------------------------------------------------
+# THE COMBINED VERDICT (2026-08-17) -- one object carrying both axes, used by
+# the L4c self-notice leg. Kept separate from `rotation_band` rather than
+# folded into it: that function's two-tuple contract has callers
+# (`_rotation_due_row`, `session_context_status`) that want the economics band
+# alone, and widening a returned shape to serve a new consumer is how a stable
+# read-back verb acquires fields its own docstring cannot explain.
+
+# Relative urgency, used ONLY to pick which axis a notice leads with. Both
+# bands are always reported; this decides the headline, never what is shown.
+# Ranks are deliberately shared across axes -- capacity_approaching and
+# warm_task_boundary are the same call to action ("rotate at a boundary"),
+# arrived at for unrelated reasons, so they rank equal and economics wins the
+# tie as the ratified policy.
+_BAND_URGENCY: dict[str, int] = {
+    "capacity_ok": 0,
+    "cold_below_h": 0,
+    "warm_keep": 0,
+    "capacity_approaching": 1,
+    "warm_task_boundary": 1,
+    "cold_above_h": 2,
+    "warm_safe_checkpoint": 2,
+    "capacity_critical": 3,
+    "warm_immediate": 3,
+}
+
+
+# The urgency rank at which a band stops saying "keep working" and starts
+# asking for a rotation of some kind. `warm_task_boundary` and
+# `capacity_approaching` both sit here: "rotate at the next boundary" is still
+# a request to rotate, and a predicate that fired only on the TOP rank would
+# have re-created GAU-08 exactly one band lower -- silent through the whole
+# 200,000-300,000 stretch instead of the whole 300,000-500,000 one.
+ACTIONABLE_BAND_RANK: int = 1
+
+
+def band_is_actionable(band: str) -> bool:
+    """Whether ``band`` asks for a rotation at all, as against keeping work.
+
+    Derived from :data:`_BAND_URGENCY` rather than from a second list of band
+    names. A hand-kept "these ones count" set would be a copy of that map with
+    nothing forcing the two to agree, and its failure mode is SILENT: a band
+    added to the map and forgotten here would simply never make a session
+    rotation-due, which is the same shape of quiet gap this function exists to
+    close.
+
+    An unranked band name raises ``KeyError`` deliberately. A band this module
+    has not ranked is one whose urgency nobody has decided, and answering "not
+    actionable" for it would be a guess in the quiet direction -- the exact
+    direction this whole landing is correcting.
+    """
+    return _BAND_URGENCY[band] >= ACTIONABLE_BAND_RANK
+
+
+def is_rotation_due_for_ceiling(
+    *, ceiling: int, current_tokens: int, cache_cold: bool | None,
+) -> bool:
+    """THE ROTATION-DUE PREDICATE (GAU-08, ruled 2026-08-18): the ECONOMICS
+    BAND is actionable, OR ``current_tokens`` has crossed
+    :data:`ROTATION_THRESHOLD_FRACTION` of ``ceiling``.
+
+    A UNION, and both halves are load-bearing. Neither alone is correct, and
+    each is wrong for the reason the other is right.
+
+    WHY NOT THE FRACTION ALONE -- the defect this replaces. The economics
+    bands are ABSOLUTE token counts and saturate at ``warm_immediate`` at
+    300,000; the fraction hint does not cross 0.5 of a 1M ceiling until
+    500,000. So for 200,000 tokens the most urgent band this policy has
+    coexisted with ``rotation_due=False``, and that is not a corner: measured
+    2026-08-18 across the live fleet, the field read False on EVERY session at
+    EVERY value any of them occupied that day (219,974 / 195,778 / 226,257).
+    It was false throughout the entire range in which anyone actually works.
+
+    WHY NOT THE BAND ALONE -- the decoy, and the reason this is a union rather
+    than a rename. The bands are MODEL-BLIND while this predicate is
+    model-AWARE through its ceiling. On a 200,000-token window the first
+    actionable band arrives at 150,000, i.e. 75% of the window, so a pure-band
+    rule returns False at 100,000 -- that model's own halfway point, and
+    precisely what the fraction hint exists to catch. It would have made
+    rotation-due strictly LATER on every small-ceiling model while looking
+    like a clean improvement on the 1M models it would have been tested on.
+
+    MONOTONE BY CONSTRUCTION: a strict superset of the fraction rule it
+    replaces, so no session that was served a notice before can lose one. That
+    is what makes it landable on a live shared surface with no migration and
+    no backfill of stored rows.
+
+    THE ECONOMICS BAND, NOT THE EFFECTIVE ONE. Folding in the capacity axis
+    looks more complete and buys nothing: :data:`CAPACITY_BAND_APPROACHING_
+    FRACTION` (0.75) is above :data:`ROTATION_THRESHOLD_FRACTION` (0.5) and
+    both are fractions of the same denominator, so the fraction term has
+    already fired everywhere capacity could, on every ceiling. That is a
+    CONDITIONAL fact rather than a permanent one -- it holds only while that
+    inequality does -- so it is pinned by a test rather than left here, where
+    it could rot silently if anyone lowered the capacity fraction.
+
+    NO ``overage`` ARGUMENT, and its absence is checked rather than assumed:
+    :func:`rotation_band` takes one, but it reaches only ``_horizon_prose``,
+    the break-even horizon quoted INSIDE the guidance string, and never the
+    band NAME. Since this decides on the name, a collapsed cache TTL cannot
+    move the verdict.
+
+    ``cache_cold=None`` means NOT MEASURED and is treated exactly as warm. It
+    is never promoted to cold: a reporter predating cache attribution sends no
+    cache state, and reading its absence as cold would make a session in the
+    110,702-150,000 window due on the strength of a field nobody wrote -- a
+    measurement manufactured out of a gap. The delivered notice already
+    carries that caveat in words (see ``_rotation_prose``).
+
+    A non-positive ``ceiling`` is REFUSED rather than defaulted, the same
+    posture :func:`capacity_band` states for itself and for the same reason:
+    inventing one here would decide whether a live session is told to rotate
+    using a window size nobody measured.
+    """
+    return rotation_due_verdict(
+        ceiling=ceiling, current_tokens=current_tokens, cache_cold=cache_cold,
+    ).due
+
+
+@dataclass(frozen=True)
+class RotationDueVerdict:
+    """The rotation-due answer TOGETHER WITH which axis produced it.
+
+    Exists so that a notice can say WHY it fired without restating the rule.
+    The hook's notice previously read ``threshold_fraction=0.5 (crossed at
+    30.0% of ceiling)`` -- a sentence that refutes itself, and one that the
+    union turns from unreachable into the common case, since the entire
+    actionable 300,000-500,000 range on a 1M ceiling fires on the band with
+    the fraction hint uncrossed. The obvious repair is to recompute
+    ``current_tokens >= ceiling * ROTATION_THRESHOLD_FRACTION`` in the prose
+    builder, and that is the trap: it puts a second copy of the rule in a
+    second file, so a later edit to the comparison would desynchronise the
+    notice from the decision it describes and nothing would say so. Returning
+    the decomposition keeps ONE evaluation of each term and lets every caller
+    read the parts it needs.
+    """
+
+    due: bool
+    band: str
+    band_actionable: bool
+    fraction: float
+    fraction_crossed: bool
+
+
+def rotation_due_verdict(
+    *, ceiling: int, current_tokens: int, cache_cold: bool | None,
+) -> RotationDueVerdict:
+    """Both terms of the union, evaluated once each, plus their disjunction.
+
+    :func:`is_rotation_due_for_ceiling` is this function's ``due`` field and
+    carries the reasoning for the definition; this is the form to call when
+    the caller must also SAY which axis fired.
+    """
+    if ceiling <= 0:
+        raise ValueError(
+            f"rotation_due_verdict needs a positive ceiling, got {ceiling}",
+        )
+    band, _ = rotation_band(current_tokens, cache_cold=bool(cache_cold))
+    actionable = band_is_actionable(band)
+    crossed = current_tokens >= ceiling * ROTATION_THRESHOLD_FRACTION
+    return RotationDueVerdict(
+        due=actionable or crossed,
+        band=band,
+        band_actionable=actionable,
+        fraction=current_tokens / ceiling,
+        fraction_crossed=crossed,
+    )
+
+
+@dataclass(frozen=True)
+class RotationVerdict:
+    """Both rotation axes for one measured session, plus the headline.
+
+    ``effective_band`` is what the notice latches on, and it is a BAND NAME,
+    never a fraction of a ceiling. That is the whole point of this landing:
+    `sweep_rotation_due_sessions` gates on `fraction >= 0.5`, which on a
+    1M-ceiling model is 500,000 -- so a session sitting anywhere between
+    300,000 and 500,000 is in the saturated `warm_immediate` band while the
+    fraction gate still reads False, and the notice is silent exactly where it
+    is most needed. Keying on the band closes that window by construction.
+    """
+
+    economics_band: str
+    economics_guidance: str
+    capacity_band: str
+    capacity_guidance: str
+    effective_band: str
+    headline: str
+    horizon_calls: float | None
+    overage: bool
+
+
+def rotation_surface_verdict(
+    *,
+    current_tokens: int,
+    ceiling: int,
+    cache_cold: bool,
+    overage: bool = False,
+) -> RotationVerdict:
+    """Both bands for one gauge reading, and which of them leads.
+
+    ``ceiling`` must already be resolved (``resolve_ceiling(model)``); this
+    function does no model lookup of its own, so a caller cannot accidentally
+    get a capacity verdict against a ceiling it never checked.
+    """
+    econ_band, econ_guidance = rotation_band(
+        current_tokens, cache_cold=cache_cold, overage=overage,
+    )
+    cap_band, cap_guidance = capacity_band(current_tokens, ceiling)
+    econ_rank = _BAND_URGENCY[econ_band]
+    cap_rank = _BAND_URGENCY[cap_band]
+    # >= keeps economics as the tie-break: it is the ratified policy, and a tie
+    # means both axes are asking for the same action anyway.
+    if econ_rank >= cap_rank:
+        effective, headline = econ_band, econ_guidance
+    else:
+        effective, headline = cap_band, cap_guidance
+    return RotationVerdict(
+        economics_band=econ_band,
+        economics_guidance=econ_guidance,
+        capacity_band=cap_band,
+        capacity_guidance=cap_guidance,
+        effective_band=effective,
+        headline=headline,
+        horizon_calls=break_even_horizon(current_tokens, overage=overage),
+        overage=overage,
+    )
+
+
+def _assert_premium_matches_its_derivation() -> None:
+    """Fail LOUD at import if the ratified premium and the two sourced vendor
+    multipliers it is derived from ever disagree.
+
+    :data:`CACHE_WRITE_PREMIUM_MULTIPLIER` is an int by choice (see its
+    comment), so it cannot simply BE the quotient. Without this guard, editing
+    :data:`CACHE_WRITE_MULTIPLIER_1H` to track a vendor price change would
+    leave the premium -- and therefore every band's stated horizon -- silently
+    describing the old pricing. An `assert` would be stripped under `python
+    -O`, and this is exactly the check that must not vanish in the environment
+    where it matters.
+    """
+    derived = CACHE_WRITE_MULTIPLIER_1H / CACHE_READ_MULTIPLIER
+    if abs(derived - CACHE_WRITE_PREMIUM_MULTIPLIER) > 1e-6:
+        raise ValueError(
+            f"CACHE_WRITE_PREMIUM_MULTIPLIER={CACHE_WRITE_PREMIUM_MULTIPLIER} no "
+            f"longer equals CACHE_WRITE_MULTIPLIER_1H/CACHE_READ_MULTIPLIER="
+            f"{derived}; the bands' stated break-even horizons are derived from "
+            "this ratio and would silently describe retired pricing",
+        )
+
+
+_assert_premium_matches_its_derivation()

@@ -220,32 +220,41 @@ def test_unbounded_read_refuses_rather_than_truncating() -> None:
     _check(would_refuse, "overflow is an ERROR, not a silently truncated prefix")
 
 
-def test_liveness_conjunction() -> None:
-    print("\n[6] liveness alarm is the CONJUNCTION, not either number alone")
+def test_liveness_stale_age_alone_is_stalled() -> None:
+    print("\n[6] liveness alarm is STALE POLL AGE ALONE — depth is corroborating, not gating")
     liveness = ActionPathLiveness()
 
+    # GAU-10 (2026-08-18, measured live during a blue-green swap): a freeze
+    # that begins at an idle moment (depth 0) must still alarm. A frozen
+    # poller pins queue_depth at its pre-freeze value forever, so depth can
+    # never gate the alarm — it is exactly as stale as the age it used to
+    # suppress.
     liveness.record_poll_cycle(queue_depth=0, dispatched=0)
     liveness.last_poll_monotonic = liveness.started_monotonic - 10_000.0
     _check(
-        not liveness.stalled(),
-        "stale age + EMPTY queue is NOT stalled (an idle platform must not alarm)",
+        liveness.stalled(),
+        "stale age WITH an empty queue IS stalled (GAU-10: the measured lie)",
+    )
+    snapshot = liveness.snapshot()
+    _check(
+        snapshot["action_path_stalled"] is True,
+        "snapshot ships the DERIVED verdict for the empty-queue freeze too",
     )
 
+    # Depth still rides along as corroborating data but never gates: fresh
+    # age must not alarm even with a deep queue, because record_poll_cycle
+    # stamps every cycle including empty ones — an idle-but-alive poller
+    # keeps age fresh regardless of what depth is doing.
     liveness.record_poll_cycle(queue_depth=40, dispatched=0)
     _check(
         not liveness.stalled(),
-        "fresh poll + deep queue is NOT stalled (a busy platform must not alarm)",
+        "fresh poll age is NOT stalled regardless of queue depth",
     )
 
     liveness.last_poll_monotonic = liveness.started_monotonic - 10_000.0
     _check(
         liveness.stalled(),
-        "stale age AND non-empty queue IS stalled (the 2026-08-15 signature)",
-    )
-    snapshot = liveness.snapshot()
-    _check(
-        snapshot["action_path_stalled"] is True,
-        "snapshot ships the DERIVED verdict, not just two raw numbers",
+        "stale age with a non-empty queue IS stalled (the 2026-08-15 signature)",
     )
 
 
@@ -333,7 +342,7 @@ def main() -> int:
     test_claim_guard_measures_before_parsing()
     test_read_limit_refuses_over_cap_without_consent()
     test_unbounded_read_refuses_rather_than_truncating()
-    test_liveness_conjunction()
+    test_liveness_stale_age_alone_is_stalled()
     test_reaper_fails_oversized_and_requeues_small()
 
     if _failures:
@@ -342,7 +351,7 @@ def main() -> int:
             print(f"  - {failure}")
         return 1
     print("\nPASS: payload bounds fire pre-parse; reads refuse over cap; "
-          "liveness needs both signals; reaper fails rather than re-wedges")
+          "liveness alarms on stale poll age alone; reaper fails rather than re-wedges")
     return 0
 
 

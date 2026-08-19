@@ -338,6 +338,152 @@ def test_resolution_rungs_all_stabilize() -> None:
         )
 
 
+def _adapter_solet_bin_readers() -> list[tuple[str, object]]:
+    """The four spawn adapters, each as ``(name, factory)``.
+
+    ``factory`` takes the constructor's ``solet_bin`` override and returns a
+    zero-argument callable reading the adapter's wake-CLI spawn surface — the
+    same attribute every one of their spawn paths reads. Kept as a table because
+    the R11 defect was IDENTICAL in all four and a leg that covers only the one
+    that got measured is the miswiring-fix-on-one-consumer shape in test form.
+    """
+    from agent_messaging_plugin.codex_app_server import (  # noqa: PLC0415
+        CodexAppServerHostDriver,
+    )
+    from agent_messaging_plugin.codex_tmux import CodexTmuxHostDriver  # noqa: PLC0415
+    from agent_messaging_plugin.headless_adapter import (  # noqa: PLC0415
+        HeadlessHostDriver,
+    )
+    from agent_messaging_plugin.tmux_adapter import TmuxHostDriver  # noqa: PLC0415
+
+    def _tmux(cli: str, cwd: Path) -> object:
+        d = TmuxHostDriver(solet_bin=cli, solet_name="testsolet", cwd=cwd)
+        return lambda: d._solet_bin  # noqa: SLF001
+    def _headless(cli: str, cwd: Path) -> object:
+        d = HeadlessHostDriver(solet_bin=cli, solet_name="testsolet", cwd=cwd)
+        return lambda: d._solet_bin  # noqa: SLF001
+    def _codex_tmux(cli: str, cwd: Path) -> object:
+        d = CodexTmuxHostDriver(solet_bin=cli, solet_name="testsolet", cwd=cwd)
+        return lambda: d._solet_bin  # noqa: SLF001
+    def _codex_app(cli: str, cwd: Path) -> object:
+        d = CodexAppServerHostDriver(solet_bin=cli, solet_name="testsolet", cwd=cwd)
+        return lambda: d._solet_bin  # noqa: SLF001
+
+    return [
+        ("TmuxHostDriver", _tmux),
+        ("HeadlessHostDriver", _headless),
+        ("CodexTmuxHostDriver", _codex_tmux),
+        ("CodexAppServerHostDriver", _codex_app),
+    ]
+
+
+def test_adapter_reresolves_after_a_flip_that_followed_construction() -> None:
+    """R11 (2026-08-17): the leg the pre-R11 suite could not make.
+
+    Every leg above calls ``stable_release_path``/``resolve_solet_bin`` directly
+    at assert time, so all of them prove the FUNCTION is correct — and all of
+    them stayed GREEN while the defect was live in production, because none of
+    them could see a CALLER that asks once in ``__init__`` and remembers the
+    answer forever. An instrument blind to the question confirms nothing.
+
+    The sequence below is the measured production one: the platform process
+    started at 13:38:51Z, after the new release was materialized (13:38Z) and
+    BEFORE cutover flipped ``current`` onto it (13:43Z). Constructing inside that
+    skew window makes :func:`stable_release_path` correctly refuse to rewrite;
+    the bug was caching the refusal, so every spawn for the next 2h47m — verified
+    on a real spawn at 16:30Z — carried the versioned path.
+    """
+    print("\nR11: an adapter built during cutover skew re-resolves after the flip")
+    for name, factory in _adapter_solet_bin_readers():
+        with tempfile.TemporaryDirectory() as tmp:
+            releases = Path(tmp) / "releases" / "testsolet"
+            releases.mkdir(parents=True)
+            incoming = _make_release(releases, "rel-20260817T133803Z-606323923")
+            _make_release(releases, "rel-20260817T005356Z-b518d3138")
+            # SKEW: the new release is on disk, `current` still names the old one.
+            _point(releases, "rel-20260817T005356Z-b518d3138")
+            _check(
+                stable_release_path(str(incoming)) == str(incoming),
+                f"{name}: negative control — the rewrite really does refuse "
+                f"during skew, so construction cannot have stabilized early",
+            )
+
+            read_spawn_surface = factory(str(incoming), Path(tmp))  # type: ignore[operator]
+
+            # CUTOVER COMPLETES, ~4 minutes after construction.
+            _point(releases, "rel-20260817T133803Z-606323923")
+            after_flip = read_spawn_surface()
+            _check(
+                "rel-20260817T133803Z-606323923" not in after_flip,
+                f"{name}: no release id survives in the spawn surface after the "
+                f"flip (got {after_flip})",
+            )
+            _check(
+                CURRENT_LINK_NAME in Path(after_flip).parts,
+                f"{name}: the spawn surface goes through `current`, so it was "
+                f"re-resolved and not cached at construction",
+            )
+
+
+def test_adapter_survives_the_next_cutover_that_reaps_its_own_release() -> None:
+    """The consequence leg: what the cached value actually costs.
+
+    A cached versioned path is not merely inelegant — the next deploy REAPS the
+    release it names (``release_manager`` keeps the last K), and every consumer
+    downstream is deliberately non-fatal, so the whole fleet goes dark with exit 0
+    everywhere. This asserts the property that matters at the adapter seam:
+    after a cutover that removes the very release the adapter was constructed
+    with, the wake CLI it hands a worker still EXECUTES.
+    """
+    print("\nR11: an adapter outlives the deploy that reaps its own release")
+    for name, factory in _adapter_solet_bin_readers():
+        with tempfile.TemporaryDirectory() as tmp:
+            releases = Path(tmp) / "releases" / "testsolet"
+            releases.mkdir(parents=True)
+            built_with = _make_release(releases, "rel-20260816T152738Z-dd0ebb517")
+            _point(releases, "rel-20260816T152738Z-dd0ebb517")
+            read_spawn_surface = factory(str(built_with), Path(tmp))  # type: ignore[operator]
+
+            # A later deploy: new release materialized, `current` swaps onto it,
+            # the release this adapter was constructed with is REAPED.
+            _make_release(releases, "rel-20260817T133803Z-606323923")
+            _point(releases, "rel-20260817T133803Z-606323923")
+            shutil.rmtree(releases / "rel-20260816T152738Z-dd0ebb517")
+            _check(
+                not Path(built_with).exists(),
+                f"{name}: negative control — the construction-time release is "
+                f"genuinely gone",
+            )
+
+            surface = read_spawn_surface()
+            env: dict[str, str] = {"PATH": "/usr/bin:/bin"}
+            expose_worker_cli(env, surface)
+            sidecar = watch_sidecar_argv(
+                surface, agent_id="claude_code", spool=True,
+            )
+            _check(
+                Path(env["AGENT_WAKE_CLI"]).is_file(),
+                f"{name}: AGENT_WAKE_CLI still names a file after the reap",
+            )
+            ran = subprocess.run(
+                [env["AGENT_WAKE_CLI"]], capture_output=True, text=True, check=False,
+            )
+            _check(
+                ran.returncode == 0
+                and ran.stdout.strip() == "rel-20260817T133803Z-606323923",
+                f"{name}: and it EXECUTES, serving the new release "
+                f"(rc={ran.returncode}, out={ran.stdout.strip()!r})",
+            )
+            _check(
+                shutil.which("solet", path=env["PATH"]) is not None,
+                f"{name}: the worker's prepended PATH still resolves bare `solet`",
+            )
+            _check(
+                Path(sidecar[0]).is_file(),
+                f"{name}: the registration sidecar's argv[0] survives too",
+            )
+
+
 def main() -> int:
     tests = [
         test_versioned_path_is_rewritten_onto_the_stable_pointer,
@@ -347,6 +493,8 @@ def main() -> int:
         test_absolute_link_text_is_honored,
         test_non_release_paths_and_degraded_inputs_are_untouched,
         test_resolution_rungs_all_stabilize,
+        test_adapter_reresolves_after_a_flip_that_followed_construction,
+        test_adapter_survives_the_next_cutover_that_reaps_its_own_release,
     ]
     for test in tests:
         test()

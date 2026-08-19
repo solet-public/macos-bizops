@@ -120,8 +120,11 @@ def test_is_rotation_due_false_strictly_below_threshold() -> None:
     ceiling = rt.DEFAULT_CONSERVATIVE_CEILING
     just_below = int(ceiling * rt.ROTATION_THRESHOLD_FRACTION) - 1
     _check(
-        rt.is_rotation_due(model="unknown", current_tokens=just_below) is False,
-        "one token below the threshold fraction -> not due",
+        rt.is_rotation_due(
+            model="unknown", current_tokens=just_below, cache_cold=False,
+        ) is False,
+        "one token below the threshold fraction -> not due (and the band half is "
+        "warm_keep at 49,999, so the fraction half is what is under test here)",
     )
 
 
@@ -129,7 +132,9 @@ def test_is_rotation_due_true_at_exact_threshold_boundary() -> None:
     ceiling = rt.DEFAULT_CONSERVATIVE_CEILING
     at_threshold = int(ceiling * rt.ROTATION_THRESHOLD_FRACTION)
     _check(
-        rt.is_rotation_due(model="unknown", current_tokens=at_threshold) is True,
+        rt.is_rotation_due(
+            model="unknown", current_tokens=at_threshold, cache_cold=False,
+        ) is True,
         "exactly at the threshold fraction -> due (kills a strict-greater-than mutation)",
     )
 
@@ -342,6 +347,336 @@ def test_transcript_parser_refuses_a_naive_timestamp() -> None:
            "an aware Z timestamp parses")
 
 
+# ---------------------------------------------------------------------------
+# GAU-08 (2026-08-18) -- `rotation_due` as the UNION of the two axes.
+#
+# The defect: the economics bands are ABSOLUTE token counts and saturate at
+# `warm_immediate` at 300,000, while `is_rotation_due` was `fraction >= 0.5`
+# of the model's own ceiling. On a 1M ceiling those are 300,000 and 500,000,
+# so the most urgent band the policy has coexisted with `rotation_due=False`
+# for 200,000 tokens. Measured 2026-08-18 on every live session in the fleet
+# at every value any of them occupied that day: the field read False on all
+# three live sessions measured, at 219,974 / 195,778 / 226,257 tokens, i.e. it
+# was not merely wrong at a corner, it was wrong across the entire range in
+# which anyone actually works. WHICH session held which number is not part of
+# the argument -- the claim is that the field was False across the whole
+# occupied range, and the three readings carry that on their own.
+
+
+def test_rotation_due_covers_the_whole_actionable_range() -> None:
+    """The gap GAU-08 names, asserted as the RANGE it spans, not one point.
+
+    A single sampled value cannot distinguish "the threshold moved" from "the
+    predicate changed shape", so both ends of the previously-blind interval
+    are pinned along with the band that was already saturated throughout it.
+    """
+    ceiling = rt.resolve_ceiling("claude-opus-5")
+    _check(ceiling == 1_000_000, "the model this range is stated against is a 1M ceiling")
+    for tokens in (300_000, 350_000, 499_999):
+        _check(
+            rt.rotation_band(tokens, cache_cold=False)[0] == "warm_immediate",
+            f"{tokens:,} was ALREADY the most urgent band the policy has",
+        )
+        _check(
+            rt.is_rotation_due(
+                model="claude-opus-5", current_tokens=tokens, cache_cold=False,
+            ) is True,
+            f"{tokens:,} on a 1M ceiling is rotation-due -- the band decides here, "
+            f"and the old fraction hint said False for all 200,000 tokens of this range",
+        )
+
+
+def test_a_small_ceiling_model_is_still_due_at_its_own_fraction() -> None:
+    """★ THE DECOY, AND THE REASON THIS IS A UNION RATHER THAN A RENAME.
+
+    The obvious-looking fix -- redefine `rotation_due` as "the band is
+    actionable" -- is WRONG, and wrong in the silent direction. The economics
+    bands are MODEL-BLIND absolute token counts; `is_rotation_due` is
+    model-AWARE via `resolve_ceiling`. On claude-haiku-4-5 (ceiling 200,000)
+    the first actionable band does not arrive until 150,000, so a pure-band
+    definition returns False at 100,000 -- which is that model's OWN halfway
+    point, and the exact value the fraction hint exists to catch. It would
+    have made `rotation_due` strictly LATER on every small-ceiling model while
+    looking like a pure improvement on the 1M models everyone tests on.
+
+    The three assertions are ordered so the test NAMES that mutation rather
+    than merely failing under it: the band at 100,000 is shown to be
+    non-actionable FIRST, so a reader can see that the True below cannot be
+    coming from the band half.
+    """
+    ceiling = rt.resolve_ceiling("claude-haiku-4-5")
+    _check(ceiling == 200_000, "the decoy is stated against a real 200K-ceiling model")
+    _check(
+        rt.rotation_band(100_000, cache_cold=False)[0] == "warm_keep",
+        "at 100,000 the ECONOMICS band still says keep working -- so a pure-band "
+        "definition of rotation_due returns False here",
+    )
+    _check(
+        rt.is_rotation_due(
+            model="claude-haiku-4-5", current_tokens=100_000, cache_cold=False,
+        ) is True,
+        "...and rotation_due is True anyway, because 100,000 is 0.5 of this model's "
+        "OWN 200,000 ceiling -- the fraction half is load-bearing, not vestigial",
+    )
+    _check(
+        rt.is_rotation_due(
+            model="claude-haiku-4-5", current_tokens=99_999, cache_cold=False,
+        ) is False,
+        "one token below its own halfway point is NOT due -- the fraction half still "
+        "has a real boundary, it was not widened into always-true",
+    )
+
+
+def test_the_union_can_only_ever_notify_more() -> None:
+    """MONOTONICITY, over a grid rather than by argument.
+
+    The union is `band_is_actionable OR fraction >= THRESHOLD`, so it is a
+    strict superset of the predicate it replaces and no session that was
+    served a notice before can lose one. That property is what makes this
+    landable on a live shared surface without a migration, so it is asserted
+    against the historical definition INLINE -- reproducing the old rule here
+    rather than citing it, because a monotonicity claim checked against the
+    new code would be checking the change against itself.
+    """
+    for model in ("claude-opus-5", "claude-haiku-4-5", "a-model-nobody-added"):
+        ceiling = rt.resolve_ceiling(model)
+        for tokens in (0, 1, 49_999, 50_000, 99_999, 100_000, 110_702, 120_000,
+                       149_999, 150_000, 199_999, 200_000, 299_999, 300_000,
+                       499_999, 500_000, 750_000, 900_000, 1_500_000):
+            for cold in (True, False):
+                historical = tokens >= ceiling * rt.ROTATION_THRESHOLD_FRACTION
+                now = rt.is_rotation_due(
+                    model=model, current_tokens=tokens, cache_cold=cold,
+                )
+                if historical and not now:
+                    _check(
+                        False,
+                        f"MONOTONICITY BROKEN: {model} at {tokens:,} cold={cold} was "
+                        f"due under the old fraction rule and is not due now",
+                    )
+                    return
+    _check(True, "across 3 ceilings x 19 sizes x 2 cache states, every session the old "
+                 "fraction rule called due is still due -- the union only ever adds")
+
+
+def test_capacity_can_never_be_the_reason_a_session_is_due() -> None:
+    """WHY THE UNION IS TWO-TERM AND NOT THREE -- enforced, not asserted in a
+    comment.
+
+    There are two model-aware quantities in this module, not one: the fraction
+    hint at 0.5 and CAPACITY_BAND_APPROACHING_FRACTION at 0.75. Folding the
+    capacity axis into the union looks like the more complete answer and buys
+    exactly nothing, because 0.75 > 0.5 means the fraction term has already
+    fired everywhere capacity could -- on EVERY ceiling, since both are
+    fractions of the same denominator.
+
+    Pinned as a test rather than written as a comment because it is a
+    CONDITIONAL fact: it holds only while that inequality does. If anyone ever
+    lowers the capacity fraction below the rotation hint, the union silently
+    stops covering the capacity axis and no comment would say so. This breaks
+    loudly instead.
+    """
+    _check(
+        rt.CAPACITY_BAND_APPROACHING_FRACTION > rt.ROTATION_THRESHOLD_FRACTION,
+        "the first capacity band (0.75) sits ABOVE the rotation fraction hint (0.5), "
+        "so the fraction term fires first on every ceiling -- this inequality is what "
+        "makes the two-term union complete, and the union must gain a capacity term "
+        "if it is ever reversed",
+    )
+    for model in ("claude-opus-5", "claude-haiku-4-5", "a-model-nobody-added"):
+        ceiling = rt.resolve_ceiling(model)
+        approaching = int(ceiling * rt.CAPACITY_BAND_APPROACHING_FRACTION)
+        _check(
+            rt.capacity_band(approaching, ceiling)[0] == "capacity_approaching",
+            f"{model}: {approaching:,} is where capacity first asks for a rotation",
+        )
+        _check(
+            rt.is_rotation_due(
+                model=model, current_tokens=approaching, cache_cold=False,
+            ) is True,
+            f"{model}: it is already due there for a reason that is NOT capacity",
+        )
+
+
+def test_a_cold_cache_above_h_is_due_where_the_same_size_warm_is_not() -> None:
+    """The cold branch reaches the union, and it is a DIFFERENT question.
+
+    120,000 is the discriminating size this file already identified for
+    `rotation_band` (between H at 110,702 and the first warm band at 150,000)
+    and it discriminates here for the same reason: cold it is `cold_above_h`
+    and actionable, warm it is `warm_keep` and not, and the fraction is 0.12
+    on a 1M ceiling so the fraction half cannot be what decides either answer.
+    A union that dropped the cache axis would return False for both and this
+    is the only size that would notice.
+    """
+    _check(
+        rt.is_rotation_due(
+            model="claude-opus-5", current_tokens=120_000, cache_cold=True,
+        ) is True,
+        "120,000 with a COLD cache is due -- the context is re-paid at full price "
+        "on the next call whether or not you rotate",
+    )
+    _check(
+        rt.is_rotation_due(
+            model="claude-opus-5", current_tokens=120_000, cache_cold=False,
+        ) is False,
+        "the same 120,000 WARM is not due -- same size, opposite verdicts by cache "
+        "state, and the fraction (0.12) is identical in both",
+    )
+
+
+def test_unmeasured_cache_state_is_treated_as_warm_never_upgraded_to_cold() -> None:
+    """`cache_cold=None` means NOT MEASURED, and it must not be promoted.
+
+    A reporter predating cache attribution sends no cache state at all, and
+    `_rotation_prose` already says in the delivered notice that such a band is
+    "the warm default rather than a measurement". Reading None as cold would
+    be the loud direction, but it would manufacture a measurement nobody took
+    and make a session in the 110,702-150,000 window due on the strength of an
+    absent field -- the same manufactured-freshness pathology that got a
+    detached gauge heartbeat refused on this lane. Quiet-but-honest is the
+    ruling; the notice already carries the caveat that goes with it.
+    """
+    _check(
+        rt.is_rotation_due(
+            model="claude-opus-5", current_tokens=120_000, cache_cold=None,
+        ) is False,
+        "an UNMEASURED cache state answers exactly as warm does, not as cold",
+    )
+    _check(
+        rt.is_rotation_due(
+            model="claude-opus-5", current_tokens=120_000, cache_cold=None,
+        ) == rt.is_rotation_due(
+            model="claude-opus-5", current_tokens=120_000, cache_cold=False,
+        ),
+        "...and it is the SAME answer as warm at the one size where warm and cold "
+        "differ -- so None is the warm default, not a third behaviour",
+    )
+
+
+def test_overage_cannot_change_which_band_a_size_falls_in() -> None:
+    """Why the union needs no `overage` argument -- checked, not assumed.
+
+    `rotation_band` takes `overage`, so leaving it out of the rotation-due
+    predicate looks like a dropped input. It is not: `overage` reaches only
+    `_horizon_prose`, i.e. the break-even HORIZON quoted inside the guidance
+    string, and never the band NAME. Since the union decides on the band name,
+    overage cannot move the decision. Asserted over a grid so the omission is
+    a measured fact about the code rather than a claim about it -- if anyone
+    ever makes a band boundary overage-dependent, the union acquires a real
+    missing input and this test says so.
+    """
+    for tokens in (0, 90_000, 110_702, 120_000, 149_999, 150_000, 200_000,
+                   250_000, 300_000, 500_000):
+        for cold in (True, False):
+            nominal = rt.rotation_band(tokens, cache_cold=cold, overage=False)[0]
+            collapsed = rt.rotation_band(tokens, cache_cold=cold, overage=True)[0]
+            if nominal != collapsed:
+                _check(
+                    False,
+                    f"overage MOVED a band at {tokens:,} cold={cold}: "
+                    f"{nominal} -> {collapsed}; the union now needs an overage input",
+                )
+                return
+    _check(True, "across 10 sizes x 2 cache states the collapsed-TTL premium changes the "
+                 "quoted horizon but never the band NAME -- so it cannot change whether "
+                 "a session is rotation-due")
+
+
+def test_the_two_entry_points_agree_on_the_models_own_ceiling() -> None:
+    """The ceiling-taking core and the model-taking delegate are ONE predicate.
+
+    Two entry points exist so that a caller holding a STORED ceiling decides on
+    the same denominator it prints (`session_context_status` and
+    `_rotation_due_row` both compute a fraction from the stored ceiling and put
+    that fraction in the notice) -- deciding on `resolve_ceiling(model)` while
+    printing a stored-ceiling fraction would attach a true number to the wrong
+    noun. This pins that they cannot drift apart where the two ceilings agree,
+    which is the only place the equivalence is even claimed.
+    """
+    for model in ("claude-opus-5", "claude-haiku-4-5", "a-model-nobody-added"):
+        ceiling = rt.resolve_ceiling(model)
+        for tokens in (0, 99_999, 100_000, 149_999, 150_000, 299_999,
+                       300_000, 499_999, 500_000, 900_000):
+            for cold in (True, False, None):
+                by_model = rt.is_rotation_due(
+                    model=model, current_tokens=tokens, cache_cold=cold,
+                )
+                by_ceiling = rt.is_rotation_due_for_ceiling(
+                    ceiling=ceiling, current_tokens=tokens, cache_cold=cold,
+                )
+                if by_model != by_ceiling:
+                    _check(
+                        False,
+                        f"the two entry points DISAGREE for {model} at {tokens:,} "
+                        f"cold={cold}: model-form {by_model}, ceiling-form {by_ceiling}",
+                    )
+                    return
+    _check(True, "across 3 models x 10 sizes x 3 cache states the model-taking delegate "
+                 "and the ceiling-taking core return the same verdict -- one predicate, "
+                 "two entry points, not two predicates")
+
+
+def test_the_frozen_out_of_tree_call_shape_still_works() -> None:
+    """★ THE CROSS-COPY CONTRACT, and it is not hypothetical.
+
+    The rotation hook exists in a THIRD copy this repository cannot edit: an
+    installed plugin-cache copy under ~/.claude/plugins/cache (GAU-04). It
+    imports THIS module out of the live checkout while carrying its own frozen
+    call site, so this function's signature is a published interface across a
+    boundary no landing here can migrate. Measured 2026-08-18: seven such
+    copies present, the marketplace plugin enabled in settings, every copy
+    calling the two-argument shape below.
+
+    Requiring `cache_cold` would therefore have converted each of that copy's
+    PostToolUse ticks into a TypeError. This pins the shape those copies
+    actually call -- and pins that they inherit the union through it, rather
+    than merely surviving it, which is the whole reason the default is `None`
+    and not something that changes the answer.
+    """
+    _check(
+        rt.is_rotation_due(model="claude-opus-5", current_tokens=350_000) is True,
+        "the frozen two-argument call shape still resolves -- AND it now returns "
+        "True at 350,000, so a copy nobody can update inherits the fix",
+    )
+    _check(
+        rt.is_rotation_due(model="claude-opus-5", current_tokens=10_000) is False,
+        "...without becoming always-true: the same frozen shape still says no "
+        "where neither axis fires",
+    )
+    _check(
+        rt.is_rotation_due(model="claude-opus-5", current_tokens=120_000)
+        == rt.is_rotation_due(
+            model="claude-opus-5", current_tokens=120_000, cache_cold=None,
+        ),
+        "...and omitting the argument is EXACTLY the unmeasured case, not a "
+        "fourth behaviour: an absent argument means nobody measured, which is "
+        "what None already means",
+    )
+
+
+def test_the_ceiling_form_refuses_a_non_positive_ceiling() -> None:
+    """A missing ceiling is REFUSED, never defaulted -- the same posture
+    `capacity_band` states for itself, and for the same reason: defaulting one
+    here would answer a question about a specific model's window with a number
+    nobody measured, and it would do it inside the predicate that decides
+    whether a live session gets told to rotate.
+
+    The model-taking form cannot reach this branch (`resolve_ceiling` always
+    returns a positive ceiling, falling back to DEFAULT_CONSERVATIVE_CEILING),
+    which is exactly why the refusal has to be tested through the core.
+    """
+    for bad in (0, -1):
+        try:
+            rt.is_rotation_due_for_ceiling(
+                ceiling=bad, current_tokens=400_000, cache_cold=False,
+            )
+        except ValueError:
+            _check(True, f"a ceiling of {bad} is refused rather than defaulted")
+        else:
+            _check(False, f"a ceiling of {bad} was ACCEPTED -- it must be refused")
+
+
 def main() -> int:
     print("=== rotation_thresholds smoke ===")
     test_table_carries_exactly_the_seat_confirmed_keys()
@@ -365,6 +700,16 @@ def main() -> int:
     test_repeated_cold_calls_across_short_gaps_are_the_overage_signature()
     test_ttl_lapse_is_caught_even_when_the_last_call_read_cache()
     test_transcript_parser_refuses_a_naive_timestamp()
+    test_rotation_due_covers_the_whole_actionable_range()
+    test_a_small_ceiling_model_is_still_due_at_its_own_fraction()
+    test_the_union_can_only_ever_notify_more()
+    test_capacity_can_never_be_the_reason_a_session_is_due()
+    test_a_cold_cache_above_h_is_due_where_the_same_size_warm_is_not()
+    test_unmeasured_cache_state_is_treated_as_warm_never_upgraded_to_cold()
+    test_overage_cannot_change_which_band_a_size_falls_in()
+    test_the_two_entry_points_agree_on_the_models_own_ceiling()
+    test_the_frozen_out_of_tree_call_shape_still_works()
+    test_the_ceiling_form_refuses_a_non_positive_ceiling()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

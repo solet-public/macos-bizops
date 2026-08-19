@@ -8,7 +8,7 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born solet without losing its state — why a fast-forward git pull from the same seed repo is the default update path and teardown-plus-re-birth is only the fallback, the exact sequence (health probe, pull --ff-only, restart preferring apply_manifest's zero-downtime blue-green swap over a bare LaunchAgent restart when a router is present, startup quiescence wait, automatic knowledge-base re-ingest for changed files), when the virtual environment needs attention (editable installs make pulled code live at restart; only NEW plugins or changed dependencies need a pip step), configuring the business-connector export/workspace root on an already-hydrated install when a release adds or extends connector containment (the one-time gap an existing clone never closes on its own), re-running the changed hydration steps afterward — including adding a release-added plugin to the clone's profile manifest and running its hydration guidance so it actually activates — the four stale copies a restart alone never refreshes (the installed Claude Code plugin's version-keyed CACHE copy, an already-open MCP bridge subprocess, an armed watcher, and knowledge-base chunks indexed from files the release removed — a deletion-only KB change is invisible to the startup staleness check and needs an explicit knowledge-service re-install with a negative-search verification) with the verifiable diff-based refresh check for the plugin cache, the one-time `git remote set-url` re-point when the seed repository moves to a new home (taken after the pull, verified with a fetch, rolled back to the old URL if the new one is unreachable), the solet rename migration's post-apply sequence (backfilling a pre-June LaunchAgent plist's missing StandardOutPath/StandardErrorPath log redirection as a stopgap versus re-running the autostart install verb as the durable fix, renaming the HOMUNCULUS_* environment keys inside `~/.claude.json`'s MCP server entries and why that step refuses outright while any Claude Code process is still running, and running `--scan-stale`'s report-only sweep for surviving old-name references split into historical/leave-alone, live-process-state/relaunch-to-fix, and fixable/safe-to-edit-directly categories with the memory-fact filename-plus-frontmatter-plus-backlink triple that a blind rename would break), and the verification checklist including the watcher role-claim ground truth.
+Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born solet without losing its state — how an adopter learns a new re-mint was published in the first place (subscribing to the seed repository's GitHub releases, Watch → Custom → Releases, rather than polling or waiting to be told) and why that subscription must be re-pointed at the new repository when the seed moves homes or it goes silently stale, why a fast-forward git pull from the same seed repo is the default update path and teardown-plus-re-birth is only the fallback, the exact sequence (health probe, pull --ff-only, restart preferring apply_manifest's zero-downtime blue-green swap over a bare LaunchAgent restart when a router is present, startup quiescence wait, automatic knowledge-base re-ingest for changed files), when the virtual environment needs attention (editable installs make pulled code live at restart; only NEW plugins or changed dependencies need a pip step), configuring the business-connector export/workspace root on an already-hydrated install when a release adds or extends connector containment (the one-time gap an existing clone never closes on its own), re-running the changed hydration steps afterward — including adding a release-added plugin to the clone's profile manifest and running its hydration guidance so it actually activates — the four stale copies a restart alone never refreshes (the installed Claude Code plugin's version-keyed CACHE copy, an already-open MCP bridge subprocess, an armed watcher, and knowledge-base chunks indexed from files the release removed — a deletion-only KB change is invisible to the startup staleness check and needs an explicit knowledge-service re-install with a negative-search verification) with the verifiable diff-based refresh check for the plugin cache, the one-time `git remote set-url` re-point when the seed repository moves to a new home (taken after the pull, verified with a fetch, rolled back to the old URL if the new one is unreachable), the solet rename migration's post-apply sequence (backfilling a pre-June LaunchAgent plist's missing StandardOutPath/StandardErrorPath log redirection as a stopgap versus re-running the autostart install verb as the durable fix, renaming the HOMUNCULUS_* environment keys inside `~/.claude.json`'s MCP server entries and why that step refuses outright while any Claude Code process is still running, and running `--scan-stale`'s report-only sweep for surviving old-name references split into historical/leave-alone, live-process-state/relaunch-to-fix, and fixable/safe-to-edit-directly categories with the memory-fact filename-plus-frontmatter-plus-backlink triple that a blind rename would break), and the verification checklist including the watcher role-claim ground truth.
 
 ## When to use this runbook
 
@@ -16,6 +16,29 @@ Use this when a solet is ALREADY alive and healthy on this machine and a
 newer seed release has been published. Do not use it for first-time setup
 (that is the hydration runbook) or for a broken instance that will not boot
 (that is teardown plus re-birth).
+
+## How you learn a new release exists
+
+Everything below assumes you already know a re-mint was published. Nothing
+above this line tells you when to come back — this section is that step,
+and it belongs before the update sequence because every other step in this
+runbook is unreachable until this one fires.
+
+**Subscribe to the seed repository's releases on GitHub**: **Watch → Custom
+→ Releases** at the repository this clone was born from, not the default
+"All Activity" setting. A re-mint publishes as a dated release
+(`release-YYYY-MM-DD`) carrying a `RELEASE_NOTES.md`; that notification is
+the trigger for this runbook. Do not wait to be told by a human, and do not
+poll the repository by hand — the subscription is the mechanism.
+
+**If this update includes Step 2a below (the seed repository moved to a new
+home), re-subscribe at the new repository as part of that same step, not as
+an afterthought.** A subscription still pointed at the old repository goes
+silent the moment the move takes effect — no error, no missed-notification
+signal, just nothing arriving again. That is a worse failure than never
+subscribing at all, because it looks identical to "no new releases have
+shipped" from where you sit. Watch the new repository in the same sitting
+you re-point `origin`, not later.
 
 ## The one decision: pull-update or re-birth
 
@@ -88,6 +111,11 @@ somewhere else.
 Verify at the end of the update: `git -C <clone> remote -v` shows the new URL
 for both fetch and push, and `git -C <clone> status -sb` shows the branch
 tracking a branch on it.
+
+**Also re-subscribe to releases at the new repository now** (see "How you
+learn a new release exists" above) — an existing GitHub Watch subscription
+does not follow a `remote set-url`; it stays pointed at the old repository
+and goes silent from here on unless you re-subscribe at the new one.
 
 ## Step 3 — virtual environment: usually nothing
 

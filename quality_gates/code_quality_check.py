@@ -73,6 +73,8 @@ _SI_AST_CHECK = _QUALITY_GATES_DIR / "service_interface_ast_check.py"
 _SI_AST_ALLOWLIST = _QUALITY_GATES_DIR / "service_interface_ast_allowlist.txt"
 _RETURN_SHAPE_CHECK = _QUALITY_GATES_DIR / "return_shape_gate.py"
 _RETURN_SHAPE_ALLOWLIST = _QUALITY_GATES_DIR / "return_shape_allowlist.txt"
+_SHIPPED_DOC_CHECK = _QUALITY_GATES_DIR / "shipped_doc_gate.py"
+_SHIPPED_DOC_ALLOWLIST = _QUALITY_GATES_DIR / "cited_path_gate_allowlist.txt"
 _EMBEDDING_BOUND_CHECK = _QUALITY_GATES_DIR / "embedding_description_bound_gate.py"
 _EMBEDDING_BOUND_ALLOWLIST = (
     _QUALITY_GATES_DIR / "embedding_description_bound_allowlist.txt"
@@ -485,6 +487,34 @@ _W_WINT2_VAULT_KEY_GATE = _GateSpec(
 )
 
 
+# Shipped-document gate (GTE-10). Tree-walking (no scope-path argv splicing) —
+# derives what this checkout WOULD ship from seed_manifest.yaml and runs the
+# seal-time cited-path and reserved-identity checks over it, bundle-free. It
+# exists because both of those instruments take an assembled `bundle_dir`, so
+# neither could run before a commit existed: measured on 2026-08-17/18, three
+# shipped-content defects reached master and every one was caught at MINT time,
+# each costing a full re-assemble/re-seal/re-verify lap.
+#
+# Its allowlist is the SAME tracked-debt register the seal-time gate reads, so
+# a finding remediated for one is remediated for both; the per-profile
+# tolerated-count declarations live beside it in shipped_doc_baseline.txt.
+# Exit codes follow the canonical _WRAPPER_OK (0) / _WRAPPER_BLOCKING (2)
+# pattern rather than sql_access_gate.py's 1, because exit 1 collides with
+# Python's unhandled-exception code and _classify_gate_exit would have to read
+# a crash as a finding count.
+#
+# In a BORN CLONE the seed factory does not ship (NO-FACTORY), so there is no
+# manifest and no seed to mint; the gate prints a declared skip and exits 0.
+# That is deliberate and it is checked: a shipped executable that assumes an
+# unshipped path is one of the three defects this gate was built for.
+_SHIPPED_DOC_GATE = _GateSpec(
+    name="shipped_doc",
+    description="shipped-document citations and identity",
+    script=_SHIPPED_DOC_CHECK,
+    allowlist=_SHIPPED_DOC_ALLOWLIST,
+)
+
+
 def _scope_roots(project_root: Path) -> list[Path]:
     """Resolve the declared quality-surface roots that exist in this checkout."""
     roots = [
@@ -832,6 +862,37 @@ def _check_return_shape_gate(project_root: Path, venv_python: Path,
     )
 
 
+def _check_shipped_doc_gate(project_root: Path, venv_python: Path,
+                            results: _CheckResults) -> bool:
+    """Run the shipped-document gate (GTE-10). True iff non-allowlisted findings.
+
+    Tree-walking gate: no scope-path argv splicing — it derives its own file
+    set from the seed manifest rather than being handed one, because "what
+    ships" is a manifest question and not a checkout-walk question. Exit codes
+    follow the canonical _WRAPPER_OK / _WRAPPER_BLOCKING pattern.
+    """
+    artifacts = _resolve_gate_artifacts(project_root, _SHIPPED_DOC_GATE)
+    if artifacts is None:
+        return True
+    script, allowlist = artifacts
+
+    print(f"\n📊 {_SHIPPED_DOC_GATE.description.title()} Gate ({_SHIPPED_DOC_GATE.name})...")
+    argv = [str(venv_python), str(script), "--repo-root", str(project_root),
+            "--allowlist", str(allowlist)]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        print(f"❌ BLOCKING: {_SHIPPED_DOC_GATE.name} gate timed out after 300s")
+        return True
+    except FileNotFoundError as exc:
+        print(f"❌ BLOCKING: {_SHIPPED_DOC_GATE.name} gate cannot invoke: {exc}")
+        return True
+
+    return _interpret_tree_gate_result(
+        _SHIPPED_DOC_GATE, result, venv_python, script, allowlist, results,
+    )
+
+
 def _check_embedding_bound_gate(project_root: Path, venv_python: Path,
                                 results: _CheckResults) -> bool:
     """Run the embedding_description bound gate. True iff non-allowlisted findings.
@@ -1061,7 +1122,7 @@ def _report_pyright_errors(output: str, error_count: int) -> None:
 def _run_blocking_gates(
     project_root: Path, venv_python: Path, results: _CheckResults,
 ) -> None:
-    """Run the four whole-tree blocking gates + the two warn-only gates into
+    """Run the five whole-tree blocking gates + the two warn-only gates into
     `results`. Split out of `main()` purely to keep its own branch count
     (and cyclomatic complexity) down -- no behavior change, same calls in
     the same order."""
@@ -1073,6 +1134,8 @@ def _run_blocking_gates(
         results.failed_blocking_gates.append(_RETURN_SHAPE_GATE.name)
     if _check_embedding_bound_gate(project_root, venv_python, results):
         results.failed_blocking_gates.append(_EMBEDDING_BOUND_GATE.name)
+    if _check_shipped_doc_gate(project_root, venv_python, results):
+        results.failed_blocking_gates.append(_SHIPPED_DOC_GATE.name)
     # W-INT Cycle 2 driver-import gate runs in WARN mode per master plan
     # §1.7 — emits findings but never blocks. Mode flip at W-WINT2-FINAL.
     _check_wint2_driver_import_gate(project_root, venv_python)

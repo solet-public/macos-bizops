@@ -42,10 +42,13 @@ the standalone bridge subprocess must both be able to import it bare.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 CLI_COMMAND_NAME = "solet"
 """The wake CLI's own BINARY name — never the solet INSTANCE name
@@ -183,10 +186,132 @@ def resolve_solet_bin(
     fatal (the Codex watch path refuses to spawn) or merely degrading (the
     Claude adapters fall back to the bare command name, preserving their
     pre-fix behavior exactly rather than refusing a spawn that used to work).
+
+    **NEVER CACHE THIS FOR THE LIFE OF A PROCESS.** This function's answer is a
+    function of MUTABLE FILESYSTEM STATE — the ``current`` symlink's target —
+    so it is a transient, not a constant. Call it per spawn.
+
+    That is not a style preference; it is the R11 defect, measured live
+    2026-08-17. All four spawn adapters used to evaluate this once in
+    ``__init__`` and store the result. The platform process started at 13:38:51Z,
+    between a release being materialized (13:38Z) and cutover flipping ``current``
+    onto it (13:43Z) — inside the skew window, where
+    :func:`stable_release_path` correctly REFUSES to rewrite and hands back the
+    versioned path. Refusing was right; caching the refusal was not. Every worker
+    spawned for the rest of that process's life — verified on a spawn at 16:30Z,
+    2h47m after the flip, while a fresh call in the same release returned the
+    ``current`` path — inherited a versioned ``AGENT_WAKE_CLI``, ``PATH`` prepend
+    and watch-sidecar argv, i.e. exactly the reap-dangling pin this whole module
+    exists to prevent. A conservative branch cached forever becomes a permanent
+    one, and every consumer downstream is non-fatal, so the whole fleet would
+    have gone dark silently at the next cutover.
+
+    The corollary for reviewers: a test that calls this function directly can
+    only ever prove the FUNCTION is right. It cannot see a caller that asks once
+    and remembers. Observing the flip must happen AFTER the caller is
+    constructed — see ``release_pointer_stability_smoke``'s adapter legs.
     """
     return stable_release_path(
         _discover_solet_bin(explicit, python_executable),
     )
+
+
+class WakeCliResolver:
+    """Resolves the wake CLI per spawn without ever handing back a dead path.
+
+    R11 (2026-08-17). All four spawn adapters used to call
+    :func:`resolve_solet_bin` once in ``__init__`` and store the answer. That
+    answer is a function of the ``current`` symlink's target — mutable state that
+    cutover moves under a long-lived process — so caching it froze whatever the
+    filesystem happened to say at startup. Measured consequence: the platform
+    process started at 13:38:51Z, inside the window between a release being
+    materialized (13:38Z) and cutover flipping ``current`` onto it (13:43Z), where
+    :func:`stable_release_path` correctly REFUSES to rewrite. Every worker spawned
+    for the rest of that process's life inherited the versioned path — confirmed
+    on a real spawn at 16:30Z, 2h47m after the flip, while a fresh call inside the
+    same release returned the ``current`` path.
+
+    Re-resolving on every read fixes that and, on its own, INTRODUCES A SECOND
+    DEFECT. Measured minimal repro before this class existed:
+
+    * ``current`` -> ``rel-OLD``; resolve once -> ``.../current/venv/bin/solet``.
+    * Deploy: materialize ``rel-NEW``, flip ``current``, REAP ``rel-OLD``.
+    * The cached value still resolves through ``current`` and EXECUTES.
+    * A fresh resolution returns ``.../rel-OLD/venv/bin/solet``, which no longer
+      exists — the discovery rung hands back the construction-time versioned path
+      (an explicit override, or ``sys.executable``'s sibling, which is equally
+      fixed for a process's life), and the skew branch then refuses to rewrite it.
+
+    So the cache was accidentally protecting a real property. Two shipped
+    invariants are in tension whenever the running release is not ``current``:
+    skew must not be silently version-substituted, and a worker must never be
+    handed a path a reap can dangle. Neither is negotiable, and no single
+    resolution strategy satisfies both.
+
+    This class satisfies both by ranking two candidates instead of picking one
+    strategy: prefer the FRESH resolution, and fall back to the construction-time
+    stabilized value only when the fresh answer does not stat as an executable
+    file and the fallback does. Consequences, all three measured by the adapter
+    legs in ``release_pointer_stability_smoke``:
+
+    * Flip onto the running release after a skewed startup — fresh wins, the R11
+      defect is closed.
+    * Cutover away plus a reap — fresh is a corpse, the stabilized fallback wins,
+      no dangling CLI reaches a worker.
+    * Skew with a LIVE source — fresh is a real versioned executable and is
+      returned unchanged, so the deliberate no-silent-substitution invariant and
+      its own smoke leg are untouched.
+    * NEITHER usable — the fresh answer is returned, ``""`` included, so the
+      degradation contract callers already implement is unchanged (the Codex watch
+      path refuses to spawn; the Claude adapters fall back to the bare command
+      name). This branch invents nothing. It is named here deliberately: an
+      unnamed third branch is where the next defect of this shape would hide.
+
+    THE FALLBACK DOES NOT WEAKEN THE NO-SILENT-SUBSTITUTION INVARIANT, and a
+    reader who thinks it does will "fix" it back into a defect. That invariant
+    governs the MOMENT OF REWRITING — do not silently swap in a different version
+    when deciding what path to hand out. It says nothing about the durability of a
+    path that was already, legitimately, rewritten. A ``current/...`` path
+    continuing to follow ``current`` across a cutover is not a substitution; it is
+    the entire purpose of rewriting onto a stable pointer. The live-source skew
+    case still returns the fresh versioned path, which is where the invariant
+    actually applies, and its smoke leg stays green.
+
+    It never returns a path that does not exist while one that does is in hand,
+    and it never substitutes a version while the honest answer is still alive.
+    """
+
+    __slots__ = ("_fallback", "_override")
+
+    def __init__(self, override: str | None) -> None:
+        self._override = override
+        # Resolved once, at construction, on purpose: this is the LAST-KNOWN-GOOD
+        # rung, not the answer. It is only ever consulted when the fresh answer
+        # has become unusable, which is precisely the case the pre-R11 cache
+        # handled correctly and a naive re-resolve regressed.
+        self._fallback = resolve_solet_bin(override)
+
+    def resolve(self) -> str:
+        """The wake CLI to hand a worker, resolved now."""
+        fresh = resolve_solet_bin(self._override)
+        if fresh and Path(fresh).is_file() and os.access(fresh, os.X_OK):
+            return fresh
+        if self._fallback and Path(self._fallback).is_file() and os.access(
+            self._fallback, os.X_OK,
+        ):
+            logger.warning(
+                "wake CLI %r no longer resolves to an executable; falling back to "
+                "the construction-time stable path %r (a cutover moved `current` "
+                "away from this process's release and the old release was reaped)",
+                fresh,
+                self._fallback,
+            )
+            return self._fallback
+        # Both rungs unusable. Return the fresh answer — including "" — so the
+        # degradation contract every caller already implements is unchanged: the
+        # Codex watch path refuses to spawn, the Claude adapters fall back to the
+        # bare command name. Never invent a path here.
+        return fresh
 
 
 def expose_worker_cli(env: dict[str, str], solet_bin: str) -> None:
@@ -250,6 +375,7 @@ __all__ = [
     "CLI_COMMAND_NAME",
     "CURRENT_LINK_NAME",
     "RELEASE_ID_PREFIX",
+    "WakeCliResolver",
     "expose_worker_cli",
     "resolve_solet_bin",
     "stable_release_path",

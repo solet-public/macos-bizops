@@ -400,8 +400,9 @@ class ActionQueuePoller:
 
         # Metrics
         self.total_actions_processed = 0
-        # Rows seen ``queued`` on the most recent fetch — half of the D5
-        # stall conjunction (the other half is poll age). See
+        # Rows seen ``queued`` on the most recent fetch — corroborating
+        # context published alongside the D5 stall verdict, which is driven
+        # by poll age alone (GAU-10). See
         # ananta.core.actions.action_path_liveness.
         self._last_observed_queue_depth = 0
         self.total_poll_cycles = 0

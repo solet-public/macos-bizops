@@ -110,6 +110,16 @@ SESSION_CONTEXT_STATUS_ID_PREFIX = "scx"
 TABLE_LANE_CHARTER = "lane_charter"
 LANE_CHARTER_ID_PREFIX = "lch"
 
+# R1 held-authorization queue (2026-08-17, seat GO ruling). Git-Controller
+# writes a row at REFUSAL time (declining a peer's citation of an
+# authorization it cannot verify first-party in its own inbox) — never the
+# requesting lane, so the entry exists mechanically regardless of any seat's
+# memory. `retired_at IS NULL` = still awaiting the matching first-party
+# authorization. No TTL: a queue that silently forgets is worse than no
+# queue, so staleness stays visible via `created_at` rather than expiring.
+TABLE_HELD_AUTHORIZATION = "held_authorization"
+HELD_AUTHORIZATION_ID_PREFIX = "hau"
+
 # ``session_claude_mapping.capture_source`` domain (ruling 2(c)) — carries
 # the SessionStart hook's own ``source`` field through (the rotation story:
 # a ``hook:clear`` row explains a new UUID on a surviving worker) vs
@@ -1103,6 +1113,53 @@ def get_session_context_status_schema() -> TableSchema:
                     "original collapsed bucket could not name."
                 ),
             ),
+            # THE ROUTING JOIN (2026-08-18). This table is keyed on the
+            # reporting session's LEDGER id, while a watcher-held worker's live
+            # `peer_binding` row is keyed on its WATCH id (`agi-watch-<hash>`).
+            # Those are different strings for the same session and no stored
+            # join related them, so a consumer holding a gauge row could not
+            # find the session's bridge -- measured live 2026-08-17: 3 of 4
+            # lanes unroutable for exactly this reason, while the one
+            # bridge-held session resolved fine.
+            #
+            # This column stores the session's STABLE `agent_session_id`, which
+            # `peer_registry.resolve_by_agent_session_id` reverse-looks-up
+            # against the live binding regardless of which id that binding is
+            # keyed on. That is the whole point: the join is resolved through
+            # the registry, never derived from the shape of the id.
+            #
+            # ★ DO NOT reconstruct this value from `agent_instance_id`. It
+            # currently happens to look like "ases-" + the ledger id, and that
+            # is a CONVENTION of one launcher, not a join. Code that slices the
+            # prefix would appear to work, pass tests, and then route to the
+            # wrong session (or nowhere) the moment a session id is minted any
+            # other way -- and its test would have verified the convention
+            # while never once exercising the routing.
+            #
+            # Nullable, and NULL means NOT REPORTED -- never "this session has
+            # no bridge". A reporter predating this widening sends nothing, and
+            # a consumer must be able to tell that apart from a session it
+            # genuinely could not route, exactly as the cache columns above
+            # keep "not measured" distinct from "measured false". Nullable is
+            # also what makes the migration safe on a populated table: the
+            # state layer reconciles this as ALTER TABLE ADD COLUMN, which is
+            # instant for a nullable column and fails for a NOT NULL one with
+            # no default.
+            "agent_session_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "The reporting session's STABLE agent_session_id "
+                    "($AGENT_SESSION_ID), used to reverse-resolve its live "
+                    "bridge binding through "
+                    "peer_registry.resolve_by_agent_session_id when the "
+                    "binding is keyed on a watch id rather than this row's "
+                    "ledger id. NULL means the reporter predates this column "
+                    "-- NOT that the session has no bridge. Never derive this "
+                    "from agent_instance_id: the 'ases-' + ledger-id shape is "
+                    "one launcher's convention, not a join."
+                ),
+            ),
             "reporter_generation": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=False,
@@ -1183,6 +1240,77 @@ def get_lane_charter_schema() -> TableSchema:
     )
 
 
+def get_held_authorization_schema() -> TableSchema:
+    """R1 held-authorization queue (2026-08-17). Mechanically enumerable
+    answer to "what is blocked on <role>?" for a freshly-booted session with
+    no memory of the previous seat — the platform-side counterpart to the
+    OBLIGATIONS running-log slot (``ananta/knowledge_base/
+    seat_running_log_convention.md``), which fixes the same failure through
+    seat discipline rather than a mechanism. GC writes the row at refusal
+    time; GC retires it on receiving the matching first-party authorization,
+    or ``owed_by_role``'s own holder retires it directly (superseded /
+    withdrawn). ``retired_at`` is set exactly once — never re-fired, mirrors
+    ``session_dependency.fired_at``'s NULL-armed convention."""
+    return TableSchema(
+        table_name=TABLE_HELD_AUTHORIZATION,
+        description=(
+            "Held authorization-citation refusals Git-Controller cannot act "
+            "on without a first-party authorization. retired_at NULL = still "
+            "owed; list_held_authorizations is the 'what is blocked on <role>?' "
+            "answer for a session with no memory of a prior seat."
+        ),
+        id_prefix=HELD_AUTHORIZATION_ID_PREFIX,
+        columns={
+            "requesting_peer": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="The role or instance whose commit request GC refused.",
+            ),
+            "owed_by_role": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "The seat/coordinator role expected to send the first-party "
+                    "authorization GC is waiting on. Not hardcoded to any one role."
+                ),
+            ),
+            "branch_or_request_ref": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="The proposed branch name or other stable request identifier.",
+            ),
+            "reason": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="Why GC refused — e.g. the citation it could not verify first-party.",
+            ),
+            "retired_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description="NULL = still owed. Set once, never re-fired, by GC or owed_by_role.",
+            ),
+            "retired_reason": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="e.g. 'authorized', 'superseded', 'withdrawn'. Set with retired_at.",
+            ),
+            "retired_by": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Role or instance that called retire_held_authorization.",
+            ),
+        },
+        indexes=[
+            IndexDefinition(
+                name="idx_held_authorization_owed_by_role", columns=["owed_by_role"],
+            ),
+            IndexDefinition(
+                name="idx_held_authorization_requesting_peer", columns=["requesting_peer"],
+            ),
+            IndexDefinition(
+                name="idx_held_authorization_open", columns=["retired_at"],
+            ),
+        ],
+    )
+
+
 def get_session_lifecycle_schema_definition() -> SchemaDefinition:
     """Wrap the D1 L0 schema deltas (§3.2-3.4 + the AMEND-4b cardinality row)
     for ``get_schema_definitions``. Same namespace as the rest of this plugin's
@@ -1191,10 +1319,11 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
     D1 is land-able alone)."""
     return SchemaDefinition(
         namespace=AGENT_ROLE_BINDING_NAMESPACE,
-        version="1.1.0",
+        version="1.2.0",
         description=(
             "Fleet session-management Phase B, D1 — L0 schema deltas. "
-            "+1.1.0: session_context_status (maintenance-verbs M1)."
+            "+1.1.0: session_context_status (maintenance-verbs M1). "
+            "+1.2.0: held_authorization (R1 held-authorization queue)."
         ),
         tables={
             TABLE_SESSION_ROLE_CLAIM: get_session_role_claim_schema(),
@@ -1204,6 +1333,7 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             TABLE_SESSION_CLAUDE_MAPPING: get_session_claude_mapping_schema(),
             TABLE_LANE_CHARTER: get_lane_charter_schema(),
             TABLE_SESSION_CONTEXT_STATUS: get_session_context_status_schema(),
+            TABLE_HELD_AUTHORIZATION: get_held_authorization_schema(),
         },
     )
 
@@ -1217,6 +1347,7 @@ __all__ = [
     "CONDITION_DEADLINE",
     "CONDITION_LANE_CLOSED",
     "CONDITION_SESSION_TERMINAL",
+    "HELD_AUTHORIZATION_ID_PREFIX",
     "LANE_CHARTER_ID_PREFIX",
     "LIFECYCLE_IDLE",
     "LIFECYCLE_LIVE",
@@ -1242,6 +1373,7 @@ __all__ = [
     "SESSION_TRANSITION_ID_PREFIX",
     "SESSION_VISIBILITY_HEADLESS",
     "SESSION_VISIBILITY_VISIBLE",
+    "TABLE_HELD_AUTHORIZATION",
     "TABLE_LANE_CHARTER",
     "TABLE_MANAGED_SESSION",
     "TABLE_SESSION_CLAUDE_MAPPING",
@@ -1254,6 +1386,7 @@ __all__ = [
     "WORK_CLASS_READ_ONLY",
     "get_agent_role_binding_schema",
     "get_agent_role_binding_schema_definition",
+    "get_held_authorization_schema",
     "get_lane_charter_schema",
     "get_managed_session_schema",
     "get_peer_binding_schema",
