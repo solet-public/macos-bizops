@@ -4,8 +4,8 @@ Spawns the router as an asyncio task within this process plus two
 mock-color HTTP servers (blue on 8101, green on 8150). Drives the
 mgmt-plane via the Unix socket and the public surface via httpx.
 
-Covers the §3.1 deliverable checklist from
-`workbench/2026-06-01_local_blue_green_L3_implementation_plan.md`:
+Covers the §3.1 deliverable checklist from the L3-implementation-plan
+design record (dev-checkout workbench — not part of the shipped tree):
 
   1. register_color + activate + curl through 8100 → blue.
   2. Second register + activate(green) → curl routes to green.

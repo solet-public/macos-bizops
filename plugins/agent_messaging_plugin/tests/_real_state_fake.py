@@ -37,6 +37,7 @@ cutover, and the same class for role/direct wake outbox bookkeeping columns.
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -82,7 +83,11 @@ def _schema_enforcement() -> dict[str, frozenset[str]]:
         get_role_covered_mark_schema,
     )
 
-    from agent_messaging_plugin.schema import get_role_binding_schema
+    from agent_messaging_plugin.schema import (
+        TABLE_SESSION_CONTEXT_STATUS,
+        get_role_binding_schema,
+        get_session_context_status_schema,
+    )
 
     role_binding = frozenset(get_role_binding_schema().columns)
     role_message = frozenset(
@@ -94,11 +99,13 @@ def _schema_enforcement() -> dict[str, frozenset[str]]:
     role_covered_mark = frozenset(
         get_role_covered_mark_schema().tables[TABLE_ROLE_COVERED_MARK].columns,
     )
+    session_context_status = frozenset(get_session_context_status_schema().columns)
     return {
         TABLE_ROLE_BINDING: role_binding | _STANDARDIZER_COLUMNS,
         TABLE_AGENT_ROLE_MESSAGE: role_message | _STANDARDIZER_COLUMNS,
         TABLE_AGENT_DIRECT_WAKE: direct_wake | _STANDARDIZER_COLUMNS,
         TABLE_ROLE_COVERED_MARK: role_covered_mark | _STANDARDIZER_COLUMNS,
+        TABLE_SESSION_CONTEXT_STATUS: session_context_status | _STANDARDIZER_COLUMNS,
     }
 
 
@@ -123,6 +130,53 @@ def _err(
     return {"action_status": "failed", "error": error, "data": {}}
 
 
+
+
+_COMPARISON_MATCHERS: dict[str, Callable[[Any, Any], bool]] = {
+    "lt": operator.lt,
+    "lte": operator.le,
+    "gt": operator.gt,
+    "gte": operator.ge,
+}
+"""The AND-range ops (Gap-A), mirroring the provider's ``_COMPARISON_OPERATORS``.
+
+Added 2026-08-19 with GAU-15's write-time prune, this plugin's first caller to
+DELETE on a range. The real providers have compiled these since Gap-A, and this
+fake's ORDERED path has always honoured them (it delegates to
+``apply_ordered_query_in_memory``, the real primitive) — so the fake was
+internally INCONSISTENT: a filter its ordered read accepted was refused by the
+same grammar on the query/delete path. A fake that refuses a sanctioned op does
+not fail safe; it makes correct production code untestable and pushes the
+caller toward a worse query the fake happens to like.
+"""
+
+
+def _match_dict_op(cell: Any, want: dict[str, Any]) -> bool:
+    """One ``{"op": ...}`` filter entry, matching the provider's grammar.
+
+    Split out of :meth:`RealShapeState._match_one` to keep that method under
+    the complexity gate — the allowlist is tracked debt for pre-existing code,
+    never a landing path for new code.
+    """
+    op = want.get("op")
+    if op == "is_null":
+        return cell is None
+    if op == "is_not_null":
+        return cell is not None
+    matcher = _COMPARISON_MATCHERS.get(str(op))
+    if matcher is None:
+        raise ValueError(f"RealShapeState._match_one: unsupported dict-op filter {want!r}")
+    if "value" not in want:
+        raise ValueError(
+            f"RealShapeState._match_one: filter op {op!r} requires a 'value' "
+            "(the real provider raises the same way)",
+        )
+    if cell is None:
+        # SQL three-valued logic: any comparison against NULL is UNKNOWN, never
+        # true. A fake that let NULL compare would hide a prune quietly
+        # deleting rows postgres would keep.
+        return False
+    return bool(matcher(cell, want["value"]))
 
 
 class RealShapeState:
@@ -198,12 +252,7 @@ class RealShapeState:
         require the same op to match a NULL cell, or it hides exactly the
         bug class that shipped live and matched nothing for months."""
         if isinstance(want, dict):
-            op = want.get("op")
-            if op == "is_null":
-                return cell is None
-            if op == "is_not_null":
-                return cell is not None
-            raise ValueError(f"RealShapeState._match_one: unsupported dict-op filter {want!r}")
+            return _match_dict_op(cell, want)
         if want is None:
             # A bare None NEVER matches, not even a None cell — the real
             # provider's `col = NULL` is always false. There is no

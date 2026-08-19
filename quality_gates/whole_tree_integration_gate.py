@@ -59,7 +59,8 @@ across the whole tree. Removing an allowlist entry is the unit of
 remediation progress; adding entries without operator approval defeats
 the gate's purpose.
 
-Reference: `workbench/2026-06-07_whole_tree_integration_gate_design.md`.
+Reference: the whole-tree-integration-gate design record (dev-checkout
+workbench — not part of the shipped tree).
 """
 
 from __future__ import annotations

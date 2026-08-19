@@ -20,7 +20,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from . import rotation_thresholds
-from .session_context_status_store import read_session_context_status, upsert_session_context_status
+from .session_context_status_store import (
+    AmbiguousAgentSessionIdError,
+    read_agent_session_id_for_binding,
+    read_session_context_status,
+    read_session_context_status_by_agent_session_id,
+    upsert_session_context_status,
+)
 from .session_lifecycle_verbs import VerbError
 
 if TYPE_CHECKING:
@@ -87,6 +93,7 @@ def report_context_status(
     current_tokens: int,
     ceiling: int,
     measured_at: str,
+    reading_at: str | None = None,
     cache_read_tokens: int | None = None,
     cache_cold: bool | None = None,
     cache_overage_signature: bool | None = None,
@@ -116,6 +123,15 @@ def report_context_status(
     unattributable, and an absent cache field cannot be told apart from a
     stale copy having served that tick. Omitting them records a
     pre-attribution reporter, which is a positive finding, not missing data.
+
+    `reading_at` is OPTIONAL and is the SECOND CLOCK (GAU-14 D3, 2026-08-19).
+    `measured_at` says when the reporter LOOKED; this says when the reading it
+    carries was PRODUCED — the transcript line's own timestamp. They differ by
+    the age of that line at observation time, measured at ~34s on the sweep
+    path and ~4 minutes on the prompt-surfaced path, which is enough to make
+    two notices about one strictly-monotone series read as later-but-LOWER.
+    Omitting it records NOT REPORTED — never a fabricated zero lag, the same
+    discipline the cache fields above follow and for the same reason.
 
     `agent_session_id` is OPTIONAL and is the ROUTING JOIN (2026-08-18): the
     reporter's own stable `$AGENT_SESSION_ID`, stored so a consumer holding
@@ -179,6 +195,7 @@ def report_context_status(
         current_tokens=current_tokens,
         ceiling=ceiling,
         measured_at=measured_at,
+        reading_at=reading_at,
         cache_read_tokens=cache_read_tokens,
         cache_cold=cache_cold,
         cache_overage_signature=cache_overage_signature,
@@ -274,6 +291,142 @@ def _reporter_view(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+ID_RESOLUTION_DIRECT = "direct"
+ID_RESOLUTION_VIA_BINDING = "resolved_via_binding"
+ID_RESOLUTION_UNRESOLVED = "unresolved"
+
+
+def resolve_status_row(
+    state: StateManagementInterface, agent_instance_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Find this session's gauge row from EITHER of the ids it is known by
+    (GAU-07), returning the row and how it was reached.
+
+    THE DEFECT. This table keys on the LEDGER id, but ``peer_list`` -- the
+    documented way to enumerate live sessions -- publishes the WATCH id for
+    any watcher-held session. Keyed on the id a caller actually has, the
+    lookup found nothing, so a healthy, freshly-reporting worker read as
+    gauge-less. Measured on three live sessions on 2026-08-18; three of five
+    ``claude_code`` instances in that fleet were watcher-held.
+
+    THE CHAIN, both hops STORED, no id derived from another:
+    ``agent_instance_id`` -> ``peer_binding.agent_session_id`` -> the gauge
+    row carrying that same stable session id. The watch id is a ONE-WAY
+    sha256 digest of the session id, so the reverse simply does not exist as
+    a computation -- and two session-id minting schemes are live at once
+    (``ases-agi-<ledger id>`` from the spawned-worker launcher,
+    ``ases-<epoch>-<pid>-<n>`` from the seat launcher), so a prefix-slice
+    would work on the first and route to nothing on the second.
+
+    The direct lookup is tried FIRST and short-circuits, so the overwhelmingly
+    common ledger-keyed read costs exactly what it did before and can never be
+    rerouted through the join.
+
+    PUBLIC as of GAU-15 (2026-08-19) because a second caller appeared:
+    ``gauge_series`` resolves the same two ids before reading a session's
+    history. Re-deriving this chain there would put two copies of a routing
+    rule in the tree, and the drift between two copies of a routing rule is
+    silent -- each keeps returning a plausible row.
+    """
+    row = read_session_context_status(state, agent_instance_id)
+    if row is not None:
+        return row, ID_RESOLUTION_DIRECT
+    agent_session_id = read_agent_session_id_for_binding(state, agent_instance_id)
+    resolved = read_session_context_status_by_agent_session_id(state, agent_session_id)
+    if resolved is None:
+        return None, ID_RESOLUTION_UNRESOLVED
+    return resolved, ID_RESOLUTION_VIA_BINDING
+
+
+def _measurement(row: dict[str, Any]) -> tuple[int, int, float]:
+    """The stored occupancy numbers and the fraction derived from them.
+
+    Extracted for the complexity reason recorded on ``_identity_view``, but it
+    earns its place on meaning too: these three MUST be derived together. The
+    fraction's denominator is the same stored ``ceiling`` this verb publishes,
+    so a reader can always check the published verdict against the published
+    numbers and find them consistent -- computing the fraction against any
+    other denominator is how ``rotation_due`` and ``rotation_band`` came to
+    contradict each other on the same row (GAU-08).
+
+    A stored ``ceiling`` of 0 means the reporter never resolved one, so the
+    conservative default stands in rather than a division by zero; the guarded
+    ``fraction`` keeps that substitution from silently becoming a real
+    measurement if the default is ever itself zero.
+    """
+    current_tokens = int(row.get("current_tokens") or 0)
+    ceiling = int(row.get("ceiling") or 0) or rotation_thresholds.DEFAULT_CONSERVATIVE_CEILING
+    fraction = current_tokens / ceiling if ceiling else 0.0
+    return current_tokens, ceiling, fraction
+
+
+def _identity_view(
+    row: dict[str, Any] | None, queried_agent_instance_id: str, id_resolution: str,
+) -> dict[str, Any]:
+    """WHICH SESSION this row describes, and HOW it was reached (GAU-07).
+
+    Extracted rather than inlined for the reason this file's own
+    ``_routing_view`` records: adding fields inline pushed
+    ``session_context_status`` past the complexity gate, and an allowlist entry
+    would freeze it AT the ceiling and hand the wall to whoever edits the verb
+    next. Extraction is the idiom here; the allowlist is not.
+
+    ``agent_instance_id`` is THE ROW'S OWN ledger id, never the caller's
+    argument. Echoing the argument back was harmless while a direct hit was the
+    only way to reach a row; once a WATCH id can resolve to a LEDGER-keyed row,
+    echoing it would label the row with an id it is not keyed on -- seeding the
+    next join error while claiming to have fixed this one. The queried id is
+    reported alongside rather than dropped, so the join stays traceable and no
+    caller loses the value it passed in.
+    """
+    resolved_id = None if row is None else str(row.get("agent_instance_id") or "")
+    return {
+        "agent_instance_id": resolved_id or queried_agent_instance_id,
+        "queried_agent_instance_id": queried_agent_instance_id,
+        "id_resolution": id_resolution,
+    }
+
+
+def _unresolved_status(agent_instance_id: str, id_resolution: str) -> dict[str, Any]:
+    """The honest-gap shape, carrying the SAME key set as the resolved one.
+
+    That identical key set is a standing contract, not an accident: a caller
+    must not be able to ``KeyError`` its way through a legitimate
+    ``resolved: false``. Every field is a null/zero PLACEHOLDER, never an
+    estimate -- the repo rule against promoting an unknown into a fact applies
+    most sharply exactly here, where a plausible-looking number would be
+    indistinguishable from a measured one.
+    """
+    return {
+        "resolved": False,
+        "resolution_error": (
+            f"no session_context_status report on file for {agent_instance_id!r} — "
+            "either this session has not completed a reporting tick yet, or "
+            "(for host=operator sessions) the seat-wiring design note has not "
+            "been acted on yet. This id was ALSO resolved through the peer "
+            "binding (the watch-id join) and still matched no row, so it is a "
+            "genuine reporting gap rather than the GAU-07 lookup miss."
+        ),
+        **_identity_view(None, agent_instance_id, id_resolution),
+        "claude_session_id": "",
+        "model": "",
+        "current_tokens": 0,
+        "ceiling": 0,
+        "fraction": 0.0,
+        "per_prompt_carriage_estimate_tokens": 0,
+        "rotation_due": False,
+        "measured_at": "",
+        "cache_read_tokens": None,
+        "cache_cold": None,
+        "cache_overage_signature": None,
+        "rotation_band": None,
+        "rotation_guidance": None,
+        "reporter_surface": None,
+        "reporter_generation": None,
+        "agent_session_id": None,
+    }
+
+
 def session_context_status(
     state: StateManagementInterface, *, agent_instance_id: str,
 ) -> dict[str, Any]:
@@ -311,37 +464,13 @@ def session_context_status(
         raise VerbError(
             "missing_argument", "session_context_status requires a non-empty agent_instance_id.",
         )
-    row = read_session_context_status(state, agent_instance_id)
+    try:
+        row, id_resolution = resolve_status_row(state, agent_instance_id)
+    except AmbiguousAgentSessionIdError as exc:
+        raise VerbError("ambiguous_agent_session_id", str(exc)) from exc
     if row is None:
-        return {
-            "resolved": False,
-            "resolution_error": (
-                f"no session_context_status report on file for {agent_instance_id!r} — "
-                "either this session has not completed a reporting tick yet, or "
-                "(for host=operator sessions) the seat-wiring design note has not "
-                "been acted on yet."
-            ),
-            "agent_instance_id": agent_instance_id,
-            "claude_session_id": "",
-            "model": "",
-            "current_tokens": 0,
-            "ceiling": 0,
-            "fraction": 0.0,
-            "per_prompt_carriage_estimate_tokens": 0,
-            "rotation_due": False,
-            "measured_at": "",
-            "cache_read_tokens": None,
-            "cache_cold": None,
-            "cache_overage_signature": None,
-            "rotation_band": None,
-            "rotation_guidance": None,
-            "reporter_surface": None,
-            "reporter_generation": None,
-            "agent_session_id": None,
-        }
-    current_tokens = int(row.get("current_tokens") or 0)
-    ceiling = int(row.get("ceiling") or 0) or rotation_thresholds.DEFAULT_CONSERVATIVE_CEILING
-    fraction = current_tokens / ceiling if ceiling else 0.0
+        return _unresolved_status(agent_instance_id, id_resolution)
+    current_tokens, ceiling, fraction = _measurement(row)
     # Derived ONCE and reused for both the verdict and the reported band. The
     # two used to be computed independently — `rotation_due` from the fraction
     # here, the band inside `_cache_view` — which is how this verb came to
@@ -352,7 +481,7 @@ def session_context_status(
     return {
         "resolved": True,
         "resolution_error": None,
-        "agent_instance_id": agent_instance_id,
+        **_identity_view(row, agent_instance_id, id_resolution),
         "claude_session_id": str(row.get("claude_session_id") or ""),
         "model": str(row.get("model") or ""),
         "current_tokens": current_tokens,
@@ -377,6 +506,9 @@ def session_context_status(
 
 __all__ = [
     "CACHE_READ_COST_FRACTION",
+    "ID_RESOLUTION_DIRECT",
+    "ID_RESOLUTION_UNRESOLVED",
+    "ID_RESOLUTION_VIA_BINDING",
     "REPORTER_SURFACES",
     "REPORTER_SURFACE_CHECKOUT",
     "REPORTER_SURFACE_PLUGIN_CACHE",
@@ -384,5 +516,6 @@ __all__ = [
     "REPORTER_SURFACE_UNKNOWN",
     "REPORTER_SURFACE_VENDORED",
     "report_context_status",
+    "resolve_status_row",
     "session_context_status",
 ]

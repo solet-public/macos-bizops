@@ -2,9 +2,9 @@
 """Service-interface AST consistency gate.
 
 Three-check static analysis of the platform's service-interface ABCs +
-their KB JSON manifests. See
-`workbench/2026-06-12_service_interface_ast_gate_design_v1.md` for the
-full design + KB precedents.
+their KB JSON manifests. See the service-interface-AST-gate design
+record v1 (dev-checkout workbench — not part of the shipped tree) for
+the full design + KB precedents.
 
 Checks (a/b/c, per design §1):
 

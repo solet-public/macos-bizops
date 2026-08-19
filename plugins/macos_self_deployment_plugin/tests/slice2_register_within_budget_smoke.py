@@ -1,8 +1,8 @@
 """Slice 2 + 2.5 smoke: unified transient-state budget + structured tokens.
 
-Validates the spawn-path guarantee from
-``workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md``
-§6 Slice 2 + Slice 2.5 (strict-I2 verdict):
+Validates the spawn-path guarantee from the bridge-port-routing-and-
+session-lifecycle design record (dev-checkout workbench — not part of
+the shipped tree) §6 Slice 2 + Slice 2.5 (strict-I2 verdict):
 
 * **Plugin-mediated bridge-port discovery.** ``_lookup_bridge_port`` walks
   ``orchestrator_ref.plugin_manager.plugins[agent_messaging_plugin]

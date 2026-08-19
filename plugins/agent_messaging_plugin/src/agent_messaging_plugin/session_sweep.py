@@ -72,7 +72,7 @@ Scope boundary (deliberate, not an oversight):
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
@@ -83,6 +83,7 @@ from ananta.llm.agent_messaging.state_results import (
 )
 
 from . import rotation_thresholds
+from .gauge_notice_emit import deliver_and_record_gauge_notice
 from .peer_registry import PeerAmbiguousError, PeerSessionAmbiguousError, PeerUnreachableError
 from .schema import (
     CONDITION_DEADLINE,
@@ -191,7 +192,102 @@ EVENT_GAUGE_COVERAGE_NOTICE = "gauge_coverage_notice"
 # this many seconds later than before. That is the trade — latency for precision
 # — and it is cheap in the direction that matters, because the outage this leg
 # was built for ran for an unknown number of HOURS before a person found it.
-GAUGE_COVERAGE_GRACE_S: float = 300.0
+#
+# GAU-13 (2026-08-18): 300.0 WAS SHORTER THAN THE BOOT IT EXISTS TO COVER, and
+# the leg went on manufacturing the false alarm the grace was added to stop.
+# Three measured data points, all spawned tmux workers:
+#   * lane-gau10-stall-boolean — spawned 15:35:12Z, notice fired 15:38Z, row
+#     landed HEALTHY at 15:43:22Z. Boot-to-first-tick ~8 min.
+#   * lane-r2-holds-false — spawned 16:30:31Z, notice fired ~16:34Z, work
+#     dispatch reached the lane ~16:38Z, so its first WORK turn began >=7.5 min
+#     post-spawn.
+#   * that same lane's row, checked later, was present and healthy once work
+#     turns ticked — a confirming third point, not a new investigation.
+# The gap is STRUCTURAL, not incidental: a managed worker goes spawn ->
+# charter dispatch -> first WORK turn, and the bootstrap-ack turn lands no gauge
+# tick, so the row cannot exist until a dispatch arrives. 600.0 is the worst
+# measured (~480s) plus headroom, and the test names the measurement so the
+# constant cannot drift back under it silently.
+#
+# WHY THE NUMBER IS NOT THE WHOLE FIX. A wall-clock grace can only ever be a
+# guess about someone else's dispatch latency, so this leg no longer rests on it
+# alone: :func:`_first_tick_landed` reads whether report_alive has landed since
+# the row went live, which is DIRECT evidence about the thing the grace was
+# proxying for. The grace remains as the floor for rows where that evidence is
+# unavailable, and as the "has it had time at all" question the evidence does
+# not answer on its own.
+GAUGE_COVERAGE_GRACE_S: float = 600.0
+
+# How far past ``last_transition_at`` a derived last-report_alive must land
+# before it counts as a completed tick. The lifecycle row's report_by is armed
+# at spawn and the spawning->live transition follows within milliseconds
+# (measured 2026-08-18 across three live lanes: 285ms, 265ms, 270ms), so the
+# two timestamps are all but identical for a session that has never reported.
+# The margin keeps that millisecond gap from reading as a tick; it is not a
+# tuning knob for how long a boot may take.
+FIRST_TICK_EVIDENCE_MARGIN_S: float = 5.0
+
+# GAU-01(b) (2026-08-18): the leg that catches a gauge row which STOPPED, as
+# distinct from one that was never written.
+#
+# A FROZEN ROW READS AS COVERAGE TODAY. :func:`_gauge_dark_session` returns None
+# the moment ``read_session_context_status`` finds ANY row, so the L4b leg is
+# blind to the shape GAU-01 actually presented: a LIVE, working session whose
+# gauge row sat unchanged for 85 minutes while it kept completing tool calls.
+# Absence was detected; arrest was not.
+EVENT_GAUGE_STALE_NOTICE = "gauge_stale_notice"
+
+# How far the last report_alive may lead the gauge row's ``measured_at`` before
+# the gauge counts as ARRESTED rather than merely between writes.
+#
+# THIS IS A LAG BETWEEN TWO CLOCKS, NOT AN AGE. An absolute "measured_at older
+# than X" bound cannot work here and the reason is structural: both writers are
+# PostToolUse hooks, so a session that is simply idle between turns writes
+# NEITHER row, and its gauge goes stale while nothing whatsoever is wrong. Only
+# the DIVERGENCE separates the two -- report_alive advancing while the gauge
+# does not means the session is completing tool calls and exactly one of its two
+# reporters is failing. That is the GAU-01 signature, and it is why this leg
+# keys on the gap rather than on either timestamp alone.
+#
+# DERIVATION OF THE NUMBER, measured rather than chosen:
+#   * The gauge reporter (``rotation_due_watch.py``) throttles at 120.0s and the
+#     heartbeat (``heartbeat_report_alive.py``) at 180.0s -- both read out of the
+#     hooks on 2026-08-18, not taken from a report.
+#   * On a session completing tool calls, the gauge throttles FASTER than the
+#     heartbeat, so the gauge is normally the FRESHER of the two.
+#   * A FIRST DRAFT OF THIS COMMENT CLAIMED the healthy positive lag was
+#     therefore bounded by the gauge's 120s throttle. THAT CLAIM IS FALSE and
+#     was falsified by measurement rather than by review: a live negative
+#     control over the running fleet on 2026-08-18T23:52Z recorded lags of
+#     +19.2s, +65.0s and +178.8s, all on healthy lanes. The 178.8s breaks the
+#     predicted ceiling outright. The clean model was wrong because report_alive
+#     does NOT land only from the 180s-throttled hook -- an explicit
+#     report_alive call (a worker reporting status, a registration path) advances
+#     the lifecycle clock with no corresponding gauge write, so the two clocks
+#     are not the symmetric pair the model assumed.
+#   * What is therefore claimed here is only what was observed: across the
+#     ~45-minute probe (+109.8s to -125.6s) and the live control (max +178.8s),
+#     the widest healthy positive lag seen to date is ~180s. THE TAIL IS NOT
+#     MEASURED -- no claim is made about the true maximum, and the bound below
+#     is chosen for headroom over the observed range, not derived from a proven
+#     ceiling.
+#   * 900s is 7.5x the gauge throttle and 3 sweep ticks
+#     (``bridge_sweep_interval_seconds``, 300s). It absorbs SEVEN consecutive
+#     missed gauge writes before firing. One transient miss (the hook's solet
+#     call has a 20s timeout and is non-fatal by design) adds up to one throttle
+#     window; a threshold anywhere near 120s would fire on a single one.
+#
+# HEADROOM IS THE POINT, and it is GAU-13's lesson taken one leg over: that
+# grace was set from a model that turned out to be one leg short of the real
+# boot path, and it under-measured. The falsified 120s ceiling above is the same
+# lesson arriving a second time inside this very constant's derivation, which is
+# why the wrong model is left in the comment rather than quietly deleted: a
+# reader tempted to tighten this number should see that the tidy argument for a
+# smaller one has already been tried and measured false. The cost asymmetry here is steep and
+# one-sided -- a late notice on an 85-minute freeze loses nothing, while a
+# notice that fires on a healthy 130s skew trains the reader to skim the channel
+# the REAL arrest arrives on. Erring long is the cheap direction.
+GAUGE_STALE_LAG_S: float = 900.0
 
 # R4 (2026-08-17): the TTL leg. A spawn's ttl_seconds became expires_at on the
 # row and NOTHING EVER READ IT — measured, not assumed: three touch points in
@@ -294,6 +390,31 @@ def _managed_sessions_in_state(
         {"table": TABLE_MANAGED_SESSION, "filters": {"lifecycle_state": lifecycle_state}},
     )
     return require_records(result)
+
+
+def live_lifecycle_rows_by_instance(
+    state: StateManagementInterface,
+) -> dict[str, dict[str, Any]]:
+    """Every ``live`` lifecycle row, indexed by ``agent_instance_id``.
+
+    ONE QUERY PER SWEEP, not one per candidate. The L4c leg scans the gauge
+    table -- which is never pruned and therefore carries the whole history of
+    every session that ever reported -- so a per-row lifecycle lookup would put
+    an unbounded query count on a leg whose entire eligibility problem is that
+    its input is unbounded. Indexing once and looking up in memory keeps the
+    leg's cost proportional to the LIVE fleet rather than to history.
+
+    Rows with no ``agent_instance_id`` are dropped rather than keyed on the
+    empty string: an empty key would collapse every such row onto one entry and
+    hand the last one out as though it were a match, which is the confident-
+    wrong-row failure the gauge store's own session-id join guards against.
+    """
+    rows: dict[str, dict[str, Any]] = {}
+    for row in _managed_sessions_in_state(state, "live"):
+        agent_instance_id = str(row.get("agent_instance_id") or "")
+        if agent_instance_id:
+            rows[agent_instance_id] = row
+    return rows
 
 
 def _managed_session_agent_id(
@@ -1302,6 +1423,86 @@ def _within_startup_grace(row: dict[str, Any], *, clock: datetime) -> bool:
     return (clock - became_live).total_seconds() < GAUGE_COVERAGE_GRACE_S
 
 
+def _first_tick_landed(row: dict[str, Any]) -> bool | None:
+    """Whether ``report_alive`` has landed for this row SINCE it went live —
+    ``None`` when the row carries no evidence either way.
+
+    ★ WHY THIS EXISTS, and why it is the better half of the GAU-13 fix. The two
+    writers involved are BOTH ``PostToolUse`` hooks firing on the same completed
+    tool call: ``heartbeat_report_alive.py`` re-arms this row's ``report_by``,
+    and ``rotation_due_watch.py`` writes the gauge row. So "report_alive has
+    landed since this row went live" is DIRECT evidence that the session
+    completes tool calls and that its ``solet`` path resolves — exactly what a
+    wall-clock grace was only ever guessing at.
+
+    THE DERIVATION, and it is an identity rather than an estimate:
+    ``_rearm_report_by`` writes ``report_by = <the moment of the call> +
+    report_by_seconds`` on EVERY report_alive, so ``report_by -
+    report_by_seconds`` IS the last report_alive's timestamp. Verified live
+    2026-08-18 against three running lanes, where the derived value matched each
+    row's ``updated_at`` to sub-millisecond (22:20:31.681054 vs .681320, and two
+    more). At spawn the same subtraction returns the row's creation moment,
+    which precedes ``last_transition_at`` — so a never-reported row derives to
+    BEFORE its transition and a reported one to comfortably after.
+
+    TRI-STATE ON PURPOSE. ``None`` is not ``False``: a row with no report_by
+    window (``report_by_seconds`` of 0, which a spawn may legitimately request)
+    carries no evidence, and absence of the WINDOW is not evidence of absence of
+    a TICK. Collapsing the two would let a missing column speak as if it were a
+    measurement — the failure mode this whole entry is about.
+    """
+    last_alive = last_report_alive(row)
+    became_live = _parse_iso(row.get("last_transition_at"))
+    if last_alive is None or became_live is None:
+        return None
+    return (last_alive - became_live).total_seconds() > FIRST_TICK_EVIDENCE_MARGIN_S
+
+
+def last_report_alive(row: dict[str, Any]) -> datetime | None:
+    """The moment ``report_alive`` last landed for this lifecycle row, or
+    ``None`` when the row carries no evidence either way.
+
+    ★ THE ONE COPY OF THE IDENTITY, and the reason it is a module-level public
+    name rather than three private re-derivations. ``_rearm_report_by`` writes
+    ``report_by = <the moment of the call> + report_by_seconds`` on EVERY
+    report_alive, so ``report_by - report_by_seconds`` IS the last call's
+    timestamp -- an identity, not an estimate. Verified live 2026-08-18 against
+    three running lanes, where the derived value matched each row's
+    ``updated_at`` to sub-millisecond (22:20:31.681054 derived vs .681320
+    stored, and two more).
+
+    THREE CALLERS NOW WANT IT, which is exactly when a shared rule has to stop
+    being copied: :func:`_first_tick_landed` (has it ticked AT ALL since going
+    live), :func:`_gauge_stale_session` (has it ticked SINCE its gauge row was
+    written), and the L4c self-notice leg's eligibility bound. Two copies of a
+    liveness rule is how the legs that depend on it drift apart, and the drift
+    is silent -- each copy keeps returning a plausible answer.
+
+    TRI-STATE PRESERVED AT THE SOURCE. ``None`` is not "never reported": a row
+    whose ``report_by_seconds`` is 0 -- which a spawn may legitimately request,
+    and which ``_spawn_live`` DEFAULTS to -- carries no window, and absence of
+    the WINDOW is not evidence of absence of a TICK. Returning a datetime there
+    would let a missing column speak as though it were a measurement, which is
+    the failure mode this whole entry is about. Callers must keep the
+    distinction; none of them may treat ``None`` as "did not tick".
+    """
+    report_by = _parse_iso(row.get("report_by"))
+    window_s = row.get("report_by_seconds")
+    if report_by is None or not isinstance(window_s, (int, float)):
+        return None
+    if window_s <= 0:
+        return None
+    return report_by - timedelta(seconds=float(window_s))
+
+
+def _live_age_seconds(row: dict[str, Any], *, clock: datetime) -> float | None:
+    """Seconds this row has been in ``live``, or ``None`` if unreadable."""
+    became_live = _parse_iso(row.get("last_transition_at"))
+    if became_live is None:
+        return None
+    return (clock - became_live).total_seconds()
+
+
 def _gauge_dark_session(
     state: StateManagementInterface, row: dict[str, Any], *, clock: datetime,
 ) -> tuple[str, str] | None:
@@ -1340,9 +1541,59 @@ def _rotation_prose(agent_instance_id: str, row: dict[str, Any]) -> str:
       band it implies is the WARM default rather than a measurement -- and an
       urgent-sounding notice derived from a default is false precision. Such a
       row is reported AS unattributable instead of being silently upgraded.
+
+    NAMES THE AXIS IT FIRED ON (GAU-12, 2026-08-18). On a small ceiling the
+    fraction term can cross while the model-blind band is still ``warm_keep``
+    -- the leg's own decision (:func:`_rotation_due_row`) is the union, but
+    this function used to print only the band, so the steward received an
+    event TYPED ``rotation_due_notice`` whose body read "keep working". Same
+    remedy GAU-08 already applied to the hook's notice
+    (``rotation_due_watch.build_notification_content``): a "DUE BECAUSE"
+    clause built from ``rotation_band_actionable`` / ``rotation_fraction_
+    crossed``, PASSED IN on ``row`` from :func:`_rotation_due_row` and never
+    recomputed here -- recomputing ``current_tokens >= ceiling * threshold``
+    in this function would put a second copy of the rule in a second file,
+    with this prose as the half that could drift and lie.
     """
     band = row.get("rotation_band") or "unknown"
     guidance = row.get("rotation_guidance") or "no guidance derived"
+    current_tokens = row.get("current_tokens")
+    ceiling = row.get("ceiling")
+    fraction = row.get("fraction")
+    band_actionable = bool(row.get("rotation_band_actionable"))
+    fraction_crossed = bool(row.get("rotation_fraction_crossed"))
+    if band_actionable and fraction_crossed:
+        because = (
+            f"BOTH axes agree -- the economics band is {band!r}, and "
+            f"{fraction:.3f} of the {ceiling} ceiling is at or past the "
+            "rotation fraction hint"
+        )
+    elif band_actionable:
+        because = (
+            f"the ECONOMICS BAND is {band!r}. That band is an ABSOLUTE token "
+            "count, not a share of the window, which is why it fires here -- "
+            "the rotation fraction hint is NOT crossed and is not what "
+            "triggered this"
+        )
+    elif fraction_crossed:
+        because = (
+            f"{current_tokens} tokens is at or past this model's rotation "
+            f"fraction hint of its {ceiling}-token ceiling, while the "
+            f"model-blind economics band is still {band!r} -- on a ceiling "
+            "this small the bands do not fit the window and the fraction is "
+            "what fires first"
+        )
+    else:
+        # UNREACHABLE from `_rotation_due_row`, which returns None before this
+        # is ever called when neither axis fired. Raised rather than printing
+        # a vague "rotation is due" -- a notice that cannot say why it exists
+        # is a notice whose reader has to guess, which is the exact defect
+        # this change removes.
+        raise ValueError(
+            f"_rotation_prose called for {agent_instance_id} with NEITHER "
+            f"axis firing (band={band!r}, current_tokens={current_tokens}, "
+            f"ceiling={ceiling}) -- there is no rotation-due reason to state",
+        )
     surface = row.get("reporter_surface")
     generation = row.get("reporter_generation")
     attribution = (
@@ -1354,8 +1605,8 @@ def _rotation_prose(agent_instance_id: str, row: dict[str, Any]) -> str:
     )
     return (
         f"rotation_due_notice: {agent_instance_id} is at "
-        f"{row.get('current_tokens')} tokens on {row.get('model')!r} "
-        f"({row.get('fraction'):.3f} of a {row.get('ceiling')} ceiling), "
+        f"{current_tokens} tokens on {row.get('model')!r} "
+        f"({fraction:.3f} of a {ceiling} ceiling). DUE BECAUSE {because}. "
         f"band={band} -- {guidance}. Measured at {row.get('measured_at')}. "
         f"{attribution}. NOTE the bands are model-blind: the thresholds derive "
         f"from one tier's economics, so weigh this against {row.get('model')!r}'s "
@@ -1462,23 +1713,31 @@ def _rotation_due_row(
     ceiling = int(gauge.get("ceiling") or 0)
     if ceiling <= 0:
         return None
-    fraction = current / ceiling
-    # Derived ONCE and used for BOTH the verdict and the band that rides into
-    # the notice, so `_rotation_prose` cannot name a band the decision did not
-    # use. Before GAU-08 this leg DECIDED on the fraction and PRINTED the band,
-    # which meant a 1M-ceiling session anywhere in 300,000-500,000 was skipped
-    # while sitting in the saturated `warm_immediate` band the notice would
-    # have quoted.
+    # Derived ONCE, as the full decomposition, and used for the verdict, the
+    # band, AND the two axis flags that ride into the notice (GAU-12), so
+    # `_rotation_prose` cannot name a band the decision did not use, nor claim
+    # an axis fired that did not. Before GAU-08 this leg DECIDED on the
+    # fraction and PRINTED the band alone, which meant a 1M-ceiling session
+    # anywhere in 300,000-500,000 was skipped while sitting in the saturated
+    # `warm_immediate` band the notice would have quoted. GAU-08 fixed the
+    # decision; GAU-12 carries the same decomposition into the prose so a
+    # small-ceiling fraction-only firing no longer prints an unqualified
+    # keep-working band under an event typed rotation_due_notice.
     cache_cold = bool(gauge.get("cache_cold"))
-    if not rotation_thresholds.is_rotation_due_for_ceiling(
+    verdict = rotation_thresholds.rotation_due_verdict(
         ceiling=ceiling, current_tokens=current, cache_cold=cache_cold,
-    ):
-        return None
-    band, guidance = rotation_thresholds.rotation_band(current, cache_cold=cache_cold)
-    enriched = dict(gauge)
-    enriched.update(
-        {"fraction": fraction, "rotation_band": band, "rotation_guidance": guidance},
     )
+    if not verdict.due:
+        return None
+    _, guidance = rotation_thresholds.rotation_band(current, cache_cold=cache_cold)
+    enriched = dict(gauge)
+    enriched.update({
+        "fraction": verdict.fraction,
+        "rotation_band": verdict.band,
+        "rotation_guidance": guidance,
+        "rotation_band_actionable": verdict.band_actionable,
+        "rotation_fraction_crossed": verdict.fraction_crossed,
+    })
     return enriched
 
 
@@ -1535,6 +1794,77 @@ def sweep_rotation_due_sessions(
     return notified
 
 
+def _gauge_coverage_prose(
+    *, agent_instance_id: str, row: dict[str, Any], clock: datetime,
+) -> str:
+    """The notice text: WHAT WAS MEASURED, and nothing this leg cannot see.
+
+    ★ GAU-13(b). The previous wording told the reader the dark session was
+    "past the startup grace, so this is not a session that simply has not
+    reported yet" — and on 2026-08-18 the row it said that about landed healthy
+    five minutes later. It WAS a session that simply had not reported yet. The
+    leg is entitled to report an absence it measured; it is not entitled to rule
+    out the explanation that turned out to be the right one, and a notice whose
+    central claim the next tick can falsify is one the reader learns to skim.
+    That cost is not paid here — it is paid by the REAL gauge-blindness this leg
+    exists to catch, which arrives on the same channel.
+
+    So: the measurement leads, in numbers. The cause is DIAGNOSED only as far as
+    :func:`_first_tick_landed` actually establishes it, and the three branches
+    are genuinely different findings rather than three wordings of one guess:
+
+    * ``True`` — report_alive HAS landed since this row went live, so this
+      session's PostToolUse path fires and its solet path resolves, and there is
+      STILL no gauge row. This is the 2026-08-16 signature, now evidenced rather
+      than assumed, and it points at one specific hook.
+    * ``False`` — neither reporter has produced anything since the transition.
+      A worker that has not been handed work yet looks exactly like this and is
+      not broken, so the notice says so instead of accusing it.
+    * ``None`` — no report_by window on the row, so which reporter is failing is
+      not established. Said plainly rather than defaulted to the confident
+      branch.
+    """
+    age_s = _live_age_seconds(row, clock=clock)
+    measured = (
+        f"{age_s:,.0f}s after it went live"
+        if age_s is not None
+        else "for an unknown duration (its transition timestamp is unreadable)"
+    )
+    lead = (
+        f"gauge_coverage_notice: {agent_instance_id} is LIVE and has NO "
+        f"session_context_status row at all, {measured} "
+        f"(the startup grace is {GAUGE_COVERAGE_GRACE_S:,.0f}s)."
+    )
+    ticked = _first_tick_landed(row)
+    if ticked is True:
+        detail = (
+            " report_alive HAS landed for it since it went live, so its "
+            "PostToolUse hooks do fire and its solet path does resolve — which "
+            "narrows this to the gauge reporter specifically. Check that "
+            "session's rotation_due_watch hook: its transcript_path, its marker "
+            "directory, and its solet invocation."
+        )
+    elif ticked is False:
+        detail = (
+            " There is also no report_alive from it since it went live, so this "
+            "session has produced NO reporter output at all. A spawned worker "
+            "whose first WORK turn has not arrived yet looks exactly like this "
+            "and is not faulty — check whether it has been given work before "
+            "reading this as a fault."
+        )
+    else:
+        detail = (
+            " Whether report_alive has landed since then is not determinable "
+            "from this row (it carries no report_by window), so which reporter "
+            "is failing is not established here."
+        )
+    return lead + detail + (
+        " Both reporters are non-fatal by design and warn only to stderr, so "
+        "neither can surface its own failure; this notice reports the absence "
+        "it measured, not a cause it inferred."
+    )
+
+
 def _notify_gauge_coverage(
     *,
     state: StateManagementInterface,
@@ -1542,39 +1872,30 @@ def _notify_gauge_coverage(
     bridge_manager: BridgeSessionManager,
     agent_instance_id: str,
     spawner_instance_id: str,
+    row: dict[str, Any],
+    clock: datetime,
 ) -> bool:
-    """Tell the steward one live session is producing no gauge row.
-
-    Same best-effort posture as the sibling notices: a delivery fault warns and
-    returns False rather than raising into the sweep loop, so one unreachable
-    steward never costs the other rows their notice.
-    """
-    binding = _resolve_steward_binding(
-        state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
+    """Tell the steward one live session is producing no gauge row."""
+    became_live = _parse_iso(row.get("last_transition_at"))
+    return deliver_and_record_gauge_notice(
+        state,
+        bridge_manager=bridge_manager,
+        binding=_resolve_steward_binding(
+            state=state, peer_registry=peer_registry,
+            spawner_instance_id=spawner_instance_id,
+        ),
+        agent_instance_id=agent_instance_id,
+        notice_type=EVENT_GAUGE_COVERAGE_NOTICE,
+        prose=lambda: _gauge_coverage_prose(
+            agent_instance_id=agent_instance_id, row=row, clock=clock,
+        ),
+        flow_id=f"gauge-coverage-{agent_instance_id}",
+        clock=clock,
+        threshold_s=GAUGE_COVERAGE_GRACE_S,
+        observed_s=(
+            0.0 if became_live is None else (clock - became_live).total_seconds()
+        ),
     )
-    if binding is None:
-        return False
-    prose = (
-        f"gauge_coverage_notice: {agent_instance_id} is LIVE (report_alive is "
-        "landing, so its hooks are running) but has NO session_context_status "
-        "row at all, and it is past the startup grace, so this is not a session "
-        "that simply has not reported yet. The likeliest cause is a reporting "
-        "path failing between the hook's tick and the state write — the hook is "
-        "non-fatal by design and warns only to stderr, so it cannot surface that "
-        "itself. Check that session's solet invocation and its environment."
-    )
-    try:
-        bridge_manager.append_event(
-            binding.bridge_id, EVENT_GAUGE_COVERAGE_NOTICE, prose,
-            {"flow_id": f"gauge-coverage-{agent_instance_id}"},
-        )
-    except Exception:  # noqa: BLE001 — best-effort notify, never fails the sweep
-        logger.warning(
-            "session %s gauge-coverage notice append failed",
-            agent_instance_id, exc_info=True,
-        )
-        return False
-    return True
 
 
 def sweep_gauge_coverage(
@@ -1635,10 +1956,230 @@ def sweep_gauge_coverage(
         if _notify_gauge_coverage(
             state=state, peer_registry=peer_registry, bridge_manager=bridge_manager,
             agent_instance_id=agent_instance_id, spawner_instance_id=spawner_instance_id,
+            row=row, clock=clock,
         ):
             notified += 1
             gate.record_sent(agent_instance_id)
     gate.retain_active(dark)
+    return notified
+
+
+def _gauge_stale_session(
+    state: StateManagementInterface, row: dict[str, Any], *, clock: datetime,
+) -> tuple[str, str, datetime, datetime] | None:
+    """``(agent_instance_id, steward_instance_id, last_alive, measured_at)`` when
+    this LIVE row is TICKING while its gauge row has ARRESTED, else ``None``.
+
+    ★ GAU-01(b). The discriminator, stated as the table it implements:
+
+    ======================  ============  ==========================================
+    lifecycle advancing?    gauge fresh?  verdict
+    ======================  ============  ==========================================
+    yes                     yes           healthy -- no finding
+    **yes**                 **stale**     **ALIVE and gauge-dark -- THIS leg fires**
+    no                      stale         quiet or dead -- the D1 sweep's ``overdue``
+                                          job, deliberately NOT a gauge finding
+    no                      fresh         not reachable (same hook family)
+    ======================  ============  ==========================================
+
+    WHY THE SECOND CLOCK IS LOAD-BEARING rather than belt-and-braces. Both
+    writers are ``PostToolUse`` hooks, so an idle session writes NEITHER row --
+    its gauge goes stale with nothing wrong. Firing on gauge age alone would
+    therefore alarm on every session between turns, which is most of a small
+    fleet most of the night. The lifecycle clock is what separates "stopped
+    reporting" from "stopped being asked to do anything", and only the first is
+    a defect.
+
+    EVERY ``None`` IS A DELIBERATE SKIP, same idiom as its siblings, and the
+    order matters:
+
+    * no identity, or no steward to tell -- nothing routable;
+    * NO GAUGE ROW AT ALL -- that is :func:`_gauge_dark_session`'s finding, not
+      this one. Two legs must never both fire on one condition, or the steward
+      gets two notices naming different causes for one session;
+    * ``last_report_alive`` returning ``None`` -- NO EVIDENCE, which is not
+      "not advancing". A row with no report_by window cannot support this
+      leg's premise, and inferring arrest from a missing column is precisely
+      the move :func:`last_report_alive`'s tri-state exists to block;
+    * report_alive NOT advancing past the gauge -- the third table row. A
+      session whose both clocks stopped is quiet or dead, and saying "your
+      gauge reporter is broken" about a session that stopped calling tools
+      would be a confident wrong diagnosis;
+    * a lag inside :data:`GAUGE_STALE_LAG_S` -- normal throttle skew.
+    """
+    agent_instance_id = str(row.get("agent_instance_id") or "")
+    spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
+    if not agent_instance_id or not spawner_instance_id:
+        return None
+    gauge = read_session_context_status(state, agent_instance_id)
+    if gauge is None:
+        return None
+    measured_at = _parse_iso(gauge.get("measured_at"))
+    if measured_at is None:
+        return None
+    last_alive = last_report_alive(row)
+    if last_alive is None:
+        return None
+    lag_s = (last_alive - measured_at).total_seconds()
+    if lag_s <= GAUGE_STALE_LAG_S:
+        return None
+    return agent_instance_id, spawner_instance_id, last_alive, measured_at
+
+
+def _gauge_stale_prose(
+    *,
+    agent_instance_id: str,
+    row: dict[str, Any],
+    last_alive: datetime,
+    measured_at: datetime,
+    clock: datetime,
+) -> str:
+    """The notice text: BOTH timestamps, the gap between them, and no cause.
+
+    ★ ITS OWN PROSE, NEVER THE MISSING-ROW LEG'S -- and this is a correctness
+    requirement, not a style one. "No row at all" and "a row that stopped" have
+    different causes and different fixes: the first points at a reporter that
+    never ran for this session, the second at one that ran and then stopped
+    while its sibling kept running. Reusing the L4b wording would re-introduce
+    exactly the conflation GAU-13 was landed to remove, one leg over.
+
+    WHAT IT MAY AND MAY NOT ASSERT, per the GAU-13 rule. It states the two
+    timestamps it read and the arithmetic between them -- all measured. It says
+    which reporter is implicated, because the DIVERGENCE genuinely establishes
+    that (report_alive landed; the gauge did not; both fire on the same
+    completed tool call). It does NOT name a cause: as of 2026-08-18 the
+    leading candidate is ``_resolve_firing_context`` returning None silently on
+    a payload carrying no transcript_path/session_id, with a per-surface
+    vendored-copy variant behind it -- but the leg cannot see which, and a
+    notice asserting one would be a guess wearing a measurement's clothes.
+
+    THE DETECTOR OUTLIVES THE DIAGNOSIS, which is why the cause is left out
+    rather than merely hedged. This keys on the divergence between two
+    independently-written rows, so it fires whatever froze the gauge -- a hook
+    resolution failure, a surface divergence, or something not yet imagined.
+    Pinning the prose to today's leading candidate would date the leg to today's
+    understanding.
+    """
+    lag_s = (last_alive - measured_at).total_seconds()
+    minutes = lag_s / 60.0
+    return (
+        f"gauge_stale_notice: {agent_instance_id} (lane_id={row.get('lane_id')!r}) "
+        f"is LIVE and STILL REPORTING, but its context-gauge row has STOPPED "
+        f"ADVANCING. Its last report_alive derives to {last_alive.isoformat()}, "
+        f"while its session_context_status row was last measured at "
+        f"{measured_at.isoformat()} — a gap of {lag_s:,.0f}s ({minutes:,.1f} "
+        f"minutes), against a tolerance of {GAUGE_STALE_LAG_S:,.0f}s. Now is "
+        f"{clock.isoformat()}. Both numbers are measured: the first is derived "
+        "from this row as report_by minus report_by_seconds, which the platform "
+        "re-arms on every report_alive; the second is the gauge row's own "
+        "measured_at. BOTH reporters are PostToolUse hooks firing on the same "
+        "completed tool call, so report_alive landing while the gauge did not "
+        "narrows this to the gauge reporter specifically — check that session's "
+        "rotation_due_watch hook. This notice does NOT identify why it stopped; "
+        "the divergence is what was measured, and the cause is not visible from "
+        "here. NOTE the reader will want: the gauge row is upsert-only and keeps "
+        "no history, so the frozen value is the only evidence of the freeze that "
+        "survives — capture it before the session rotates."
+    )
+
+
+def _notify_gauge_stale(
+    *,
+    state: StateManagementInterface,
+    peer_registry: PeerRegistry,
+    bridge_manager: BridgeSessionManager,
+    agent_instance_id: str,
+    spawner_instance_id: str,
+    row: dict[str, Any],
+    last_alive: datetime,
+    measured_at: datetime,
+    clock: datetime,
+) -> bool:
+    """Tell the steward one live session's gauge has arrested."""
+    return deliver_and_record_gauge_notice(
+        state,
+        bridge_manager=bridge_manager,
+        binding=_resolve_steward_binding(
+            state=state, peer_registry=peer_registry,
+            spawner_instance_id=spawner_instance_id,
+        ),
+        agent_instance_id=agent_instance_id,
+        notice_type=EVENT_GAUGE_STALE_NOTICE,
+        prose=lambda: _gauge_stale_prose(
+            agent_instance_id=agent_instance_id, row=row,
+            last_alive=last_alive, measured_at=measured_at, clock=clock,
+        ),
+        flow_id=f"gauge-stale-{agent_instance_id}",
+        clock=clock,
+        threshold_s=GAUGE_STALE_LAG_S,
+        observed_s=(last_alive - measured_at).total_seconds(),
+        last_report_alive_at=last_alive,
+        gauge_measured_at=measured_at,
+    )
+
+
+def sweep_gauge_staleness(
+    state: StateManagementInterface,
+    *,
+    now: datetime | None = None,
+    peer_registry: PeerRegistry | None = None,
+    bridge_manager: BridgeSessionManager | None = None,
+    latch: NoticeLatch | None = None,
+) -> int:
+    """Notify stewards of LIVE sessions whose gauge row has STOPPED advancing.
+
+    ★ THE DEFECT THIS EXISTS FOR, measured on 2026-08-18. A lane
+    (``lane-rotation-notice``) sat with a frozen gauge row for 85 minutes while
+    it was alive and working. Nothing surfaced it: the L4b leg checks whether a
+    gauge row EXISTS, and this one existed -- it just never changed again. A
+    frozen row read as coverage, so the session most in need of a rotation
+    signal was the one the surface had stopped measuring.
+
+    WHY THIS IS A SEPARATE LEG rather than another branch inside
+    :func:`sweep_gauge_coverage`. The two answer different questions about
+    different evidence and produce different remedies, and folding them would
+    force one count and one log line to stand for both -- the reader could no
+    longer tell "four sessions never reported" from "four sessions stopped
+    reporting", which are opposite operational situations. Separate legs also
+    buy separate fault isolation, on the rider's own stated principle that one
+    read-only notice's fault must not cost another its tick.
+
+    ``latch`` gates repetition exactly as in its siblings: an arrested gauge
+    stays arrested until someone fixes it or the session rotates, so unlatched
+    this would re-deliver every 300s for the whole outage. The latch releases
+    when the row starts advancing again, which makes a RELAPSE a fresh notice
+    rather than a silence -- and a relapse is a real shape here, since a hook
+    that fails on one payload may succeed on the next.
+
+    NO STARTUP GRACE, and its absence is deliberate rather than overlooked. The
+    grace L4b needs exists because a young row has had no TIME to be written;
+    this leg's premise already requires a report_alive to have landed AFTER the
+    gauge's measured_at, which cannot be true of a session that has not reported
+    yet. The condition is self-gating on evidence, so a wall-clock floor would
+    add nothing but a second number to keep true.
+    """
+    if peer_registry is None or bridge_manager is None:
+        return 0
+    clock = now or datetime.now(UTC)
+    gate = _latch_or_transient(latch)
+    notified = 0
+    stale: set[str] = set()
+    for row in _managed_sessions_in_state(state, "live"):
+        found = _gauge_stale_session(state, row, clock=clock)
+        if found is None:
+            continue
+        agent_instance_id, spawner_instance_id, last_alive, measured_at = found
+        stale.add(agent_instance_id)
+        if gate.suppressed(agent_instance_id):
+            continue
+        if _notify_gauge_stale(
+            state=state, peer_registry=peer_registry, bridge_manager=bridge_manager,
+            agent_instance_id=agent_instance_id, spawner_instance_id=spawner_instance_id,
+            row=row, last_alive=last_alive, measured_at=measured_at, clock=clock,
+        ):
+            notified += 1
+            gate.record_sent(agent_instance_id)
+    gate.retain_active(stale)
     return notified
 
 

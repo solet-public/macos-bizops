@@ -1,8 +1,9 @@
 """Slice 4 smoke: drain sentinel held across SIGTERM + unregister.
 
-Validates the crash-supervisor coordination invariant from
-``workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md``
-§6 Slice 4 (Architect's 2026-06-06 verdict — Option A + single
+Validates the crash-supervisor coordination invariant from the
+bridge-port-routing-and-session-lifecycle design record (dev-checkout
+workbench — not part of the shipped tree) §6 Slice 4 (Architect's
+2026-06-06 verdict — Option A + single
 cross-color sentinel):
 
 * **Sentinel exists during the SIGTERM call.** The smoke patches

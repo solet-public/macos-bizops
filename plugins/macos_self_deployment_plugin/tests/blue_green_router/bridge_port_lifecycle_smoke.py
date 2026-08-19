@@ -1,10 +1,10 @@
 """Slice 1 + 1.5 smoke — bridge port file ownership + stale-canonical cleanup.
 
-Per Slice 1 and Slice 1.5 of
-``workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md``
-(operator framing: "ironclad, absolutely infallible"). Closes TLC
-counterexample #2 from
-``workbench/2026-06-05_bridge_lifecycle_tla_narrative.md`` §10.2.
+Per Slice 1 and Slice 1.5 of the bridge-port-routing-and-session-
+lifecycle design record (operator framing: "ironclad, absolutely
+infallible"). Closes TLC counterexample #2 from the bridge-lifecycle
+TLA narrative record §10.2 (both dev-checkout workbench records — not
+part of the shipped tree).
 
 What this smoke verifies:
 

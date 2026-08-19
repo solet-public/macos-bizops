@@ -9,7 +9,8 @@ because callers reach SQL through ``state_handle.execute_sql(...)`` /
 ``.transactional()`` WITHOUT importing a driver. This gate detects the FULL
 non-owner SQL-access surface.
 
-Design: ``workbench/2026-06-20_sql_lockdown_gate_design.md`` (v2). Category
+Design: the SQL-lockdown-gate design record v2 (dev-checkout workbench
+— not part of the shipped tree). Category
 registry — adding a rule = one Detector + one registry row; the runner,
 allowlist matcher, reporter, and exit-code logic are category-agnostic.
 

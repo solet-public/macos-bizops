@@ -103,6 +103,65 @@ SESSION_CLAUDE_MAPPING_ID_PREFIX = "scm"
 # threshold-fraction change never requires a backfill.
 TABLE_SESSION_CONTEXT_STATUS = "session_context_status"
 SESSION_CONTEXT_STATUS_ID_PREFIX = "scx"
+TABLE_SESSION_CONTEXT_STATUS_HISTORY = "session_context_status_history"
+SESSION_CONTEXT_STATUS_HISTORY_ID_PREFIX = "scxh"
+
+# GAU-21 (2026-08-19) — the DURABLE record that a gauge notice fired. The
+# sweep's notices are appended as in-memory bridge events only: nothing
+# persists them, a restart loses every un-drained one, reading them REMOVES
+# them (`BridgeSessionState.events_after` rebinds the queue), no surface is
+# keyed on event type, and an unbound steward means the alarm is never emitted
+# anywhere. So a missed alarm and an alarm that never fired are the same
+# silence — the GAU-01 shape one level up, applied to the instrument's own
+# output. This table is written at the EMIT site, before and independently of
+# the steward binding, so the fact of firing survives a delivery that never
+# happened.
+#
+# SCOPED DELIBERATELY TO THE TWO GAUGE FAMILIES. `notice_type` is a plain
+# string and the seven sibling families (rotation_due, ttl_overdue, the spawn
+# and registration notices, session_overdue, dependency wake) share the same
+# durability defect and could be folded in unchanged. They are NOT in this
+# landing: each carries its own evidence columns and its own emit-site
+# posture, and folding seven unmeasured families into a table built for the
+# two with measured evidence would trade the verified for the unverified.
+TABLE_GAUGE_NOTICE_RECORD = "gauge_notice_record"
+GAUGE_NOTICE_RECORD_ID_PREFIX = "gnr"
+
+# GAU-15 item 4 (2026-08-19) — the TAMPER CANARY's two tables.
+#
+# `gauge_canary_registry` is constraint (c): the canary's provenance mark lives
+# at the store plane in ITS OWN TABLE, deliberately NOT as a column on the
+# gauge row. A column on the row is exactly the flag constraint (b) forbids —
+# the detector reads that row, so a mark there is a mark the detection path
+# could learn to read, and a detector that can tell it is being tested has
+# stopped being the thing under test. Operational consumers (rotation notices,
+# steward interrupts, economics) filter canaries out by JOINING this table
+# deliberately; the detector never joins it.
+#
+# `gauge_canary_tamper` is constraint (d): every arrest is an audited row
+# carrying who directed it, the window requested, and the alarm expected. This
+# is what makes an alarm MECHANICALLY ATTRIBUTABLE — an alarm inside a logged
+# window is scheduled, an alarm outside one is real. Without it a canary
+# normalises alarms and trains stewards to ignore the instrument, which is
+# worse than having no canary.
+TABLE_GAUGE_CANARY_REGISTRY = "gauge_canary_registry"
+GAUGE_CANARY_REGISTRY_ID_PREFIX = "gcr"
+
+TABLE_GAUGE_CANARY_TAMPER = "gauge_canary_tamper"
+GAUGE_CANARY_TAMPER_ID_PREFIX = "gct"
+
+# `gauge_notice_record.delivery_outcome` domain. NOT a boolean, and that is
+# the count-4 fix rather than a taste preference: "no steward was bound" and
+# "the append raised" are different faults with different owners, and today
+# both present to a reader as the same silence.
+NOTICE_DELIVERY_APPENDED = "appended"
+NOTICE_DELIVERY_NO_STEWARD_BINDING = "no_steward_binding"
+NOTICE_DELIVERY_APPEND_FAILED = "append_failed"
+NOTICE_DELIVERY_OUTCOMES = (
+    NOTICE_DELIVERY_APPENDED,
+    NOTICE_DELIVERY_NO_STEWARD_BINDING,
+    NOTICE_DELIVERY_APPEND_FAILED,
+)
 
 # fleet-watch-transport-migration phase 2 slice 6 (2026-08-06, design
 # check-in ruling item 3) — the operator's verbatim founding words for a
@@ -1028,6 +1087,41 @@ def get_session_context_status_schema() -> TableSchema:
                 not_null=True,
                 description="When the reporting hook computed this snapshot (its own clock).",
             ),
+            # GAU-14 (D3), 2026-08-19 -- THE SECOND CLOCK. `measured_at` above is
+            # the OBSERVER's; this is the READING's. They are not the same
+            # quantity and conflating them is a measured defect, not a
+            # theoretical one: on 2026-08-19 the seat's two notice paths
+            # reported 164,118 "measured 01:19:31Z" and 153,682 "measured
+            # ~01:21Z" -- later-but-LOWER -- and both numbers are real lines of
+            # the SAME monotone transcript in the CORRECT order (01:18:57.127Z
+            # and 01:17:10.380Z respectively). Nothing disagreed about the
+            # measurement; the notices reported WHEN THEY LOOKED and called it
+            # when it was measured.
+            #
+            # ★ CONSUMERS OF THIS COLUMN, READ THE HISTORY TABLE'S OWN
+            # DECLARATION TOO (`get_session_context_status_history_schema`).
+            # The history row is copied from the dict handed to this table's
+            # upsert, so the two must state the same semantics or a reader will
+            # trust whichever one they happened to open.
+            "reading_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                not_null=False,
+                description=(
+                    "When the READING ITSELF was produced — the source "
+                    "transcript assistant line's own timestamp, the line whose "
+                    "usage block yielded current_tokens. NOT an observer "
+                    "clock: measured_at MINUS reading_at IS the observation "
+                    "lag. NULL = NOT REPORTED (a reporter predating the "
+                    "column), never a synonym for 'same as measured_at' — "
+                    "defaulting it would fabricate zero lag exactly where the "
+                    "lag is unknown. NON-MONOTONE BY CONSTRUCTION: two rows "
+                    "minutes apart legitimately share one reading_at when the "
+                    "transcript did not advance, so it plateaus on healthy "
+                    "data and must never be used for ordering — that is "
+                    "measured_at's job. Mirrors the history table's column of "
+                    "the same name, which is copied from this one."
+                ),
+            ),
             # CACHE STATE (2026-08-16). The economic rotation policy's cold
             # trigger needs to know whether the prompt cache is live, and only
             # the reporting hook can see that -- it reads the transcript, which
@@ -1185,6 +1279,502 @@ def get_session_context_status_schema() -> TableSchema:
     )
 
 
+def get_session_context_status_history_schema() -> TableSchema:
+    """The `session_context_status_history` APPEND-ONLY series behind the cache
+    (GAU-15, ruled 2026-08-19). One row per accepted gauge write, bounded by the
+    writer itself.
+
+    ★ WHY A SECOND TABLE RATHER THAN A WIDER CACHE. `session_context_status`
+    is a CACHE — one row per `agent_instance_id`, conflict on that column
+    alone, last write wins — and that is correct for the rotation decision it
+    serves. It is also why the GAU-01 freeze can never be analysed after the
+    fact: the frozen 487,777 reading of 2026-08-18T00:50:56Z was overwritten by
+    the successor context's own write, and a `/clear` keeps the instance id, so
+    ONE row silently spanned both sides of that rotation. A defect whose whole
+    signature is "a timestamp stopped advancing" was being detected against a
+    store that kept no record of it advancing.
+
+    ★ THREE CLOCKS, ON PURPOSE, and they answer three different questions.
+    `reading_at` is when the READING was produced (the transcript line whose
+    usage block yielded the number); `measured_at` is when the reporting hook
+    OBSERVED it; `recorded_at` is when the state layer STORED it. Their
+    differences are the observation lag and the delivery lag, and keeping them
+    apart makes both VISIBLE instead of assumed — the assumed version has
+    already been measured false once: a first draft of GAU-01(b)'s threshold
+    argued the healthy lag was bounded by the reporter's 120s throttle, and a
+    live control measured +178.8s. ORDERING IS `recorded_at`'s JOB ALONE:
+    `measured_at` is the reporter's clock and `reading_at` legitimately
+    plateaus, so neither is a sort key.
+
+    ★ WHAT THE SERIES MAKES ANSWERABLE, which one row cannot:
+    * STOPPED — the series stalls while `report_by - report_by_seconds` (the
+      last `report_alive`) keeps advancing: the session works and its gauge is
+      dark. That is the GAU-01 class, and the series says WHEN it began and
+      WHAT the last good reading was.
+    * IDLE — the series and that identity stall together: nobody is driving
+      the session. A normal, expected fleet state, and NOT an incident.
+    * NEVER-STARTED — no history rows and no cache row.
+    * ROTATED — `claude_session_id` changes while `agent_instance_id` stays:
+      a `/clear` boundary, so readings either side are two series, not one.
+      Measured 2026-08-19: all three of the first states presented as the same
+      single alarm to the steward, which is what this table exists to end.
+
+    Retention is the WRITER's job (`GAUGE_HISTORY_RETENTION` rows per instance
+    id, hard-deleted at write time) — no reaper to arm and forget, and no
+    soft-delete flag that nothing ever sets.
+    """
+    return TableSchema(
+        table_name=TABLE_SESSION_CONTEXT_STATUS_HISTORY,
+        description=(
+            "Bounded append-only series of accepted session_context_status "
+            "writes — the history the upsert-only cache cannot keep."
+        ),
+        id_prefix=SESSION_CONTEXT_STATUS_HISTORY_ID_PREFIX,
+        columns={
+            COL_AGENT_INSTANCE_ID: ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="The reporting session, as on the cache row.",
+            ),
+            "claude_session_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "The Claude Code session_id this reading was measured "
+                    "against. THE ROTATION MARKER: a change here under a "
+                    "constant agent_instance_id is a /clear boundary, which is "
+                    "exactly what made the original freeze unanalysable."
+                ),
+            ),
+            "agent_session_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "The session's stable agent_session_id as reported. NULL "
+                    "means NOT REPORTED (a reporter predating that column), "
+                    "never 'this session has no bridge'."
+                ),
+            ),
+            "model": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="Transcript message.model at measurement time.",
+            ),
+            "current_tokens": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=True,
+                description="The reading itself — the occupancy this tick saw.",
+            ),
+            "ceiling": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=True,
+                description="resolve_ceiling(model) at measurement time.",
+            ),
+            "measured_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                not_null=True,
+                description=(
+                    "The REPORTER's clock: when the hook computed this "
+                    "snapshot. The timestamp whose arrest is the whole "
+                    "signature of GAU-01."
+                ),
+            ),
+            "recorded_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                not_null=True,
+                description=(
+                    "The STATE LAYER's clock: when this row was appended. Kept "
+                    "beside measured_at so the difference between them is "
+                    "readable evidence rather than an assumption."
+                ),
+            ),
+            "reading_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                not_null=False,
+                description=(
+                    "When the READING ITSELF was produced — the source "
+                    "transcript assistant line's own timestamp, the line whose "
+                    "usage block yielded current_tokens. NOT an observer "
+                    "clock: measured_at MINUS reading_at IS the observation "
+                    "lag. NULL = NOT REPORTED (a reporter predating the "
+                    "column), never a synonym for 'same as measured_at' — "
+                    "defaulting it would fabricate zero lag exactly where the "
+                    "lag is unknown. NON-MONOTONE BY CONSTRUCTION: two rows "
+                    "minutes apart legitimately share one reading_at when the "
+                    "transcript did not advance, so it plateaus on healthy "
+                    "data and must never be used for ordering. Carried from "
+                    "birth on this table per the 2026-08-19 cross-lane column "
+                    "exchange with lane-gau-notice (D3)."
+                ),
+            ),
+            "cache_read_tokens": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description="As reported; NULL = not reported by this reporter.",
+            ),
+            "cache_cold": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description=(
+                    "1/0 as reported; NULL = NOT REPORTED, which is a third "
+                    "state and never a synonym for 'cache is warm'."
+                ),
+            ),
+            "cache_overage_signature": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description="1/0 as reported; NULL = not reported.",
+            ),
+            "reporter_surface": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "Which registered COPY of the reporting hook served this "
+                    "tick (checkout | plugin_cache | vendored | release | "
+                    "unknown). NULL = a reporter predating the column. In a "
+                    "SERIES this is worth more than on the cache row: a value "
+                    "that ALTERNATES across consecutive rows is the "
+                    "two-copies-racing signature, which a single row can only "
+                    "hint at."
+                ),
+            ),
+            "reporter_generation": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description=(
+                    "The reporting hook copy's generation. NULL = "
+                    "pre-attribution reporter."
+                ),
+            ),
+        },
+        indexes=[
+            IndexDefinition(
+                name="idx_scx_history_instance_recorded",
+                columns=[COL_AGENT_INSTANCE_ID, "recorded_at"],
+            ),
+        ],
+    )
+
+
+def get_gauge_notice_record_schema() -> TableSchema:
+    """The `gauge_notice_record` DURABLE record of a fired gauge notice
+    (GAU-21, 2026-08-19). One row per notice the sweep DECIDED to emit —
+    written at the emit site, whether or not delivery then happened.
+
+    ★ WHY THIS TABLE EXISTS, measured against the source rather than argued.
+    The sweep's gauge notices are appended only as in-memory bridge events, and
+    four independent properties of that queue each defeat an audit:
+
+    * NOT DURABLE — `BridgeSessionState` is documented as "In-memory state for
+      one active bridge"; `pending_events` is a plain list behind a lock and
+      nothing persists it, so a restart loses every un-drained notice. The
+      DEPLOY a canary must traverse IS a restart.
+    * DRAIN-ONCE, AND READING STEALS — `events_after` returns the acked events
+      and rebinds the queue to only those after the cursor. A verifier polling
+      that queue races the steward and can consume the very notice the steward
+      needed: not merely unreadable, but an active harm to the operational
+      path.
+    * NO BY-TYPE READ — no surface is keyed on event type; the only reader is a
+      cursor-ordered drain of one bridge's queue.
+    * CONDITIONALLY NEVER EMITTED — the notify path resolves the steward
+      binding FIRST and returns early when it is None, so on an unbound steward
+      the alarm reaches nothing and leaves nothing behind.
+
+    ★ THE CONSEQUENCE THIS ENDS. A missed alarm and an alarm that never fired
+    are today the same silence. That is the GAU-01 shape one level up: the
+    instrument's own output is unobservable after the moment, which is exactly
+    what GAU-15 fixed for the READING and this fixes for the ALARM. It is also
+    why the manual freeze-watch cannot retire when the detector merely deploys
+    — a detector whose firings leave no trace cannot be audited after the fact.
+
+    ★ `release_id` IS LOAD-BEARING, NOT PROVENANCE DECORATION. The deployed
+    detector's thresholds are not master's: measured 2026-08-19, the running
+    release ran gauge coverage at 300s against master's 600s, and carried no
+    staleness detector at all while master had one. A recorded alarm that does
+    not say which release's numbers produced it cannot be re-read later, and
+    a reader reasoning from master would date the evidence wrongly in both
+    directions.
+
+    ★ EVIDENCE AS EXPLICIT COLUMNS, not one prose field. A reader who must
+    parse prose to recover a threshold will not, and the prose is already
+    written for a steward rather than for a query. The two gauge families
+    populate different subsets and the NULLs are meaningful: the coverage
+    notice has no gauge row by definition, so its gauge timestamps are absent
+    rather than zero.
+    """
+    return TableSchema(
+        table_name=TABLE_GAUGE_NOTICE_RECORD,
+        description=(
+            "Durable, attributable record that a gauge notice fired — the "
+            "trace the in-memory, drain-once bridge event queue cannot keep."
+        ),
+        id_prefix=GAUGE_NOTICE_RECORD_ID_PREFIX,
+        columns={
+            "notice_type": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "Which detector fired: gauge_stale_notice or "
+                    "gauge_coverage_notice. The by-type read the bridge event "
+                    "queue has no surface for."
+                ),
+            ),
+            COL_AGENT_INSTANCE_ID: ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "The SUBJECT session the notice is about — never the "
+                    "steward it was addressed to."
+                ),
+            ),
+            "emitted_at": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "When the sweep DECIDED to fire, on the sweep's own clock. "
+                    "Not when a steward read it: the read may never happen, "
+                    "which is the point of the table."
+                ),
+            ),
+            "steward_instance_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "Who the notice was addressed to. NULL means NO STEWARD "
+                    "WAS RESOLVED — a real and previously invisible outcome, "
+                    "never 'not recorded'."
+                ),
+            ),
+            "delivery_outcome": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "appended / no_steward_binding / append_failed. "
+                    "Deliberately not a boolean: an unbound steward and a "
+                    "failed append are different faults with different owners, "
+                    "and both look like silence from outside."
+                ),
+            ),
+            "release_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "The release whose detector fired this, self-identified "
+                    "from the running module's own tree. NULL means the "
+                    "release could not be determined (a checkout run, say) — "
+                    "absent, never guessed, because a wrong release id "
+                    "silently re-dates the thresholds a reader applies."
+                ),
+            ),
+            "threshold_s": ColumnDefinition(
+                type=ColumnType.REAL,
+                not_null=False,
+                description=(
+                    "The threshold IN FORCE at emit time, recorded rather than "
+                    "re-read at read time — the running release's value has "
+                    "already been measured to differ from master's."
+                ),
+            ),
+            "observed_s": ColumnDefinition(
+                type=ColumnType.REAL,
+                not_null=False,
+                description=(
+                    "What was actually measured against that threshold: the "
+                    "gauge lag for a staleness notice, the live-row age for a "
+                    "coverage notice."
+                ),
+            ),
+            "last_report_alive_at": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "The lifecycle clock the staleness leg diverged FROM. NULL "
+                    "for a coverage notice, which does not read it."
+                ),
+            ),
+            "gauge_measured_at": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "The arrested gauge reading's own timestamp — the value "
+                    "the upsert-only cache would otherwise overwrite. NULL for "
+                    "a coverage notice, which fires precisely because there is "
+                    "no gauge row to read."
+                ),
+            ),
+        },
+        indexes=[
+            IndexDefinition(
+                name="idx_gnr_instance_type_emitted",
+                columns=[COL_AGENT_INSTANCE_ID, "notice_type", "emitted_at"],
+            ),
+        ],
+    )
+
+
+def get_gauge_canary_registry_schema() -> TableSchema:
+    """The `gauge_canary_registry` — which identities are CANARIES (GAU-15
+    item 4, constraint (c)).
+
+    ★ ITS OWN TABLE, AND THAT IS CONSTRAINT (b) RATHER THAN TIDINESS. The
+    obvious design puts an `is_canary` column on the gauge row. That column
+    would sit on the very row the staleness detector reads, which makes it a
+    flag the detection path could come to read — and a detector that can tell
+    it is under test has stopped being the thing under test. Constraint (b)
+    binds harder than (c): the mark must exist for operational consumers and
+    must NOT be reachable from the detector's own read.
+
+    ★ WHO JOINS THIS, AND WHO MUST NEVER. Rotation notices, steward interrupts
+    and economics join it deliberately, so a synthetic session never pollutes a
+    fleet decision — a canary that shows up in the rotation economics is a
+    canary that costs real money and real attention. The sweep's gauge legs
+    never join it: to them a canary row is an ordinary session, which is the
+    entire point.
+
+    `retired_at` rather than a delete: a canary that has been stood down still
+    explains the alarms it produced while it ran, and a registry that forgets
+    makes its own history unattributable.
+    """
+    return TableSchema(
+        table_name=TABLE_GAUGE_CANARY_REGISTRY,
+        description=(
+            "Identities that are synthetic gauge canaries — the store-plane "
+            "provenance mark, deliberately not a column on the gauge row."
+        ),
+        id_prefix=GAUGE_CANARY_REGISTRY_ID_PREFIX,
+        columns={
+            COL_AGENT_INSTANCE_ID: ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                unique=True,
+                description=(
+                    "The canary's own instance id, as the real reporting path "
+                    "writes it. Unique: one registration per identity."
+                ),
+            ),
+            "purpose": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "Why this canary exists, in words, for whoever finds a "
+                    "synthetic session in a listing and needs to know it is "
+                    "deliberate."
+                ),
+            ),
+            "registered_at": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="When it was registered.",
+            ),
+            "registered_by": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "Who registered it, in the same directed_by form the "
+                    "tamper log uses — a synthetic identity in the fleet is an "
+                    "act someone took, never an ambient fact."
+                ),
+            ),
+            "retired_at": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "When it was stood down; NULL means ACTIVE. Retired rather "
+                    "than deleted, because a stood-down canary still has to "
+                    "explain the alarms it produced while it ran."
+                ),
+            ),
+        },
+    )
+
+
+def get_gauge_canary_tamper_schema() -> TableSchema:
+    """The `gauge_canary_tamper` audit log — every arrest, who ordered it, and
+    what alarm it expected (GAU-15 item 4, constraint (d)).
+
+    ★ WHAT THIS BUYS: MECHANICAL ATTRIBUTION. With this log, an alarm inside a
+    recorded window is SCHEDULED and an alarm outside every window is REAL, and
+    a reader derives that rather than remembering it. Without it, the canary
+    emits alarms indistinguishable from genuine ones — which does not merely
+    fail to help, it actively trains stewards to discount the instrument. That
+    is the naive build the constraint was written to forbid.
+
+    ★ NO AMBIENT TEST MODE, which is the other half of (d). The arrest is a
+    row written by a registered verb carrying `directed_by`, not an environment
+    variable and not a test flag. An env var leaves no audit trail, cannot be
+    scoped to a window, and silently persists into runs nobody intended.
+
+    ★ `expected_notice_type` IS RECORDED AT ARREST TIME, not asserted at read
+    time. The verifier must be checkable against what the tamper ASKED FOR,
+    otherwise it grades its own expectations after seeing the answer.
+    """
+    return TableSchema(
+        table_name=TABLE_GAUGE_CANARY_TAMPER,
+        description=(
+            "Audited record of every canary arrest: who directed it, the "
+            "window, and the alarm it expected — what makes an alarm "
+            "attributable to a scheduled tamper rather than a real fault."
+        ),
+        id_prefix=GAUGE_CANARY_TAMPER_ID_PREFIX,
+        columns={
+            COL_AGENT_INSTANCE_ID: ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="The canary this arrest applies to.",
+            ),
+            "directed_by": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "Who ordered the tamper, in the platform's directed_by "
+                    "form. An unattributable tamper is the failure mode this "
+                    "column exists to make impossible."
+                ),
+            ),
+            "arrest_from": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="Start of the requested arrest window, inclusive.",
+            ),
+            "arrest_until": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "End of the requested arrest window, exclusive. ALWAYS "
+                    "bounded: an open-ended arrest is a canary that stays "
+                    "broken, and its alarms would then be attributable "
+                    "forever, which is the same as not being attributable."
+                ),
+            ),
+            "expected_notice_type": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description=(
+                    "Which alarm this arrest is expected to provoke, recorded "
+                    "BEFORE the outcome is known so the verifier cannot grade "
+                    "its own expectations after the fact."
+                ),
+            ),
+            "reason": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="Why this arrest was ordered, in words.",
+            ),
+            "recorded_at": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="When the arrest was ordered (the state layer's clock).",
+            ),
+        },
+        indexes=[
+            IndexDefinition(
+                name="idx_gct_instance_from",
+                columns=[COL_AGENT_INSTANCE_ID, "arrest_from"],
+            ),
+        ],
+    )
+
+
 def get_lane_charter_schema() -> TableSchema:
     """Append-only lane-charter capture (fleet-watch-transport-migration
     phase 2 slice 6, design check-in ruling item 3). Insert-only via
@@ -1319,11 +1909,15 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
     D1 is land-able alone)."""
     return SchemaDefinition(
         namespace=AGENT_ROLE_BINDING_NAMESPACE,
-        version="1.2.0",
+        version="1.5.0",
         description=(
             "Fleet session-management Phase B, D1 — L0 schema deltas. "
             "+1.1.0: session_context_status (maintenance-verbs M1). "
-            "+1.2.0: held_authorization (R1 held-authorization queue)."
+            "+1.2.0: held_authorization (R1 held-authorization queue). "
+            "+1.3.0: session_context_status_history (GAU-15 gauge series). "
+            "+1.4.0: gauge_notice_record (GAU-21 durable notice record). "
+            "+1.5.0: gauge_canary_registry + gauge_canary_tamper (GAU-15 "
+            "item 4 tamper canary)."
         ),
         tables={
             TABLE_SESSION_ROLE_CLAIM: get_session_role_claim_schema(),
@@ -1333,7 +1927,13 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             TABLE_SESSION_CLAUDE_MAPPING: get_session_claude_mapping_schema(),
             TABLE_LANE_CHARTER: get_lane_charter_schema(),
             TABLE_SESSION_CONTEXT_STATUS: get_session_context_status_schema(),
+            TABLE_SESSION_CONTEXT_STATUS_HISTORY: (
+                get_session_context_status_history_schema()
+            ),
             TABLE_HELD_AUTHORIZATION: get_held_authorization_schema(),
+            TABLE_GAUGE_NOTICE_RECORD: get_gauge_notice_record_schema(),
+            TABLE_GAUGE_CANARY_REGISTRY: get_gauge_canary_registry_schema(),
+            TABLE_GAUGE_CANARY_TAMPER: get_gauge_canary_tamper_schema(),
         },
     )
 
@@ -1347,6 +1947,9 @@ __all__ = [
     "CONDITION_DEADLINE",
     "CONDITION_LANE_CLOSED",
     "CONDITION_SESSION_TERMINAL",
+    "GAUGE_CANARY_REGISTRY_ID_PREFIX",
+    "GAUGE_CANARY_TAMPER_ID_PREFIX",
+    "GAUGE_NOTICE_RECORD_ID_PREFIX",
     "HELD_AUTHORIZATION_ID_PREFIX",
     "LANE_CHARTER_ID_PREFIX",
     "LIFECYCLE_IDLE",
@@ -1358,12 +1961,17 @@ __all__ = [
     "LIFECYCLE_TERMINATED",
     "LIFECYCLE_TRANSITIONS",
     "MANAGED_SESSION_ID_PREFIX",
+    "NOTICE_DELIVERY_APPENDED",
+    "NOTICE_DELIVERY_APPEND_FAILED",
+    "NOTICE_DELIVERY_NO_STEWARD_BINDING",
+    "NOTICE_DELIVERY_OUTCOMES",
     "PEER_BINDING_ID_PREFIX",
     "PEER_BINDING_NAMESPACE",
     "PEER_BINDING_TABLE",
     "ROLE_BINDING_ID_PREFIX",
     "ROLE_ID_PREFIX",
     "SESSION_CLAUDE_MAPPING_ID_PREFIX",
+    "SESSION_CONTEXT_STATUS_HISTORY_ID_PREFIX",
     "SESSION_CONTEXT_STATUS_ID_PREFIX",
     "SESSION_DEPENDENCY_ID_PREFIX",
     "SESSION_HOST_HEADLESS",
@@ -1373,11 +1981,15 @@ __all__ = [
     "SESSION_TRANSITION_ID_PREFIX",
     "SESSION_VISIBILITY_HEADLESS",
     "SESSION_VISIBILITY_VISIBLE",
+    "TABLE_GAUGE_CANARY_REGISTRY",
+    "TABLE_GAUGE_CANARY_TAMPER",
+    "TABLE_GAUGE_NOTICE_RECORD",
     "TABLE_HELD_AUTHORIZATION",
     "TABLE_LANE_CHARTER",
     "TABLE_MANAGED_SESSION",
     "TABLE_SESSION_CLAUDE_MAPPING",
     "TABLE_SESSION_CONTEXT_STATUS",
+    "TABLE_SESSION_CONTEXT_STATUS_HISTORY",
     "TABLE_SESSION_DEPENDENCY",
     "TABLE_SESSION_ROLE_CLAIM",
     "TABLE_SESSION_TRANSITION",
@@ -1386,6 +1998,9 @@ __all__ = [
     "WORK_CLASS_READ_ONLY",
     "get_agent_role_binding_schema",
     "get_agent_role_binding_schema_definition",
+    "get_gauge_canary_registry_schema",
+    "get_gauge_canary_tamper_schema",
+    "get_gauge_notice_record_schema",
     "get_held_authorization_schema",
     "get_lane_charter_schema",
     "get_managed_session_schema",
@@ -1395,6 +2010,7 @@ __all__ = [
     "get_role_model_schema_definition",
     "get_role_schema",
     "get_session_claude_mapping_schema",
+    "get_session_context_status_history_schema",
     "get_session_context_status_schema",
     "get_session_dependency_schema",
     "get_session_lifecycle_schema_definition",

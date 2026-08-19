@@ -31,8 +31,8 @@ lives at ``ananta/src/ananta/services/self_deployment_service/interfaces/public.
 cloud-only verbs stay separate so macOS-bound solets never see them
 in ``process_search``.
 
-See: ``workbench/2026-05-30_self_deployment_plugin_design.md`` plus
-``workbench/2026-05-30_self_deployment_plugin_design_addendum.md`` §A.
+See the self-deployment-plugin design record plus its addendum §A
+(both dev-checkout workbench records — not part of the shipped tree).
 """
 
 from __future__ import annotations

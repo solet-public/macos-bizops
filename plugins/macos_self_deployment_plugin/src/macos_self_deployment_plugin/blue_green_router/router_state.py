@@ -1,7 +1,7 @@
 """In-memory routing state for the local blue-green router.
 
-Implements the §2 contract from
-`workbench/2026-06-01_local_blue_green_L3_implementation_plan.md`:
+Implements the §2 contract from the L3-implementation-plan design
+record (dev-checkout workbench — not part of the shipped tree):
 
 - Session-id affinity per D21' Option α (operator-confirmed
   2026-06-02): an Mcp-Session-Id stays bound to the color that
@@ -12,9 +12,9 @@ Implements the §2 contract from
   newly-activated color; existing session-bound traffic continues
   against the prior color until drain expiry.
 
-Slice 3 of
-``workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md``
-eliminated the hardcoded blue/green port bands per invariant I1.A.
+Slice 3 of the bridge-port-routing-and-session-lifecycle design record
+(dev-checkout workbench — not part of the shipped tree) eliminated the
+hardcoded blue/green port bands per invariant I1.A.
 ``register()`` no longer validates the incoming port against a range —
 the spawn-path guarantee from invariant I2 (Slices 2 + 2.5) prevents
 rogue registrations because every spawn path either registers

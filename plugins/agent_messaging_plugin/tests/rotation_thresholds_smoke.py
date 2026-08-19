@@ -32,6 +32,32 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src")
 
 from agent_messaging_plugin import rotation_thresholds as rt  # noqa: E402
 
+# ★ THE DISCRIMINATING SIZE -- DERIVED, NEVER A LITERAL (GAU-05, 2026-08-19).
+#
+# Several tests below need a token count that lands strictly BETWEEN H and the
+# first warm band, because that window is the only place a "compares against H"
+# implementation and a "compares against the 150K band" implementation give
+# different answers. Everywhere else the two agree, so an assertion outside the
+# window passes under the collapse it is supposed to catch.
+#
+# It used to be the literal 120,000, and the GAU-05 re-measurement is exactly
+# the event that invalidates a literal: H moved 110,702 -> 146,139, which put
+# 120,000 BELOW H. Every assertion built on it would have flipped from
+# `cold_above_h` to `cold_below_h` -- and a re-measurer whose only instinct is
+# "make the tests green again" would have edited the EXPECTATIONS to match,
+# destroying the discriminator while leaving a file that still reads like a
+# live test. Deriving it means a future H measurement moves the probe with the
+# threshold instead of silently stranding it on the wrong side.
+#
+# The window is NOT assumed to exist. `test_cold_cache_is_a_separate_axis_not_a_
+# stricter_warm` asserts `WARM_BAND_KEEP_WORKING_TOKENS > POLICY_H_TOKENS`
+# first, and `test_the_discriminating_window_is_real` below fails loudly if the
+# window ever closes -- which is a live risk, not a theoretical one: at the
+# 2026-08-19 values it is 3,861 tokens wide, down from 39,298.
+_DISCRIMINATING_TOKENS: int = (
+    rt.POLICY_H_TOKENS + rt.WARM_BAND_KEEP_WORKING_TOKENS
+) // 2
+
 _passed = 0
 _failed: list[str] = []
 
@@ -197,7 +223,15 @@ def test_h_is_the_sum_of_its_measured_parts() -> None:
         rt.POLICY_H_TOKENS == rt.POLICY_H_BOOT_TOKENS + rt.POLICY_H_REHYDRATION_TOKENS,
         "H equals boot payload + incremental rehydration, not an independent number",
     )
-    _check(rt.POLICY_H_TOKENS == 110_702, "H is the measured 110,702 (2026-08-16)")
+    _check(rt.POLICY_H_TOKENS == 146_139, "H is the measured 146,139 (2026-08-19)")
+    # The COMPONENTS are pinned too, not just the total. GAU-05 measured that
+    # the two move for different reasons and at wildly different rates -- boot
+    # +1.4% while rehydration +51.4% over the same three days -- so a total-only
+    # pin cannot tell a real re-measurement from an edit that moved one part and
+    # compensated in the other.
+    _check(rt.POLICY_H_BOOT_TOKENS == 43_474, "boot payload is the measured 43,474")
+    _check(rt.POLICY_H_REHYDRATION_TOKENS == 102_665,
+           "incremental rehydration is the measured 102,665")
 
 
 def test_warm_bands_are_ordered_and_exhaustive() -> None:
@@ -245,16 +279,53 @@ def test_cold_is_a_different_question_not_a_stricter_band() -> None:
     # THE DISCRIMINATING VALUE. 90K and 250K cannot tell "compares against H"
     # apart from "compares against the 150K warm band" -- both thresholds sort
     # them identically, so those assertions pass under a cold-is-just-stricter-
-    # warm implementation. Only a value BETWEEN H (110,702) and 150,000
-    # separates the two, which is the whole claim this test exists to make.
-    # Found by mutation: without this line the test was blind to exactly the
-    # collapse it is named after.
+    # warm implementation. Only a value strictly BETWEEN H and
+    # WARM_BAND_KEEP_WORKING_TOKENS separates the two, which is the whole claim
+    # this test exists to make. Found by mutation: without this line the test
+    # was blind to exactly the collapse it is named after. The probe is
+    # DERIVED (see `_DISCRIMINATING_TOKENS`) so a future H re-measurement moves
+    # it with the threshold rather than stranding it on the wrong side.
     _check(rt.WARM_BAND_KEEP_WORKING_TOKENS > rt.POLICY_H_TOKENS,
            "H sits BELOW the first warm band -- there is a range that separates them")
-    _check(rt.rotation_band(120_000, cache_cold=True)[0] == "cold_above_h",
-           "120K cold is ABOVE H -> rotate, even though 120K warm would keep working")
-    _check(rt.rotation_band(120_000, cache_cold=False)[0] == "warm_keep",
-           "120K warm keeps working -- the same size, opposite verdicts by cache state")
+    _check(rt.rotation_band(_DISCRIMINATING_TOKENS, cache_cold=True)[0] == "cold_above_h",
+           f"{_DISCRIMINATING_TOKENS:,} cold is ABOVE H -> rotate, even though the "
+           "same size warm would keep working")
+    _check(rt.rotation_band(_DISCRIMINATING_TOKENS, cache_cold=False)[0] == "warm_keep",
+           f"{_DISCRIMINATING_TOKENS:,} warm keeps working -- the same size, "
+           "opposite verdicts by cache state")
+
+
+def test_the_discriminating_window_is_real() -> None:
+    """The window between H and the first warm band EXISTS and the derived
+    probe lands strictly inside it (GAU-05, 2026-08-19).
+
+    Every "cold and warm disagree at the same size" assertion in this file is
+    only a test while that window is non-empty. It is not a formality: the
+    2026-08-19 H re-measurement narrowed it from 39,298 tokens to 3,861, so a
+    further ~2.6% rise in H closes it entirely. When it closes, the honest
+    outcome is a LOUD RED here naming the collapse -- not a set of downstream
+    assertions that quietly start passing for the wrong reason, which is
+    precisely what a hardcoded probe would have delivered.
+
+    Checked as a property of the live constants rather than against copies of
+    them, so it cannot pass by agreeing with a stale transcription.
+    """
+    width = rt.WARM_BAND_KEEP_WORKING_TOKENS - rt.POLICY_H_TOKENS
+    _check(width > 0,
+           f"the H-to-first-warm-band window is non-empty (width {width:,}) -- "
+           "without it no size can tell the cold axis from the warm one")
+    _check(rt.POLICY_H_TOKENS < _DISCRIMINATING_TOKENS < rt.WARM_BAND_KEEP_WORKING_TOKENS,
+           f"the derived probe {_DISCRIMINATING_TOKENS:,} lands STRICTLY inside "
+           f"({rt.POLICY_H_TOKENS:,}, {rt.WARM_BAND_KEEP_WORKING_TOKENS:,})")
+    # The probe must also be low enough that the FRACTION half of the union
+    # cannot be what decides the cold/warm split -- otherwise the cold-axis
+    # tests would be green for a reason that has nothing to do with the cache.
+    _check(
+        _DISCRIMINATING_TOKENS
+        < rt.resolve_ceiling("claude-opus-5") * rt.ROTATION_THRESHOLD_FRACTION,
+        "the probe is below the fraction threshold on a 1M ceiling, so the "
+        "fraction half of the union decides neither answer",
+    )
 
 
 def test_clearing_wins_needs_calls_to_amortise_over() -> None:
@@ -267,8 +338,24 @@ def test_clearing_wins_needs_calls_to_amortise_over() -> None:
     _check(not rt.clearing_wins(10_000_000, -3), "negative N is refused too")
     _check(rt.clearing_wins(559_000, 50),
            "the 559K case with 50 calls ahead: clearing wins")
-    _check(not rt.clearing_wins(120_000, 2),
-           "modest context with only 2 calls ahead: clearing loses")
+    # ★ MUST BE ABOVE H (GAU-05, 2026-08-19). This probe exists to exercise the
+    # AMORTISATION term, so it has to be a context a clear could plausibly pay
+    # for -- i.e. C > H -- and lose only because N is too small. The old literal
+    # 120,000 was above the then-H of 110,702; after the re-measurement to
+    # 146,139 it fell BELOW H, where `clearing_wins` returns False on the H
+    # comparison alone. Left as it was, this assertion would still be green with
+    # the entire `20H/N` term deleted -- a test that had quietly stopped testing
+    # its own subject. Derived from H for the same reason the discriminating
+    # size is.
+    _amortisation_probe = rt.POLICY_H_TOKENS + 50_000
+    _check(_amortisation_probe > rt.POLICY_H_TOKENS,
+           "the amortisation probe sits ABOVE H, so only N can decide it")
+    _check(not rt.clearing_wins(_amortisation_probe, 2),
+           f"{_amortisation_probe:,} (above H) with only 2 calls ahead: clearing "
+           "loses -- the rewrite never amortises")
+    _check(rt.clearing_wins(_amortisation_probe, 10_000),
+           "...and the SAME context with plenty of calls ahead wins -- so N, not "
+           "size, is what the previous assertion measured")
 
 
 def test_the_superseded_fraction_survives_as_a_hint_only() -> None:
@@ -440,7 +527,8 @@ def test_the_union_can_only_ever_notify_more() -> None:
     """
     for model in ("claude-opus-5", "claude-haiku-4-5", "a-model-nobody-added"):
         ceiling = rt.resolve_ceiling(model)
-        for tokens in (0, 1, 49_999, 50_000, 99_999, 100_000, 110_702, 120_000,
+        for tokens in (0, 1, 49_999, 50_000, 99_999, 100_000,
+                       rt.POLICY_H_TOKENS, _DISCRIMINATING_TOKENS,
                        149_999, 150_000, 199_999, 200_000, 299_999, 300_000,
                        499_999, 500_000, 750_000, 900_000, 1_500_000):
             for cold in (True, False):
@@ -501,9 +589,9 @@ def test_capacity_can_never_be_the_reason_a_session_is_due() -> None:
 def test_a_cold_cache_above_h_is_due_where_the_same_size_warm_is_not() -> None:
     """The cold branch reaches the union, and it is a DIFFERENT question.
 
-    120,000 is the discriminating size this file already identified for
-    `rotation_band` (between H at 110,702 and the first warm band at 150,000)
-    and it discriminates here for the same reason: cold it is `cold_above_h`
+    `_DISCRIMINATING_TOKENS` is the size this file already identified for
+    `rotation_band` (strictly between H and the first warm band) and it
+    discriminates here for the same reason: cold it is `cold_above_h`
     and actionable, warm it is `warm_keep` and not, and the fraction is 0.12
     on a 1M ceiling so the fraction half cannot be what decides either answer.
     A union that dropped the cache axis would return False for both and this
@@ -511,17 +599,18 @@ def test_a_cold_cache_above_h_is_due_where_the_same_size_warm_is_not() -> None:
     """
     _check(
         rt.is_rotation_due(
-            model="claude-opus-5", current_tokens=120_000, cache_cold=True,
+            model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS, cache_cold=True,
         ) is True,
-        "120,000 with a COLD cache is due -- the context is re-paid at full price "
+        "the discriminating size with a COLD cache is due -- the context is "
+        "re-paid at full price "
         "on the next call whether or not you rotate",
     )
     _check(
         rt.is_rotation_due(
-            model="claude-opus-5", current_tokens=120_000, cache_cold=False,
+            model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS, cache_cold=False,
         ) is False,
-        "the same 120,000 WARM is not due -- same size, opposite verdicts by cache "
-        "state, and the fraction (0.12) is identical in both",
+        "the same size WARM is not due -- same size, opposite verdicts by cache "
+        "state, and the fraction is identical in both",
     )
 
 
@@ -532,22 +621,22 @@ def test_unmeasured_cache_state_is_treated_as_warm_never_upgraded_to_cold() -> N
     `_rotation_prose` already says in the delivered notice that such a band is
     "the warm default rather than a measurement". Reading None as cold would
     be the loud direction, but it would manufacture a measurement nobody took
-    and make a session in the 110,702-150,000 window due on the strength of an
+    and make a session in the H-to-150,000 window due on the strength of an
     absent field -- the same manufactured-freshness pathology that got a
     detached gauge heartbeat refused on this lane. Quiet-but-honest is the
     ruling; the notice already carries the caveat that goes with it.
     """
     _check(
         rt.is_rotation_due(
-            model="claude-opus-5", current_tokens=120_000, cache_cold=None,
+            model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS, cache_cold=None,
         ) is False,
         "an UNMEASURED cache state answers exactly as warm does, not as cold",
     )
     _check(
         rt.is_rotation_due(
-            model="claude-opus-5", current_tokens=120_000, cache_cold=None,
+            model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS, cache_cold=None,
         ) == rt.is_rotation_due(
-            model="claude-opus-5", current_tokens=120_000, cache_cold=False,
+            model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS, cache_cold=False,
         ),
         "...and it is the SAME answer as warm at the one size where warm and cold "
         "differ -- so None is the warm default, not a third behaviour",
@@ -566,7 +655,8 @@ def test_overage_cannot_change_which_band_a_size_falls_in() -> None:
     ever makes a band boundary overage-dependent, the union acquires a real
     missing input and this test says so.
     """
-    for tokens in (0, 90_000, 110_702, 120_000, 149_999, 150_000, 200_000,
+    for tokens in (0, 90_000, rt.POLICY_H_TOKENS, _DISCRIMINATING_TOKENS,
+                   149_999, 150_000, 200_000,
                    250_000, 300_000, 500_000):
         for cold in (True, False):
             nominal = rt.rotation_band(tokens, cache_cold=cold, overage=False)[0]
@@ -645,9 +735,9 @@ def test_the_frozen_out_of_tree_call_shape_still_works() -> None:
         "where neither axis fires",
     )
     _check(
-        rt.is_rotation_due(model="claude-opus-5", current_tokens=120_000)
+        rt.is_rotation_due(model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS)
         == rt.is_rotation_due(
-            model="claude-opus-5", current_tokens=120_000, cache_cold=None,
+            model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS, cache_cold=None,
         ),
         "...and omitting the argument is EXACTLY the unmeasured case, not a "
         "fourth behaviour: an absent argument means nobody measured, which is "
@@ -693,6 +783,7 @@ def main() -> int:
     test_warm_bands_are_ordered_and_exhaustive()
     test_band_boundaries_are_inclusive_where_the_policy_says_so()
     test_cold_is_a_different_question_not_a_stricter_band()
+    test_the_discriminating_window_is_real()
     test_clearing_wins_needs_calls_to_amortise_over()
     test_the_superseded_fraction_survives_as_a_hint_only()
     test_post_clear_rewrite_is_not_evidence_of_a_cold_cache()

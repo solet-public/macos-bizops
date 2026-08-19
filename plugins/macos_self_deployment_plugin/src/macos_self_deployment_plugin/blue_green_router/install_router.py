@@ -1,7 +1,8 @@
 """Install the local blue-green router under launchd (macOS) or systemd (Linux).
 
-Per L3 plan §3.6 (`workbench/2026-06-01_local_blue_green_L3_implementation_plan.md`)
-and Slice 1 of `workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md`.
+Per L3 plan §3.6 and Slice 1 of the bridge-port-routing-and-session-
+lifecycle design (both dev-checkout workbench records — not part of the
+shipped tree).
 
 Idempotent: re-running on an already-installed system is a no-op success.
 Fast-fail: any subprocess error surfaces verbatim — no fallbacks, no retries.

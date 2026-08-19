@@ -1,7 +1,7 @@
 """Atomic single-plugin install/remove — the sanctioned runtime roster mutator.
 
 Fourth collaborator in the Step-9.C plugin-manager decomposition
-(`workbench/2026-05-25_plugin_god_class_remediation.md` §9.C), added by the C1
+(design record, Step 9.C, dev-checkout workbench — not part of the shipped tree), added by the C1
 atomicity design (`workbench/2026-07-10_install_plugin_from_path_failure_
 atomicity_design.md`).
 

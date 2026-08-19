@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Bundle-license gate — keeps a shipped capability bundle license-clean.
 
-Closes the gap found by the 2026-07-26 dependency + license provenance audit
-(``workbench/2026-07-26_dependency_license_provenance_audit.md``): the bundle
+Closes the gap found by the 2026-07-26 dependency + license provenance
+audit record (dev-checkout workbench — not part of the shipped tree):
+the bundle
 boundary in ``capability_bundles.yaml`` is load-bearing for LICENSE COMPLIANCE,
 not merely for scope. Every strong-copyleft package in this repo is confined to
 plugins the shipped bundle excludes — adding the audio stack or the iterm2

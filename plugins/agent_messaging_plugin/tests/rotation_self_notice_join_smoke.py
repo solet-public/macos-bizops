@@ -42,6 +42,9 @@ from _real_state_fake import RealShapeState  # noqa: E402
 from ananta.interfaces.state_management_interface import (  # noqa: E402
     StateManagementInterface,
 )
+from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
+    AGENT_ROLE_BINDING_NAMESPACE,
+)
 from ananta.services.store import Store, open_store  # noqa: E402
 
 from agent_messaging_plugin import rotation_self_notice as rsn  # noqa: E402
@@ -58,6 +61,7 @@ from agent_messaging_plugin.peer_registry import (  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     PEER_BINDING_NAMESPACE,
+    TABLE_SESSION_CONTEXT_STATUS,
     get_peer_binding_schema,
     get_session_context_status_schema,
 )
@@ -188,6 +192,34 @@ def _write_gauge_row(
     )
 
 
+class _RecordingMessagingService:
+    """The durable half, recorded rather than exercised (GAU-06 G2).
+
+    This file's subject is ROUTING -- which key resolves a session's binding --
+    so the durable write is stood in for rather than run against a real service
+    and repository. What it must NOT be is absent: the leg refuses to notify at
+    all without a messaging service, so omitting it here would make every
+    routing assertion in this file pass or fail for a reason that has nothing to
+    do with the join. The request SHAPE is asserted in
+    ``rotation_self_notice_smoke.py``, which is where it belongs.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[Any] = []
+
+    def peer_send(self, request: Any) -> object:
+        self.sent.append(request)
+        # Carries a thread_id because the writer PRUNES the thread it just
+        # wrote to (GAU-06 retention). A bare object() here is not a smaller
+        # stand-in, it is one the notify path cannot get past -- which is how
+        # this file went red the second time on the same change.
+        return SimpleNamespace(
+            thread_id=f"agt-rotation-{request.peer_agent_instance_id}",
+            message_id="agm-join-fake",
+            cursor=1,
+        )
+
+
 def _sweep(
     state: StateManagementInterface,
     registry: PeerRegistry,
@@ -198,6 +230,7 @@ def _sweep(
         now=_now(),
         peer_registry=registry,
         bridge_manager=manager,
+        agent_messaging_service=_RecordingMessagingService(),  # type: ignore[arg-type]
         latch=rsn.BandEdgeLatch(),
     )
 
@@ -241,11 +274,11 @@ def test_a_watcher_held_worker_is_reached_through_the_join() -> None:
     )
 
     counts = _sweep(state, registry, manager)
-    _check(counts.notified == 1, "the watcher-held worker IS notified (was impossible)")
+    _check(counts.appended == 1, "the watcher-held worker IS notified (was impossible)")
     _check(
         counts.unroutable == 0 and counts.undeliverable == 0,
         "...and is not counted as a gap -- all three numbers pinned, since "
-        "notified==1 alone cannot rule out a second row being miscounted",
+        "appended==1 alone cannot rule out a second row being miscounted",
     )
 
     events = _events_on(manager, bridges[WATCH_ID])
@@ -277,7 +310,7 @@ def test_the_join_is_what_does_the_work() -> None:
     _write_gauge_row(state, agent_instance_id=LEDGER_ID, agent_session_id=None)
 
     counts = _sweep(state, registry, manager)
-    _check(counts.notified == 0, "a row with NO join is NOT notified -- the pre-change behaviour")
+    _check(counts.appended == 0, "a row with NO join is NOT notified -- the pre-change behaviour")
     _check(counts.unroutable == 1, "...and is counted as unroutable, not silently skipped")
     _check(
         not _events_on(manager, bridges[WATCH_ID]),
@@ -307,7 +340,7 @@ def test_the_join_is_resolved_not_reconstructed() -> None:
     _write_gauge_row(state, agent_instance_id=LEDGER_ID, agent_session_id=SESSION_ID)
 
     counts = _sweep(state, registry, manager)
-    _check(counts.notified == 1, "the stored join resolves")
+    _check(counts.appended == 1, "the stored join resolves")
     _check(
         len(_events_on(manager, bridges[WATCH_ID])) == 1,
         "the notice went to the session the STORED join names",
@@ -334,7 +367,7 @@ def test_the_bridge_held_case_still_resolves_on_its_own_key() -> None:
     _write_gauge_row(state, agent_instance_id=SEAT_ID, agent_session_id=None)
 
     counts = _sweep(state, registry, manager)
-    _check(counts.notified == 1, "a bridge-held seat resolves on its own key with NO join stored")
+    _check(counts.appended == 1, "a bridge-held seat resolves on its own key with NO join stored")
     _check(
         len(_events_on(manager, bridges[SEAT_ID])) == 1,
         "...and really receives the notice",
@@ -356,7 +389,7 @@ def test_an_empty_join_is_not_a_lookup() -> None:
     _write_gauge_row(state, agent_instance_id=LEDGER_ID, agent_session_id="")
 
     counts = _sweep(state, registry, manager)
-    _check(counts.notified == 0, "an empty join does not resolve")
+    _check(counts.appended == 0, "an empty join does not resolve")
     _check(counts.unroutable == 1, "...and is counted as the coverage gap it is")
 
 
@@ -388,13 +421,16 @@ def test_two_bindings_for_one_session_id_fails_loud() -> None:
 def test_the_column_is_declared_and_nullable() -> None:
     """CATCHES: the store writing a column the schema never declared.
 
-    This is asserted STRUCTURALLY rather than by round-tripping through the
-    test fake, and the reason is worth recording: `RealShapeState` rejects
-    unknown columns only for the tables in its `_schema_enforcement` allowlist,
-    and `session_context_status` is NOT one of them. So a write of an
-    undeclared column round-trips green through the fake and fails only against
-    live Postgres. Reading the declared schema directly is the check that
-    actually binds.
+    `session_context_status` is now IN `RealShapeState._schema_enforcement`
+    (GAU-03, 2026-08-19), so the fake rejects an undeclared column on this
+    table exactly as live postgres does, and the store write below is itself
+    the round-trip check -- it would fail loud, here, on a store that named a
+    column the schema does not declare. The landing that added the join column
+    could not rely on that: the table was outside the allowlist, an undeclared
+    write round-tripped GREEN through the fake, and the check had to read the
+    declared schema structurally instead. That workaround is retired; the
+    structural assertions that remain are the ones about the DECLARATION
+    (presence and nullability), which no write can make for us.
 
     NULLABLE is load-bearing twice: it is the NOT-REPORTED tri-state, and it is
     what makes the migration safe -- the state layer reconciles this as ALTER
@@ -413,16 +449,56 @@ def test_the_column_is_declared_and_nullable() -> None:
     _write_gauge_row(state, agent_instance_id=LEDGER_ID, agent_session_id=SESSION_ID)
     rows = cast("Any", state)._rows  # noqa: SLF001
     written = next(iter(rows.values()))[0]
-    undeclared = sorted(
-        key for key in written
-        if key not in columns and key not in {
-            "id", "external_id", "namespace", "created_at", "updated_at",
-            "created_by", "updated_by", "is_deleted", "deleted_at", "metadata",
-        }
+    _check(
+        written.get("agent_session_id") == SESSION_ID,
+        "the store's write is accepted by the now-enforcing fake and persists "
+        "the join column",
+    )
+
+
+def test_the_fake_enforces_this_tables_declared_schema() -> None:
+    """THE NEGATIVE CONTROL for the check above, and the reason GAU-03 was a
+    defect rather than a preference.
+
+    Without this, `test_the_column_is_declared_and_nullable`'s round trip is
+    indistinguishable from the pre-GAU-03 world: a fake that enforces NOTHING
+    for this table accepts every write, so the write passing proves only that
+    the store ran. This asserts the discriminator directly -- an undeclared
+    column MUST come back as a provider-ERROR envelope (`action_status` other
+    than 'completed'), which is how postgres rejects 'column does not exist'.
+    Delete the table from `_schema_enforcement` and this test is the one that
+    goes red.
+
+    The write goes through `state.upsert_state` rather than the store, on
+    purpose: the store cannot name an undeclared column (that is the property
+    under test upstream), so the drift has to be injected at the state call
+    the store makes.
+    """
+    state = _state()
+    result = cast("Any", state).upsert_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {
+            "table": TABLE_SESSION_CONTEXT_STATUS,
+            "record": {
+                "agent_instance_id": LEDGER_ID,
+                "claude_session_id": "c-session",
+                "model": "claude-opus-5",
+                "current_tokens": 1,
+                "ceiling": 1_000_000,
+                "measured_at": _fresh_stamp(),
+                "not_a_declared_column": "drift",
+            },
+            "conflict_columns": ["agent_instance_id"],
+        },
     )
     _check(
-        not undeclared,
-        f"every column the store writes is declared in the schema (undeclared: {undeclared})",
+        result.get("action_status") != "completed",
+        "an UNDECLARED column on session_context_status is rejected by the fake "
+        "(postgres would reject it live)",
+    )
+    _check(
+        "not_a_declared_column" in str(result.get("error", {})),
+        "...and the rejection names the offending column",
     )
 
 
@@ -801,6 +877,7 @@ def _run() -> int:
         test_an_empty_join_is_not_a_lookup,
         test_two_bindings_for_one_session_id_fails_loud,
         test_the_column_is_declared_and_nullable,
+        test_the_fake_enforces_this_tables_declared_schema,
         test_the_verb_round_trips_the_join_and_preserves_null,
         test_the_hook_actually_sends_the_join,
         test_both_hook_copies_report_the_join,

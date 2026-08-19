@@ -45,9 +45,9 @@ Verb semantics: all verbs on this extension are **sync** —
 backgrounding is the caller's concern via
 ``scheduling_service::execute_in_seconds``.
 
-See: ``workbench/2026-06-01_local_blue_green_L3_implementation_plan.md``
-§3.3 (Slice E spec) and ``workbench/2026-05-30_local_blue_green_availability_design.md``
-§4 for the design framing.
+See the L3-implementation-plan design record §3.3 (Slice E spec) and the
+blue-green-availability design record §4 (both dev-checkout workbench —
+not part of the shipped tree) for the design framing.
 """
 
 from __future__ import annotations

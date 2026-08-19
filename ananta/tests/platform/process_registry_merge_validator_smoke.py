@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Smoke test for the extended `_merge_process_json` contract.
 
-Covers Step 1b/2.A.1 of the plugin-god-class remediation
-(`workbench/2026-05-25_plugin_god_class_remediation.md` §8.2.1):
+Covers Step 1b/2.A.1 of the plugin-god-class remediation design record
+§8.2.1 (dev-checkout workbench — not part of the shipped tree):
 
 1. `_merge_process_json` lifts the 5 prose fields (`parameters`,
    `return_value_schema`, `complete_examples`, `error_cases`,
@@ -17,7 +17,8 @@ Covers Step 1b/2.A.1 of the plugin-god-class remediation
    (`_validate_processor_customizations_post_merge`) is DELETED —
    customizations are optional on EDGE processes. Case 3 pins the deletion
    so a reintroduction has to consciously revisit the relaxed contract (see
-   `workbench/2026-07-15_frontier_first_result_processing_consolidation.md`).
+   the frontier-first result-processing consolidation design record,
+   dev-checkout workbench — not part of the shipped tree).
 
 Project policy: no pytest. Exits 0 on success, 1 on first failure.
 """

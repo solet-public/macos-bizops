@@ -1,7 +1,7 @@
 """Entry-point discovery + class validation for plugins.
 
 Extracted from `PluginManager` during the Step 9.C decomposition
-(`workbench/2026-05-25_plugin_god_class_remediation.md` §9.C).
+(design record, Step 9.C, dev-checkout workbench — not part of the shipped tree).
 
 Responsibility: walk the `ananta.plugins` entry-point group, filter by
 the solet's profile manifest (`allowed_plugins`), order by priority

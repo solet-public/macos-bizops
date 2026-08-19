@@ -1,8 +1,8 @@
 """Slice 4.5 smoke: macos stop_self drain sentinel + detached watchdog.
 
-Validates the contract from
-``workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md``
-§6 Slice 4.5 (operator-scoped stop_self verb on
+Validates the contract from the bridge-port-routing-and-session-
+lifecycle design record (dev-checkout workbench — not part of the
+shipped tree) §6 Slice 4.5 (operator-scoped stop_self verb on
 SelfDeploymentServiceInterface, paired with the cloud sibling):
 
 * **Live path:** writes the cross-color drain sentinel at

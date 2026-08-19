@@ -50,14 +50,14 @@ Verb semantics: per D6' (operator-confirmed 2026-06-02), all verbs on
 this extension are **sync** — backgrounding is the caller's concern.
 Signatures preserve the pre-rename behaviour of the previous
 ``SelfDeploymentServiceInterface`` (4-verb cloud surface) unchanged
-per ``workbench/2026-06-02_aws_self_deployment_plugin_design.md`` §10.2
+per the AWS-self-deployment-plugin design record §10.2
 ("no behavioral change to deploy_self / complete_deploy / deploy_status
 / deploy_rollback").
 
-See: ``workbench/2026-06-02_aws_self_deployment_plugin_design.md`` §3.3
-(extension-interface pattern) and
-``workbench/2026-05-30_self_deployment_plugin_design.md`` for the
-blue-green mechanics this extension carries.
+See the same design record §3.3 (extension-interface pattern) and the
+self-deployment-plugin design record for the blue-green mechanics this
+extension carries (both dev-checkout workbench records — not part of
+the shipped tree).
 """
 
 from __future__ import annotations

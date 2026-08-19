@@ -160,20 +160,56 @@ CAPACITY_BAND_APPROACHING_FRACTION: float = 0.75
 CAPACITY_BAND_CRITICAL_FRACTION: float = 0.90
 
 # H -- the post-rotation prefix a `/clear` re-writes, and the quantity the
-# cold-cache rule compares against. MEASURED 2026-08-16
-# (workbench/2026-08-16_h_measurement_lane_al.md), replacing a 74K ESTIMATE
-# that measurement put roughly 50% low.
+# cold-cache rule compares against. RE-MEASURED 2026-08-19
+# (workbench/2026-08-19_gau05_policy_h_remeasurement_lane_gau_notice.md,
+# GAU-05), superseding the 2026-08-16 measurement of 110,702
+# (workbench/2026-08-16_h_measurement_lane_al.md), which had itself replaced a
+# 74K ESTIMATE that measurement put roughly 50% low.
 #
 # H is boot payload PLUS incremental rehydration: the boot payload is re-paid
 # on every clear, so it belongs inside H rather than beside it.
 #
-# THIS CONSTANT HAS A SHELF LIFE. It drifts as the boot payload changes, so
-# re-measuring it belongs in the seed-update runbook rather than in anyone's
-# memory. Measured 2026-08-16; re-measure when CLAUDE.md, MEMORY.md or the
-# hook set changes materially.
-POLICY_H_BOOT_TOKENS: int = 42_873
-POLICY_H_REHYDRATION_TOKENS: int = 67_829
-POLICY_H_TOKENS: int = POLICY_H_BOOT_TOKENS + POLICY_H_REHYDRATION_TOKENS  # 110,702
+# SPECIMEN, so the number is checkable rather than quoted: seat session
+# `c36fb2e4`, boot 2026-08-19T00:45:17Z, claude-fable-5, v19 pickup prompt,
+# 146 assistant calls. Last call of the pickup turn, transcript line 639 at
+# 01:02:20.820Z: input 2 + cache_creation 396 + cache_read 145,741 = 146,139.
+# Median of the three seat-pickup generations measured that night
+# (v18 136,368 / v19 146,139 / v17 240,397); the median rather than the max
+# because OVER-stating H suppresses rotation signals that are arithmetically
+# correct, which is the expensive direction this whole surface exists to
+# prevent (see the tier-scaling argument above, which fails the same way).
+#
+# THE INSTRUMENT WAS CONTROLLED, not just re-run. The same scanner re-applied
+# to the 2026-08-16 transcript reproduces that measurement EXACTLY -- 42,873
+# and 110,702, same model, same line numbers. So the +32% is a change in the
+# measured world, not a change in how it is counted. A future re-measurement
+# that cannot reproduce those two numbers has a different instrument and its
+# result is not comparable to this one.
+#
+# ★ THIS CONSTANT HAS A SHELF LIFE, AND THE 2026-08-19 MEASUREMENT CORRECTED
+# WHAT SHORTENS IT. The trigger used to read "when CLAUDE.md, MEMORY.md or the
+# hook set changes materially" -- and measurement says those three moved H by
+# 1.4% in three days, while the SEAT PICKUP PROMPT moved it by 31%. The boot
+# component (`POLICY_H_BOOT_TOKENS`) is what the hook set and the instruction
+# files determine; the rehydration component is what the pickup turn's own
+# workload determines, it is the dominant term, and it changes every seat
+# generation. So: re-measure when CLAUDE.md, MEMORY.md, the hook set OR THE
+# SEAT PICKUP PROMPT changes materially -- and record the two components
+# separately, because a single-number re-measurement cannot tell which one
+# moved and will mis-attribute the drift, as the GAU-05 backlog entry did.
+#
+# ★ ONE H, AND IT IS NOT UNIFORM ACROSS TIERS -- stated because it is measured,
+# not fixed here. `POLICY_H_BOOT_TOKENS` varies by MODEL: on byte-identical
+# input (same prompt, same hooks, same instruction files, four lanes inside 45
+# seconds) fable-5 measured 43,474, opus-5 44,723/44,720 and sonnet-5
+# 53,941/53,947 -- single-digit spread within a tier, 9,218 tokens between
+# them, which is the vendor's own system prompt and tool schemas rather than
+# anything this repo controls. This constant is the fable-5 seat class. Making
+# H per-tier moves a ratified policy input, so it is an operator decision
+# (GAU-14 axis 2, candidate B3) and is deliberately NOT taken here.
+POLICY_H_BOOT_TOKENS: int = 43_474
+POLICY_H_REHYDRATION_TOKENS: int = 102_665
+POLICY_H_TOKENS: int = POLICY_H_BOOT_TOKENS + POLICY_H_REHYDRATION_TOKENS  # 146,139
 
 # The two vendor cache multipliers the break-even is built from. Both are
 # multipliers on THAT MODEL'S OWN base input price, uniform across models --

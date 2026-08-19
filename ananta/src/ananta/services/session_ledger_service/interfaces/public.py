@@ -1,7 +1,8 @@
 """Session ledger service public API — @service_interface_process declarations.
 
-Spec §5.4. Per `workbench/2026-06-11_session_ledger_api_god_class_split_v1.md`
-the former 4-ABC layout split into EIGHT coherent ABCs along domain axes
+Spec §5.4. Per the session-ledger-API god-class-split design record
+(dev-checkout workbench — not part of the shipped tree) the former 4-ABC
+layout split into EIGHT coherent ABCs along domain axes
 (read / ingest / polling-driver / canonical-pointer-repair /
 inverted-bounds-repair / summarize / deployment / search). The
 ``SessionLedgerAnnotationAPI`` (list_quarantined_events,
@@ -72,9 +73,9 @@ class SessionLedgerReadAPI(ABC):
     """Session-ledger READ-PATH operations exposed to model and operator.
 
     Implemented by ``ananta.services.session_ledger_service.service.SessionLedgerService``.
-    Split out from former ``SessionLedgerServiceAPI`` per
-    ``workbench/2026-06-11_session_ledger_api_god_class_split_v1.md`` along
-    the read / ingest / triage domain axes. Process keys unchanged
+    Split out from former ``SessionLedgerServiceAPI`` per the same
+    god-class-split design record (dev-checkout workbench — not part of
+    the shipped tree) along the read / ingest / triage domain axes. Process keys unchanged
     (``service_interface::session_ledger_service::<verb>``); the
     ServiceInterfaceScanner walks every class in this module and discovers
     @service_interface_process methods by attribute marker.
@@ -869,9 +870,9 @@ class SessionLedgerIngestAPI(ABC):
         Schema-debt-external-id lane, 2b-S1 quiesce-protocol prerequisite
         (2026-08-07) — the duplicate-source-repair protocol's own "disable
         BOTH pair members" step had no executable verb until this one; full
-        rationale in
-        ``workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md``
-        ("Canary attempt (2026-08-07)").
+        rationale in the schema-debt external-id findings record
+        (dev-checkout workbench — not part of the shipped tree),
+        "Canary attempt (2026-08-07)".
 
         Homed here (not alongside :meth:`retire_duplicate_source` on
         ``SessionLedgerInvertedBoundsRepairAPI``, which was the first
@@ -919,9 +920,10 @@ class SessionLedgerPollingDriverAPI(ABC):
         is_discoverable=False,  # operator-bridge + cron-fired only; not model-discoverable
         provider=_PROVIDER,
         # EDGE_SINK per the canonical scheduler cron-action contract
-        # enforced at ``create_cron_schedule`` registration (see
-        # ``workbench/2026-06-17_scheduler_cron_action_contract_design.md``
-        # for the validator design + the canonical KB article at
+        # enforced at ``create_cron_schedule`` registration (see the
+        # scheduler cron-action-contract design record, dev-checkout
+        # workbench — not part of the shipped tree, for the validator
+        # design) + the canonical KB article at
         # ``knowledge_bases/ananta_platform/21_scheduling_service/
         # 01_template_flow_record_lifecycle.md``): terminal node — flow
         # ends here.
@@ -1947,8 +1949,8 @@ class SessionLedgerInvertedBoundsRepairAPI(ABC):
         (8 duplicated ``source_kind``s at diagnosis time) — full rationale,
         winner-selection rules, and the required per-pair quiesce sequence
         (disable both rows, wait out any active polling lease, repair,
-        re-enable the winner) are in
-        ``workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md``.
+        re-enable the winner) are in the schema-debt external-id findings
+        record (dev-checkout workbench — not part of the shipped tree).
 
         Use ``confirm=True`` to actually write. Default ``confirm=False``
         returns a structured dry-run.

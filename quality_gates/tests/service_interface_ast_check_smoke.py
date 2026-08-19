@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Acceptance smoke for the service-interface AST gate.
 
-Per `workbench/2026-06-12_service_interface_ast_gate_design_v1.md` §9
-acceptance criterion #4: the gate must empirically catch synthetic
+Per the service-interface-AST-gate design record v1 §9 (dev-checkout
+workbench — not part of the shipped tree) acceptance criterion #4: the
+gate must empirically catch synthetic
 re-creations of BOTH origin incidents.
 
 Coverage:

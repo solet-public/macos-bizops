@@ -1,7 +1,7 @@
 """Action discovery for plugins.
 
 Extracted from `PluginBase` during the Step 9.B decomposition
-(`workbench/2026-05-25_plugin_god_class_remediation.md` §9.2).
+(design record, Step 9.2, dev-checkout workbench — not part of the shipped tree).
 
 Walks a plugin instance's class surface, identifies `@platform_process`-
 decorated action methods, validates each method's signature against the

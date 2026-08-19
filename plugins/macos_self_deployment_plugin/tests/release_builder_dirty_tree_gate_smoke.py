@@ -1,7 +1,8 @@
 """ReleaseBuilder dirty-tree gate — the six ruled legs plus the unattestable case.
 
-Architect's ruling (``workbench/2026-08-01_architect_releasebuilder_dirty_tree_ruling.md``):
-the deploy artifact is built from the WORKING TREE but IDENTIFIED by HEAD, so a live
+Architect's ruling (dev-checkout workbench record — not part of the
+shipped tree): the deploy artifact is built from the WORKING TREE but
+IDENTIFIED by HEAD, so a live
 edit ships unreviewed under a clean SHA. The gate refuses by default, but ONLY on dirt
 the artifact actually ships, and ``VERSION`` attests the tree state POSITIVELY in both
 directions so absence of the field can never be read as "clean".

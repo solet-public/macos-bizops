@@ -29,7 +29,7 @@ next driver to land).
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -57,6 +57,40 @@ class DriverChannel(Protocol):
     ``None`` — ``unsupported_on_host``, never a silent degradation)."""
 
     def send(self, text: str) -> None: ...
+
+
+@runtime_checkable
+class ClearVerifyingDriverChannel(Protocol):
+    """A ``DriverChannel`` that can positively READ BACK whether a
+    ``/clear`` actually took effect (GAU-09, 2026-08-18).
+
+    THE DEFECT THIS EXISTS TO CLOSE. ``clear_session`` used to report the
+    SEND in a return value shaped like a verdict — measured returning
+    ``success TRUE`` for a ``/clear`` that provably never happened, because
+    ``send()`` alone can only ever mean "bytes left". ``ARMED != FIRED``. A
+    channel implementing this protocol converts that guess into a
+    measurement; a channel that does NOT implement it makes
+    ``clear_session`` say so explicitly rather than quietly imply success.
+
+    DELIBERATELY A SEPARATE PROTOCOL, NOT A WIDENED ``DriverChannel``. The
+    capability is genuinely partial and always will be: a tmux pane can be
+    read with ``capture-pane``, a headless stream-json stdin pipe has no
+    pane to read at all, and the ``operator`` driver has no channel
+    whatsoever. Folding an optional method into ``DriverChannel`` would
+    force every implementation to grow a stub, and the only honest stub is
+    one that returns "I do not know" — which is exactly the ambiguity the
+    caller must be able to SEE. Keeping it a distinct, ``runtime_checkable``
+    protocol makes the capability probe a real discrimination
+    (``isinstance``) instead of a flag someone can set wrongly.
+
+    ``verify_cleared`` returns ``True`` only on a POSITIVE observation of a
+    cleared state, and ``False`` on a deadline passing without one. It must
+    FAIL CLOSED, and it must NEVER re-send anything: each ``/clear`` fire
+    deposits real text into a live input buffer, so a verification step that
+    retried the send would be worse than the defect it closes.
+    """
+
+    def verify_cleared(self) -> bool: ...
 
 
 class DriverChannelSendError(Exception):
@@ -277,6 +311,7 @@ __all__ = [
     "SUPPORTED_AGENT_RUNTIMES",
     "OPERATOR_HOST",
     "AgentRuntimeNotSupportedError",
+    "ClearVerifyingDriverChannel",
     "DriverChannel",
     "DriverChannelSendError",
     "HostCannotSpawnError",

@@ -175,7 +175,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Allowlisted findings are still printed so the gate stays "
             "honest; they just do not contribute to the exit-2 verdict. "
             "Removing an entry is the unit of remediation progress. See "
-            "`workbench/2026-05-25_plugin_god_class_remediation.md` "
+            "the plugin-god-class-remediation design record "
             "§9.D–§9.Z + Task #74."
         ),
     )

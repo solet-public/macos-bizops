@@ -34,8 +34,10 @@ Per the dispatch isolation rules:
 
 Reference:
 - `ananta/src/ananta/core/services/call_context.py` (foundation).
-- `workbench/2026-06-07_state_service_consolidation_master_plan.md` §3.3.
-- `workbench/2026-06-07_tier_1_dispatch_plan_for_codex_signoff.md` v2 §1.B (binding mechanism).
+- the state-service consolidation master plan §3.3 (dev-checkout
+  workbench — not part of the shipped tree).
+- the tier-1 dispatch plan for Codex signoff v2 §1.B, binding mechanism
+  (dev-checkout workbench — not part of the shipped tree).
 """
 
 from __future__ import annotations

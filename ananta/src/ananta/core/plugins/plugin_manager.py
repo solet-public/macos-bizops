@@ -1,7 +1,7 @@
 """Plugin registry orchestrator.
 
 Decomposed during Step 9.C
-(`workbench/2026-05-25_plugin_god_class_remediation.md` §9.C)
+(design record, Step 9.C, dev-checkout workbench — not part of the shipped tree)
 into three focused collaborators:
 
   - `PluginDiscovery` — finds plugin classes from entry points.

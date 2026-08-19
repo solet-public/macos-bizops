@@ -8,10 +8,10 @@ ActionExecutor not initialized`. The failure was a 22-hour silent break (nothing
 logs at INFO on successful fires; the ERROR was buried in the profile log; no
 session observed the symptom because cron-driven session wake-ups were exactly
 what was broken). Root cause was state corruption from a prior blue-green cycle;
-the 11:51 cutover self-healed it. See
-`workbench/2026-06-13_scheduler_callback_actionfactory_not_injected_p0.md` for the
-empirical investigation and `workbench/2026-06-13_w5k_reality_flip.md` semantics
-(folded into the same doc).
+the 11:51 cutover self-healed it. See the P0 investigation record for the
+empirical investigation and the W5.K reality-flip semantics (folded into
+the same doc; both dev-checkout workbench records — not part of the
+shipped tree).
 
 W5.K (A): a `StartupError` is raised at the end of `_init_actions` (startup
 sequence step 19) if `default_scheduling_plugin._action_executor` is still None

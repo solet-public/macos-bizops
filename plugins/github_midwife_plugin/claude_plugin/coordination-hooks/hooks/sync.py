@@ -129,8 +129,9 @@ def cmd_drain() -> int:
             # Nothing to submit, but skipped-deleted entries still occupy the
             # journal — advance past them so a re-deleted-then-gone file
             # doesn't get re-read forever (R6: a local delete is a forget of
-            # the FILE, not a reason to keep polling it).
-            _journal.advance_watermark()
+            # the FILE, not a reason to keep polling it). Bound to the
+            # listing _build_upserts() just recorded (MEM-06), not a fresh EOF.
+            _journal.advance_to_listed_offset()
         print(json.dumps({"status": "drained", "upserts_submitted": 0, "skipped_deleted": skipped_deleted}))
         return 0
     submitted = 0
@@ -153,7 +154,10 @@ def cmd_drain() -> int:
             file=sys.stderr,
         )
         return 1
-    _journal.advance_watermark()
+    # Bound to the listing _build_upserts() recorded above, not a fresh EOF
+    # read (MEM-06) — a capture landing during the upsert loop above stays
+    # pending and is retried on the next drain.
+    _journal.advance_to_listed_offset()
     print(json.dumps({"status": "drained", "upserts_submitted": submitted, "skipped_deleted": skipped_deleted}))
     return 0
 

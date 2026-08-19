@@ -1,7 +1,7 @@
 """Plugin lookup + action dispatch + service-provider access enforcement.
 
 Extracted from `PluginManager` during the Step 9.C decomposition
-(`workbench/2026-05-25_plugin_god_class_remediation.md` §9.C).
+(design record, Step 9.C, dev-checkout workbench — not part of the shipped tree).
 
 Responsibility: serve `get_plugin(name)` lookups and `execute_action(...)`
 calls, enforcing that service-provider plugins are accessed only through
