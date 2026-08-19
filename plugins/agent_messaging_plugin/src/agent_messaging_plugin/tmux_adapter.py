@@ -217,6 +217,7 @@ def _emit_role_tag_path() -> Path:
 def _env_pairs(
     *, agent_instance_id: str, agent_session_id: str, label: str,
     solet_name: str, solet_bin: str, allowed_tools: object, transport: str,
+    provider_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """``-e KEY=VAL`` args for ``tmux new-session`` — split out of
     :meth:`TmuxHostDriver.spawn` to keep it under the radon cc threshold.
@@ -224,7 +225,17 @@ def _env_pairs(
     ``transport`` is caller-resolved (fleet-watch-transport-migration phase
     2 slice 1, 2026-08-06) -- never hardcoded here, the same declared,
     never-probed FLEET_TRANSPORT contract every consumer reads
-    independently."""
+    independently.
+
+    ``provider_env`` (2026-08-10) is the vault-resolved per-spawn inference
+    provider overlay — parity with ``headless_adapter._spawn_env``. Unlike
+    headless (which strips-then-sets over an inherited ``dict(os.environ)``),
+    tmux only ADDS ``-e`` pairs onto the tmux server's own environment, so
+    every overlay entry is emitted as an explicit pair: a real value sets
+    the variable, and an empty value (the ``anthropic`` strip signal) forces
+    it empty — which Claude Code reads as "Bedrock off," the tmux-side
+    equivalent of the headless unset. An empty/absent overlay adds nothing
+    (inherit — today's behavior)."""
     # Registration-loss fix (2026-08-14): AGENT_WAKE_CLI must be the wake
     # CLI's own binary, never `solet_name` (the solet INSTANCE name, e.g.
     # "mysolet") -- that conflation was the 2026-08-08 deaf-wake defect. The
@@ -1073,7 +1084,8 @@ class TmuxHostDriver:
         env_pairs = _env_pairs(
             agent_instance_id=agent_instance_id, agent_session_id=agent_session_id,
             label=label, solet_name=self._solet_name, solet_bin=self._solet_bin,
-            allowed_tools=spec.get("allowed_tools") or (), transport=transport)
+            allowed_tools=spec.get("allowed_tools") or (), transport=transport,
+            provider_env=_coerce_provider_env(spec))
         try:
             claude_cmd = self._spawn_command(spec, transport=transport, label=label)
         except WorkerHookResolutionError as exc:

@@ -448,11 +448,11 @@ class _ProviderResolutionError(Exception):
 def _bedrock_vault_name(credential: str) -> str:
     """Scoped vault entry name for a Bedrock provider credential — same
     convention as :func:`_bearer_hmac_key_vault_name`."""
-    name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+    name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise _ProviderResolutionError(
             "provider_env_unresolved",
-            "HOMUNCULUS_NAME is not set — cannot resolve the scoped Bedrock "
+            "SOLET_NAME is not set — cannot resolve the scoped Bedrock "
             "provider vault entry name for a provider='bedrock' spawn.",
         )
     return f"{name}.agent_messaging_plugin.{credential}"
@@ -976,7 +976,7 @@ class AgentMessagingPlugin(
         and NOT in ``get_required_vault_keys``).
         """
         keys = [_BEARER_HMAC_KEY_VAULT_NAME]
-        name = os.environ.get("HOMUNCULUS_NAME", "").strip()
+        name = os.environ.get("SOLET_NAME", "").strip()
         if name:
             keys.append(f"{name}.agent_messaging_plugin.{_VAULT_CRED_BEDROCK_TOKEN}")
             keys.append(f"{name}.agent_messaging_plugin.{_VAULT_CRED_BEDROCK_BASE_URL}")

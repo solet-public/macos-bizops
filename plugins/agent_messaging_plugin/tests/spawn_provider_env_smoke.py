@@ -199,11 +199,11 @@ def test_resolve_provider_env_bedrock_ok() -> None:
             },
         ),
     )
-    prior = _restore_homunculus_name("dax")
+    prior = _restore_solet_name("dax")
     try:
         env = plugin._resolve_provider_env("bedrock")
     finally:
-        _restore_homunculus_name_value(prior)
+        _restore_solet_name_value(prior)
     _check(
         env is not None and env.get("ANTHROPIC_AUTH_TOKEN") == "tok123",
         "resolve bedrock: token",
@@ -220,7 +220,7 @@ def test_resolve_provider_env_bedrock_ok() -> None:
 
 def test_resolve_provider_env_bedrock_missing_creds() -> None:
     plugin = _bare_plugin(_FakeVault({}))
-    prior = _restore_homunculus_name("dax")
+    prior = _restore_solet_name("dax")
     try:
         plugin._resolve_provider_env("bedrock")
         _check(False, "resolve bedrock: missing creds fails loud")
@@ -231,12 +231,12 @@ def test_resolve_provider_env_bedrock_missing_creds() -> None:
             "silent wrong-provider spawn)",
         )
     finally:
-        _restore_homunculus_name_value(prior)
+        _restore_solet_name_value(prior)
 
 
 def test_resolve_provider_env_bedrock_no_vault() -> None:
     plugin = _bare_plugin(None)
-    prior = _restore_homunculus_name("dax")
+    prior = _restore_solet_name("dax")
     try:
         plugin._resolve_provider_env("bedrock")
         _check(False, "resolve bedrock: no vault fails loud")
@@ -246,24 +246,24 @@ def test_resolve_provider_env_bedrock_no_vault() -> None:
             "resolve bedrock: no bound vault -> provider_env_unresolved",
         )
     finally:
-        _restore_homunculus_name_value(prior)
+        _restore_solet_name_value(prior)
 
 
-def _restore_homunculus_name(value: str) -> str | None:
+def _restore_solet_name(value: str) -> str | None:
     import os
 
-    prior = os.environ.get("HOMUNCULUS_NAME")
-    os.environ["HOMUNCULUS_NAME"] = value
+    prior = os.environ.get("SOLET_NAME")
+    os.environ["SOLET_NAME"] = value
     return prior
 
 
-def _restore_homunculus_name_value(prior: str | None) -> None:
+def _restore_solet_name_value(prior: str | None) -> None:
     import os
 
     if prior is None:
-        os.environ.pop("HOMUNCULUS_NAME", None)
+        os.environ.pop("SOLET_NAME", None)
     else:
-        os.environ["HOMUNCULUS_NAME"] = prior
+        os.environ["SOLET_NAME"] = prior
 
 
 def test_headless_spawn_applies_bedrock_overlay() -> None:
@@ -347,11 +347,11 @@ def test_tmux_omits_dev_channels_flag_on_bedrock() -> None:
     )
 
     driver = TmuxHostDriver(
-        tmux_bin="tmux", homunculus_name="dax", permission_mode="bypassPermissions",
+        tmux_bin="tmux", solet_name="dax", permission_mode="bypassPermissions",
     )
     cmd_bedrock = driver._spawn_command(
         {"provider": "bedrock", "provider_env": {"CLAUDE_CODE_USE_BEDROCK": "1"}},
-        transport="watch",
+        transport="watch", label="smoke-bedrock",
     )
     _check(
         _DEV_CHANNELS_FLAG not in cmd_bedrock,
@@ -362,7 +362,7 @@ def test_tmux_omits_dev_channels_flag_on_bedrock() -> None:
         _needs_dev_channels_confirmation(cmd_bedrock) is False,
         "tmux + bedrock: confirm expect loop is skipped (no flag = no prompt to wait for)",
     )
-    cmd_default = driver._spawn_command({}, transport="watch")
+    cmd_default = driver._spawn_command({}, transport="watch", label="smoke-default")
     _check(
         _DEV_CHANNELS_FLAG in cmd_default,
         "tmux + no provider: dev-channels flag still present (Anthropic path unchanged)",
