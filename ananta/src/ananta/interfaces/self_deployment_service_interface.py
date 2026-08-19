@@ -19,10 +19,9 @@ plugin is bound to ``self_deployment_service`` in the live profile:
 
 The interface is one verb intentionally: cloud-specific multi-verb
 mechanics live on :class:`CloudSelfDeploymentServiceInterface`. The
-matrix plan's lifecycle row (Architect's 2026-06-02 design,
-``workbench/2026-06-02_lifecycle_plugins_matrix_design_plan.md`` §6
-Step 3) unifies the macOS and cloud restart surfaces under this single
-name.
+matrix plan's lifecycle row (Architect's 2026-06-02 design record, §6
+Step 3, dev-checkout workbench — not part of the shipped tree) unifies
+the macOS and cloud restart surfaces under this single name.
 
 Per the D1 architectural mandate
 (``ananta_platform/08_service_architecture/SERVICE_ARCHITECTURE.md``),
@@ -78,9 +77,9 @@ class SelfDeploymentServiceInterface(ABC):
           MUST NOT re-validate the manifest; the caller's pre-flight is
           authoritative.
 
-        - ``expected_etag`` is the CAS lock from
-          ``workbench/2026-06-02_lifecycle_interfaces_design.md`` §13.2.
-          Implementations re-read the on-disk manifest's stored ETag at
+        - ``expected_etag`` is the CAS lock from the lifecycle-interfaces
+          design record §13.2 (dev-checkout workbench — not part of the
+          shipped tree). Implementations re-read the on-disk manifest's stored ETag at
           dispatch time and refuse the restart when it differs from
           ``expected_etag``. This guards against a second
           ``apply_manifest`` racing the first between manifest-write and
@@ -120,9 +119,9 @@ class SelfDeploymentServiceInterface(ABC):
     ) -> StopSelfResult:
         """Stop this solet without tearing down its infrastructure.
 
-        Per Slice 4.5 of
-        ``workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md``.
-        Distinct from ``aws_undertaker_plugin::teardown_solet``:
+        Per Slice 4.5 of the bridge-port-routing-and-session-lifecycle
+        design record (dev-checkout workbench — not part of the shipped
+        tree). Distinct from ``aws_undertaker_plugin::teardown_solet``:
         teardown DESTROYS infra (RDS, ALB, ACM, KMS, S3, ECS service
         definitions); stop_self leaves ALL of that in place and only
         sets the live serving capacity to zero. Operators bring the

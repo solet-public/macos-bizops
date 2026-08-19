@@ -2326,6 +2326,19 @@ plugins/actr_memory_plugin/tests/actr_memory_read_discipline_smoke.py
 # byte-identical round-trip + MEMORY.md + hash stamping), fail-loud on invalid
 # frontmatter, the drain watermark, and the local-delete-vs-forget skip.
 
+# MEM-05 (2026-08-18) — the reconciliation check: pending:0 cannot discriminate
+# "already drained" from "never captured" (the bash-written-memory trap), so
+# compare canonical slot slugs (from an export) against local fact files, both
+# directions, red-first against fixture files.
+
+# MEM-04 (2026-08-19) — the modular memory-lifecycle head policy: control_manual
+# is a byte-for-byte pass-through (zero behavior change from pre-MEM-04
+# rendering); age_based/link_weighted admit under budget with pin-classed
+# facts (🚨/⭐ marker, or type: feedback) forced in regardless, and the pin
+# marker round-trips through a second consecutive algorithmic render; an
+# unknown policy fails loud and never corrupts the active config; --check
+# never writes a decision-journal record, a real render writes exactly one.
+
 # Frontier-first B5 (2026-07-17) — the SINGLE ActionFactory result/error-processor
 # merge that assembles a local-inference (process_results / process_error) prompt
 # from the inference base template ⊕ a process's customizations survived the
@@ -3574,3 +3587,98 @@ plugins/agent_messaging_plugin/tests/context_status_verbs_smoke.py
 # symlinks and executable stubs. No tmux server, bridge, database, network,
 # deploy, or model turn.
 plugins/agent_messaging_plugin/tests/release_pointer_stability_smoke.py
+
+# GAU-09 (2026-08-18, lane-gau-verbs) — clear_session must report the EFFECT of
+# a /clear, not merely the SEND. Measured returning success TRUE for a /clear
+# that never happened; ARMED != FIRED one layer up. Pins the fail-loud
+# unverified path, the honest cleared=None degradation on drivers with no
+# read-back surface, the exact-match (never substring) cleared-state signature,
+# and the HARD no-retry rule: a blind re-fire deposits a second copy of real
+# text into a live input buffer.
+#
+# PURE UNIT, offline: fake driver channels and a stub tmux run_fn. No real tmux
+# server, no live session is ever driven, no bridge, database, or model turn.
+plugins/agent_messaging_plugin/tests/clear_session_effect_verification_smoke.py
+
+# GAU-07 (2026-08-18, lane-gau-verbs) — session_context_status must resolve the
+# WATCH id peer_list publishes for a watcher-held session, whose gauge row is
+# keyed on its LEDGER id. A join error in the READER (kept separate from
+# GAU-06's surfacing loss). Pins the two stored hops, the fail-loud ambiguity
+# refusal, the empty-key short-circuit, and the decoy: a prefix-slice
+# derivation of one id from another passes every other case and fails here.
+#
+# PURE UNIT, offline: a two-table state double. No bridge, database, network,
+# or model turn.
+plugins/agent_messaging_plugin/tests/session_context_status_watch_id_join_smoke.py
+
+# GAU-15 (2026-08-19, lane-gau-store) — the gauge SERIES: the upsert-only cache
+# keeps no history of the timestamp whose arrest is the entire signature of a
+# gauge freeze, so the original 85-minute incident was unanalysable the moment
+# its subject wrote again. Pins the append on the real write path, the
+# write-time HARD retention bound (a soft delete would leave the bound cosmetic
+# — nothing here reaps), the named split-write error (the cache row commits
+# first, so a blanket raise would report a half-succeeded write as failed), and
+# the discriminator that separates a STOPPED gauge from an IDLE session using
+# two independent clocks — the collapse that reported two undriven lanes as
+# broken on 2026-08-19.
+#
+# PURE UNIT, offline: the shared real-shape state fake. No bridge, database,
+# network, or model turn.
+plugins/agent_messaging_plugin/tests/gauge_series_smoke.py
+
+# GAU-15 (a') RELEASE-CAPABILITY PROBE — what the DEPLOYED release can actually
+# do, established before anything asserts what it did. A merge is not a deploy:
+# measured 2026-08-19, the running release carried NO gauge-staleness detector
+# while master had one, and ran gauge coverage at 300s against master's 600s —
+# two different wrong answers available to anyone reasoning from master.
+#
+# Covers the discriminations that make the probe trustworthy rather than
+# merely confident: presence resolved through the syntax tree so a name in a
+# comment is not a deployed detector, a missing sweep module raising instead of
+# reporting every detector absent (a broken layout is not an undeployed
+# feature), and thresholds read but never defaulted, never evaluated, and never
+# accepted from a bool.
+#
+# PURE UNIT, offline: builds its own release trees under a temporary directory.
+# No bridge, database, network, model turn, or real release read.
+
+# GAU-21 (2026-08-19) DURABLE GAUGE-NOTICE RECORD — a gauge alarm now leaves a
+# trace, INCLUDING the alarm that reached nobody. The sweep's notices were
+# in-memory bridge events only: a restart lost them, the only reader REMOVED
+# what it read (so a verifier polling that queue could swallow the steward's
+# own notice), nothing was keyed on type, and the notify path returned early on
+# an unbound steward — so an alarm that fired into the void and one that never
+# fired were the same silence.
+#
+# Everything is driven through the REAL sweep legs rather than by calling the
+# store to make a row appear, because the wiring is where the original defect
+# lived. Covers: the record survives a delivery that never happened
+# (no_steward_binding as a recorded outcome, not an early return); the three
+# delivery outcomes stay distinct rather than collapsing to a boolean; a record
+# fault never costs another row its notice; retention is a HARD bound scoped
+# per (subject, type); reading does not consume; an omitted filter does not
+# narrow; and release attribution is read or honestly absent, never a phantom.
+#
+# PURE UNIT, offline: real-shape state fake plus a real in-memory bridge. No
+# database, network, or model turn.
+plugins/agent_messaging_plugin/tests/gauge_notice_record_smoke.py
+
+# GAU-15 item 4 (2026-08-19) GAUGE TAMPER CANARY — proof the staleness detector
+# CAN catch, by arresting a synthetic gauge on the real write path. Pinned
+# against all six binding constraints: the arrest withholds ONLY the gauge
+# write while the lifecycle clock keeps advancing (so it reproduces the real
+# freeze signature instead of an idle session, which the detector correctly
+# ignores); the detector stays blind, with no canary mark on the row it reads;
+# provenance lives in its own table that operational consumers join and the
+# detector never does; every tamper is audited with who directed it, a bounded
+# half-open window, and the alarm expected recorded BEFORE the outcome; both
+# edges are judged on independent evidence; and the verifier reads the durable
+# notice record rather than the drain-once bridge queue.
+#
+# Also pins the two refusals that protect attribution — a tamper may never
+# target a real session, and an undeployed detector ABSTAINS rather than
+# producing a false accusation about an instrument that is not running.
+#
+# PURE UNIT, offline: real-shape state fake plus a real in-memory bridge. No
+# database, network, or model turn.
+plugins/agent_messaging_plugin/tests/gauge_canary_smoke.py

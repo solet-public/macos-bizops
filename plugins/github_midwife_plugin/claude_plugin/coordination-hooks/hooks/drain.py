@@ -15,9 +15,13 @@ Modes:
               (R6: a local delete is a cache clear, not a canonical forget — the
               record stays and the next hydrate regenerates the file). To forget
               canonically, the agent calls delete_memories_by_tag(<slot>).
-  --advance   Advance the drain watermark to the journal's current end. Call this
-              only AFTER the upserts succeed. Captures that landed during the drain
-              sit past the watermark and are picked up next time.
+  --advance   Advance the drain watermark to exactly the last (no-args) listing's
+              end offset — never a fresh re-read of the journal's current end
+              (MEM-06: that re-read used to swallow a capture that landed between
+              the listing and this call). Call this only AFTER the upserts
+              succeed. Captures that land during the drain sit past the listed
+              offset and are picked up next time. Fails loud (exit 2) if no
+              listing was recorded to bind to.
 
 Stdlib-only — the agent runs it via Bash, outside the venv.
 """
@@ -37,9 +41,10 @@ UPSERT_PROCESS_KEY = "service_interface::memory_service::upsert_memory_by_tag"
 
 
 def _build_upserts() -> dict[str, object]:
+    entries, end_offset = _journal.pending_entries_snapshot()
     upserts: list[dict[str, object]] = []
     skipped_deleted = 0
-    for entry in _journal.pending_entries():
+    for entry in entries:
         path = entry.get("path")
         if not isinstance(path, str):
             continue
@@ -62,12 +67,19 @@ def _build_upserts() -> dict[str, object]:
                 },
             }
         )
+    # Bind a later --advance to exactly what THIS listing covered (MEM-06) —
+    # never to whatever the journal has grown to by the time --advance runs.
+    _journal.record_listing_offset(end_offset)
     return {"pending": len(upserts), "upserts": upserts, "skipped_deleted": skipped_deleted}
 
 
 def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "--advance":
-        _journal.advance_watermark()
+        try:
+            _journal.advance_to_listed_offset()
+        except _journal.NoPendingListingError as exc:
+            print(json.dumps({"status": "error", "message": str(exc)}), file=sys.stderr)
+            return 2
         print(json.dumps({"status": "advanced"}))
         return 0
     if len(sys.argv) != 1:

@@ -23,7 +23,8 @@ Proxy honesty: this exercises the **orchestration + artifact** half
 (symlinks, ledger, finalized trees). The import-resolution half (a real
 interpreter booting the release's own ``code/`` via the re-pointed
 ``.pth``, CWD-independently) was proven empirically in Claude-B's spike
-(``workbench/2026-06-27_blue_green_spike_measurements.md`` §3). Together
+measurements record §3 (dev-checkout workbench — not part of the
+shipped tree). Together
 they cover the deploy->fault->rollback cycle.
 
 Run:

@@ -74,6 +74,7 @@ from .schema import (
 from .session_hosts import (
     DEFAULT_AGENT_RUNTIME,
     AgentRuntimeNotSupportedError,
+    ClearVerifyingDriverChannel,
     DriverChannelSendError,
     HostCannotSpawnError,
     HostMechanismMissingError,
@@ -853,16 +854,93 @@ def drive_on_delivery(
         )
 
 
+CLEAR_VERIFICATION_CONFIRMED = "confirmed"
+CLEAR_VERIFICATION_UNSUPPORTED = "unsupported_on_driver"
+
+
+def _verify_clear_effect(channel: DriverChannel, agent_instance_id: str) -> str:
+    """Ask the channel whether the ``/clear`` ACTUALLY took effect (GAU-09).
+
+    Returns the verification token for the result envelope, or raises
+    ``clear_unverified`` when a channel that CAN see its target looked and
+    did not find a cleared state.
+
+    The three-way split is the whole point, and collapsing any two of them
+    reintroduces the defect:
+
+    * verified true  -> ``confirmed``: a real measurement.
+    * verified false -> RAISE. The send happened and the effect did not, so
+      a success-shaped return here would be precisely the GAU-09 lie
+      (measured ``success TRUE`` for a ``/clear`` that never happened).
+    * no read-back surface -> ``unsupported_on_driver``: an honest "cannot
+      know", never a quiet success. Distinct from the case above because a
+      driver that never looked and a driver that looked and saw nothing are
+      different facts with different fixes -- the same tri-state discipline
+      this plugin already enforces on the gauge's cache columns.
+
+    ★ NO RETRY, EVER. The failure path raises without re-sending anything.
+    Each ``/clear`` fire deposits real text into a live input buffer, so a
+    blind retry converts one stranded line into two and can never confirm
+    itself.
+    """
+    if not isinstance(channel, ClearVerifyingDriverChannel):
+        return CLEAR_VERIFICATION_UNSUPPORTED
+    if channel.verify_cleared():
+        return CLEAR_VERIFICATION_CONFIRMED
+    raise VerbError(
+        "clear_unverified",
+        f"the /clear for {agent_instance_id!r} was DISPATCHED but its effect could "
+        "not be confirmed — the driver read the target back and never observed a "
+        "cleared state. The text is already in that session's input buffer: do NOT "
+        "re-send it (a blind retry deposits a second copy and still cannot confirm "
+        "itself). A session that is mid-turn when the /clear arrives takes it as an "
+        "ordinary message rather than a command, which is the measured shape of this "
+        "failure; clear it externally instead.",
+    )
+
+
 def clear_session(
     state: StateManagementInterface, *, agent_instance_id: str, park: bool, directed_by: str,
 ) -> dict[str, Any]:
     """§4 ``clear_session`` (AMEND 5b) — context hygiene via the host
-    driver's driver channel (fire-and-forget: sends ``/clear``, does not
-    await the resulting turn). ``park=True`` additionally drives
-    ``live/idle/overdue -> parked`` (§3.2 matrix, L3 rule 2, steward
-    direction) — the ONLY writer of that edge. Errors: ``session_not_found``,
-    ``lifecycle_state_conflict`` (terminal rows never receive driver-channel
-    commands), ``unsupported_on_host``, ``illegal_lifecycle_transition``,
+    driver's driver channel, WITH EFFECT VERIFICATION where the driver can
+    provide it (GAU-09, 2026-08-18).
+
+    ★ THIS VERB USED TO REPORT THE SEND IN A RETURN VALUE SHAPED LIKE A
+    VERDICT. Measured 2026-08-18: it returned ``success TRUE
+    {'lifecycle_state': 'live', 'parked': False}`` for a ``/clear`` that
+    provably never happened, because ``send()`` alone can only ever mean
+    "bytes left" -- ``ARMED != FIRED``. The result now separates what is
+    KNOWN from what is MEASURED:
+
+    * ``dispatched`` -- the send succeeded. Always ``True`` on a return
+      (a failed send raises ``driver_delivery_failed``).
+    * ``cleared`` -- ``True`` only on a POSITIVE observation of a cleared
+      state; ``None`` when this driver has no read-back surface. Never
+      ``False`` on a return: a driver that looked and saw nothing RAISES
+      ``clear_unverified`` instead, so ``success`` can never accompany an
+      unconfirmed clear.
+    * ``clear_verification`` -- ``confirmed`` or ``unsupported_on_driver``,
+      naming WHICH of those two states produced ``cleared``.
+
+    WHICH DRIVERS GET WHICH, measured against this build: the ``tmux``
+    channel reads its pane with ``capture-pane`` and is VERIFIED; the
+    ``headless`` stream-json channel writes to a stdin pipe with no pane to
+    read and is ``unsupported_on_driver``; the ``operator`` driver has no
+    channel at all and still fails earlier with ``unsupported_on_host``.
+
+    ``park=True`` additionally drives ``live/idle/overdue -> parked`` (§3.2
+    matrix, L3 rule 2, steward direction) — the ONLY writer of that edge —
+    and is NOT reached when verification failed, so an unproven clear can
+    never leave a park behind in the ledger to outlive the return value that
+    carried it. A driver that simply cannot verify still parks: refusing
+    that would strand every headless session unparkable over a measurement
+    that was never available.
+
+    Errors: ``session_not_found``, ``lifecycle_state_conflict`` (terminal
+    rows never receive driver-channel commands), ``unsupported_on_host``,
+    ``driver_delivery_failed``, ``clear_unverified`` (dispatched, effect not
+    observed — DO NOT RETRY), ``illegal_lifecycle_transition``,
     ``stale_lifecycle_state`` (a sweep or another verb raced the row between
     the read above and the park transition)."""
     try:
@@ -878,8 +956,14 @@ def clear_session(
         )
     channel = _resolve_driver_channel(row)
     _send_driver_text(channel, "/clear")
+    verification = _verify_clear_effect(channel, agent_instance_id)
+    cleared = True if verification == CLEAR_VERIFICATION_CONFIRMED else None
     if not park:
-        return {"lifecycle_state": current, "parked": False}
+        return {
+            "lifecycle_state": current, "parked": False,
+            "dispatched": True, "cleared": cleared,
+            "clear_verification": verification,
+        }
     try:
         transition_lifecycle_state(
             state, agent_instance_id=agent_instance_id, from_state=current,
@@ -889,7 +973,11 @@ def clear_session(
         raise VerbError("illegal_lifecycle_transition", str(exc)) from exc
     except StaleLifecycleStateError as exc:
         raise VerbError("stale_lifecycle_state", str(exc)) from exc
-    return {"lifecycle_state": LIFECYCLE_PARKED, "parked": True}
+    return {
+        "lifecycle_state": LIFECYCLE_PARKED, "parked": True,
+        "dispatched": True, "cleared": cleared,
+        "clear_verification": verification,
+    }
 
 
 def compact_session(state: StateManagementInterface, *, agent_instance_id: str) -> dict[str, Any]:
@@ -1404,6 +1492,8 @@ def report_alive(
 
 
 __all__ = [
+    "CLEAR_VERIFICATION_CONFIRMED",
+    "CLEAR_VERIFICATION_UNSUPPORTED",
     "CaptureLaneCharterRequest",
     "FALLBACK_FIRST_TURN_TEXT",
     "FIRST_TURN_SOURCE_CHARTER",

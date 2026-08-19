@@ -10,7 +10,8 @@ every other plugin uses the state_service surface verbs.
 Cycle 2 early-ratchet ships in WARN mode: invoke with `--warn-only` and
 the gate always exits 0 — findings still print so the gate stays honest,
 but no commit is blocked. Initial allowlist captures the current bypass
-sites from `workbench/2026-06-07_postgres_drift_inventory.md` §1 + the
+sites from the postgres-drift-inventory design record §1 (dev-checkout
+workbench — not part of the shipped tree) + the
 three retained sites per master plan §1.7 (midwife `postgres_init.py`
 role-DDL caller; state-plugin tests; the sqlalchemy code-generation site
 at `ananta/src/ananta/platform/code_generator.py`). Each subsequent
@@ -50,8 +51,8 @@ the KB "Gate Allowlist Conventions", adding entries without operator
 approval defeats the gate's purpose. Removing an entry is the unit of
 remediation progress.
 
-Reference: `workbench/2026-06-07_state_service_consolidation_master_plan.md`
-§1.7, §3.6, §4 W-WINT2-EARLY.
+Reference: the state-service consolidation master plan (dev-checkout
+workbench — not part of the shipped tree) §1.7, §3.6, §4 W-WINT2-EARLY.
 """
 
 from __future__ import annotations

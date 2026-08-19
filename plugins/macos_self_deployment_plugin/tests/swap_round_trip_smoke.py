@@ -522,8 +522,9 @@ def run_smoke() -> None:  # noqa: C901, PLR0915 — long-form smoke
         enqueued["name"] == "complete_swap",
         f"enqueued name: {enqueued.get('name')}",
     )
-    # Task #21 regression guard (NS.C migration per
-    # `workbench/2026-06-07_plugin_namespace_callsite_sweep.md`): the
+    # Task #21 regression guard (NS.C migration per the plugin-
+    # namespace-callsite-sweep design record, dev-checkout workbench
+    # -- not part of the shipped tree): the
     # enqueued action MUST carry the canonical service-interface
     # process_key, NOT the legacy `plugin::macos_self_deployment_plugin::*`
     # form (which is skipped at scan time per `_should_skip_plugin()`).

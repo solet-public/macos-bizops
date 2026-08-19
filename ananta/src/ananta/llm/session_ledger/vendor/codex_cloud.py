@@ -6,9 +6,9 @@ parses the CLOUD task-detail response shape returned by the
 ``GET https://chatgpt.com/backend-api/wham/tasks/{task_id}`` endpoint that the
 open-source ``openai/codex`` Rust CLI calls during ``codex cloud status``.
 
-Phase A discovery: ``workbench/2026-06-14_codex_cloud_phase_a_discovery.md``.
-Design v3 §7: ``workbench/2026-06-14_unified_url_walker_design.md`` v3 §7.4
-(the Turn→RawSessionEvent transform table).
+Phase A discovery and the unified-url-walker design v3 §7.4 (the
+Turn→RawSessionEvent transform table) are dev-checkout workbench design
+records, not part of the shipped tree.
 
 ================================================================
 Wire shape (operator-side walker SHIPS this; one envelope per cloud task)

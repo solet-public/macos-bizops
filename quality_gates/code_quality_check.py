@@ -428,7 +428,8 @@ _W_INT_WRAPPER_BLOCKING = 1  # gate uses 1 (mirrors design doc), not 2
 # interface ABC carries @service_interface_process; (c) every JSON in
 # processes/<provider>/ matches a registered decorator. Exit codes
 # follow _WRAPPER_OK (0) / _WRAPPER_BLOCKING (2) — canonical pattern.
-# See `workbench/2026-06-12_service_interface_ast_gate_design_v1.md`.
+# See the service-interface-AST-gate design record v1 (dev-checkout
+# workbench — not part of the shipped tree).
 _SI_AST_GATE = _GateSpec(
     name="service_interface_ast",
     description="service-interface AST consistency",

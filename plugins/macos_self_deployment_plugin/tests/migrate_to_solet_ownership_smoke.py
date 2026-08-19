@@ -8,8 +8,8 @@ rewritten it — but its candidate filter skipped any plist named
 ``com.openai.tunnel-client.<solet>``: OUR tunnel supervisor, launched from OUR
 venv, named after the vendor binary it supervises. It kept the dead flag,
 exited 2 on every start, and the ChatGPT connector lost its public ingress for
-four days with no symptom but an ABSENCE of traffic
-(``workbench/2026-08-15_chatgpt_mcp_registration_report_lane_ad.md``).
+four days with no symptom but an ABSENCE of traffic (dev-checkout
+workbench incident record — not part of the shipped tree).
 
 This smoke pins BOTH directions, because each one alone is satisfied by a
 catastrophic implementation:

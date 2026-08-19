@@ -1,7 +1,8 @@
 """Slice 3 smoke: invariant I1.A — no hardcoded port bands.
 
-Validates the structural change from Slice 3 of
-``workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md``:
+Validates the structural change from Slice 3 of the bridge-port-
+routing-and-session-lifecycle design record (dev-checkout workbench —
+not part of the shipped tree):
 
 * **``RouterState.register`` accepts any port.** With the old
   ``_port_in_band`` validation deleted, register_color must succeed for

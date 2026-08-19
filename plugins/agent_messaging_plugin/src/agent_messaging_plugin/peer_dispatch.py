@@ -330,6 +330,28 @@ def dispatch_peer_send(
     # Drive-on-delivery (2026-08-04): a managed recipient's driver channel
     # gets an extra best-effort nudge ALONGSIDE the notify above (never
     # instead of it — this call cannot raise and cannot change delivery_kind).
+    #
+    # ★ IT IS UNCONDITIONAL AGAIN (GAU-06, 2026-08-19). A ``drive=False``
+    # parameter lived here for one prospective caller — the rotation
+    # SELF-notice, which must not inject a turn — and was removed WITHOUT ever
+    # being invoked, because that caller measured this whole function as the
+    # wrong route and went to the service-level ``peer_send`` instead. The knob
+    # disarmed only the nudge below, while three other properties of this
+    # function were equally wrong for a self-notice: the hardcoded
+    # ``important=True`` above, the ``EVENT_PEER_MESSAGE`` label that destroys
+    # the event-name discriminator a read-side filter needs, and the
+    # ``[peer:...]`` envelope that presents a session's own measurement as mail
+    # from somebody else. A parameter that fixes one quarter of a mismatch is
+    # not a fix, it is a control nobody can reason about — and an uninvoked one
+    # is worse, because the next reader has to work out what it was for.
+    #
+    # THE TRAP IT WAS WRITTEN TO DISARM IS REAL AND MOVED, NOT DROPPED: see
+    # ``rotation_self_notice._notify_rotation_self``, which now carries it at
+    # the call site where the decision lives. In short — ``drive_on_delivery``
+    # NO-OPS for a session with no managed row (every operator-present seat) and
+    # fires on every managed watcher-held worker, so a notice routed through
+    # this default looks perfectly well behaved when hand-tested on a seat and
+    # injects a turn on exactly the population it was meant to protect.
     drive_on_delivery(
         state_service,
         recipient_agent_instance_id=recipient.agent_instance_id,

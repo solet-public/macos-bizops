@@ -8,8 +8,9 @@ decorated method bodies + decorator extents + the contract-mandated
 the **non-process structural surface** rather than penalizing coherent
 plugin growth.
 
-Per `workbench/2026-05-25_plugin_god_class_remediation.md`
-§5–§6: the platform's chosen architecture is "larger plugins organized
+Per the plugin-god-class-remediation design record §5–§6 (dev-checkout
+workbench — not part of the shipped tree): the platform's chosen
+architecture is "larger plugins organized
 via submodules, bounded by coherence not method count." Textbook MI
 penalizes raw file size (radon's MI formula has a `-16.2·ln(L)` term);
 plugins that concretize use into `@platform_process` methods accumulate
@@ -156,9 +157,9 @@ def _load_allowlist(path: Path) -> frozenset[str]:
     file's resolved path — entries can be repo-relative
     (`plugins/foo/src/foo/plugin.py`) or absolute. The allowlist is a
     tracked-debt register documenting files whose maintainability fix
-    is deferred (per
-    `workbench/2026-05-25_plugin_god_class_remediation.md`
-    §9.D–§9.Z + Task #74). Allowlisted findings are still printed in
+    is deferred (per the plugin-god-class-remediation design record
+    §9.D–§9.Z + Task #74, dev-checkout workbench — not part of the
+    shipped tree). Allowlisted findings are still printed in
     the report but do NOT contribute to the exit-2 verdict.
     """
     if not path.exists():
@@ -206,8 +207,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "against each candidate's path. Allowlisted findings are still "
             "printed so the gate stays honest; they just do not contribute "
             "to the exit-2 verdict. Removing an entry from the allowlist is "
-            "the unit of remediation progress. See "
-            "`workbench/2026-05-25_plugin_god_class_remediation.md` "
+            "the unit of remediation progress. See the "
+            "plugin-god-class-remediation design record "
             "§9.D–§9.Z + Task #74."
         ),
     )

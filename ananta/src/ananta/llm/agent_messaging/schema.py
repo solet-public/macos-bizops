@@ -325,7 +325,19 @@ def get_agent_messaging_schema() -> SchemaDefinition:
         id_prefix=ID_PREFIX_MESSAGE,
         description=(
             "Append-only, cursor-addressable messages inside a thread. "
-            "Cursor is unique within a thread."
+            "Cursor is unique within a thread. "
+            "EXCEPTION, ruled 2026-08-19 (GAU-06): event-type-scoped retention "
+            "is permitted on MACHINE-GENERATED NOTICE THREADS, of which there "
+            "is currently exactly one kind -- threads whose sender is the "
+            "'system:rotation-notice' sentinel, where the writer hard-deletes "
+            "its own oldest rows past a bound. The append-only guarantee for "
+            "EVERY OTHER THREAD is unchanged: the exception is named, narrow "
+            "and sentinel-scoped, and no retention path can reach agent or "
+            "human coordination mail, because peer threads key on "
+            "(sender_bridge_id, peer_instance) and the pruner is only ever "
+            "handed the thread its own write just landed in. Cursors are "
+            "REMOVED by a prune, never renumbered, so a client holding a "
+            "pre-prune cursor still pages forward correctly."
         ),
         columns={
             "thread_id": ColumnDefinition(

@@ -10,9 +10,9 @@ This module provides utilities for:
 - ``PortManager`` — thin wrapper that ``allocate``-then-``write_port_file``
   for the common case.
 
-Slice 3 of
-``workbench/2026-06-05_bridge_port_routing_and_session_lifecycle_design.md``
-(invariant I1.A — no hardcoded port bands) eliminated the per-color
+Slice 3 of the bridge-port-routing-and-session-lifecycle design record
+(dev-checkout workbench — not part of the shipped tree; invariant I1.A
+— no hardcoded port bands) eliminated the per-color
 allocation bands (blue=8101-8149 / green=8150-8198 / probe=8200-8299
 plus the legacy unset band). Allocation is now ``bind(0)`` against the
 OS ephemeral range; the spawn-path guarantee from invariant I2 ensures
@@ -21,7 +21,7 @@ partitioning is unnecessary.
 
 ``<name>.bridge.port`` names the solet's bridge front door and has
 exactly ONE writer — whatever component owns that front door (D11 ruling,
-``workbench/2026-07-13_d11_bridge_port_discovery_routerless_ruling.md``).
+dev-checkout workbench record — not part of the shipped tree).
 
 In router topology, the router owns it:
 ``plugins/macos_self_deployment_plugin/src/macos_self_deployment_plugin/blue_green_router/install_router.py``
@@ -209,8 +209,8 @@ def write_routerless_bridge_port_file(port: int, solet_name: str | None = None) 
     The one narrow, explicitly-named exception to the ``write_port_file``
     bridge guard above. ``<name>.bridge.port`` has exactly one writer per
     solet topology; in router-less topology ``agent_messaging_plugin``
-    IS the front door, so it is that writer (D11 ruling,
-    ``workbench/2026-07-13_d11_bridge_port_discovery_routerless_ruling.md``).
+    IS the front door, so it is that writer (D11 ruling, dev-checkout
+    workbench record — not part of the shipped tree).
 
     Contract (binding, do not weaken without a fresh Architect ruling):
 

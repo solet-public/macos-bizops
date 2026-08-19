@@ -307,16 +307,28 @@ def _read_watermark() -> int:
         return 0
 
 
-def pending_lines() -> list[dict[str, object]]:
-    """Parsed journal records appended since the last drain watermark."""
+def pending_snapshot() -> tuple[list[dict[str, object]], int]:
+    """Parsed journal records since the watermark, plus the EXACT byte offset
+    this read stopped at.
+
+    The offset is bound to what this call actually returned, never re-derived
+    later from a fresh read of the file's current size. MEM-06 (2026-08-19):
+    the old ``advance_watermark()`` re-read the journal's current EOF at
+    advance time, so a capture landing between a listing and a later,
+    separately-invoked advance was marked drained without ever being
+    upserted. Every advance now must consume exactly the offset a listing
+    call like this one returned — see :func:`record_listing_offset` /
+    :func:`advance_to_listed_offset`.
+    """
     path = journal_path()
+    start = _read_watermark()
     if not path.exists():
-        return []
+        return [], start
     records: list[dict[str, object]] = []
     with open(path, encoding="utf-8") as handle:
-        handle.seek(_read_watermark())
-        for line in handle:
-            line = line.strip()
+        handle.seek(start)
+        for raw_line in handle:
+            line = raw_line.strip()
             if not line:
                 continue
             try:
@@ -325,17 +337,32 @@ def pending_lines() -> list[dict[str, object]]:
                 continue
             if isinstance(obj, dict):
                 records.append(obj)
+        end_offset = handle.tell()
+    return records, end_offset
+
+
+def pending_lines() -> list[dict[str, object]]:
+    """Parsed journal records appended since the last drain watermark."""
+    records, _ = pending_snapshot()
     return records
+
+
+def pending_entries_snapshot() -> tuple[list[dict[str, object]], int]:
+    """Deduped drain work (latest record per path, newest wins, order-stable)
+    plus the exact end offset the underlying listing was read through."""
+    records, end_offset = pending_snapshot()
+    latest: dict[str, dict[str, object]] = {}
+    for rec in records:
+        p = rec.get("path")
+        if isinstance(p, str):
+            latest[p] = rec
+    return list(latest.values()), end_offset
 
 
 def pending_entries() -> list[dict[str, object]]:
     """Deduped drain work: latest record per path (newest wins), order-stable."""
-    latest: dict[str, dict[str, object]] = {}
-    for rec in pending_lines():
-        p = rec.get("path")
-        if isinstance(p, str):
-            latest[p] = rec
-    return list(latest.values())
+    entries, _ = pending_entries_snapshot()
+    return entries
 
 
 def pending_count() -> int:
@@ -343,19 +370,66 @@ def pending_count() -> int:
     return len(pending_entries())
 
 
-def advance_watermark() -> None:
-    """Mark everything currently in the journal as drained.
+def listing_offset_path() -> Path:
+    return state_dir() / "journal.listing_offset"
 
-    Set the watermark to the journal's current size. Captures that land AFTER
-    this call append past the offset and are picked up by the next drain, so the
-    read-then-advance window loses nothing (bounded staleness <= one session,
-    accepted by design §4.4).
+
+def record_listing_offset(end_offset: int) -> None:
+    """Persist the end offset of the most recent listing.
+
+    A later, separately-invoked advance (possibly in a different process —
+    the agent-mediated ``drain.py`` / ``drain.py --advance`` pair runs across
+    two Bash calls with N upsert process_calls in between) must bind to
+    exactly this value rather than to whatever the journal has grown to by
+    the time it runs (MEM-06).
     """
+    _atomic_write_text(listing_offset_path(), str(end_offset))
+
+
+class NoPendingListingError(RuntimeError):
+    """Raised when an advance is requested with no recorded listing to bind to."""
+
+
+def advance_to_listed_offset() -> int:
+    """Advance the watermark to exactly the last recorded listing's end offset.
+
+    Never re-reads the journal's current size — that re-read is the MEM-06
+    bug's exact shape. Raises :class:`NoPendingListingError` (rather than a
+    silent no-op or a fallback to a fresh EOF) when no listing was recorded,
+    or it was already consumed by a prior advance. Consumes the marker on
+    success so a stale offset can't be reused by a second, unpaired advance.
+    """
+    marker = listing_offset_path()
     try:
-        size = journal_path().stat().st_size
+        with open(marker, encoding="utf-8") as handle:
+            end_offset = int(handle.read().strip())
+    except (OSError, ValueError) as exc:
+        raise NoPendingListingError(
+            "no listing recorded to advance to — list pending entries first "
+            "(drain.py with no args)"
+        ) from exc
+    _atomic_write_text(watermark_path(), str(end_offset))
+    try:
+        marker.unlink()
     except OSError:
-        size = 0
-    _atomic_write_text(watermark_path(), str(size))
+        pass
+    return end_offset
+
+
+def advance_past_all_pending() -> int:
+    """List everything currently pending and advance the watermark to cover it.
+
+    Safe ONLY when nothing else can capture between the list and the advance
+    within this call — e.g. test setup under a scratch state dir. Production
+    drain flows (``drain.py``, ``sync.py``) must keep the listing and the
+    advance as two separate calls across their own real work (the upserts),
+    using :func:`record_listing_offset` / :func:`advance_to_listed_offset`
+    directly, so a capture landing in that real window is retried next time,
+    never swallowed.
+    """
+    _, end_offset = pending_snapshot()
+    record_listing_offset(end_offset)
+    return advance_to_listed_offset()
 
 
 # --- Low-level IO -----------------------------------------------------------

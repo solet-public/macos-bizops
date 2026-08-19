@@ -5,9 +5,9 @@ Runs Python AST analysis against the files passed on the command line and
 reports classes that violate Single-Responsibility-Principle heuristics
 once the platform-process veneer is stripped.
 
-The reform (per
-`workbench/2026-05-25_plugin_god_class_remediation.md`
-§5–§6 / §8.4): the textbook OO heuristics (LOC, method count, public method
+The reform (per the plugin-god-class-remediation design record §5–§6 /
+§8.4, dev-checkout workbench — not part of the shipped tree): the
+textbook OO heuristics (LOC, method count, public method
 count, instance-attribute count) all penalize raw size. In this platform's plugin
 model that's the wrong signal — a *coherent* plugin can carry hundreds
 of `@platform_process`-decorated methods as ad-hoc use cases get concretized
@@ -417,8 +417,9 @@ def _load_allowlist(path: Path) -> frozenset[str]:
     """Read a class-name allowlist file (one name per line; `#` comments).
 
     The allowlist is a tracked-debt register documenting classes whose
-    decomposition is deferred (per `workbench/2026-05-25_plugin_god_class_remediation.md`
-    §9.D–§9.Z + Task #74). Allowlisted findings are still printed in the
+    decomposition is deferred (per the plugin-god-class-remediation
+    design record §9.D–§9.Z + Task #74, dev-checkout workbench — not
+    part of the shipped tree). Allowlisted findings are still printed in the
     report — the gate stays honest about known debt — but they do NOT
     contribute to the exit-2 verdict. Removing an entry from this list
     is the unit of remediation progress.
@@ -501,8 +502,8 @@ def main(argv: list[str]) -> int:
             "blank lines and `#` comments ignored). Allowlisted findings "
             "are still printed so the gate stays honest; they just do not "
             "contribute to the exit-2 verdict. Removing an entry from the "
-            "allowlist is the unit of remediation progress. See "
-            "`workbench/2026-05-25_plugin_god_class_remediation.md` "
+            "allowlist is the unit of remediation progress. See the "
+            "plugin-god-class-remediation design record "
             "§9.D–§9.Z + Task #74."
         ),
     )

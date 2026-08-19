@@ -1,7 +1,7 @@
 """Plugin instance lifecycle: construct, inject services, query readiness.
 
 Extracted from `PluginManager` during the Step 9.C decomposition
-(`workbench/2026-05-25_plugin_god_class_remediation.md` §9.C).
+(design record, Step 9.C, dev-checkout workbench — not part of the shipped tree).
 
 Responsibility: own the per-plugin lifecycle once the plugin classes have
 been discovered. Instantiates each class, wires the validation registry,

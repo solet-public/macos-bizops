@@ -123,6 +123,7 @@ def _render_profile(report: ProfileReport) -> str:
     return (
         f"    {report.profile:<22} files={report.file_count:>5}  "
         f"markdown={report.markdown_count:>4}  "
+        f"sources={report.source_count:>4}  "
         f"blocking={len(report.blocking):>3}  "
         f"tolerated={report.tolerated_count:>4}"
     )

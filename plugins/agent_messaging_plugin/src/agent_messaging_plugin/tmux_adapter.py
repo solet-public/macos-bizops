@@ -360,6 +360,38 @@ def _resolve_bin(explicit: str | None, which_name: str, default: str) -> str:
     return shutil.which(which_name) or default
 
 
+DEFAULT_CLEARED_COMPOSER_SIGNATURE = "\u276f"
+"""The rendered EMPTY-composer row of a Claude Code TUI, stripped.
+
+INHERITED FROM A MEASUREMENT, NOT GUESSED HERE, and the provenance matters:
+this exact value was measured against a real iTerm2-hosted Claude Code pane
+during rotation-systematization P3 and is pinned in
+``seat_rotation_helper_smoke.py`` -- the empty row renders as the prompt glyph
+plus a trailing NBSP (``"\u276f\xa0"``), which strips to the bare glyph. The
+TUI is the same program here; only the HOST terminal differs, which is why
+this is carried over rather than re-derived.
+
+★ A live tmux confirmation leg is OUTSTANDING and is deliberately not
+claimed by the offline smoke that covers this file. That is also why the
+signature is a constructor knob rather than a hardcode: if a tmux-hosted pane
+ever renders its empty composer differently, the fix is a caller-supplied
+signature, not an edit here (the same posture ``seat_rotation_helper`` takes,
+where the signature is a required CLI argument for exactly this reason).
+"""
+
+DEFAULT_CLEAR_VERIFY_POLL_INTERVAL_SECONDS = 0.5
+DEFAULT_CLEAR_VERIFY_SAMPLES_REQUIRED = 3
+DEFAULT_CLEAR_VERIFY_TIMEOUT_SECONDS = 120.0
+"""Matched to ``seat_rotation_helper``'s settle window, and long on purpose.
+
+That constant was RECALIBRATED after a live failure: the real post-``/clear``
+settle floor is ~14-15s (SessionStart hooks, MCP bridge respawn, full TUI
+redraw), which consumed a 15s budget entirely. The asymmetry is the whole
+argument -- a long timeout costs nothing in the common case, because the poll
+returns as soon as it sees its consecutive matches, while a short one reports
+a real clear as unverified and sends a steward chasing a healthy session.
+"""
+
 DEFAULT_PASTE_STABLE_POLL_INTERVAL_SECONDS = 0.5
 DEFAULT_PASTE_STABLE_SAMPLES_REQUIRED = 3
 DEFAULT_PASTE_STABLE_TIMEOUT_SECONDS = 10.0
@@ -421,6 +453,12 @@ class _TmuxSendKeysDriverChannel:
         poll_interval_seconds: float = DEFAULT_PASTE_STABLE_POLL_INTERVAL_SECONDS,
         stable_samples_required: int = DEFAULT_PASTE_STABLE_SAMPLES_REQUIRED,
         stable_timeout_seconds: float = DEFAULT_PASTE_STABLE_TIMEOUT_SECONDS,
+        cleared_signature: str = DEFAULT_CLEARED_COMPOSER_SIGNATURE,
+        clear_verify_poll_interval_seconds: float = (
+            DEFAULT_CLEAR_VERIFY_POLL_INTERVAL_SECONDS
+        ),
+        clear_stable_samples_required: int = DEFAULT_CLEAR_VERIFY_SAMPLES_REQUIRED,
+        clear_verify_timeout_seconds: float = DEFAULT_CLEAR_VERIFY_TIMEOUT_SECONDS,
         sleep_fn: Any = time.sleep,
         now_fn: Any = time.monotonic,
     ) -> None:
@@ -430,6 +468,10 @@ class _TmuxSendKeysDriverChannel:
         self._poll_interval_seconds = poll_interval_seconds
         self._stable_samples_required = stable_samples_required
         self._stable_timeout_seconds = stable_timeout_seconds
+        self._cleared_signature = cleared_signature
+        self._clear_verify_poll_interval_seconds = clear_verify_poll_interval_seconds
+        self._clear_stable_samples_required = clear_stable_samples_required
+        self._clear_verify_timeout_seconds = clear_verify_timeout_seconds
         self._sleep_fn = sleep_fn
         self._now_fn = now_fn
 
@@ -480,6 +522,77 @@ class _TmuxSendKeysDriverChannel:
         if getattr(result, "returncode", 1) != 0:
             return None
         return str(getattr(result, "stdout", "") or "")
+
+    def _is_cleared_screen(self, captured: str) -> bool:
+        """POSITIVE cleared-state check by EXACT match after stripping,
+        never by substring containment.
+
+        ★ The containment version is UNSOUND here, and this is the single
+        most important line in the whole GAU-09 fix. The empty composer row
+        strips to the bare prompt glyph -- but so does the PREFIX of a
+        still-populated row like ``"\u276f\xa0/clear"``, so ``glyph in row``
+        is True for exactly the stranded-``/clear`` screen that the GAU-09
+        measurement actually found on the lane's pane. A containment check
+        would therefore certify the defect's own signature as a successful
+        clear. Exact-match-after-strip rejects that row while still accepting
+        the genuinely empty one. Both halves were measured directly against
+        real captured screen lines by the iTerm2 precedent this mirrors
+        (``seat_rotation_helper.is_cleared_state``), not reasoned about.
+        """
+        return any(
+            line.replace("\x00", "").strip() == self._cleared_signature
+            for line in captured.splitlines()
+        )
+
+    def verify_cleared(self) -> bool:
+        """Poll the pane until ``clear_stable_samples_required`` CONSECUTIVE
+        samples positively show a cleared composer. Satisfies
+        ``session_hosts.ClearVerifyingDriverChannel``.
+
+        Three properties, each load-bearing and each pinned by
+        ``clear_session_effect_verification_smoke.py``:
+
+        * POSITIVE, not quiescent (ruling 4, carried over from the iTerm2
+          helper): a screen that has merely stopped changing proves nothing
+          -- a pane stranded mid-``/clear`` is perfectly quiet. Only a match
+          against the cleared signature counts, and any non-matching sample
+          resets the streak to ZERO rather than decaying it, so a transient
+          mid-redraw frame cannot accumulate into a false confirmation.
+
+        * FAIL-CLOSED on the deadline -- deliberately the OPPOSITE of
+          :meth:`_wait_for_paste_stable`, a few lines below, which fails
+          OPEN. The two are not inconsistent: a paste whose render is never
+          observed should still submit, because the alternative is never
+          submitting at all; but a clear whose effect is never observed must
+          never be REPORTED as one, because the alternative is the exact lie
+          GAU-09 filed. Opposite costs, opposite defaults.
+
+        * SENDS NOTHING. This method only ever reads. Re-firing ``/clear``
+          on a failed verification would deposit a second copy of real text
+          into a live input buffer, which is why the no-retry rule is an
+          invariant of the verification step itself and not merely of its
+          caller.
+        """
+        deadline = self._now_fn() + self._clear_verify_timeout_seconds
+        stable_count = 0
+        while True:
+            captured = self._capture_pane()
+            if captured is not None and self._is_cleared_screen(captured):
+                stable_count += 1
+                if stable_count >= self._clear_stable_samples_required:
+                    return True
+            else:
+                stable_count = 0
+            if self._now_fn() > deadline:
+                logger.warning(
+                    "tmux driver channel: pane %r never showed a cleared composer "
+                    "within %.1fs -- reporting the clear as UNVERIFIED (fail-closed). "
+                    "No key is re-sent: the /clear text is already in that pane's "
+                    "input buffer and re-firing it would deposit a second copy.",
+                    self._session, self._clear_verify_timeout_seconds,
+                )
+                return False
+            self._sleep_fn(self._clear_verify_poll_interval_seconds)
 
     def _wait_for_paste_stable(self) -> None:
         """Poll until the pane's rendered content is IDENTICAL across

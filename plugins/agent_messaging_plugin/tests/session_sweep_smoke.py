@@ -75,11 +75,14 @@ from agent_messaging_plugin.session_sweep import (  # noqa: E402
     DEFAULT_REGISTRATION_BOUND_S,
     EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE,
     GAUGE_COVERAGE_GRACE_S,
+    GAUGE_STALE_LAG_S,
     NoticeLatch,
     SessionRoleClaimPruner,
     _notify_rotation_due,
+    last_report_alive,
     sweep_deadline_dependencies,
     sweep_gauge_coverage,
+    sweep_gauge_staleness,
     sweep_lane_closed_dependencies,
     sweep_overdue_sessions,
     sweep_rotation_due_sessions,
@@ -1239,42 +1242,69 @@ def test_the_saturated_band_below_the_fraction_now_reaches_the_steward() -> None
 
 
 def test_consumer_4_prose_names_an_axis_the_decision_actually_used() -> None:
-    """CONFIRMED, NOT ASSUMED -- and the answer is PARTIAL, so it is recorded
-    as partial.
+    """FIXED (GAU-12, 2026-08-18). This test used to PIN the residual left by
+    GAU-08: `_rotation_prose` always printed the BAND while `_rotation_due_row`
+    decided on the union, so a fraction-only firing on a small ceiling sent a
+    notice typed `rotation_due_notice` whose body read "keep working".
 
-    `_rotation_prose` always printed the BAND while `_rotation_due_row`
-    decided on the FRACTION: the notice named an axis its decision had not
-    used. The ruling for GAU-08 asked whether making the decision a union
-    fixes that for free. Measured here rather than reasoned about:
+    That pin is flipped here to assert the corrected prose, using the same
+    remedy GAU-08 already applied to the hook's notice
+    (`rotation_due_watch.build_notification_content`): a "DUE BECAUSE" clause
+    naming the axis that fired, sourced from `RotationDueVerdict`'s own
+    decomposition (`band_actionable` / `fraction_crossed`) rather than a
+    second copy of the predicate at the prose site.
 
-    * IT DOES for the band-fired case -- the 300,000 row above fires BECAUSE
-      the band is actionable and the prose names that same band. Decision and
-      prose are on one axis.
-    * IT DOES NOT for the fraction-fired case, asserted below. On a small
-      ceiling the fraction fires while the model-blind band is still
-      `warm_keep`, so the steward gets a notice typed `rotation_due_notice`
-      whose body reads "keep working".
+    Both non-contradiction cases are asserted, each checked for what it must
+    NOT say as well as what it must -- a notice that merely mentions the right
+    axis while still implying the other one fired would pass a contains-only
+    test and still be misleading:
 
-    That second case is PRE-EXISTING and UNCHANGED by the union: it fired the
-    same way, with the same prose, before this landing -- the union neither
-    created it nor made it more frequent, which is why it is pinned here as
-    known current behaviour rather than fixed inside a change whose ruling
-    scoped it to the predicate. Pinned rather than merely written down so it
-    cannot be "fixed" by accident and go unnoticed, and so the next lane to
-    pick it up starts from a measurement.
+    * The BAND-FIRED case (below) is UNCHANGED behaviour, not a new
+      assertion -- proving this fix did not destroy the discriminator that
+      already told band-fired and fraction-fired apart. 300,000 on a 1M
+      ceiling still fires BECAUSE the band is actionable, still names that
+      band, and must NOT claim the fraction hint was crossed (it is not, at
+      0.300 of the ceiling).
+    * The FRACTION-FIRED case is what GAU-12 fixes: a small ceiling at the
+      model's own halfway point fires because the fraction crossed, while the
+      model-blind band is still `warm_keep`. The prose must say THAT is why it
+      fired, and must NOT claim the band asked for a rotation.
     """
     state, reg, mgr, bridge_id = _wired()
-    _gauge(state, "agi-worker", current_tokens=100_000, ceiling=200_000,
-           model="claude-haiku-4-5")
+
+    _gauge(state, "agi-worker", current_tokens=300_000, ceiling=1_000_000,
+           model="claude-opus-5")
     n = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
-    _check(n == 1, "a small-ceiling session at its own halfway point is notified -- "
-                   "the fraction term keeps this reachable where the bands cannot")
+    _check(n == 1, "the band-fired case still notifies")
     _, events = mgr.get(bridge_id).events_after(-1)
-    body = events[0].content if events else ""
-    _check("band=warm_keep" in body,
-           "RESIDUAL (pre-existing, not introduced by the union): the notice that "
-           "fired on the FRACTION still prints the keep-working BAND, so this one "
-           "case still names an axis the decision did not use")
+    band_fired_body = events[0].content if events else ""
+    _check("band=warm_immediate" in band_fired_body,
+           "band-fired case: the discriminator this fix must not destroy -- "
+           "still names the band that fired")
+    _check("DUE BECAUSE the ECONOMICS BAND is 'warm_immediate'" in band_fired_body,
+           "...and says IN WORDS that the band is why, not the fraction")
+    _check("NOT crossed" in band_fired_body,
+           "...and explicitly disclaims the fraction hint, which is NOT "
+           "crossed at 0.300 of the ceiling")
+
+    state2, reg2, mgr2, bridge_id2 = _wired()
+    _gauge(state2, "agi-worker", current_tokens=100_000, ceiling=200_000,
+           model="claude-haiku-4-5")
+    n2 = sweep_rotation_due_sessions(state2, peer_registry=reg2, bridge_manager=mgr2)
+    _check(n2 == 1, "a small-ceiling session at its own halfway point is notified -- "
+                    "the fraction term keeps this reachable where the bands cannot")
+    _, events2 = mgr2.get(bridge_id2).events_after(-1)
+    fraction_fired_body = events2[0].content if events2 else ""
+    _check("band=warm_keep" in fraction_fired_body,
+           "fraction-fired case: the band is still shown -- informational, not "
+           "hidden -- but no longer the unqualified verdict")
+    _check("DUE BECAUSE" in fraction_fired_body and "fires first" in fraction_fired_body,
+           "FIXED: the notice now says the FRACTION is why it fired, so an "
+           "event typed rotation_due_notice no longer contradicts its own body "
+           "by reading a bare 'keep working'")
+    _check("DUE BECAUSE the ECONOMICS BAND" not in fraction_fired_body,
+           "...and does not claim the band-only branch's reason, which would "
+           "be a lie for this row")
 
 
 def test_rotation_due_flags_an_unattributable_reporter() -> None:
@@ -1359,8 +1389,8 @@ def test_gauge_coverage_still_fires_once_the_grace_expires() -> None:
     _check(len(events) == 1, "exactly one notice, delivered on the later tick")
     _check(
         "startup grace" in events[0].content,
-        "and the prose says it is past the grace, so the reader knows this is "
-        "not simply a session that has not reported yet",
+        "and the prose names the grace it passed, so the reader can see the "
+        "measurement the finding rests on",
     )
 
 
@@ -1383,6 +1413,180 @@ def test_gauge_coverage_does_not_grant_grace_on_an_unreadable_timestamp() -> Non
         state, now=datetime.now(UTC), peer_registry=reg, bridge_manager=mgr,
     )
     _check(n == 1, "an unreadable age does NOT buy silence")
+
+
+# ---------------------------------------------------------------------------
+# GAU-13: the grace is shorter than a spawned worker's real boot-to-first-tick,
+# and the notice asserts a negative the next tick can falsify
+# ---------------------------------------------------------------------------
+
+# The worst boot-to-first-tick MEASURED for a spawned tmux worker, across the
+# three data points in the GAU-13 backlog entry (lane-gau10-stall-boolean
+# 2026-08-18T15:35:12Z spawn -> first tick ~15:43Z; lane-r2-holds-false
+# 16:30:31Z spawn -> first WORK turn >=7.5 min later; and that lane's own row
+# confirmed present once work turns ticked). A spawned worker's clock to its
+# first tick is spawn -> charter dispatch -> first WORK turn, and the
+# bootstrap-ack turn lands no gauge tick, so the gap is structural rather than
+# incidental. Named here, in the test, so the grace constant can never be
+# lowered back under the measurement without this failing and saying why.
+MEASURED_WORST_BOOT_TO_FIRST_TICK_S = 480.0
+
+
+def test_gauge_coverage_grace_covers_the_measured_boot_to_first_tick() -> None:
+    """★ CATCHES: GAU-13(a) -- a grace shorter than the boot it exists to cover.
+
+    Asserted BEHAVIOURALLY (a session that old is not called dark) rather than
+    only on the constant, because the constant is the current implementation of
+    the property and not the property itself.
+    """
+    _check(
+        GAUGE_COVERAGE_GRACE_S >= MEASURED_WORST_BOOT_TO_FIRST_TICK_S,
+        f"the startup grace ({GAUGE_COVERAGE_GRACE_S}s) covers the WORST "
+        f"MEASURED boot-to-first-tick ({MEASURED_WORST_BOOT_TO_FIRST_TICK_S}s) "
+        "for a spawned worker -- a grace under the measurement manufactures one "
+        "false alarm per lane per spawn wave",
+    )
+    state, reg, mgr, bridge_id = _wired()
+    at_worst_boot = datetime.now(UTC) + timedelta(
+        seconds=MEASURED_WORST_BOOT_TO_FIRST_TICK_S - 30,
+    )
+    n = sweep_gauge_coverage(
+        state, now=at_worst_boot, peer_registry=reg, bridge_manager=mgr,
+    )
+    _check(
+        n == 0,
+        "a live session still inside the measured boot-to-first-tick window is "
+        "NOT reported dark -- this is the exact false alarm measured against "
+        "lane-gau10-stall-boolean and lane-r2-holds-false on 2026-08-18",
+    )
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(not events, "and its steward is not woken about it")
+
+
+def test_gauge_coverage_notice_states_the_measurement_not_the_inference() -> None:
+    """★ CATCHES: GAU-13(b) -- the notice asserts a negative the NEXT TICK can
+    falsify.
+
+    Measured 2026-08-18: the notice told the reader the dark session was "past
+    the startup grace, so this is not a session that simply has not reported
+    yet" -- and the row landed healthy five minutes later. It WAS a session that
+    simply had not reported yet. The notice is entitled to report what it
+    measured (no row after N seconds live); it is not entitled to rule out the
+    explanation that turned out to be the right one.
+
+    False alarms here train the reader to skim L4b, which is the leg that
+    catches the REAL GAU-01 family -- so the cost of the overclaim is paid by a
+    different defect's detection.
+    """
+    state, reg, mgr, bridge_id = _wired()
+    sweep_gauge_coverage(state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr)
+    _, events = mgr.get(bridge_id).events_after(-1)
+    body = events[0].content if events else ""
+    _check(bool(body), "the dark session still produces a notice")
+    _check(
+        "not a session that simply has not reported yet" not in body,
+        "the notice does NOT rule out 'it just has not reported yet' -- that is "
+        f"the inference the next tick falsified. Got: {body!r}",
+    )
+    _check(
+        "likeliest cause" not in body,
+        "...nor does it present a CAUSE it did not measure as the likeliest "
+        f"one. Got: {body!r}",
+    )
+    _check(
+        str(int(GAUGE_COVERAGE_GRACE_S)) in body,
+        "...and it DOES state the measurable fact instead: how long the session "
+        f"has been live with no row. Got: {body!r}",
+    )
+
+
+def test_gauge_coverage_notice_says_when_no_reporter_has_run_at_all() -> None:
+    """★ CATCHES: attributing a dark row to a broken WRITE when the session has
+    produced no reporter output at all.
+
+    The two hooks that write these rows are BOTH PostToolUse hooks on the same
+    tool call: the heartbeat writes the lifecycle row and rotation_due_watch
+    writes the gauge row. So "report_alive has landed since this row went live"
+    is positive evidence that the session completes tool calls and that its
+    solet path resolves -- and its absence is positive evidence of the opposite.
+    The notice must not claim the first when it measured the second.
+
+    This row has NEVER reported alive -- its report_by is still the deadline
+    armed at spawn, so the derived last-report_alive lands ON the transition
+    rather than after it -- and the notice must say the session has produced NO
+    reporter output rather than blaming the gauge write path specifically.
+
+    The window is set EXPLICITLY rather than left at the fixture default: with
+    no report_by at all the evidence is UNKNOWN, which is a third case and not
+    this one. A test that leaves its own precondition to a default is not
+    stating which branch it pins.
+    """
+    state, reg, mgr, bridge_id = _wired()
+    row = read_managed_session(state, "agi-worker")
+    became_live = datetime.fromisoformat(str(row["last_transition_at"]))
+    if became_live.tzinfo is None:
+        became_live = became_live.replace(tzinfo=UTC)
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-worker"}},
+        {
+            "report_by_seconds": 300,
+            "report_by": (became_live + timedelta(seconds=300)).isoformat(),
+        },
+    )
+    sweep_gauge_coverage(state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr)
+    _, events = mgr.get(bridge_id).events_after(-1)
+    body = events[0].content if events else ""
+    _check(
+        "report_alive is landing" not in body,
+        "a row with no report_alive since it went live is NOT described as one "
+        f"whose report_alive is landing. Got: {body!r}",
+    )
+    _check(
+        "no report_alive" in body.lower() or "never reported alive" in body.lower(),
+        "...the notice names the second measurement (no lifecycle report either) "
+        f"so the reader can tell the two failures apart. Got: {body!r}",
+    )
+
+
+def test_gauge_coverage_notice_names_the_evidence_when_the_session_has_ticked()\
+        -> None:
+    """★ CATCHES: the other half -- throwing away the STRONG signal.
+
+    When report_alive HAS landed since the row went live, PostToolUse
+    demonstrably fires for this session and its solet path demonstrably
+    resolves, and there is still no gauge row. THAT is the 2026-08-16 signature
+    the leg was built for, and it is now evidenced rather than assumed. The
+    notice must say so, because it is a materially different finding from a
+    session that has produced nothing at all.
+    """
+    state, reg, mgr, bridge_id = _wired()
+    row = read_managed_session(state, "agi-worker")
+    became_live = datetime.fromisoformat(str(row["last_transition_at"]))
+    if became_live.tzinfo is None:
+        became_live = became_live.replace(tzinfo=UTC)
+    ticked_at = became_live + timedelta(seconds=600)
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-worker"}},
+        {
+            "report_by_seconds": 300,
+            "report_by": (ticked_at + timedelta(seconds=300)).isoformat(),
+        },
+    )
+    sweep_gauge_coverage(state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr)
+    _, events = mgr.get(bridge_id).events_after(-1)
+    body = events[0].content if events else ""
+    _check(
+        "report_alive" in body and "no report_alive" not in body.lower(),
+        "a session whose report_alive IS landing is described that way -- the "
+        f"evidenced form of the finding. Got: {body!r}",
+    )
+    _check(
+        "not a session that simply has not reported yet" not in body,
+        "...and even the strong branch does not assert the unfalsifiable "
+        f"negative. Got: {body!r}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1692,6 +1896,218 @@ def test_l4a_legs_no_op_without_a_bridge() -> None:
     _check(sweep_gauge_coverage(state) == 0, "gauge-coverage leg no-ops with no bridge")
 
 
+
+# ---------------------------------------------------------------------------
+# GAU-01(b): the gauge row that STOPPED, as distinct from the one never written
+#
+# The defect these pin, measured 2026-08-18: a lane sat with a FROZEN gauge row
+# for 85 minutes while alive and completing tool calls, and nothing surfaced it.
+# L4b asks whether a row EXISTS; this one existed and simply never changed
+# again, so a frozen row read as coverage.
+#
+# Every test below sets report_by_seconds EXPLICITLY. `_spawn_live` defaults it
+# to 0, which derives to NO EVIDENCE rather than "never ticked" -- a test that
+# leaves its own precondition to that default is not stating which branch it
+# pins.
+# ---------------------------------------------------------------------------
+
+
+def _ticking(
+    state: StateManagementInterface, agent_instance_id: str, *, last_alive: datetime,
+) -> None:
+    """Arm the lifecycle row so the §3.3 identity derives to ``last_alive``.
+
+    Writes the PAIR, never `report_by` alone: the derivation is
+    ``report_by - report_by_seconds``, so a test that set only one of them
+    would be pinning a value it did not choose.
+    """
+    window_s = 300
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": agent_instance_id}},
+        {
+            "report_by_seconds": window_s,
+            "report_by": (last_alive + timedelta(seconds=window_s)).isoformat(),
+        },
+    )
+
+
+def test_last_report_alive_derives_the_tick_moment() -> None:
+    """The identity the whole leg rests on, pinned on its own before anything
+    composes it: report_by minus report_by_seconds IS the last report_alive."""
+    moment = datetime(2026, 8, 18, 12, 0, 0, tzinfo=UTC)
+    row = {"report_by": (moment + timedelta(seconds=300)).isoformat(), "report_by_seconds": 300}
+    _check(last_report_alive(row) == moment, "the derived tick moment is exact")
+    _check(
+        last_report_alive({"report_by": moment.isoformat(), "report_by_seconds": 0}) is None,
+        "a zero window is NO EVIDENCE (None), never a datetime — absence of the "
+        "WINDOW is not evidence of absence of a TICK",
+    )
+
+
+def test_gauge_stale_fires_when_alive_and_the_gauge_arrested() -> None:
+    """★ THE GAU-01 SIGNATURE. Lifecycle advancing, gauge frozen — the one row
+    of the discriminator table that is a finding."""
+    state, reg, mgr, bridge_id = _wired()
+    now = datetime.now(UTC)
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
+    _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
+    n = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 1, "a live, reporting session with a frozen gauge row is detected")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(
+        events and events[0].event_type == "gauge_stale_notice",
+        "and it arrives as its OWN event type, not the missing-row one",
+    )
+
+
+def test_gauge_stale_is_silent_when_both_clocks_stopped() -> None:
+    """Row 3 of the table: not advancing + stale = quiet or dead. That is the
+    D1 sweep's `overdue` job. Saying "your gauge reporter is broken" about a
+    session that stopped calling tools would be a confident wrong diagnosis.
+
+    ★ THE LAG IS DELIBERATELY LARGE AND NEGATIVE (-1800s), not merely negative.
+    An earlier draft used -100s and a mutation SURVIVED it: replacing the signed
+    comparison with `abs(lag)` still passed, because 100 is inside the tolerance
+    either way. A test that pins DIRECTION has to put the magnitude past the
+    threshold, or it is only re-testing the threshold. Found by the mutation
+    battery, not by reading.
+    """
+    state, reg, mgr, _ = _wired()
+    now = datetime.now(UTC)
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
+    _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=7200))
+    n = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
+    _check(
+        n == 0,
+        "a session whose BOTH clocks stopped is not a gauge finding — and the "
+        "gauge being the FRESHER of the two does not invert into one",
+    )
+
+
+def test_gauge_stale_is_silent_on_a_healthy_throttle_skew() -> None:
+    """The false-alarm guard, pinned at the MEASURED healthy maximum. Three live
+    lanes over ~45 minutes ran +109.8s at the widest; the gauge throttles at
+    120s and the heartbeat at 180s. A threshold that fired here would alarm on
+    the normal fleet and train the reader to skim the channel."""
+    state, reg, mgr, _ = _wired()
+    now = datetime.now(UTC)
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=140)).isoformat())
+    _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
+    n = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 0, "a 110s skew — inside the measured healthy band — is not a finding")
+
+
+def test_gauge_stale_threshold_is_a_boundary_not_a_vibe() -> None:
+    """Both sides of GAUGE_STALE_LAG_S, so the constant is pinned rather than
+    merely referenced. A test that only ever exercises one side cannot tell a
+    threshold from a hardcoded True."""
+    now = datetime.now(UTC)
+    for lag, expected, label in (
+        (GAUGE_STALE_LAG_S - 60, 0, "just inside the tolerance stays silent"),
+        (GAUGE_STALE_LAG_S + 60, 1, "just past the tolerance fires"),
+    ):
+        state, reg, mgr, _ = _wired()
+        _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=lag + 30)).isoformat())
+        _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
+        n = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
+        _check(n == expected, label)
+
+
+def test_gauge_stale_leaves_the_missing_row_to_the_coverage_leg() -> None:
+    """Row 1 of the table's complement: NO row at all is L4b's finding. Two legs
+    must never both fire on one condition, or the steward gets two notices
+    naming different causes for one session."""
+    state, reg, mgr, _ = _wired()  # agi-worker LIVE with NO gauge row
+    now = datetime.now(UTC)
+    _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
+    n = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 0, "a session with no gauge row is NOT claimed by the staleness leg")
+
+
+def test_gauge_stale_treats_a_missing_window_as_no_evidence() -> None:
+    """The tri-state, defended at the leg. report_by_seconds of 0 carries no
+    window, so arrest is not establishable — and inferring it from a missing
+    column is the exact move the identity's None exists to block."""
+    state, reg, mgr, _ = _wired()
+    now = datetime.now(UTC)
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
+    # report_by_seconds left at the _spawn_live default of 0 — stated, not inherited.
+    n = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 0, "no report_by window means NO EVIDENCE, never a reported arrest")
+
+
+def test_gauge_stale_notice_states_both_clocks_and_names_no_cause() -> None:
+    """The GAU-13 prose rule, one leg over: state the measurement, diagnose only
+    as far as the evidence carries, assert no negative the next tick falsifies.
+
+    The divergence DOES establish which reporter is implicated (both fire on the
+    same completed tool call), so naming the gauge reporter is measured. WHY it
+    stopped is not visible from here, and a notice asserting it would be a guess
+    wearing a measurement's clothes."""
+    state, reg, mgr, bridge_id = _wired()
+    now = datetime.now(UTC)
+    measured_at = now - timedelta(seconds=5400)
+    last_alive = now - timedelta(seconds=30)
+    _gauge(state, "agi-worker", measured_at=measured_at.isoformat())
+    _ticking(state, "agi-worker", last_alive=last_alive)
+    sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
+    _, events = mgr.get(bridge_id).events_after(-1)
+    body = events[0].content if events else ""
+    _check(
+        measured_at.isoformat() in body and last_alive.isoformat() in body,
+        f"BOTH measured timestamps appear in the notice. Got: {body!r}",
+    )
+    _check("rotation_due_watch" in body, "the implicated reporter is named")
+    _check(
+        "likeliest cause" not in body and "transcript_path" not in body,
+        "but no CAUSE is asserted — the leg cannot see which, and the detector "
+        f"must outlive today's leading candidate. Got: {body!r}",
+    )
+    _check(
+        "no session_context_status row at all" not in body,
+        "and it never reuses the missing-row leg's wording — different cause, "
+        f"different fix. Got: {body!r}",
+    )
+
+
+def test_gauge_stale_notifies_once_and_releases_on_recovery() -> None:
+    """Latched like every sibling: an arrested gauge stays arrested until it is
+    fixed, so unlatched this re-delivers every 300s for the whole outage. The
+    release makes a RELAPSE a fresh notice rather than a silence — a real shape
+    here, since a hook failing on one payload may succeed on the next."""
+    state, reg, mgr, _ = _wired()
+    now = datetime.now(UTC)
+    latch = NoticeLatch()
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
+    _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
+    first = sweep_gauge_staleness(
+        state, now=now, peer_registry=reg, bridge_manager=mgr, latch=latch,
+    )
+    second = sweep_gauge_staleness(
+        state, now=now, peer_registry=reg, bridge_manager=mgr, latch=latch,
+    )
+    _check(first == 1 and second == 0, "one notice per episode, not one per tick")
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=10)).isoformat())
+    recovered = sweep_gauge_staleness(
+        state, now=now, peer_registry=reg, bridge_manager=mgr, latch=latch,
+    )
+    _check(recovered == 0, "a recovered gauge produces no notice")
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
+    relapse = sweep_gauge_staleness(
+        state, now=now, peer_registry=reg, bridge_manager=mgr, latch=latch,
+    )
+    _check(relapse == 1, "and a RELAPSE notifies again rather than staying silent")
+
+
+def test_gauge_stale_leg_no_ops_without_a_bridge() -> None:
+    """Same posture as its siblings: unwired is a no-op, never a fault."""
+    state, _, _, _ = _wired()
+    _check(
+        sweep_gauge_staleness(state, now=datetime.now(UTC)) == 0,
+        "the leg is inert without a peer registry and bridge manager",
+    )
+
 def main() -> int:
     test_overdue_no_report_by_never_swept()
     test_overdue_marks_past_deadline_live_and_idle()
@@ -1744,6 +2160,10 @@ def main() -> int:
     test_gauge_coverage_grants_a_newly_live_session_its_startup_grace()
     test_gauge_coverage_still_fires_once_the_grace_expires()
     test_gauge_coverage_does_not_grant_grace_on_an_unreadable_timestamp()
+    test_gauge_coverage_grace_covers_the_measured_boot_to_first_tick()
+    test_gauge_coverage_notice_states_the_measurement_not_the_inference()
+    test_gauge_coverage_notice_says_when_no_reporter_has_run_at_all()
+    test_gauge_coverage_notice_names_the_evidence_when_the_session_has_ticked()
 
     test_a_broken_notice_message_surfaces_instead_of_being_swallowed()
 
@@ -1761,6 +2181,17 @@ def main() -> int:
     test_rotation_due_latch_does_not_swallow_an_undelivered_notice()
     test_gauge_coverage_notifies_once_and_releases_on_recovery()
     test_latches_are_independent_per_notice_kind()
+
+    test_last_report_alive_derives_the_tick_moment()
+    test_gauge_stale_fires_when_alive_and_the_gauge_arrested()
+    test_gauge_stale_is_silent_when_both_clocks_stopped()
+    test_gauge_stale_is_silent_on_a_healthy_throttle_skew()
+    test_gauge_stale_threshold_is_a_boundary_not_a_vibe()
+    test_gauge_stale_leaves_the_missing_row_to_the_coverage_leg()
+    test_gauge_stale_treats_a_missing_window_as_no_evidence()
+    test_gauge_stale_notice_states_both_clocks_and_names_no_cause()
+    test_gauge_stale_notifies_once_and_releases_on_recovery()
+    test_gauge_stale_leg_no_ops_without_a_bridge()
 
     print()
     print(f"PASSED: {_passed}")

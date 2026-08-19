@@ -1,7 +1,7 @@
 """Cycle 7 §2.1 smoke — router bridge-port watchdog convergence.
 
-Cycle 7 of
-``workbench/2026-06-16_bridge_port_three_color_split_brain_followon.md``.
+Cycle 7 of the bridge-port three-color split-brain follow-on design
+record (dev-checkout workbench — not part of the shipped tree).
 Closes Failure Mode B: when F2 Phase 0c's
 ``stale_runtime_cleanup.cleanup_and_restore`` scrubs ``<name>.bridge.port``
 and its router-mgmt-probe restore transiently fails, the bind-time

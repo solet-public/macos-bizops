@@ -623,7 +623,8 @@ class SessionLedgerService(
 
         # The cron-fired action is TERMINAL/HEADLESS per the canonical
         # scheduler cron-action contract enforced at ``create_cron_schedule``
-        # registration (see ``workbench/2026-06-17_scheduler_cron_action_contract_design.md``
+        # registration (see the scheduler cron-action-contract design
+        # record, dev-checkout workbench — not part of the shipped tree,
         # for the validator design + the canonical KB article at
         # ``knowledge_bases/ananta_platform/21_scheduling_service/
         # 01_template_flow_record_lifecycle.md``): the action runs
@@ -1071,9 +1072,10 @@ class SessionLedgerService(
 
         Schema-debt-external-id lane, 2b-S1 (2026-08-06). Full contract
         (refusal conditions, quiesce protocol, soft-delete rationale) is on
-        the ABC declaration (``interfaces/public.py``) and in
-        ``workbench/2026-08-06_schema_debt_external_id_findings_schema-debt-impl.md``
-        — not repeated here to keep this concrete implementation lean.
+        the ABC declaration (``interfaces/public.py``) and in the
+        schema-debt external-id findings record (dev-checkout workbench —
+        not part of the shipped tree) — not repeated here to keep this
+        concrete implementation lean.
         """
         _winner, loser = resolve_duplicate_source_pair(
             self._repository, winner_source_id, loser_source_id,

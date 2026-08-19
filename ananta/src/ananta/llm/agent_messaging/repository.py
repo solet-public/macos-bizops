@@ -277,8 +277,13 @@ class AgentMessagingRepository:
         # sentinel `{prefix}_g` reproduces strict `created_at > after`
         # (collation-robust), preserving the existing dup-created_at skip.
         # query_ordered implicitly excludes is_deleted=1 (the raw SQL did not) —
-        # a no-op today (core__agent_message is append-only; no soft-delete write
-        # path, grep-confirmed), matching the R2 thread-read reconciliation. The
+        # a no-op today (core__agent_message has no soft-delete write path,
+        # grep-confirmed), matching the R2 thread-read reconciliation. STILL a
+        # no-op after GAU-06 (2026-08-19) added the ONLY delete path this table
+        # has: rotation self-notice retention hard-deletes (soft_delete=False),
+        # so it removes rows outright rather than parking them behind the flag
+        # this filter would have to skip. See the table's own description in
+        # schema.py for the scope of that exception. The
         # migration smoke pins this exclusion so a future message-soft-delete
         # path can't silently drop peer-inbox rows undetected.
         filters: dict[str, object] = {"role": MessageRole.ORIGINATOR.value}

@@ -35,11 +35,21 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
+from ananta.llm.agent_messaging.models import PeerSendRequest, TextPart
+
 from . import rotation_thresholds
+from .constants import (
+    SYSTEM_AGENT_ID,
+    SYSTEM_ROTATION_NOTICE_ID,
+    SYSTEM_ROTATION_NOTICE_LABEL,
+)
+from .rotation_notice_retention import prune_rotation_notices
 from .session_context_status_store import list_session_context_statuses
+from .session_sweep import live_lifecycle_rows_by_instance
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
+    from ananta.llm.agent_messaging.service import AgentMessagingService
 
     from .bridge_sessions import BridgeSessionManager
     from .models import BridgeBinding
@@ -158,9 +168,28 @@ class SelfNoticeCounts:
     the `agent_session_id` join column, which carries NULL), not the structural
     watch-id gap it originally counted. It should decay to zero as reporters
     upgrade; one that does not is a new fault, not the old known one.
+
+    ★ GAU-06 (G1), 2026-08-19: `notified` WAS THE WRONG WORD AND IT WAS HIDING A
+    QUESTION. It named neither what this leg does nor what the session gets. A
+    session is "notified" only if something surfaced it to a reader, and this leg
+    cannot know that -- what it knows is that the durable row was accepted. So:
+
+    * `appended` -- the DURABLE peer-message row was persisted for that session.
+      That is a transport fact this leg can actually assert, and the one that
+      matters, because the durable row is what survives a watcher drain.
+    * `watcher_held` -- how many of those `appended` sessions are WATCHER-HELD,
+      a SUBSET and never an additional population. It is reported because the two
+      have materially different delivery stories: a bridge-held session's event
+      surfaces at its next natural boundary, while a watcher-held worker sees it
+      only when it next looks, and no turn starts either way. A single number
+      averaged those two into a claim neither of them supports.
+
+    So `appended - watcher_held` is the bridge-held count; no field is a total of
+    the others, and the two failure counts remain disjoint from both.
     """
 
-    notified: int = 0
+    appended: int = 0
+    watcher_held: int = 0
     unroutable: int = 0
     undeliverable: int = 0
 
@@ -264,6 +293,47 @@ def _measured_age_seconds(row: dict[str, Any], *, clock: datetime) -> float | No
     return (clock - stamp).total_seconds()
 
 
+def _provenance_note(row: dict[str, Any]) -> str:
+    """The notice's two clocks, and the gap between them (GAU-14 D3).
+
+    ``measured_at`` is when the reporter LOOKED. ``reading_at`` is when the
+    number it carries was PRODUCED. Reporting only the first is what made two
+    notices about one strictly-monotone series read as later-but-LOWER on
+    2026-08-19: the copy with the later stamp carried the earlier reading, by
+    107 seconds, and nothing in either notice let a reader see that.
+
+    NULL ``reading_at`` is NOT REPORTED and is SAID SO rather than elided. A
+    silent omission would leave the reader with a lone timestamp and the same
+    wrong inference the field exists to prevent -- and this branch is the
+    normal one for every reporter generation predating the column, so it is
+    the branch most readers will meet first.
+    """
+    measured = str(row.get("measured_at") or "").strip()
+    raw_reading = str(row.get("reading_at") or "").strip()
+    if not raw_reading:
+        return (
+            f"Measured at {measured} (that is when the reporter LOOKED; the "
+            "reading's own time was NOT REPORTED by this reporter, so the "
+            "observation lag is unknown -- it is not zero)."
+        )
+    lag = ""
+    try:
+        m = datetime.fromisoformat(measured)
+        r = datetime.fromisoformat(raw_reading)
+    except ValueError:
+        m = r = None
+    if m is not None and r is not None:
+        if m.tzinfo is None:
+            m = m.replace(tzinfo=UTC)
+        if r.tzinfo is None:
+            r = r.replace(tzinfo=UTC)
+        lag = f", an observation lag of {(m - r).total_seconds():.0f}s"
+    return (
+        f"Reading produced at {raw_reading}, observed at {measured}{lag}. The "
+        "number above is as of the READING, not the observation."
+    )
+
+
 def _gauge_verdict(row: dict[str, Any]) -> rotation_thresholds.RotationVerdict | None:
     """The two-axis verdict for one gauge row, or ``None`` when the row cannot
     support one.
@@ -334,9 +404,51 @@ def _self_notice_prose(row: dict[str, Any], verdict: rotation_thresholds.Rotatio
             f"got recommended={recommended}, strongly={strongly}, "
             f"H={rotation_thresholds.POLICY_H_TOKENS}",
         )
+    # ★ GAU-14 (B2), 2026-08-19 -- THE FLOOR, STATED BESIDE THE ABSOLUTE BAND.
+    #
+    # The bands are absolute counts by design (see `rotation_thresholds`: the
+    # economics they encode are model-independent). But an absolute count read
+    # on its own invites a wrong inference, and the wrong inference was measured
+    # four times on the night of 2026-08-18/19: every fresh session in this
+    # checkout crossed `warm_task_boundary` within its first quarter hour, and
+    # "you have reached 164,118 tokens" read to its recipient as "you have DONE
+    # 164,118 tokens of work" when most of it was the prefix the session was
+    # born carrying. H is now 146,139 (GAU-05) against a first warm band of
+    # 150,000 -- 3,861 tokens of headroom -- so the notice fires on a session
+    # with essentially no work behind it and says nothing that lets the reader
+    # tell that from a session with 150,000 tokens of real work behind it.
+    #
+    # This does NOT change a single threshold. It states the quantity that makes
+    # the number triageable in one read: what a clear would have to re-write
+    # (H), and therefore what this session would actually be shedding.
+    #
+    # ★ WHAT IT DELIBERATELY DOES NOT CLAIM. It does not say "your boot floor
+    # was H". That would be false for most sessions and it was measured false:
+    # this lane booted at `POLICY_H_BOOT_TOKENS` ~44.7K, nowhere near H, and
+    # reached the band by reading its brief. H is the POST-ROTATION PREFIX --
+    # what a `/clear` re-writes -- which is well defined for every session
+    # regardless of how it got here, and it is the exact quantity the
+    # break-even rule already compares against. Saying more than that would
+    # manufacture a per-session measurement nobody took.
+    #
+    # H is also the fable-5 seat-class figure; `POLICY_H_BOOT_TOKENS` measurably
+    # varies ~9.2K between model tiers (GAU-05). Whether H becomes per-tier is
+    # an open operator question (GAU-14 axis 2, candidate B3), so the line names
+    # H as the policy constant it is and claims nothing per-tier.
+    floor = rotation_thresholds.POLICY_H_TOKENS
+    above_floor = current - floor
+    floor_note = (
+        f"Of that, {floor:,} is H -- the prefix a clear would have to re-write "
+        f"before you did any work at all -- so about {above_floor:,} is what "
+        "rotating would actually shed.\n"
+        if above_floor > 0 else
+        f"You are still BELOW H ({floor:,}, the prefix a clear would have to "
+        "re-write), so a clear would cost more than it could save.\n"
+    )
     return (
         f"rotation_self_notice: YOUR context has reached {current:,} tokens on "
         f"{model} ({current / ceiling:.1%} of its {ceiling:,} ceiling).\n"
+        f"{floor_note}"
         f"Band: {verdict.effective_band} -- {verdict.headline}.{ttl_note}\n"
         f"The ratified thresholds and the horizons they came from: clearing is "
         f"RECOMMENDED past {recommended:,} (pays off with ~{recommended_n:.0f} "
@@ -344,7 +456,7 @@ def _self_notice_prose(row: dict[str, Any], verdict: rotation_thresholds.Rotatio
         f"with ~{strongly_n:.0f} calls left).\n"
         f"Economics axis: {verdict.economics_band}. Capacity axis: "
         f"{verdict.capacity_band} -- {verdict.capacity_guidance}\n"
-        f"Measured at {row.get('measured_at')}. NOTHING HAS BEEN CLEARED AND "
+        f"{_provenance_note(row)} NOTHING HAS BEEN CLEARED AND "
         "NOTHING WILL BE: this is a notice, the decision and the action are "
         "yours."
     )
@@ -411,40 +523,143 @@ def _resolve_self_binding(
     return peer_registry.resolve_by_agent_session_id(str(agent_session_id))
 
 
+def _prune_notice_thread(
+    state: StateManagementInterface, *, thread_id: str,
+) -> None:
+    """Bound this recipient's notice thread, without letting it fail the notice.
+
+    THE PRUNE RUNS AFTER THE WRITE IT IS BOUNDING, by the writer, per the
+    ruling -- see :mod:`.rotation_notice_retention` for why a reaper was not
+    chosen.
+
+    A FAILED PRUNE IS LOGGED, NEVER RAISED, and the direction matters: the
+    notice is already persisted and readable, so raising here would convert a
+    storage-hygiene problem into a lost delivery. The cost of swallowing it is
+    an unbounded thread, which is what the WARNING is for -- it names the thread
+    so the growth is attributable rather than mysterious.
+    """
+    try:
+        prune_rotation_notices(state, thread_id=thread_id)
+    except Exception:  # noqa: BLE001 — hygiene must never fail a delivered notice
+        logger.warning(
+            "rotation self-notice thread %s could not be pruned; the notice "
+            "itself was delivered and this thread is now unbounded until the "
+            "next successful prune",
+            thread_id, exc_info=True,
+        )
+
+
 def _notify_rotation_self(
     *,
+    state: StateManagementInterface,
+    agent_messaging_service: AgentMessagingService,
     peer_registry: PeerRegistry,
     bridge_manager: BridgeSessionManager,
     row: dict[str, Any],
     agent_instance_id: str,
     verdict: rotation_thresholds.RotationVerdict,
-) -> Literal["notified", "unroutable", "undeliverable"]:
-    """Best-effort notice to the session's OWN bridge.
+) -> tuple[Literal["appended", "unroutable", "undeliverable"], bool]:
+    """Best-effort notice to the session itself, PERSIST-FIRST (GAU-06 G2).
 
-    Returns WHICH outcome, not merely whether it worked. `unroutable` (no
-    binding for this instance id) and `undeliverable` (binding resolved,
-    `append_event` raised) have different causes and different owners, and a
-    single False collapsed them under log prose that named only the first.
+    Returns ``(outcome, watcher_held)``. ``unroutable`` (no binding for this
+    instance id) and ``undeliverable`` (binding resolved, the durable write
+    raised) have different causes and different owners, and a single False
+    collapsed them under log prose that named only the first.
 
-    Resolution is :func:`_resolve_self_binding` -- the row's own key first,
-    then the stored session-id join -- and a miss is a COUNTED coverage gap
-    rather than a silent skip; see :func:`sweep_rotation_self_notice` for what
-    the gap now is and why it is reported as a number.
+    ★ WHY A DURABLE ROW AND NOT JUST THE BRIDGE EVENT (GAU-06). A bridge event
+    is a QUEUE entry: a watcher's drain consumes it, and after that it is gone
+    with no cursor-addressable trace. So the one population this leg exists for
+    -- a worker running autonomously, whose watcher drains its channel without a
+    model turn -- could have its context notice consumed and never see it, which
+    is the same delivery failure this leg was built to fix, one layer down. The
+    peer-message row is the half that survives that: it is cursor-addressable,
+    it is readable from the session's own inbox at any later time, and it does
+    not depend on anyone being at the surface when it arrives.
 
-    ★ NO `drive_on_delivery` CALL HERE, unlike every sibling notify in this
-    module. Driving the host driver injects a turn; the standing ruling is that
-    no agent sits in the injection path for a context clear. Appending to the
-    session's own bridge is enough -- it surfaces at the next natural boundary
-    without interrupting in-flight work. If a future edit "fixes" the
-    inconsistency by adding the drive call, it will have converted a notice
-    into an interruption and broken the ruling. It is absent on purpose.
+    ★ PERSIST FIRST, THEN SURFACE, and the order is the point. If the append
+    went first, a crash between the two would leave a notice that was surfaced
+    and then lost -- the worst of both, because the reader who saw it has no way
+    to retrieve it and the reader who did not has no trace that it happened.
+    Persisting first means every notice a session was ever surfaced is also a
+    notice it can go back and read.
+
+    ★ SERVICE-LEVEL ``peer_send``, NEVER ``dispatch_peer_send``, and this is not
+    a style preference -- it was measured on 2026-08-19 and each item is
+    independent of the others:
+
+    1. ``dispatch_peer_send`` hardcodes ``important=True``. Every self-notice
+       would be stamped wake-bound, which is exactly the training of the
+       coordination inbox that GAU-06's noise half exists to prevent.
+    2. It appends ``EVENT_PEER_MESSAGE``, destroying the event-name
+       discriminator a read-side filter needs.
+    3. It wraps the prose in a ``[peer:<sender> instance=...]`` envelope with a
+       reply hint -- a session's own context measurement presented to it as mail
+       from somebody else.
+    4. It calls the registered NATIVE WAKE ADAPTER for ``claude_code``. That
+       adapter is not a turn injection (it appends on the same bridge queue as
+       ``queued_notification``), so the standing no-injection ruling survives it
+       -- but it RAISES when the recipient has no ``parent_pid`` or no open
+       bridge, and ``dispatch_peer_send`` also raises ``PeerUnreachableError``
+       for a stale binding. This leg counts those per session and keeps
+       sweeping; routed through the helper, ONE dead binding would fault the
+       pass for every other session in it.
+
+    A ``drive=False`` parameter was built on that helper for this caller and is
+    being REMOVED in the same change, because it addresses only item 4's nudge
+    and none of 1-3. The trap it was written to disarm is worth keeping in
+    words, though, since it is invisible where anyone would test it:
+    ``drive_on_delivery`` NO-OPS for a session with no managed row -- every
+    operator-present seat -- and fires on every managed watcher-held worker,
+    which is precisely the population this leg serves. A self-notice routed
+    through the default path therefore looks perfectly well behaved when
+    hand-tested on a seat.
+
+    ★ STILL NO ``drive_on_delivery`` CALL ON THIS PATH, by construction now
+    rather than by discipline: this module does not import it, the service-level
+    ``peer_send`` cannot reach it, and the smoke asserts no drive call occurs.
+    Driving a host driver injects a turn, and the standing ruling is that no
+    agent sits in the injection path for a context clear.
+
+    ★ THE SENDER IS A SENTINEL, NOT A SESSION. ``SYSTEM_ROTATION_NOTICE_ID``
+    gives these notices their own peer thread per recipient (threads key on
+    ``(sender_bridge_id, peer_instance)``), which is what lets a coordination
+    drain leave them alone. It also keeps the service's same-instance self-send
+    rejection satisfied honestly: the sender is the platform, not the measured
+    session talking to itself.
     """
     binding = _resolve_self_binding(
         peer_registry, row=row, agent_instance_id=agent_instance_id,
     )
     if binding is None:
-        return "unroutable"
+        return "unroutable", False
+    watcher_held = binding.is_watcher
     prose = _self_notice_prose(row, verdict)
+    try:
+        persisted = agent_messaging_service.peer_send(
+            PeerSendRequest(
+                sender_bridge_id=SYSTEM_ROTATION_NOTICE_ID,
+                sender_agent_id=SYSTEM_AGENT_ID,
+                sender_agent_instance_id=SYSTEM_ROTATION_NOTICE_ID,
+                sender_session_label=SYSTEM_ROTATION_NOTICE_LABEL,
+                peer_agent_id=binding.agent_id,
+                peer_agent_instance_id=binding.agent_instance_id,
+                peer_session_label=binding.session_label,
+                peer_agent_session_id=binding.agent_session_id,
+                content=[TextPart(type="text", text=prose)],
+                # NOT important: this is a notice, not a wake. The flag is what
+                # peer_inbox's silent-only filters read, and stamping a machine
+                # -generated measurement as wake-bound is the noise GAU-06 is
+                # about.
+                important=False,
+            ),
+        )
+    except Exception:  # noqa: BLE001 — best-effort notify, never fails the sweep
+        logger.warning(
+            "session %s rotation self-notice durable write failed",
+            agent_instance_id, exc_info=True,
+        )
+        return "undeliverable", watcher_held
+    _prune_notice_thread(state, thread_id=str(persisted.thread_id))
     try:
         bridge_manager.append_event(
             binding.bridge_id,
@@ -452,17 +667,84 @@ def _notify_rotation_self(
             prose,
             {"flow_id": f"rotation-self-{agent_instance_id}"},
         )
-    except Exception:  # noqa: BLE001 — best-effort notify, never fails the sweep
+    except Exception:  # noqa: BLE001 — the durable half already succeeded
+        # NOT `undeliverable`, and the distinction is deliberate: the row this
+        # session can read exists. What failed is the surface that would have
+        # shown it sooner, so the notice is late rather than lost -- a different
+        # fault with a different owner, and reporting it as a delivery failure
+        # would send someone looking for a message that is sitting in the inbox.
         logger.warning(
-            "session %s rotation self-notice append failed",
+            "session %s rotation self-notice persisted but its bridge append "
+            "failed; the notice is readable from that session's inbox",
             agent_instance_id, exc_info=True,
         )
-        return "undeliverable"
-    return "notified"
+    return "appended", watcher_held
+
+
+def _session_still_live(
+    lifecycle_row: dict[str, Any] | None, *, clock: datetime,
+) -> bool:
+    """Whether this session is currently MEETING its reporting obligation.
+
+    ★ GAU-01(c)'s instrument, and the reason it is the lifecycle row rather
+    than a second wall-clock number. The bound this replaces was evaluated
+    against ``measured_at`` -- the GAUGE clock -- so a session whose gauge had
+    arrested dropped out of the notifiable population after an hour. It stopped
+    being told to rotate at exactly the moment it had been running longest
+    without an operator prompt, which is the scenario this leg exists for. The
+    gauge going quiet was being read as the SESSION going quiet, and those are
+    the two things GAU-01 is about not confusing.
+
+    NO NEW THRESHOLD IS INVENTED HERE, deliberately. ``report_by`` is the
+    platform's OWN declared deadline for this session -- re-armed on every
+    report_alive, and the very field the D1 sweep uses to flip a row to
+    ``overdue``. A session inside its window is one the platform itself
+    currently considers live; asking the same question with a fresh constant
+    would mean maintaining a second opinion that can disagree with the first,
+    and the disagreement would be silent.
+
+    ``report_by`` in the FUTURE is the whole test. It is not "recently
+    reported": a session may legitimately go a long quiet stretch inside a
+    generous window, and the platform grants that window on purpose.
+
+    Absence is NOT liveness. No row (the session is not in ``live`` at all) and
+    an unreadable ``report_by`` both return False, so this can only ever EXTEND
+    eligibility on positive evidence -- never grant it on a timestamp that
+    could not be read. The bound it relaxes is protecting an unbounded scan, and
+    a guard that fails open on unreadable input is not a guard.
+    """
+    if lifecycle_row is None:
+        return False
+    report_by = _parse_report_by(lifecycle_row)
+    if report_by is None:
+        return False
+    return report_by >= clock
+
+
+def _parse_report_by(lifecycle_row: dict[str, Any]) -> datetime | None:
+    """``report_by`` as an aware UTC datetime, or ``None`` if unreadable.
+
+    Same naive-reads-back coercion as :func:`_measured_age_seconds` documents
+    for ``measured_at``: state ``DATETIME`` columns drop the offset on the
+    round-trip, and subtracting a naive value from an aware ``clock`` raises
+    ``TypeError`` -- which inside this rider's per-leg fault isolation would
+    fail the leg silently on every tick.
+    """
+    raw = str(lifecycle_row.get("report_by") or "").strip()
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
 
 
 def _self_notice_candidate(
-    row: dict[str, Any], *, clock: datetime,
+    row: dict[str, Any],
+    *,
+    clock: datetime,
+    lifecycle: dict[str, dict[str, Any]],
 ) -> tuple[str, rotation_thresholds.RotationVerdict] | None:
     """``(agent_instance_id, verdict)`` for a row worth notifying, else None.
 
@@ -492,7 +774,19 @@ def _self_notice_candidate(
     if not agent_instance_id:
         return None
     age_seconds = _measured_age_seconds(row, clock=clock)
-    if age_seconds is None or age_seconds > SELF_NOTICE_STALENESS_S:
+    if age_seconds is None:
+        return None
+    if age_seconds > SELF_NOTICE_STALENESS_S and not _session_still_live(
+        lifecycle.get(agent_instance_id), clock=clock,
+    ):
+        # ★ GAU-01(c). The bound still fires -- it is the only thing keeping
+        # this scan off the unpruned gauge table's entire history -- but it is
+        # no longer decided by the gauge clock ALONE. A stale measured_at now
+        # excludes a row only when the LIFECYCLE row also fails to vouch for
+        # the session, so an arrested gauge no longer silences a session that
+        # is demonstrably still reporting. Order matters: the cheap timestamp
+        # test short-circuits, so the lifecycle lookup runs only for the rows
+        # the old bound would have dropped.
         return None
     verdict = _gauge_verdict(row)
     if verdict is None:
@@ -502,12 +796,62 @@ def _self_notice_candidate(
     return (agent_instance_id, verdict)
 
 
+def _consider_one_row(
+    row: dict[str, Any],
+    *,
+    clock: datetime,
+    lifecycle: dict[str, dict[str, Any]],
+    gate: BandEdgeLatch,
+    state: StateManagementInterface,
+    agent_messaging_service: AgentMessagingService,
+    peer_registry: PeerRegistry,
+    bridge_manager: BridgeSessionManager,
+) -> tuple[str, tuple[Literal["appended", "unroutable", "undeliverable"], bool] | None] | None:
+    """One gauge row's whole decision, in the three outcomes it really has.
+
+    * ``None`` -- not a candidate at all (stale, below band, ended session).
+    * ``(instance_id, None)`` -- a candidate the latch is currently suppressing.
+      The id still comes back because :meth:`BandEdgeLatch.retain_active` must
+      count it: a suppressed session is NOTIFIABLE, and dropping it from that
+      set would expire its own latch entry and re-notify it next tick.
+    * ``(instance_id, (outcome, watcher_held))`` -- a notice was attempted.
+
+    ★ EXTRACTED FOR THE COMPLEXITY GATE (2026-08-19), and the split is chosen so
+    the caller keeps only the ACCUMULATION. GAU-06's durable half took the
+    sweep to cyclomatic C(11) against an A/B-only gate. Decomposed rather than
+    allowlisted: the allowlist is a register of debt the operator deferred, not
+    a place for work landing tonight to park itself.
+
+    The latch is recorded HERE rather than by the caller because the record
+    belongs with the decision that earned it -- the durable write, not the
+    surface append. The notice a session can read exists at that point, so
+    repeating it at the same band edge would be a duplicate whether or not the
+    bridge accepted the event.
+    """
+    candidate = _self_notice_candidate(row, clock=clock, lifecycle=lifecycle)
+    if candidate is None:
+        return None
+    agent_instance_id, verdict = candidate
+    if gate.suppressed(agent_instance_id, verdict.effective_band, now=clock):
+        return agent_instance_id, None
+    outcome, is_watcher_held = _notify_rotation_self(
+        state=state,
+        agent_messaging_service=agent_messaging_service,
+        peer_registry=peer_registry, bridge_manager=bridge_manager,
+        row=row, agent_instance_id=agent_instance_id, verdict=verdict,
+    )
+    if outcome == "appended":
+        gate.record_sent(agent_instance_id, verdict.effective_band, now=clock)
+    return agent_instance_id, (outcome, is_watcher_held)
+
+
 def sweep_rotation_self_notice(
     state: StateManagementInterface,
     *,
     now: datetime | None = None,
     peer_registry: PeerRegistry | None = None,
     bridge_manager: BridgeSessionManager | None = None,
+    agent_messaging_service: AgentMessagingService | None = None,
     latch: BandEdgeLatch | None = None,
 ) -> SelfNoticeCounts:
     """Tell each session ITSELF how big its context has got.
@@ -585,29 +929,49 @@ def sweep_rotation_self_notice(
     WRONG for a repeating tick -- the composed production caller always
     supplies one.
     """
-    if peer_registry is None or bridge_manager is None:
+    if (
+        peer_registry is None
+        or bridge_manager is None
+        or agent_messaging_service is None
+    ):
+        # UNWIRED, not broken: the composed production caller passes all three,
+        # and a test or one-shot that passes none gets an empty tally rather
+        # than an import-time dependency. ``agent_messaging_service`` joins the
+        # guard rather than being defaulted (GAU-06 G2) because the durable
+        # write is not optional decoration -- a sweep that quietly ran without
+        # it would append surface events that a watcher drain can still eat,
+        # which is the exact failure this leg was extended to close, reported
+        # as a healthy tally.
         return SelfNoticeCounts()
     clock = now or datetime.now(UTC)
     gate = latch if latch is not None else BandEdgeLatch()
-    tally = {"notified": 0, "unroutable": 0, "undeliverable": 0}
+    tally = {"appended": 0, "unroutable": 0, "undeliverable": 0}
+    watcher_held = 0
     notifiable: set[str] = set()
+    lifecycle = live_lifecycle_rows_by_instance(state)
     for row in list_session_context_statuses(state):
-        candidate = _self_notice_candidate(row, clock=clock)
-        if candidate is None:
-            continue
-        agent_instance_id, verdict = candidate
-        notifiable.add(agent_instance_id)
-        if gate.suppressed(agent_instance_id, verdict.effective_band, now=clock):
-            continue
-        outcome = _notify_rotation_self(
-            peer_registry=peer_registry, bridge_manager=bridge_manager,
-            row=row, agent_instance_id=agent_instance_id, verdict=verdict,
+        considered = _consider_one_row(
+            row,
+            clock=clock,
+            lifecycle=lifecycle,
+            gate=gate,
+            state=state,
+            agent_messaging_service=agent_messaging_service,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
         )
+        if considered is None:
+            continue
+        agent_instance_id, delivered = considered
+        notifiable.add(agent_instance_id)
+        if delivered is None:
+            continue
+        outcome, is_watcher_held = delivered
         tally[outcome] += 1
-        if outcome == "notified":
-            gate.record_sent(agent_instance_id, verdict.effective_band, now=clock)
+        if outcome == "appended":
+            watcher_held += int(is_watcher_held)
     gate.retain_active(notifiable)
-    return SelfNoticeCounts(**tally)
+    return SelfNoticeCounts(watcher_held=watcher_held, **tally)
 
 
 __all__ = [

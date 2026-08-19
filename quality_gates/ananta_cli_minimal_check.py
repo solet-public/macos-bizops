@@ -16,7 +16,8 @@ Same exit-code semantics as the other ``quality_gates/`` scripts:
   1  — one or more violations
   2  — harness error
 
-Reference: ``workbench/2026-06-16_launch_py_choice_y_design.md`` §5.
+Reference: the launch.py choice-Y design record §5 (dev-checkout
+workbench — not part of the shipped tree).
 """
 
 from __future__ import annotations

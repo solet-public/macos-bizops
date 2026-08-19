@@ -5,9 +5,9 @@ entire 3h20m freeze, and every observer on the fleet was misled by it. (That
 history is about the observers, not about deploy gating: this checkout's
 blue-green swap paths — local router and AWS ALB/ECS alike — never consult
 this endpoint's body during warmup, only the unrelated ``readiness_probe``
-closure's 200-vs-503 split; see GAU-10 investigation notes in
-``workbench/2026-08-18_gau10_stall_boolean_report_lane_gau10.md``. Do not
-read the paragraph below as a description of current deploy wiring.)
+closure's 200-vs-503 split; see the GAU-10 investigation notes (dev-checkout
+workbench record, not part of the shipped tree). Do not read the paragraph
+below as a description of current deploy wiring.)
 
 Lane AA established the subtlety that decides this module's design: **health
 was not lying.** It was truthfully measuring a genuinely-alive half of a

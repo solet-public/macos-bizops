@@ -44,6 +44,8 @@ from agent_messaging_plugin.context_status_verbs import (  # noqa: E402
 )
 from agent_messaging_plugin.session_lifecycle_verbs import VerbError  # noqa: E402
 
+_HISTORY_RECORDED_AT = "recorded_at"
+
 _passed = 0
 _failed: list[str] = []
 
@@ -68,6 +70,7 @@ class _RecordingState:
 
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
+        self.history: list[dict[str, Any]] = []
 
     def upsert_state(self, _namespace: str, payload: dict[str, Any]) -> dict[str, Any]:
         record = dict(payload["record"])
@@ -78,6 +81,47 @@ class _RecordingState:
         wanted = payload["filters"]["agent_instance_id"]
         row = self.rows.get(wanted)
         return {"action_status": "completed", "data": {"records": [row] if row else []}}
+
+    # -- GAU-15 (2026-08-19): the gauge write now also APPENDS a history row.
+    # These three exist because `upsert_session_context_status` gained a second
+    # writer, and a double that implements only the old half would fail this
+    # smoke on a missing attribute rather than on anything it means to test.
+    # They keep this double's whole point intact -- records are stored VERBATIM,
+    # so a field the store forgets to carry into the history row is simply
+    # absent on read, which is exactly what an envelope fake cannot express.
+
+    def write_state(self, _namespace: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.history.append(dict(payload["record"]))
+        return {"action_status": "completed", "data": {"result": {"id": "h"}}}
+
+    def query_ordered(self, _namespace: str, payload: dict[str, Any]) -> dict[str, Any]:
+        wanted = payload["filters"]["agent_instance_id"]
+        rows = [r for r in self.history if r.get("agent_instance_id") == wanted]
+        # Newest first on the same key the store orders by; the store's own
+        # prune/read logic is what is under test, never this ordering.
+        rows.sort(key=lambda r: str(r.get("recorded_at") or ""), reverse=True)
+        limit = int(payload.get("limit", len(rows)))
+        return {
+            "action_status": "completed",
+            "data": {"records": rows[:limit], "count": min(limit, len(rows))},
+        }
+
+    def delete_records(self, _namespace: str, payload: dict[str, Any]) -> dict[str, Any]:
+        filters = payload["filters"]
+        cutoff = str(filters[_HISTORY_RECORDED_AT]["value"])
+        kept = [
+            r for r in self.history
+            if not (
+                r.get("agent_instance_id") == filters["agent_instance_id"]
+                and str(r.get("recorded_at") or "") < cutoff
+            )
+        ]
+        deleted = len(self.history) - len(kept)
+        self.history = kept
+        return {
+            "action_status": "completed",
+            "data": {"result": {"deleted": deleted, "soft_delete": False}},
+        }
 
 
 def _report(state: _RecordingState, **overrides: Any) -> dict[str, Any]:

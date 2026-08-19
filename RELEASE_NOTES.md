@@ -4,6 +4,233 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-19 — Alarms that leave a record, a context notice that survives its own delivery, and a stalled gauge you can see
+
+**One behaviour change worth knowing about, and it is deliberate.** A command in
+the shipped coordination hooks that used to do nothing quietly now fails with a
+message when it is asked to do nothing. Everything else in this release is
+additive: alarms that could fire into silence now leave a durable record, a
+condition that could not be detected at all now can be, and several notices stop
+asserting things they never measured. No envelope shrinks, and no stored row
+needs rewriting.
+
+Update with the standard short form: pull fast-forward only, restart, and wait
+for startup to finish. The seed update runbook carries the complete procedure.
+
+### A context-rotation notice now survives the delivery that used to consume it
+
+When a session crosses a rotation threshold, the platform tells that session so
+directly. That notice was only ever a queue entry on the session's own event
+channel. A queue entry is consumed by whoever drains it, and it leaves nothing
+addressable behind, so for the one population the notice exists to serve — a
+session running unattended, whose channel is drained by machinery rather than
+read by a person — the notice could be taken off the queue and never seen.
+
+The notice is now written as a durable message first and surfaced second, and
+the order is the guarantee rather than a detail: surfacing first would let an
+interruption between the two steps leave a notice that was displayed and then
+lost. The persisted copy outlives the drain and stays readable from that
+session's own inbox afterwards, so a notice that was delivered while nobody was
+looking can still be found later.
+
+The durable copy deliberately does not travel the same path an ordinary peer
+message takes. That path marks everything it sends as important, wraps the text
+in an envelope that presents the session's own measurement as mail from someone
+else, and wakes the recipient through an adapter that raises when a recipient
+has no live attachment — which would let a single dead binding fault the pass
+for every other session in it. The measurement is now written as what it is: the
+session's own reading, in its own words, counted per session, with a sweep that
+keeps going when one recipient is unreachable.
+
+### A notice that fired on the fraction now says so, instead of telling you to keep working
+
+Rotation urgency is measured on two axes, an absolute token count and a share of
+the model's own context ceiling, and the notice fires when either one is
+actionable. On a small ceiling the share can cross while the absolute band is
+still comfortable — and in exactly that case the notice printed the absolute
+band alone, so a message typed as a rotation notice arrived reading, in effect,
+keep working.
+
+Every notice now carries the reason it fired: both axes agreeing, the absolute
+band alone, or the share alone, each stated with the numbers behind it. The
+reason is passed down from the decision that already made it rather than
+recomputed where it is printed, so the sentence cannot drift away from the rule
+it describes.
+
+### One due condition now reaches you once, not up to three times
+
+Four independent legs can notice that a session is due, each latching against
+its own store, and none of them can see the others. A single condition could
+therefore reach a steward three times and a session-level reader twice.
+
+The watch leg now stands down whenever its own report to the platform completed,
+because the platform's own legs then cover the same condition. This is deferral
+rather than suppression: the stand-down never consumes the delivery record, so a
+platform that stops answering makes the very next unthrottled tick fire
+normally. It is additionally conditioned on the band being actionable, because
+the platform being reachable does not establish that the platform is saying
+this.
+
+### The boot-cost figure the notices reason from was re-measured, and it had moved
+
+The rotation policy subtracts an estimate of what a session costs before it does
+any work of its own. That estimate was re-measured on a current session
+generation by the same method that produced the original, with the older
+transcript re-run as a control to prove the method still reproduces its own
+earlier result exactly. It had drifted upward by about a third.
+
+The drift is not the hook set: the boot payload moved barely at all over three
+days, while the rehydration prompt that runs at pickup moved by half. The
+provenance note now names the pickup prompt as a re-measurement trigger and
+requires both components to be recorded separately, so the next drift is
+attributable instead of merely visible. Test probes that were fixed numbers
+sitting either side of the estimate are now derived from it — at the new value
+those literals had ended up on the wrong side of their own thresholds, where the
+assertions would have stayed green while no longer testing their subject.
+
+### A gauge that STOPPED is now detected, not just one that was never written
+
+The coverage check asked whether a session's context gauge row existed. A live
+session sat for over an hour with a row that existed and had simply stopped
+changing, and nothing surfaced it, because a frozen row reads as coverage.
+
+There is now a separate check for the frozen case, and it deliberately does not
+key on either clock alone. Both the heartbeat and the gauge reporter run on the
+same completed tool call, so a session that is merely idle writes neither row
+and its gauge goes stale with nothing wrong. The new check keys on the
+divergence between the two: a session whose heartbeat is advancing while its
+gauge is not. It carries its own wording and its own latch, and it releases that
+latch when the condition relapses.
+
+The same reasoning fixed a bound that had the opposite failure. Eligibility to
+receive a rotation notice was gated on the gauge clock, so a session whose gauge
+had arrested dropped out of the notifiable population after an hour — it stopped
+being told to rotate at exactly the point it had been running longest without
+being told. Eligibility is now read from the session's own liveness deadline.
+
+### A bounded history behind the gauge, so a freeze is diagnosable after it ends
+
+A single current reading cannot distinguish a gauge that stopped from a session
+that went quiet, and by the time anyone looks the evidence is usually gone. The
+platform now keeps a bounded series of past readings per session and exposes it
+for reading, so the shape of a freeze — when it started, what the last moving
+value was, whether it resumed — can be reconstructed after the fact instead of
+having to be caught live.
+
+### Every gauge alarm now leaves a durable, attributable record
+
+Gauge alarms existed only as in-memory events. Nothing persisted them, the only
+reader removed what it read, no surface was keyed on the kind of alarm, and the
+notify path returned early when no steward was bound. The consequence is the one
+that matters: an alarm that fired into the void and an alarm that never fired
+were the same silence.
+
+Each alarm is now recorded where it is raised, and the record is not conditional
+on a steward being bound — having nobody to tell is written down as an outcome
+rather than taken as a reason to stop. The record carries the delivery outcome
+as a stated result rather than a bare success flag, the thresholds as they were
+measured at the moment the alarm fired, and the identity of the release that
+raised it, taken from the running code's own tree rather than from whatever the
+reader believes is deployed. A new read path returns these records without
+consuming them.
+
+Alongside it there is now a canary: a synthetic subject that reports through the
+real write path, a bounded and audited way to disturb it, and a verifier that
+judges both edges against the durable record — that the detector fires when it
+should, and stays quiet when it should. When the detector is not deployed at
+all, the verifier abstains rather than accusing, because absence of the
+instrument is not evidence about the thing it measures.
+
+### Coverage alarms no longer fire at a worker that has simply not booted yet
+
+The startup grace before a session was expected to have reported was five
+minutes. The worst measured time from spawn to first reading, across several
+observations of real managed workers, is nearer eight — the gap is structural,
+because a spawned worker goes through dispatch and an acknowledgement turn
+before its first working turn, and only a working turn produces a reading. The
+grace is now ten minutes, with the measurement named in a test so it cannot
+quietly drift back under the evidence.
+
+The better half of the fix is that the check no longer rests on a wall clock at
+all, since a wall clock can only ever guess at someone else's dispatch latency.
+It now reads whether a heartbeat has landed since the session went live, which
+is direct evidence that the session is completing tool calls. That reading is
+three-valued on purpose: a session with no heartbeat window at all returns
+unknown, because the absence of the window is not evidence about the beat.
+
+The alarm text changed with it. It used to open by asserting that the session's
+hooks were running — an inference about a row it had not read — and to name a
+likeliest cause it had never measured, then close by ruling out the explanation
+that turned out to be correct. It now leads with what was measured, how long the
+session has been live with no reading against the stated grace, and diagnoses
+only as far as that evidence reaches.
+
+### Clearing a session now reports what actually happened to it
+
+The verb that clears a session reported success on the basis of having sent the
+instruction, not on the basis of the session having been cleared — so a pane
+that was mid-turn, and therefore never cleared, produced a success. It now
+reports the effect: what the session's state was before, what it is after, and
+whether the clear actually took. The companion status verb also accepts either
+of the two session identifier forms in circulation, instead of resolving only
+one and reporting nothing for the other.
+
+### An installed copy of a hook is now checked by content, not by version number
+
+A hook exists in two places: the copy carried in the repository and the copy an
+installation actually runs from its own cache. Both declared the same version
+while differing by more than a hundred lines, and a version comparison reports
+agreement on exactly that state. The check now compares content at the version
+both trees declare. Only a matching version is compared, so a deliberately
+retained older installation cannot raise a false alarm, and an installation that
+is simply absent produces a stated skip rather than a silent pass.
+
+### The shipped memory hooks no longer swallow an interleaved write
+
+The hooks that write local memory edits back to the platform list what is
+pending, send it, and then mark that batch as sent. The marking step re-read the
+journal to its current end rather than binding to the batch it had just listed,
+so anything captured in between was marked as sent without ever having been
+sent, and was then invisible to every later run.
+
+The marking step is now bound to the listed batch. This is the behaviour change
+named at the top: asking to mark a batch as sent when nothing was freshly listed
+used to do nothing at all and report success, and now fails with a message
+saying so, because the two situations need to be told apart.
+
+The same fix has been applied to the vendored copy of those hooks that ships
+with the coordination-hooks plugin, which had been left on the old behaviour.
+The two trees were confirmed to be the same vintage before the fix was carried
+across, differing only in wording, so this is the identical repair rather than a
+reimplementation of it.
+
+### Document checks now walk shipped executables, not only shipped prose
+
+The check that catches references to files a seed never ships walked shipped
+documentation only. A reference living in the docstring of a shipped source file
+was invisible to it by construction, and there was a live instance. The walk now
+covers shipped sources as well, narrowed to references into the planning
+directory, which is never shipped under any profile and therefore has no
+per-profile ambiguity. Deliberately narrower than checking every reference in
+every source file: a trial run of the broader form surfaced a large number of
+findings belonging to an unrelated class, and mixing the two would have buried
+both.
+
+The one live instance is fixed. The pre-existing references the widened walk
+surfaced are registered as tracked debt through the same allowlist and baseline
+mechanism the earlier document checks already use, and a first pass has since
+rewritten a substantial share of them from references into plain prose, with no
+functional change to any of the files involved. The remainder stays tracked
+rather than silently tolerated.
+
+Two smaller repairs travel with it. The bundle verifier now writes its own
+verdict as part of verifying, instead of leaving that to a separate call a
+runner had to remember — a forgotten call produced no baseline, which then read
+as a passing comparison rather than a missing one. And the test double that
+stands in for the database now enforces the declared shape of the gauge table,
+so a column that was never declared fails in the test suite rather than only
+against a live database.
+
 ## 2026-08-18 (second update) — A stall alarm that can actually fire, and a bridge registration that refuses to start broken
 
 **One narrow breaking change, and it is deliberate.** A managed spawn that was

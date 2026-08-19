@@ -1,7 +1,7 @@
 """Plugin base class — slim lifecycle + service-injection surface.
 
 Decomposed during Step 9.B
-(`workbench/2026-05-25_plugin_god_class_remediation.md` §9.2):
+(design record, Step 9.2, dev-checkout workbench — not part of the shipped tree):
 
   - Action discovery → `action_discovery.py` (module-level functions).
   - Action execution → `action_execution.py` (module-level functions).

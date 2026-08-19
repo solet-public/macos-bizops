@@ -974,8 +974,21 @@ def test_clear_session_sends_and_can_park() -> None:
         )
         _check(driver.channel.sent == ["/clear"], "clear_session sends '/clear' over the channel")
         _check(
-            result == {"lifecycle_state": LIFECYCLE_LIVE, "parked": False},
+            result == {
+                "lifecycle_state": LIFECYCLE_LIVE, "parked": False,
+                "dispatched": True, "cleared": None,
+                "clear_verification": "unsupported_on_driver",
+            },
             "clear_session(park=False) does not transition lifecycle_state",
+        )
+        # GAU-09: this fixture's channel has no read-back surface, so the
+        # verb must say the effect is UNVERIFIED rather than imply success.
+        # Asserted as a whole-dict equality on purpose -- a field silently
+        # dropped from the envelope is exactly the regression that would put
+        # the "success means cleared" reading back.
+        _check(
+            result["cleared"] is None,
+            "GAU-09: a channel with no read-back surface never claims cleared=True",
         )
         _check(
             read_managed_session(state, "agi-clear-1")["lifecycle_state"] == LIFECYCLE_LIVE,
@@ -990,7 +1003,11 @@ def test_clear_session_sends_and_can_park() -> None:
             "clear_session(park=True) still sends '/clear' before parking",
         )
         _check(
-            parked_result == {"lifecycle_state": LIFECYCLE_PARKED, "parked": True},
+            parked_result == {
+                "lifecycle_state": LIFECYCLE_PARKED, "parked": True,
+                "dispatched": True, "cleared": None,
+                "clear_verification": "unsupported_on_driver",
+            },
             "clear_session(park=True) drives live -> parked",
         )
         _check(

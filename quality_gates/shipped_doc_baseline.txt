@@ -32,7 +32,100 @@
 # same absence cannot produce a false finding.
 #
 # Measured at 4fc06b84b (2026-08-18).
+#
+# GTE-11 RE-BASELINE (2026-08-18, on top of 90a78d83f, lane-gate-tooling): the
+# citation walk was extended to shipped `.py` sources, filtered to `workbench/`
+# citations only (a shipped executable can carry a dead citation the
+# markdown-only walk cannot see — see `cited_path_gate.py`'s module docstring).
+# That widening surfaced 205 pre-existing keys, registered as tracked debt in
+# the allowlist rather than fixed file-by-file (an unrelated-scope sweep across
+# dozens of plugin owners). This is a DELIBERATE one-time re-baseline from a
+# scope change, not the ordinary per-occurrence drift the note above warns
+# against — the same kind of move that established the 119/166/126 numbers
+# when this gate first landed.
+#
+# HEAD-ANCHORED, NOT LIVE-TREE-CONTAMINATED (2026-08-18, same lane, seat
+# review). This mechanism measures the WORKING TREE by design (WORKTREE
+# SEMANTICS above — an untracked-but-not-ignored file counts as shipped), which
+# in a shared multi-lane checkout means a concurrent lane's uncommitted WIP can
+# transiently inflate this count. The 205 keys above were cross-checked against
+# `git show HEAD:<path>` for every citing file that was ALSO dirty in another
+# lane's working tree at measurement time (8 keys touched 2 such files; 7
+# resolved identically at HEAD and were kept, 1 came from a file untracked at
+# HEAD entirely — `plugins/agent_messaging_plugin/tests/
+# clear_session_effect_verification_smoke.py`, lane-gau-verbs' new test — and
+# was EXCLUDED). This baseline therefore describes HEAD plus this lane's own
+# diff only, which is what actually lands when this commit merges — not
+# whatever else happened to be dirty in the shared tree at the moment it was
+# measured. A sibling lane's own citation debt is that lane's own baseline
+# concern, not folded into this one.
 
-macos_free_minimal 119
-bizops_standard    166
-macos_samantha     126
+macos_free_minimal 234
+bizops_standard    310
+macos_samantha     267
+
+# 2026-08-19 -- lane-gte-debt, GTE-11-DEBT tranche 1: remediated 8 of the 205
+# tracked workbench/-citation keys (ananta/core/plugins/{action_discovery,
+# action_execution,plugin_base,plugin_discovery,plugin_dispatcher,
+# plugin_initializer,plugin_installer,plugin_manager}.py, all citing the same
+# `workbench/2026-05-25_plugin_god_class_remediation.md` target) -- rewrote the
+# backticked citation to prose, same pattern as the action_path_liveness.py
+# exemplar GTE-11 fixed. -8 per profile (all 8 ship in every profile); 197
+# keys remain in the allowlist as tracked debt.
+#
+# 2026-08-19 -- lane-gte-debt, GTE-11-DEBT tranche 2: remediated 6 more keys
+# (ananta/interfaces/self_deployment_service_interface.py x3,
+# ananta/services/session_ledger_service/interfaces/public.py x3 keys across
+# 5 physical citation occurrences) -- same prose-rewrite pattern. -8
+# occurrences per profile (all ship in every profile); 191 keys remain.
+#
+# 2026-08-19 -- lane-gte-debt, GTE-11-DEBT tranche 3: remediated 10 more keys
+# (ananta/interfaces/local_self_deployment_service_interface.py x2,
+# ananta/llm/session_ledger/__init__.py x2,
+# ananta/services/cloud_self_deployment_service/interfaces/public.py x2,
+# ananta/services/vault_service/vault_service_proxy.py x2,
+# quality_gates/wint2_driver_import_check.py x2) -- same prose-rewrite
+# pattern, one occurrence per key. -10 per profile (all ship in every
+# profile, quality_gates/ ships wholesale); 181 keys remain.
+#
+# 2026-08-19 -- lane-gte-debt, GTE-11-DEBT tranche 4: remediated 12 more keys
+# (ananta/llm/session_ledger/vendor/codex_cloud.py x2,
+# ananta/tests/platform/process_registry_merge_validator_smoke.py x2,
+# plugins/default_scheduling_plugin/tests/action_factory_injection_smoke.py x2,
+# plugins/macos_self_deployment_plugin/src/macos_self_deployment_plugin/
+# blue_green_router/{install_router,router_state}.py x2 each,
+# plugins/macos_self_deployment_plugin/tests/blue_green_router/
+# bridge_port_lifecycle_smoke.py x2) -- same prose-rewrite pattern, one
+# occurrence per key. -12 bizops_standard/macos_samantha, -6
+# macos_free_minimal (the macos_self_deployment_plugin blue_green_router
+# trio -- 6 of the 12 occurrences -- does not ship in the free-tier
+# profile); 169 keys remain.
+#
+# 2026-08-19 -- lane-gte-debt, GTE-11-DEBT tranche 5: remediated 6 more keys
+# (ananta/core/runtime/port_manager.py x2, ananta/interfaces/
+# cloud_self_deployment_service_interface.py x2,
+# ananta/services/session_ledger_service/service.py x2, across 8 physical
+# occurrences) -- same prose-rewrite pattern. -8 per profile (all ship in
+# every profile); 163 keys remain.
+#
+# 2026-08-19 -- lane-gte-debt, GTE-11-DEBT tranche 6: remediated 10 more keys
+# in quality_gates/ itself (ananta_cli_minimal_check.py, bundle_license_gate.py,
+# code_quality_check.py, god_class_check.py x3 occurrences,
+# radon_cc_check.py, radon_mi_check.py x3 occurrences,
+# service_interface_ast_check.py, sql_access_gate.py,
+# tests/service_interface_ast_check_smoke.py,
+# whole_tree_integration_gate.py) across 14 physical citation occurrences
+# -- same prose-rewrite pattern. -14 per profile (quality_gates/ ships
+# wholesale in every profile); 153 keys remain.
+#
+# 2026-08-19 -- lane-gte-debt, GTE-11-DEBT tranche 7: remediated 10 more keys,
+# all in plugins/macos_self_deployment_plugin/tests/ (single occurrence each:
+# blue_green_router/{bridge_port_watchdog_smoke,router_smoke,
+# slice3_no_hardcoded_bands_smoke}.py, migrate_to_solet_ownership_smoke.py,
+# release_builder_dirty_tree_gate_smoke.py,
+# release_manager_call_sequence_smoke.py,
+# slice2_register_within_budget_smoke.py, slice4_5_stop_self_smoke.py,
+# slice4_drain_sentinel_smoke.py, swap_round_trip_smoke.py) -- same
+# prose-rewrite pattern. -10 bizops_standard/macos_samantha, 0
+# macos_free_minimal (macos_self_deployment_plugin does not ship in the
+# free-tier profile at all, consistent with tranche 4); 143 keys remain.

@@ -148,6 +148,23 @@ from .constants import (
 )
 from .context_status_verbs import report_context_status as lifecycle_report_context_status
 from .context_status_verbs import session_context_status as lifecycle_session_context_status
+from .gauge_canary import (
+    direct_canary_arrest as canary_direct_arrest,
+)
+from .gauge_canary import (
+    register_synthetic_session as canary_register_synthetic_session,
+)
+from .gauge_canary import (
+    verify_canary as canary_verify,
+)
+from .gauge_canary_store import CanaryError, register_canary
+from .gauge_notice_record_store import MAX_READ_ROWS as GAUGE_NOTICE_READ_ROWS
+from .gauge_notice_records import (
+    gauge_notice_records as gauge_read_notice_records,
+)
+from .gauge_series import (
+    session_context_status_history as gauge_session_context_status_history,
+)
 from .held_authorization_verbs import (
     list_held_authorizations as lifecycle_list_held_authorizations,
 )
@@ -236,6 +253,7 @@ from .session_claude_mapping_ingest import (
 from .session_claude_mapping_store import (
     list_session_claude_mappings as lifecycle_list_session_claude_mappings,
 )
+from .session_context_status_store import GAUGE_HISTORY_RETENTION
 from .session_inference_provider import SessionInferenceProvider
 from .session_lifecycle_store import format_directed_by
 from .session_lifecycle_store import resolve_lane_charter as lifecycle_resolve_lane_charter
@@ -264,6 +282,7 @@ from .session_sweep import (
     SessionRoleClaimPruner,
     sweep_deadline_dependencies,
     sweep_gauge_coverage,
+    sweep_gauge_staleness,
     sweep_lane_closed_dependencies,
     sweep_overdue_sessions,
     sweep_rotation_due_sessions,
@@ -275,7 +294,7 @@ from .system_slots import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover — type-only references
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from ananta.core.orchestration.interfaces import ISessionManager
     from ananta.core.orchestration.managers.flow_manager import FlowManager
@@ -708,6 +727,48 @@ class _SessionLifecyclePolicyConfig:
     default_fleet_transport: str = ""
 
 
+def _run_counted_leg(
+    legs: list[str],
+    label: str,
+    description: str,
+    run: Callable[[], int],
+    summarise: Callable[[int], str],
+    on_finding: Callable[[int], None],
+) -> None:
+    """Run one count-returning notice leg, fault-isolated, and record it.
+
+    ★ THE SHAPE THIS REMOVES, and why it is worth a helper rather than a
+    fourth copy. Each leg was try / except-log-FAULTED-and-append /
+    else-append-and-maybe-warn -- identical control flow, three different
+    strings. The duplication was not merely untidy: it put the rider's
+    fault-isolation contract in four places, so a leg added later could
+    silently omit the except clause and cost every leg after it that tick.
+    Here the contract exists once and a new leg cannot forget it.
+
+    BOTH INVARIANTS THE RIDER DEPENDS ON LIVE HERE:
+
+    * A FAULTED leg is still NAMED in ``legs``. An all-clear summary built
+      only from legs that succeeded shrinks silently, and a shrinking line
+      reads as a healthy one -- the failure the GAU-02 work exists to stop.
+    * ``on_finding`` fires only on a NON-ZERO count, so a healthy tick stays
+      quiet at WARNING while still reporting itself at INFO through the
+      summary.
+
+    The callables are passed rather than the sweep function plus arguments
+    so each leg keeps its own keyword shape and its own prose at the call
+    site, where a reader comparing legs can see them side by side.
+    """
+    try:
+        count = run()
+    except Exception:  # noqa: BLE001 — one leg's fault must not skip the others
+        logger.exception("%s %s leg FAULTED; rider continues", label, description)
+        legs.append(f"{label}=FAULTED")
+        return
+    legs.append(f"{label}={summarise(count)}")
+    if count:
+        on_finding(count)
+
+
 class AgentMessagingPlugin(
     ServicePlugin,
     IOInterfacePlugin,
@@ -764,6 +825,13 @@ class AgentMessagingPlugin(
         # the bound that buys.
         self._rotation_due_latch: NoticeLatch = NoticeLatch()
         self._gauge_coverage_latch: NoticeLatch = NoticeLatch()
+        # L4d (GAU-01(b)) gets its OWN instance for the reason stated above, and
+        # it is the sharpest case yet: "no gauge row at all" and "a gauge row
+        # that stopped" are conditions the SAME session moves BETWEEN. A shared
+        # latch would let the missing-row episode suppress the arrest notice
+        # that follows it -- silencing the finding precisely when the session
+        # started reporting again but its gauge did not.
+        self._gauge_stale_latch: NoticeLatch = NoticeLatch()
         # L4c keys on (session, BAND) rather than on the session alone, so a
         # NoticeLatch cannot serve it -- see BandEdgeLatch's docstring for why
         # the difference is a correctness one and not a refinement.
@@ -1786,6 +1854,74 @@ class AgentMessagingPlugin(
             # Read-only (issues no writes) -- always safe to retry.
             "session_context_status": EdgeProcessDefinition(
                 name="session_context_status",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # GAU-15 (2026-08-19): the SERIES behind that single row. Read-only
+            # like its sibling -- a bounded ordered page plus one lifecycle row.
+            "session_context_status_history": EdgeProcessDefinition(
+                name="session_context_status_history",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # GAU-21 (2026-08-19): the DURABLE record of which gauge
+            # notices fired. Read-only and NON-CONSUMING -- unlike the bridge
+            # event queue it exists to replace, whose only reader REMOVES what
+            # it reads.
+            "gauge_notice_records": EdgeProcessDefinition(
+                name="gauge_notice_records",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # GAU-15 item 4 (2026-08-19): the tamper canary's surface.
+            # register/arrest each WRITE an audit row -- NOT retryable, because
+            # a retry after a transient dispatch fault whose write already
+            # landed would create a SECOND registration or a SECOND arrest
+            # window for the same act, and a duplicated arrest window is
+            # exactly the attribution ambiguity the audit log exists to
+            # prevent. verify is read-only and retries safely.
+            "register_gauge_canary": EdgeProcessDefinition(
+                name="register_gauge_canary",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "arrest_gauge_canary": EdgeProcessDefinition(
+                name="arrest_gauge_canary",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            # register_synthetic_session WRITES the lifecycle ledger row, so it
+            # is not retryable for the same reason its siblings are not: a
+            # retry after a transient dispatch fault whose write already landed
+            # would ask for a SECOND identity for one canary. (It would in fact
+            # be refused with session_exists -- but a caller reading a retryable
+            # flag should not have to depend on a downstream guard to avoid
+            # duplicating a write.)
+            "register_synthetic_session": EdgeProcessDefinition(
+                name="register_synthetic_session",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "verify_gauge_canary": EdgeProcessDefinition(
+                name="verify_gauge_canary",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(
                 ),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
@@ -3348,20 +3484,43 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description="§4 clear_session (AMEND 5b) — context hygiene via the driver channel.",
+        output_description=(
+            "§4 clear_session (AMEND 5b) — context hygiene via the driver channel, with "
+            "effect verification where the driver can read its target back (GAU-09)."
+        ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="clear_session outcome",
             properties={
                 "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
                 "parked": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "dispatched": ParameterMetadata(
+                    description="The '/clear' reached the driver channel.",
+                    type=ParameterType.BOOLEAN,
+                ),
+                "cleared": ParameterMetadata(
+                    description=(
+                        "True only on a POSITIVE observation that the target is now "
+                        "clear; null when this driver has no read-back surface. Never "
+                        "false -- a driver that looked and saw nothing raises "
+                        "clear_unverified instead."
+                    ),
+                    type=ParameterType.BOOLEAN,
+                ),
+                "clear_verification": ParameterMetadata(
+                    description="'confirmed' or 'unsupported_on_driver'.",
+                    type=ParameterType.STRING,
+                ),
             },
         ),
     )
     def clear_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        """§4 ``clear_session`` (AMEND 5b) — fire-and-forget ``/clear`` over
-        the resolved host driver's channel; ``park=True`` additionally
-        drives the row to ``parked`` (the only writer of that edge)."""
+        """§4 ``clear_session`` (AMEND 5b) — sends ``/clear`` over the
+        resolved host driver's channel and, where that driver can read its
+        target back, VERIFIES the effect before answering (GAU-09: this verb
+        used to report the send in a return value shaped like a verdict).
+        ``park=True`` additionally drives the row to ``parked`` (the only
+        writer of that edge), and is skipped when a verification failed."""
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
@@ -3991,6 +4150,26 @@ class AgentMessagingPlugin(
                 required=True,
                 type=ParameterType.STRING,
             ),
+            # ★ GAU-14 (D3): OPTIONAL, AND THAT IS NOT LAZINESS. This verb is
+            # called by the INSTALLED plugin-cache copy of the reporting hook,
+            # which updates only on a reinstall -- so a REQUIRED parameter here
+            # would fail every un-upgraded copy's call outright, turning a
+            # provenance improvement into an outage on exactly the copies that
+            # are hardest to see. `required=False` is also what the column's
+            # tri-state wants: omission records NOT REPORTED, which is a
+            # positive finding about that reporter, never a synonym for
+            # "same as measured_at".
+            "reading_at": ParameterMetadata(
+                description=(
+                    "When the READING was produced — the source transcript "
+                    "line's own timestamp, NOT the reporter's clock. "
+                    "measured_at MINUS reading_at is the observation lag. Omit "
+                    "if the transcript line carried no timestamp; omission "
+                    "records NOT REPORTED, never a fabricated zero lag."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
             "cache_read_tokens": ParameterMetadata(
                 description=(
                     "cache_read_input_tokens on THE MOST RECENT ASSISTANT CALL — "
@@ -4109,6 +4288,7 @@ class AgentMessagingPlugin(
                 reporter_generation=_opt_int(raw.get("reporter_generation")),
                 agent_session_id=_opt_str(raw.get("agent_session_id")),
                 measured_at=str(raw.get("measured_at", "")),
+                reading_at=_opt_str(raw.get("reading_at")),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -4136,7 +4316,28 @@ class AgentMessagingPlugin(
             properties={
                 "resolved": ParameterMetadata(type=ParameterType.BOOLEAN),
                 "resolution_error": ParameterMetadata(type=ParameterType.STRING),
-                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "agent_instance_id": ParameterMetadata(
+                    description=(
+                        "The LEDGER id the returned row is actually keyed on -- not "
+                        "necessarily the id that was queried (GAU-07)."
+                    ),
+                    type=ParameterType.STRING,
+                ),
+                # Watch-id join (GAU-07, 2026-08-18): a watcher-held session is
+                # published by peer_list under its WATCH id while its gauge row
+                # lives under the LEDGER id. The verb now accepts either.
+                "queried_agent_instance_id": ParameterMetadata(
+                    description="The id the caller passed, whichever of the two it was.",
+                    type=ParameterType.STRING,
+                ),
+                "id_resolution": ParameterMetadata(
+                    description=(
+                        "'direct' (the queried id keyed the row), "
+                        "'resolved_via_binding' (reached through the peer binding's "
+                        "stable agent_session_id), or 'unresolved'."
+                    ),
+                    type=ParameterType.STRING,
+                ),
                 "claude_session_id": ParameterMetadata(type=ParameterType.STRING),
                 "model": ParameterMetadata(type=ParameterType.STRING),
                 "current_tokens": ParameterMetadata(type=ParameterType.INTEGER),
@@ -4182,6 +4383,720 @@ class AgentMessagingPlugin(
                 state_service, agent_instance_id=str(raw.get("agent_instance_id", "")),
             )
         except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="session_context_status_history",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description=(
+                    "The session whose gauge SERIES to read. Accepts either id "
+                    "the session is known by (ledger or watch), same GAU-07 "
+                    "join as session_context_status."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "limit": ParameterMetadata(
+                description=(
+                    "How many history rows to return, newest first. Capped at "
+                    "the store's retention (64); the reply says whether the "
+                    "page was truncated rather than leaving it implied."
+                ),
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "GAU-15 — one session's bounded gauge series, newest first, with "
+            "the series classified as healthy / stopped / idle / "
+            "never_started / undetermined against the lifecycle's own last "
+            "report_alive. resolved=False (never a raised error) when no "
+            "series is on file."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="session_context_status_history outcome",
+            properties={
+                "resolved": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "resolution_error": ParameterMetadata(type=ParameterType.STRING),
+                "agent_instance_id": ParameterMetadata(
+                    description="The LEDGER id the returned series is keyed on.",
+                    type=ParameterType.STRING,
+                ),
+                "queried_agent_instance_id": ParameterMetadata(
+                    description="The id the caller passed, whichever of the two it was.",
+                    type=ParameterType.STRING,
+                ),
+                "id_resolution": ParameterMetadata(
+                    description="'direct' | 'resolved_via_binding' | 'unresolved'.",
+                    type=ParameterType.STRING,
+                ),
+                "series_state": ParameterMetadata(
+                    description=(
+                        "healthy | stopped | idle | never_started | "
+                        "undetermined. 'stopped' is the GAU-01 class (the "
+                        "session works and its gauge is dark); 'idle' is a "
+                        "normal fleet state and NOT an incident."
+                    ),
+                    type=ParameterType.STRING,
+                ),
+                "series_state_reason": ParameterMetadata(
+                    description="The evidence the classification used, in numbers.",
+                    type=ParameterType.STRING,
+                ),
+                "last_report_alive": ParameterMetadata(
+                    description=(
+                        "When report_alive last landed for this session, "
+                        "derived from report_by minus report_by_seconds. Null "
+                        "when the row carries no window -- absence of the "
+                        "WINDOW is not evidence of absence of a TICK."
+                    ),
+                    type=ParameterType.STRING,
+                ),
+                "entries": ParameterMetadata(
+                    description=(
+                        "The history rows, newest first: recorded_at, "
+                        "measured_at, reading_at, current_tokens, ceiling, "
+                        "model, claude_session_id, agent_session_id, the three "
+                        "cache fields, reporter_surface, reporter_generation."
+                    ),
+                    type=ParameterType.LIST,
+                ),
+                "returned": ParameterMetadata(type=ParameterType.INTEGER),
+                "truncated": ParameterMetadata(
+                    description="Whether more rows exist beyond this page.",
+                    type=ParameterType.BOOLEAN,
+                ),
+                "retention": ParameterMetadata(
+                    description="Rows the store keeps per session (the hard bound).",
+                    type=ParameterType.INTEGER,
+                ),
+                "rotation_boundaries": ParameterMetadata(
+                    description=(
+                        "How many /clear boundaries this page spans, counted "
+                        "as changes of claude_session_id under one instance id."
+                    ),
+                    type=ParameterType.INTEGER,
+                ),
+            },
+        ),
+    )
+    def session_context_status_history(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """GAU-15 — read the bounded gauge series behind the cached snapshot.
+
+        The cache answers "what is it now"; this answers "did it stop, and if
+        so when" — the question a single upsert-only row structurally cannot,
+        and the reason the original 85-minute freeze could never be analysed.
+        """
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        limit = raw.get("limit")
+        try:
+            result = gauge_session_context_status_history(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                limit=int(limit) if isinstance(limit, (int, str)) and str(limit).strip()
+                else GAUGE_HISTORY_RETENTION,
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="gauge_notice_records",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "notice_type": ParameterMetadata(
+                description=(
+                    "Narrow to one detector: 'gauge_stale_notice' (a live "
+                    "session's gauge ARRESTED) or 'gauge_coverage_notice' (a "
+                    "live session produced NO gauge row at all). Omit for "
+                    "both."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "agent_instance_id": ParameterMetadata(
+                description=(
+                    "Narrow to the SUBJECT session the notices are about (not "
+                    "the steward they were sent to). Accepts either id the "
+                    "session is known by, same GAU-07 join as "
+                    "session_context_status. Omit for all subjects."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "since": ParameterMetadata(
+                description=(
+                    "ISO-8601 lower bound on emitted_at, inclusive. Omit for "
+                    "everything retained."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "limit": ParameterMetadata(
+                description=(
+                    "How many records to return, newest first. Capped at the "
+                    "store's read ceiling (64); the reply says whether the "
+                    "page was truncated rather than leaving it implied."
+                ),
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "GAU-21 — the durable record of gauge notices that FIRED, newest "
+            "first, filterable by type, subject and time window. Each record "
+            "carries the delivery outcome (appended / no_steward_binding / "
+            "append_failed), the threshold in force and the value measured "
+            "against it, and the release whose detector fired it. Reading does "
+            "NOT consume: the bridge event queue this replaces hands its only "
+            "reader the events and then drops them."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="gauge_notice_records outcome",
+            properties={
+                "entries": ParameterMetadata(
+                    description=(
+                        "The records, newest first: notice_type, "
+                        "agent_instance_id, emitted_at, steward_instance_id, "
+                        "delivery_outcome, release_id, threshold_s, "
+                        "observed_s, last_report_alive_at, gauge_measured_at."
+                    ),
+                    type=ParameterType.LIST,
+                ),
+                "returned": ParameterMetadata(type=ParameterType.INTEGER),
+                "truncated": ParameterMetadata(
+                    description="Whether more records exist beyond this page.",
+                    type=ParameterType.BOOLEAN,
+                ),
+                "queried_agent_instance_id": ParameterMetadata(
+                    description=(
+                        "The subject id the caller passed, whichever of the "
+                        "two it was. Null when unfiltered."
+                    ),
+                    type=ParameterType.STRING,
+                ),
+                "agent_instance_id": ParameterMetadata(
+                    description=(
+                        "The id the records are keyed on after the GAU-07 "
+                        "join. Null when unfiltered."
+                    ),
+                    type=ParameterType.STRING,
+                ),
+                "id_resolution": ParameterMetadata(
+                    description=(
+                        "'direct' | 'resolved_via_binding' | 'unresolved'. "
+                        "Null when no subject filter was given."
+                    ),
+                    type=ParameterType.STRING,
+                ),
+                "notice_type": ParameterMetadata(
+                    description="The type filter applied, or null for both.",
+                    type=ParameterType.STRING,
+                ),
+                "since": ParameterMetadata(
+                    description="The lower bound applied, or null.",
+                    type=ParameterType.STRING,
+                ),
+                "retention": ParameterMetadata(
+                    description=(
+                        "Records the store keeps per subject per type (the "
+                        "hard bound)."
+                    ),
+                    type=ParameterType.INTEGER,
+                ),
+                "delivery_outcomes": ParameterMetadata(
+                    description=(
+                        "The delivery_outcome domain, published so a reader "
+                        "need not guess which values are possible."
+                    ),
+                    type=ParameterType.LIST,
+                ),
+                "notice_types": ParameterMetadata(
+                    description="The notice_type domain this verb reads.",
+                    type=ParameterType.LIST,
+                ),
+            },
+        ),
+    )
+    def gauge_notice_records(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """GAU-21 — read which gauge notices actually fired, durably.
+
+        The sweep's notices live only as in-memory bridge events, so until this
+        record existed "the detector never alarmed" and "it alarmed and reached
+        nobody" were the same silence — and a verifier polling that queue would
+        have consumed the steward's own notice to find out.
+        """
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        limit = raw.get("limit")
+        notice_type = raw.get("notice_type")
+        agent_instance_id = raw.get("agent_instance_id")
+        since = raw.get("since")
+        try:
+            result = gauge_read_notice_records(
+                state_service,
+                notice_type=str(notice_type) if notice_type else None,
+                agent_instance_id=str(agent_instance_id) if agent_instance_id else None,
+                since=str(since) if since else None,
+                limit=int(limit) if isinstance(limit, (int, str)) and str(limit).strip()
+                else GAUGE_NOTICE_READ_ROWS,
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="register_gauge_canary",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The synthetic identity to mark as a gauge canary.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "purpose": ParameterMetadata(
+                description=(
+                    "Why this canary exists, in words — for whoever finds a "
+                    "synthetic session in a listing and needs to know it is "
+                    "deliberate."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "registered_by": ParameterMetadata(
+                description=(
+                    "Who is registering it. A synthetic identity in the fleet "
+                    "is an act someone took, never an ambient fact."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "GAU-15 item 4 — mark one identity as a gauge canary at the STORE "
+            "plane, in its own table. Deliberately never a column on the gauge "
+            "row: the staleness detector reads that row, and a detector that "
+            "can tell it is under test has stopped being the thing under test. "
+            "Operational consumers filter canaries out by joining this "
+            "registry; the detector never joins it."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="register_gauge_canary outcome",
+            properties={
+                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "purpose": ParameterMetadata(type=ParameterType.STRING),
+                "registered_at": ParameterMetadata(type=ParameterType.STRING),
+                "registered_by": ParameterMetadata(type=ParameterType.STRING),
+                "retired_at": ParameterMetadata(
+                    description="Null while active; set when stood down.",
+                    type=ParameterType.STRING,
+                ),
+            },
+        ),
+    )
+    def register_gauge_canary(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """GAU-15 item 4 — mark an identity as a canary, at the store plane."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            result = register_canary(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                purpose=str(raw.get("purpose", "")),
+                registered_by=str(raw.get("registered_by", "")),
+            )
+        except CanaryError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="arrest_gauge_canary",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description=(
+                    "The CANARY to arrest. A tamper may only ever target a "
+                    "registered canary — never a real session."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "directed_by": ParameterMetadata(
+                description=(
+                    "Who is ordering the tamper. An unattributable tamper is "
+                    "the failure this verb exists to make impossible."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "arrest_from": ParameterMetadata(
+                description="Start of the arrest window, inclusive, ISO-8601.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "arrest_until": ParameterMetadata(
+                description=(
+                    "End of the arrest window, exclusive, ISO-8601. Always "
+                    "bounded: an arrest that never ends makes its alarms "
+                    "attributable forever, which is the same as not being "
+                    "attributable."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "expected_notice_type": ParameterMetadata(
+                description=(
+                    "Which alarm this arrest expects to provoke — "
+                    "gauge_stale_notice or gauge_coverage_notice. Recorded "
+                    "BEFORE the outcome is known, so the verifier cannot grade "
+                    "its own expectations after the fact."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "reason": ParameterMetadata(
+                description="Why this arrest was ordered, in words.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "GAU-15 item 4 — order an AUDITED, bounded arrest of one canary's "
+            "gauge, so the staleness detector can be exercised end to end. The "
+            "arrest withholds only the canary's gauge write; its lifecycle "
+            "clock keeps advancing, which is what reproduces the real freeze "
+            "signature rather than an idle session. Every arrest is logged "
+            "with who ordered it, so any alarm is mechanically attributable to "
+            "a scheduled tamper or to a real fault. There is NO ambient "
+            "test-mode environment variable and never will be: an env var "
+            "leaves no audit trail and cannot be scoped to a window."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="arrest_gauge_canary outcome",
+            properties={
+                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "directed_by": ParameterMetadata(type=ParameterType.STRING),
+                "arrest_from": ParameterMetadata(type=ParameterType.STRING),
+                "arrest_until": ParameterMetadata(type=ParameterType.STRING),
+                "expected_notice_type": ParameterMetadata(type=ParameterType.STRING),
+                "reason": ParameterMetadata(type=ParameterType.STRING),
+                "recorded_at": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def arrest_gauge_canary(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """GAU-15 item 4 — the audited tamper. Constraint (d) in one verb."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            result = canary_direct_arrest(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                directed_by=str(raw.get("directed_by", "")),
+                arrest_from=str(raw.get("arrest_from", "")),
+                arrest_until=str(raw.get("arrest_until", "")),
+                expected_notice_type=str(raw.get("expected_notice_type", "")),
+                reason=str(raw.get("reason", "")),
+            )
+        except CanaryError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="register_synthetic_session",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description=(
+                    "The ALREADY-REGISTERED canary to mint a lifecycle row "
+                    "for. Any other identity is refused: this verb is the "
+                    "inverse of the not_a_canary guard, and without that "
+                    "inversion it would be a way to fabricate a session that "
+                    "looks alive to every fleet surface."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "lane_id": ParameterMetadata(
+                description=(
+                    "The lane label the row carries. Must be ordinary-looking: "
+                    "the staleness alarm quotes it verbatim, so a lane named "
+                    "for the canary announces it in every alarm."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "spawned_by_instance_id": ParameterMetadata(
+                description=(
+                    "The steward to notify. REQUIRED — the staleness leg skips "
+                    "every row without a spawner, so a canary registered "
+                    "without one is invisible to the detector it exists to "
+                    "exercise."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "directed_by": ParameterMetadata(
+                description=(
+                    "Who ordered this synthetic identity into the fleet ledger."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "report_by_seconds": ParameterMetadata(
+                description=(
+                    "The lifecycle reporting window, in seconds. Must be "
+                    "positive: with no window the derived last report_alive is "
+                    "None, which means NO EVIDENCE rather than 'not "
+                    "advancing', and the staleness leg skips the row."
+                ),
+                required=True,
+                type=ParameterType.INTEGER,
+            ),
+            "brief_ref": ParameterMetadata(
+                description="Optional brief reference recorded on the row.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "budget_line": ParameterMetadata(
+                description="Optional budget line recorded on the row.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "model": ParameterMetadata(
+                description="Optional model label recorded on the row.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "GAU-15 item 4 follow-up — give a registered gauge canary the "
+            "managed_session row the staleness detector reads, WITHOUT "
+            "dispatching any process. Closes a measured exercisability gap: "
+            "the detector inspects live managed_session rows, the only writer "
+            "of those rows was spawn_session, and spawn_session always "
+            "launches a real process — so a canary could never acquire the row "
+            "that makes it visible, and the pipeline was unfalsifiable while "
+            "51 checks passed. The row declares host 'synthetic', for which no "
+            "driver is registered, so every verb that would touch a process "
+            "refuses it loudly instead of aiming at a pane that does not "
+            "exist. It is minted in 'spawning', exactly where spawn_session "
+            "leaves it; the first canary tick promotes it to 'live' through "
+            "the real report_alive, so no second promotion rule exists."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="register_synthetic_session outcome",
+            properties={
+                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "lane_id": ParameterMetadata(type=ParameterType.STRING),
+                "host": ParameterMetadata(
+                    description=(
+                        "Always 'synthetic' — a host with no registered driver."
+                    ),
+                    type=ParameterType.STRING,
+                ),
+                "lifecycle_state": ParameterMetadata(
+                    description=(
+                        "'spawning' — the first canary tick's report_alive "
+                        "promotes it to live."
+                    ),
+                    type=ParameterType.STRING,
+                ),
+                "spawned_by_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "report_by_seconds": ParameterMetadata(type=ParameterType.INTEGER),
+                "report_by": ParameterMetadata(type=ParameterType.STRING),
+                "promoted_by": ParameterMetadata(
+                    description="Which path promotes this row to live, stated.",
+                    type=ParameterType.STRING,
+                ),
+            },
+        ),
+    )
+    def register_synthetic_session(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """GAU-15 item 4 follow-up — a canary's lifecycle row, no process."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        window = raw.get("report_by_seconds", 0)
+        try:
+            result = canary_register_synthetic_session(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                lane_id=str(raw.get("lane_id", "")),
+                spawned_by_instance_id=str(raw.get("spawned_by_instance_id", "")),
+                directed_by=str(raw.get("directed_by", "")),
+                report_by_seconds=int(window) if str(window).strip().lstrip("-").isdigit()
+                else 0,
+                brief_ref=str(raw.get("brief_ref", "")),
+                budget_line=str(raw.get("budget_line", "")),
+                model=str(raw.get("model", "")),
+            )
+        except CanaryError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="verify_gauge_canary",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The canary to judge.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "detector_deployed": ParameterMetadata(
+                description=(
+                    "Whether the staleness detector is present in the RUNNING "
+                    "release, established out-of-band by the release "
+                    "capability probe. Omit when it is not established: the "
+                    "verifier then ABSTAINS rather than guessing."
+                ),
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
+            "since": ParameterMetadata(
+                description=(
+                    "ISO-8601 lower bound on the windows and alarms examined."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "GAU-15 item 4 — judge BOTH edges for one canary: did it alarm "
+            "when tampered, and was it quiet when healthy. The two are read "
+            "from independent evidence and are not each other's complement — a "
+            "canary that never alarms passes the second and fails the first. "
+            "Alarms are attributed by time AND type: an alarm inside a logged "
+            "window matching its expected type is SCHEDULED, anything else is "
+            "UNATTRIBUTED and means a real fault or a gap in the audit log. "
+            "Judged against the durable notice record, never the drain-once "
+            "bridge queue, which a verifier reading it would consume. Returns "
+            "'abstained' when the detector's deployment is not established, "
+            "because a verdict about an instrument that is not running is a "
+            "false accusation whichever way it lands."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="verify_gauge_canary outcome",
+            properties={
+                "verdict": ParameterMetadata(
+                    description=(
+                        "pass | fail | abstained | no_evidence. A pass requires "
+                        "POSITIVE evidence — at least one closed arrest window "
+                        "that produced its expected alarm. A run that exercised "
+                        "nothing returns no_evidence, never pass: an unexercised "
+                        "canary and a detector that can no longer fire are "
+                        "identical from the quiet edge. Quote the verdict WITH "
+                        "closed_windows and windows_with_expected_alarm."
+                    ),
+                    type=ParameterType.STRING,
+                ),
+                "verdict_reason": ParameterMetadata(
+                    description="The evidence the verdict used, in numbers.",
+                    type=ParameterType.STRING,
+                ),
+                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "detector_deployed": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "windows_examined": ParameterMetadata(type=ParameterType.INTEGER),
+                "closed_windows": ParameterMetadata(
+                    description=(
+                        "Windows that have ENDED — the only ones whose alarm "
+                        "can be judged. An open window has not had its chance."
+                    ),
+                    type=ParameterType.INTEGER,
+                ),
+                "windows_with_expected_alarm": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                ),
+                "silent_windows": ParameterMetadata(
+                    description="Closed windows that produced no matching alarm.",
+                    type=ParameterType.INTEGER,
+                ),
+                "alarms_examined": ParameterMetadata(type=ParameterType.INTEGER),
+                "scheduled_alarms": ParameterMetadata(type=ParameterType.INTEGER),
+                "unattributed_alarms": ParameterMetadata(
+                    description=(
+                        "Alarms outside every logged window. NOT canary noise "
+                        "to dismiss."
+                    ),
+                    type=ParameterType.INTEGER,
+                ),
+                "truncated": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "since": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def verify_gauge_canary(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """GAU-15 item 4 — both edges, judged against the durable record."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        deployed = raw.get("detector_deployed")
+        since = raw.get("since")
+        try:
+            result = canary_verify(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                detector_deployed=bool(deployed) if deployed is not None else None,
+                since=str(since) if since else None,
+            )
+        except CanaryError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
@@ -5629,41 +6544,42 @@ class AgentMessagingPlugin(
         # leg has no count to report and must still appear in the line; a leg
         # missing from it would otherwise read as healthy-and-quiet.
         legs: list[str] = []
-        try:
-            due = sweep_rotation_due_sessions(
+        _run_counted_leg(
+            legs, "L4a", "rotation-due",
+            lambda: sweep_rotation_due_sessions(
                 state_service,
                 peer_registry=self._peer_registry,
                 bridge_manager=self._bridge_manager,
                 latch=self._rotation_due_latch,
-            )
-        except Exception:  # noqa: BLE001 — one leg's fault must not skip the others
-            logger.exception("L4a rotation-due leg FAULTED; rider continues")
-            legs.append("L4a=FAULTED")
-        else:
-            legs.append(f"L4a={due} steward(s) notified")
-            if due:
-                logger.info(
-                    "L4 sweep: notified %d steward(s) of a rotation-due session", due,
-                )
-        try:
-            dark = sweep_gauge_coverage(
+            ),
+            lambda n: f"{n} steward(s) notified",
+            lambda n: logger.info(
+                "L4 sweep: notified %d steward(s) of a rotation-due session", n,
+            ),
+        )
+        _run_counted_leg(
+            legs, "L4b", "gauge-coverage",
+            lambda: sweep_gauge_coverage(
                 state_service,
                 peer_registry=self._peer_registry,
                 bridge_manager=self._bridge_manager,
                 latch=self._gauge_coverage_latch,
-            )
-        except Exception:  # noqa: BLE001 — one leg's fault must not skip the others
-            logger.exception("L4b gauge-coverage leg FAULTED; rider continues")
-            legs.append("L4b=FAULTED")
-        else:
-            legs.append(f"L4b={dark} session(s) with no gauge row")
-            if dark:
-                logger.warning(
-                    "L4 sweep: %d LIVE session(s) past the startup grace have no "
-                    "context-gauge row — likeliest cause is the reporting path "
-                    "between hook tick and state write failing silently for them",
-                    dark,
-                )
+            ),
+            lambda n: f"{n} session(s) with no gauge row",
+            # ★ GAU-13(b), the SAME overclaim one level up. This line used
+            # to name a "likeliest cause" the sweep never measured, exactly
+            # as the per-session notice did. The notice now states what it
+            # measured and diagnoses only as far as the report_alive
+            # evidence carries; a rider summary that kept asserting the
+            # cause would have re-introduced the inference the notice just
+            # dropped, on the surface a reader hits FIRST.
+            lambda n: logger.warning(
+                "L4 sweep: %d LIVE session(s) past the startup grace have no "
+                "context-gauge row; each notice names what was measured for "
+                "that session and how far the evidence identifies the cause",
+                n,
+            ),
+        )
         # L4c is fault-isolated INSIDE the rider rather than promoted to a
         # fourth rider. Its axis is this rider's axis exactly — same table,
         # read-only, same question ("is this session getting expensive") — so a
@@ -5677,6 +6593,12 @@ class AgentMessagingPlugin(
                 state_service,
                 peer_registry=self._peer_registry,
                 bridge_manager=self._bridge_manager,
+                # GAU-06 (G2): the leg's DURABLE half. This one argument is
+                # what the whole item waited on -- nothing else in this rider
+                # or in session_sweep holds a messaging-service reference, so
+                # the self-notice could not persist anything until the supplier
+                # was wired from here.
+                agent_messaging_service=self._require_service(),
                 latch=self._rotation_self_latch,
             )
         except Exception:  # noqa: BLE001 — one leg's fault must not skip the others
@@ -5684,10 +6606,34 @@ class AgentMessagingPlugin(
             legs.append("L4c=FAULTED")
         else:
             legs.append(
-                f"L4c={counts.notified} notified/{counts.unroutable} unroutable/"
+                f"L4c={counts.appended} appended"
+                f"({counts.watcher_held} watcher-held)/"
+                f"{counts.unroutable} unroutable/"
                 f"{counts.undeliverable} undeliverable",
             )
             self._log_self_notice_counts(counts)
+        # L4d (GAU-01(b)): the gauge row that STOPPED, as distinct from the one
+        # never written. Fault-isolated like every sibling. It is a FOURTH leg
+        # rather than a branch inside L4b because the two produce different
+        # counts and different remedies -- folding them would leave the reader
+        # unable to tell "N sessions never reported" from "N sessions stopped
+        # reporting", which are opposite operational situations.
+        _run_counted_leg(
+            legs, "L4d", "gauge-staleness",
+            lambda: sweep_gauge_staleness(
+                state_service,
+                peer_registry=self._peer_registry,
+                bridge_manager=self._bridge_manager,
+                latch=self._gauge_stale_latch,
+            ),
+            lambda n: f"{n} session(s) with an arrested gauge row",
+            lambda n: logger.warning(
+                "L4 sweep: %d LIVE session(s) are still reporting while their "
+                "context-gauge row has stopped advancing; each notice carries "
+                "the two timestamps it compared and the gap between them",
+                n,
+            ),
+        )
         # ★ The rider's REACHABLE ALL-CLEAR. Emitted unconditionally, after
         # every leg, INCLUDING the all-zero tick that is the normal overnight
         # case — that is the whole point. "Did the rotation surface sweep?" was
@@ -5702,7 +6648,14 @@ class AgentMessagingPlugin(
 
     @staticmethod
     def _log_self_notice_counts(counts: SelfNoticeCounts) -> None:
-        """ALL THREE counts, always, and never one without the others.
+        """ALL FOUR counts, always, and never one without the others.
+
+        ``appended`` replaced ``notified`` on 2026-08-19 (GAU-06 G1) because the
+        old word claimed something this leg cannot observe: whether anybody read
+        it. What it can assert is that the durable row was accepted.
+        ``watcher_held`` is a SUBSET of ``appended``, printed beside it because
+        the two have different delivery stories and one averaged number
+        supported neither.
 
         A count of failures alone reads identically to a healthy run, and a
         count of successes alone hides the leg's own blind spot. A zero that
@@ -5716,7 +6669,7 @@ class AgentMessagingPlugin(
         WARNING with a traceback. Naming only the first, as an earlier draft
         did, would have attributed every delivery fault to the join gap.
         """
-        if not (counts.notified or counts.unroutable or counts.undeliverable):
+        if not (counts.appended or counts.unroutable or counts.undeliverable):
             # ★ GAU-02, the half found first. This used to `return` and log
             # NOTHING, which made a healthy leg that found nobody identical in
             # the log to a leg that never ran. All-zero is not an edge case
@@ -5727,21 +6680,26 @@ class AgentMessagingPlugin(
             # counts — a zero that prints what it counted is the only kind a
             # reader can trust.
             logger.info(
-                "L4c sweep: 0 session(s) notified, 0 unroutable, 0 undeliverable "
+                "L4c sweep: 0 session(s) appended (0 watcher-held), 0 unroutable, "
+                "0 undeliverable "
                 "— the leg RAN and had no eligible subject (every gauge row was "
                 "stale, below band, or already latched for this episode); this "
                 "is the expected quiet-fleet result, not a failure",
             )
             return
         logger.info(
-            "L4c sweep: %d session(s) notified of their own context band; "
+            "L4c sweep: %d session(s) had a durable notice of their own context "
+            "band APPENDED to their inbox, %d of them watcher-held (a subset, "
+            "not an extra population — those surface when the session next "
+            "looks, and no turn starts either way); "
             "%d unroutable (gauge row present, and neither its own key nor its "
             "stored agent_session_id join resolves to a live binding — since "
             "2026-08-18 this means a row written by a reporter predating the "
             "join column, and it should decay to 0 as reporters upgrade); "
-            "%d undeliverable (binding resolved, append raised — see the "
-            "WARNING above for each)",
-            counts.notified, counts.unroutable, counts.undeliverable,
+            "%d undeliverable (binding resolved, the durable write raised — see "
+            "the WARNING above for each)",
+            counts.appended, counts.watcher_held, counts.unroutable,
+            counts.undeliverable,
         )
 
     def _run_session_lifecycle_sweep(self) -> None:

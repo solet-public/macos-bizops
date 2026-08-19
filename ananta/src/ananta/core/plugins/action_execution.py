@@ -1,7 +1,7 @@
 """Action execution for plugins.
 
 Extracted from `PluginBase` during the Step 9.B decomposition
-(`workbench/2026-05-25_plugin_god_class_remediation.md` §9.2).
+(design record, Step 9.2, dev-checkout workbench — not part of the shipped tree).
 
 Owns the runtime execute path: pre-action parameter validation, dispatch
 to the action method (sync or async), response formatting, post-action
