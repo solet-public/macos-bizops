@@ -260,6 +260,9 @@ FAILED_REGISTRATION_LOCAL_BRIDGE_PORT_NEVER_APPEARED: Final[str] = (
 # pattern as `_collect_set_active_targets` uses for set_active.
 AGENT_MESSAGING_PLUGIN_NAME: Final[str] = "agent_messaging_plugin"
 BRIDGE_PORT_ATTRIBUTE: Final[str] = "bridge_port"
+# BLG-04: same cross-plugin lookup pattern, for the streamable HTTP
+# listener's own (now ephemeral, no longer hardcoded) bound port.
+STREAMABLE_PORT_ATTRIBUTE: Final[str] = "streamable_bound_port"
 
 # Single cross-color drain marker `~/.ananta/runtime/<name>.draining`. this solet's
 # CORE SIGTERM handler reads it (ananta.core.runtime.is_draining) and exits 0

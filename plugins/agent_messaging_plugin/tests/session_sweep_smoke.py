@@ -38,6 +38,10 @@ from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
 from ananta.services.store import Store, open_store  # noqa: E402
 
 from agent_messaging_plugin.bridge_sessions import BridgeSessionManager  # noqa: E402
+from agent_messaging_plugin.gauge_notice_record_store import (  # noqa: E402
+    read_gauge_notice_records,
+)
+from agent_messaging_plugin.local_cli.spool import watch_instance_digest  # noqa: E402
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.peer_registry import PeerRegistry  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
@@ -50,6 +54,8 @@ from agent_messaging_plugin.schema import (  # noqa: E402
     LIFECYCLE_RETIRED,
     LIFECYCLE_SPAWNING,
     LIFECYCLE_TERMINATED,
+    NOTICE_DELIVERY_APPENDED,
+    NOTICE_DELIVERY_NO_STEWARD_BINDING,
     PEER_BINDING_NAMESPACE,
     TABLE_SESSION_DEPENDENCY,
     TABLE_SESSION_ROLE_CLAIM,
@@ -76,8 +82,10 @@ from agent_messaging_plugin.session_sweep import (  # noqa: E402
     EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE,
     GAUGE_COVERAGE_GRACE_S,
     GAUGE_STALE_LAG_S,
+    GAUGE_STALE_ROTATION_GRACE_S,
     NoticeLatch,
     SessionRoleClaimPruner,
+    StewardNoticeCounts,
     _notify_rotation_due,
     last_report_alive,
     sweep_deadline_dependencies,
@@ -224,18 +232,58 @@ def test_overdue_skips_future_deadline() -> None:
 
 def _register_live_binding(
     reg: PeerRegistry, mgr: BridgeSessionManager, *, agent_instance_id: str,
+    agent_session_id: str = "",
 ) -> str:
     """Same pattern ``test_deadline_dependency_fires_and_delivers`` uses —
     a real bridge + a real peer registry binding, no server, so the
-    resolve-then-append delivery path is exercised for real, not stubbed."""
+    resolve-then-append delivery path is exercised for real, not stubbed.
+
+    ``agent_session_id`` is what a real registration carries (the launcher's
+    exported ``$AGENT_SESSION_ID``); it defaults to empty so every pre-GAU-26
+    caller keeps the binding shape it was written against."""
     bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
     reg.register(
         BridgeBinding(
             bridge_id=bridge_id, agent_id="claude_code", agent_instance_id=agent_instance_id,
             session_label=agent_instance_id, parent_pid=1,
+            agent_session_id=agent_session_id,
         ),
     )
     return bridge_id
+
+
+def _register_watcher_held_steward(
+    state: StateManagementInterface,
+    reg: PeerRegistry,
+    mgr: BridgeSessionManager,
+    *,
+    ledger_instance_id: str,
+    agent_session_id: str,
+) -> tuple[str, str]:
+    """A steward in the population GAU-26 is about it: its ``managed_session``
+    row keys on its LEDGER id, while its live bridge binding keys on the
+    WATCH id its session id derives to.
+
+    Built through the real write paths, not by poking columns.
+    ``backfill_registration`` is the production registration hook, and the
+    watch id comes from ``watch_instance_digest`` — the same function
+    ``_resolve_watch_identity`` (``local_cli/cli.py``) uses to mint it — so
+    the fixture cannot drift from the id scheme it is testing.
+
+    Returns ``(watch_instance_id, steward_bridge_id)``.
+    """
+    _spawn_live(
+        state, agent_instance_id=ledger_instance_id, lifecycle_state=LIFECYCLE_SPAWNING,
+    )
+    backfill_registration(
+        state, agent_instance_id=ledger_instance_id, agent_id="claude_code",
+        agent_session_id=agent_session_id,
+    )
+    watch_instance_id = f"agi-watch-{watch_instance_digest(agent_session_id)}"
+    bridge_id = _register_live_binding(
+        reg, mgr, agent_instance_id=watch_instance_id, agent_session_id=agent_session_id,
+    )
+    return watch_instance_id, bridge_id
 
 
 def test_overdue_notifies_steward() -> None:
@@ -319,6 +367,258 @@ def test_overdue_notifies_unmanaged_steward() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# GAU-26 — steward resolution across the fleet's TWO session-id minting schemes
+#
+# Every steward-notify leg in this module keys on the LEDGER
+# ``spawned_by_instance_id`` recorded on the worker's row. A watcher-held
+# steward's live bridge binding keys on a WATCH id instead
+# (``agi-watch-<sha256(agent_session_id)[:24]>``), so the lookup missed by
+# construction for the majority population — measured live 2026-08-19 19:27:36Z,
+# and again at 19:57:38Z from the other direction (a BRIDGE-BOUND steward, the
+# operator seat under its plain ledger id, took the same leg's notice with
+# delivery_outcome=appended). Same leg, same night, same release: a matched
+# pass/fail pair, which is why both discriminators below reproduce a MEASURED
+# failure rather than a hypothesised one.
+#
+# The fix reads the join key from the durable ``managed_session`` row and never
+# rebuilds it. ``test_overdue_join_reads_the_session_id_and_never_derives_it``
+# is the one that enforces the second half of that sentence.
+# ---------------------------------------------------------------------------
+
+
+def test_overdue_notifies_a_watch_id_registered_steward() -> None:
+    """DISCRIMINATOR (a): a steward whose live binding is registered under a
+    WATCH id gets the overdue notice.
+
+    The specimen is the measured one — ``lane-gau-store``'s ledger id
+    ``agi-73ba7ce5…`` paired with watch id ``agi-watch-d09a711455d6e5eb7631c087``
+    — and the fixture derives that watch id rather than hard-coding it, so the
+    24 hex characters matching the id observed in the live registry at 19:48Z is
+    a property of the code under test, not of this file.
+
+    RED before the fix: ``resolve_by_agent_instance_id`` is a ``read_one`` on
+    the binding table keyed by the ledger id, which appears nowhere in it, and
+    the ``(agent_id, instance_id)`` fallback re-keys the SAME ledger id against
+    the SAME table — both legs miss, the leg logs 'steward not notified' and
+    returns."""
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    ledger_id = "agi-73ba7ce552285765b4716a1059326da0"
+    watch_id, steward_bridge_id = _register_watcher_held_steward(
+        state, reg, mgr,
+        ledger_instance_id=ledger_id,
+        agent_session_id=f"ases-{ledger_id}",
+    )
+    _check(
+        watch_id == "agi-watch-d09a711455d6e5eb7631c087",
+        f"the fixture's derived watch id reproduces the id observed live in the "
+        f"peer registry at 2026-08-19 19:48Z (got {watch_id!r})",
+    )
+    past = (T0 - timedelta(seconds=10)).isoformat()
+    _spawn_live(
+        state, agent_instance_id="agi-worker-watch-held-steward",
+        lifecycle_state=LIFECYCLE_LIVE, report_by_override=past,
+        spawned_by_instance_id=ledger_id,
+    )
+    marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
+    _check(marked == 1, "the overdue row is still transitioned")
+    _, events = mgr.get(steward_bridge_id).events_after(-1)
+    _check(
+        len(events) == 1
+        and events[0].event_type == "session_overdue_notice"
+        and "agi-worker-watch-held-steward" in events[0].content,
+        f"RED-vs-GREEN (GAU-26 discriminator a): a WATCHER-HELD steward gets the "
+        f"overdue notice on its live bridge (got {events!r}) -- before this fix "
+        "both resolution legs keyed the ledger id against a registry holding only "
+        "its watch id, and the alarm was delivered nowhere",
+    )
+
+
+def test_overdue_join_reads_the_session_id_and_never_derives_it() -> None:
+    """DISCRIMINATOR (b), the one a derive-based fix cannot pass: the join key
+    is READ from the ledger row, never rebuilt from the ledger id.
+
+    ``"ases-" + <ledger id>`` is the SPAWN path's env injection
+    (``tmux_adapter``/``headless_adapter``), not a join. The counter-example is
+    first-party and live: the operator seat pairs ledger
+    ``agi-6be1383613fbd0ec10874571e89956e1`` with session
+    ``ases-1786663089-37639-3748``. This steward carries that measured pairing
+    and holds its bridge under the watch id that session id derives to — the
+    reconnect shape ``agent_session_id`` exists for ("survives reconnect /
+    agent_instance_id rotation", models.py), and the state in which the
+    session-id join is the ONLY leg that can resolve it.
+
+    A DECOY live binding is registered under exactly the value a reconstructor
+    would build. So an implementation that rebuilds the key does not merely fail
+    to deliver — it MISROUTES BY NAME, and the second check says so.
+    """
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    ledger_id = "agi-6be1383613fbd0ec10874571e89956e1"
+    _, steward_bridge_id = _register_watcher_held_steward(
+        state, reg, mgr,
+        ledger_instance_id=ledger_id,
+        agent_session_id="ases-1786663089-37639-3748",
+    )
+    decoy_bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
+    reg.register(
+        BridgeBinding(
+            bridge_id=decoy_bridge_id, agent_id="claude_code",
+            agent_instance_id="agi-decoy-somebody-else", session_label="decoy",
+            parent_pid=1, agent_session_id=f"ases-{ledger_id}",
+        ),
+    )
+    past = (T0 - timedelta(seconds=10)).isoformat()
+    _spawn_live(
+        state, agent_instance_id="agi-worker-foreign-session-id",
+        lifecycle_state=LIFECYCLE_LIVE, report_by_override=past,
+        spawned_by_instance_id=ledger_id,
+    )
+    marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
+    _check(marked == 1, "the overdue row is still transitioned")
+    _, events = mgr.get(steward_bridge_id).events_after(-1)
+    _check(
+        len(events) == 1 and events[0].event_type == "session_overdue_notice",
+        f"RED-vs-GREEN (GAU-26 discriminator b): a steward whose agent_session_id "
+        f"is NOT derivable from its ledger id still resolves, because the key is "
+        f"read from its managed_session row (got {events!r})",
+    )
+    _, decoy_events = mgr.get(decoy_bridge_id).events_after(-1)
+    _check(
+        decoy_events == [],
+        f"THE DERIVE-KILLER: the decoy bound to 'ases-' + the ledger id -- exactly "
+        f"what a reconstructing implementation builds -- receives NOTHING (got "
+        f"{decoy_events!r}). A deriving build misroutes this session's private "
+        "overdue notice to a different session, and fails here by name",
+    )
+
+
+def test_overdue_bridge_bound_steward_keeps_its_direct_route() -> None:
+    """The complementary half, and the measured PASSING side of the pair: a
+    BRIDGE-BOUND steward registered under its plain ledger id is resolved by the
+    direct lookup, ahead of any ledger read.
+
+    Live at 19:57:38.027Z — a gauge_coverage_notice to steward
+    ``agi-6be1383613fbd0ec10874571e89956e1`` (the seat) recorded
+    ``delivery_outcome=appended`` on the same leg that lost the watcher-held
+    one. The decoy is present again, so an implementation that consults a
+    DERIVED key before the direct binding fails here too."""
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    ledger_id = "agi-6be1383613fbd0ec10874571e89956e1"
+    steward_bridge_id = _register_live_binding(
+        reg, mgr, agent_instance_id=ledger_id,
+        agent_session_id="ases-1786663089-37639-3748",
+    )
+    decoy_bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
+    reg.register(
+        BridgeBinding(
+            bridge_id=decoy_bridge_id, agent_id="claude_code",
+            agent_instance_id="agi-decoy-somebody-else", session_label="decoy",
+            parent_pid=1, agent_session_id=f"ases-{ledger_id}",
+        ),
+    )
+    past = (T0 - timedelta(seconds=10)).isoformat()
+    _spawn_live(
+        state, agent_instance_id="agi-worker-bridge-bound-steward",
+        lifecycle_state=LIFECYCLE_LIVE, report_by_override=past,
+        spawned_by_instance_id=ledger_id,
+    )
+    sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
+    _, events = mgr.get(steward_bridge_id).events_after(-1)
+    _, decoy_events = mgr.get(decoy_bridge_id).events_after(-1)
+    _check(
+        len(events) == 1 and decoy_events == [],
+        f"a bridge-bound steward with NO managed_session row still takes the "
+        f"direct route, and the derived-key decoy stays empty (steward "
+        f"{events!r}, decoy {decoy_events!r})",
+    )
+
+
+def test_overdue_steward_row_without_a_session_id_is_best_effort() -> None:
+    """A ledger row whose ``agent_session_id`` is still empty (spawned, never
+    registered) has no join key. Omission must read as NOT RECORDED, never as a
+    licence to reconstruct one -- the leg degrades to the existing warning."""
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    ledger_id = "agi-never-registered-steward"
+    _spawn_live(state, agent_instance_id=ledger_id, lifecycle_state=LIFECYCLE_SPAWNING)
+    decoy_bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
+    reg.register(
+        BridgeBinding(
+            bridge_id=decoy_bridge_id, agent_id="claude_code",
+            agent_instance_id="agi-decoy-somebody-else", session_label="decoy",
+            parent_pid=1, agent_session_id=f"ases-{ledger_id}",
+        ),
+    )
+    past = (T0 - timedelta(seconds=10)).isoformat()
+    _spawn_live(
+        state, agent_instance_id="agi-worker-sessionless-steward",
+        lifecycle_state=LIFECYCLE_LIVE, report_by_override=past,
+        spawned_by_instance_id=ledger_id,
+    )
+    marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
+    _, decoy_events = mgr.get(decoy_bridge_id).events_after(-1)
+    _check(
+        marked == 1 and decoy_events == [],
+        f"an empty agent_session_id is best-effort silence, not a rebuilt key: "
+        f"the row is still marked and the decoy gets nothing (got {decoy_events!r})",
+    )
+
+
+def test_overdue_ambiguous_session_id_is_never_a_guessed_recipient() -> None:
+    """Two live bindings under one ``agent_session_id`` is presence, not
+    absence -- but it is not a delivery target either. The join must degrade to
+    the leg's warning rather than picking one, and must never raise back into
+    the sweep loop (the other overdue rows in this tick still have to be
+    marked)."""
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    ledger_id = "agi-ambiguous-steward"
+    session_id = f"ases-{ledger_id}"
+    _, first_bridge_id = _register_watcher_held_steward(
+        state, reg, mgr, ledger_instance_id=ledger_id, agent_session_id=session_id,
+    )
+    twin_bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
+    reg.register(
+        BridgeBinding(
+            bridge_id=twin_bridge_id, agent_id="claude_code",
+            agent_instance_id="agi-watch-twin-row", session_label="twin",
+            parent_pid=1, agent_session_id=session_id,
+        ),
+    )
+    past = (T0 - timedelta(seconds=10)).isoformat()
+    _spawn_live(
+        state, agent_instance_id="agi-worker-ambiguous-steward",
+        lifecycle_state=LIFECYCLE_LIVE, report_by_override=past,
+        spawned_by_instance_id=ledger_id,
+    )
+    _spawn_live(
+        state, agent_instance_id="agi-worker-sharing-the-tick",
+        lifecycle_state=LIFECYCLE_LIVE, report_by_override=past,
+    )
+    marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
+    _check(
+        marked == 2,
+        f"an ambiguous session id does not raise out of the sweep -- both rows in "
+        f"the tick are still marked (got {marked})",
+    )
+    _, first_events = mgr.get(first_bridge_id).events_after(-1)
+    _, twin_events = mgr.get(twin_bridge_id).events_after(-1)
+    _check(
+        first_events == [] and twin_events == [],
+        f"and NEITHER candidate is picked: a private steward notice delivered to "
+        f"the wrong one of two sessions sharing a session id is the failure this "
+        f"whole defect is about (first {first_events!r}, twin {twin_events!r})",
+    )
+
+
 def test_overdue_no_spawner_is_silent_noop() -> None:
     """An operator-hosted row (or any row with no recorded spawner) has no
     steward to notify by construction -- marked overdue, zero notify
@@ -369,6 +669,127 @@ def test_overdue_marks_without_notify_when_registry_absent() -> None:
     _check(
         marked == 1,
         "the state transition still runs with no peer_registry/bridge_manager passed at all",
+    )
+
+
+# ---------------------------------------------------------------------------
+# GAU-28 — the overdue leg's alarm leaves a first-party record, delivered or not
+#
+# Its only trace used to be a WARNING in a rotating log file: the leg returned
+# on `binding is None` before append_event and before any write, so nothing
+# durable existed at all. A trace that ages out is not a record — every audit of
+# alarm loss that reads the notice store under-counted this leg to exactly zero,
+# including any future audit of GAU-26's blast radius. GAU-26's fix makes the
+# delivery SUCCEED; it does not make the FAILURE observable, so without this the
+# resolver could regress silently afterwards.
+# ---------------------------------------------------------------------------
+
+
+def _overdue_records(state: StateManagementInterface) -> list[dict[str, Any]]:
+    rows, _ = read_gauge_notice_records(state, notice_type="session_overdue_notice")
+    return rows
+
+
+def test_overdue_alarm_that_reached_nobody_is_still_recorded() -> None:
+    """★ THE GAU-28 FIX. An unresolvable steward is a RECORDED OUTCOME, not an
+    early return.
+
+    Same fixture as ``test_overdue_unresolvable_spawner_is_best_effort``, which
+    asserts the row is still marked; this asserts the half that was missing —
+    that the alarm left something behind.
+
+    MUTATION: restore the early ``return`` ahead of the record → this fails and
+    the marking test does not, which is exactly how the defect survived."""
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    past = (T0 - timedelta(seconds=10)).isoformat()
+    _spawn_live(
+        state, agent_instance_id="agi-worker-unrecorded", lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past, spawned_by_instance_id="agi-steward-ghost",
+    )
+    marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
+    _check(marked == 1, "the row is still transitioned")
+    rows = _overdue_records(state)
+    _check(
+        len(rows) == 1,
+        f"RED-vs-GREEN (GAU-28): the undelivered overdue alarm leaves exactly one "
+        f"durable row (got {len(rows)}) -- before this fix its only trace was a "
+        "WARNING in a log file that rotates",
+    )
+    row = rows[0] if rows else {}
+    _check(
+        row.get("delivery_outcome") == NOTICE_DELIVERY_NO_STEWARD_BINDING
+        and row.get("steward_instance_id") is None,
+        f"and it says WHY nobody got it, with a NULL steward meaning 'none was "
+        f"resolved' rather than 'not recorded' (got {row.get('delivery_outcome')!r}, "
+        f"steward {row.get('steward_instance_id')!r})",
+    )
+    _check(
+        row.get("agent_instance_id") == "agi-worker-unrecorded",
+        "the SUBJECT is the overdue session, never the steward it was addressed to",
+    )
+
+
+def test_overdue_delivered_alarm_records_the_steward_it_reached() -> None:
+    """The other outcome, so the table can tell a delivered alarm from a lost
+    one rather than only proving the failure case. Uses the GAU-26 watcher-held
+    steward, which is the population that produced both defects."""
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    ledger_id = "agi-73ba7ce552285765b4716a1059326da0"
+    watch_id, steward_bridge_id = _register_watcher_held_steward(
+        state, reg, mgr, ledger_instance_id=ledger_id, agent_session_id=f"ases-{ledger_id}",
+    )
+    past = (T0 - timedelta(seconds=10)).isoformat()
+    _spawn_live(
+        state, agent_instance_id="agi-worker-recorded", lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past, spawned_by_instance_id=ledger_id,
+    )
+    sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
+    _, events = mgr.get(steward_bridge_id).events_after(-1)
+    rows = _overdue_records(state)
+    row = rows[0] if rows else {}
+    _check(
+        len(events) == 1
+        and len(rows) == 1
+        and row.get("delivery_outcome") == NOTICE_DELIVERY_APPENDED
+        and row.get("steward_instance_id") == watch_id,
+        f"a DELIVERED overdue alarm is recorded as 'appended' and names the "
+        f"binding it reached (got {row.get('delivery_outcome')!r}, steward "
+        f"{row.get('steward_instance_id')!r}, {len(events)} event(s))",
+    )
+
+
+def test_overdue_record_carries_the_measured_lateness() -> None:
+    """The evidence columns, and what they mean for THIS leg: ``threshold_s``
+    is 0.0 because the bound is the deadline itself, and ``observed_s`` is the
+    seconds past ``report_by`` measured on the sweep's own clock.
+
+    MUTATION: record the lateness against a re-derived 'now' instead of the
+    sweep's clock → the number stops matching the fixture's deadline."""
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    past = (T0 - timedelta(seconds=137)).isoformat()
+    _spawn_live(
+        state, agent_instance_id="agi-worker-late-by-137", lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past, spawned_by_instance_id="agi-steward-ghost",
+    )
+    sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
+    rows = _overdue_records(state)
+    row = rows[0] if rows else {}
+    _check(
+        row.get("observed_s") == 137.0 and row.get("threshold_s") == 0.0,
+        f"the record carries the MEASURED lateness (137s past report_by) against "
+        f"a zero-second bound, not a re-derived or defaulted number (got "
+        f"observed_s={row.get('observed_s')!r}, threshold_s={row.get('threshold_s')!r})",
+    )
+    _check(
+        row.get("emitted_at") == T0.isoformat(),
+        f"and it is stamped with the sweep's own clock, the moment the sweep "
+        f"DECIDED to fire (got {row.get('emitted_at')!r})",
     )
 
 
@@ -1920,6 +2341,15 @@ def _ticking(
     Writes the PAIR, never `report_by` alone: the derivation is
     ``report_by - report_by_seconds``, so a test that set only one of them
     would be pinning a value it did not choose.
+
+    ALSO backdates ``last_transition_at`` to a day before ``last_alive``
+    (GAU-22(c)): ``_spawn_live`` stamps its OWN transition at real wall-clock
+    "now", which every gauge-stale fixture below implicitly relied on being
+    OLDER than its (backdated) gauge ``measured_at`` -- true for a genuinely
+    long-lived ticking session, false by fixture accident otherwise. A
+    session that is TICKING has, by construction, been alive for a while;
+    modelling that here is what keeps GAU-22(c)'s rotation-window grace from
+    misreading every "long-lived, reporter died" fixture as "just rotated".
     """
     window_s = 300
     state.update_state(
@@ -1928,6 +2358,7 @@ def _ticking(
         {
             "report_by_seconds": window_s,
             "report_by": (last_alive + timedelta(seconds=window_s)).isoformat(),
+            "last_transition_at": (last_alive - timedelta(days=1)).isoformat(),
         },
     )
 
@@ -2108,12 +2539,339 @@ def test_gauge_stale_leg_no_ops_without_a_bridge() -> None:
         "the leg is inert without a peer registry and bridge manager",
     )
 
+# ---------------------------------------------------------------------------
+# GAU-25: DETECTIONS and DELIVERIES are two numbers and must never collapse
+# ---------------------------------------------------------------------------
+
+
+def _unresolvable_steward() -> tuple[StateManagementInterface, PeerRegistry, BridgeSessionManager]:
+    """A worker whose spawner is registered NOWHERE — the GAU-26 shape, reduced.
+
+    This is the fixture GAU-25 was blind to and it is the only one that
+    discriminates: with a RESOLVABLE steward, detections and deliveries are
+    equal and a collapsed counter looks correct. The two numbers only diverge
+    when a real detection fails to deliver, so any test of this fix that wires a
+    working steward proves nothing at all.
+    """
+    state, reg, mgr = _state(), _peer_registry(), _bridge_manager()
+    _spawn_live(state, agent_instance_id="agi-worker", spawned_by_instance_id="agi-nobody")
+    return state, reg, mgr
+
+
+def test_gauge_stale_counts_the_detection_the_delivery_lost() -> None:
+    """★ GAU-25's FILED SPECIMEN, as a test. The 2026-08-19 17:47:33Z tick
+    detected a real arrested gauge, failed to resolve its steward, and reported
+    ``L4d=0`` — because the leg's only number was the DELIVERY count.
+
+    THE MUTATION THIS CATCHES, named explicitly: collapse the two numbers back
+    into one — i.e. make ``_fill_counts`` receive ``detected=notified``, or drop
+    the ``counts`` sink and let a caller read the ``int`` return as the
+    detection count. Either way ``detected`` reads 0 here and this test fails.
+    A green over a resolvable steward would survive that mutation; this fixture
+    does not.
+    """
+    state, reg, mgr = _unresolvable_steward()
+    now = datetime.now(UTC)
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
+    _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
+    counts = StewardNoticeCounts()
+    delivered = sweep_gauge_staleness(
+        state, now=now, peer_registry=reg, bridge_manager=mgr, counts=counts,
+    )
+    _check(delivered == 0, "nothing was delivered — the steward resolves to no binding")
+    _check(
+        counts.detected == 1,
+        "★ but the DETECTOR fired, and the sweep says so. This is the number "
+        "the operator-facing line could not previously report, and the whole "
+        "of GAU-25: L4d=0 was consistent with any number of real detections",
+    )
+    _check(
+        counts.undelivered == 1,
+        "and the failed delivery is counted as its own population — an alarm "
+        "nobody received, not a quiet tick",
+    )
+    _check(
+        counts.delivered == delivered,
+        "the sink's delivered field and the legacy int return are the SAME "
+        "number — the return value's meaning is unchanged, which is what lets "
+        "~86 existing call sites keep reading it",
+    )
+
+
+def _transitioned(
+    state: StateManagementInterface, agent_instance_id: str, *, last_transition_at: datetime,
+) -> None:
+    """Set ``last_transition_at`` directly -- the GAU-22(c) rotation-window
+    signal reads this column, and ``_spawn_live``'s own transition call stamps
+    real wall-clock time, not a fixture-controlled one."""
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": agent_instance_id}},
+        {"last_transition_at": last_transition_at.isoformat()},
+    )
+
+
+def test_gau22_rotation_window_holds_fire_inside_the_grace() -> None:
+    """★ GAU-22(c), THE POSITIVE CASE. A rotation just happened
+    (``last_transition_at`` newer than the gauge's ``measured_at``) and the
+    gauge is stale PAST GAUGE_STALE_LAG_S purely because the successor has
+    not written its first row yet -- this is the L4d false-positive GAU-22
+    measured live (an 8.9-minute specimen), and it must NOT fire."""
+    state, reg, mgr, _ = _wired()
+    now = datetime.now(UTC)
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=1200)).isoformat())
+    _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
+    _transitioned(state, "agi-worker", last_transition_at=now - timedelta(seconds=300))
+    n = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 0, "a rotation inside its grace window holds fire even past GAUGE_STALE_LAG_S")
+
+
+def test_gau22_rotation_window_still_fires_once_grace_expires() -> None:
+    """The negative control: a rotation whose successor STILL has not
+    written a gauge row well past the grace window is a genuinely stuck
+    reporter, not a transient rotation gap -- it must still alarm."""
+    state, reg, mgr, _ = _wired()
+    now = datetime.now(UTC)
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=1800)).isoformat())
+    _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
+    _transitioned(
+        state, "agi-worker",
+        last_transition_at=now - timedelta(seconds=GAUGE_STALE_ROTATION_GRACE_S + 60),
+    )
+    n = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 1, "a rotation-window finding past its own grace still fires -- the grace is not a suppression")
+
+
+def test_gau22_a_transition_older_than_the_gauge_is_not_a_rotation_window() -> None:
+    """CATCHES: the rotation-window check misfiring on a normal ongoing
+    session whose last transition long predates its gauge -- this is NOT a
+    rotation in progress, so the grace must not apply and the ordinary lag
+    check (GAU-01(b)) must decide, unchanged."""
+    state, reg, mgr, _ = _wired()
+    now = datetime.now(UTC)
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
+    _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
+    _transitioned(state, "agi-worker", last_transition_at=now - timedelta(seconds=7200))
+    n = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 1, "an old transition (not a rotation-in-progress) leaves the ordinary GAU-01(b) alarm intact")
+
+
+def test_every_steward_leg_reports_detections_separately_from_deliveries() -> None:
+    """The audit, as an assertion: L4a and L4b carried the IDENTICAL defect, so
+    fixing only the filed leg (L4d) would have left two live instances of it.
+
+    A ruling's footprint is always larger than the first count. L4c is NOT here
+    because it was already honest — it reports appended/unroutable/undeliverable
+    and cannot print all-zero while a detection went undelivered.
+    """
+    now = datetime.now(UTC)
+
+    state, reg, mgr = _unresolvable_steward()
+    _gauge(state, "agi-worker")
+    due = StewardNoticeCounts()
+    _check(
+        sweep_rotation_due_sessions(
+            state, peer_registry=reg, bridge_manager=mgr, counts=due,
+        ) == 0 and due.detected == 1 and due.undelivered == 1,
+        "L4a (rotation-due) reports its detection even when delivery fails",
+    )
+
+    state, reg, mgr = _unresolvable_steward()
+    dark = StewardNoticeCounts()
+    _check(
+        sweep_gauge_coverage(
+            state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr, counts=dark,
+        ) == 0 and dark.detected == 1 and dark.undelivered == 1,
+        "L4b (gauge-coverage) reports its detection even when delivery fails",
+    )
+
+    state, reg, mgr = _unresolvable_steward()
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
+    _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
+    stale = StewardNoticeCounts()
+    _check(
+        sweep_gauge_staleness(
+            state, now=now, peer_registry=reg, bridge_manager=mgr, counts=stale,
+        ) == 0 and stale.detected == 1 and stale.undelivered == 1,
+        "L4d (gauge-staleness) reports its detection even when delivery fails",
+    )
+
+
+def test_latch_suppressed_detections_stay_visible_but_do_not_re_warn() -> None:
+    """The two halves of the latch decision, pinned together because they pull
+    in opposite directions and a fix that got one right could get the other
+    wrong silently.
+
+    A session already notified stays in ``detected`` (the condition still
+    holds, and the operator line must not claim the fleet is clean) but is NOT
+    in ``actionable`` (so the WARNING does not re-fire every 300s for the whole
+    of an outage already reported).
+    """
+    state, reg, mgr, _bridge_id = _wired()
+    now = datetime.now(UTC)
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
+    _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
+    latch = NoticeLatch()
+    first, second = StewardNoticeCounts(), StewardNoticeCounts()
+    sweep_gauge_staleness(
+        state, now=now, peer_registry=reg, bridge_manager=mgr, latch=latch, counts=first,
+    )
+    sweep_gauge_staleness(
+        state, now=now, peer_registry=reg, bridge_manager=mgr, latch=latch, counts=second,
+    )
+    _check(
+        (first.detected, first.delivered, first.actionable) == (1, 1, 1),
+        "the first tick detects, delivers, and is actionable",
+    )
+    _check(
+        (second.detected, second.delivered, second.undelivered) == (1, 0, 0),
+        "★ the second tick STILL REPORTS THE DETECTION — a suppressed notice "
+        "must not make the operator line read as an all-clear",
+    )
+    _check(
+        second.actionable == 0,
+        "but it is not actionable, so the WARNING stays quiet across an "
+        "outage already reported — which is what the latch is for",
+    )
+
+
+def test_the_rider_actually_passes_the_sink_and_prints_both_numbers() -> None:
+    """★ THE INERT-KNOB GUARD. Every assertion above would pass unchanged if the
+    rider never passed a sink at all — the legs would fill nothing, the log line
+    would print zeros, and the fix would be dead on the surface it exists for.
+    A config knob that is never passed is inert, and a green over an inert knob
+    is a green that lies.
+
+    So this drives the REAL ``_run_rotation_surface_sweep`` against a spy and
+    asserts three things the unit tests structurally cannot:
+
+    1. the rider hands each leg a ``StewardNoticeCounts``;
+    2. the emitted line carries the DETECTED count, not the delivered one;
+    3. the WARNING fires on a tick with detections and ZERO deliveries — the
+       ``_run_counted_leg`` gate reads the value the leg lambda returns, so a
+       lambda that returned the delivered count would emit no warning at all.
+    """
+    import logging
+    from types import SimpleNamespace
+
+    import agent_messaging_plugin.plugin as plugin_mod
+    from agent_messaging_plugin import rotation_self_notice
+
+    saved = (
+        plugin_mod.sweep_rotation_due_sessions,
+        plugin_mod.sweep_gauge_coverage,
+        plugin_mod.sweep_rotation_self_notice,
+        plugin_mod.sweep_gauge_staleness,
+    )
+    seen: dict[str, object] = {}
+
+    def _quiet(*_args: object, **kwargs: object) -> int:
+        seen.setdefault("quiet_sink", kwargs.get("counts"))
+        return 0
+
+    def _stale_spy(*_args: object, **kwargs: object) -> int:
+        sink = kwargs.get("counts")
+        seen["stale_sink"] = sink
+        if isinstance(sink, StewardNoticeCounts):
+            # Three real detections, none of them delivered: the exact shape of
+            # the 17:47:33Z specimen, scaled up so a collapsed counter cannot
+            # coincidentally match.
+            sink.detected, sink.delivered, sink.undelivered = 3, 0, 3
+        return 0
+
+    plugin_mod.sweep_rotation_due_sessions = _quiet  # type: ignore[assignment]
+    plugin_mod.sweep_gauge_coverage = _quiet  # type: ignore[assignment]
+    plugin_mod.sweep_rotation_self_notice = (  # type: ignore[assignment]
+        lambda *_a, **_k: rotation_self_notice.SelfNoticeCounts()
+    )
+    plugin_mod.sweep_gauge_staleness = _stale_spy  # type: ignore[assignment]
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture()
+    plugin_mod.logger.addHandler(handler)
+    prior_level = plugin_mod.logger.level
+    plugin_mod.logger.setLevel(logging.INFO)
+    try:
+        fake_self = SimpleNamespace(
+            _log_self_notice_counts=plugin_mod.AgentMessagingPlugin._log_self_notice_counts,  # noqa: SLF001
+            _get_state_service=lambda: object(),
+            _peer_registry=object(),
+            _bridge_manager=object(),
+            _rotation_due_latch=object(),
+            _gauge_coverage_latch=object(),
+            _gauge_stale_latch=object(),
+            _rotation_self_latch=object(),
+            _require_service=lambda: object(),
+        )
+        plugin_mod.AgentMessagingPlugin._run_rotation_surface_sweep(  # noqa: SLF001
+            cast("Any", fake_self),
+        )
+    finally:
+        plugin_mod.logger.removeHandler(handler)
+        plugin_mod.logger.setLevel(prior_level)
+        (
+            plugin_mod.sweep_rotation_due_sessions,
+            plugin_mod.sweep_gauge_coverage,
+            plugin_mod.sweep_rotation_self_notice,
+            plugin_mod.sweep_gauge_staleness,
+        ) = saved  # type: ignore[assignment]
+
+    _check(
+        isinstance(seen.get("stale_sink"), StewardNoticeCounts),
+        "★ the rider PASSES a counts sink to the L4d leg. Without this the "
+        "whole fix is an inert knob and every other assertion here is vacuous",
+    )
+    _check(
+        isinstance(seen.get("quiet_sink"), StewardNoticeCounts),
+        "and to the L4a/L4b legs too — the audit fixed all three, not just the "
+        "one that was filed",
+    )
+    summary = next(
+        (r.getMessage() for r in records if "rotation surface swept" in r.getMessage()),
+        "",
+    )
+    _check(
+        "L4d=3 detected(0 delivered/3 undelivered)" in summary,
+        "★ the operator-facing line prints DETECTIONS and DELIVERIES as "
+        "separate numbers. The pre-fix line for this exact tick read "
+        f"'L4d=0 session(s) with an arrested gauge row'. Got: {summary!r}",
+    )
+    _check(
+        "L4d=0 session(s)" not in summary,
+        "and the old collapsed spelling is gone — nobody can read the new line "
+        "the way L4d=0 used to be read",
+    )
+    _check(
+        any(
+            r.levelno == logging.WARNING and "stopped advancing" in r.getMessage()
+            for r in records
+        ),
+        "★ and the WARNING fires on a tick with 3 detections and 0 deliveries. "
+        "_run_counted_leg gates on the leg lambda's return value, so this is "
+        "the assertion that pins the lambda returning delivered+undelivered "
+        "rather than delivered — the same GAU-25 defect one level up",
+    )
+
+
 def main() -> int:
     test_overdue_no_report_by_never_swept()
     test_overdue_marks_past_deadline_live_and_idle()
     test_overdue_skips_future_deadline()
     test_overdue_notifies_steward()
     test_overdue_notifies_unmanaged_steward()
+    test_overdue_notifies_a_watch_id_registered_steward()
+    test_overdue_join_reads_the_session_id_and_never_derives_it()
+    test_overdue_bridge_bound_steward_keeps_its_direct_route()
+    test_overdue_steward_row_without_a_session_id_is_best_effort()
+    test_overdue_ambiguous_session_id_is_never_a_guessed_recipient()
+    test_overdue_alarm_that_reached_nobody_is_still_recorded()
+    test_overdue_delivered_alarm_records_the_steward_it_reached()
+    test_overdue_record_carries_the_measured_lateness()
     test_overdue_no_spawner_is_silent_noop()
     test_overdue_unresolvable_spawner_is_best_effort()
     test_overdue_marks_without_notify_when_registry_absent()
@@ -2192,6 +2950,13 @@ def main() -> int:
     test_gauge_stale_notice_states_both_clocks_and_names_no_cause()
     test_gauge_stale_notifies_once_and_releases_on_recovery()
     test_gauge_stale_leg_no_ops_without_a_bridge()
+    test_gauge_stale_counts_the_detection_the_delivery_lost()
+    test_gau22_rotation_window_holds_fire_inside_the_grace()
+    test_gau22_rotation_window_still_fires_once_grace_expires()
+    test_gau22_a_transition_older_than_the_gauge_is_not_a_rotation_window()
+    test_every_steward_leg_reports_detections_separately_from_deliveries()
+    test_latch_suppressed_detections_stay_visible_but_do_not_re_warn()
+    test_the_rider_actually_passes_the_sink_and_prints_both_numbers()
 
     print()
     print(f"PASSED: {_passed}")

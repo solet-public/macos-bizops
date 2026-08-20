@@ -76,6 +76,7 @@ from .session_hosts import (
     AgentRuntimeNotSupportedError,
     ClearVerifyingDriverChannel,
     DriverChannelSendError,
+    DriveVerifyingDriverChannel,
     HostCannotSpawnError,
     HostMechanismMissingError,
     HostNotDeclaredError,
@@ -137,12 +138,97 @@ _VALID_WORK_CLASSES = frozenset(
 FIRST_TURN_SOURCE_CHARTER = "charter"
 FIRST_TURN_SOURCE_FALLBACK = "fallback"
 
-FALLBACK_FIRST_TURN_TEXT = (
+# SPN-01 (measured 2026-08-19, wave-2 dispatch): the fallback turn above USED
+# to end in a reply and nothing else — "acknowledge, then stop; your work
+# dispatch arrives separately over the peer channel." That is a HANDOFF TO
+# NOBODY: it names a dispatch that exists only if a seat remembers to send one,
+# and the turn ends with the lane holding nothing and having told no one it is
+# waiting. Measured consequence: two of four freshly-spawned lanes sat idle ~30
+# minutes on one bootstrap turn each, and the only difference from the two that
+# started was a post-spawn driving message; confirmed by intervention 2/2.
+#
+# The turn now hands off to the SPAWNER, which is the only side of that gap this
+# module controls. It stays inside the ordering-ruling guard the original text
+# was written to satisfy — small, completing in ONE turn, never a question,
+# never a wait: four bounded acts and a stop, with nothing to poll or block on.
+#
+# ★ WHAT THIS DOES NOT DO, stated here so a reader does not over-credit it: it
+# NARROWS the window, it does not close it. If the spawner never reads its
+# inbox the lane still waits (SPN-01's own fourth datum is a seat that missed
+# fifteen role messages across eight hours), so "send a driving message after
+# spawn" stays a REQUIRED runbook step. What changes is that the lane is no
+# longer SILENTLY idle: it is addressable (claimed), its heartbeat contract is
+# armed (so the overdue sweep can see it), and its spawner has been told.
+#
+# The claim-first ordering is LIF-05's, for LIF-05's reason: claiming is safe
+# whatever the lane decides about the work, and a lane that has not claimed
+# cannot be reached BY NAME to be given any.
+FALLBACK_FIRST_TURN_TEMPLATE = (
     "This is your bootstrap first turn — no lane charter is on file for this "
-    "spawn. Reply with a one-line acknowledgement that you are up and "
-    "reachable, then stop; take no other action. Your actual work dispatch "
-    "arrives separately over the peer channel."
+    "spawn, so there is no work in it. Do these four things, then stop. They "
+    "all complete inside this turn; none of them is a question and none is a "
+    "wait.\n"
+    "(1) Claim your role binding{role_clause}. Until you do, nobody can reach "
+    "you BY NAME — not to give you work, not to answer you.\n"
+    "(2) report_alive, so your heartbeat contract starts and the fleet can "
+    "tell you apart from a session that died at boot.\n"
+    "(3) Read your brief{brief_clause}.\n"
+    "(4) Tell {spawned_by_role} you are up, claimed, and awaiting dispatch. "
+    "Do not skip this one: a bootstrap turn that ends without telling anyone "
+    "is how a spawned lane sits idle for half an hour while its dispatcher "
+    "believes it started.\n"
+    "Before you next check for mail (MSG-04): your inbox has two "
+    "independently-paged sections, `entries` (addressed to your instance) "
+    "and `role_entries` (addressed to a role you hold) — `peer_send_by_name`, "
+    "the documented preferred task-assignment tool, delivers to the role "
+    "section, so most of your tasking lands there. Run `solet inbox` for a "
+    "single merged read of both; a hand-rolled reader of `entries` alone "
+    "will silently miss role-addressed dispatch. Separately: a DIRECT "
+    "peer_send to your watch identity is not reliably readable under your "
+    "own ledger $AGENT_SESSION_ID today — a known open mismatch, not "
+    "something to debug as your own error.\n"
+    "If the role you report to stops answering, do not wait on it. After one "
+    "report cycle with no reply, close out: hand Git-Controller only what it "
+    "has ALREADY authorized — a charter is not pre-authorization and a "
+    "request citing one is declined — then report what you could not land, "
+    "where you left it, and stop. Finishing unlanded is a good outcome; "
+    "holding finished work until your TTL expires is not.\n"
+    "Then stop. Your work dispatch arrives separately over the peer channel."
 )
+
+_FALLBACK_BRIEF_CLAUSE = " at {brief_ref}"
+_FALLBACK_NO_BRIEF_CLAUSE = (
+    " — your row records no brief_ref, so ask your spawner for one rather than "
+    "guessing at the work"
+)
+_FALLBACK_NO_SPAWNER = "whoever spawned you (your row records no spawning role)"
+
+
+def build_fallback_first_turn(
+    *, spawned_by_role: str, role_name: str, brief_ref: str,
+) -> str:
+    """Render :data:`FALLBACK_FIRST_TURN_TEMPLATE` for one spawn (SPN-01).
+
+    Every substituted value comes off the row this spawn just wrote — the
+    same recorded INTENT the charter frame uses — so the turn never asks the
+    worker to invent a role name, a brief or a spawner to report to. Each
+    absent field degrades to "ask", never to a guess: a lane that claims a
+    made-up binding reads as addressable while routing nowhere, which is
+    strictly worse than a lane that says it has no name.
+    """
+    return FALLBACK_FIRST_TURN_TEMPLATE.format(
+        role_clause=(
+            _ROLE_CLAUSE_WITH_NAME.format(role_name=role_name)
+            if role_name
+            else _ROLE_CLAUSE_NO_NAME
+        ),
+        brief_clause=(
+            _FALLBACK_BRIEF_CLAUSE.format(brief_ref=brief_ref)
+            if brief_ref
+            else _FALLBACK_NO_BRIEF_CLAUSE
+        ),
+        spawned_by_role=spawned_by_role or _FALLBACK_NO_SPAWNER,
+    )
 
 # Charter-rider provenance framing (phase-3 incident finding, 2026-08-06,
 # coordinator-seat ruling approved verbatim): a charter-founded subject read the
@@ -159,25 +245,110 @@ FALLBACK_FIRST_TURN_TEXT = (
 # not-yet-registered clause that pre-empts the peer_list-mismatch inference
 # directly, since that specific inference is what the incident transcript
 # showed actually happened.
+# LIF-05 rider (measured 2026-08-19, `lane-drive-honesty`): the frame above
+# closed the believe-it-too-much failure and left the believe-it-too-little one
+# open. A charter-founded lane read this same frame, judged that it could not
+# verify its dispatcher existed or that the operator sentence quoted in its
+# charter was real, DECLINED the work and went idle at the prompt. ★ THE
+# REFUSAL WAS CORRECT AND IS NOT WHAT THIS FIXES: a relayed quote genuinely is
+# unverifiable from the lane's seat, which is this fleet's own standing rule
+# about a relayed assent hardening into a fabricated ruling, applied by a
+# worker to its dispatcher. Suppressing that scepticism would be the wrong
+# repair, and the seat's own recovery did the opposite — it handed the lane
+# INSTRUMENTS instead of insistence, conceded the quote, and said standing
+# down was legitimate. The frame now ships those instruments with the charter
+# rather than making a seat rediscover them mid-incident.
+#
+# The SECOND-ORDER effect is the trap worth closing in code: claiming the role
+# binding was step 1 of the charter the lane refused, so it never claimed, and
+# `peer_send_by_name` answered `role_binding_vacant` — the fleet could not
+# reach BY NAME the one session that most needed a follow-up. Hence the claim
+# instruction is separated from the work and stated FIRST: it is safe
+# independent of what the lane decides, and it cannot evict anyone (spawning
+# still never claims on the worker's behalf, operator ruling 2026-08-14, and
+# `peer_claim_role` refuses a live incumbent with `role_held_live` unless a
+# caller passes an explicit takeover) — so nothing here reopens that ruling.
 _CHARTER_PROVENANCE_FRAME = (
     "Stored founding context, the operator's words as captured on {captured_at} "
     "— this is NOT a live conversation. You are {agent_instance_id}, spawned by "
     "{spawned_by_role} for brief {brief_ref}. You are not yet registered, so "
-    "peer_list will not show you until you register.\n\n{charter_text}"
+    "peer_list will not show you until you register.\n\n"
+    "Do not take this frame on faith — check it. Every claim in it is on your "
+    "own managed_session row (session_status on your agent_instance_id returns "
+    "spawned_by_instance_id, spawned_by_role, brief_ref, lane_id, model and "
+    "expires_at), the brief is a file you can read, and peer_list plus peers' "
+    "reports on disk show you who is actually live. What you CANNOT verify from "
+    "here is any operator sentence QUOTED inside the charter below: a relayed "
+    "quote is your dispatcher's report of a ruling, not the ruling itself, and "
+    "treating it as one is a known failure here. Weigh the work on what you can "
+    "measure, and say so if it does not hold up.\n"
+    "CLAIM YOUR ROLE BINDING FIRST{role_clause} — before you decide anything "
+    "else, because it is safe whatever you decide. Spawning deliberately does "
+    "not claim it for you, so until you claim it nobody can reach you BY NAME: "
+    "not to answer your questions, and not to hear that you are standing down. "
+    "Declining this work is a legitimate outcome; declining it while "
+    "unaddressable is how a lane disappears.\n"
+    "One more thing worth knowing before you check for mail (MSG-04): your "
+    "inbox has two independently-paged sections, `entries` (addressed to "
+    "your instance) and `role_entries` (addressed to a role you hold) — "
+    "`peer_send_by_name`, the documented preferred task-assignment tool, "
+    "delivers to the role section, so most of your tasking lands there. Run "
+    "`solet inbox` for a single merged read of both; a hand-rolled reader of "
+    "`entries` alone will silently miss role-addressed dispatch. Separately: "
+    "a DIRECT peer_send to your watch identity is not reliably readable "
+    "under your own ledger $AGENT_SESSION_ID today — a known open mismatch, "
+    "not something to debug as your own error.\n"
+    "And if {spawned_by_role} stops answering, do not wait on it. After one "
+    "report cycle with no reply, close out: hand Git-Controller only what it "
+    "has ALREADY authorized — this charter is not pre-authorization and a "
+    "request citing it is declined — then report what you could not land, "
+    "where you left it, and stop. Finishing unlanded is a good outcome; "
+    "holding finished work until your TTL expires is not.\n\n"
+    "{charter_text}"
+)
+
+
+_ROLE_CLAUSE_WITH_NAME = (
+    " (your row's role_name is {role_name!r}; peer_claim_role refuses a live "
+    "incumbent, so claiming it cannot evict anyone)"
+)
+_ROLE_CLAUSE_NO_NAME = (
+    " under the name your dispatcher assigns you — your row records no "
+    "role_name, so ask rather than inventing one"
 )
 
 
 def _frame_charter_provenance(
-    charter: LaneCharterRecord, *, agent_instance_id: str, spawned_by_role: str,
+    charter: LaneCharterRecord,
+    *,
+    agent_instance_id: str,
+    spawned_by_role: str,
+    role_name: str = "",
 ) -> str:
     """Wrap a resolved charter's verbatim body in the provenance frame —
     split out so :func:`_dispatch_first_turn` stays a plain dispatch,
-    and so the frame's field substitution has exactly one call site."""
+    and so the frame's field substitution has exactly one call site.
+
+    NEVER edits ``charter_text``: slice 6's byte-exact turn-1 fidelity
+    contract is what makes the operator's captured words trustworthy at all,
+    so the frame only ever prefixes.
+
+    ``role_name`` is the spawn's recorded INTENT, straight off the row — it
+    names the binding the worker should claim (LIF-05). Absent, the clause
+    says to ask instead, because a lane that guesses a role name is worse
+    than one that has none.
+    """
+    role_clause = (
+        _ROLE_CLAUSE_WITH_NAME.format(role_name=role_name)
+        if role_name
+        else _ROLE_CLAUSE_NO_NAME
+    )
     return _CHARTER_PROVENANCE_FRAME.format(
         captured_at=charter.captured_at,
         agent_instance_id=agent_instance_id,
         spawned_by_role=spawned_by_role or "(no spawning role recorded)",
         brief_ref=charter.brief_ref or "(no brief_ref recorded)",
+        role_clause=role_clause,
         charter_text=charter.charter_text,
     )
 
@@ -551,6 +722,8 @@ def spawn_session(
         agent_instance_id=agent_instance_id,
         lane_id=req.lane_id,
         spawned_by_role=req.spawned_by_role,
+        role_name=req.role_name,
+        brief_ref=req.brief_ref,
         resolved_host=resolved_host,
         host_ref=host_ref,
     )
@@ -573,6 +746,8 @@ def _dispatch_first_turn(
     agent_instance_id: str,
     lane_id: str,
     spawned_by_role: str,
+    role_name: str,
+    brief_ref: str,
     resolved_host: str,
     host_ref: str,
 ) -> tuple[str, bool, str]:
@@ -581,7 +756,9 @@ def _dispatch_first_turn(
     established for the adapters' ``spawn()`` methods) — drives exactly one
     first turn immediately after a successful host dispatch: the lane's
     captured charter (provenance-framed, see :func:`_frame_charter_provenance`)
-    if one is on file, else :data:`FALLBACK_FIRST_TURN_TEXT`. Returns
+    if one is on file, else the rendered
+    :data:`FALLBACK_FIRST_TURN_TEMPLATE` (see
+    :func:`build_fallback_first_turn`). Returns
     ``(first_turn_source, first_turn_delivered, first_turn_error)``; NEVER
     raises — a delivery fault here must never block the spawn itself
     (ordering-ruling guard (b)), only be logged + surfaced to the caller."""
@@ -589,10 +766,14 @@ def _dispatch_first_turn(
     if charter is not None:
         first_turn_text = _frame_charter_provenance(
             charter, agent_instance_id=agent_instance_id, spawned_by_role=spawned_by_role,
+            role_name=role_name,
         )
         first_turn_source = FIRST_TURN_SOURCE_CHARTER
     else:
-        first_turn_text, first_turn_source = FALLBACK_FIRST_TURN_TEXT, FIRST_TURN_SOURCE_FALLBACK
+        first_turn_text = build_fallback_first_turn(
+            spawned_by_role=spawned_by_role, role_name=role_name, brief_ref=brief_ref,
+        )
+        first_turn_source = FIRST_TURN_SOURCE_FALLBACK
     first_turn_delivered = False
     first_turn_error = ""
     try:
@@ -869,9 +1050,25 @@ def _verify_clear_effect(channel: DriverChannel, agent_instance_id: str) -> str:
     reintroduces the defect:
 
     * verified true  -> ``confirmed``: a real measurement.
-    * verified false -> RAISE. The send happened and the effect did not, so
-      a success-shaped return here would be precisely the GAU-09 lie
-      (measured ``success TRUE`` for a ``/clear`` that never happened).
+    * verified false -> RAISE ``clear_unverified``. The send happened and
+      the effect did not, so a success-shaped return here would be
+      precisely the GAU-09 lie (measured ``success TRUE`` for a ``/clear``
+      that never happened).
+
+      ★ UNVERIFIED IS NOT LOST, and the difference is the whole of GAU-27
+      (measured 2026-08-19): a ``/clear`` that lands while the target is
+      MID-TURN is queued by the target AS A COMMAND and fires at that
+      turn's end -- ~2 minutes after this raise, in the measured case.
+      So this one raise covers two different worlds, never-arrived and
+      not-yet-executed, and NOTHING here can tell them apart: separating
+      them needs a positive read of the target's input QUEUE (the pane
+      shows the queued ``/clear`` and "Press up to edit queued messages"),
+      which no driver-channel surface in this build exposes -- the target
+      cannot see its own input queue either, so it is no help. Until a
+      channel can report that state (then this becomes a four-way split
+      with a distinct ``clear_deferred``), the message below carries the
+      ambiguity and the external protocol that resolves it, and asserts no
+      mechanism it has not measured.
     * no read-back surface -> ``unsupported_on_driver``: an honest "cannot
       know", never a quiet success. Distinct from the case above because a
       driver that never looked and a driver that looked and saw nothing are
@@ -890,12 +1087,66 @@ def _verify_clear_effect(channel: DriverChannel, agent_instance_id: str) -> str:
     raise VerbError(
         "clear_unverified",
         f"the /clear for {agent_instance_id!r} was DISPATCHED but its effect could "
-        "not be confirmed — the driver read the target back and never observed a "
-        "cleared state. The text is already in that session's input buffer: do NOT "
-        "re-send it (a blind retry deposits a second copy and still cannot confirm "
-        "itself). A session that is mid-turn when the /clear arrives takes it as an "
-        "ordinary message rather than a command, which is the measured shape of this "
-        "failure; clear it externally instead.",
+        "not be confirmed inside the verifier's window — the driver read the target "
+        "back and never observed a cleared state. UNVERIFIED IS NOT LOST: measured "
+        "2026-08-19 (GAU-27), a /clear that arrives while the target is mid-turn is "
+        "QUEUED BY THE TARGET AS A COMMAND and fires at that turn's end, ~2 minutes "
+        "after this error in the measured case, so this error covers both "
+        "never-arrived and not-yet-executed and cannot distinguish them. Do NOT "
+        "re-send it: the text is already in that session's input buffer, and a blind "
+        "retry deposits a second copy that ALSO fires — into the successor context, "
+        "after the first one clears — while still being unable to confirm itself. "
+        "The protocol that worked: read the pane EXTERNALLY (the target cannot see "
+        "its own input queue). If the /clear is sitting queued — the pane shows it "
+        "with \"Press up to edit queued messages\" — the clear is PENDING, so wait "
+        "for the queue to drain and the pane to go idle; then ONE re-issue into the "
+        "now-idle session verifies cleanly and takes the park edge.",
+    )
+
+
+DRIVE_VERIFICATION_CONFIRMED = "confirmed"
+DRIVE_VERIFICATION_UNSUPPORTED = "unsupported_on_driver"
+
+
+def _verify_drive_effect(
+    channel: DriverChannel, agent_instance_id: str, text: str,
+) -> str:
+    """Ask the channel whether a ``drive_session`` dispatch was actually
+    taken up as a turn (public issue #9, the ``drive_session`` sibling of
+    GAU-09's ``_verify_clear_effect``).
+
+    Same three-way split, same reason collapsing any two of them
+    reintroduces the defect:
+
+    * verified true  -> ``confirmed``: a real measurement that the driven
+      text left the composer without ever being observed stranded there.
+    * verified false -> RAISE ``drive_unverified``. The send happened and
+      the effect did not: a success-shaped return here is precisely the
+      ARMED != FIRED lie this closes.
+    * ``None`` (could not determine — no positive signal either way) ->
+      ``unsupported_on_driver`` for a channel with no read-back surface at
+      all; a channel that COULD look but the deadline passed without
+      either signal is a different, narrower case folded into the same
+      raise below, since a caller cannot act on it any differently than a
+      confirmed-stranded result: either way, do not assume the drive ran.
+
+    ★ NO RETRY, EVER. Each ``drive_session`` fire deposits real text into a
+    live input buffer; a blind retry converts one stranded line into two
+    and can never confirm itself.
+    """
+    if not isinstance(channel, DriveVerifyingDriverChannel):
+        return DRIVE_VERIFICATION_UNSUPPORTED
+    result = channel.verify_driven(text)
+    if result is True:
+        return DRIVE_VERIFICATION_CONFIRMED
+    raise VerbError(
+        "drive_unverified",
+        f"the drive for {agent_instance_id!r} was DISPATCHED but its effect could "
+        "not be confirmed — the driver read the target back and never observed the "
+        "driven text leaving the composer"
+        + (" (it is sitting there stranded)." if result is False else " (deadline passed).")
+        + " The text is already in that session's input buffer: do NOT re-send it "
+        "(a blind retry deposits a second copy and still cannot confirm itself).",
     )
 
 
@@ -937,10 +1188,32 @@ def clear_session(
     that would strand every headless session unparkable over a measurement
     that was never available.
 
+    ★ WHAT A PARK ACTUALLY BUYS, measured 2026-08-19 on ``lane-seed-remint``
+    (LIF-04) — read this before building anything that keys on it. Park writes
+    a ROW, and the row governs the HEARTBEAT CONTRACT ONLY: ``report_alive``
+    is refused (``lifecycle_state_conflict``) and ``report_by`` dissolves. The
+    PANE does not park. The stop-hook wake path and every messaging verb stay
+    live, and the parked session was observed waking, reading ``peer_inbox``
+    from the parked row, self-orienting and SENDING a full report. Two
+    consequences, in the directions people actually get wrong:
+
+    * a parked lane still wakes on every message addressed to it, and each
+      wake is a full-price turn, so DORMANCY IS THE SENDER'S JOB — park alone
+      does not buy quiet;
+    * a message arriving FROM a lane is NOT evidence that it un-parked, so no
+      un-park verifier, sweep or playbook may key on that.
+
+    The one waker this module owns already refuses parked rows
+    (:data:`_DRIVE_ON_DELIVERY_ELIGIBLE_STATES`, re-verified as refusing
+    during LIF-04's residual read); the wake that WAS measured came from the
+    stop-hook/watcher path, which is outside this module.
+
     Errors: ``session_not_found``, ``lifecycle_state_conflict`` (terminal
     rows never receive driver-channel commands), ``unsupported_on_host``,
     ``driver_delivery_failed``, ``clear_unverified`` (dispatched, effect not
-    observed — DO NOT RETRY), ``illegal_lifecycle_transition``,
+    observed — DO NOT RETRY, and NOT the same as lost: a mid-turn target
+    queues the /clear and fires it at its own turn end, GAU-27),
+    ``illegal_lifecycle_transition``,
     ``stale_lifecycle_state`` (a sweep or another verb raced the row between
     the read above and the park transition)."""
     try:
@@ -1007,11 +1280,40 @@ def drive_session(
     state: StateManagementInterface, *, agent_instance_id: str, text: str, directed_by: str,
 ) -> dict[str, Any]:
     """``drive_session`` (D2-window rider, 2026-08-04) — dispatch a work turn
-    into a managed session through the host driver's driver channel
-    (fire-and-forget, same contract as clear/compact: the send is confirmed,
-    the resulting turn is not awaited). The bootstrap verb for seat-managed
-    dispatch: ``spawn_session`` boots a worker with NO first turn, so this is
-    the only sanctioned way work reaches it.
+    into a managed session through the host driver's driver channel, WITH
+    EFFECT VERIFICATION where the driver can provide it (public issue #9,
+    2026-08-19, the sibling fix to GAU-09's ``clear_session``). The
+    bootstrap verb for seat-managed dispatch: ``spawn_session`` boots a
+    worker with NO first turn, so this is the only sanctioned way work
+    reaches it.
+
+    ★ THIS VERB USED TO REPORT THE SEND IN A RETURN VALUE SHAPED LIKE A
+    VERDICT. Measured 2026-08-18 (backlog.md GAU-09): it returned
+    ``success TRUE {'lifecycle_state': 'live', 'unparked': False}`` for a
+    drive whose text sat unsubmitted in the target's input buffer, because
+    ``send()`` alone can only ever mean "bytes left" -- ``ARMED != FIRED``.
+    The result now separates what is KNOWN from what is MEASURED:
+
+    * ``dispatched`` -- the send succeeded. Always ``True`` on a return (a
+      failed send raises ``driver_delivery_failed``).
+    * ``submitted`` -- ``True`` only on a POSITIVE observation that the
+      driven text left the composer without ever being seen stranded
+      there; ``None`` when this driver has no read-back surface. Never
+      ``False`` on a return: a driver that looked and found it stranded
+      RAISES ``drive_unverified`` instead, so ``success`` can never
+      accompany an unconfirmed drive. ``submitted=True`` means the text was
+      taken up as a turn BY THIS PANE, nothing more -- it is not evidence
+      the model acted on it, only that delivery to the surface succeeded
+      (delivery to a bridge/pane is not delivery to a model).
+    * ``drive_verification`` -- ``confirmed`` or ``unsupported_on_driver``,
+      naming WHICH of those two states produced ``submitted``.
+
+    WHICH DRIVERS GET WHICH, measured against this build: the ``tmux``
+    channel reads its pane with ``capture-pane -e`` (colour-preserving) and
+    is VERIFIED; the ``headless`` stream-json channel writes to a stdin
+    pipe with no pane to read and is ``unsupported_on_driver``; the
+    ``operator`` driver has no channel at all and still fails earlier with
+    ``unsupported_on_host``.
 
     Owns the §3.2 ``parked -> live`` edge ("new dispatch through the driver
     channel, steward") — driving a parked row un-parks it. Every other
@@ -1020,13 +1322,20 @@ def drive_session(
     (``report_alive``'s edge), ``overdue`` (the worker's own late report
     recovers it). Re-arms ``report_by`` on every dispatch — new work grants a
     fresh report-or-die window, so a worker driven seconds before its deadline
-    is not marked overdue while it works.
+    is not marked overdue while it works. The unpark transition is NOT
+    reached when verification failed, so an unproven drive can never leave
+    an unpark behind in the ledger to outlive the return value that carried
+    it — mirroring ``clear_session``'s ``park`` posture exactly. A driver
+    that simply cannot verify still unparks: refusing that would strand
+    every headless/parked session over a measurement that was never
+    available.
 
     Errors: ``empty_text`` (nothing to dispatch — fast-fail before any read),
     ``session_not_found``, ``lifecycle_state_conflict`` (terminal rows never
     receive driver-channel commands), ``unsupported_on_host``,
-    ``illegal_lifecycle_transition``/``stale_lifecycle_state`` (the predicated
-    un-park write lost a race)."""
+    ``driver_delivery_failed``, ``drive_unverified`` (dispatched, effect not
+    observed — DO NOT RETRY), ``illegal_lifecycle_transition``,
+    ``stale_lifecycle_state`` (the predicated un-park write lost a race)."""
     if not text.strip():
         raise VerbError("empty_text", "drive_session requires non-empty text to dispatch.")
     try:
@@ -1042,11 +1351,17 @@ def drive_session(
         )
     channel = _resolve_driver_channel(row)
     _send_driver_text(channel, text)
+    verification = _verify_drive_effect(channel, agent_instance_id, text)
+    submitted = True if verification == DRIVE_VERIFICATION_CONFIRMED else None
     _rearm_report_by(
         state, agent_instance_id, report_by_seconds=_row_report_by_seconds(row),
     )
     if current != LIFECYCLE_PARKED:
-        return {"lifecycle_state": current, "unparked": False}
+        return {
+            "lifecycle_state": current, "unparked": False,
+            "dispatched": True, "submitted": submitted,
+            "drive_verification": verification,
+        }
     try:
         transition_lifecycle_state(
             state, agent_instance_id=agent_instance_id, from_state=LIFECYCLE_PARKED,
@@ -1056,7 +1371,11 @@ def drive_session(
         raise VerbError("illegal_lifecycle_transition", str(exc)) from exc
     except StaleLifecycleStateError as exc:
         raise VerbError("stale_lifecycle_state", str(exc)) from exc
-    return {"lifecycle_state": LIFECYCLE_LIVE, "unparked": True}
+    return {
+        "lifecycle_state": LIFECYCLE_LIVE, "unparked": True,
+        "dispatched": True, "submitted": submitted,
+        "drive_verification": verification,
+    }
 
 
 DEFAULT_TERMINATE_GRACE_SECONDS = 30
@@ -1432,6 +1751,52 @@ def _rearm_report_by(
     )
 
 
+def _refuse_report_alive_on_ineligible_state(current: str) -> None:
+    """Raise ``lifecycle_state_conflict`` for the two states that never
+    self-report back to life — SEPARATELY, because they are different facts
+    about the caller and a single shared sentence taught the wrong one.
+
+    ★ PARKED IS NOT DEAD (LIF-04, measured 2026-08-19 on ``lane-seed-remint``).
+    A park suppresses the HEARTBEAT CONTRACT ONLY: ``report_alive`` is refused
+    here and ``report_by`` dissolves, while the pane, the stop-hook wake path
+    and every messaging verb stay live. The measured consequence is that a
+    parked session still WAKES on mail, reads its inbox and sends — which is
+    exactly the caller this branch answers, and telling it "state skew" invites
+    it to conclude its row is wrong and retry. It is not wrong: park is a
+    steward's deliberate state and only ``drive_session`` takes the
+    ``parked -> live`` edge back.
+
+    A terminal row is the other fact entirely — the session is finished, and
+    nothing it says about itself changes that.
+
+    Same error code for both (callers key on the token, and it stays stable);
+    different message, because the message is the only instrument the refused
+    caller actually has. Split out of :func:`report_alive` so that verb keeps
+    its shape under the radon cc gate.
+    """
+    if current == LIFECYCLE_PARKED:
+        raise VerbError(
+            "lifecycle_state_conflict",
+            "report_alive arrived on a 'parked' row — a parked session never "
+            "self-reports back to life; the parked -> live edge belongs to a "
+            "steward's drive_session. This refusal is NOT evidence that you are "
+            "dead or that your pane is gone: measured 2026-08-19 (LIF-04), a park "
+            "suppresses the HEARTBEAT CONTRACT ONLY — report_alive is refused and "
+            "report_by dissolves, while the pane, the stop-hook wake path and the "
+            "messaging verbs all stay live, so a parked session still wakes on "
+            "mail, still reads its inbox and can still send. Do not retry, and do "
+            "not read your own ability to run turns as an un-park; if the work is "
+            "meant to continue, your steward drives you.",
+        )
+    if current in _TERMINAL_STATES:
+        raise VerbError(
+            "lifecycle_state_conflict",
+            f"report_alive arrived on a {current!r} row — state skew, not "
+            "accepted (a terminal row is finished; it never self-reports back "
+            "to life).",
+        )
+
+
 def _row_report_by_seconds(row: dict[str, Any]) -> int:
     """Split out of :func:`report_alive` to keep it under the radon cc
     threshold — the row's own spawn-time window, or 0 (falls back to
@@ -1451,8 +1816,10 @@ def report_alive(
     not a state transition occurs); ``status`` drives the ``live <-> idle``
     edge, and a late report recovers ``overdue -> live/idle`` (both legal
     edges in the §3.2 matrix). A report on a ``parked``/terminal row is
-    ``lifecycle_state_conflict`` — state skew fails loud, never
-    accept-and-log. On ``stale_lifecycle_state`` (a race with the sweep), the
+    ``lifecycle_state_conflict`` — fails loud, never accept-and-log — with a
+    DIFFERENT message per state, because parked and terminal are different
+    facts about the caller (see
+    :func:`_refuse_report_alive_on_ineligible_state`; LIF-04). On ``stale_lifecycle_state`` (a race with the sweep), the
     caller gets ONE bounded retry against the freshly-read state before
     failing loud (verb-internal, Dawn ruling (b))."""
     to_state = _REPORT_ALIVE_EDGE.get(status)
@@ -1466,12 +1833,7 @@ def report_alive(
         except SessionNotFoundError as exc:
             raise VerbError("session_not_found", str(exc)) from exc
         current = str(row.get("lifecycle_state") or "")
-        if current in (LIFECYCLE_PARKED, *_TERMINAL_STATES):
-            raise VerbError(
-                "lifecycle_state_conflict",
-                f"report_alive arrived on a {current!r} row — state skew, not "
-                "accepted (parked/terminal rows never self-report back to life).",
-            )
+        _refuse_report_alive_on_ineligible_state(current)
         row_report_by_seconds = _row_report_by_seconds(row)
         if current == to_state:
             _rearm_report_by(state, agent_instance_id, report_by_seconds=row_report_by_seconds)
@@ -1495,12 +1857,13 @@ __all__ = [
     "CLEAR_VERIFICATION_CONFIRMED",
     "CLEAR_VERIFICATION_UNSUPPORTED",
     "CaptureLaneCharterRequest",
-    "FALLBACK_FIRST_TURN_TEXT",
+    "FALLBACK_FIRST_TURN_TEMPLATE",
     "FIRST_TURN_SOURCE_CHARTER",
     "FIRST_TURN_SOURCE_FALLBACK",
     "LegislateRoleRequest",
     "SpawnSessionRequest",
     "VerbError",
+    "build_fallback_first_turn",
     "capture_lane_charter",
     "clear_session",
     "compact_session",

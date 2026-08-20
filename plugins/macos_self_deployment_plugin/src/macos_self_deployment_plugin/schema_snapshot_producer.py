@@ -32,11 +32,23 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from collections.abc import Callable
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 from macos_self_deployment_plugin.release_manager import ReleaseManagerError
+
+
+class SchemaSnapshotFn(Protocol):
+    """The collector closure: snapshot a code tree, optionally overriding its manifest.
+
+    A bare ``Callable[[Path], dict]`` cannot express the optional second
+    argument, and the argument is precisely the part a reader needs to see —
+    which manifest gates which tree is the whole of BLG-02.
+    """
+
+    def __call__(
+        self, code_root: Path, manifest_override: tuple[str, ...] | None = None,
+    ) -> dict[str, object]: ...
 
 # The DB-free plugin-set collection measured ~2s; 120s is a generous ceiling.
 _TIMEOUT_SECONDS: Final[float] = 120.0
@@ -63,17 +75,40 @@ def _pythonpath_for_tree(code_root: Path) -> str:
 
 def build_schema_snapshot_fn(
     *, solet_name: str, app_home: Path, source_root: Path,
-) -> Callable[[Path], dict[str, object]]:
-    """Return a ``(code_root) -> snapshot`` collector closure (candidate + derive)."""
+) -> SchemaSnapshotFn:
+    """Return a ``(code_root) -> snapshot`` collector closure (candidate + derive).
+
+    The closure takes an optional ``manifest_override``: the plugin set that
+    governed ``code_root`` itself. The CANDIDATE call site omits it — the live
+    manifest at ``app_home`` already IS the candidate's own manifest, because
+    ``apply_manifest`` commits the new manifest before delegating a restart.
+    The DERIVE call site passes the OLD release's captured set, because by then
+    the live manifest describes the incoming deploy rather than the old tree
+    being snapshotted (BLG-02: a manifest-GROW deploy would otherwise trip the
+    collector's completeness assert and false-REFUSE a safe deploy).
+
+    Omitting it is therefore not a neutral default — it means "the live
+    manifest is the right one for this tree", which is true at exactly one of
+    the two call sites.
+    """
     venv_python = source_root / _SOURCE_VENV_DIRNAME / "bin" / "python3"
     collector_path = source_root.joinpath(*_COLLECTOR_RELPATH)
 
-    def _snapshot(code_root: Path) -> dict[str, object]:
+    def _snapshot(
+        code_root: Path, manifest_override: tuple[str, ...] | None = None,
+    ) -> dict[str, object]:
         env = dict(os.environ)
         env["SOLET_NAME"] = solet_name
         env["APP_HOME"] = str(app_home)
         env["EXPECT_ROOT"] = str(code_root.resolve())
         env["PYTHONPATH"] = _pythonpath_for_tree(code_root)
+        if manifest_override is not None:
+            env["MANIFEST_PLUGIN_OVERRIDE"] = json.dumps(sorted(manifest_override))
+        else:
+            # An inherited value from the parent process would silently gate
+            # this tree by an unrelated manifest; the closure is the only
+            # sanctioned source of this variable.
+            env.pop("MANIFEST_PLUGIN_OVERRIDE", None)
         try:
             result = subprocess.run(
                 [str(venv_python), str(collector_path)],
@@ -102,4 +137,4 @@ def build_schema_snapshot_fn(
     return _snapshot
 
 
-__all__ = ["build_schema_snapshot_fn"]
+__all__ = ["SchemaSnapshotFn", "build_schema_snapshot_fn"]

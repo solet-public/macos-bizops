@@ -428,13 +428,24 @@ def _check_result_processor_kind(
 
 def validate_deterministic_continuation(
     payload: DeterministicContinuationInput,
-) -> ValidatedDeterministicContinuation:
+) -> ValidatedDeterministicContinuation | None:
     """Validate the 18 deterministic-continuation invariants.
 
     Raises :class:`ResultContractViolationError` on the first failed
     invariant.  Returns an immutable
-    :class:`ValidatedDeterministicContinuation` on success.
+    :class:`ValidatedDeterministicContinuation` on success, or ``None``
+    when the active plan is legitimately finished (JOS-07: the terminal
+    step of a completed plan has no ``[>]`` current step by design — every
+    step is ``[X]``/skipped and there is nothing left to advance to. That
+    is NOT a contract violation; ``_check_current_step_resolved`` cannot
+    distinguish "genuinely no current step because the plan is done" from
+    "corrupted, no current step despite unfinished work" on its own, so
+    the distinction is made here, before that check ever runs, via
+    ``ParsedPlan.is_complete`` — false on an empty/malformed plan, so this
+    does not weaken the existing corruption check).
     """
+    if payload.active_plan.is_complete:
+        return None
     current_step = _check_current_step_resolved(payload)
     _check_current_step_declares_completed_process_key(payload, current_step)
     _check_current_step_permits_deterministic(payload, current_step)

@@ -212,9 +212,17 @@ async def _read_request_head(
 
 
 async def _open_upstream(
-    binding: ColorBinding,
+    binding: ColorBinding, *, port: int,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    return await asyncio.open_connection("127.0.0.1", binding.port)
+    return await asyncio.open_connection("127.0.0.1", port)
+
+
+def _main_port(binding: ColorBinding) -> int | None:
+    return binding.port
+
+
+def _streamable_port(binding: ColorBinding) -> int | None:
+    return binding.streamable_port
 
 
 async def _pump(
@@ -351,11 +359,19 @@ async def _prepare_proxy_route(
     *,
     state: RouterState,
     buffer_timeout: float,
+    port_selector: Callable[[ColorBinding], int | None] = _main_port,
+    no_route_reason: str = "no_active_color",
 ) -> _PreparedProxyRoute | None:
     """Parse the request head, resolve the bound color, open upstream.
 
-    On any recoverable failure (bad request, no active color, upstream
-    refused) writes a 503 to ``writer`` and returns ``None``.
+    ``port_selector`` picks which port on the resolved binding to connect
+    to — the main bridge port (default) or, for the BLG-04 streamable
+    listener, ``binding.streamable_port``. A resolved color whose selected
+    port is ``None`` (a color that hasn't reported a streamable port, e.g.
+    it runs with streamable disabled) is treated the same as no route.
+
+    On any recoverable failure (bad request, no route, upstream refused)
+    writes a 503 to ``writer`` and returns ``None``.
     """
     peer = writer.get_extra_info("peername")
     try:
@@ -373,15 +389,19 @@ async def _prepare_proxy_route(
         state, parsed.mcp_session_id, buffer_timeout=buffer_timeout,
     )
     if binding is None:
-        await _write_503(writer, "no_active_color")
+        await _write_503(writer, no_route_reason)
+        return None
+    upstream_port = port_selector(binding)
+    if upstream_port is None:
+        await _write_503(writer, no_route_reason)
         return None
 
     try:
-        up_reader, up_writer = await _open_upstream(binding)
+        up_reader, up_writer = await _open_upstream(binding, port=upstream_port)
     except (ConnectionRefusedError, OSError) as exc:
         logger.warning(
             "public: upstream %s:%d connect failed: %s",
-            binding.color, binding.port, exc,
+            binding.color, upstream_port, exc,
         )
         await _write_503(writer, "upstream_connect_failed")
         return None
@@ -463,6 +483,37 @@ async def _handle_public_request(
 ) -> None:
     route = await _prepare_proxy_route(
         reader, writer, state=state, buffer_timeout=buffer_timeout,
+    )
+    if route is None:
+        return
+    try:
+        captured_session = await _proxy_streams(reader, writer, route=route)
+        if captured_session is not None:
+            state.record_session(captured_session, route.binding.instance_id)
+    finally:
+        with contextlib.suppress(ConnectionResetError, BrokenPipeError, OSError):
+            route.up_writer.close()
+            await route.up_writer.wait_closed()
+
+
+async def _handle_streamable_public_request(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    state: RouterState,
+    buffer_timeout: float,
+) -> None:
+    """BLG-04: same proxy as :func:`_handle_public_request`, streamable port.
+
+    Resolves the SAME active-color/session-affinity binding as the main
+    proxy — only the upstream port selection differs (``binding.
+    streamable_port`` instead of ``binding.port``). A color that hasn't
+    reported a streamable port (streamable disabled, or not registered yet)
+    503s here exactly like "no active color" does on the main proxy.
+    """
+    route = await _prepare_proxy_route(
+        reader, writer, state=state, buffer_timeout=buffer_timeout,
+        port_selector=_streamable_port, no_route_reason="no_streamable_route",
     )
     if route is None:
         return
@@ -577,7 +628,10 @@ def _dispatch_register(state: RouterState, args: dict[str, object]) -> dict[str,
     instance_id = args.get("instance_id")
     if not isinstance(port, int) or not isinstance(color, str) or not isinstance(instance_id, str):
         return {"accepted": False, "reason": "bad_args"}
-    result = state.register(port, color, instance_id)
+    streamable_port = args.get("streamable_port")
+    if streamable_port is not None and not isinstance(streamable_port, int):
+        return {"accepted": False, "reason": "bad_args"}
+    result = state.register(port, color, instance_id, streamable_port=streamable_port)
     out: dict[str, object] = {"accepted": result.accepted}
     if result.reason:
         out["reason"] = result.reason
@@ -645,6 +699,7 @@ def _dispatch_status(state: RouterState) -> dict[str, object]:
                 "instance_id": e.instance_id,
                 "status": e.status,
                 "last_heartbeat": e.last_heartbeat,
+                "streamable_port": e.streamable_port,
             }
             for e in snap.colors
         ],
@@ -655,6 +710,7 @@ def _dispatch_status(state: RouterState) -> dict[str, object]:
                 "instance_id": e.instance_id,
                 "status": e.status,
                 "last_heartbeat": e.last_heartbeat,
+                "streamable_port": e.streamable_port,
             }
             for e in snap.drain_entries
         ],
@@ -672,12 +728,24 @@ async def run_router(
     buffer_timeout: float = DEFAULT_BUFFER_TIMEOUT_SECONDS,
     bridge_port_watchdog_interval: float = DEFAULT_BRIDGE_PORT_WATCHDOG_INTERVAL_SECONDS,
     ready_event: asyncio.Event | None = None,
+    streamable_public_port: int | None = None,
+    streamable_public_host: str = "0.0.0.0",  # noqa: S104
 ) -> None:
     """Run the router until cancelled.
 
     The `ready_event` is set after both surfaces are bound — useful
     for smoke harnesses that spawn the router in-process and need
     to wait for liveness before driving it.
+
+    BLG-04: ``streamable_public_port`` is opt-in (``None`` = today's
+    behaviour, no second listener). When set, the router — a single
+    always-up process, never itself color-duplicated — binds it and
+    proxies to whichever color has reported a ``streamable_port``,
+    replacing each color's own now-removed fixed-port bind as the thing
+    that holds this port. Default host is ``0.0.0.0`` (not the main
+    proxy's loopback-only default) because this port's whole purpose is
+    external reachability (phone/Caddy), matching what the removed
+    per-color listener bound.
     """
 
     state = RouterState(
@@ -701,9 +769,35 @@ async def run_router(
             except (ConnectionResetError, BrokenPipeError, OSError):
                 pass
 
+    async def _streamable_client(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            await _handle_streamable_public_request(
+                reader, writer, state=state, buffer_timeout=buffer_timeout
+            )
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                pass
+
     public_server = await asyncio.start_server(
         _public_client, host=public_host, port=public_port
     )
+    streamable_server: asyncio.Server | None = None
+    if streamable_public_port is not None:
+        streamable_server = await asyncio.start_server(
+            _streamable_client, host=streamable_public_host, port=streamable_public_port,
+        )
+        logger.info(
+            "streamable: listening on %s:%d (solet=%s)",
+            streamable_public_host,
+            streamable_public_port,
+            solet,
+        )
     _write_port_discovery_files(solet, public_port)
     logger.info(
         "public: listening on %s:%d (solet=%s)",
@@ -727,15 +821,22 @@ async def run_router(
     )
 
     try:
-        async with public_server:
-            mgmt_serve = asyncio.create_task(
-                mgmt.serve_forever(), name="mgmt_serve"
-            )
-            public_serve = asyncio.create_task(
-                public_server.serve_forever(), name="public_serve"
-            )
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(public_server)
+            if streamable_server is not None:
+                await stack.enter_async_context(streamable_server)
+            serve_tasks = [
+                asyncio.create_task(mgmt.serve_forever(), name="mgmt_serve"),
+                asyncio.create_task(public_server.serve_forever(), name="public_serve"),
+            ]
+            if streamable_server is not None:
+                serve_tasks.append(
+                    asyncio.create_task(
+                        streamable_server.serve_forever(), name="streamable_serve",
+                    ),
+                )
             try:
-                await asyncio.gather(mgmt_serve, public_serve)
+                await asyncio.gather(*serve_tasks)
             except asyncio.CancelledError:
                 raise
     finally:
@@ -790,6 +891,19 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
         "--log-level", default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
     )
+    parser.add_argument(
+        "--streamable-public-port", type=int, default=None,
+        help=(
+            "BLG-04: external stable port for the streamable HTTP MCP "
+            "transport, proxied to whichever color has reported a "
+            "streamable port. Omitted (default) = no streamable listener, "
+            "today's behaviour."
+        ),
+    )
+    parser.add_argument(
+        "--streamable-public-host", default="0.0.0.0",  # noqa: S104
+        help="Streamable bind host (default 0.0.0.0 — external reachability).",
+    )
     return parser.parse_args(list(argv))
 
 
@@ -820,6 +934,8 @@ def main(argv: Iterable[str] | None = None) -> int:
                 drain_window_seconds=args.drain_window_seconds,
                 buffer_timeout=args.buffer_timeout_seconds,
                 ready_event=ready,
+                streamable_public_port=args.streamable_public_port,
+                streamable_public_host=args.streamable_public_host,
             ),
             name="run_router",
         )

@@ -370,6 +370,24 @@ def get_peer_binding_schema() -> TableSchema:
                     "default (True)."
                 ),
             ),
+            "watcher_declared": ColumnDefinition(
+                type=ColumnType.BOOLEAN,
+                default=0,
+                description=(
+                    "MSG-04/identity-unification (2026-08-20): declared by "
+                    "`solet watch` on every peer/register call (never "
+                    "probed), matching BridgeBinding.watcher_declared's own "
+                    "default. True when this binding is a no-MCP `watch` "
+                    "subprocess registering under its ledger AGENT_INSTANCE_ID "
+                    "— a caller that no longer carries the legacy "
+                    "`agi-watch-` prefix BridgeBinding.is_watcher used to "
+                    "infer this from. False (the default) for every other "
+                    "registration path; is_watcher still also recognizes the "
+                    "legacy prefix, so a manual/no-ledger-id watch (which "
+                    "still mints the derived, prefixed identity) is "
+                    "unaffected."
+                ),
+            ),
         },
     )
 

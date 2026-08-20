@@ -72,7 +72,7 @@ from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
 )
 from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
     DEFAULT_REPORT_BY_SECONDS,
-    FALLBACK_FIRST_TURN_TEXT,
+    FALLBACK_FIRST_TURN_TEMPLATE,
     FIRST_TURN_SOURCE_CHARTER,
     FIRST_TURN_SOURCE_FALLBACK,
     ArmSessionDependencyRequest,
@@ -80,6 +80,7 @@ from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
     SpawnSessionRequest,
     VerbError,
     arm_session_dependency,
+    build_fallback_first_turn,
     capture_lane_charter,
     clear_session,
     compact_session,
@@ -878,6 +879,119 @@ def test_spawn_session_drives_charter_as_first_turn_byte_exact() -> None:
         _remove_fake_hosts()
 
 
+def test_charter_frame_ships_instruments_and_the_claim_first_instruction() -> None:
+    """LIF-05 — measured 2026-08-19 on ``lane-drive-honesty``: a
+    charter-founded lane judged that it could not verify its dispatcher was
+    real or that the operator sentence quoted in its charter had ever been
+    said, DECLINED the work, and went idle at the prompt.
+
+    ★ THE REFUSAL WAS CORRECT AND THIS MUST NOT SUPPRESS IT. A relayed quote
+    is unverifiable from the lane's seat — the fleet's own rule about a
+    relayed assent hardening into a fabricated ruling, turned on the
+    dispatcher. So this pins the OPPOSITE of an obedience nudge: the frame
+    must concede the limit, hand over first-party instruments instead of
+    insistence, and say in as many words that declining is legitimate. An
+    assertion below fails if a future edit tries to buy compliance instead.
+
+    The trap that made the incident expensive was second-order: claiming the
+    role binding was step 1 of the charter the lane refused, so it never
+    claimed, and peer_send_by_name answered role_binding_vacant — the fleet
+    could not reach BY NAME the one session that most needed a follow-up.
+    Hence the claim instruction is stated FIRST and independently of the
+    work, and names the row's own role_name so the lane never has to guess.
+    """
+    state = _state()
+    _install_fake_hosts()
+    try:
+        charter_text = "Operator's verbatim founding words — em—dashes intact."
+        capture_lane_charter(
+            state,
+            CaptureLaneCharterRequest(
+                lane_id="lane-lif05", charter_text=charter_text,
+                captured_at="2026-08-19T00:00:00+00:00", brief_ref="workbench/brief.md",
+                directed_by="operator:none",
+            ),
+        )
+        spawn_session(
+            state,
+            _spawn_req(
+                host=_TEST_HOST, lane_id="lane-lif05", role_name="lane-lif05",
+                spawned_by_role="coordinator-seat",
+            ),
+        )
+        driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
+        driven = driver.channel.sent[0] if driver.channel.sent else ""
+        _check(
+            driven.endswith(charter_text),
+            "the charter BODY is still byte-exact and still last — the frame only prefixes",
+        )
+        _check(
+            "session_status" in driven and "peer_list" in driven,
+            "the frame names the checks the lane can run first-party, instead of "
+            "asserting the frame and expecting belief",
+        )
+        _check(
+            "not the ruling itself" in driven,
+            "the frame CONCEDES the one thing the lane genuinely cannot verify: an "
+            "operator sentence quoted inside the charter",
+        )
+        _check(
+            "Declining this work is a legitimate outcome" in driven,
+            "ANTI-SUPPRESSION: the frame says standing down is legitimate — a version "
+            "that buys compliance instead fails here",
+        )
+        _check(
+            "CLAIM YOUR ROLE BINDING FIRST" in driven,
+            "the claim instruction is separated from the work and comes first",
+        )
+        _check(
+            "'lane-lif05'" in driven and "cannot evict anyone" in driven,
+            "...and names the row's OWN role_name, plus why claiming it evicts nobody "
+            "(peer_claim_role refuses a live incumbent — the 2026-08-14 ruling stands)",
+        )
+        _check(
+            "reach you BY NAME" in driven,
+            "the frame states the CONSEQUENCE of not claiming — the addressability trap "
+            "itself, which is what made the incident unrecoverable by message",
+        )
+    finally:
+        _remove_fake_hosts()
+
+
+def test_charter_frame_asks_rather_than_guessing_when_no_role_name_is_recorded() -> None:
+    """LIF-05, the other half: a spawn with no ``role_name`` on the row must
+    not hand the lane a name to invent. A guessed role name is worse than no
+    name — it claims a binding nobody routes to, so the lane reads as
+    addressable while still being unreachable."""
+    state = _state()
+    _install_fake_hosts()
+    try:
+        capture_lane_charter(
+            state,
+            CaptureLaneCharterRequest(
+                lane_id="lane-lif05-noname", charter_text="body",
+                captured_at="2026-08-19T00:00:00+00:00", brief_ref="workbench/brief.md",
+                directed_by="operator:none",
+            ),
+        )
+        spawn_session(
+            state, _spawn_req(host=_TEST_HOST, lane_id="lane-lif05-noname"),
+        )
+        driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
+        driven = driver.channel.sent[0] if driver.channel.sent else ""
+        _check(
+            "ask rather than inventing one" in driven,
+            "with no role_name recorded, the frame tells the lane to ASK for its name",
+        )
+        _check(
+            "your row's role_name is" not in driven,
+            "...and never presents a name as if the row had recorded one (a derived "
+            "lane_id offered as the role_name is the guess this branch exists to avoid)",
+        )
+    finally:
+        _remove_fake_hosts()
+
+
 def test_spawn_session_drives_fallback_when_no_charter_on_file() -> None:
     """Ordering-ruling guard (a): the no-charter fallback must be a small,
     single-shot, terminating turn — never a question, never a wait."""
@@ -894,9 +1008,109 @@ def test_spawn_session_drives_fallback_when_no_charter_on_file() -> None:
         )
         _check(result["first_turn_delivered"] is True, "the fallback turn was delivered")
         driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
+        expected = build_fallback_first_turn(
+            spawned_by_role="", role_name="", brief_ref="workbench/brief.md",
+        )
         _check(
-            driver.channel.sent == [FALLBACK_FIRST_TURN_TEXT],
-            f"the exact fallback text is driven, unmodified (got {driver.channel.sent!r})",
+            driver.channel.sent == [expected],
+            f"the exact rendered fallback text is driven, unmodified (got "
+            f"{driver.channel.sent!r})",
+        )
+        _check(
+            expected != FALLBACK_FIRST_TURN_TEMPLATE,
+            "the template is RENDERED, not driven raw — an unsubstituted {field} reaching "
+            "a live pane would be the defect this check exists to catch",
+        )
+    finally:
+        _remove_fake_hosts()
+
+
+def test_fallback_first_turn_hands_off_to_the_spawner() -> None:
+    """SPN-01 — measured 2026-08-19 (wave-2 dispatch): two of four freshly
+    spawned lanes sat idle ~30 minutes on one bootstrap turn each, and the
+    only difference from the two that started was a post-spawn driving
+    message (confirmed by intervention, 2/2).
+
+    The mechanism is in the TEXT, not the transport. The old fallback said
+    "acknowledge, then stop; your work dispatch arrives separately over the
+    peer channel" — a handoff to NOBODY. It names a dispatch that exists only
+    if a seat remembers, and it ends the turn with the lane holding nothing
+    and having told no one it is waiting. The turn now hands off to the
+    SPAWNER, which is the only side of the gap this module controls.
+
+    Also pins the guard the original text existed to satisfy: small,
+    completing in ONE turn, never a question and never a wait — so a "fix"
+    that tells the lane to poll or block for its dispatch fails here.
+    """
+    state = _state()
+    _install_fake_hosts()
+    try:
+        spawn_session(
+            state,
+            _spawn_req(
+                host=_TEST_HOST, lane_id="lane-spn01", role_name="lane-spn01",
+                brief_ref="workbench/spn01-brief.md", spawned_by_role="coordinator-seat",
+            ),
+        )
+        driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
+        driven = driver.channel.sent[0] if driver.channel.sent else ""
+        _check(
+            "coordinator-seat" in driven and "awaiting dispatch" in driven,
+            "the bootstrap turn ends by TELLING THE SPAWNER it is up and waiting — the "
+            "handoff the old text did not have",
+        )
+        _check(
+            "Do not skip this one" in driven,
+            "...and says why, in the words of the measurement: a turn that ends without "
+            "telling anyone is how a lane sits idle while its dispatcher believes it started",
+        )
+        _check(
+            "'lane-spn01'" in driven and "report_alive" in driven,
+            "the turn claims the row's OWN role name and arms the heartbeat contract — "
+            "addressable and visible to the overdue sweep, not merely awake",
+        )
+        _check(
+            "workbench/spn01-brief.md" in driven,
+            "the turn points the lane at its own recorded brief_ref",
+        )
+        _check(
+            "none is a wait" in driven and "Then stop." in driven,
+            "ORDERING GUARD: the turn still completes in one turn and ends in a stop — a "
+            "version that tells the lane to poll or block for its dispatch reds here",
+        )
+        _check(
+            "?" not in driven,
+            "...and asks the lane NO question (the guard's other half — a question turn "
+            "strands a worker that has nobody to answer it)",
+        )
+    finally:
+        _remove_fake_hosts()
+
+
+def test_fallback_first_turn_asks_rather_than_guessing_what_the_row_lacks() -> None:
+    """SPN-01, the degradation half: a spawn with no role_name, no brief_ref
+    and no spawning role recorded must still produce a turn that is honest
+    about each gap rather than inventing a name, a brief or a recipient. A
+    lane that claims a made-up binding reads as addressable while routing
+    nowhere — strictly worse than one that says it has no name."""
+    state = _state()
+    _install_fake_hosts()
+    try:
+        spawn_session(state, _spawn_req(host=_TEST_HOST, lane_id="lane-spn01-bare", brief_ref=""))
+        driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
+        driven = driver.channel.sent[0] if driver.channel.sent else ""
+        _check(
+            "ask rather than inventing one" in driven,
+            "no role_name recorded -> the turn tells the lane to ASK for its name",
+        )
+        _check(
+            "no brief_ref" in driven and "rather than guessing at the work" in driven,
+            "no brief_ref recorded -> the turn says so instead of pointing at nothing",
+        )
+        _check(
+            "whoever spawned you" in driven,
+            "no spawning role recorded -> the handoff still has a stated recipient, "
+            "described honestly rather than fabricated",
         )
     finally:
         _remove_fake_hosts()
@@ -1076,7 +1290,11 @@ def test_drive_session_dispatches_and_unparks() -> None:
             "drive_session sends the text over the channel",
         )
         _check(
-            spawning_result == {"lifecycle_state": LIFECYCLE_SPAWNING, "unparked": False},
+            spawning_result == {
+                "lifecycle_state": LIFECYCLE_SPAWNING, "unparked": False,
+                "dispatched": True, "submitted": None,
+                "drive_verification": "unsupported_on_driver",
+            },
             "drive_session on a 'spawning' row dispatches without a transition",
         )
         report_by_after_first = read_managed_session(state, "agi-drive-1").get("report_by")
@@ -1102,7 +1320,11 @@ def test_drive_session_dispatches_and_unparks() -> None:
             "a second drive_session sends the follow-up text",
         )
         _check(
-            unpark_result == {"lifecycle_state": LIFECYCLE_LIVE, "unparked": True},
+            unpark_result == {
+                "lifecycle_state": LIFECYCLE_LIVE, "unparked": True,
+                "dispatched": True, "submitted": None,
+                "drive_verification": "unsupported_on_driver",
+            },
             "drive_session drives parked -> live (unparked=True)",
         )
         _check(
@@ -1531,6 +1753,100 @@ def test_report_alive() -> None:
     _check(unknown_status == "unknown_status", "report_alive(status='bogus') -> unknown_status")
 
 
+def test_report_alive_parked_refusal_is_distinct_from_the_terminal_one() -> None:
+    """LIF-04 — a PARKED row and a TERMINAL row both refuse ``report_alive``
+    with the same code, and until now with the same SENTENCE ("state skew ...
+    parked/terminal rows never self-report back to life"). They are not the
+    same fact, and the shared sentence taught the wrong one.
+
+    Measured 2026-08-19 on ``lane-seed-remint``: a park suppresses the
+    HEARTBEAT CONTRACT ONLY. The pane, the stop-hook wake path and the
+    messaging verbs stay live, so a parked session keeps waking, keeps reading
+    its inbox and can still send — and a session in exactly that position is
+    the caller this refusal answers. "State skew" invites it to conclude its
+    own row is wrong; the truth is that its row is right, park is a steward's
+    deliberate state, and only ``drive_session`` takes ``parked -> live``
+    back. A terminal row is the opposite fact: it IS finished.
+
+    The error TOKEN must not move (callers key on it) — so the discriminator
+    this pins is that the two messages differ and that the parked one carries
+    the measured scope. Collapsing them back into one sentence reds this.
+    """
+    state = _state()
+
+    def _refusal(agent_instance_id: str) -> VerbError | None:
+        try:
+            report_alive(
+                state, agent_instance_id=agent_instance_id, status="working",
+                directed_by="operator:none",
+            )
+        except VerbError as exc:
+            return exc
+        return None
+
+    for instance_id, terminal in (("agi-lif04-parked", False), ("agi-lif04-dead", True)):
+        insert_managed_session(
+            state,
+            ManagedSessionSpec(
+                agent_instance_id=instance_id, lane_id="lane-lif04", brief_ref="",
+                work_class="read_only", budget_line="b1", host="operator",
+            ),
+        )
+        transition_lifecycle_state(
+            state, agent_instance_id=instance_id, from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+        )
+        transition_lifecycle_state(
+            state, agent_instance_id=instance_id, from_state=LIFECYCLE_LIVE,
+            to_state=LIFECYCLE_TERMINATED if terminal else LIFECYCLE_PARKED,
+            directed_by="steward:none",
+        )
+
+    parked = _refusal("agi-lif04-parked")
+    dead = _refusal("agi-lif04-dead")
+    _check(
+        parked is not None and dead is not None,
+        "both a parked row and a terminal row still refuse report_alive",
+    )
+    _check(
+        parked is not None and dead is not None
+        and parked.code == "lifecycle_state_conflict" == dead.code,
+        "the error TOKEN is unchanged on both — LIF-04 moves the message, not the code",
+    )
+    parked_message = parked.message if parked is not None else ""
+    dead_message = dead.message if dead is not None else ""
+    _check(
+        parked_message != dead_message,
+        "the two refusals are not the same sentence",
+    )
+    lowered = parked_message.lower()
+    _check(
+        "state skew" not in lowered,
+        "the parked refusal drops the 'state skew' framing — a parked lane's row is "
+        "RIGHT, and telling it otherwise is what sends it retrying",
+    )
+    _check(
+        "not evidence that you are dead" in lowered,
+        "the parked refusal says outright that it is NOT a death notice",
+    )
+    _check(
+        "report_by" in lowered and "heartbeat contract only" in lowered,
+        "the parked refusal names the MEASURED scope: the heartbeat contract, and only that",
+    )
+    _check(
+        "wake" in lowered and "inbox" in lowered,
+        "...and that the pane/wake/inbox stay live through a park (LIF-04's whole point)",
+    )
+    _check(
+        "drive_session" in lowered,
+        "the parked refusal names who owns the way back: a steward's drive_session",
+    )
+    _check(
+        "drive_session" not in dead_message.lower(),
+        "the terminal refusal does NOT offer the parked row's way back — different fact",
+    )
+
+
 def _report_by_delta_seconds(row: dict[str, object]) -> float:
     report_by = datetime.fromisoformat(str(row["report_by"]))
     if report_by.tzinfo is None:
@@ -1727,6 +2043,7 @@ def main() -> int:
     test_terminate_session_kills_the_real_headless_process()
     test_retire_idempotent_and_redrivable()
     test_report_alive()
+    test_report_alive_parked_refusal_is_distinct_from_the_terminal_one()
     test_rearm_report_by_honors_spawn_window()
     test_insert_managed_session_arms_report_by_for_non_operator_hosts()
     test_drive_session_rearm_honors_spawn_window()
@@ -1738,7 +2055,11 @@ def main() -> int:
     test_capture_lane_charter_is_insert_only_and_supersedes_by_recency()
     test_resolve_lane_charter_empty_for_unknown_lane()
     test_spawn_session_drives_charter_as_first_turn_byte_exact()
+    test_charter_frame_ships_instruments_and_the_claim_first_instruction()
+    test_charter_frame_asks_rather_than_guessing_when_no_role_name_is_recorded()
     test_spawn_session_drives_fallback_when_no_charter_on_file()
+    test_fallback_first_turn_hands_off_to_the_spawner()
+    test_fallback_first_turn_asks_rather_than_guessing_what_the_row_lacks()
     test_spawn_session_first_turn_failure_is_visible_not_blocking()
     test_spawn_session_first_turn_send_raising_is_contained()
 

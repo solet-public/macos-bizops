@@ -211,6 +211,132 @@ def test_call_exit_nonzero_when_not_completed() -> None:
     assert result.exit_code == int(ExitCodes.EXTERNAL_ERROR), result.output
 
 
+def _role_addressed_inbox_page(
+    *, role_section_status: str = "ok", role_section_error: str | None = None,
+    role_entries: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "recipient_agent_id": "claude_code",
+        "recipient_agent_instance_id": "agi-msg04-test",
+        "entries": [],
+        "next_after_created_at": None,
+        "role_entries": [] if role_entries is None else role_entries,
+        "next_role_cursor": None,
+        "role_section_status": role_section_status,
+        "role_section_error": role_section_error,
+        "role_floor_applied": False,
+        "role_history_cursor": None,
+    }
+
+
+def _process_result_handler(data: dict[str, Any]) -> Handler:
+    """A one-shot bridge (`open`/`close`) plus a `process/call`+`process/result`
+    pair that always answers `data` — the routes `solet inbox` actually uses.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/bridge/open":
+            return httpx.Response(
+                200, json={"bridge_id": "agc-smoke", "session_id": "s"},
+            )
+        if path.endswith("/close"):
+            return httpx.Response(200, json={"status": "closed"})
+        if path.endswith("/process/call"):
+            return httpx.Response(
+                200, json={"status": "queued", "action_id": "ae-inbox-smoke"},
+            )
+        if "/process/result/" in path:
+            return httpx.Response(
+                200,
+                json={
+                    "action_id": "ae-inbox-smoke",
+                    "status": "completed",
+                    "result": {
+                        "action_status": "completed", "data": data, "error": None,
+                    },
+                },
+            )
+        return httpx.Response(404, json={"detail": f"unmapped {path}"})
+
+    return handler
+
+
+def test_inbox_surfaces_role_addressed_mail_the_entries_only_idiom_misses() -> None:
+    """MSG-04 mutation evidence: `lane-w3-instruments`' actual broken parser
+    (`len(data['entries'])`, verbatim from its transcript) reports ZERO mail
+    for this exact inbox page, because the message is role-addressed. `solet
+    inbox` must surface it anyway — that is the whole point of the fix.
+
+    Mutation that turns this red: `solet inbox` reading only ``entries`` (the
+    same field the incident's hand-rolled parser read), or the merge dropping
+    the ``role_entries`` half.
+    """
+    role_message = {
+        "thread_id": "role:lane-msg04-bootstrap",
+        "sender_agent_id": "claude_code",
+        "sender_agent_instance_id": "agi-adamain0000000000000000000001",
+        "sender_session_label": "Coordinator-Seat",
+        "message": {
+            "id": "m-1", "cursor": "c-1", "role": "user", "kind": "text",
+            "content": [{"type": "text", "text": "role-addressed dispatch"}],
+            "action_id": None, "backend_session_id": None, "error": None,
+            "artifacts": [], "metadata": {},
+            "created_at": "2026-08-20T05:00:00+00:00",
+        },
+    }
+    page = _role_addressed_inbox_page(role_entries=[role_message])
+
+    # THE OLD IDIOM, unaltered: this is the exact incident-transcript parser.
+    old_idiom_count = len(page["entries"])
+    assert old_idiom_count == 0, (
+        "sanity check on the fixture: the old entries-only idiom must miss "
+        "this role-addressed message, or this test is not exercising MSG-04"
+    )
+
+    with patch.dict(os.environ, {"AGENT_SESSION_ID": "ases-msg04-test"}):
+        result = _invoke(["inbox"], _process_result_handler(page))
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["role_count"] == 1, payload
+    assert payload["direct_count"] == 0, payload
+    assert payload["complete"] is True, payload
+    role_messages = [m for m in payload["messages"] if m["section"] == "role"]
+    assert len(role_messages) == 1, payload
+    assert any(
+        "role-addressed dispatch" in part["text"]
+        for part in role_messages[0]["message"]["content"]
+    ), payload
+
+
+def test_inbox_needs_caller_session_id() -> None:
+    stripped = {k: v for k, v in os.environ.items() if k != "AGENT_SESSION_ID"}
+    with patch.dict(os.environ, stripped, clear=True):
+        result = _invoke(["inbox"], _process_result_handler(_role_addressed_inbox_page()))
+    assert result.exit_code == int(ExitCodes.UNKNOWN_ERROR), result.output
+
+
+def test_inbox_reports_incomplete_loudly_on_a_role_section_fault() -> None:
+    """Requirement: a role-section fault must never look like a complete,
+    empty inbox. Exit is non-zero AND the JSON itself says `complete: false`
+    — a script that only checks exit code and one that only parses JSON both
+    still see the fault.
+    """
+    page = _role_addressed_inbox_page(
+        role_section_status="error", role_section_error="boom",
+    )
+    with patch.dict(os.environ, {"AGENT_SESSION_ID": "ases-msg04-test"}):
+        result = _invoke(["inbox"], _process_result_handler(page))
+    assert result.exit_code == int(ExitCodes.EXTERNAL_ERROR), result.output
+    # JSON on stdout is followed by a loud stderr warning line (CliRunner
+    # mixes both into `.output`), so decode only the leading JSON value.
+    payload, _ = json.JSONDecoder().raw_decode(result.output)
+    assert payload["complete"] is False, payload
+    assert payload["role_section_status"] == "error", payload
+    assert payload["role_section_error"] == "boom", payload
+
+
 def test_not_running_maps_to_connection_error() -> None:
     def boom(_name: str | None = None) -> str:
         raise client_mod.SoletNotRunningError("down")
@@ -262,6 +388,18 @@ def test_identity_falls_back_to_basename_on_placeholder() -> None:
 _WATCH_ENV = {
     "AGENT_SESSION_LABEL": "Git-Controller",
     "AGENT_SESSION_ID": "ases-1753000000-777-12345",
+    # MSG-04 rider: _resolve_watch_identity (cli.py:698) now PREFERS an ambient
+    # AGENT_INSTANCE_ID when present (8d5b084f4). Before that landing this
+    # fixture was already isolated because identity derived only from the
+    # AGENT_SESSION_ID it DOES override; after it, a caller running this smoke
+    # from inside a live managed worker (every spawned lane has its own real
+    # AGENT_INSTANCE_ID exported) leaked that ambient value straight into
+    # CliRunner-invoked tests, colliding with the calling session's own live
+    # watch lock. Pinning a fixture value here means the test controls every
+    # input its identity resolution reads, same as the fixture already
+    # promises. `_no_ledger_id_env` strips this key back out for the
+    # no-ledger-id fixtures, which must keep exercising the derived-id branch.
+    "AGENT_INSTANCE_ID": "agi-0123456789abcdef0123456789abcdef",
 }
 _NO_WATCH_ENV = {
     "AGENT_SESSION_LABEL": "",
@@ -688,19 +826,73 @@ def test_watch_heartbeat_reregisters_during_stream() -> None:
     assert counts["register"] >= 3, counts  # 1 at arm + 1 heartbeat per poll
 
 
+def _no_ledger_id_env(overrides: Mapping[str, str]) -> dict[str, str]:
+    """``_WATCH_ENV``-shaped env with NO ``AGENT_INSTANCE_ID`` inherited.
+
+    This process (a managed worker) has its own real ``AGENT_INSTANCE_ID``
+    exported — a bare ``patch.dict(..., clear=False)`` would leak it into
+    every "no ledger id" fixture below and silently test the wrong branch
+    (negative-control convention, this file's own established pattern).
+    ``overrides`` (typically ``_WATCH_ENV``) is stripped of the same key
+    AFTER the merge, not just before: ``_WATCH_ENV`` itself now pins a
+    fixture ``AGENT_INSTANCE_ID`` (the MSG-04 rider above), and a caller of
+    this helper is asking for the no-ledger-id branch regardless of what the
+    base fixture carries.
+    """
+    stripped = {
+        k: v for k, v in os.environ.items() if k != "AGENT_INSTANCE_ID"
+    }
+    stripped.update(overrides)
+    stripped.pop("AGENT_INSTANCE_ID", None)
+    return stripped
+
+
 def test_watch_identity_is_deterministic_per_session() -> None:
-    # Same session id -> same instance id (reconnect REPLACES the binding);
-    # different session id -> different instance id (no cross-session bleed).
-    with patch.dict(os.environ, _WATCH_ENV, clear=False):
+    # No ledger AGENT_INSTANCE_ID -> the derived fallback: same session id ->
+    # same instance id (reconnect REPLACES the binding); different session id
+    # -> different instance id (no cross-session bleed).
+    with patch.dict(os.environ, _no_ledger_id_env(_WATCH_ENV), clear=True):
         first = cli_mod._resolve_watch_identity(None, "claude_code")
         second = cli_mod._resolve_watch_identity(None, "claude_code")
     assert first == second
     assert first.agent_instance_id.startswith(cli_mod.WATCH_AGENT_INSTANCE_PREFIX)
     other_env = dict(_WATCH_ENV)
     other_env["AGENT_SESSION_ID"] = "ases-1753000001-778-54321"
-    with patch.dict(os.environ, other_env, clear=False):
+    with patch.dict(os.environ, _no_ledger_id_env(other_env), clear=True):
         third = cli_mod._resolve_watch_identity(None, "claude_code")
     assert third.agent_instance_id != first.agent_instance_id
+
+
+def test_watch_prefers_ledger_instance_id_when_present() -> None:
+    """MSG-04/identity-unification: a managed worker's `AGENT_INSTANCE_ID`
+    wins over the derived `agi-watch-{digest}` scheme, so a DIRECT peer_send
+    addressed to the ledger id (the identity `session_status`/`peer_list`
+    show a spawner) reaches the SAME identity the watcher registers under.
+
+    Mutation that turns this red: `_resolve_watch_identity` ignoring
+    `AGENT_INSTANCE_ID` and always deriving from the session id.
+    """
+    env = dict(_WATCH_ENV)
+    env["AGENT_INSTANCE_ID"] = "agi-82be2462c96a9bcc2e12d25db4e1fdde"
+    with patch.dict(os.environ, env, clear=True):
+        identity = cli_mod._resolve_watch_identity(None, "claude_code")
+    assert identity.agent_instance_id == "agi-82be2462c96a9bcc2e12d25db4e1fdde", (
+        "the ledger AGENT_INSTANCE_ID must win outright, not just influence "
+        f"the derived digest (got {identity.agent_instance_id!r})"
+    )
+    assert not identity.agent_instance_id.startswith(
+        cli_mod.WATCH_AGENT_INSTANCE_PREFIX,
+    )
+
+
+def test_watch_falls_back_to_derived_id_with_no_ledger_row() -> None:
+    """The manual/no-ledger-row case (an interactive, non-managed watch) is
+    UNCHANGED: nothing addresses that session by a ledger id that does not
+    exist, so there is nothing to unify — it keeps the derived scheme.
+    """
+    with patch.dict(os.environ, _no_ledger_id_env(_WATCH_ENV), clear=True):
+        identity = cli_mod._resolve_watch_identity(None, "claude_code")
+    assert identity.agent_instance_id.startswith(cli_mod.WATCH_AGENT_INSTANCE_PREFIX)
 
 
 def _claim_refusal_client(

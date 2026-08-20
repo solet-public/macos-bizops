@@ -118,8 +118,11 @@ class _StubRouter:
             "colors": colors,
         }
 
-    def register_color(self, port: int, color: str, instance_id: str) -> dict[str, Any]:
-        del color
+    def register_color(
+        self, port: int, color: str, instance_id: str,
+        *, streamable_port: int | None = None,
+    ) -> dict[str, Any]:
+        del color, streamable_port
         self.registered[instance_id] = port
         return {"accepted": True}
 
@@ -191,9 +194,11 @@ class _RollbackReleaseManager:
 
     # --- forward-cutover surface (unused by rollback_release) -------------
     def build_candidate(
-        self, *, manifest_etag: str = "", schema_snapshot_fn: object = None,
+        self, *, manifest_etag: str = "",
+        manifest_plugins: tuple[str, ...] | None = None,
+        schema_snapshot_fn: object = None,
     ) -> CandidatePaths:
-        del manifest_etag, schema_snapshot_fn
+        del manifest_etag, manifest_plugins, schema_snapshot_fn
         raise NotImplementedError("rollback smoke: build_candidate unused")
 
     def cutover(self, candidate: CandidatePaths) -> SwapResult:

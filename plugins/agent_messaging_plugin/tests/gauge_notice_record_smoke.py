@@ -212,6 +212,16 @@ def _gauge(state: Any, agent_instance_id: str, **over: object) -> None:
 
 
 def _ticking(state: Any, agent_instance_id: str, *, last_alive: datetime) -> None:
+    """ALSO backdates ``last_transition_at`` to a day before ``last_alive``
+    (GAU-22(c), same root fix as ``session_sweep_smoke.py``'s ``_ticking``):
+    ``_spawn_live`` stamps its own transition at real wall-clock "now", which
+    every gauge-stale fixture here implicitly relied on being OLDER than its
+    backdated gauge ``measured_at``. That is true of a genuinely long-lived
+    ticking session and false only by fixture accident -- and the accident
+    reads to the sweep as "just rotated", which is precisely the case
+    GAU-22(c)'s grace window holds fire on. Without this, a fixture meaning
+    "long-lived, reporter died" is indistinguishable from a fresh /clear.
+    """
     window_s = 5400
     state.update_state(
         AGENT_ROLE_BINDING_NAMESPACE,
@@ -219,6 +229,7 @@ def _ticking(state: Any, agent_instance_id: str, *, last_alive: datetime) -> Non
         {
             "report_by_seconds": window_s,
             "report_by": (last_alive + timedelta(seconds=window_s)).isoformat(),
+            "last_transition_at": (last_alive - timedelta(days=1)).isoformat(),
         },
     )
 

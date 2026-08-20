@@ -59,12 +59,16 @@ class DispatchOutcome(StrEnum):
     The AQP uses the outcome to drive parent-token completion:
     ``CONTRACT_VIOLATION_DISPATCHED`` is treated as ``blocks_continuation``
     so happy-path advancement does not fire after a violation.
+    ``DETERMINISTIC_PLAN_COMPLETE`` (JOS-07) is the terminal step of an
+    already-finished plan — a normal happy-path ending, not a violation, so
+    it does NOT block continuation.
     """
 
     INFERENCE_DISPATCHED = "inference_dispatched"
     DETERMINISTIC_SUBMITTED = "deterministic_submitted"
     CONTRACT_VIOLATION_DISPATCHED = "contract_violation_dispatched"
     BRIDGE_DELIVERY_DISPATCHED = "bridge_delivery_dispatched"
+    DETERMINISTIC_PLAN_COMPLETE = "deterministic_plan_complete"
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +295,11 @@ class SuccessfulResultCoordinator:
                 flow_token_id=flow_token_id,
             )
             return DispatchOutcome.CONTRACT_VIOLATION_DISPATCHED
+        if continuation is None:
+            # JOS-07: the active plan is legitimately finished — the
+            # terminal step's own completion has no next step to submit.
+            # Not a violation; do not route to the error dispatcher.
+            return DispatchOutcome.DETERMINISTIC_PLAN_COMPLETE
         self.deterministic_submitter.submit(
             completed=completed,
             continuation=continuation,

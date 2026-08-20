@@ -195,6 +195,14 @@ class PeerRegisterBody(BaseModel):
     # matching BridgeBinding.wake_capable's own default. See models.py for
     # the full field rationale.
     wake_capable: bool = True
+    # MSG-04/identity-unification (2026-08-20): declared by `solet watch`
+    # itself (local_cli/cli.py's peer_register call), matching
+    # BridgeBinding.watcher_declared's own default. See models.py for the
+    # full field rationale — this is the explicit signal that replaces the
+    # `agi-watch-` prefix convention for a watcher registering under its
+    # ledger AGENT_INSTANCE_ID. Defaults False: every non-watch caller is
+    # unaffected.
+    watcher_declared: bool = False
     # The session's CONFIGURED standing role, sent so the response can answer
     # "do I still hold it?" (``session_role_held``) on the INFRA register route.
     # Without that answer the forwarder's steady-state re-assert has to issue a
@@ -799,6 +807,7 @@ def _register_peer_routes(
             parent_pid=body.parent_pid,
             agent_session_id=effective_agent_session_id,
             wake_capable=body.wake_capable,
+            watcher_declared=body.watcher_declared,
         )
         # ``register`` returns the EFFECTIVE label — the preserve-on-empty
         # path (2026-06-01 §4.2) restores a stored label when the incoming

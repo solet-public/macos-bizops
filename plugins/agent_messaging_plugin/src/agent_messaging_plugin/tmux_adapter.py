@@ -392,6 +392,22 @@ returns as soon as it sees its consecutive matches, while a short one reports
 a real clear as unverified and sends a steward chasing a healthy session.
 """
 
+DEFAULT_DRIVE_VERIFY_POLL_INTERVAL_SECONDS = 0.5
+DEFAULT_DRIVE_VERIFY_SAMPLES_REQUIRED = 3
+DEFAULT_DRIVE_VERIFY_TIMEOUT_SECONDS = 120.0
+"""Same settle-window reasoning as ``DEFAULT_CLEAR_VERIFY_TIMEOUT_SECONDS`` --
+a long timeout costs nothing in the common case (the poll returns as soon as
+either signal is confirmed) while a short one reports a real submit as
+unverified."""
+
+_STRANDED_INPUT_SGR = "\x1b[97m"
+"""Bright-white SGR — the measured signature of REAL stranded input sitting
+in a composer (public issue #9 / GAU-09 pane read, backlog.md GAU-09)."""
+
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+"""Matches an SGR escape sequence so it can be stripped for content
+comparison, or walked to find the style in effect at a given position."""
+
 DEFAULT_PASTE_STABLE_POLL_INTERVAL_SECONDS = 0.5
 DEFAULT_PASTE_STABLE_SAMPLES_REQUIRED = 3
 DEFAULT_PASTE_STABLE_TIMEOUT_SECONDS = 10.0
@@ -459,6 +475,11 @@ class _TmuxSendKeysDriverChannel:
         ),
         clear_stable_samples_required: int = DEFAULT_CLEAR_VERIFY_SAMPLES_REQUIRED,
         clear_verify_timeout_seconds: float = DEFAULT_CLEAR_VERIFY_TIMEOUT_SECONDS,
+        drive_verify_poll_interval_seconds: float = (
+            DEFAULT_DRIVE_VERIFY_POLL_INTERVAL_SECONDS
+        ),
+        drive_verify_samples_required: int = DEFAULT_DRIVE_VERIFY_SAMPLES_REQUIRED,
+        drive_verify_timeout_seconds: float = DEFAULT_DRIVE_VERIFY_TIMEOUT_SECONDS,
         sleep_fn: Any = time.sleep,
         now_fn: Any = time.monotonic,
     ) -> None:
@@ -472,6 +493,9 @@ class _TmuxSendKeysDriverChannel:
         self._clear_verify_poll_interval_seconds = clear_verify_poll_interval_seconds
         self._clear_stable_samples_required = clear_stable_samples_required
         self._clear_verify_timeout_seconds = clear_verify_timeout_seconds
+        self._drive_verify_poll_interval_seconds = drive_verify_poll_interval_seconds
+        self._drive_verify_samples_required = drive_verify_samples_required
+        self._drive_verify_timeout_seconds = drive_verify_timeout_seconds
         self._sleep_fn = sleep_fn
         self._now_fn = now_fn
 
@@ -593,6 +617,162 @@ class _TmuxSendKeysDriverChannel:
                 )
                 return False
             self._sleep_fn(self._clear_verify_poll_interval_seconds)
+
+    def _capture_pane_colored(self) -> str | None:
+        """Same contract as :meth:`_capture_pane` but with ``-e``, which
+        preserves the ANSI SGR escape codes tmux otherwise strips on plain
+        ``capture-pane -p``. Without ``-e`` every pane reads as colourless
+        and the stranded-input probe below has nothing to detect, ever —
+        the standing trap this guards against."""
+        try:
+            result = self._run_fn(
+                [self._tmux_bin, "capture-pane", "-e", "-t", self._session, "-p"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if getattr(result, "returncode", 1) != 0:
+            return None
+        return str(getattr(result, "stdout", "") or "")
+
+    def _composer_content_matches(self, raw_line: str, probe_text: str) -> bool:
+        """The POPULATION anchor: True if ``raw_line`` is the composer row
+        AND its stripped content is a genuine PREFIX of the driven text,
+        REGARDLESS of colour. This is proof the driven text actually
+        reached the composer at all, independent of what happens to it
+        next — used both to gate a confirmed submit (see
+        :meth:`verify_driven`) and, paired with a colour check, to detect a
+        stranded one.
+
+        The glyph anchor (the same composer-row signature
+        :meth:`_is_cleared_screen` uses) restricts the check to the
+        COMPOSER row, not scrollback — a probe that scanned the whole pane
+        would match unrelated content wherever it happens to look similar,
+        the "pane detector matches the echo of its own probe" trap. The
+        content anchor (a genuine prefix, not mere presence) guards the
+        other direction: a composer row showing something else entirely is
+        not evidence of THIS drive."""
+        plain = raw_line.replace("\x00", "")
+        stripped = _ANSI_SGR_RE.sub("", plain).strip()
+        if not stripped.startswith(self._cleared_signature):
+            return False
+        composer_content = stripped[len(self._cleared_signature) :].strip()
+        probe = probe_text.strip()
+        return bool(composer_content) and bool(probe) and probe.startswith(composer_content)
+
+    def _composer_style_at_content(self, raw_line: str) -> str | None:
+        """The SGR style in effect at the first content character after the
+        composer glyph, or ``None`` if the row carries no style at that
+        point. Walks past whitespace and escape codes to find the style
+        that actually applies to the composer's TEXT, not merely the first
+        code emitted anywhere on the line."""
+        plain = raw_line.replace("\x00", "")
+        glyph_pos = plain.find(self._cleared_signature)
+        if glyph_pos < 0:
+            return None
+        after_glyph = plain[glyph_pos + len(self._cleared_signature) :]
+        last_style: str | None = None
+        i = 0
+        n = len(after_glyph)
+        while i < n:
+            match = _ANSI_SGR_RE.match(after_glyph, i)
+            if match:
+                last_style = match.group(0)
+                i = match.end()
+                continue
+            if after_glyph[i] in (" ", "\xa0", "\x00"):
+                i += 1
+                continue
+            break
+        return last_style
+
+    def _is_stranded_drive_line(self, raw_line: str, probe_text: str) -> bool:
+        """POSITIVE detection that ``probe_text`` is sitting in the composer
+        as REAL stranded input, not a submitted-and-gone turn: the
+        population anchor (:meth:`_composer_content_matches`) plus a colour
+        check. SGR 97 (bright white) is the measured stranded-input
+        signature (public issue #9 / GAU-09 pane read); anything else
+        (SGR 2 dim ghost text, or no style at all) is not stranded."""
+        if not self._composer_content_matches(raw_line, probe_text):
+            return False
+        return self._composer_style_at_content(raw_line) == _STRANDED_INPUT_SGR
+
+    def _classify_drive_sample(self, captured: str, text: str) -> tuple[bool, bool, bool]:
+        """Classify one polled sample as ``(stranded, populated, idle)`` —
+        a pure reader, no state. Split out of :meth:`verify_driven` to keep
+        that method's own branching under the CC gate; the state machine
+        (the idle streak, the population gate) stays in the caller."""
+        lines = captured.splitlines()
+        stranded = any(self._is_stranded_drive_line(line, text) for line in lines)
+        populated = any(self._composer_content_matches(line, text) for line in lines)
+        idle = any(
+            _ANSI_SGR_RE.sub("", line.replace("\x00", "")).strip() == self._cleared_signature
+            for line in lines
+        )
+        return stranded, populated, idle
+
+    def verify_driven(self, text: str) -> bool | None:
+        """Poll the pane for evidence of what happened to a driven ``text``
+        after :meth:`send` — POSITIVE evidence on EVERY side, two-phase.
+
+        Composer-idle alone CANNOT serve as the success signal, and not
+        only for the reason it looks like at first: it is the observation
+        a genuine submit produces, but it is ALSO the observation of a
+        ``send()`` that silently no-op'd (this channel's own ``send()``
+        swallows a dead-pane failure into a logged warning and simply
+        returns — a fire-and-forget contract by design) — in BOTH cases the
+        composer reads "idle" for the entire poll, with no way to tell them
+        apart from idle alone. The fix is a POPULATION anchor: this method
+        does not accept "idle" as success until it has independently
+        observed the driven text actually LAND in the composer at least
+        once (any colour) — proof bytes genuinely reached the pane — and
+        only THEN treats a subsequent return to idle as a confirmed submit.
+        The stranded check is checked on every sample, independently and
+        first, and is the load-bearing FAILURE signal; the population
+        gate is the load-bearing SUCCESS-side signal. Idle observed before
+        population is not evidence of anything and keeps polling.
+
+        Returns ``True`` on a confirmed submit (text observed landing, then
+        observed leaving without ever being seen stranded), ``False`` on a
+        POSITIVE stranded-input observation, and ``None`` on a deadline
+        passing with neither — could-not-determine, genuinely distinct from
+        ``False`` (looked and found it stranded). Collapsing either pairing
+        is the exact shape of the defect this closes.
+
+        ``submitted=True`` here means the text was taken up as a turn by
+        THIS pane, nothing more — it is not evidence the model acted on
+        it, only that it left the composer. Sends nothing on any path,
+        same no-retry invariant as :meth:`verify_cleared`."""
+        deadline = self._now_fn() + self._drive_verify_timeout_seconds
+        idle_streak = 0
+        observed_populated = False
+        while True:
+            captured = self._capture_pane_colored()
+            if captured is not None:
+                stranded, populated, is_idle = self._classify_drive_sample(captured, text)
+                if stranded:
+                    return False
+                observed_populated = observed_populated or populated
+                if is_idle and observed_populated:
+                    idle_streak += 1
+                    if idle_streak >= self._drive_verify_samples_required:
+                        return True
+                elif not is_idle:
+                    idle_streak = 0
+                # is_idle and not observed_populated: idle-by-never-arrived --
+                # NOT evidence of a submit, the exact trap this method
+                # exists to close. Keep polling toward the deadline rather
+                # than resetting or accepting it.
+            if self._now_fn() > deadline:
+                logger.warning(
+                    "tmux driver channel: pane %r showed neither a confirmed "
+                    "submit nor a positively stranded composer for the driven "
+                    "text within %.1fs -- reporting the drive as UNVERIFIED "
+                    "(could-not-determine). No key is re-sent.",
+                    self._session, self._drive_verify_timeout_seconds,
+                )
+                return None
+            self._sleep_fn(self._drive_verify_poll_interval_seconds)
 
     def _wait_for_paste_stable(self) -> None:
         """Poll until the pane's rendered content is IDENTICAL across

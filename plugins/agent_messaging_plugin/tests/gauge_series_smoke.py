@@ -49,14 +49,18 @@ from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     AGENT_ROLE_BINDING_NAMESPACE,
 )
 
+from agent_messaging_plugin.context_status_verbs import VerbError  # noqa: E402
 from agent_messaging_plugin.gauge_series import (  # noqa: E402
     GAUGE_SERIES_STALL_S,
+    GAUGE_STOPPED_CONFIRM_GAP_S,
+    SERIES_ABSENT,
     SERIES_HEALTHY,
     SERIES_IDLE,
     SERIES_NEVER_STARTED,
     SERIES_STOPPED,
     SERIES_UNDETERMINED,
     classify_gauge_series,
+    confirm_gauge_stopped,
     session_context_status_history,
 )
 from agent_messaging_plugin.schema import (  # noqa: E402
@@ -427,6 +431,236 @@ def test_the_store_read_reports_its_own_truncation() -> None:
     _check(len(rows_all) == 4 and not truncated_all, "a full read reports no truncation")
 
 
+def test_gau19_single_sample_never_escalates_the_race_window() -> None:
+    """★ THE DISCRIMINATOR for GAU-19. CATCHES: a "fix" that just re-classifies
+    the single read differently (e.g. widening the stall bound) instead of
+    actually requiring a second read -- the discriminator here is the RACE,
+    not the staleness. First read lands INSIDE the inter-hook window: gauge
+    stale, report_alive just landed (the textbook single-sample STOPPED
+    signature). Second read, taken past the confirm gap, shows the gauge
+    caught up -- proving it was the race, not a freeze.
+    """
+    first_now = NOW
+    race_last_alive = first_now - timedelta(seconds=20)
+    stopped_state, _ = classify_gauge_series(
+        newest_recorded_at=first_now - timedelta(seconds=GAUGE_SERIES_STALL_S + 381),
+        last_alive=race_last_alive,
+        lifecycle_readable=True,
+        now=first_now,
+    )
+    _check(stopped_state == SERIES_STOPPED, "setup: the single sample DOES read STOPPED (the bug this fixes)")
+
+    second_now = first_now + timedelta(seconds=GAUGE_STOPPED_CONFIRM_GAP_S + 5)
+    confirmed, why = confirm_gauge_stopped(
+        first_newest_recorded_at=first_now - timedelta(seconds=GAUGE_SERIES_STALL_S + 381),
+        first_last_alive=race_last_alive,
+        first_lifecycle_readable=True,
+        first_now=first_now,
+        second_newest_recorded_at=second_now - timedelta(seconds=5),
+        second_last_alive=second_now - timedelta(seconds=2),
+        second_lifecycle_readable=True,
+        second_now=second_now,
+    )
+    _check(confirmed is False, "the race window does NOT escalate once re-read")
+    _check("race window" in why, "the refusal names the race, not a bare 'not stopped'")
+
+
+def test_gau19_a_genuine_freeze_still_escalates() -> None:
+    """CATCHES: a fix that suppresses ALL single-sample STOPPED reads,
+    including real ones -- the negative control the discriminator above
+    needs. Both reads show the gauge stalled at the SAME old write while
+    report_alive keeps landing (advancing between the two reads) -- this is
+    GAU-01, not the GAU-19 race, and must still alarm.
+    """
+    first_now = NOW
+    frozen_write = first_now - timedelta(seconds=GAUGE_SERIES_STALL_S + 500)
+    second_now = first_now + timedelta(seconds=GAUGE_STOPPED_CONFIRM_GAP_S + 30)
+    confirmed, why = confirm_gauge_stopped(
+        first_newest_recorded_at=frozen_write,
+        first_last_alive=first_now - timedelta(seconds=10),
+        first_lifecycle_readable=True,
+        first_now=first_now,
+        second_newest_recorded_at=frozen_write,
+        second_last_alive=second_now - timedelta(seconds=8),
+        second_lifecycle_readable=True,
+        second_now=second_now,
+    )
+    _check(confirmed is True, "a genuine freeze (gauge dark at both reads, report_alive advancing) STILL escalates")
+    _check("genuinely dark" in why, "the confirmation states the evidence, not a bare verdict")
+
+
+def test_gau19_report_alive_not_advancing_reads_as_idle_not_stopped() -> None:
+    """CATCHES: confirming a STOPPED verdict off a session that went IDLE
+    between the two reads (GAU-18 territory) -- report_alive must ADVANCE,
+    not merely still exist, or this collapses back into the false alarm."""
+    first_now = NOW
+    frozen_write = first_now - timedelta(seconds=GAUGE_SERIES_STALL_S + 500)
+    same_alive = first_now - timedelta(seconds=10)
+    second_now = first_now + timedelta(seconds=GAUGE_STOPPED_CONFIRM_GAP_S + 30)
+    confirmed, why = confirm_gauge_stopped(
+        first_newest_recorded_at=frozen_write,
+        first_last_alive=same_alive,
+        first_lifecycle_readable=True,
+        first_now=first_now,
+        second_newest_recorded_at=frozen_write,
+        second_last_alive=same_alive,
+        second_lifecycle_readable=True,
+        second_now=second_now,
+    )
+    _check(confirmed is False, "report_alive NOT advancing refuses to confirm STOPPED")
+    _check("did not advance" in why, "the refusal names report_alive's own stall, not a generic no")
+
+
+def test_gau19_too_short_a_gap_is_inconclusive_not_a_pass() -> None:
+    """CATCHES: a confirm gap of zero (calling classify_gauge_series twice on
+    the same instant, which proves nothing about the race resolving)."""
+    first_now = NOW
+    frozen_write = first_now - timedelta(seconds=GAUGE_SERIES_STALL_S + 500)
+    second_now = first_now + timedelta(seconds=5)
+    confirmed, why = confirm_gauge_stopped(
+        first_newest_recorded_at=frozen_write,
+        first_last_alive=first_now - timedelta(seconds=10),
+        first_lifecycle_readable=True,
+        first_now=first_now,
+        second_newest_recorded_at=frozen_write,
+        second_last_alive=second_now - timedelta(seconds=1),
+        second_lifecycle_readable=True,
+        second_now=second_now,
+    )
+    _check(confirmed is False, "a too-fast re-read refuses rather than confirms")
+    _check("inconclusive" in why, "the refusal says inconclusive, not 'not stopped'")
+
+
+def test_gau19_first_read_not_stopped_short_circuits() -> None:
+    """CATCHES: confirming a STOPPED verdict when the first read was never
+    STOPPED to begin with (e.g. HEALTHY or IDLE)."""
+    first_now = NOW
+    confirmed, why = confirm_gauge_stopped(
+        first_newest_recorded_at=first_now - timedelta(seconds=30),
+        first_last_alive=first_now,
+        first_lifecycle_readable=True,
+        first_now=first_now,
+        second_newest_recorded_at=first_now - timedelta(seconds=30),
+        second_last_alive=first_now,
+        second_lifecycle_readable=True,
+        second_now=first_now + timedelta(seconds=GAUGE_STOPPED_CONFIRM_GAP_S + 5),
+    )
+    _check(confirmed is False, "a first read that was never STOPPED never confirms")
+    _check("nothing to confirm" in why, "the refusal says there was nothing to confirm")
+
+
+def test_gau19_non_monotonic_reads_fail_loud() -> None:
+    """CATCHES: silently accepting two reads out of order, which would let a
+    caller launder a stale re-check as a fresh confirmation."""
+    first_now = NOW
+    try:
+        confirm_gauge_stopped(
+            first_newest_recorded_at=first_now - timedelta(seconds=GAUGE_SERIES_STALL_S + 500),
+            first_last_alive=first_now,
+            first_lifecycle_readable=True,
+            first_now=first_now,
+            second_newest_recorded_at=first_now - timedelta(seconds=GAUGE_SERIES_STALL_S + 500),
+            second_last_alive=first_now,
+            second_lifecycle_readable=True,
+            second_now=first_now - timedelta(seconds=1),
+        )
+        _check(False, "a non-monotonic read pair raises rather than silently accepting")
+    except VerbError as exc:
+        _check(exc.code == "non_monotonic_reads", "raises the named non_monotonic_reads error")
+
+
+def test_gau18_no_registry_preserves_pre_gau18_idle_behavior() -> None:
+    """CATCHES: a change that alters IDLE's behaviour for callers who never
+    opted into the watcher-presence join -- backward compatibility is the
+    point of ``watcher_present`` defaulting to ``None``."""
+    stalled = NOW - timedelta(seconds=GAUGE_SERIES_STALL_S + 60)
+    state, why = classify_gauge_series(
+        newest_recorded_at=stalled,
+        last_alive=stalled,
+        lifecycle_readable=True,
+        now=NOW,
+    )
+    _check(state == SERIES_IDLE, "omitting watcher_present still reads IDLE")
+    _check(
+        "not faulty" in why and "STILL COVERS TWO SITUATIONS" not in why,
+        "the ORIGINAL reason text is unchanged when the caller opted out",
+    )
+
+
+def test_gau18_presence_confirmed_reads_idle_with_the_mandatory_caveat() -> None:
+    """★ THE HARD CONSTRAINT (coordinating-seat ruling, 2026-08-20): the idle reason
+    line MUST plainly state it still covers two situations. CATCHES: a
+    label that implies precision it does not have -- e.g. dropping the
+    caveat once presence is confirmed, which is exactly the trap the
+    ruling names."""
+    stalled = NOW - timedelta(seconds=GAUGE_SERIES_STALL_S + 60)
+    state, why = classify_gauge_series(
+        newest_recorded_at=stalled,
+        last_alive=stalled,
+        lifecycle_readable=True,
+        now=NOW,
+        watcher_present=True,
+    )
+    _check(state == SERIES_IDLE, "a live watcher-presence row reads IDLE, not ABSENT")
+    _check(
+        "STILL COVERS TWO SITUATIONS" in why and "undriven" in why and "mid-call" in why,
+        "the reason line names BOTH situations idle still conflates",
+    )
+    _check(
+        "Nothing separates them" in why or "nothing separates them" in why.lower(),
+        "the reason line states plainly that nothing separates them",
+    )
+
+
+def test_gau18_no_presence_reads_absent_not_idle() -> None:
+    """CATCHES: collapsing ABSENT back into IDLE -- the whole point of the
+    split is that a process that has vanished is a materially different
+    fact from one that is alive but undriven."""
+    stalled = NOW - timedelta(seconds=GAUGE_SERIES_STALL_S + 60)
+    state, why = classify_gauge_series(
+        newest_recorded_at=stalled,
+        last_alive=stalled,
+        lifecycle_readable=True,
+        now=NOW,
+        watcher_present=False,
+    )
+    _check(state == SERIES_ABSENT, "no live watcher-presence row reads ABSENT")
+    _check("process itself appears gone" in why, "the reason states the process is gone, not merely quiet")
+
+
+def test_gau18_watcher_presence_joins_on_agent_session_id_never_derived() -> None:
+    """CATCHES: joining watcher presence on ``agent_instance_id`` (the
+    ledger id) instead of ``agent_session_id`` -- GAU-26's own ruling is
+    that a watcher registers under a DERIVED ``agi-watch-...`` id the
+    ledger id will never match, so a ledger-keyed join always reads
+    ``None``/absent even for a genuinely present watcher."""
+
+    class _FakeBinding:
+        updated_at = NOW.isoformat()
+
+    class _FakeRegistry:
+        def __init__(self) -> None:
+            self.seen_session_id: str | None = None
+
+        def resolve_by_agent_session_id(self, agent_session_id: str) -> _FakeBinding | None:
+            self.seen_session_id = agent_session_id
+            return _FakeBinding() if agent_session_id == SESSION_ID else None
+
+    registry = _FakeRegistry()
+    from agent_messaging_plugin.gauge_series import _watcher_presence  # noqa: PLC0415
+
+    present = _watcher_presence(cast("Any", registry), SESSION_ID, now=NOW)
+    _check(present is True, "a fresh binding resolved by agent_session_id reads present")
+    _check(registry.seen_session_id == SESSION_ID, "the join was made on agent_session_id, not a derived id")
+
+    stale_registry = _FakeRegistry()
+    stale_result = _watcher_presence(cast("Any", stale_registry), "", now=NOW)
+    _check(stale_result is None, "an empty agent_session_id opts out (None), never reads as absent")
+
+    no_registry_result = _watcher_presence(None, SESSION_ID, now=NOW)
+    _check(no_registry_result is None, "no registry supplied opts out (None), never reads as absent")
+
+
 def main() -> int:
     tests = (
         test_the_write_path_appends,
@@ -441,6 +675,16 @@ def main() -> int:
         test_truncation_is_published_not_implied,
         test_an_unknown_session_is_an_honest_gap,
         test_the_store_read_reports_its_own_truncation,
+        test_gau19_single_sample_never_escalates_the_race_window,
+        test_gau19_a_genuine_freeze_still_escalates,
+        test_gau19_report_alive_not_advancing_reads_as_idle_not_stopped,
+        test_gau19_too_short_a_gap_is_inconclusive_not_a_pass,
+        test_gau19_first_read_not_stopped_short_circuits,
+        test_gau19_non_monotonic_reads_fail_loud,
+        test_gau18_no_registry_preserves_pre_gau18_idle_behavior,
+        test_gau18_presence_confirmed_reads_idle_with_the_mandatory_caveat,
+        test_gau18_no_presence_reads_absent_not_idle,
+        test_gau18_watcher_presence_joins_on_agent_session_id_never_derived,
     )
     for test in tests:
         print(f"\n{test.__name__}")

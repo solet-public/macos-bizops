@@ -93,8 +93,11 @@ class _SuccessRouter:
         colors = [{"instance_id": iid, "port": p} for iid, p in self.registered.items()]
         return {"active_color": COLOR_BLUE, "active_instance_id": "blue-id", "colors": colors}
 
-    def register_color(self, port: int, color: str, instance_id: str) -> dict[str, Any]:
-        del color
+    def register_color(
+        self, port: int, color: str, instance_id: str,
+        *, streamable_port: int | None = None,
+    ) -> dict[str, Any]:
+        del color, streamable_port
         self.registered[instance_id] = port
         return {"accepted": True}
 
@@ -105,9 +108,11 @@ class _SuccessRouter:
 
 class _SuccessReleaseManager:
     def build_candidate(
-        self, *, manifest_etag: str = "", schema_snapshot_fn: object = None,
+        self, *, manifest_etag: str = "",
+        manifest_plugins: tuple[str, ...] | None = None,
+        schema_snapshot_fn: object = None,
     ) -> CandidatePaths:
-        del manifest_etag, schema_snapshot_fn
+        del manifest_etag, manifest_plugins, schema_snapshot_fn
         base = Path("/nonexistent/rel-ok")
         return CandidatePaths(
             release_id="rel-ok", release_dir=base, code_root=base / "code",

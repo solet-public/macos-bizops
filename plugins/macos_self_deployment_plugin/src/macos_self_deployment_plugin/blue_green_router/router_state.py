@@ -44,6 +44,14 @@ class ColorBinding:
     instance_id: str
     registered_at: float
     last_heartbeat: float
+    # BLG-04: the color's OWN ephemeral streamable-HTTP listener port.
+    # Delivered via an optional `register()` arg — sticky-preserved across
+    # re-registers that omit it (see `RouterState.register`), since the
+    # child binds its main port first and typically learns its streamable
+    # port slightly later. `None` until delivered, or if this color never
+    # runs with streamable enabled; the streamable proxy 503s a color with
+    # no reported port rather than guessing.
+    streamable_port: int | None = None
 
 
 @dataclass
@@ -93,6 +101,7 @@ class StatusEntry:
     instance_id: str
     status: str
     last_heartbeat: float
+    streamable_port: int | None = None
 
 
 @dataclass
@@ -131,7 +140,11 @@ class RouterState:
         return self._clock()
 
     def register(
-        self, port: int, color: str, instance_id: str
+        self,
+        port: int,
+        color: str,
+        instance_id: str,
+        streamable_port: int | None = None,
     ) -> RegisterResult:
         if color not in ("blue", "green"):
             return RegisterResult(False, reason="unknown_color")
@@ -147,6 +160,14 @@ class RouterState:
             instance_id=instance_id,
             registered_at=existing.registered_at if existing else ts,
             last_heartbeat=ts,
+            # Sticky: a re-register that doesn't carry a streamable_port
+            # (the common case — only the first delivery or a fresh instance
+            # passes one) preserves whatever was already known instead of
+            # wiping it back to None.
+            streamable_port=(
+                streamable_port if streamable_port is not None
+                else (existing.streamable_port if existing else None)
+            ),
         )
         return RegisterResult(True)
 
@@ -266,6 +287,7 @@ class RouterState:
                 instance_id=b.instance_id,
                 status="active" if b.instance_id == self.active_instance_id else "inactive",
                 last_heartbeat=b.last_heartbeat,
+                streamable_port=b.streamable_port,
             )
             for b in self.bindings.values()
         ]
@@ -276,6 +298,7 @@ class RouterState:
                 instance_id=d.binding.instance_id,
                 status="draining",
                 last_heartbeat=d.binding.last_heartbeat,
+                streamable_port=d.binding.streamable_port,
             )
             for d in self.drain_entries
             if d.drain_ends_at > self.now()

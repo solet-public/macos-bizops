@@ -228,6 +228,18 @@ restart apply_manifest" via Step Zero for the exact call shape (`new_manifest` +
 bare LaunchAgent restart is a full stop that drops in-memory state (blob storage by default);
 it is not wrong, just the higher-cost path when a router is available.
 
+**Expect this once, for a release whose own notes describe a change to the deploy
+preflight or the swap path itself: the bare-restart path is required first, and
+`apply_manifest` cannot be the one to install that release.** `apply_manifest`'s cutover
+preflight runs INSIDE the still-running old process — it validates the candidate release
+using the OLD code's preflight logic, not the new code it is about to activate. A release
+that fixes a defect in that preflight logic ships a fix the old preflight is not running
+yet, so the very call that would install the fix is evaluated by the broken logic the fix
+replaces. This is not a new failure mode to diagnose: fall back to the bare LaunchAgent
+restart below, once, for this release only; `apply_manifest` clears normally on every
+release after it. Read this release's `RELEASE_NOTES.md` before Step 4 to know whether it
+applies before you hit the failure.
+
 If that plugin is absent, this solet has no router and no blue-green path
 (single-color by design) — restart the LaunchAgent directly:
 
@@ -283,8 +295,20 @@ a second look, not a silent pass.
 
 Updates that only change platform code end here. Updates that change the
 OPERATOR-SIDE artifacts — the generated `AGENTS.md` / `CLAUDE.md` blocks, the
-user-scope `~/.claude/settings.json` hooks, the rename skill, the fleet functions — need
-the matching hydration steps re-run once. The hydration runbook's steps are
+user-scope `~/.claude/settings.json` hooks, the rename skill, the fleet
+functions, **and the session launchers themselves (`client/bin/claude-<name>`,
+`client/bin/codex-<name>`)** — need the matching hydration steps re-run once.
+
+⚠ **The launchers were added to that list 2026-08-20, and the omission had
+teeth.** A launcher is rendered ONCE at genesis from
+`claude_launcher.template`; a `git pull` updates the TEMPLATE in the clone and
+touches the rendered launcher never. So a release whose entire operator-visible
+value is a launcher change — this release's permission-mode default flip is
+exactly that — lands, deploys, seals, publishes, gets pulled, and still leaves
+the operator running the byte-identical launcher they had before, with nothing
+anywhere reporting a gap. If you are updating across a release that changed a
+launcher template, **re-running hydration Step 2 is the delivery, not a
+formality.** The hydration runbook's steps are
 idempotent by design: probes first, marker-based structural merges, never
 clobber. Re-run its Step 2 (and Step 4a if the operator uses fleet roles);
 the markers replace the old solet-owned pieces in place and leave

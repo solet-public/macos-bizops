@@ -25,6 +25,7 @@ plugins/macos_self_deployment_plugin/tests/cutover_failure_smoke.py
 plugins/macos_self_deployment_plugin/tests/complete_swap_crash_consistency_smoke.py
 plugins/macos_self_deployment_plugin/tests/rollback_release_smoke.py
 plugins/macos_self_deployment_plugin/tests/schema_preflight_smoke.py
+plugins/macos_self_deployment_plugin/tests/blg02_manifest_capture_smoke.py
 plugins/macos_self_deployment_plugin/tests/preflight_refusal_smoke.py
 plugins/macos_self_deployment_plugin/tests/release_manager_crash_consistency_smoke.py
 plugins/macos_self_deployment_plugin/tests/release_builder_dirty_tree_gate_smoke.py
@@ -1099,6 +1100,11 @@ ananta/tests/lifecycle_management_service/preflight_probe_cache_poison_smoke.py
 ananta/tests/lifecycle_management_service/preflight_probe_release_context_smoke.py
 ananta/tests/lifecycle_management_service/apply_manifest_probe_rollback_smoke.py
 ananta/tests/lifecycle_management_service/preflight_entry_point_deferral_smoke.py
+# LIF-01 (2026-08-19, lane-w3-lifecycle): the set_plugin_enabled re-enable
+# regression suite landed with c21e22e8d but was never registered here, so it
+# has never run in a battery — an unregistered smoke passes only by not
+# existing. 26/26 green, ~6s, own fixture plugin.
+ananta/tests/lifecycle_management_service/set_plugin_enabled_reenable_smoke.py
 
 # JOS-02 session-scoped plan focus (2026-07-07). 13 cases / 37 checks: schema
 # column pin vs DEFINITIONS; per-session isolation + cap-20 (F2); the
@@ -1484,6 +1490,16 @@ plugins/github_midwife_plugin/tests/command_launcher_smoke.py
 plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py
 plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py
 plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py
+# MEM-08 (2026-08-19) — the vendored memory_passthrough copy (drain.py/_journal.py)
+# had no smoke of its own in this plugin, so the MEM-06->MEM-07 divergence class
+# (a blind-EOF `drain.py --advance` swallowing a capture that lands during the
+# drain window) could silently recur here after MEM-07's mirror landing
+# (`8eb55dad9`). Re-runs the same regression directly against THIS plugin's
+# hooks/capture.py and hooks/drain.py, plus the bare --advance fail-loud
+# contract. Does not re-prove the full capture/hydrate loop — the checkout
+# carries head-budget policing this plugin does not vendor (a disclosed,
+# legitimate divergence; see SECURITY.md's Known gaps note).
+plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/memory_passthrough_regression_smoke.py
 # WS-3c — the operator-guidance channel, the plugin's ONLY verbatim-text
 # surface. Registered separately from reminder_hooks_smoke.py because its
 # arming contract differs (a label alone does not arm it; the event's own
@@ -3600,6 +3616,24 @@ plugins/agent_messaging_plugin/tests/release_pointer_stability_smoke.py
 # server, no live session is ever driven, no bridge, database, or model turn.
 plugins/agent_messaging_plugin/tests/clear_session_effect_verification_smoke.py
 
+# Public issue #9 (2026-08-19, lane-drive-honesty) — drive_session's sibling to
+# GAU-09: it must report whether a driven turn was actually taken up, not the
+# send. Pins the DriveVerifyingDriverChannel protocol, the two-phase
+# population-then-idle success signature, the positive bright-white (SGR 97)
+# stranded-input detector (dim SGR 2 ghost text is NOT stranded), the
+# drive_unverified/None distinction, and the HARD no-retry rule.
+#
+# ★ The discriminating case: a composer idle for the ENTIRE poll, having
+# NEVER once shown the driven text land, must resolve to None (could not
+# determine), not True — composer-idle alone is what BOTH a genuine submit
+# and a silently-failed send() look like from the outside. A fix that drops
+# the population gate passes every other case in this file and fails only
+# that one.
+#
+# PURE UNIT, offline: fake driver channels and a stub tmux run_fn. No real tmux
+# server, no live session is ever driven, no bridge, database, or model turn.
+plugins/agent_messaging_plugin/tests/drive_session_effect_verification_smoke.py
+
 # GAU-07 (2026-08-18, lane-gau-verbs) — session_context_status must resolve the
 # WATCH id peer_list publishes for a watcher-held session, whose gauge row is
 # keyed on its LEDGER id. A join error in the READER (kept separate from
@@ -3682,3 +3716,139 @@ plugins/agent_messaging_plugin/tests/gauge_notice_record_smoke.py
 # PURE UNIT, offline: real-shape state fake plus a real in-memory bridge. No
 # database, network, or model turn.
 plugins/agent_messaging_plugin/tests/gauge_canary_smoke.py
+
+# lane-w3-smallfix (2026-08-20), Wave-1 defect burn-down.
+#
+# INF-08 retention rider: gc_terminal_completion_requests hard-deletes aged
+# served/failed rows from core__inference_completion_request, mirroring the
+# INF-06 forwarded-vertex terminal-row GC shape. This is a DESTRUCTIVE path,
+# so the discriminator that matters is not the row count but the
+# never-delete-on-unknown-age contract in _terminal_row_aged. Red-first,
+# verified by temporarily mutating _terminal_row_aged's missing-updated_at
+# branch from `return False` to `return True` (reaps unknown-age rows): the
+# smoke's "icr-no-stamp-failed survives" assertion goes red under that
+# mutation (3 rows reaped instead of 2, the unstamped row included);
+# restoring the real branch returns it to green. PURE UNIT, offline: a
+# real-shape CompletionRequestStore fake (ActionResult envelopes), no
+# database.
+ananta/tests/services/inference_service/gc_terminal_completion_requests_smoke.py
+
+# JOS-07: a terminal-complete plan's own last-step completion must not raise
+# current_step_missing as a full ResultContractViolationError (it used to,
+# every single completed run). Drives the REAL SuccessfulResultCoordinator
+# with a genuine core.plans.parser-parsed plan across three legs: (1) a
+# fully [X] terminal plan -> DETERMINISTIC_PLAN_COMPLETE, no violation, no
+# submit; (2) an empty/malformed plan (genuine corruption) -> still raises
+# current_step_missing, proving ParsedPlan.is_complete did not widen into
+# the corruption case; (3) a mid-plan continuation -> unaffected, still
+# submits. Case (1) confirmed red pre-fix (AttributeError: DispatchOutcome
+# has no DETERMINISTIC_PLAN_COMPLETE) by reverting contracts.py/
+# coordinator.py to their pre-fix HEAD content and re-running; restored to
+# green. PURE UNIT, offline: constructed inputs + recording collaborator
+# stubs, no database, network, or model turn.
+ananta/tests/core/substrate_contracts/deterministic_plan_complete_smoke.py
+
+# lane-msg04-bootstrap (2026-08-20), MSG-04/identity-unification (c).
+#
+# `_resolve_watch_identity` now prefers a spawned worker's ledger
+# AGENT_INSTANCE_ID over the derived agi-watch-{digest(session_id)} scheme,
+# closing the mismatch where a DIRECT peer_send addressed the watch identity
+# while the worker read mail under its ledger identity. Proves ROUTING
+# CONVERGENCE with a real in-memory PeerRegistry: a DIRECT send resolved by
+# peer_agent_instance_id and the worker's own peer_inbox resolution by
+# agent_session_id land on ONE persisted row, not two — and that
+# watcher_declared restores BridgeBinding.is_watcher despite the registered
+# id carrying none of the legacy agi-watch- prefix. Also proves the
+# collision analysis: a reconnect under the new identity (same
+# agent_session_id, new agent_instance_id) is swept as the SAME session by
+# PeerRegistry.register's existing agent_session_id-keyed label sweep (no
+# orphaned row), and role_claim._protects_a_live_holder already tolerates the
+# same swap as a self-refresh by design (REL-07/§4.3.2) — verified directly
+# against that pure function, plus a negative control confirming a
+# genuinely different session is still protected. Mutation-verified: reverting
+# _resolve_watch_identity to always derive (never prefer the ledger id) turns
+# the convergence test red on its own fixture-sanity assertion; restoring the
+# fix returns it to green. PURE UNIT, offline: a real in-memory Store-backed
+# PeerRegistry, no database, network, or model turn.
+plugins/agent_messaging_plugin/tests/watch_ledger_identity_convergence_smoke.py
+
+# lif02_half_booted_color_smoke (2026-08-20, LIF-02/D4 fix): a color whose
+# prepare_for_readiness had not yet reached the self._router_client
+# assignment crashed on any apply_manifest-delegated restart_with_manifest
+# with "router client not initialized — prepare_for_readiness not called?",
+# leaving no recovery but SIGKILL. _lazy_router_client builds a RouterClient
+# on demand from SOLET_NAME (no I/O at construction) instead of gating on
+# the readiness-time bookkeeping flag, so the call reaches
+# SwapOrchestrator._prepare_swap's own typed NOT_ACTIVE_INSTANCE /
+# ROUTER_UNREACHABLE refusal. Four scenarios: half-booted _require_orchestrator
+# and _require_client both succeed and point at the right socket path; the
+# lazy build never mutates self._router_client itself (the heartbeat-thread
+# spawn guard depends on that field staying None until real readiness sets
+# it); the truly-unresolvable case (no SOLET_NAME anywhere) still raises,
+# with a message naming SOLET_NAME instead of blaming readiness. Mutation-
+# verified: reverting _require_client/_require_orchestrator to the old
+# unconditional raise turns scenario 1 red (RuntimeError on a half-booted
+# color); restoring the fix returns all four to green.
+plugins/macos_self_deployment_plugin/tests/lif02_half_booted_color_smoke.py
+
+# session_context_status_history_process_smoke (2026-08-20, GAU-18 rider):
+# GAU-18's idle/absent split (76d3387f5) landed BUILT but INERT —
+# plugin.py's session_context_status_history call site never passed
+# peer_registry to gauge_series.session_context_status_history, so the split
+# was unreachable through the live verb even though the classifier's own 58
+# tests (gauge_series_smoke.py) passed. This smoke drives
+# AgentMessagingPlugin.session_context_status_history itself — the real
+# platform-process entry point, not the classifier and not the bare module
+# function — with a stalled series and a peer_registry that either has or
+# lacks a live watcher binding for the session. Mutation-verified red-first
+# against the unpatched call site: 2 of 4 checks failed, both on the
+# discriminator (no-binding case read 'idle' instead of 'absent', the
+# mandatory two-situations caveat text absent); adding
+# peer_registry=self._peer_registry to the call site returns all 4 to green.
+# PURE UNIT, offline: RealShapeState + a real in-memory Store-backed
+# PeerRegistry, no database, network, or model turn.
+plugins/agent_messaging_plugin/tests/session_context_status_history_process_smoke.py
+
+# role_message_retention_smoke (2026-08-20, MSG-03): age-based GC for
+# terminal (consumed or escalated) core__agent_role_message rows, mirroring
+# INF-08's gc_terminal_completion_requests shape exactly. Six-row fixture
+# covering an aged consumed row (reaped), a fresh consumed row (survives), an
+# aged escalated row (reaped), a row that is BOTH consumed and escalated
+# (reaped exactly once — dedupe across the two AND-only queries), an
+# escalated row with no updated_at (survives — never-delete-on-unknown-age),
+# and an aged row that is neither (survives — still-owed live work, never
+# terminal-reaped). Mutation-verified red-first: temporarily flipping
+# _terminal_row_aged's missing-timestamp branch to return True (reap
+# unknown-age rows) turned 3 of 5 checks red, including the
+# never-delete-on-unknown-age assertion by name; restoring the real branch
+# returned all 5 to green. PURE UNIT, offline: a hand-rolled ActionResult-
+# shaped fake store, no database, network, or model turn.
+plugins/agent_messaging_plugin/tests/role_message_retention_smoke.py
+
+# materialized_battery_artifact_check_smoke (2026-08-20, GTE-13): the
+# GTE-13 materialized-battery artifact discriminator — formalizes the
+# hand-applied "not staged AND byte-identical to HEAD AND clean on a direct
+# checkout run => artifact" check Git-Controller ran by eye all night.
+# 9 checks: the Evidence() default-to-REAL contract itself; the positive
+# case (clean + byte-identical + pyright-clean -> ARTIFACT); two negative
+# controls each breaking exactly one of the three checks (a dirty live
+# checkout, a worktree copy that genuinely diverged from HEAD); three FAULT
+# cases (missing worktree file, file not tracked at HEAD, missing pyright
+# binary) each asserting REAL with a named FAULT line, never a silent
+# skip; the run() exit-code contract (0 artifact / 1 real / 2 harness
+# error); and main()'s argparse-usage-error -> 64 mapping. Mutation-
+# verified red-first: replacing the byte-identity comparison's real
+# condition with an unconditional True turned the worktree-diverged
+# negative control red (2 checks); restoring the real comparison returned
+# all 9 cases to green. PURE UNIT, offline: throwaway git repos under
+# tempfile.TemporaryDirectory, the repo's own pyright binary, no network or
+# model turn — SKIPS (not silently passes) its two pyright-dependent cases
+# if pyright is genuinely absent from .venv.
+quality_gates/tests/materialized_battery_artifact_check_smoke.py
+# BLG-04: proves the router-side streamable proxy — a color that reports a
+# streamable_port on register_color is reached through the router's SEPARATE
+# streamable listener, a swap re-points it, a color with no streamable_port
+# 503s there while its main proxy keeps working, status() carries the field,
+# and streamable_public_port=None (default) starts no second listener at all.
+# Offline: fake TCP listeners standing in for colors, no live solet.
+plugins/macos_self_deployment_plugin/tests/blue_green_router/blg04_streamable_proxy_smoke.py

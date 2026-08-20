@@ -414,6 +414,7 @@ class InferenceService(BootstrappableServiceInterface, InferenceServiceInterface
         """Best-effort §D.4 cold-context assembly (seam kept for the smokes)."""
         return assemble_cold_context(
             self._ensure_pipeline_factory, params=params, state=state,
+            orchestrator=self._orchestrator_ref,
         )
 
     def _ensure_pipeline_factory(self) -> Any:

@@ -42,12 +42,32 @@ Stdlib-only -- fires outside the venv, mirrors this repo's other hooks
 .claude/hooks/headless_tool_allowlist_gate.py).
 """
 
+
 from __future__ import annotations
+
+# INTERPRETER FLOOR. These hooks are Python 3.13 source and use datetime.UTC
+# (3.11+). Claude Code launches them with a bare `python3`, which resolves from
+# PATH -- on a stock macOS that is frequently the system 3.9, and the resulting
+# ImportError traceback surfaced to the operator as a hook error on EVERY tool
+# call. Measured 2026-08-20: 8 of 20 shipped hook modules failed to import.
+#
+# Placed AFTER `from __future__` (which must stay the first statement) and
+# BEFORE the first 3.11+ import, because an ImportError at module level cannot
+# be caught by anything inside this file. Exits 0 and SILENTLY: the shipped
+# contract is that a session which cannot run these hooks gets zero output and
+# zero errors, and a diagnostic here would reproduce the very symptom it fixes.
+# A floor, not a compatibility shim -- nothing is emulated or back-ported.
+import sys
+
+if sys.version_info < (3, 11):  # noqa: UP036 -- see above; ruff assumes
+    # the project's py313 target, but this file ships to an ADOPTER's machine
+    # and is launched by whatever `python3` their PATH resolves.
+    raise SystemExit(0)
+
 
 import json
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -166,12 +186,22 @@ def main() -> int:
     agent_instance_id = os.environ.get(_INSTANCE_ID_ENV, "").strip()
 
     if not agent_instance_id:
-        # No fleet instance id at all: genuinely not a fleet-managed spawn
-        # (or the adapter never wired identity). Nothing to report against.
-        _warn(
-            f"{_INSTANCE_ID_ENV} not set -- not a fleet-managed spawn, or "
-            "the adapter didn't wire it; skipping",
-        )
+        # No fleet instance id: not a fleet-managed spawn. SILENT, deliberately.
+        #
+        # This is the NORMAL case, not an anomaly — the operator launcher
+        # (claude_launcher.template) exports the solet name, the session
+        # label/id pair and the wake CLI, but NOT this one, which only the
+        # fleet spawn adapters wire. So every ordinary operator session took
+        # this branch, and this used to _warn() 121 bytes to stderr on EVERY
+        # tool call — surfaced to adopters as a hook error per action, on a
+        # correctly-installed machine doing nothing wrong (reported
+        # 2026-08-20).
+        #
+        # It also broke the shipped contract that a session which is not part
+        # of fleet coordination "must get zero output and zero errors". A
+        # condition that holds for the majority of sessions is a state, not a
+        # warning; warning on it trains operators to ignore hook output, which
+        # is exactly when a real one gets missed.
         return 0
 
     if not marker_dir:

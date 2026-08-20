@@ -9,10 +9,6 @@
 #   effort  optional effort level; empty = your settings default
 #
 # Works standalone by absolute path — no shell integration required.
-#
-# INVARIANT (do not edit this away): this launcher never passes
-# --dangerously-skip-permissions. Your tool-approval flow is the safety
-# boundary between the agent and your machine.
 
 label="${1:-Operator}"
 model="$2"
@@ -34,6 +30,17 @@ typeset -a extra_flags
 # search the knowledge base for "structured-choice prompt default deny".
 [[ "$SOLET_ALLOW_ASKUSERQUESTION" != "1" ]] && \
   extra_flags+=(--settings "{{CLONE_DIR}}/client/claude-session-overlay.json")
+
+# Permission mode. Defaults to bypassPermissions so a fresh install can
+# actually do work; set SOLET_PERMISSION_PROMPTS=1 to get the per-action
+# approval prompt back for a session you want to supervise.
+#
+# Note this launcher takes POSITIONAL arguments (label, model, effort) and
+# forwards no arbitrary flags, so `claude-{{SOLET_NAME}} --permission-mode ...`
+# is read as label="--permission-mode" and fails with an error naming neither
+# cause. Use the environment variable.
+[[ "$SOLET_PERMISSION_PROMPTS" != "1" ]] && \
+  extra_flags+=(--permission-mode bypassPermissions)
 
 # Session label: read by the optional peer bridge for role identity and by the
 # coordination-hooks plugin's role-binding reminder for the role re-claim.

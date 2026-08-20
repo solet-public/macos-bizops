@@ -80,11 +80,6 @@ DEAD plugins/agent_messaging_plugin/knowledge_base/11_tmux_host_driver_presentat
 DEAD plugins/github_midwife_plugin/claude_plugin/coordination-hooks/README.md::hooks/hooks.json
 DEAD plugins/github_midwife_plugin/claude_plugin/coordination-hooks/README.md::tests/reminder_hooks_smoke.py
 DEAD plugins/github_midwife_plugin/claude_plugin/coordination-hooks/SECURITY.md::hooks/hooks.json
-DEAD plugins/github_midwife_plugin/claude_plugin/coordination-hooks/SECURITY.md::tests/git_controller_gate_smoke.py
-DEAD plugins/github_midwife_plugin/claude_plugin/coordination-hooks/SECURITY.md::tests/manifest_consistency_smoke.py
-DEAD plugins/github_midwife_plugin/claude_plugin/coordination-hooks/SECURITY.md::tests/reminder_hooks_smoke.py
-DEAD plugins/github_midwife_plugin/claude_plugin/coordination-hooks/SECURITY.md::tests/run_all.py
-DEAD plugins/github_midwife_plugin/claude_plugin/coordination-hooks/SECURITY.md::tests/wake_waiter_smoke.py
 DEAD plugins/github_midwife_plugin/codex_plugin/coordination-hooks/README.md::tests/manifest_consistency_smoke.py
 DEAD plugins/github_midwife_plugin/codex_plugin/coordination-hooks/README.md::tests/reminder_hooks_smoke.py
 DEAD plugins/github_midwife_plugin/codex_plugin/coordination-hooks/SECURITY.md::hooks/hooks.json

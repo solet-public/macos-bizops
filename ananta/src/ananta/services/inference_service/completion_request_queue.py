@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 from uuid import uuid4
 
@@ -119,6 +119,8 @@ class CompletionRequestStore(Protocol):
         query: dict[str, object],
         updates: dict[str, object],
     ) -> object: ...
+
+    def delete_records(self, namespace: str, query: dict[str, object]) -> object: ...
 
 
 def require_completion_request_store(state_service: object) -> CompletionRequestStore:
@@ -450,6 +452,95 @@ def forwarded_before(row: dict[str, object], *, cutoff_iso: str) -> bool:
     return to_naive_utc(forwarded_at) < to_naive_utc(cutoff_iso)
 
 
+# The standard soft-delete/audit column the ``SchemaStandardizer`` auto-injects on
+# every table (so it is NOT declared in ``completion_request_schema.py``); it
+# carries the terminal-flip timestamp the GC ages ``served``/``failed`` rows by.
+COL_UPDATED_AT = "updated_at"
+
+
+def _terminal_row_aged(row: dict[str, object], *, cutoff_iso: str) -> bool:
+    """Is this terminal (``served``/``failed``) row older than ``cutoff_iso``?
+
+    Compares ``updated_at`` (the terminal-flip timestamp) by VALUE via
+    ``to_naive_utc``, mirroring ``deferred_vertex_queue.terminal_row_aged`` /
+    ``forwarded_vertex_reconcile.terminal_row_aged`` in spirit — WITHOUT
+    importing across the plugin boundary (each table's queue module owns its
+    own comparator, same convention as ``forwarded_before`` above).
+
+    A missing / empty ``updated_at`` returns False (never-delete-on-unknown-age):
+    a DESTRUCTIVE GC must never reap a row whose age it cannot read. A
+    present-but-unparseable stamp is a genuine corruption — ``to_naive_utc``
+    raises (fail loud); the GC tick catches it, logs, and retries.
+    """
+    updated = row.get(COL_UPDATED_AT)
+    if not (isinstance(updated, str) and updated):
+        return False
+    return to_naive_utc(updated) < to_naive_utc(cutoff_iso)
+
+
+def gc_terminal_completion_requests(
+    store: CompletionRequestStore,
+    *,
+    terminal_gc_after_seconds: int,
+) -> int:
+    """Hard-delete aged terminal (``served``/``failed``) completion-request rows.
+
+    INF-08 retention rider — mirrors
+    ``forwarded_vertex_reconcile.ForwardedVertexReconciler.gc_terminal_rows``'
+    ``gc_terminal_rows``/``terminal_gc_after_seconds`` shape for the INF-02
+    ``core__inference_completion_request`` queue, so terminal rows here do not
+    grow unbounded either. Scoped to the two TERMINAL statuses only —
+    ``pending`` rows (assigned or not) are live work and are never reaped
+    here, matching the deferred-vertex queue's own terminal-only GC.
+
+    Callers must self-isolate around this the same way
+    ``ForwardedVertexReconciler`` does (never raises here so a caller wiring
+    this into a sweeper tick still needs its own try/except per the existing
+    convention) — kept bare since this module has no sweeper-tick composition
+    seam of its own; the wiring lives with whichever caller schedules it.
+
+    Returns the number of rows reaped.
+    """
+    cutoff = (
+        datetime.now(UTC) - timedelta(seconds=terminal_gc_after_seconds)
+    ).isoformat()
+    reaped: list[str] = []
+    for status in (STATUS_SERVED, STATUS_FAILED):
+        rows = require_records(
+            store.query_state(
+                INFERENCE_COMPLETION_REQUEST_NAMESPACE,
+                {
+                    "table": TABLE_INFERENCE_COMPLETION_REQUEST,
+                    "filters": {COL_STATUS: status, COL_IS_DELETED: 0},
+                },
+            ),
+        )
+        for row in rows:
+            if not _terminal_row_aged(row, cutoff_iso=cutoff):
+                continue
+            request_id = str(row.get(COL_REQUEST_ID) or "")
+            if request_id:
+                reaped.append(request_id)
+    for request_id in reaped:
+        require_completed(
+            store.delete_records(
+                INFERENCE_COMPLETION_REQUEST_NAMESPACE,
+                {
+                    "table": TABLE_INFERENCE_COMPLETION_REQUEST,
+                    "filters": {COL_REQUEST_ID: request_id},
+                    "soft_delete": False,
+                },
+            ),
+            "hard-delete completion request",
+        )
+    if reaped:
+        logger.info(
+            "INF-08 terminal-row GC: reaped %d aged completion-request rows",
+            len(reaped),
+        )
+    return len(reaped)
+
+
 __all__ = [
     "REQUEUE_FAILED_TERMINAL",
     "REQUEUE_LOST_RACE",
@@ -463,6 +554,7 @@ __all__ = [
     "CompletionRequestStore",
     "clear_stamp_after_failed_forward",
     "forwarded_before",
+    "gc_terminal_completion_requests",
     "insert_completion_request",
     "pending_stamped_requests",
     "pending_unassigned_requests",

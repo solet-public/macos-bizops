@@ -155,6 +155,9 @@ from .gauge_canary import (
     register_synthetic_session as canary_register_synthetic_session,
 )
 from .gauge_canary import (
+    retire_gauge_canary as canary_retire_gauge_canary,
+)
+from .gauge_canary import (
     verify_canary as canary_verify,
 )
 from .gauge_canary_store import CanaryError, register_canary
@@ -280,6 +283,7 @@ from .session_role_claim_store import delete_session_role_claim_if_still_holds
 from .session_sweep import (
     NoticeLatch,
     SessionRoleClaimPruner,
+    StewardNoticeCounts,
     sweep_deadline_dependencies,
     sweep_gauge_coverage,
     sweep_gauge_staleness,
@@ -918,6 +922,21 @@ class AgentMessagingPlugin(
         that initial-window absence rather than fail-loud.
         """
         return self._port
+
+    @property
+    def streamable_bound_port(self) -> int | None:
+        """Streamable HTTP listener's own port, or ``None`` before bind.
+
+        BLG-04: cross-plugin discovery surface mirroring :attr:`bridge_port`
+        exactly, same tolerance for the initial-window absence. Read by
+        ``macos_self_deployment_plugin``'s heartbeat
+        (``_lookup_streamable_port``) so it can report this color's
+        EPHEMERAL streamable port to the router via ``register_color``,
+        which is what lets the router proxy its own stable external port to
+        it. ``None`` when this color runs with ``streamable_enabled=False``,
+        same as any other "capability not running" case.
+        """
+        return self._streamable_port
 
     # ------------------------------------------------------------------
     # Platform-injected setters
@@ -1914,6 +1933,21 @@ class AgentMessagingPlugin(
             # duplicating a write.)
             "register_synthetic_session": EdgeProcessDefinition(
                 name="register_synthetic_session",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            # GAU-24 (2026-08-19): the retire-side of the canary surface,
+            # closing the leak register/arrest/register_synthetic_session had
+            # no counterpart for. Two writes (ledger retire, then registry
+            # mark) -- NOT retryable for the same reason its siblings above
+            # are not: a retry after a transient dispatch fault whose writes
+            # already landed would re-enter an idempotent-but-not-free
+            # sequence rather than a clean single act.
+            "retire_gauge_canary": EdgeProcessDefinition(
+                name="retire_gauge_canary",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(
                 ),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
@@ -3608,13 +3642,22 @@ class AgentMessagingPlugin(
             properties={
                 "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
                 "unparked": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "dispatched": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "submitted": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "drive_verification": ParameterMetadata(type=ParameterType.STRING),
             },
         ),
     )
     def drive_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        """``drive_session`` (D2-window rider, 2026-08-04) — fire-and-forget
-        work dispatch over the resolved host driver's channel; owns the §3.2
-        ``parked -> live`` edge and re-arms ``report_by`` on every dispatch."""
+        """``drive_session`` (D2-window rider, 2026-08-04; effect-verified
+        public issue #9, 2026-08-19) — work dispatch over the resolved host
+        driver's channel, WITH EFFECT VERIFICATION where the driver can
+        provide it. ``submitted=True`` only on a positive observation that
+        the driven text left the composer without ever being seen stranded
+        there; ``None`` on drivers with no read-back surface. A driver that
+        looked and found it stranded raises ``drive_unverified`` rather than
+        returning a success-shaped lie. Owns the §3.2 ``parked -> live`` edge
+        and re-arms ``report_by`` on every dispatch."""
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
@@ -4508,6 +4551,7 @@ class AgentMessagingPlugin(
                 agent_instance_id=str(raw.get("agent_instance_id", "")),
                 limit=int(limit) if isinstance(limit, (int, str)) and str(limit).strip()
                 else GAUGE_HISTORY_RETENTION,
+                peer_registry=self._peer_registry,
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -4933,7 +4977,10 @@ class AgentMessagingPlugin(
                 "lane_id": ParameterMetadata(type=ParameterType.STRING),
                 "host": ParameterMetadata(
                     description=(
-                        "Always 'synthetic' — a host with no registered driver."
+                        "Always 'synthetic' — a degenerate, no-op host driver "
+                        "(GAU-24): it refuses spawn/terminate loudly rather "
+                        "than touching anything, so retire_gauge_canary can "
+                        "reach this row without a real process behind it."
                     ),
                     type=ParameterType.STRING,
                 ),
@@ -4980,6 +5027,76 @@ class AgentMessagingPlugin(
                 model=str(raw.get("model", "")),
             )
         except CanaryError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="retire_gauge_canary",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description=(
+                    "The registered canary to stand down. If it has a "
+                    "managed_session row, that row is retired first; the "
+                    "registry mark is stamped retired_at only after that "
+                    "succeeds (or there was never a row to retire)."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "directed_by": ParameterMetadata(
+                description="Who is retiring it — recorded on the ledger transition.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "GAU-24 — stand a canary down all the way: the ledger row (via "
+            "the no-op synthetic host driver, if a row exists) AND the "
+            "registry mark, ledger first. Closes the leak where every canary "
+            "exercise left one active canary mark plus one permanently-live "
+            "managed_session row that nothing could retire."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="retire_gauge_canary outcome",
+            properties={
+                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "session_row_existed": ParameterMetadata(
+                    description="Whether a managed_session row existed to retire.",
+                    type=ParameterType.BOOLEAN,
+                ),
+                "session_retire_result": ParameterMetadata(
+                    description=(
+                        "retire_session's own outcome when a row existed, "
+                        "else null."
+                    ),
+                    type=ParameterType.OBJECT,
+                ),
+                "canary_mark_retired": ParameterMetadata(type=ParameterType.BOOLEAN),
+            },
+        ),
+    )
+    def retire_gauge_canary(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """GAU-24 — retire a canary's ledger row (if any) and its registry
+        mark, ledger first."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            result = canary_retire_gauge_canary(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                directed_by=str(raw.get("directed_by", "")),
+            )
+        except (CanaryError, VerbError) as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
@@ -6544,28 +6661,71 @@ class AgentMessagingPlugin(
         # leg has no count to report and must still appear in the line; a leg
         # missing from it would otherwise read as healthy-and-quiet.
         legs: list[str] = []
+        # ★ GAU-25, 2026-08-19: EVERY LEG BELOW REPORTS DETECTIONS AND
+        # DELIVERIES AS SEPARATE NUMBERS, and none of them may collapse back
+        # into one. Until this change each leg printed a single count, and that
+        # count was DELIVERIES -- so the tick that caught a real arrested gauge
+        # printed "L4d=0" while a durable gauge_notice_record for the same tick
+        # carried delivery_outcome=no_steward_binding. An operator reading
+        # "L4d=0" could not distinguish "the detector found nothing" from "the
+        # detector found something and nobody could be told", which are opposite
+        # situations with opposite remedies. The sink each leg is handed here is
+        # what makes the difference printable; see StewardNoticeCounts.
+        #
+        # THE LAMBDAS BELOW RETURN `actionable` (delivered + undelivered), NOT
+        # the sweep's int return. That is deliberate and it fixes the SAME
+        # defect one level up: _run_counted_leg gates its on_finding warning on
+        # the value returned here, so returning the delivered count would leave
+        # a tick with detections and zero deliveries emitting no warning at all.
+        # Returning `detected` instead would warn every tick for the whole of a
+        # long outage, which is what each leg's latch exists to prevent.
+        # TRACKED DEBT (GAU-25): the helper itself still carries the defect for
+        # any FUTURE leg whose author does not read this comment. Not fixed here
+        # -- _run_counted_leg is shared code and this landed mid-wave with three
+        # lanes holding surgical leases on this file.
+        due_counts = StewardNoticeCounts()
         _run_counted_leg(
             legs, "L4a", "rotation-due",
-            lambda: sweep_rotation_due_sessions(
-                state_service,
-                peer_registry=self._peer_registry,
-                bridge_manager=self._bridge_manager,
-                latch=self._rotation_due_latch,
+            lambda: (
+                sweep_rotation_due_sessions(
+                    state_service,
+                    peer_registry=self._peer_registry,
+                    bridge_manager=self._bridge_manager,
+                    latch=self._rotation_due_latch,
+                    counts=due_counts,
+                ),
+                due_counts.actionable,
+            )[1],
+            lambda _n: (
+                f"{due_counts.detected} detected"
+                f"({due_counts.delivered} delivered/"
+                f"{due_counts.undelivered} undelivered) session(s) due to rotate"
             ),
-            lambda n: f"{n} steward(s) notified",
-            lambda n: logger.info(
-                "L4 sweep: notified %d steward(s) of a rotation-due session", n,
+            lambda _n: logger.warning(
+                "L4 sweep: %d session(s) due to rotate; %d steward(s) notified, "
+                "%d NOT reached — an undelivered rotation notice is an alarm "
+                "nobody received, not a quiet tick",
+                due_counts.detected, due_counts.delivered, due_counts.undelivered,
             ),
         )
+        dark_counts = StewardNoticeCounts()
         _run_counted_leg(
             legs, "L4b", "gauge-coverage",
-            lambda: sweep_gauge_coverage(
-                state_service,
-                peer_registry=self._peer_registry,
-                bridge_manager=self._bridge_manager,
-                latch=self._gauge_coverage_latch,
+            lambda: (
+                sweep_gauge_coverage(
+                    state_service,
+                    peer_registry=self._peer_registry,
+                    bridge_manager=self._bridge_manager,
+                    latch=self._gauge_coverage_latch,
+                    counts=dark_counts,
+                ),
+                dark_counts.actionable,
+            )[1],
+            lambda _n: (
+                f"{dark_counts.detected} detected"
+                f"({dark_counts.delivered} delivered/"
+                f"{dark_counts.undelivered} undelivered) session(s) with no gauge row"
             ),
-            lambda n: f"{n} session(s) with no gauge row",
             # ★ GAU-13(b), the SAME overclaim one level up. This line used
             # to name a "likeliest cause" the sweep never measured, exactly
             # as the per-session notice did. The notice now states what it
@@ -6573,11 +6733,12 @@ class AgentMessagingPlugin(
             # evidence carries; a rider summary that kept asserting the
             # cause would have re-introduced the inference the notice just
             # dropped, on the surface a reader hits FIRST.
-            lambda n: logger.warning(
+            lambda _n: logger.warning(
                 "L4 sweep: %d LIVE session(s) past the startup grace have no "
-                "context-gauge row; each notice names what was measured for "
-                "that session and how far the evidence identifies the cause",
-                n,
+                "context-gauge row; %d steward(s) notified, %d NOT reached; "
+                "each notice names what was measured for that session and how "
+                "far the evidence identifies the cause",
+                dark_counts.detected, dark_counts.delivered, dark_counts.undelivered,
             ),
         )
         # L4c is fault-isolated INSIDE the rider rather than promoted to a
@@ -6618,20 +6779,38 @@ class AgentMessagingPlugin(
         # counts and different remedies -- folding them would leave the reader
         # unable to tell "N sessions never reported" from "N sessions stopped
         # reporting", which are opposite operational situations.
+        # ★ GAU-25's FILED SPECIMEN IS THIS LEG. On 2026-08-19 17:47:33Z this
+        # line printed "L4d=0 session(s) with an arrested gauge row" on the tick
+        # that emitted a gauge_stale_notice with observed_s 1031.8 against
+        # threshold_s 900.0 and delivery_outcome=no_steward_binding. The
+        # detection was real, the delivery failed, and the count that reached
+        # the operator was the DELIVERY count. Both numbers now print.
+        stale_counts = StewardNoticeCounts()
         _run_counted_leg(
             legs, "L4d", "gauge-staleness",
-            lambda: sweep_gauge_staleness(
-                state_service,
-                peer_registry=self._peer_registry,
-                bridge_manager=self._bridge_manager,
-                latch=self._gauge_stale_latch,
+            lambda: (
+                sweep_gauge_staleness(
+                    state_service,
+                    peer_registry=self._peer_registry,
+                    bridge_manager=self._bridge_manager,
+                    latch=self._gauge_stale_latch,
+                    counts=stale_counts,
+                ),
+                stale_counts.actionable,
+            )[1],
+            lambda _n: (
+                f"{stale_counts.detected} detected"
+                f"({stale_counts.delivered} delivered/"
+                f"{stale_counts.undelivered} undelivered) session(s) with an "
+                f"arrested gauge row"
             ),
-            lambda n: f"{n} session(s) with an arrested gauge row",
-            lambda n: logger.warning(
+            lambda _n: logger.warning(
                 "L4 sweep: %d LIVE session(s) are still reporting while their "
-                "context-gauge row has stopped advancing; each notice carries "
-                "the two timestamps it compared and the gap between them",
-                n,
+                "context-gauge row has stopped advancing; %d steward(s) "
+                "notified, %d NOT reached; each notice carries the two "
+                "timestamps it compared and the gap between them",
+                stale_counts.detected, stale_counts.delivered,
+                stale_counts.undelivered,
             ),
         )
         # ★ The rider's REACHABLE ALL-CLEAR. Emitted unconditionally, after
@@ -8426,9 +8605,39 @@ class AgentMessagingPlugin(
     def _start_streamable_server(
         self, bridge_config: _BridgeRuntimeConfig,
     ) -> dict[str, Any] | None:
-        """Start the streamable HTTP listener; return failure dict on error."""
+        """Start the streamable HTTP listener; return failure dict on error.
+
+        BLG-04: tries ``bridge_config.streamable_port`` (default 9000) FIRST
+        via ``find_available_port(preferred=...)``, falling back to an
+        OS-assigned ephemeral port only when that's already taken. This is
+        deliberately NOT "always ephemeral":
+
+        - Container deployments run one solet per container (isolated
+          network namespace) with a HOST port mapped onto this exact
+          container-internal port (see the ``streamable_port`` field's own
+          comment: host 9001 -> container 9000 via Caddy/mkcert). There the
+          preferred port is always free, so this is byte-identical to
+          today — no behavior change for that topology.
+        - Local macOS blue-green steady state (only one color running) is
+          the same: preferred is free, binds exactly as before.
+        - Local macOS blue-green DURING an overlap window is the ONE case
+          that changes: green's preferred bind now loses the race
+          (EADDRINUSE) exactly as it does today, but instead of that
+          failing the color's boot, it falls back to an ephemeral port.
+          External reachability at the stable, well-known port becomes the
+          local blue-green router's job in that topology: it binds the
+          fixed port once (never itself color-duplicated) and proxies to
+          whichever color's ephemeral port it has on file, via
+          `register_color`'s optional `streamable_port`
+          (`macos_self_deployment_plugin.heartbeat_lifecycle`,
+          `_lookup_streamable_port`/`streamable_bound_port` below) — the
+          same pattern already proven for the main bridge port at line
+          ~7141.
+        """
         self._streamable_host = bridge_config.streamable_host
-        self._streamable_port = bridge_config.streamable_port
+        self._streamable_port = find_available_port(
+            preferred=bridge_config.streamable_port,
+        )
         self._streamable_server_started_event.clear()
         self._streamable_server_thread = threading.Thread(
             target=self._run_streamable_server,
@@ -8458,12 +8667,25 @@ class AgentMessagingPlugin(
                 self.name,
             )
             return
+        streamable_port = self._streamable_port
+        if streamable_port is None:
+            logger.error(
+                "%s: streamable server thread started before "
+                "_start_streamable_server bound a port",
+                self.name,
+            )
+            return
         self._streamable_server_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._streamable_server_loop)
+        # BLG-04: host stays configurable (loopback-only is a legitimate
+        # local-dev choice), but the port is always the ephemeral value
+        # `_start_streamable_server` already bound via `find_available_port`
+        # — never a fixed fallback, since a fixed value is exactly what
+        # caused the cross-color collision this fix removes.
         cfg = uvicorn.Config(
             app,
             host=self._streamable_host or "0.0.0.0",  # noqa: S104
-            port=self._streamable_port or 9000,
+            port=streamable_port,
             log_level="warning",
             loop="asyncio",
         )
