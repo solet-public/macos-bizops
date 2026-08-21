@@ -60,9 +60,9 @@
 # measured. A sibling lane's own citation debt is that lane's own baseline
 # concern, not folded into this one.
 
-macos_free_minimal 234
-bizops_standard    310
-macos_samantha     267
+macos_free_minimal 210
+bizops_standard    286
+macos_samantha     243
 
 # 2026-08-19 -- lane-gte-debt, GTE-11-DEBT tranche 1: remediated 8 of the 205
 # tracked workbench/-citation keys (ananta/core/plugins/{action_discovery,
@@ -129,3 +129,33 @@ macos_samantha     267
 # prose-rewrite pattern. -10 bizops_standard/macos_samantha, 0
 # macos_free_minimal (macos_self_deployment_plugin does not ship in the
 # free-tier profile at all, consistent with tranche 4); 143 keys remain.
+#
+# 2026-08-20 -- lane-w3-parity, MEM-08: GREW by one new tracked key,
+# `coordination-hooks/SECURITY.md::tests/memory_passthrough_regression_smoke.py`
+# (cited_path_gate_allowlist.txt, alongside its five siblings for the same
+# file), cited twice in SECURITY.md (Verification table row + Known-gaps
+# paragraph) -- +2 per profile (SECURITY.md ships in every profile); 144 keys
+# tracked. Ruled by the coordinating seat: the plugin-relative short form is required by
+# this same file's own manifest_consistency_smoke.py (regex demands a span
+# reading exactly `tests/<name>.py`), which the cited-path gate's
+# repo-relative grammar always marks DEAD -- the two checks want
+# incompatible forms for the same citation, filed as its own register entry
+# (naming the regex-widening fix as the ruled end state) rather than solved
+# ad hoc here.
+#
+# 2026-08-20 -- lane-w3-parity, GTE-12 option (B), the ruled end state named
+# above: widened `check_every_smoke_is_cited_in_security`'s regex
+# (coordination-hooks/tests/manifest_consistency_smoke.py:699) to accept a
+# full repo-relative path ending in `tests/<name>.py`, not only the bare
+# short form -- both still accepted, neither swapped out, so the five
+# pre-existing citations keep working untouched. Converted all SIX
+# coordination-hooks/SECURITY.md test citations (five siblings plus MEM-08's)
+# to the full repo-relative form and retired their six now-obsolete DEAD
+# entries from cited_path_gate_allowlist.txt -- the discriminator that (B)
+# actually happened, not just that the regex changed. SHRANK by the 26
+# physical occurrences those six keys carried across the Verification table
+# and the Known-gaps paragraph (12 manifest_consistency_smoke.py, 5
+# reminder_hooks_smoke.py, 5 wake_waiter_smoke.py, 2
+# memory_passthrough_regression_smoke.py, 1 run_all.py, 1
+# git_controller_gate_smoke.py) -- -26 per profile (SECURITY.md ships in
+# every profile); 138 keys tracked (144 - 6 retired), GTE-12 closed.

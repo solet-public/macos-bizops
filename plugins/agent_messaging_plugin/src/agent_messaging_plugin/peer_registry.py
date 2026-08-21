@@ -290,6 +290,7 @@ class PeerRegistry:
                 # a bool has no "empty" state, so (unlike session_label above)
                 # the incoming value always wins outright.
                 "wake_capable": binding.wake_capable,
+                "watcher_declared": binding.watcher_declared,
             },
         )
         logger.info(
@@ -553,6 +554,7 @@ def _binding_from_row(row: dict[str, object]) -> BridgeBinding:
         updated_at=str(row.get("updated_at") or ""),
         agent_session_id=str(row.get("agent_session_id") or ""),
         wake_capable=bool(row.get("wake_capable", True)),
+        watcher_declared=bool(row.get("watcher_declared", False)),
     )
 
 

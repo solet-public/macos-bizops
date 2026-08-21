@@ -42,7 +42,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from macos_self_deployment_plugin import process_identity
 from macos_self_deployment_plugin.constants import (
@@ -88,6 +88,7 @@ def run(
     pending_finisher_file: Path | None = None,
     current_release_lookup: CurrentReleaseLookup | None = None,
     budget_seconds: float = DEFAULT_TRANSIENT_STATE_BUDGET_SECONDS,
+    streamable_port_lookup: PortLookup | None = None,
 ) -> None:
     """Three-phase heartbeat with one unified transient-state budget.
 
@@ -97,6 +98,17 @@ def run(
     once on budget expiry, with the structured token naming the phase
     that missed the deadline. Exits silently when ``stop_event`` fires
     or when the steady-state loop receives the stop signal.
+
+    ``streamable_port_lookup`` (BLG-04) is best-effort and OUTSIDE the
+    strict-I2 budget/SIGTERM contract entirely — unlike the bridge port,
+    a streamable port that never appears (streamable disabled, or this
+    solet doesn't run it) is a normal, permanent, non-fatal state, not a
+    spawn-path failure. Whatever value the lookup returns (possibly
+    ``None``, possibly not yet bound) rides the same ``register_color``
+    calls Phases 2 and 3 already make; the router's ``register()``
+    preserves the last-known value across a call that reports ``None``,
+    so a lookup that resolves after the very first register still gets
+    delivered on the next opportunity instead of being lost.
     """
     logger.info(
         "%s: heartbeat lifecycle starting color=%s instance=%s budget=%ss",
@@ -118,6 +130,7 @@ def run(
         deadline=deadline,
         stop_event=stop_event,
         logger=logger,
+        streamable_port_lookup=streamable_port_lookup,
     ):
         if stop_event.is_set():
             return
@@ -136,6 +149,7 @@ def run(
         pending_finisher_file=pending_finisher_file,
         current_release_lookup=current_release_lookup,
         logger=logger,
+        streamable_port_lookup=streamable_port_lookup,
     )
 
 
@@ -209,6 +223,7 @@ def _register_within_deadline(
     deadline: float,
     stop_event: threading.Event,
     logger: logging.Logger,
+    streamable_port_lookup: PortLookup | None = None,
 ) -> bool:
     """Retry registration until success OR the unified deadline OR stop fires.
 
@@ -219,12 +234,16 @@ def _register_within_deadline(
     while time.monotonic() < deadline:
         if stop_event.is_set():
             return False
+        streamable_port = (
+            streamable_port_lookup() if streamable_port_lookup is not None else None
+        )
         if _register_and_activate_if_needed(
             client=client,
             port=port,
             self_color=self_color,
             self_instance_id=self_instance_id,
             logger=logger,
+            streamable_port=streamable_port,
         ):
             return True
         time.sleep(DEFAULT_REGISTRATION_POLL_INTERVAL_SECONDS)
@@ -234,6 +253,59 @@ def _register_within_deadline(
 # ---------------------------------------------------------------------
 # Phase 3 — steady-state heartbeat with passive reconciliation.
 # ---------------------------------------------------------------------
+
+
+def _process_heartbeat_response(
+    *,
+    response: dict[str, Any],
+    client: RouterClient,
+    port: int,
+    self_color: str,
+    self_instance_id: str,
+    logger: logging.Logger,
+    streamable_port_lookup: PortLookup | None,
+    streamable_delivered: bool,
+) -> bool:
+    """Act on one heartbeat response; return the updated ``streamable_delivered``.
+
+    Split out of :func:`_run_steady_state_heartbeat` to keep that loop's own
+    cyclomatic complexity within the project's A/B ceiling — this is pure
+    per-tick decision logic with no loop state of its own beyond what's
+    threaded in and returned.
+    """
+    if response.get("unknown_instance") or not response.get("alive"):
+        streamable_port = (
+            streamable_port_lookup() if streamable_port_lookup is not None else None
+        )
+        delivered = _register_and_activate_if_needed(
+            client=client,
+            port=port,
+            self_color=self_color,
+            self_instance_id=self_instance_id,
+            logger=logger,
+            streamable_port=streamable_port,
+        ) and streamable_port is not None
+        return streamable_delivered or delivered
+
+    _ensure_active_color(
+        client=client,
+        self_color=self_color,
+        self_instance_id=self_instance_id,
+        logger=logger,
+    )
+    if streamable_delivered or streamable_port_lookup is None:
+        return streamable_delivered
+    streamable_port = streamable_port_lookup()
+    if streamable_port is not None and _safe_register(
+        client=client,
+        port=port,
+        self_color=self_color,
+        self_instance_id=self_instance_id,
+        logger=logger,
+        streamable_port=streamable_port,
+    ):
+        return True
+    return streamable_delivered
 
 
 def _run_steady_state_heartbeat(
@@ -246,6 +318,7 @@ def _run_steady_state_heartbeat(
     pending_finisher_file: Path | None,
     current_release_lookup: CurrentReleaseLookup | None,
     logger: logging.Logger,
+    streamable_port_lookup: PortLookup | None = None,
 ) -> None:
     """Heartbeat every ``DEFAULT_HEARTBEAT_INTERVAL_SECONDS``; re-register on miss.
 
@@ -270,28 +343,32 @@ def _run_steady_state_heartbeat(
     one-shot at startup): the prior writes the record AFTER the new color has
     already booted + run its startup reconcile, so a startup-only check would
     miss it. Disabled when ``pending_finisher_file`` is ``None``.
+
+    ``streamable_port_lookup`` (BLG-04): a re-register on ``unknown_instance``
+    picks up the freshest lookup value the same way Phase 2 does. On an
+    otherwise-healthy tick (no re-register triggered) a streamable port that
+    was not yet known when this instance first registered is delivered via
+    ONE extra ``register_color`` call as soon as the lookup starts returning
+    a value — not on every tick after that, since the router already has it
+    once delivery succeeds.
     """
+    streamable_delivered = streamable_port_lookup is None
     while not stop_event.is_set():
         try:
             response = client.heartbeat(self_instance_id)
         except RouterClientError as exc:
             logger.debug("heartbeat failed: %s (will retry)", exc)
         else:
-            if response.get("unknown_instance") or not response.get("alive"):
-                _register_and_activate_if_needed(
-                    client=client,
-                    port=port,
-                    self_color=self_color,
-                    self_instance_id=self_instance_id,
-                    logger=logger,
-                )
-            else:
-                _ensure_active_color(
-                    client=client,
-                    self_color=self_color,
-                    self_instance_id=self_instance_id,
-                    logger=logger,
-                )
+            streamable_delivered = _process_heartbeat_response(
+                response=response,
+                client=client,
+                port=port,
+                self_color=self_color,
+                self_instance_id=self_instance_id,
+                logger=logger,
+                streamable_port_lookup=streamable_port_lookup,
+                streamable_delivered=streamable_delivered,
+            )
         if pending_finisher_file is not None and current_release_lookup is not None:
             _run_pending_finisher_backstop(
                 client=client,
@@ -499,6 +576,7 @@ def _register_and_activate_if_needed(
     self_color: str,
     self_instance_id: str,
     logger: logging.Logger,
+    streamable_port: int | None = None,
 ) -> bool:
     """Register self; on success, claim active color when none is set yet."""
     if not _safe_register(
@@ -507,6 +585,7 @@ def _register_and_activate_if_needed(
         self_color=self_color,
         self_instance_id=self_instance_id,
         logger=logger,
+        streamable_port=streamable_port,
     ):
         return False
     _ensure_active_color(
@@ -525,10 +604,13 @@ def _safe_register(
     self_color: str,
     self_instance_id: str,
     logger: logging.Logger,
+    streamable_port: int | None = None,
 ) -> bool:
     """One register_color attempt; True iff the router accepted."""
     try:
-        result = client.register_color(port, self_color, self_instance_id)
+        result = client.register_color(
+            port, self_color, self_instance_id, streamable_port=streamable_port,
+        )
     except RouterClientError as exc:
         logger.warning("%s: register_color failed: %s", PLUGIN_NAME, exc)
         return False

@@ -84,7 +84,9 @@ class _FakeAcceptingClient:
 
     def register_color(
         self, port: int, color: str, instance_id: str,
+        *, streamable_port: int | None = None,
     ) -> dict[str, Any]:
+        del streamable_port
         self.register_calls.append((port, color, instance_id))
         return {"accepted": True}
 
@@ -109,8 +111,9 @@ class _FakeFailingClient:
 
     def register_color(
         self, port: int, color: str, instance_id: str,
+        *, streamable_port: int | None = None,
     ) -> dict[str, Any]:
-        del port, color, instance_id
+        del port, color, instance_id, streamable_port
         self.register_attempts += 1
         raise RouterClientError("register_color", "router unavailable (smoke)")
 

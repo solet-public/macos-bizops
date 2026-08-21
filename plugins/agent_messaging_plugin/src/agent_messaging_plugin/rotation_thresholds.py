@@ -160,41 +160,111 @@ CAPACITY_BAND_APPROACHING_FRACTION: float = 0.75
 CAPACITY_BAND_CRITICAL_FRACTION: float = 0.90
 
 # H -- the post-rotation prefix a `/clear` re-writes, and the quantity the
-# cold-cache rule compares against. RE-MEASURED 2026-08-19
-# (workbench/2026-08-19_gau05_policy_h_remeasurement_lane_gau_notice.md,
-# GAU-05), superseding the 2026-08-16 measurement of 110,702
-# (workbench/2026-08-16_h_measurement_lane_al.md), which had itself replaced a
-# 74K ESTIMATE that measurement put roughly 50% low.
+# cold-cache rule compares against. H is boot payload PLUS incremental
+# rehydration: the boot payload is re-paid on every clear, so it belongs
+# inside H rather than beside it.
 #
-# H is boot payload PLUS incremental rehydration: the boot payload is re-paid
-# on every clear, so it belongs inside H rather than beside it.
+# ★ H IS A DISTRIBUTION, NOT A CONSTANT, and the single number below is a
+# POLICY SIMPLIFICATION of it. Do not read the digits as precision. Nine
+# measured pickups span 28,294-58,513 on the rehydration half -- a 2.07x
+# spread -- because rehydration is set by how busy the pickup WINDOW was, not
+# by anything the boot surface or this repo fixes. A reader who treats 81,889
+# as "the" restart cost of any particular session will be wrong by tens of
+# thousands of tokens in either direction; what it is, is the value that makes
+# the fleet-wide rotation decision come out right most often.
 #
-# SPECIMEN, so the number is checkable rather than quoted: seat session
-# `c36fb2e4`, boot 2026-08-19T00:45:17Z, claude-fable-5, v19 pickup prompt,
-# 146 assistant calls. Last call of the pickup turn, transcript line 639 at
-# 01:02:20.820Z: input 2 + cache_creation 396 + cache_read 145,741 = 146,139.
-# Median of the three seat-pickup generations measured that night
-# (v18 136,368 / v19 146,139 / v17 240,397); the median rather than the max
-# because OVER-stating H suppresses rotation signals that are arithmetically
-# correct, which is the expensive direction this whole surface exists to
-# prevent (see the tier-scaling argument above, which fails the same way).
+# ---------------------------------------------------------------------------
+# THE REHYDRATION HALF -- RE-MEASURED 2026-08-19 (bug-wave lane E), 102,665 ->
+# 38,415. This is the file's OWN shelf-life trigger firing exactly as written
+# (see below): the seat pickup prompt was replaced wholesale by the
+# pointer-card protocol, and 102,665 prices the PRE-pointer-card pickup.
+# Source data: the SURFACE-1 RESULT entries in the 2026-08-19 H-reduction
+# link-first charter under workbench/, nine live link-first seat pickups,
+# v21 through v29, all on 2026-08-19:
 #
-# THE INSTRUMENT WAS CONTROLLED, not just re-run. The same scanner re-applied
-# to the 2026-08-16 transcript reproduces that measurement EXACTLY -- 42,873
-# and 110,702, same model, same line numbers. So the +32% is a change in the
-# measured world, not a change in how it is counted. A future re-measurement
-# that cannot reproduce those two numbers has a different instrument and its
-# result is not comparable to this one.
+#   v21 36,999 · v22 40,573 · v23 58,513 · v24 38,415 · v25 43,586
+#   v26 28,294 · v27 35,435 · v28 33,302 · v29 54,943 (see the datum-#9 note)
 #
-# ★ THIS CONSTANT HAS A SHELF LIFE, AND THE 2026-08-19 MEASUREMENT CORRECTED
-# WHAT SHORTENS IT. The trigger used to read "when CLAUDE.md, MEMORY.md or the
-# hook set changes materially" -- and measurement says those three moved H by
-# 1.4% in three days, while the SEAT PICKUP PROMPT moved it by 31%. The boot
-# component (`POLICY_H_BOOT_TOKENS`) is what the hook set and the instruction
-# files determine; the rehydration component is what the pickup turn's own
-# workload determines, it is the dominant term, and it changes every seat
-# generation. So: re-measure when CLAUDE.md, MEMORY.md, the hook set OR THE
-# SEAT PICKUP PROMPT changes materially -- and record the two components
+#   sorted: 28,294 · 33,302 · 35,435 · 36,999 · [38,415] · 40,573 · 43,586
+#           · 54,943 · 58,513          MEDIAN 38,415   mean 41,118
+#
+# WHY THE MEDIAN, and not the mean. Two of the nine are self-labelled UPPER
+# BOUNDS by their own authors: #7 took two substantive lane messages inside the
+# pickup window ("live-work tokens no rehydration design removes"), and #9
+# disclosed an over-read queue file plus a doubled inbox pull. The mean absorbs
+# that contamination; the median is robust to it. The claim is not merely
+# asserted here, it is DEMONSTRATED: datum #9 was filed as 54,943 and is
+# corrected to ~60,533 (its reported "H_boot" was the first gauge sample of the
+# session, already carrying the pickup prompt, not a controlled boot reading).
+# That correction moves the mean 41,118 -> 41,739 and moves the median NOT AT
+# ALL. Same discipline, same reason, as the 2026-08-16/19 measurements that
+# preceded this one -- "the median rather than the max".
+#
+# WHY ERR LOW, which is the tie-break and is asymmetric in the code below, not
+# just in argument. H is a FLOOR: `rotation_band` rotates on
+# `current_tokens > POLICY_H_TOKENS`, and `clearing_wins` returns False on the
+# `<= H` comparison alone, for any N. So OVERSTATING H raises the bar to
+# rotate, and the excess context a session then keeps carrying is re-read at
+# the cache-read price on EVERY SUBSEQUENT CALL -- an unbounded cost.
+# UNDERSTATING H clears a session that marginally should not have cleared --
+# one bounded, one-time H. The old value erred the unbounded way, which is why
+# sessions sat fat. The median (38,415) is below the mean (41,118), so both
+# arguments point the same direction and there is no tie left to break.
+#
+# ★ THE POPULATION IS THE SEAT-PICKUP CLASS, BY INHERITANCE, AND LANE
+# REHYDRATION HAS NEVER BEEN MEASURED. Stated because the constant governs
+# rotation economics for EVERY session and the data behind it does not.
+# All nine measurements above are SEAT pickups under the pointer-card
+# protocol. That is not a narrowing introduced here: the value being replaced
+# was itself the median of THREE seat pickups (v17/v18/v19), chosen after its
+# author explicitly set aside the other eleven rows of a fourteen-row survey.
+# Same class, same measurement point, three times the sample -- which is what
+# makes this an apples-to-apples re-measurement rather than a redefinition.
+#
+# The survey rows that were set aside are NOT a competing estimate of H, and
+# should not be resurrected as one. They record tokens accumulated by the time
+# a fresh session reached steady state -- for the largest of them, 243, 352
+# and 390 calls of actual lane WORK. H is a floor, not a session total: in
+# `C > H + kH/N` both C and H are context sizes at the SAME MOMENT, so work not
+# yet done sits on both sides and cancels, exactly as the price-per-token does.
+# Those rows are the right instrument for aiming the rehydration diet, which is
+# what their author used them for, and the wrong quantity for this constant.
+#
+# WHAT IS GENUINELY UNKNOWN, recorded rather than papered over: what a LANE
+# re-reads after a clear. The only lane-side rehydration figures anyone has
+# taken are bootstrap rows at H_rehyd = 0 (one or two calls in), and a lane's
+# real post-clear cost is boot plus its brief -- plausibly well under a seat's,
+# never measured. So the seat-derived figure most likely OVERSTATES for lanes,
+# which is the same direction of error the correction above reduces. Do not
+# read that as a measurement. Anyone who takes one should re-open this comment.
+#
+# NO TREND, so "just use the latest" is not available. Read chronologically
+# v21..v29 the series oscillates rather than drifts -- it tracks pickup
+# workload, not calendar time. That is what makes the distribution framing
+# above honest rather than a hedge.
+#
+# ---------------------------------------------------------------------------
+# THE BOOT HALF -- 43,474, measured 2026-08-19 (GAU-05,
+# workbench/2026-08-19_gau05_policy_h_remeasurement_lane_gau_notice.md),
+# DELIBERATELY UNCHANGED by the 2026-08-19 re-measurement above. It is the
+# fable-5 seat class. Specimen, so the number is checkable rather than quoted:
+# seat session `c36fb2e4`, boot 2026-08-19T00:45:17Z, claude-fable-5, v19
+# pickup prompt. THE INSTRUMENT WAS CONTROLLED, not just re-run: the same
+# scanner re-applied to the 2026-08-16 transcript reproduces that measurement
+# EXACTLY -- 42,873 and 110,702, same model, same line numbers. A future
+# re-measurement that cannot reproduce those two numbers has a different
+# instrument and its result is not comparable.
+#
+# ★ THIS CONSTANT HAS A SHELF LIFE, AND THE TWO HALVES EXPIRE FOR DIFFERENT
+# REASONS -- which is why they are recorded separately and must stay that way.
+# The trigger once read "when CLAUDE.md, MEMORY.md or the hook set changes
+# materially". Measurement says those three moved H by 1.4% in three days
+# while the SEAT PICKUP PROMPT moved it by 31%, and then by -63% when the
+# pointer card replaced it. The boot component is what the hook set and the
+# instruction files determine; the rehydration component is what the pickup
+# turn's own workload determines, it is the dominant term, and it changes every
+# seat generation. So: re-measure when CLAUDE.md, MEMORY.md, the hook set OR
+# THE SEAT PICKUP PROMPT changes materially -- and record the two components
 # separately, because a single-number re-measurement cannot tell which one
 # moved and will mis-attribute the drift, as the GAU-05 backlog entry did.
 #
@@ -204,12 +274,30 @@ CAPACITY_BAND_CRITICAL_FRACTION: float = 0.90
 # seconds) fable-5 measured 43,474, opus-5 44,723/44,720 and sonnet-5
 # 53,941/53,947 -- single-digit spread within a tier, 9,218 tokens between
 # them, which is the vendor's own system prompt and tool schemas rather than
-# anything this repo controls. This constant is the fable-5 seat class. Making
-# H per-tier moves a ratified policy input, so it is an operator decision
-# (GAU-14 axis 2, candidate B3) and is deliberately NOT taken here.
+# anything this repo controls. Making H per-tier moves a ratified policy input,
+# so it is an OPERATOR decision (GAU-14 axis 2, candidate B3). It was put to
+# the operator on 2026-08-19 and explicitly DEFERRED -- "not now, just fix with
+# the data you already have" -- which is the scope of the re-measurement above
+# and the reason the boot half is untouched. Do not take it here.
+#
+# ★ WHAT THIS RE-MEASUREMENT MOVED DOWNSTREAM, named because the asserts that
+# guard these went on passing and only their MARGINS changed:
+#   · `WARM_BAND_KEEP_WORKING_TOKENS - H` widens 3,861 -> 68,111. The
+#     cold-vs-warm discriminating window is no longer nearly closed; the
+#     "born 3,861 tokens under the first band" argument that motivated the
+#     GAU-14 (B2) floor line is NO LONGER TRUE and that line now rests on the
+#     weaker ground that a reader cannot decompose the number unaided.
+#   · The gap between H and the 75,000 point where an unrecognised model trips
+#     `capacity_approaching` narrows 71,139 -> 6,889, and that fence now decides
+#     whether the below-H branch of the rotation self-notice is reachable at
+#     all. The QUIETEST of the nine pickups above (v26, 28,294) already implies
+#     an H of 71,768, i.e. BELOW 75,000. Further success at reducing
+#     rehydration -- which is an active programme, not a hypothetical -- closes
+#     that branch. `rotation_self_notice_smoke.py` carries an explicit margin
+#     guard that reds loudly when it inverts, rather than letting it pass.
 POLICY_H_BOOT_TOKENS: int = 43_474
-POLICY_H_REHYDRATION_TOKENS: int = 102_665
-POLICY_H_TOKENS: int = POLICY_H_BOOT_TOKENS + POLICY_H_REHYDRATION_TOKENS  # 146,139
+POLICY_H_REHYDRATION_TOKENS: int = 38_415
+POLICY_H_TOKENS: int = POLICY_H_BOOT_TOKENS + POLICY_H_REHYDRATION_TOKENS  # 81,889
 
 # The two vendor cache multipliers the break-even is built from. Both are
 # multipliers on THAT MODEL'S OWN base input price, uniform across models --

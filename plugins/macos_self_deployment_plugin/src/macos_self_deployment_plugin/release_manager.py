@@ -212,6 +212,19 @@ class CandidatePaths:
     DDL-free gate's diff (the OLD side is
     :meth:`ReleaseManager.current_schema_snapshot`). ReleaseManager
     stores it verbatim and never interprets its shape.
+
+    ``manifest_plugins`` is the profile plugin SET that governed this release at
+    ITS OWN build time, captured here because the live manifest is overwritten
+    by the next deploy before the §3 derive path ever reads it (BLG-02). ``None``
+    on any release built before this capture landed — absent, not empty, and the
+    two must not be conflated: an empty tuple would claim "this release had no
+    plugins", while ``None`` correctly says "this release never recorded it".
+
+    ``manifest_plugins_error`` carries a REJECTED capture without raising, so a
+    garbage schema-gate field cannot make an otherwise-bootable release
+    un-rollback-able. It is set only when ``VERSION`` held a present-but-invalid
+    value; the §3 derive refuses on it at the point of use, and every other
+    consumer — rollback included — ignores it.
     """
 
     release_id: str
@@ -221,6 +234,8 @@ class CandidatePaths:
     version_file: Path
     missing_pth_targets: tuple[str, ...]
     schema_snapshot: dict[str, object] | None
+    manifest_plugins: tuple[str, ...] | None = None
+    manifest_plugins_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,6 +494,57 @@ def _read_version_or_raise(version_file: Path) -> dict[str, object]:
     return raw
 
 
+def _read_manifest_plugins(
+    payload: dict[str, object], release_id: str,
+) -> tuple[tuple[str, ...] | None, str | None]:
+    """Read a release's captured plugin set back, as ``(plugins, error)``.
+
+    ABSENCE is the only tolerated degradation, and it is a real one: every
+    release built before per-release capture landed has no ``manifest_plugins``
+    key, and the §3 derive path falls back to the live manifest for those —
+    exactly today's behaviour, false-refuse exposure included. That fallback is
+    self-limiting; once every release in the chain postdates this, it stops
+    firing.
+
+    A PRESENT-but-malformed value is REPORTED, not raised. This function is on
+    the rehydrate path, which ``rollback`` also walks — and ``manifest_plugins``
+    is advisory input to the schema gate that says nothing about whether a
+    release BOOTS. Raising here turned a garbage field into
+    ``ROLLBACK_TARGET_UNBOOTABLE`` on a release whose ``code/`` and ``venv/``
+    are perfectly intact, precisely when the fleet is already in trouble and
+    reaching for its safety net. So the refusal moves to the point of USE
+    (``swap_orchestrator._resolve_current_snapshot``), which is the only place
+    the value is actually trusted.
+
+    An EMPTY list is malformation, not an empty capture, and this is the
+    important one. No writer can emit it: ``_capture_manifest_plugins`` returns
+    ``None`` or a non-empty tuple, and ``load_manifest_plugin_set`` itself
+    rejects an empty ``plugins`` list. Tolerating ``[]`` would hand the collector
+    an empty allow-set, which discovers ZERO plugins (the unresolved-plugin
+    check there is a non-fatal warning), satisfies the completeness assert
+    vacuously (``set() - set()`` is empty), and yields an EMPTY old snapshot —
+    and ``classify_snapshot_diff`` iterates the OLD side, so an empty old never
+    enters the loop and reports ``is_additive`` unconditionally. That is the
+    §3 gate failing OPEN on every dropped column. "Our writer would never emit
+    that" is the wrong standard for a field we now read off an adopter's disk.
+    """
+    raw = payload.get("manifest_plugins")
+    if raw is None:
+        return None, None
+    if not isinstance(raw, list) or not all(isinstance(name, str) for name in raw):
+        return None, (
+            f"release {release_id} has a malformed 'manifest_plugins' in VERSION "
+            f"(expected a list of plugin names, got {type(raw).__name__})"
+        )
+    if not raw:
+        return None, (
+            f"release {release_id} has an EMPTY 'manifest_plugins' in VERSION — no "
+            "writer can emit that, and an empty plugin set would collapse the §3 "
+            "snapshot to nothing and pass the additive check vacuously"
+        )
+    return tuple(raw), None
+
+
 class ReleaseSymlinks:
     """The ``current``/``previous`` release symlink pair (design §4.2).
 
@@ -665,6 +731,7 @@ class ReleaseBuilder:
         self,
         *,
         manifest_etag: str = "",
+        manifest_plugins: tuple[str, ...] | None = None,
         schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = None,
         allow_dirty: bool = False,
     ) -> CandidatePaths:
@@ -686,6 +753,14 @@ class ReleaseBuilder:
         ``CandidatePaths``. A raise propagates and fails the build (a
         snapshot-less release would silently defeat the gate).
 
+        ``manifest_plugins`` is the profile plugin set governing THIS build,
+        supplied by the caller for the same dependency-inversion reason as
+        ``schema_snapshot_fn`` (the ``ananta.core.plugins`` import stays in the
+        caller). It is persisted verbatim into ``VERSION`` and onto
+        ``CandidatePaths`` so a LATER deploy — which overwrites the live
+        manifest before the §3 derive runs — cannot retroactively change what
+        this release claims it was built with (BLG-02).
+
         ``allow_dirty`` is the ruled override for the dirty-tree gate: the
         artifact is built from the WORKING TREE but IDENTIFIED by HEAD, so
         by default a modification inside the cloned subtrees refuses rather
@@ -696,6 +771,21 @@ class ReleaseBuilder:
         invisibly is worse than no knob). Its intended caller is the
         operator-confirmation path.
         """
+        # THE WRITE END of the same invariant the read side enforces. `()` is
+        # not `None`, so an empty tuple would serialize as `[]` — the exact
+        # value the reader classifies as malformation, permanently disqualifying
+        # this release as a derive source with nothing saying so at build time.
+        # Production cannot reach it (``_capture_manifest_plugins`` returns
+        # ``None`` or non-empty), but ``build_candidate`` is public and this
+        # parameter is caller-supplied. Refusing at BOTH ends is what stops an
+        # invariant enforced on one side from rotting on the other.
+        if manifest_plugins is not None and not manifest_plugins:
+            msg = (
+                "manifest_plugins must be a non-empty tuple or None — an empty capture "
+                "would write [] into VERSION, which the §3 derive rejects as malformed. "
+                "Pass None to mean 'ungated / not captured'."
+            )
+            raise ReleaseManagerError(msg)
         self._releases_root.mkdir(parents=True, exist_ok=True)
         tree_state, dirty_paths = self._attest_tree_state(allow_dirty=allow_dirty)
         git_sha = self._resolve_git_sha()
@@ -726,6 +816,7 @@ class ReleaseBuilder:
             release_id=release_id,
             git_sha=git_sha,
             manifest_etag=manifest_etag,
+            manifest_plugins=manifest_plugins,
             missing_pth=missing,
             schema_snapshot=schema_snapshot,
             tree_state=tree_state,
@@ -744,6 +835,10 @@ class ReleaseBuilder:
             final_dir,
             missing_pth_targets=missing,
             schema_snapshot=schema_snapshot,
+            manifest_plugins=manifest_plugins,
+            # A freshly-built release validated its capture above, so there is
+            # nothing rejected to carry.
+            manifest_plugins_error=None,
         )
 
     def rehydrate(self, release_id: str) -> CandidatePaths:
@@ -762,11 +857,14 @@ class ReleaseBuilder:
         raw_missing = payload.get("missing_pth_targets")
         missing = tuple(raw_missing) if isinstance(raw_missing, list) else ()
         snapshot = payload.get("schema_snapshot")
+        manifest_plugins, manifest_plugins_error = _read_manifest_plugins(payload, release_id)
         return self._compose_candidate(
             release_id,
             release_dir,
             missing_pth_targets=missing,
             schema_snapshot=snapshot if isinstance(snapshot, dict) else None,
+            manifest_plugins=manifest_plugins,
+            manifest_plugins_error=manifest_plugins_error,
         )
 
     @staticmethod
@@ -776,13 +874,17 @@ class ReleaseBuilder:
         *,
         missing_pth_targets: tuple[str, ...],
         schema_snapshot: dict[str, object] | None,
+        manifest_plugins: tuple[str, ...] | None,
+        # No default, deliberately: a future call site that forgets this would
+        # otherwise construct a CandidatePaths silently CLAIMING no error.
+        manifest_plugins_error: str | None,
     ) -> CandidatePaths:
         """Derive the release's path layout into a :class:`CandidatePaths`.
 
         The single owner of the code/venv/VERSION layout mapping, shared by
-        :meth:`build` (with in-memory ``missing`` / ``schema_snapshot``) and
-        :meth:`rehydrate` (reading them back from ``VERSION``) so the two
-        can never drift.
+        :meth:`build` (with in-memory ``missing`` / ``schema_snapshot`` /
+        ``manifest_plugins``) and :meth:`rehydrate` (reading them back from
+        ``VERSION``) so the two can never drift.
         """
         return CandidatePaths(
             release_id=release_id,
@@ -792,6 +894,8 @@ class ReleaseBuilder:
             version_file=release_dir / VERSION_FILENAME,
             missing_pth_targets=missing_pth_targets,
             schema_snapshot=schema_snapshot,
+            manifest_plugins=manifest_plugins,
+            manifest_plugins_error=manifest_plugins_error,
         )
 
     def _build_into_staging(self, staging: Path) -> None:
@@ -911,6 +1015,7 @@ class ReleaseBuilder:
         release_id: str,
         git_sha: str,
         manifest_etag: str,
+        manifest_plugins: tuple[str, ...] | None,
         missing_pth: tuple[str, ...],
         schema_snapshot: dict[str, object] | None,
         tree_state: str,
@@ -922,6 +1027,14 @@ class ReleaseBuilder:
             "build_time_utc": self._clock().isoformat(),
             "source_root": str(self._source_root),
             "manifest_etag": manifest_etag,
+            # The plugin set THIS release was built with, so the §3 derive path
+            # can gate an old tree by its OWN manifest rather than by whatever
+            # the next deploy wrote over the live one (BLG-02). ``null`` is
+            # written explicitly when the caller supplied none, so a reader can
+            # tell "not captured" from "captured as empty".
+            "manifest_plugins": (
+                sorted(manifest_plugins) if manifest_plugins is not None else None
+            ),
             "missing_pth_targets": list(missing_pth),
             "schema_snapshot": schema_snapshot,
             # Written on EVERY build, clean included: absence must never be
@@ -1484,6 +1597,7 @@ class ReleaseManager:
         self,
         *,
         manifest_etag: str = "",
+        manifest_plugins: tuple[str, ...] | None = None,
         schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = None,
         allow_dirty: bool = False,
     ) -> CandidatePaths:
@@ -1495,6 +1609,10 @@ class ReleaseManager:
         is recorded in ``VERSION`` + on ``CandidatePaths`` and later read
         back via :meth:`current_schema_snapshot`.
 
+        ``manifest_plugins`` is this build's own profile plugin set, persisted
+        so the §3 derive path can later gate this tree by the manifest that
+        actually governed it (see :meth:`ReleaseBuilder.build`, BLG-02).
+
         ``allow_dirty`` overrides the dirty-tree gate (see
         :meth:`ReleaseBuilder.build`). No production call site passes it
         today — by design, since it is the operator-confirmation path's
@@ -1502,6 +1620,7 @@ class ReleaseManager:
         """
         return self._builder.build(
             manifest_etag=manifest_etag,
+            manifest_plugins=manifest_plugins,
             schema_snapshot_fn=schema_snapshot_fn,
             allow_dirty=allow_dirty,
         )

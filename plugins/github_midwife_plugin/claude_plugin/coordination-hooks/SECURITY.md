@@ -873,34 +873,35 @@ way Claude Code invokes them.
 
 | Claim on this page | Where it is proved |
 |---|---|
-| Exactly the four disclosed hooks/utilities (wake waiter, heartbeat, rotation-due watch, `sync.py`) can execute a subprocess; each uses `subprocess.run` only, no `shell=True` | `tests/manifest_consistency_smoke.py` |
-| No network I/O in any hook | `tests/manifest_consistency_smoke.py` |
-| No hook writes a file as an action of its own, except the six disclosed exceptions | `tests/manifest_consistency_smoke.py` and `tests/wake_waiter_smoke.py` |
-| The two MARKER_ONLY writers (heartbeat, rotation-due watch) write only a bare timestamp marker | `tests/manifest_consistency_smoke.py` |
-| Supply chain is stdlib/built-ins only, except `rotation_due_watch.py`'s disclosed same-platform import and the memory-passthrough CLI utilities' disclosed intra-plugin imports of each other | `tests/manifest_consistency_smoke.py` |
-| Agent-invoked CLI utilities (`drain.py`/`hydrate_render.py`/`index_render.py`/`sync.py`) are correctly NOT wired in `hooks.json` — they never fire automatically | `tests/manifest_consistency_smoke.py` |
-| `hooks.json` is exec-form with no shell in the invocation path | `tests/manifest_consistency_smoke.py` |
-| The hook inventory on this page matches the tree | `tests/manifest_consistency_smoke.py` |
-| Injected context is a fixed literal, with `AGENT_SESSION_LABEL` the one exception | `tests/reminder_hooks_smoke.py` |
-| That one interpolated value is JSON-escaped and cannot restructure the output | `tests/reminder_hooks_smoke.py` |
-| Reminders are default-off and degrade to a silent no-op | `tests/reminder_hooks_smoke.py` |
-| Reminders can never block a session (never exit 2) | `tests/reminder_hooks_smoke.py` |
-| The wake waiter discards the child's output unread | `tests/manifest_consistency_smoke.py` and `tests/wake_waiter_smoke.py` |
-| The wake waiter conveys exactly one bit, via a compiled-in nudge | `tests/wake_waiter_smoke.py` |
-| The wake waiter's argv is fixed, with no shell | `tests/manifest_consistency_smoke.py` |
-| The prose surfaces (README.md, this page) describe the wake waiter's real argv — expected tokens derived from the source literal, the stale unbounded form refused | `tests/manifest_consistency_smoke.py` |
-| A broken wake path never traps the session | `tests/wake_waiter_smoke.py` |
-| Fifteen of sixteen hooks are default-off behind an environment or filesystem-presence guard; `step_zero_reminder.py` is unconditionally armed by design | `tests/reminder_hooks_smoke.py` and `tests/wake_waiter_smoke.py` |
-| The git-mutation guard blocks every mutating git invocation (direct, shell-wrapped, chained, path-qualified) for a non-controller session, allows it for the controller, and is fail-open when its env var is unset | `tests/git_controller_gate_smoke.py` |
-| The heartbeat and rotation-due watch hooks' `solet call` argv carries their fixed process key, never a shell, never `subprocess.call`/`Popen` | `tests/manifest_consistency_smoke.py` |
+| Exactly the four disclosed hooks/utilities (wake waiter, heartbeat, rotation-due watch, `sync.py`) can execute a subprocess; each uses `subprocess.run` only, no `shell=True` | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| No network I/O in any hook | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| No hook writes a file as an action of its own, except the six disclosed exceptions | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` and `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py` |
+| The two MARKER_ONLY writers (heartbeat, rotation-due watch) write only a bare timestamp marker | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| Supply chain is stdlib/built-ins only, except `rotation_due_watch.py`'s disclosed same-platform import and the memory-passthrough CLI utilities' disclosed intra-plugin imports of each other | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| Agent-invoked CLI utilities (`drain.py`/`hydrate_render.py`/`index_render.py`/`sync.py`) are correctly NOT wired in `hooks.json` — they never fire automatically | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| `hooks.json` is exec-form with no shell in the invocation path | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| The hook inventory on this page matches the tree | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| Injected context is a fixed literal, with `AGENT_SESSION_LABEL` the one exception | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py` |
+| That one interpolated value is JSON-escaped and cannot restructure the output | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py` |
+| Reminders are default-off and degrade to a silent no-op | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py` |
+| Reminders can never block a session (never exit 2) | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py` |
+| The wake waiter discards the child's output unread | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` and `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py` |
+| The wake waiter conveys exactly one bit, via a compiled-in nudge | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py` |
+| The wake waiter's argv is fixed, with no shell | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| The prose surfaces (README.md, this page) describe the wake waiter's real argv — expected tokens derived from the source literal, the stale unbounded form refused | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| A broken wake path never traps the session | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py` |
+| Fifteen of sixteen hooks are default-off behind an environment or filesystem-presence guard; `step_zero_reminder.py` is unconditionally armed by design | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py` and `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py` |
+| The git-mutation guard blocks every mutating git invocation (direct, shell-wrapped, chained, path-qualified) for a non-controller session, allows it for the controller, and is fail-open when its env var is unset | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/git_controller_gate_smoke.py` |
+| The heartbeat and rotation-due watch hooks' `solet call` argv carries their fixed process key, never a shell, never `subprocess.call`/`Popen` | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
 | The heartbeat and rotation-due watch hooks never print a `hookSpecificOutput` block | disclosed here (source-read); no dedicated behavioral smoke ships in this plugin's own `tests/` yet — see the Known gaps note below |
 | The rotation-due notice hook refuses to inject a marker owned by another uid or one that is group/world-writable, and skips the ownership half rather than faking it where no uid exists | the checkout's .claude/hooks/tests/rotation_due_notice_smoke.py — checkout-external, see the Known gaps note below |
 | The rotation-due notice hook surfaces a marker at most once (the stamp is written into the marker itself), emits exactly ONE `hookSpecificOutput` object however many markers match, and still delivers when the stamp cannot be written | the checkout's .claude/hooks/tests/rotation_due_notice_smoke.py — same external caveat |
 | The rotation-due notice hook's copies in this plugin and in the checkout's `.claude/hooks/` are BYTE-IDENTICAL (it has no adaptation window) and behave identically on the empty and the surfaced path | `.claude/hooks/tests/coordination_hook_ports_smoke.py` parity leg — same external caveat |
 | The origin-resolution ladder (env → root_manifest.yaml, placeholder-skipped → dirname) resolves identically across both independent implementations (the hooks' `_journal.py` and the memory-tag verb resolver), across a matrix of env/file/dirname combinations | `.claude/hooks/tests/memory_passthrough_origin_ladder_smoke.py` — checkout-external, see the Known gaps note below |
-| The heartbeat, rotation-due watch, capture, and session-context hook copies in this plugin and in the checkout's `.claude/hooks/` behave identically (throttle/latch marker paths, arming, argv/output shape) | the checkout's own `.claude/hooks/tests/coordination_hook_ports_smoke.py` parity legs — external to this plugin's own `tests/`, so not run by `tests/run_all.py`; see the Known gaps note below |
+| The heartbeat, rotation-due watch, capture, and session-context hook copies in this plugin and in the checkout's `.claude/hooks/` behave identically (throttle/latch marker paths, arming, argv/output shape) | the checkout's own `.claude/hooks/tests/coordination_hook_ports_smoke.py` parity legs — external to this plugin's own `tests/`, so not run by `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/run_all.py`; see the Known gaps note below |
 | The spawn-injected `headless_tool_allowlist_gate.py`/`capture_session_mapping.py` copies in this plugin and in the checkout's `.claude/hooks/` behave identically (exit code, block/no-op decision, spool record shape) | the checkout's own `.claude/hooks/tests/coordination_hook_ports_smoke.py` parity legs — same external-to-this-plugin caveat as the row above |
 | Every hook filename a spawning host adapter (`headless_adapter.py`/`tmux_adapter.py`) injects into a spawned worker's generated `--settings` exists in this plugin's own shipped `hooks/` — the two-rung resolution ladder's fallback rung never points at a missing file | `plugins/agent_messaging_plugin/tests/worker_hook_shipping_smoke.py` — checkout-external, adapter-side |
+| `drain.py --advance` binds to the offset its own prior listing recorded rather than the journal's current end, so a capture landing between a listing and its `--advance` is never swallowed; a bare `--advance` with no recorded listing fails loud (exit 2) rather than silently no-op-ing | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/memory_passthrough_regression_smoke.py` |
 
 One limit, stated so the coverage is not read as wider than it is:
 
@@ -923,12 +924,21 @@ behavior is independently correct against a live `solet` fixture.
 `manifest_consistency_smoke.py`'s source-level checks (fixed process key,
 no shell, `subprocess.run` only, marker/write shape) still apply and are
 real coverage, just not a live-process behavioral proof. Additionally:
-`drain.py`/`hydrate_render.py`/`index_render.py`/`sync.py` have no
-dedicated smoke of any kind in THIS plugin — their only coverage is
+`hydrate_render.py`/`index_render.py`/`sync.py` still have no dedicated
+smoke of their own in THIS plugin — their only coverage is
 `manifest_consistency_smoke.py`'s source-level structural checks (no
 network, correct import graph, `sync.py`'s subprocess shape) plus the
 checkout-original's own pre-existing unit smokes for the code they share
-via `_journal.py`. The origin-resolution ladder's parity smoke tests the
+via `_journal.py`. `drain.py` is the one exception (MEM-08, 2026-08-19):
+`plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/memory_passthrough_regression_smoke.py` drives it and
+`capture.py` as live subprocesses and re-proves the MEM-06 interleaved-
+capture regression directly against this plugin's own copies, closing
+the specific gap that let MEM-07's mirror landing (`8eb55dad9`) ship
+with no smoke of its own. It does not cover `hydrate_render.py` — that
+utility's checkout and vendored copies carry a disclosed, legitimate
+behavioral divergence (head-budget policing exists only in the checkout)
+that a shared smoke would need to declare, not merely re-run. The
+origin-resolution ladder's parity smoke tests the
 ladder logic itself across both implementations, but neither
 implementation has yet been live-tested against a real
 `root_manifest.yaml` on an actual post-genesis adopter clone — only

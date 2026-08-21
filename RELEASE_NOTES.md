@@ -4,6 +4,83 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-08-20 — A fresh install can do work again, and the hook errors on a stock Mac are gone
+
+**This release exists because two defects together made a correctly-installed
+solet unable to act.** Both were reported by people installing, not found by us.
+If you have hit either, nothing was wrong with your machine.
+
+### ⚠ Two steps are required to RECEIVE this release. A pull is not enough.
+
+Read this part even if you read nothing else. Neither step is automatic, and
+neither announces itself if you skip it — you will simply keep experiencing the
+old behaviour on an install that reports itself up to date.
+
+**1. Re-run the hydration runbook's Step 2.** Your launcher
+(`client/bin/claude-<name>`) was rendered ONCE, when your solet was born. A
+`git pull` updates the template it was rendered from and never touches the
+rendered file. Since this release's operator-visible change IS a launcher
+change, pulling alone leaves you byte-identical to before.
+
+**2. Uninstall and reinstall the `coordination-hooks` plugin.** The plugin runs
+from a version-keyed cache copy. This release bumps it to `0.7.0`, but a version
+bump only ARMS a refresh — neither `claude plugin install` on an
+already-installed plugin nor `claude plugin update` re-copies changed files;
+both report success without touching the cache. Only a genuine
+uninstall-then-install moves the bytes.
+
+### Your sessions no longer stop to ask permission for every action
+
+The launcher used to pass no permission bypass, ever, and the only opt-in shipped
+in an optional fleet-coordination file most installs never render. The practical
+effect was that a single operator running a single session had no supported route
+to an unattended one, short of adopting a whole multi-session apparatus to answer
+a question none of it was about.
+
+`claude-<name>` now starts with permission prompts off. If you want them back for
+a session you intend to supervise:
+
+```bash
+SOLET_PERMISSION_PROMPTS=1 claude-<name>
+```
+
+The Codex launcher is unchanged and still passes no bypass of any kind.
+
+One thing worth knowing, because its error message names neither cause: the
+launcher takes positional arguments (`label`, `model`, `effort`) and forwards no
+flags. `claude-<name> --permission-mode bypassPermissions` is therefore read as a
+session named `--permission-mode` running a model called `bypassPermissions`. Use
+the environment variable.
+
+### The coordination hooks no longer fail on every single action
+
+If your machine's `python3` was older than 3.11 — which is the default on a stock
+macOS, where it is 3.9 — every tool call produced a hook error. The hooks are
+written for a newer Python and used one function that only exists from 3.11
+onward, and they were being started with whichever `python3` your PATH happened
+to resolve first. Eight of the twenty shipped hook modules could not even load.
+
+Each hook now checks the interpreter before it loads anything that would fail,
+and steps aside quietly when it cannot run. Your sessions work either way.
+
+**But quietly is not the same as fine.** On an interpreter below 3.11 the
+coordination features — the heartbeat, rotation notices, memory capture — are
+inert. They are not broken and they will not warn you; they simply do nothing.
+If you want them, install a Python 3.11 or newer and make sure it is what
+`python3` resolves to. The hydration runbook's Step 3 now verifies this in a
+fresh login shell and reports what it finds, so an install that is degraded says
+so instead of looking healthy.
+
+### A hook that reported its own normal state as a problem
+
+Separately: one hook wrote a diagnostic line on every tool call whenever a
+session was not part of a coordinated fleet. That is the ordinary state of an
+ordinary session, so the message was noise on a correctly-configured machine —
+and noise on every action is how people learn to stop reading hook output. It is
+silent now. Genuinely anomalous conditions still report.
+
+---
+
 ## 2026-08-19 — Alarms that leave a record, a context notice that survives its own delivery, and a stalled gauge you can see
 
 **One behaviour change worth knowing about, and it is deliberate.** A command in

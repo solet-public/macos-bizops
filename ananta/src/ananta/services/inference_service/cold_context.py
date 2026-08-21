@@ -36,6 +36,7 @@ def assemble_cold_context(
     *,
     params: dict[str, Any],
     state: dict[str, Any],
+    orchestrator: object,
 ) -> dict[str, Any] | None:
     """Best-effort standalone assembly for the autonomic forward.
 
@@ -43,6 +44,13 @@ def assemble_cold_context(
     ``PromptPipelineFactory``; ``context_id`` stays ``None`` in v1 (contract-
     valid per ``PromptAssemblyRequest`` — assembly fidelity against the
     plugin-resolved context is a live-path verification item).
+
+    ``orchestrator`` resolves ``io_namespace`` from the flow's
+    ``source_namespace`` (INF-05: the standalone pipeline run needs this
+    resolved the same way ``inference_transaction.execute`` resolves it for
+    the default path — decode-contract's ``<origin_io>``/pseudo-key
+    resolution raises when it is ``None`` on any WBS step that references it,
+    which this module's own broad except previously swallowed silently).
     """
     try:
         factory = ensure_factory()
@@ -51,10 +59,18 @@ def assemble_cold_context(
         from ananta.services.inference_service.assembly_types import (
             PromptAssemblyRequest,
         )
+        from ananta.services.inference_service.inference_transaction import (
+            _resolve_io_process_key,
+        )
+        from ananta.services.inference_service.transaction import (
+            _resolve_io_namespace,
+        )
 
         flow_id = state.get("flow_id")
         session_id = state.get("session_id")
         action_name = state.get("action_name")
+        io_process_key = _resolve_io_process_key(orchestrator, state)
+        io_namespace = _resolve_io_namespace({**state, "io_process_key": io_process_key})
         result = assemble_prompt(
             PromptAssemblyRequest(
                 profile_name="inference",
@@ -62,6 +78,7 @@ def assemble_cold_context(
                 action_name=action_name if isinstance(action_name, str) else "",
                 session_id=session_id if isinstance(session_id, str) else "",
                 raw_action_params=params,
+                io_namespace=io_namespace,
             ),
             INFERENCE_PROFILE,
             factory,

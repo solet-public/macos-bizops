@@ -633,8 +633,11 @@ def test_the_overage_ttl_moves_the_break_even_and_moves_it_down() -> None:
     # 110,702 by 947 tokens; the re-measurement to 146,139 moved both
     # thresholds up and left 167,000 BELOW BOTH, where it loses either way --
     # the assertion would have gone red, and "fix the number until it is green
-    # again" would have re-stranded it at the next measurement. Derived from H
-    # so it travels with the constant instead.
+    # again" would have re-stranded it at the next measurement. It would have,
+    # too: the 2026-08-19 rehydration re-measurement (H 81,889) puts the pair at
+    # 122,834 and 147,400, so 167,000 is now ABOVE BOTH and wins either way --
+    # stranded a second time, in the opposite direction, inside the same day.
+    # Derived from H so it travels with the constant instead.
     overage_threshold = rt.POLICY_H_TOKENS * 1.5
     nominal_threshold = rt.POLICY_H_TOKENS * 1.8
     discriminating = int((overage_threshold + nominal_threshold) / 2)
@@ -697,8 +700,23 @@ def test_the_notice_states_the_floor_beside_the_absolute_band() -> None:
     The measured failure this closes: four fresh sessions on 2026-08-18/19 each
     crossed `warm_task_boundary` inside their first quarter hour, and the notice
     gave the recipient no way to distinguish that from 150,000 tokens of work.
-    H is 146,139 against a first band of 150,000 -- 3,861 tokens apart -- so the
-    ambiguity is structural, not incidental.
+
+    ★ THE ORIGINAL JUSTIFICATION HAS SINCE BEEN PARTLY INVALIDATED, and it is
+    rewritten here rather than left standing, because a docstring whose premise
+    is false teaches the next reader the wrong thing about why the code exists.
+    This test used to argue: "H is 146,139 against a first band of 150,000 --
+    3,861 tokens apart -- so the ambiguity is STRUCTURAL, not incidental." The
+    2026-08-19 rehydration re-measurement put H at 81,889, i.e. 68,111 below the
+    first band, and that sentence is now simply untrue -- a session is no longer
+    born a hair under the band.
+
+    The FEATURE survives; its ground is weaker and different. What justifies the
+    floor line now is not that sessions are born next to the band, but that a
+    reader handed one absolute number CANNOT DECOMPOSE IT unaided: 218,613 tells
+    you nothing about how much is unshakeable prefix and how much is work you
+    could rotate away. That is true at any H. The four fresh sessions still
+    crossed the boundary early -- pickup workload, not H alone, took them there
+    -- so the observation stands even though its former explanation does not.
 
     Asserted on the RENDERED prose and on the ARITHMETIC, not on the presence of
     a phrase: a line that printed the right words with the wrong subtraction
@@ -746,10 +764,30 @@ def test_the_below_h_floor_branch_is_reachable_and_says_the_opposite() -> None:
     turns this red rather than leaving dead prose behind.
 
     Route: an UNRECOGNISED model resolves to DEFAULT_CONSERVATIVE_CEILING
-    (100,000), so `capacity_approaching` fires at 75,000 -- below H (146,139).
+    (100,000), so `capacity_approaching` fires at 75,000 -- below H (81,889).
     That is the two axes legitimately disagreeing: room is running out while the
     economics still say a clear cannot pay for itself. The floor line must say
     so rather than reporting a negative saving.
+
+    ★ THIS ROUTE IS ONE RE-MEASUREMENT FROM CLOSING, AND THE THREAT IS THIS
+    PROJECT'S OWN SUCCESS. The route exists only while `75,000 < H`. That
+    margin was 71,139 at the GAU-05 value; the 2026-08-19 rehydration
+    re-measurement cut it to 6,889. It is not a comfortable 6,889 either: the
+    QUIETEST of the nine pickups that measurement averaged (v26, H_rehyd
+    28,294) already implies an H of 71,768 -- BELOW 75,000 -- so a seat
+    generation no busier than one we have already observed prices this branch
+    dead. Driving rehydration down further is an active programme, not a
+    hypothetical, which means the ordinary course of that work will invert this
+    fence.
+
+    So the margin is asserted EXPLICITLY below and prints its own distance,
+    rather than being left implicit in an assertion that would quietly go red
+    with no explanation of what it meant. When it does invert, the correct
+    response is NOT to lower the probe until this file is green again: it is to
+    decide, deliberately, whether the below-H branch of the notice still has a
+    reachable route in production, and to delete the branch if it does not. A
+    branch nothing can reach is not a branch -- which is the claim in this
+    test's own name.
     """
     ceiling = rt.resolve_ceiling("a-model-nobody-added")
     _check(ceiling == rt.DEFAULT_CONSERVATIVE_CEILING,
@@ -760,8 +798,13 @@ def test_the_below_h_floor_branch_is_reachable_and_says_the_opposite() -> None:
     _check(verdict.effective_band in rsn.ROTATION_SELF_NOTICE_BANDS,
            f"this row actually NOTIFIES (band {verdict.effective_band}) -- "
            "otherwise the branch below is unreachable in production")
-    _check(75_000 < rt.POLICY_H_TOKENS,
-           "...and it is below H, which is what makes the branch live")
+    _margin = rt.POLICY_H_TOKENS - 75_000
+    _check(_margin > 0,
+           f"...and it is below H by {_margin:,} tokens, which is what makes "
+           f"the branch live (H {rt.POLICY_H_TOKENS:,} vs the 75,000 "
+           "capacity_approaching point on the conservative ceiling) -- if this "
+           "ever reds, see the docstring: the fix is a decision about the "
+           "branch, NOT a smaller probe")
     prose = rsn._self_notice_prose(row, verdict)
     _check("BELOW H" in prose,
            "the notice says the session is below H rather than reporting a "

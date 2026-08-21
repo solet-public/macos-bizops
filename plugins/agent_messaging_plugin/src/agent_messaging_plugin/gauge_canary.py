@@ -44,12 +44,15 @@ from typing import TYPE_CHECKING, Any
 from .gauge_canary_store import (
     CanaryError,
     is_active_canary,
+    read_canary,
     read_tamper_windows,
     record_tamper,
 )
+from .gauge_canary_store import retire_canary as retire_canary_mark
 from .gauge_notice_record_store import read_gauge_notice_records
 from .schema import WORK_CLASS_READ_ONLY
 from .session_context_status_store import upsert_session_context_status
+from .session_hosts import SYNTHETIC_HOST
 from .session_lifecycle_store import (
     ManagedSessionSpec,
     SessionNotFoundError,
@@ -57,6 +60,7 @@ from .session_lifecycle_store import (
     read_managed_session,
 )
 from .session_lifecycle_verbs import report_alive
+from .session_lifecycle_verbs import retire_session as retire_managed_session
 from .session_sweep import EVENT_GAUGE_COVERAGE_NOTICE, EVENT_GAUGE_STALE_NOTICE
 
 if TYPE_CHECKING:
@@ -83,15 +87,20 @@ what separates them, and it is now required.
 TICK_ARRESTED = "arrested"
 TICK_REPORTED = "reported"
 
-SYNTHETIC_HOST = "synthetic"
-"""The host a canary's lifecycle row declares — and NO driver is registered for
-it, deliberately.
+SYNTHETIC_HOST_HELP = """The host a canary's lifecycle row declares.
 
-A canary has no process. Every lifecycle verb that would touch one
-(``spawn_session``, ``drive_session``, ``clear_session``, the terminate path)
-resolves a driver by ``(agent_runtime, host)`` and raises
-``HostMechanismMissingError`` for an unregistered name, so each of them refuses
-this row LOUDLY, by construction, naming the hosts it does know.
+A canary has no process. ``spawn_session``, ``drive_session``, and
+``clear_session`` still refuse this row LOUDLY — their driver is registered
+but DEGENERATE (:class:`SyntheticHostDriver`, ``session_hosts.py``, GAU-24),
+so they raise the same way :data:`OPERATOR_HOST`'s driver does for a row it
+never spawned. GAU-24 registered that driver so ``terminate_session`` /
+``retire_session`` could reach this row too: before that fix, the row's
+host resolved to NOTHING (``HostMechanismMissingError``), and a canary
+exercise permanently leaked one live ``managed_session`` row nothing could
+retire. Registering a no-op driver is distinct from resolution failure — a
+host name that genuinely has no driver in this build still raises
+``HostMechanismMissingError`` via ``resolve_host_driver``; only this one
+literal, explicitly-declared name gets the no-op path.
 
 The alternative — borrowing an existing host name — was rejected on measurement,
 not taste. ``operator`` would have been the closest fit (its driver is the
@@ -179,6 +188,24 @@ def canary_tick(
     tick that would write a synthetic reading against a real session's row is
     the one mistake here that corrupts live fleet data, so it is refused at the
     door rather than guarded by convention.
+
+    ★ GAU-24, 2026-08-19 — DELIBERATELY NOT WIRED TO ANY VERB. This function
+    is dead code: no verb dispatches it, and its only repo-wide caller is a
+    smoke test driving an in-memory fake, so it has never run against the
+    live database. It must NOT be wired as-is: the gauge write below calls
+    ``upsert_session_context_status`` DIRECTLY, while production's real
+    reporting hook dispatches the VERB ``report_context_status`` — a direct
+    store call is the store-plane injection the 2026-08-19 02:02Z ruling item
+    4 disallowed. Wiring this correctly means dispatching that verb instead
+    (with a ``reporter_surface`` it actually accepts — "canary" is not in its
+    allowed set) and then OBSERVING the arrest→withhold behaviour live, not
+    inferring it from source; that observation is out of scope for the lane
+    that found this. CONSEQUENCE WHILE THIS STAYS UNWIRED: ``arrest_gauge_canary``
+    only RECORDS a window — the withhold logic below is the only code that
+    reads a window and acts on it, so an arrest currently changes NOTHING
+    about any gauge, and the arrest record is attribution metadata only,
+    never a behavioural effect. An operator reading an arrest as "the gauge
+    write was withheld" would be wrong until this is wired.
     """
     if not is_active_canary(state, agent_instance_id):
         raise CanaryError(
@@ -372,6 +399,69 @@ def register_synthetic_session(
             "the first canary_tick's report_alive — production's own "
             "spawning -> live transition, not a second rule minted here."
         ),
+    }
+
+
+def retire_gauge_canary(
+    state: StateManagementInterface,
+    *,
+    agent_instance_id: str,
+    directed_by: str,
+) -> dict[str, Any]:
+    """GAU-24 — stand a canary down all the way: the ledger row (if it has
+    one) AND the registry mark, in that fixed order.
+
+    ★ WHY THIS EXISTS. Before this fix, ``retire_canary`` (the store
+    primitive) was exported but wired to no verb, and the ledger row was
+    stuck a second, independent way: ``retire_session`` refused a canary
+    row with ``unsupported_on_host`` because ``synthetic`` had no host
+    driver. Every canary exercise therefore leaked one active canary mark
+    plus one permanently-``live`` ``managed_session`` row that nothing
+    could retire — standing debt, accumulating per exercise. GAU-24 closed
+    the ledger side by registering a no-op :class:`SyntheticHostDriver`
+    (``session_hosts.py``); this function is what makes retiring the
+    ledger row and the registry mark reachable from one call.
+
+    ★ TWO ACTS, LEDGER FIRST — AND WHY THAT ORDER. If a ``managed_session``
+    row exists for this identity, ``retire_session`` runs FIRST. Only once
+    that succeeds (or there was never a row to retire) does the registry
+    mark get stamped ``retired_at``. This makes the registry mark mean
+    what it says: "this canary's lifecycle is actually finished," never
+    "someone asked to retire it." If the ledger step raises (a real
+    lifecycle conflict, or a host that still cannot be reached), the
+    registry mark is untouched — the canary stays active, honestly,
+    rather than recording a retirement that didn't happen.
+
+    ★ THE PARTIAL-FAILURE CASE the brief asked to be named explicitly: if
+    the ledger step SUCCEEDS and the registry-mark write then fails (a
+    state-layer fault), this function has torn down the ledger row but
+    left the registry mark active. That is safely re-drivable, not wedged:
+    re-running this function calls ``retire_session`` again, which is
+    idempotent on an already-``retired`` row (returns
+    ``already_retired: True`` rather than re-transitioning), and then
+    retries the registry-mark write, which is an unconditional predicated
+    UPDATE — safe to repeat, and simply re-stamps ``retired_at`` with a
+    fresh timestamp on a retry.
+    """
+    if read_canary(state, agent_instance_id) is None:
+        raise CanaryError(
+            "not_a_canary", f"{agent_instance_id!r} is not a registered canary.",
+        )
+    try:
+        existing_session = read_managed_session(state, agent_instance_id)
+    except SessionNotFoundError:
+        existing_session = None
+    session_result: dict[str, Any] | None = None
+    if existing_session is not None:
+        session_result = retire_managed_session(
+            state, agent_instance_id=agent_instance_id, directed_by=directed_by,
+        )
+    retire_canary_mark(state, agent_instance_id=agent_instance_id)
+    return {
+        "agent_instance_id": agent_instance_id,
+        "session_row_existed": existing_session is not None,
+        "session_retire_result": session_result,
+        "canary_mark_retired": True,
     }
 
 
@@ -637,5 +727,6 @@ __all__ = [
     "canary_tick",
     "direct_canary_arrest",
     "register_synthetic_session",
+    "retire_gauge_canary",
     "verify_canary",
 ]

@@ -692,11 +692,36 @@ def check_stdlib_only(res: Results, hooks: list[str], siblings: list[str]) -> No
 
 
 def check_verification_section(res: Results) -> None:
-    """SECURITY.md's Verification section must cite tests that actually exist."""
+    """SECURITY.md's Verification section must cite tests that actually exist.
+
+    GTE-12: a citation may be the bare plugin-relative form (`tests/<name>.py`)
+    OR a full repo-relative path ending in it -- ACCEPT BOTH, never swap one
+    for the other, because the cited-path gate (a checkout-wide instrument
+    this artifact does not control) resolves every backtick token repo-root-
+    absolute only, while the bare form is what stays meaningful when this
+    plugin is reviewed standalone with no ancestor `plugins/.../` path to
+    resolve against.
+
+    The full form is recognized ONLY by the `coordination-hooks/` boundary
+    immediately before `tests/`, not by any arbitrary prefix: this table also
+    carries pre-existing CHECKOUT-EXTERNAL citations one directory shape off
+    from this plugin's own (e.g. `.claude/hooks/tests/...`,
+    `plugins/agent_messaging_plugin/tests/...`) that legitimately point
+    OUTSIDE this plugin and must never be checked against PLUGIN_ROOT. A
+    prefix-agnostic `tests/<name>.py` suffix match would misfire on those --
+    caught live the first time this widened (GTE-12's own build, three false
+    FAILs). Requiring the plugin's own directory name as the anchor is what
+    keeps "cites one of MY tests" and "cites someone else's tests/ dir that
+    happens to share a filename shape" distinguishable without hardcoding
+    this plugin's ancestor path (still self-contained: `coordination-hooks`
+    is this plugin's OWN name, the same invariant `PLUGIN_ROOT` already
+    encodes structurally, never an assumption about what sits above it).
+    """
     text = _read("SECURITY.md")
     if not res.check("## Verification" in text, "SECURITY.md has a Verification section"):
         return
-    cited = set(re.findall(r"`(tests/[A-Za-z0-9_]+\.py)`", text))
+    raw_cited = set(re.findall(r"`((?:[\w./-]*coordination-hooks/)?tests/[A-Za-z0-9_]+\.py)`", text))
+    cited = {citation.rsplit("coordination-hooks/", 1)[-1] for citation in raw_cited}
     res.check(bool(cited), "Verification section cites at least one test file")
     for relative in sorted(cited):
         res.check((PLUGIN_ROOT / relative).is_file(), f"cited test exists: {relative}")

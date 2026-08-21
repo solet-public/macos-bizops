@@ -33,7 +33,7 @@ from ananta.llm.agent_messaging.schema import (
 
 # The parent package __init__ is lazy (PEP 562) and ``models`` is stdlib-only,
 # so this import keeps the console script's bare-PATH contract intact.
-from ..env_contract import enforce_no_legacy_agent_env
+from ..env_contract import AGENT_INSTANCE_ID_ENV, enforce_no_legacy_agent_env
 from ..models import WATCH_AGENT_INSTANCE_PREFIX
 from . import __version__
 from .client import (
@@ -401,6 +401,96 @@ def health() -> None:
 
 @cli.command()
 @click.option(
+    "--limit", type=int, default=WATCH_INBOX_DRAIN_LIMIT, show_default=True,
+    help="Page size per fetch.",
+)
+def inbox(limit: int) -> None:
+    """Read THIS session's full durable inbox — BOTH sections, merged.
+
+    MSG-04: `peer_inbox` returns two independently-paged sections —
+    ``entries`` (addressed to this instance) and ``role_entries`` (addressed
+    to a role this session holds; ``peer_send_by_name``, the documented
+    preferred task-assignment tool, delivers there). A caller hand-parsing
+    the raw ``solet call ... peer_inbox`` JSON routinely reads only
+    ``entries`` and never learns the other half exists, silently missing
+    every role-addressed dispatch. This command drains both sections to
+    exhaustion — reusing the exact per-section paging algorithms `solet
+    watch` already proved correct, including the role section's opposite
+    (backward) cursor direction — and merges them into one chronological
+    feed, so there is no field left to forget.
+
+    Exits non-zero, and marks ``"complete": false`` in the JSON, if either
+    section could not be fully drained or the role section reported its own
+    fault (``role_section_status: "error"``): printing a partial feed that
+    LOOKS like the whole inbox is the exact failure this command exists to
+    close, so it never does that silently.
+
+    Also worth knowing while reading mail here: a DIRECT ``peer_send`` to
+    this session's watch identity is not reliably reachable from the ledger
+    identity this command reads under ($AGENT_SESSION_ID) — two live id
+    schemes, tracked separately. Role-addressed and instance-addressed mail
+    read via THIS command are both unaffected; it is only the sender-side
+    DIRECT-send workaround that fails.
+    """
+    agent_session_id = _caller_agent_session_id()
+    if not agent_session_id:
+        _die(
+            f"inbox needs the caller's session id: export {WATCH_SESSION_ID_ENV} "
+            "(the claude-<name> launcher and fleet functions do this)",
+            ExitCodes.UNKNOWN_ERROR,
+        )
+
+    fault: dict[str, str] = {}
+
+    def _fn(client: BridgeClient) -> dict[str, Any]:
+        def _fetch(after: str | None, role_after: str | None) -> dict[str, Any]:
+            data = _one_shot_peer_inbox_page(
+                client, agent_session_id, limit, after=after, role_after=role_after,
+            )
+            status = data.get("role_section_status")
+            if status == "error" and "role" not in fault:
+                fault["role"] = str(
+                    data.get("role_section_error")
+                    or "role section reported an error with no message",
+                )
+            return data
+
+        direct_entries, _, direct_exhausted = _drain_instance_section(
+            _fetch, "", seeding=False,
+        )
+        role_entries, _, role_exhausted = _drain_role_section(
+            _fetch, "", seeding=False,
+        )
+        merged = sorted(
+            [{**entry, "section": "direct"} for entry in direct_entries]
+            + [{**entry, "section": "role"} for entry in role_entries],
+            key=_entry_created_at,
+        )
+        role_ok = "role" not in fault
+        return {
+            "messages": merged,
+            "direct_count": len(direct_entries),
+            "role_count": len(role_entries),
+            "direct_exhausted": direct_exhausted,
+            "role_exhausted": role_exhausted,
+            "role_section_status": "ok" if role_ok else "error",
+            "role_section_error": fault.get("role"),
+            "complete": direct_exhausted and role_exhausted and role_ok,
+        }
+
+    payload = _run(_fn)
+    _emit(payload)
+    if not payload.get("complete", False):
+        click.echo(
+            "solet inbox: DID NOT fully drain — treat this as a PARTIAL read, "
+            "not the whole inbox (see role_section_status / *_exhausted above).",
+            err=True,
+        )
+        raise SystemExit(int(ExitCodes.EXTERNAL_ERROR))
+
+
+@cli.command()
+@click.option(
     "--role",
     default=None,
     help=f"Role to register and claim (default: ${WATCH_SESSION_LABEL_ENV}).",
@@ -615,6 +705,16 @@ def _resolve_watch_identity(role: str | None, agent_id: str) -> WatchIdentity:
     binding. An un-migrated launcher still exporting a legacy prefixed
     family (either pre-rename generation, e.g. ``HOMUNCULUS_AGENT_*``)
     fails loud the same way (one-release tripwire, env_contract.py).
+
+    MSG-04/identity-unification (2026-08-20): when this session was spawned
+    with a ledger ``AGENT_INSTANCE_ID`` (every managed worker has one), the
+    watcher registers under THAT identity instead of minting a derived
+    ``agi-watch-{digest(session_id)}`` — the mismatch that made a DIRECT
+    ``peer_send`` to a worker's own ledger instance id unreachable from the
+    identity it reads mail under (two live id schemes for one session). The
+    derived scheme survives as the fallback for a bare manual watch with no
+    ledger row — nothing addresses THAT session by a ledger id that does not
+    exist, so there is nothing to unify.
     """
     try:
         enforce_no_legacy_agent_env()
@@ -635,12 +735,16 @@ def _resolve_watch_identity(role: str | None, agent_id: str) -> WatchIdentity:
             "a PID is not an acceptable substitute",
             ExitCodes.UNKNOWN_ERROR,
         )
-    digest = watch_instance_digest(session_id)
+    ledger_instance_id = os.environ.get(AGENT_INSTANCE_ID_ENV, "").strip()
+    resolved_instance_id = (
+        ledger_instance_id
+        or f"{WATCH_AGENT_INSTANCE_PREFIX}{watch_instance_digest(session_id)}"
+    )
     return WatchIdentity(
         role=resolved_role,
         agent_id=agent_id,
         agent_session_id=session_id,
-        agent_instance_id=f"{WATCH_AGENT_INSTANCE_PREFIX}{digest}",
+        agent_instance_id=resolved_instance_id,
     )
 
 
@@ -736,6 +840,7 @@ def _register_without_claim(
         agent_instance_id=identity.agent_instance_id,
         session_label=identity.role,
         agent_session_id=identity.agent_session_id,
+        watcher_declared=True,
     )
     return {"claimed": False, "reason": "managed_registration_only"}
 
@@ -767,6 +872,7 @@ def _register_and_claim(
             agent_instance_id=identity.agent_instance_id,
             session_label=identity.role,
             agent_session_id=identity.agent_session_id,
+            watcher_declared=True,
         )
         return client.peer_claim_role(name=identity.role, takeover=takeover)
     except RoleClaimRejectedError as rejection:
@@ -853,12 +959,18 @@ def _drain_inbox(client: BridgeClient, spool: Path | None, marks_path: Path) -> 
     state (B) now has to seed correctly rather than replay.
     """
     instance_after, role_high_water = read_watch_marks(marks_path)
-    fresh_instance, next_after = _drain_instance_section(
-        client, instance_after,
+    fetch_page: _PageFetcher = lambda after, role_after: client.peer_inbox(  # noqa: E731
+        include_important=True,
+        limit=WATCH_INBOX_DRAIN_LIMIT,
+        after=after,
+        role_after=role_after,
+    )
+    fresh_instance, next_after, _ = _drain_instance_section(
+        fetch_page, instance_after,
         seeding=not instance_after and not role_high_water,
     )
-    fresh_role, next_high_water = _drain_role_section(
-        client, role_high_water, seeding=not role_high_water,
+    fresh_role, next_high_water, _ = _drain_role_section(
+        fetch_page, role_high_water, seeding=not role_high_water,
     )
     for entry in fresh_instance:
         _emit_line({"watch": "inbox", "section": "entries", "entry": entry}, spool)
@@ -878,6 +990,49 @@ def _inbox_section(page: dict[str, Any], section: str) -> list[Any]:
     return items
 
 
+PEER_INBOX_PROCESS_KEY: Final[str] = "plugin::agent_messaging_plugin::peer_inbox"
+
+
+def _one_shot_peer_inbox_page(
+    client: BridgeClient,
+    agent_session_id: str,
+    limit: int,
+    *,
+    after: str | None,
+    role_after: str | None,
+) -> dict[str, Any]:
+    """Fetch one ``peer_inbox`` page through the no-MCP platform process.
+
+    Unlike `solet watch`'s ``client.peer_inbox`` (the registered-bridge HTTP
+    route, which needs a prior ``peer_register``), ``solet inbox`` runs as a
+    fresh, unregistered bridge — the exact caller ``peer_inbox_action``'s own
+    module docstring names as having "no pull path at all" before it existed.
+    So this goes through the platform PROCESS instead, naming the caller's own
+    session explicitly, and unwraps the dispatch envelope into the bare page —
+    raising loud (never a silent empty page) on a call that did not complete.
+    """
+    dispatched = client.call_and_wait(
+        PEER_INBOX_PROCESS_KEY,
+        {
+            "agent_session_id": agent_session_id,
+            "limit": limit,
+            **({"after": after} if after else {}),
+            **({"role_after": role_after} if role_after else {}),
+        },
+        reason="solet inbox: one-shot both-section drain (MSG-04)",
+    )
+    outcome = dispatched.get("result")
+    if not isinstance(outcome, dict) or outcome.get("action_status") != "completed":
+        error = outcome.get("error") if isinstance(outcome, dict) else None
+        raise BridgeCallError(
+            f"{PEER_INBOX_PROCESS_KEY} did not complete: {error or dispatched!r}",
+        )
+    data = outcome.get("data")
+    if not isinstance(data, dict):
+        raise BridgeCallError(f"{PEER_INBOX_PROCESS_KEY} returned no data: {outcome!r}")
+    return data
+
+
 def _entry_created_at(entry: object) -> str:
     """The entry's ``created_at``, or ``""`` when the shape is unexpected.
 
@@ -894,18 +1049,37 @@ def _entry_created_at(entry: object) -> str:
     return created_at if isinstance(created_at, str) else ""
 
 
+_PageFetcher = Callable[[str | None, str | None], dict[str, Any]]
+
+
+def _forward_page_exhausted(nxt: str, after: str) -> bool:
+    """No next cursor, or one that does not advance past ``after``."""
+    return not nxt or nxt == after
+
+
 def _drain_instance_section(
-    client: BridgeClient, mark: str, *, seeding: bool,
-) -> tuple[list[Any], str]:
-    """Page FORWARD from ``mark`` to exhaustion; return (fresh entries, new mark)."""
+    fetch_page: _PageFetcher, mark: str, *, seeding: bool,
+) -> tuple[list[Any], str, bool]:
+    """Page FORWARD from ``mark`` to exhaustion; return (fresh, new mark, exhausted).
+
+    ``fetch_page(after, role_after)`` is the one seam shared with
+    ``_drain_role_section`` (MSG-04): ``watch``'s marks-based drain and
+    `solet inbox`'s stateless one-shot drain supply DIFFERENT fetchers — a
+    registered-bridge route vs. the no-MCP ``peer_inbox`` platform process —
+    over the SAME proven forward-paging algorithm, so the opposite-direction
+    cursor handling this module already got right (2026-08-01) is never
+    re-derived by a caller hand-rolling its own parser.
+
+    ``exhausted`` is False only when ``WATCH_INBOX_MAX_PAGES`` was hit before
+    a natural stop (empty page, or no/non-advancing next cursor) — a caller
+    that must report a COMPLETE drain, rather than accept `watch`'s
+    per-arm bound, needs this to avoid presenting a partial page as the
+    whole inbox.
+    """
     after = mark
     fresh: list[Any] = []
     for _ in range(WATCH_INBOX_MAX_PAGES):
-        page = client.peer_inbox(
-            include_important=True,
-            limit=WATCH_INBOX_DRAIN_LIMIT,
-            after=after or None,
-        )
+        page = fetch_page(after or None, None)
         entries = _inbox_section(page, "entries")
         if not entries:
             break
@@ -913,30 +1087,35 @@ def _drain_instance_section(
             fresh.extend(entries)
         nxt = page.get("next_after_created_at")
         nxt = nxt if isinstance(nxt, str) and nxt else ""
-        if not nxt or nxt == after:
+        if _forward_page_exhausted(nxt, after):
             after = nxt or after
             break
         after = nxt
-    return fresh, after
+    else:
+        return fresh, after, False
+    return fresh, after, True
+
+
+def _role_cursor_exhausted(cursor: object, role_after: str | None) -> bool:
+    """No cursor, or one that does not advance past ``role_after``."""
+    return not isinstance(cursor, str) or not cursor or cursor == role_after
 
 
 def _drain_role_section(
-    client: BridgeClient, mark: str, *, seeding: bool,
-) -> tuple[list[Any], str]:
-    """Walk BACKWARD from newest, stopping at ``mark``; return (fresh, new mark).
+    fetch_page: _PageFetcher, mark: str, *, seeding: bool,
+) -> tuple[list[Any], str, bool]:
+    """Walk BACKWARD from newest, stopping at ``mark``; return (fresh, new mark, exhausted).
 
     Returns the fresh entries in chronological order so the spool reads oldest
-    first, matching the instance section and the order a reader expects.
+    first, matching the instance section and the order a reader expects. See
+    ``_drain_instance_section`` for the shared-fetcher rationale and what
+    ``exhausted`` means.
     """
     role_after: str | None = None
     fresh: list[Any] = []
     newest = mark
     for _ in range(WATCH_INBOX_MAX_PAGES):
-        page = client.peer_inbox(
-            include_important=True,
-            limit=WATCH_INBOX_DRAIN_LIMIT,
-            role_after=role_after,
-        )
+        page = fetch_page(None, role_after)
         entries = _inbox_section(page, "role_entries")
         if not entries:
             break
@@ -950,15 +1129,18 @@ def _drain_role_section(
         if len(newer) < len(entries):
             break
         cursor = page.get("next_role_cursor")
-        if not isinstance(cursor, str) or not cursor or cursor == role_after:
+        if _role_cursor_exhausted(cursor, role_after):
             # No token, or a token that does not ADVANCE. A non-advancing cursor
             # would otherwise re-serve the same page until the page bound, and
             # every one of those entries is still "newer than the mark", so the
             # loop would spool the same mail up to MAX_PAGES times.
             break
         role_after = cursor
+    else:
+        fresh.reverse()
+        return fresh, newest, False
     fresh.reverse()
-    return fresh, newest
+    return fresh, newest, True
 
 
 def _live_role_created_at(event: object) -> str:
@@ -1059,6 +1241,7 @@ def _stream_events(
                 agent_instance_id=identity.agent_instance_id,
                 session_label=identity.role,
                 agent_session_id=identity.agent_session_id,
+                watcher_declared=True,
             )
             last_register = time.monotonic()
 

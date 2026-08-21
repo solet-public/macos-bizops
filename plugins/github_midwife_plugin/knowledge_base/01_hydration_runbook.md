@@ -427,15 +427,26 @@ The rules are the same shape as the deployment-directory managed block, with two
 
 **Take the body from the template, not from memory.** The section names one process key and one pinned search query, and that query is tuned together with the knowledge-base orientation article it retrieves — the article's own retrieval test is what keeps them in agreement. A body retyped from an example, or copied from an older runbook, drifts out of retrieval silently: the command still looks right, still runs, and returns the wrong page or nothing.
 
-### Why the launcher never passes `--dangerously-skip-permissions`
+### Launcher permission mode
 
-The launcher invariant is non-negotiable: `claude-<name>` never passes
-`--dangerously-skip-permissions`, and `codex-<name>` never passes a dangerous
-approval, sandbox, hook-trust, or MCP bypass. The user's tool-approval flow and
-Codex's explicit `/hooks` review are the safety boundaries of the client-
-deployment pattern. A generated launcher that bypasses either deletes that
-boundary. `CODEX_BIN` may select an explicit stock executable; never point it
-at a locally patched receive build.
+`claude-<name>` passes `--permission-mode bypassPermissions` by default, so a
+fresh install can do work without an approval prompt on every action. To get
+prompts back for a session you want to supervise:
+
+```bash
+SOLET_PERMISSION_PROMPTS=1 claude-<name>
+```
+
+`codex-<name>` is unchanged and still passes no dangerous approval, sandbox,
+hook-trust, or MCP bypass. `CODEX_BIN` may select an explicit stock executable;
+never point it at a locally patched receive build.
+
+**Do not tell an operator to pass the flag to the launcher.** `claude-<name>`
+takes POSITIONAL arguments (`label`, `model`, `effort`) and forwards no
+arbitrary flags, so `claude-<name> --permission-mode bypassPermissions` is read
+as `label="--permission-mode"`, `model="bypassPermissions"` — a garbage session
+name and an invalid model, whose error message names neither cause. Use the
+environment variable.
 
 The coordination hooks no-op silently for bare sessions, and at user scope this guard is load-bearing for the user's ENTIRE Claude Code use: a plain `claude` session anywhere on the machine has no session-label environment variable set, and it must get zero output and zero errors. **The rule, not a count:** every shipped entrypoint but one (`step_zero_reminder.js`, `check_messages_reminder.js`, `role_binding_reminder.js`) returns nothing unless `AGENT_SESSION_LABEL` is set. Read the roster from the plugin's own `hooks/hooks.json` rather than trusting a number in prose: entrypoints, registrations, and matcher groups are three different counts, and all three move as hooks land (the Codex plugin currently ships no `Stop`-bound entrypoint at all — codex-0147-async-hook-regression, 2026-08-13). The exception, `git_controller_gate.py`, reads no label at all: it holds the same invariant by a different boundary — it does nothing unless `GIT_CONTROLLER_NAME` is present in the environment (Step 4a), which on a deployment that never sets it is never. If you edit a hook, keep whichever of the two boundaries it already has; a hook that gains output on an unlabeled, unarmed session is a defect against this paragraph, not a feature.
 
@@ -476,6 +487,56 @@ On accept:
 On decline: stop. No partial edits, no retry next session. Tell the user the launcher still works by absolute path: `<clone>/client/bin/claude-<name>`, and the newborn's `<name>` CLI should already be on PATH via genesis's `~/.local/bin/<name>` symlink.
 
 If `~/.zshrc` did not exist at probe time, write a minimal file directly and say so; there is nothing to back up.
+
+### Step 3-verify — prove the paths resolve IN A NEW SHELL (required, added 2026-08-20)
+
+**Do not skip this because the edit "obviously worked."** Every failure this step
+catches was found the hard way, on real installs, by an operator who had been
+told hydration succeeded:
+
+- `.zshrc` carrying no solet wiring at all, because the Step 3 offer was declined
+  or never made — so `claude-<name>` was simply not a command.
+- Hooks resolving `python3` to the macOS system **3.9**, while the shipped hooks
+  are 3.13 source that imports `datetime.UTC` (needs ≥ 3.11). Every tool call
+  produced an ImportError traceback surfaced as a hook error. 8 of 20 shipped
+  hook modules failed to import that way.
+
+**Verify in a FRESH LOGIN SHELL, never the one you just edited** — the shell you
+made the change in may already carry state (a hand-set PATH, an exported
+variable) that the operator's next terminal will not have. That is the whole
+point of the check, and running it in the current shell reliably reports a green
+that the next terminal will not reproduce.
+
+```bash
+zsh -lic '
+  echo "source line : $(grep -c "client/<name>.zsh" ~/.zshrc)  (expect 1)"
+  echo "launcher    : $(command -v claude-<name> || echo MISSING)"
+  echo "solet CLI   : $(command -v <name> || echo MISSING)"
+  echo "python3     : $(command -v python3 || echo MISSING) -> $(python3 -V 2>&1)"
+  echo "clone venv  : $(<clone>/.venv/bin/python3 -V 2>&1)"
+'
+```
+
+Read the results against these bars, and report every line to the operator
+rather than only the failures — a silent pass teaches them nothing about what
+their machine now depends on:
+
+| line | required | if it fails |
+|---|---|---|
+| source line | `1` | Step 3 was declined or did not land. Either add the managed block or tell the operator the absolute-path form is now their supported route — do not leave it ambiguous. |
+| launcher | resolves | the `client/bin` PATH export is not reaching new shells. |
+| solet CLI | resolves | genesis's `~/.local/bin/<name>` symlink is missing or `~/.local/bin` is not on PATH. |
+| python3 | **≥ 3.11**, ideally 3.13 | the coordination hooks go silently INERT below 3.11 — no heartbeat, no rotation notice, no memory capture. Not an error and not a crash, but the operator must be TOLD, because inert-and-silent is indistinguishable from working unless someone says so. |
+| clone venv | 3.13 | the venv is the platform's own interpreter; a wrong version here is a genesis defect, not a PATH one. |
+
+**`python3` resolving to 3.9 is expected on a stock macOS.** It is no longer a
+crash: each shipped hook carries an interpreter-floor guard that exits 0 silently
+below 3.11, placed before the first 3.11+ import because an ImportError at module
+level cannot be caught from inside the file. Before that guard existed, the
+system interpreter produced a traceback on EVERY tool call, surfaced to the
+operator as a hook error on a correctly-installed machine. **Report the version
+you found even when nothing is broken** — a 3.9 machine has working sessions and
+dead coordination, and only this line distinguishes that from a healthy install.
 
 ## Step 4 — named-session start
 

@@ -42,7 +42,11 @@ from agent_messaging_plugin import rotation_thresholds as rt  # noqa: E402
 #
 # It used to be the literal 120,000, and the GAU-05 re-measurement is exactly
 # the event that invalidates a literal: H moved 110,702 -> 146,139, which put
-# 120,000 BELOW H. Every assertion built on it would have flipped from
+# 120,000 BELOW H. (H has since moved AGAIN -- 146,139 -> 81,889 on 2026-08-19,
+# when the rehydration half was re-priced against the pointer-card pickup --
+# which puts 120,000 back ABOVE H and would have stranded the same literal a
+# second time, in the opposite direction. Twice in one day is the argument for
+# deriving it.) Every assertion built on it would have flipped from
 # `cold_above_h` to `cold_below_h` -- and a re-measurer whose only instinct is
 # "make the tests green again" would have edited the EXPECTATIONS to match,
 # destroying the discriminator while leaving a file that still reads like a
@@ -52,11 +56,32 @@ from agent_messaging_plugin import rotation_thresholds as rt  # noqa: E402
 # The window is NOT assumed to exist. `test_cold_cache_is_a_separate_axis_not_a_
 # stricter_warm` asserts `WARM_BAND_KEEP_WORKING_TOKENS > POLICY_H_TOKENS`
 # first, and `test_the_discriminating_window_is_real` below fails loudly if the
-# window ever closes -- which is a live risk, not a theoretical one: at the
-# 2026-08-19 values it is 3,861 tokens wide, down from 39,298.
+# window ever closes. That was a live risk at the GAU-05 values, where it was
+# 3,861 tokens wide, down from 39,298; the 2026-08-19 rehydration
+# re-measurement re-opened it to 68,111, so the guard is now armed rather than
+# nearly tripped. It stays because the width is a MEASUREMENT, not a design
+# choice, and it has now moved in both directions inside a single day.
 _DISCRIMINATING_TOKENS: int = (
     rt.POLICY_H_TOKENS + rt.WARM_BAND_KEEP_WORKING_TOKENS
 ) // 2
+
+# ★ THE BELOW-H SIZE -- DERIVED FOR THE SAME REASON, AND STRANDED FOR REAL
+# (2026-08-19 rehydration re-measurement).
+#
+# `test_cold_is_a_different_question_not_a_stricter_band` needs a size that is
+# below H AND below the first warm band, so that cold and warm agree there for
+# DIFFERENT reasons. It was the literal 90,000, chosen when H was 110,702 and
+# still correct at 146,139. The re-measurement to 81,889 put 90,000 ABOVE H,
+# and the assertion went red -- the only red this whole change produced, and
+# the useful kind: it is the literal announcing that it had stopped describing
+# the case it was named for. Deriving it is the fix; editing the EXPECTATION
+# from `cold_below_h` to `cold_above_h` would also have been green and would
+# have deleted the below-H half of the asymmetry this test exists to state.
+#
+# Half of H is used rather than a fixed offset so the probe cannot be dragged
+# to zero or below by a future measurement, and it is asserted to be inside
+# both bounds at the point of use rather than assumed here.
+_BELOW_H_TOKENS: int = rt.POLICY_H_TOKENS // 2
 
 _passed = 0
 _failed: list[str] = []
@@ -223,15 +248,20 @@ def test_h_is_the_sum_of_its_measured_parts() -> None:
         rt.POLICY_H_TOKENS == rt.POLICY_H_BOOT_TOKENS + rt.POLICY_H_REHYDRATION_TOKENS,
         "H equals boot payload + incremental rehydration, not an independent number",
     )
-    _check(rt.POLICY_H_TOKENS == 146_139, "H is the measured 146,139 (2026-08-19)")
-    # The COMPONENTS are pinned too, not just the total. GAU-05 measured that
-    # the two move for different reasons and at wildly different rates -- boot
-    # +1.4% while rehydration +51.4% over the same three days -- so a total-only
-    # pin cannot tell a real re-measurement from an edit that moved one part and
-    # compensated in the other.
+    _check(rt.POLICY_H_TOKENS == 81_889, "H is the measured 81,889 (2026-08-19)")
+    # The COMPONENTS are pinned too, not just the total, and this file is where
+    # that separation earns its keep. GAU-05 measured that the two move for
+    # different reasons and at wildly different rates -- boot +1.4% while
+    # rehydration +51.4% over the same three days -- so a total-only pin cannot
+    # tell a real re-measurement from an edit that moved one part and
+    # compensated in the other. The 2026-08-19 bug-wave re-measurement then
+    # moved ONLY the rehydration half (102,665 -> 38,415, re-priced against the
+    # pointer-card pickup that replaced the seat pickup prompt) and left the
+    # boot half untouched, which is exactly the shape a total-only pin cannot
+    # express.
     _check(rt.POLICY_H_BOOT_TOKENS == 43_474, "boot payload is the measured 43,474")
-    _check(rt.POLICY_H_REHYDRATION_TOKENS == 102_665,
-           "incremental rehydration is the measured 102,665")
+    _check(rt.POLICY_H_REHYDRATION_TOKENS == 38_415,
+           "incremental rehydration is the measured 38,415")
 
 
 def test_warm_bands_are_ordered_and_exhaustive() -> None:
@@ -268,15 +298,27 @@ def test_cold_is_a_different_question_not_a_stricter_band() -> None:
     would 'keep working' warm can still be worth rotating cold, and one that
     would rotate warm can be NOT worth rotating cold -- the asymmetry is the
     point, and collapsing cold into 'a stricter warm' loses it."""
-    _check(rt.rotation_band(90_000, cache_cold=True)[0] == "cold_below_h",
+    # The probe is DERIVED (see `_BELOW_H_TOKENS`); the two bounds it has to sit
+    # inside are asserted here rather than trusted, so a future H that strands
+    # it says so instead of quietly re-labelling the case.
+    _check(_BELOW_H_TOKENS < rt.POLICY_H_TOKENS,
+           f"the below-H probe {_BELOW_H_TOKENS:,} really is below H "
+           f"({rt.POLICY_H_TOKENS:,})")
+    _check(_BELOW_H_TOKENS < rt.WARM_BAND_KEEP_WORKING_TOKENS,
+           f"...and below the first warm band ({rt.WARM_BAND_KEEP_WORKING_TOKENS:,}), "
+           "so warm and cold agree there for DIFFERENT reasons, which is the "
+           "case this test is about")
+    _check(rt.rotation_band(_BELOW_H_TOKENS, cache_cold=True)[0] == "cold_below_h",
            "cold and under H -> keep working; a clear would cost more than it saves")
     _check(rt.rotation_band(250_000, cache_cold=True)[0] == "cold_above_h",
            "cold and over H -> rotate")
-    _check(rt.rotation_band(90_000, cache_cold=False)[0] == "warm_keep",
-           "the same 90K warm is also keep -- but for a different reason")
+    _check(rt.rotation_band(_BELOW_H_TOKENS, cache_cold=False)[0] == "warm_keep",
+           f"the same {_BELOW_H_TOKENS:,} warm is also keep -- but for a "
+           "different reason")
     _check(rt.rotation_band(250_000, cache_cold=False)[0] == "warm_safe_checkpoint",
            "the same 250K warm waits for a safe checkpoint rather than rotating now")
-    # THE DISCRIMINATING VALUE. 90K and 250K cannot tell "compares against H"
+    # THE DISCRIMINATING VALUE. The below-H probe and 250K cannot tell
+    # "compares against H"
     # apart from "compares against the 150K warm band" -- both thresholds sort
     # them identically, so those assertions pass under a cold-is-just-stricter-
     # warm implementation. Only a value strictly BETWEEN H and
@@ -300,9 +342,12 @@ def test_the_discriminating_window_is_real() -> None:
     probe lands strictly inside it (GAU-05, 2026-08-19).
 
     Every "cold and warm disagree at the same size" assertion in this file is
-    only a test while that window is non-empty. It is not a formality: the
-    2026-08-19 H re-measurement narrowed it from 39,298 tokens to 3,861, so a
-    further ~2.6% rise in H closes it entirely. When it closes, the honest
+    only a test while that window is non-empty. It is not a formality, and the
+    history is the proof: GAU-05 narrowed it from 39,298 tokens to 3,861 -- a
+    further ~2.6% rise in H would have closed it outright -- and the 2026-08-19
+    rehydration re-measurement then re-opened it to 68,111. The width tracks a
+    measured quantity and has moved in both directions, so it can close again
+    without anyone deciding to close it. When it does, the honest
     outcome is a LOUD RED here naming the collapse -- not a set of downstream
     assertions that quietly start passing for the wrong reason, which is
     precisely what a hardcoded probe would have delivered.
@@ -343,7 +388,9 @@ def test_clearing_wins_needs_calls_to_amortise_over() -> None:
     # for -- i.e. C > H -- and lose only because N is too small. The old literal
     # 120,000 was above the then-H of 110,702; after the re-measurement to
     # 146,139 it fell BELOW H, where `clearing_wins` returns False on the H
-    # comparison alone. Left as it was, this assertion would still be green with
+    # comparison alone. (At the 2026-08-19 H of 81,889 it would sit above H once
+    # more -- but a literal that is only accidentally correct again is still not
+    # a test.) Left as it was, this assertion would still be green with
     # the entire `20H/N` term deleted -- a test that had quietly stopped testing
     # its own subject. Derived from H for the same reason the discriminating
     # size is.
@@ -655,7 +702,7 @@ def test_overage_cannot_change_which_band_a_size_falls_in() -> None:
     ever makes a band boundary overage-dependent, the union acquires a real
     missing input and this test says so.
     """
-    for tokens in (0, 90_000, rt.POLICY_H_TOKENS, _DISCRIMINATING_TOKENS,
+    for tokens in (0, _BELOW_H_TOKENS, rt.POLICY_H_TOKENS, _DISCRIMINATING_TOKENS,
                    149_999, 150_000, 200_000,
                    250_000, 300_000, 500_000):
         for cold in (True, False):

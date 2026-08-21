@@ -98,9 +98,11 @@ class _RecordingReleaseManager:
         return GcResult(deleted=(), retained=())
 
     def build_candidate(
-        self, *, manifest_etag: str = "", schema_snapshot_fn: object = None,
+        self, *, manifest_etag: str = "",
+        manifest_plugins: tuple[str, ...] | None = None,
+        schema_snapshot_fn: object = None,
     ) -> CandidatePaths:
-        del manifest_etag, schema_snapshot_fn
+        del manifest_etag, manifest_plugins, schema_snapshot_fn
         self.build_count += 1
         base = Path("/nonexistent/rel-x")
         return CandidatePaths(

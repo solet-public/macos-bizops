@@ -37,9 +37,12 @@ from .session_sweep import last_report_alive
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
+    from .peer_registry import PeerRegistry
+
 SERIES_HEALTHY = "healthy"
 SERIES_STOPPED = "stopped"
 SERIES_IDLE = "idle"
+SERIES_ABSENT = "absent"
 SERIES_NEVER_STARTED = "never_started"
 SERIES_UNDETERMINED = "undetermined"
 
@@ -47,6 +50,7 @@ SERIES_STATES = (
     SERIES_HEALTHY,
     SERIES_STOPPED,
     SERIES_IDLE,
+    SERIES_ABSENT,
     SERIES_NEVER_STARTED,
     SERIES_UNDETERMINED,
 )
@@ -84,19 +88,26 @@ def _parse(value: object) -> datetime | None:
 
 def _lifecycle_tick(
     state: StateManagementInterface, agent_instance_id: str,
-) -> tuple[datetime | None, bool]:
-    """``(last report_alive, lifecycle row was readable)``.
+) -> tuple[datetime | None, bool, str]:
+    """``(last report_alive, lifecycle row was readable, agent_session_id)``.
 
     The bool matters on its own: "no lifecycle row" and "a lifecycle row that
     carries no report_by window" both yield ``None`` for the timestamp and are
     NOT the same finding, and a classifier that collapsed them would report a
     session it could not find as one that never ticked.
+
+    The DURABLE ``agent_session_id`` rides along (empty string when the row
+    is unreadable or the field is unset) because GAU-18's watcher-presence
+    join must key on it, never on ``agent_instance_id`` -- GAU-26's own
+    ruling: a watcher registers its presence under a DERIVED
+    ``agi-watch-...`` id, and the ledger ``agent_instance_id`` this
+    function's caller already has does not match it.
     """
     try:
         row = read_managed_session(state, agent_instance_id)
     except SessionNotFoundError:
-        return (None, False)
-    return (last_report_alive(row), True)
+        return (None, False, "")
+    return (last_report_alive(row), True, str(row.get("agent_session_id") or ""))
 
 
 def classify_gauge_series(
@@ -105,6 +116,7 @@ def classify_gauge_series(
     last_alive: datetime | None,
     lifecycle_readable: bool,
     now: datetime,
+    watcher_present: bool | None = None,
 ) -> tuple[str, str]:
     """``(state, why)`` for one session's gauge series.
 
@@ -117,9 +129,21 @@ def classify_gauge_series(
     * series moving inside the stall bound -> HEALTHY.
     * series stalled, ``report_alive`` still advancing -> STOPPED. The session
       completes tool calls and its gauge does not. This is GAU-01.
-    * series stalled, ``report_alive`` stalled with it -> IDLE. Nobody is
-      driving this session. A normal fleet state and NOT an incident -- the
-      alarm that treats it as one is what trains stewards to ignore alarms.
+    * series stalled, ``report_alive`` stalled with it -> IDLE or ABSENT
+      (GAU-18), decided by ``watcher_present`` -- a THIRD, independent clock
+      (watcher-presence ``updated_at``, ~7s cadence) that answers
+      PROCESS-ALIVE rather than TAKING-TURNS:
+        - ``watcher_present`` not supplied (``None``, the caller opted out of
+          the join) -> IDLE, with the ORIGINAL (pre-GAU-18) reason text.
+        - ``True`` -> IDLE. The process is confirmed alive, but IDLE STILL
+          COVERS TWO SITUATIONS -- undriven, or deep inside one long tool
+          call -- and NOTHING SEPARATES THEM: no hook fires at tool START,
+          so this classifier cannot tell which. Ruled binding (the
+          coordinating seat, 2026-08-20): do not let the label imply a
+          precision it does not have.
+        - ``False`` -> ABSENT. No live watcher-presence row at all --
+          the process itself appears gone, a materially different fact
+          from "alive but undriven".
     * anything unreadable -> UNDETERMINED, said plainly. A classifier that
       guesses here is worse than one that abstains, because its guess is
       indistinguishable from a measurement.
@@ -159,12 +183,184 @@ def classify_gauge_series(
             f"report_alive landed {alive_age_s:,.0f}s ago -- this session works "
             "and its gauge is dark",
         )
+    if watcher_present is None:
+        return (
+            SERIES_IDLE,
+            f"the series has been stalled {series_age_s:,.0f}s and report_alive "
+            f"is {alive_age_s:,.0f}s old -- both clocks stopped together, so "
+            "nobody is driving this session; it is not faulty",
+        )
+    if watcher_present:
+        return (
+            SERIES_IDLE,
+            f"the series has been stalled {series_age_s:,.0f}s and report_alive "
+            f"is {alive_age_s:,.0f}s old, but a live watcher-presence row "
+            "confirms the PROCESS is alive -- this reads IDLE, not ABSENT. "
+            "IDLE STILL COVERS TWO SITUATIONS: undriven (nobody is at the "
+            "wheel) or mid-call (deep inside one long tool call). Nothing "
+            "separates them -- no hook fires at tool START, so this "
+            "classifier cannot tell which.",
+        )
     return (
-        SERIES_IDLE,
-        f"the series has been stalled {series_age_s:,.0f}s and report_alive "
-        f"is {alive_age_s:,.0f}s old -- both clocks stopped together, so "
-        "nobody is driving this session; it is not faulty",
+        SERIES_ABSENT,
+        f"the series has been stalled {series_age_s:,.0f}s, report_alive is "
+        f"{alive_age_s:,.0f}s old, AND no live watcher-presence row was "
+        "found -- this reads ABSENT: the process itself appears gone, a "
+        "materially different fact from alive-but-undriven.",
     )
+
+
+GAUGE_STOPPED_CONFIRM_GAP_S = 60.0
+"""GAU-19 -- the minimum real-time gap between two reads before a STOPPED
+verdict may be confirmed (never escalate on ONE sample). DERIVATION, NOT
+MEASUREMENT: the register's own ruled fix shape names ~60s. Every live
+inter-hook race window measured so far resolved well inside it (03:30:52Z ->
+fresh 45s later; 12:36:11Z -> fresh 12:36:31Z, 20s later; 1,281s stale against
+the 900s bound, resolved 20s after the read), so a genuine race always
+resolves before the confirm gap elapses, while a true GAU-01 freeze
+(report_alive landing, gauge dark) stays STOPPED across it."""
+
+
+def confirm_gauge_stopped(
+    *,
+    first_newest_recorded_at: datetime | None,
+    first_last_alive: datetime | None,
+    first_lifecycle_readable: bool,
+    first_now: datetime,
+    second_newest_recorded_at: datetime | None,
+    second_last_alive: datetime | None,
+    second_lifecycle_readable: bool,
+    second_now: datetime,
+    min_confirm_gap_s: float = GAUGE_STOPPED_CONFIRM_GAP_S,
+) -> tuple[bool, str]:
+    """GAU-19 -- never escalate a STOPPED verdict on ONE sample.
+
+    :func:`classify_gauge_series` is a SINGLE-sample classifier by
+    construction, and that single sample can land inside the inter-hook race
+    window: ``rotation_due_watch.py`` (gauge write) and
+    ``heartbeat_report_alive.py`` (report_alive write) are two independent
+    PostToolUse subprocesses that complete on the same tool call in
+    unguaranteed order, so a sample taken between their two completions reads
+    a healthy session's textbook STOPPED signature -- report_alive just
+    landed, the gauge still carrying the PREVIOUS write. Raising the stall
+    bound cannot escape this: the register's own live specimen read 1,281s
+    stale against a 900s bound and resolved 20s later, far past any
+    plausible threshold bump.
+
+    The only escape is a SECOND read, taken >= ``min_confirm_gap_s`` after the
+    first, that is STILL classified STOPPED. A caller supplies both samples'
+    RAW evidence -- never a memoized verdict -- because each half is
+    independently reclassified here, so a caller cannot short-circuit past
+    the confirmation by pre-computing one side. Escalation additionally
+    requires ``report_alive`` to have ADVANCED between the two reads: a
+    session whose report_alive did NOT move has not proven itself
+    alive-and-gauge-dark -- it may simply have gone IDLE in the interval
+    (GAU-18 territory, not GAU-19's), and conflating the two would
+    reintroduce exactly the false alarm this function exists to prevent.
+    """
+    if second_now <= first_now:
+        raise VerbError(
+            "non_monotonic_reads",
+            f"second read ({second_now.isoformat()}) is not after the first "
+            f"({first_now.isoformat()}) -- confirmation requires two reads "
+            "separated in real time, not two labels on the same moment.",
+        )
+    gap_s = (second_now - first_now).total_seconds()
+    first_state, first_why = classify_gauge_series(
+        newest_recorded_at=first_newest_recorded_at,
+        last_alive=first_last_alive,
+        lifecycle_readable=first_lifecycle_readable,
+        now=first_now,
+    )
+    if first_state != SERIES_STOPPED:
+        return (
+            False,
+            f"first read classified {first_state!r}, not STOPPED -- nothing "
+            "to confirm",
+        )
+    if gap_s < min_confirm_gap_s:
+        return (
+            False,
+            f"only {gap_s:.0f}s between reads, below the "
+            f"{min_confirm_gap_s:.0f}s confirm gap -- inconclusive, re-check "
+            "later rather than escalate on a too-fast re-read",
+        )
+    second_state, second_why = classify_gauge_series(
+        newest_recorded_at=second_newest_recorded_at,
+        last_alive=second_last_alive,
+        lifecycle_readable=second_lifecycle_readable,
+        now=second_now,
+    )
+    if second_state != SERIES_STOPPED:
+        return (
+            False,
+            f"second read ({gap_s:.0f}s later) classified {second_state!r} "
+            f"({second_why}) -- the first STOPPED reading was the "
+            "inter-hook race window, not a freeze",
+        )
+    if (
+        first_last_alive is None
+        or second_last_alive is None
+        or second_last_alive <= first_last_alive
+    ):
+        return (
+            False,
+            "report_alive did not advance between reads -- this session may "
+            "have gone IDLE rather than stayed working-and-gauge-dark; a "
+            "confirmed STOPPED requires report_alive to keep landing across "
+            "both reads",
+        )
+    return (
+        True,
+        f"STOPPED confirmed across two reads {gap_s:.0f}s apart: the series "
+        f"was stalled at both reads ({first_why}) ({second_why}), while "
+        f"report_alive advanced from {first_last_alive.isoformat()} to "
+        f"{second_last_alive.isoformat()} -- the session is working and its "
+        "gauge is genuinely dark",
+    )
+
+
+WATCHER_PRESENCE_FRESH_S = 30.0
+"""GAU-18 -- how recently a watcher's own presence row must have been
+touched to count as PROCESS-ALIVE. DERIVATION, NOT MEASUREMENT: roughly 4x
+the ~7s watcher-presence touch cadence (Session-Start Orientation KB),
+enough margin for ordinary jitter without treating a watcher that stopped
+touching half a minute ago as still present."""
+
+
+def _watcher_presence(
+    peer_registry: PeerRegistry | None,
+    agent_session_id: str,
+    *,
+    now: datetime,
+    fresh_s: float = WATCHER_PRESENCE_FRESH_S,
+) -> bool | None:
+    """Whether a LIVE watcher-presence binding exists for this session.
+
+    Resolved via the DURABLE ``agent_session_id`` -- never a derived id.
+    GAU-26's own ruling: a watcher registers its presence under a derived
+    ``agi-watch-...`` id, which the ledger ``agent_instance_id`` this
+    module's other lookups key on will not match, so
+    ``resolve_by_agent_session_id`` is the only join that reaches a
+    watcher-held session's actual presence row.
+
+    Returns ``None`` when the caller opted out (no registry supplied) or the
+    session carries no ``agent_session_id`` (registration never completed)
+    -- both are "not checked", not "checked and absent", and
+    :func:`classify_gauge_series` treats that distinction as load-bearing
+    (``None`` preserves the pre-GAU-18 IDLE behaviour rather than reading as
+    ABSENT). Returns ``False`` only when a registry WAS consulted and
+    genuinely found nothing fresh.
+    """
+    if peer_registry is None or not agent_session_id:
+        return None
+    binding = peer_registry.resolve_by_agent_session_id(agent_session_id)
+    if binding is None:
+        return False
+    updated = _parse(binding.updated_at)
+    if updated is None:
+        return False
+    return (now - updated).total_seconds() <= fresh_s
 
 
 def _entry(row: dict[str, Any]) -> dict[str, Any]:
@@ -244,6 +440,7 @@ def session_context_status_history(
     agent_instance_id: str,
     limit: int = GAUGE_HISTORY_RETENTION,
     now: datetime | None = None,
+    peer_registry: PeerRegistry | None = None,
 ) -> dict[str, Any]:
     """The bounded gauge series for one session, newest first, classified.
 
@@ -255,6 +452,12 @@ def session_context_status_history(
     ``truncated`` is published rather than implied. A reader asking "when did
     this stop" is asking about the OLDEST row it can see, and a silently capped
     page answers that with a boundary the reader picked by accident.
+
+    ``peer_registry`` is OPTIONAL (GAU-18): omitted, this verb's IDLE
+    classification is UNCHANGED from before GAU-18 -- no ABSENT split. A
+    caller that supplies it gets the watcher-presence join and the
+    IDLE/ABSENT split; this keeps every existing call site working with zero
+    changes while making the split available to a new one.
     """
     if not agent_instance_id.strip():
         raise VerbError(
@@ -266,12 +469,14 @@ def session_context_status_history(
     rows, truncated = read_session_context_status_history(state, series_id, limit=limit)
     entries = [_entry(r) for r in rows]
     newest = _parse(entries[0]["recorded_at"]) if entries else None
-    last_alive, lifecycle_readable = _lifecycle_tick(state, series_id)
+    last_alive, lifecycle_readable, session_id = _lifecycle_tick(state, series_id)
+    watcher_present = _watcher_presence(peer_registry, session_id, now=clock)
     series_state, why = classify_gauge_series(
         newest_recorded_at=newest,
         last_alive=last_alive,
         lifecycle_readable=lifecycle_readable,
         now=clock,
+        watcher_present=watcher_present,
     )
     return {
         "resolved": bool(entries),
@@ -292,12 +497,16 @@ def session_context_status_history(
 
 __all__ = [
     "GAUGE_SERIES_STALL_S",
+    "GAUGE_STOPPED_CONFIRM_GAP_S",
+    "SERIES_ABSENT",
     "SERIES_HEALTHY",
     "SERIES_IDLE",
     "SERIES_NEVER_STARTED",
     "SERIES_STATES",
     "SERIES_STOPPED",
     "SERIES_UNDETERMINED",
+    "WATCHER_PRESENCE_FRESH_S",
     "classify_gauge_series",
+    "confirm_gauge_stopped",
     "session_context_status_history",
 ]

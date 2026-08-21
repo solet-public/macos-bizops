@@ -106,6 +106,7 @@ from macos_self_deployment_plugin.constants import (
     STATUS_FAILED,
     STATUS_ROLLBACK_NOT_APPLICABLE,
     STATUS_ROLLED_BACK,
+    STREAMABLE_PORT_ATTRIBUTE,
     is_valid_color,
 )
 from macos_self_deployment_plugin.pending_finisher import (
@@ -670,6 +671,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         stop_event = self._heartbeat_stop
         logger = self.logger
         port_lookup = self._lookup_bridge_port
+        streamable_port_lookup = self._lookup_streamable_port
         budget_override = self._smoke_overrides.get("budget_seconds")
         # B2: the active color's heartbeat loop runs the pending-finisher
         # backstop against this path each tick (live runtime dir; the same
@@ -692,6 +694,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
                 "pending_finisher_file": pending_finisher_file,
                 "current_release_lookup": current_release_lookup,
                 "logger": logger,
+                "streamable_port_lookup": streamable_port_lookup,
             }
             if budget_override is not None:
                 kwargs["budget_seconds"] = budget_override
@@ -737,6 +740,31 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         if plugin is None or not hasattr(plugin, BRIDGE_PORT_ATTRIBUTE):
             return None
         port = getattr(plugin, BRIDGE_PORT_ATTRIBUTE)
+        return port if isinstance(port, int) else None
+
+    def _lookup_streamable_port(self) -> int | None:
+        """Read ``agent_messaging_plugin.streamable_bound_port`` (BLG-04).
+
+        Same cross-plugin duck-typed lookup as :meth:`_lookup_bridge_port`.
+        ``None`` whenever the peer plugin doesn't run, hasn't bound a
+        streamable listener yet, or runs with streamable disabled — all
+        indistinguishable here and all fine, since this lookup is best-effort
+        (see :func:`heartbeat_lifecycle.run`'s own docstring on why it never
+        gates the strict-I2 SIGTERM budget the bridge port lookup does).
+        """
+        orch = getattr(self, "orchestrator_ref", None)
+        if orch is None:
+            return None
+        plugin_manager = getattr(orch, "plugin_manager", None)
+        if plugin_manager is None:
+            return None
+        plugins = getattr(plugin_manager, "plugins", None)
+        if plugins is None:
+            return None
+        plugin = plugins.get(AGENT_MESSAGING_PLUGIN_NAME)
+        if plugin is None or not hasattr(plugin, STREAMABLE_PORT_ATTRIBUTE):
+            return None
+        port = getattr(plugin, STREAMABLE_PORT_ATTRIBUTE)
         return port if isinstance(port, int) else None
 
     def _lookup_current_release(self) -> str | None:
@@ -1443,11 +1471,39 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
     # Helpers
     # ------------------------------------------------------------------
 
+    def _lazy_router_client(self) -> RouterClient | None:
+        """Return the router client, building one on demand if readiness hasn't run yet.
+
+        ``RouterClient`` construction is stateless — no socket connection, no
+        I/O (see its own docstring: "no connection cached"). The
+        ``prepare_for_readiness`` step that assigns ``self._router_client``
+        is a bookkeeping ordering artifact, not a real dependency: the solet
+        name it derives the socket path from is available from the launch
+        environment (``ENV_SOLET_NAME``) well before readiness completes.
+        A half-booted color — readiness blocked before that assignment —
+        can therefore still get a usable client here, so a restart/status/
+        rollback call reaches the router RPC and gets the router's own
+        clean, typed answer (``ROUTER_UNREACHABLE`` / ``NOT_ACTIVE_INSTANCE``
+        in ``SwapOrchestrator._prepare_swap``) instead of an opaque
+        "prepare_for_readiness not called?" crash that leaves an operator
+        with no recovery but SIGKILL (LIF-02).
+        """
+        if self._router_client is not None:
+            return self._router_client
+        solet_name = self._solet_name or os.environ.get(ENV_SOLET_NAME, "")
+        if not solet_name:
+            return None
+        return RouterClient(_router_socket_path(solet_name))
+
     def _require_client(self) -> RouterClient:
-        if self._router_client is None:
-            msg = f"{PLUGIN_NAME}: router client not initialized — prepare_for_readiness not called?"
+        client = self._lazy_router_client()
+        if client is None:
+            msg = (
+                f"{PLUGIN_NAME}: router client not initialized and "
+                f"{ENV_SOLET_NAME} is unset; cannot resolve a router socket path"
+            )
             raise RuntimeError(msg)
-        return self._router_client
+        return client
 
     def _require_orchestrator(self) -> SwapOrchestrator:
         """Return a SwapOrchestrator bound to the current action_factory.
@@ -1462,10 +1518,11 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         """
         if self._orchestrator is not None:
             return self._orchestrator
-        if self._router_client is None:
+        router_client = self._lazy_router_client()
+        if router_client is None:
             msg = (
-                f"{PLUGIN_NAME}: router client not initialized — "
-                "prepare_for_readiness not called?"
+                f"{PLUGIN_NAME}: {ENV_SOLET_NAME} is unset; cannot resolve a "
+                "router socket path to build the swap orchestrator"
             )
             raise RuntimeError(msg)
         if self.action_factory is None:
@@ -1475,7 +1532,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
             )
             raise RuntimeError(msg)
         return SwapOrchestrator(
-            router_client=self._router_client,
+            router_client=router_client,
             action_factory=self.action_factory,
             session_factory=self._create_swap_session,
             solet_name=self._solet_name,

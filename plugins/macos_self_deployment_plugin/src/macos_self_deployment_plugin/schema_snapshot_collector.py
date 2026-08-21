@@ -28,11 +28,18 @@ WRONG tree silently defeats the gate):
   plugin from live source instead of ``T``.
 - **completeness** — the discovered plugin set MUST be a superset of the profile
   manifest set. Catches silent under-collection (an old ``T`` missing a manifest
-  plugin, which would otherwise shrink the snapshot).
+  plugin, which would otherwise shrink the snapshot). Which manifest that is
+  matters: see ``MANIFEST_PLUGIN_OVERRIDE`` below and :func:`_resolve_manifest`.
 
 Either assert raises → non-zero exit → the producer raises ``ReleaseManagerError``
 → the deploy is refused. Requires ``SOLET_NAME`` + ``APP_HOME`` (profile
 manifest gating) + ``EXPECT_ROOT`` (provenance root); the producer sets all three.
+
+``MANIFEST_PLUGIN_OVERRIDE`` (optional, JSON array of plugin names) names the
+manifest that governed ``T`` itself, and exists because ``APP_HOME``'s live
+manifest describes the INCOMING deploy, not the old tree the derive path points
+at (BLG-02). Set by the producer for the derive call site only; the candidate
+call site leaves it unset and reads the live manifest, which is correct there.
 
 Namespace merge: multiple ``SchemaDefinition`` objects can share one namespace
 (e.g. several core schemas under ``core``), each contributing distinct tables.
@@ -152,6 +159,61 @@ def _assert_completeness(manager: PluginManager, manifest: set[str] | None) -> N
         raise ValueError(msg)
 
 
+def _resolve_manifest(app_home: str) -> set[str] | None:
+    """Return the plugin set that governs THIS target tree.
+
+    ``MANIFEST_PLUGIN_OVERRIDE`` (JSON array of plugin names) is the derive
+    path's answer to BLG-02: when snapshotting an OLD release's ``code/``, the
+    LIVE manifest at ``app_home`` has already been overwritten with the
+    INCOMING deploy's manifest, so reading it would gate an old tree by a new
+    profile. A deploy that GROWS the manifest then trips
+    :func:`_assert_completeness` on a plugin the old tree never had — a
+    false-REFUSE of a perfectly safe deploy. The producer passes the OLD
+    release's own captured set instead.
+
+    Absent override → read the live manifest, which is CORRECT for the
+    candidate call site (``apply_manifest`` writes the new manifest before
+    delegating a restart, so live IS the candidate's own manifest) and is also
+    the compat rung for an old release built before per-release capture landed:
+    those carry no captured set, and falling back reproduces today's exact
+    behaviour rather than inventing a more permissive one.
+
+    An override that is present but not a JSON array of strings is a
+    programming error in the producer, never adopter input, so it raises
+    rather than falling back — a silent fallback here would gate an old tree
+    by the wrong manifest, which is the very defect this exists to fix.
+    """
+    override_raw = os.environ.get("MANIFEST_PLUGIN_OVERRIDE")
+    if override_raw is None:
+        return load_manifest_plugin_set(app_home)
+    try:
+        decoded = json.loads(override_raw)
+    except json.JSONDecodeError as exc:
+        msg = f"MANIFEST_PLUGIN_OVERRIDE is not valid JSON: {exc}"
+        raise ValueError(msg) from exc
+    if not isinstance(decoded, list) or not all(isinstance(name, str) for name in decoded):
+        msg = (
+            "MANIFEST_PLUGIN_OVERRIDE must be a JSON array of plugin names, got: "
+            f"{type(decoded).__name__}"
+        )
+        raise ValueError(msg)
+    if not decoded:
+        # Independently guarded here, not just upstream, because this process
+        # reads the variable across a subprocess boundary and is the last thing
+        # standing between it and the gate. An EMPTY allow-set discovers zero
+        # plugins (the unresolved-plugin check is a non-fatal warning), passes
+        # the completeness assert vacuously, and produces an empty snapshot —
+        # which ``classify_snapshot_diff`` reports as unconditionally additive
+        # because it iterates the OLD side. That is the gate failing OPEN.
+        msg = (
+            "MANIFEST_PLUGIN_OVERRIDE is an EMPTY array — refusing, because an empty "
+            "plugin set collapses the snapshot to nothing and would pass the additive "
+            "check vacuously. Omit the variable to read the live manifest instead."
+        )
+        raise ValueError(msg)
+    return set(decoded)
+
+
 def collect_declared_schemas() -> list[SchemaDefinition]:
     """Discover + provenance/completeness-verify the target tree, return its schemas.
 
@@ -164,7 +226,7 @@ def collect_declared_schemas() -> list[SchemaDefinition]:
         msg = "EXPECT_ROOT not set — refusing to snapshot without a provenance root"
         raise ValueError(msg)
     expect_root = Path(expect_root_env).resolve()
-    manifest = load_manifest_plugin_set(app_home)
+    manifest = _resolve_manifest(app_home)
     manager = PluginManager()
     manager.discover_plugins(allowed_plugins=manifest)
     _assert_provenance(manager, expect_root)

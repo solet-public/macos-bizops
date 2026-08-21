@@ -223,6 +223,80 @@ def test_unconfirmed_clear_fails_loud_instead_of_returning_success() -> None:
         _uninstall(_TEST_HOST_VERIFYING)
 
 
+def test_unverified_clear_guidance_names_deferral_not_an_ordinary_message() -> None:
+    """GAU-27 — the ``clear_unverified`` message is the CALLER'S ONLY
+    INSTRUMENT, and the pre-fix text pointed it straight at the trap.
+
+    Measured 2026-08-19 (GAU-27): a ``/clear`` dispatched at a MID-TURN
+    target is QUEUED AS A COMMAND and fires at that turn's end — observed
+    ~2 minutes after this very error was returned. The pre-fix message
+    asserted the opposite mechanism ("takes it as an ordinary message
+    rather than a command") and closed with an action ("clear it externally
+    instead") that, taken immediately, deposits a SECOND clear which fires
+    into the SUCCESSOR context after the first one lands. So the message
+    has to carry three things and refuse a fourth:
+
+      * unverified is NOT lost — the clear may be PENDING;
+      * the discriminator: the target's own input QUEUE, readable only
+        from outside (the target cannot see it);
+      * the protocol that worked — wait for idle, then exactly ONE
+        re-issue;
+      * and NOT the refuted mechanism claim, which is the part that makes
+        a caller believe the clear is gone.
+
+    This asserts message CONTENT because content is the whole defect: the
+    error code was already correct and unchanged.
+    """
+    channel = _VerifyingChannel(cleared=False)
+    _install(_TEST_HOST_VERIFYING, channel)
+    try:
+        state = _state()
+        _live_session(state, "agi-gau27-guidance", _TEST_HOST_VERIFYING)
+        raised: VerbError | None = None
+        try:
+            clear_session(
+                state, agent_instance_id="agi-gau27-guidance", park=False,
+                directed_by="operator:none",
+            )
+        except VerbError as exc:
+            raised = exc
+        message = (raised.message if raised is not None else "").lower()
+        _check(
+            raised is not None and raised.code == "clear_unverified",
+            "the error token is unchanged — GAU-27 corrects the guidance, not the code",
+        )
+        _check(
+            "ordinary message" not in message,
+            "the REFUTED mechanism claim ('ordinary message rather than a command') is gone",
+        )
+        _check(
+            "clear it externally instead" not in message,
+            "the message no longer closes with the immediate re-clear that double-deposits",
+        )
+        _check(
+            "not lost" in message or "not-yet-executed" in message,
+            "the message states that an unverified clear may be PENDING, not lost",
+        )
+        _check(
+            "queued" in message,
+            "the message names the input QUEUE — the state that discriminates the two worlds",
+        )
+        _check(
+            "do not" in message and "re-send" in message,
+            "the no-blind-retry rule survives the rewrite",
+        )
+        _check(
+            "one re-issue" in message and "idle" in message,
+            "the message carries the protocol that worked: wait for idle, then ONE re-issue",
+        )
+        _check(
+            channel.sent == ["/clear"],
+            "HARD RULE holds on this path too: '/clear' is deposited EXACTLY ONCE",
+        )
+    finally:
+        _uninstall(_TEST_HOST_VERIFYING)
+
+
 def test_unconfirmed_clear_does_not_take_the_park_edge() -> None:
     """A park recorded beside a clear that never happened would put the lie
     in the LEDGER, outliving the return value that carried it."""
@@ -482,6 +556,7 @@ def main() -> int:
     for fn in (
         test_unconfirmed_clear_fails_loud_instead_of_returning_success,
         test_unconfirmed_clear_does_not_take_the_park_edge,
+        test_unverified_clear_guidance_names_deferral_not_an_ordinary_message,
         test_confirmed_clear_reports_the_effect_positively,
         test_blind_driver_degrades_to_honest_naming_never_to_a_verdict,
         test_blind_driver_still_parks_on_request,

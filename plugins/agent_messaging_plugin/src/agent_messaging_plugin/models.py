@@ -162,6 +162,16 @@ class BridgeBinding:
     # path can flip it without a migration; nothing currently branches on it
     # at dispatch time.
     wake_capable: bool = True
+    # MSG-04/identity-unification (2026-08-20): DECLARED, never probed, by
+    # `solet watch` on every peer/register call — the one caller that KNOWS
+    # it is a watcher regardless of what `agent_instance_id` it registers
+    # under. Needed because that fix stops deriving `agent_instance_id` from
+    # `agent_session_id` (the `agi-watch-{digest}` scheme) in favor of the
+    # caller's own ledger `AGENT_INSTANCE_ID` when one exists — so the prefix
+    # this class used to infer "is a watcher" from is no longer reliably
+    # present on exactly the bindings that need the label. Default False:
+    # every non-watch registration path (Claude Code, GC, seat) is unaffected.
+    watcher_declared: bool = False
 
     @property
     def is_watcher(self) -> bool:
@@ -171,8 +181,17 @@ class BridgeBinding:
         bridge and surface when its long-poll streams them — no model turn
         starts. Dispatch labels such deliveries ``queued_watcher`` and the
         events route treats the watcher's long-poll ack as consumption.
+
+        Checks the explicit ``watcher_declared`` flag FIRST, then falls back
+        to the legacy ``agi-watch-`` prefix convention — the OR keeps a
+        manual/no-ledger-id watch (which still mints the derived, prefixed
+        identity) detected exactly as before, while a ledger-identified
+        watch binding (which carries no such prefix) is now detected via the
+        flag instead of an identity convention it no longer follows.
         """
-        return self.agent_instance_id.startswith(WATCH_AGENT_INSTANCE_PREFIX)
+        return self.watcher_declared or self.agent_instance_id.startswith(
+            WATCH_AGENT_INSTANCE_PREFIX,
+        )
 
 
 @dataclass(slots=True)

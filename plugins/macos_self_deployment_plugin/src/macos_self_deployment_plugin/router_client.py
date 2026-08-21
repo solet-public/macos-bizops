@@ -63,12 +63,23 @@ class RouterClient:
         return self._call("status", {})
 
     def register_color(
-        self, port: int, color: str, instance_id: str
+        self,
+        port: int,
+        color: str,
+        instance_id: str,
+        *,
+        streamable_port: int | None = None,
     ) -> dict[str, Any]:
-        return self._call(
-            "register_color",
-            {"port": port, "color": color, "instance_id": instance_id},
-        )
+        args: dict[str, Any] = {"port": port, "color": color, "instance_id": instance_id}
+        # BLG-04: omitted (not merely None) when the caller has nothing new
+        # to report — the router's own `register()` treats an explicit
+        # streamable_port as authoritative and a missing one as "preserve
+        # whatever I already had", so a bare `{"streamable_port": None}` key
+        # would be indistinguishable on the wire from "preserve" anyway, but
+        # omitting it keeps the payload identical to pre-BLG-04 callers.
+        if streamable_port is not None:
+            args["streamable_port"] = streamable_port
+        return self._call("register_color", args)
 
     def unregister_color(self, instance_id: str) -> dict[str, Any]:
         return self._call("unregister_color", {"instance_id": instance_id})

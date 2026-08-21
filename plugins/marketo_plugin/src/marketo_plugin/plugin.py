@@ -276,7 +276,7 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
         """
         if self.orchestrator_ref is None:
             raise RuntimeError(f"{self.name}: orchestrator_ref not injected")
-        manager = self.orchestrator_ref.async_job_manager
+        manager = getattr(self.orchestrator_ref, "async_job_manager", None)
         if manager is None:
             raise RuntimeError(f"{self.name}: AsyncJobManager not yet available")
         return manager  # type: ignore[return-value]
@@ -518,7 +518,7 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
     def _process_pending_jobs(self) -> None:
         if self.orchestrator_ref is None:
             return
-        raw_manager = self.orchestrator_ref.async_job_manager
+        raw_manager = getattr(self.orchestrator_ref, "async_job_manager", None)
         if raw_manager is None:
             return
         manager = cast("AsyncJobManager", raw_manager)

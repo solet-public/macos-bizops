@@ -33,6 +33,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
 from ananta.core.runtime import get_runtime_dir
 from ananta.interfaces.lifecycle_result_types import RestartResult, RestartStatus
 
@@ -71,6 +72,7 @@ from macos_self_deployment_plugin.router_client import (
 )
 from macos_self_deployment_plugin.schema_preflight import PreflightVerdict
 from macos_self_deployment_plugin.schema_snapshot_producer import (
+    SchemaSnapshotFn,
     build_schema_snapshot_fn,
 )
 from macos_self_deployment_plugin.swap_executor import (
@@ -150,6 +152,7 @@ class ReleaseManagerProtocol(Protocol):
         self,
         *,
         manifest_etag: str = ...,
+        manifest_plugins: tuple[str, ...] | None = ...,
         schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = ...,
     ) -> CandidatePaths: ...
 
@@ -332,9 +335,29 @@ def _rollback_cas_check(
     )
 
 
+def _capture_manifest_plugins(app_home: Path) -> tuple[str, ...] | None:
+    """Snapshot the LIVE profile plugin set for the release being built (BLG-02).
+
+    Called at build time because that is the one moment the live manifest still
+    describes the tree being built: ``apply_manifest`` commits the new manifest
+    before delegating a restart, and the NEXT deploy overwrites it again. The §3
+    derive path therefore cannot read it back later and must consult the
+    release's own persisted copy instead.
+
+    ``None`` is preserved rather than flattened to an empty tuple: ``None``
+    means "ungated — load everything installed", while ``()`` would claim the
+    release had NO plugins and gate a later derive to an empty discovery, which
+    would silently produce an empty snapshot. Module-level alongside
+    ``_resolve_current_snapshot`` so ``SwapOrchestrator`` stays under the
+    god-class LOC bound.
+    """
+    live = load_manifest_plugin_set(app_home)
+    return None if live is None else tuple(sorted(live))
+
+
 def _resolve_current_snapshot(
     release_manager: ReleaseManagerProtocol,
-    snapshot_fn: Callable[[Path], dict[str, object]],
+    snapshot_fn: SchemaSnapshotFn,
 ) -> dict[str, object] | None:
     """Resolve the OLD side of the §3 diff — read it, or DERIVE it (B1·1).
 
@@ -343,6 +366,16 @@ def _resolve_current_snapshot(
     release EXISTS, DERIVE the snapshot by running the SAME collector
     (``snapshot_fn``) against ``current/code`` — so a pre-producer current (e.g.
     the live ``af157a1fe`` transition) is still gated.
+
+    The derive passes the OLD release's OWN captured plugin set as the
+    collector's manifest (BLG-02). By the time this runs, ``apply_manifest``
+    has already written the INCOMING deploy's manifest over the live one, so
+    letting the collector read ``APP_HOME`` would gate the old tree by the new
+    profile — and a deploy that GROWS the manifest would then false-REFUSE on a
+    plugin the old tree never had. ``None`` (a release built before capture
+    landed) preserves today's live-manifest behaviour rather than inventing a
+    more permissive one; it is a compat rung that stops firing once every
+    release in the chain postdates this.
 
     FAIL-CLOSED on both legs: ``current_schema_snapshot`` raises on a torn
     ``VERSION`` and the derive raises on any collect failure, so the only
@@ -355,8 +388,20 @@ def _resolve_current_snapshot(
     current_release = release_manager.current_release
     current_snapshot = release_manager.current_schema_snapshot()
     if current_snapshot is None and current_release is not None:
-        old_code_root = release_manager.candidate_for(current_release).code_root
-        current_snapshot = snapshot_fn(old_code_root)
+        old_candidate = release_manager.candidate_for(current_release)
+        # THE point of use, and therefore the only place a rejected capture may
+        # refuse. Rehydrate deliberately reports rather than raises, so that a
+        # garbage schema-gate field cannot make a bootable release
+        # un-rollback-able; the cost of that choice is paid here, loudly.
+        if old_candidate.manifest_plugins_error is not None:
+            msg = (
+                f"§3 derive refused: {old_candidate.manifest_plugins_error} — refusing to "
+                "snapshot an old tree against an untrustworthy manifest"
+            )
+            raise ReleaseManagerError(msg)
+        current_snapshot = snapshot_fn(
+            old_candidate.code_root, old_candidate.manifest_plugins,
+        )
     return current_snapshot
 
 
@@ -833,7 +878,9 @@ class SwapOrchestrator:
         )
         try:
             candidate = self._release_manager.build_candidate(
-                manifest_etag=expected_etag, schema_snapshot_fn=snapshot_fn,
+                manifest_etag=expected_etag,
+                manifest_plugins=_capture_manifest_plugins(app_home),
+                schema_snapshot_fn=snapshot_fn,
             )
         except ReleaseManagerError as exc:
             return self._failure(

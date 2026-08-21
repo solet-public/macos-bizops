@@ -84,6 +84,7 @@ from ananta.llm.agent_messaging.state_results import (
 
 from . import rotation_thresholds
 from .gauge_notice_emit import deliver_and_record_gauge_notice
+from .overdue_notice import EVENT_SESSION_OVERDUE_NOTICE, _notify_steward_of_overdue
 from .peer_registry import PeerAmbiguousError, PeerSessionAmbiguousError, PeerUnreachableError
 from .schema import (
     CONDITION_DEADLINE,
@@ -114,6 +115,8 @@ from .session_lifecycle_verbs import (
     drive_on_delivery,
     terminate_session,
 )
+from .steward_notice_counts import StewardNoticeCounts, fill_counts
+from .steward_resolution import managed_session_agent_id, resolve_steward_binding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -141,7 +144,6 @@ EVENT_SESSION_DEPENDENCY_WAKE = "session_dependency_wake"
 # Same convention, the D2-lane-tail overdue-steward-notice fix (follow-up
 # #3): the report-or-die contract's own steward notification, distinct from
 # the session_dependency wake above even though both ride append_event.
-EVENT_SESSION_OVERDUE_NOTICE = "session_overdue_notice"
 
 # Same convention again, for the two L4 sweep legs (2026-08-17).
 #
@@ -289,6 +291,17 @@ EVENT_GAUGE_STALE_NOTICE = "gauge_stale_notice"
 # the REAL arrest arrives on. Erring long is the cheap direction.
 GAUGE_STALE_LAG_S: float = 900.0
 
+GAUGE_STALE_ROTATION_GRACE_S: float = 600.0
+"""GAU-22(c) -- how long to hold fire on a gauge-stale finding when this
+row's own ``last_transition_at`` is NEWER than the gauge's ``measured_at``
+(a rotation-window signature, not a freeze). DERIVATION, NOT MEASUREMENT:
+the register's own live specimens show the window's true duration varies
+0-9+ minutes (an 8.9-minute specimen resolved 6 minutes short of the 900s
+GAUGE_STALE_LAG_S eligibility bound; a second rotation closed in under a
+minute) -- 600s covers the measured range with margin without approaching
+GAUGE_STALE_LAG_S itself, so this grace is never the reason a genuine
+freeze goes unreported."""
+
 # R4 (2026-08-17): the TTL leg. A spawn's ttl_seconds became expires_at on the
 # row and NOTHING EVER READ IT — measured, not assumed: three touch points in
 # this plugin (the column, one write at spawn, one output-schema entry) and zero
@@ -417,128 +430,6 @@ def live_lifecycle_rows_by_instance(
     return rows
 
 
-def _managed_session_agent_id(
-    state: StateManagementInterface, agent_instance_id: str,
-) -> str:
-    result = state.query_state(
-        AGENT_ROLE_BINDING_NAMESPACE,
-        {"table": TABLE_MANAGED_SESSION, "filters": {"agent_instance_id": agent_instance_id}},
-    )
-    rows = require_records(result)
-    return str(rows[0].get("agent_id") or "") if rows else ""
-
-
-def _resolve_steward_via_managed_session(
-    *,
-    state: StateManagementInterface,
-    peer_registry: PeerRegistry,
-    spawner_instance_id: str,
-) -> BridgeBinding | None:
-    """Fallback path for :func:`_notify_steward_of_overdue` — the ORIGINAL
-    (pre-fix) resolution route: look up the spawner's ``agent_id`` via its
-    own ``managed_session`` row, then resolve ``(agent_id, instance_id)``.
-    Kept for a direct registry-by-instance-id miss; no longer the primary
-    path since it silently fails for any spawner with no managed_session row
-    of its own (the operator-launched-seat case this fix addresses)."""
-    spawner_agent_id = _managed_session_agent_id(state, spawner_instance_id)
-    if not spawner_agent_id:
-        return None
-    try:
-        return peer_registry.resolve(spawner_agent_id, spawner_instance_id)
-    except (PeerUnreachableError, PeerAmbiguousError):
-        return None
-
-
-def _resolve_steward_binding(
-    *,
-    state: StateManagementInterface,
-    peer_registry: PeerRegistry,
-    spawner_instance_id: str,
-) -> BridgeBinding | None:
-    """Shared resolution step for both steward-notify paths below: resolve
-    straight from the peer registry by instance id, falling back to the
-    managed_session detour on a miss. See :func:`_notify_steward_of_overdue`
-    for why the direct lookup is primary."""
-    binding = peer_registry.resolve_by_agent_instance_id(spawner_instance_id)
-    if binding is None:
-        binding = _resolve_steward_via_managed_session(
-            state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
-        )
-    return binding
-
-
-def _notify_steward_of_overdue(
-    *,
-    state: StateManagementInterface,
-    peer_registry: PeerRegistry,
-    bridge_manager: BridgeSessionManager,
-    row: dict[str, Any],
-) -> None:
-    """Best-effort steward notice for one just-marked-overdue row (D2-lane-
-    tail follow-up #3 — the report-or-die contract's own promise: "the
-    platform sweep marks overdue rows overdue and notifies the steward
-    (spawner) through normal messaging"). Mirrors
-    :func:`_deliver_dependency_wake`'s exact resolve-then-append pattern —
-    the row is already transitioned (state), so a delivery fault here must
-    never raise back into the sweep loop and must never block marking the
-    OTHER overdue rows in this tick.
-
-    Absent ``spawned_by_instance_id`` (an operator-launched row, or a row
-    with no recorded spawner) is silently skipped, not warned — that is a
-    session with no steward to notify by construction, not a fault.
-
-    Resolves the steward straight from the peer registry by instance id
-    (``PeerRegistry.resolve_by_agent_instance_id`` — a direct lookup, no
-    ``agent_id`` needed up front): the ``managed_session``-row detour this
-    used to require as its ONLY path fails for the dominant case, an
-    operator-launched seat (e.g. the primary seat) that spawned the overdue
-    session directly — that seat has no ``managed_session`` row of its own,
-    so the notice silently never fired (measured live, 2026-08-04 13:13:01Z,
-    session_sweep.py:175). The old managed_session-based resolution stays as
-    a fallback for a registry-lookup miss, not the primary path."""
-    agent_instance_id = str(row.get("agent_instance_id") or "")
-    spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
-    if not spawner_instance_id:
-        return
-    binding = _resolve_steward_binding(
-        state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
-    )
-    if binding is None:
-        logger.warning(
-            "session %s overdue: spawner %s not resolvable to a live binding "
-            "(checked the peer registry directly and via its managed_session "
-            "row) — marked overdue, steward not notified",
-            agent_instance_id, spawner_instance_id,
-        )
-        return
-    prose = (
-        f"session_overdue_notice: {agent_instance_id} (lane_id="
-        f"{row.get('lane_id')!r}) missed its report_by deadline and was "
-        "marked overdue. This is the report-or-die contract firing — "
-        "silence is detectable by construction. Check the session's "
-        "status; direct a recovery report, park, or terminate it."
-    )
-    meta: dict[str, object] = {"flow_id": f"session-overdue-{agent_instance_id}"}
-    try:
-        bridge_manager.append_event(
-            binding.bridge_id, EVENT_SESSION_OVERDUE_NOTICE, prose, meta,
-        )
-    except Exception:  # noqa: BLE001 — best-effort notify; the row is already marked overdue
-        logger.warning(
-            "session %s overdue notice append failed", agent_instance_id, exc_info=True,
-        )
-    # Drive-on-delivery (2026-08-04, slice 2): ALONGSIDE the append_event
-    # above, never instead of it. The steward is usually an operator-
-    # launched, UNMANAGED session (the seat) — drive_on_delivery's own
-    # SessionNotFoundError no-op covers that path byte-unchanged; a managed
-    # steward (a spawned session that itself spawned the overdue worker)
-    # gets the extra nudge.
-    drive_on_delivery(
-        state, recipient_agent_instance_id=spawner_instance_id,
-        sender_label="session_overdue_notice",
-    )
-
-
 def _notify_steward_of_spawn_orphaned(
     *,
     state: StateManagementInterface,
@@ -558,7 +449,7 @@ def _notify_steward_of_spawn_orphaned(
     spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
     if not spawner_instance_id:
         return
-    binding = _resolve_steward_binding(
+    binding = resolve_steward_binding(
         state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
     )
     if binding is None:
@@ -647,7 +538,7 @@ def _notify_steward_of_spawn_unregistered(
     spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
     if not spawner_instance_id:
         return
-    binding = _resolve_steward_binding(
+    binding = resolve_steward_binding(
         state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
     )
     if binding is None:
@@ -947,7 +838,7 @@ def _notify_steward_of_registration_overdue(
     spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
     if not spawner_instance_id:
         return
-    binding = _resolve_steward_binding(
+    binding = resolve_steward_binding(
         state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
     )
     if binding is None:
@@ -1008,6 +899,7 @@ def _mark_one_overdue(
     if peer_registry is not None and bridge_manager is not None:
         _notify_steward_of_overdue(
             state=state, peer_registry=peer_registry, bridge_manager=bridge_manager, row=row,
+            clock=clock, report_by=report_by,
         )
     return True
 
@@ -1030,7 +922,7 @@ def _resolve_dependency_waiter(
     binding = peer_registry.resolve_by_agent_instance_id(waiter_instance_id)
     if binding is not None:
         return binding
-    agent_id = _managed_session_agent_id(state, waiter_instance_id)
+    agent_id = managed_session_agent_id(state, waiter_instance_id)
     if not agent_id:
         return None
     try:
@@ -1645,7 +1537,7 @@ def _notify_rotation_due(
     session's own bridge. The void is closed, but it was closed BESIDE this
     function, not inside it. Nothing about this leg's own reach changed.
     """
-    binding = _resolve_steward_binding(
+    binding = resolve_steward_binding(
         state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
     )
     if binding is None:
@@ -1747,6 +1639,7 @@ def sweep_rotation_due_sessions(
     peer_registry: PeerRegistry | None = None,
     bridge_manager: BridgeSessionManager | None = None,
     latch: NoticeLatch | None = None,
+    counts: StewardNoticeCounts | None = None,
 ) -> int:
     """Notify stewards of managed sessions whose gauge says rotation is due.
 
@@ -1773,11 +1666,18 @@ def sweep_rotation_due_sessions(
     rotation-due condition persists across ticks and an unlatched notice would
     re-deliver every ``bridge_sweep_interval_seconds`` until the session
     rotates.
+
+    ``counts``, when supplied, is filled in with this leg's DETECTED /
+    DELIVERED / UNDELIVERED breakdown (:class:`StewardNoticeCounts`, GAU-25).
+    The ``int`` return is unchanged and still means DELIVERED ALONE, so a caller
+    that wants to know whether the DETECTOR fired must pass a sink -- the return
+    value cannot answer that and never could.
     """
     if peer_registry is None or bridge_manager is None:
         return 0
     gate = _latch_or_transient(latch)
     notified = 0
+    undelivered = 0
     due: set[str] = set()
     for agent_instance_id, spawner_instance_id, enriched in _rotation_due_sessions(state):
         due.add(agent_instance_id)
@@ -1790,7 +1690,10 @@ def sweep_rotation_due_sessions(
         ):
             notified += 1
             gate.record_sent(agent_instance_id)
+        else:
+            undelivered += 1
     gate.retain_active(due)
+    fill_counts(counts, detected=len(due), delivered=notified, undelivered=undelivered)
     return notified
 
 
@@ -1880,7 +1783,7 @@ def _notify_gauge_coverage(
     return deliver_and_record_gauge_notice(
         state,
         bridge_manager=bridge_manager,
-        binding=_resolve_steward_binding(
+        binding=resolve_steward_binding(
             state=state, peer_registry=peer_registry,
             spawner_instance_id=spawner_instance_id,
         ),
@@ -1905,6 +1808,7 @@ def sweep_gauge_coverage(
     peer_registry: PeerRegistry | None = None,
     bridge_manager: BridgeSessionManager | None = None,
     latch: NoticeLatch | None = None,
+    counts: StewardNoticeCounts | None = None,
 ) -> int:
     """Notify stewards of LIVE sessions that have no gauge row at all.
 
@@ -1938,6 +1842,12 @@ def sweep_gauge_coverage(
     because it is NEW, not because anything is broken. The latch cannot cover
     that case — every spawn wave is a fresh episode with fresh keys — so the
     grace is a predicate here rather than a suppression there.
+
+    ``counts``, when supplied, is filled in with this leg's DETECTED /
+    DELIVERED / UNDELIVERED breakdown (:class:`StewardNoticeCounts`, GAU-25).
+    The ``int`` return is unchanged and still means DELIVERED ALONE, so a caller
+    that wants to know whether the DETECTOR fired must pass a sink -- the return
+    value cannot answer that and never could.
     """
     if peer_registry is None or bridge_manager is None:
         return 0
@@ -1945,6 +1855,7 @@ def sweep_gauge_coverage(
     gate = _latch_or_transient(latch)
     notified = 0
     dark: set[str] = set()
+    undelivered = 0
     for row in _managed_sessions_in_state(state, "live"):
         pair = _gauge_dark_session(state, row, clock=clock)
         if pair is None:
@@ -1960,8 +1871,28 @@ def sweep_gauge_coverage(
         ):
             notified += 1
             gate.record_sent(agent_instance_id)
+        else:
+            undelivered += 1
     gate.retain_active(dark)
+    fill_counts(counts, detected=len(dark), delivered=notified, undelivered=undelivered)
     return notified
+
+
+def _in_rotation_grace(
+    row: dict[str, Any], *, measured_at: datetime, clock: datetime,
+) -> bool:
+    """GAU-22(c) -- split out of :func:`_gauge_stale_session` to keep it
+    under the radon cc threshold. True iff this row's ``last_transition_at``
+    is NEWER than the gauge's ``measured_at`` (the gauge predates the row's
+    latest transition -- most often a ``/clear`` rotation onto the SAME
+    instance id) and that transition happened within
+    :data:`GAUGE_STALE_ROTATION_GRACE_S`. See :func:`_gauge_stale_session`'s
+    own docstring for why this is a hold-fire, not a suppression."""
+    last_transition_at = _parse_iso(row.get("last_transition_at"))
+    if last_transition_at is None or last_transition_at <= measured_at:
+        return False
+    transition_age_s = (clock - last_transition_at).total_seconds()
+    return transition_age_s <= GAUGE_STALE_ROTATION_GRACE_S
 
 
 def _gauge_stale_session(
@@ -2005,7 +1936,18 @@ def _gauge_stale_session(
       session whose both clocks stopped is quiet or dead, and saying "your
       gauge reporter is broken" about a session that stopped calling tools
       would be a confident wrong diagnosis;
-    * a lag inside :data:`GAUGE_STALE_LAG_S` -- normal throttle skew.
+    * a lag inside :data:`GAUGE_STALE_LAG_S` -- normal throttle skew;
+    * GAU-22(c) -- ``last_transition_at`` NEWER than the gauge's own
+      ``measured_at``, inside :data:`GAUGE_STALE_ROTATION_GRACE_S`. This row
+      transitioned (most often a ``/clear`` rotation onto the SAME instance
+      id) more recently than its gauge last wrote, so the gauge predates the
+      successor entirely -- it is not that a reporter STOPPED, it is that
+      the successor's own first gauge write has not landed YET. Firing here
+      would report a rotation as a freeze, which is the L4d false-positive
+      GAU-22 measured live (an 8.9-minute specimen that resolved 6 minutes
+      short of :data:`GAUGE_STALE_LAG_S` eligibility on its own). Past the
+      grace window this check no longer applies and a genuinely stuck
+      rotation is free to alarm through the ordinary lag check below.
     """
     agent_instance_id = str(row.get("agent_instance_id") or "")
     spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
@@ -2019,6 +1961,8 @@ def _gauge_stale_session(
         return None
     last_alive = last_report_alive(row)
     if last_alive is None:
+        return None
+    if _in_rotation_grace(row, measured_at=measured_at, clock=clock):
         return None
     lag_s = (last_alive - measured_at).total_seconds()
     if lag_s <= GAUGE_STALE_LAG_S:
@@ -2099,7 +2043,7 @@ def _notify_gauge_stale(
     return deliver_and_record_gauge_notice(
         state,
         bridge_manager=bridge_manager,
-        binding=_resolve_steward_binding(
+        binding=resolve_steward_binding(
             state=state, peer_registry=peer_registry,
             spawner_instance_id=spawner_instance_id,
         ),
@@ -2125,6 +2069,7 @@ def sweep_gauge_staleness(
     peer_registry: PeerRegistry | None = None,
     bridge_manager: BridgeSessionManager | None = None,
     latch: NoticeLatch | None = None,
+    counts: StewardNoticeCounts | None = None,
 ) -> int:
     """Notify stewards of LIVE sessions whose gauge row has STOPPED advancing.
 
@@ -2157,12 +2102,19 @@ def sweep_gauge_staleness(
     gauge's measured_at, which cannot be true of a session that has not reported
     yet. The condition is self-gating on evidence, so a wall-clock floor would
     add nothing but a second number to keep true.
+
+    ``counts``, when supplied, is filled in with this leg's DETECTED /
+    DELIVERED / UNDELIVERED breakdown (:class:`StewardNoticeCounts`, GAU-25).
+    The ``int`` return is unchanged and still means DELIVERED ALONE, so a caller
+    that wants to know whether the DETECTOR fired must pass a sink -- the return
+    value cannot answer that and never could.
     """
     if peer_registry is None or bridge_manager is None:
         return 0
     clock = now or datetime.now(UTC)
     gate = _latch_or_transient(latch)
     notified = 0
+    undelivered = 0
     stale: set[str] = set()
     for row in _managed_sessions_in_state(state, "live"):
         found = _gauge_stale_session(state, row, clock=clock)
@@ -2179,7 +2131,10 @@ def sweep_gauge_staleness(
         ):
             notified += 1
             gate.record_sent(agent_instance_id)
+        else:
+            undelivered += 1
     gate.retain_active(stale)
+    fill_counts(counts, detected=len(stale), delivered=notified, undelivered=undelivered)
     return notified
 
 
@@ -2257,7 +2212,7 @@ def _notify_ttl_overdue(
     steward warns and returns False rather than raising into the sweep loop, so
     one bad binding never costs the other rows their notice.
     """
-    binding = _resolve_steward_binding(
+    binding = resolve_steward_binding(
         state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
     )
     if binding is None:
@@ -2374,6 +2329,7 @@ __all__ = [
     "EVENT_TTL_OVERDUE_NOTICE",
     "NoticeLatch",
     "SessionRoleClaimPruner",
+    "StewardNoticeCounts",
     "sweep_deadline_dependencies",
     "sweep_gauge_coverage",
     "sweep_lane_closed_dependencies",

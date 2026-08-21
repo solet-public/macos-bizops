@@ -38,6 +38,19 @@ _ENV_FLEET_SESSION_HOST = "FLEET_SESSION_HOST"
 DEFAULT_HOST = "headless"
 
 OPERATOR_HOST = "operator"
+SYNTHETIC_HOST = "synthetic"
+"""GAU-15 item 4 / GAU-24 — the gauge tamper canary's declared host. A
+canary has no process, so this driver is registered but DEGENERATE exactly
+like :class:`OperatorHostDriver`: ``spawn``/``terminate`` both refuse with
+``HostCannotSpawnError`` rather than touching anything. Registering it
+(rather than leaving the name unresolved) is deliberate and narrow —
+``resolve_host_driver`` still raises :class:`HostMechanismMissingError` for
+every host name that is genuinely unregistered (a typo, a future host not
+yet built), so a real orphaned session on an unresolvable host is never
+conflated with this literal, explicitly-declared name. The distinction that
+matters is FAILED-TO-RESOLVE vs DECLARED-AND-NO-OP — collapsing those two
+would let a real orphaned session be marked retired without anything being
+torn down, which is exactly the ambiguous case GAU-24 named as unsafe."""
 AGENT_RUNTIME_CLAUDE_CODE = "claude_code"
 AGENT_RUNTIME_CODEX = "codex"
 DEFAULT_AGENT_RUNTIME = AGENT_RUNTIME_CLAUDE_CODE
@@ -91,6 +104,37 @@ class ClearVerifyingDriverChannel(Protocol):
     """
 
     def verify_cleared(self) -> bool: ...
+
+
+@runtime_checkable
+class DriveVerifyingDriverChannel(Protocol):
+    """A ``DriverChannel`` that can positively READ BACK what happened to a
+    ``drive_session`` dispatch (public issue #9, 2026-08-19) -- the
+    ``drive_session`` sibling of :class:`ClearVerifyingDriverChannel`.
+
+    THE DEFECT THIS EXISTS TO CLOSE. ``drive_session`` used to report the
+    SEND in a return value shaped like a verdict -- measured returning
+    ``success TRUE`` for a drive whose text sat unsubmitted in the target's
+    input buffer, because ``send()`` alone can only ever mean "bytes left".
+    ``ARMED != FIRED``, same class as GAU-09, one layer up.
+
+    ``verify_driven`` differs from ``verify_cleared`` in what "positive"
+    means: a cleared composer is unambiguous evidence of ITS effect, but an
+    idle composer is evidence of BOTH a genuine submit and a drive that
+    never landed at all -- so this method's own success path is not
+    "composer went idle", it is "the driven text was never observed
+    STRANDED, and the composer then went idle". The load-bearing check is
+    the positive stranded-input detector (bright-white SGR 97 on the
+    composer row, per the measured GAU-09/#9 pane read), not idle-by-
+    absence. Returns ``True`` on a confirmed submit, ``False`` on a
+    POSITIVE stranded-input observation, and ``None`` when a deadline
+    passes with neither observed (could-not-determine, distinct from
+    looked-and-failed). Like ``verify_cleared``, it must NEVER re-send
+    anything: a drive fires real text into a live input buffer, so a
+    verification step that retried would deposit a second copy.
+    """
+
+    def verify_driven(self, text: str) -> bool | None: ...
 
 
 class DriverChannelSendError(Exception):
@@ -205,6 +249,47 @@ class OperatorHostDriver:
         return []
 
 
+class SyntheticHostDriver:
+    """GAU-24 — the degenerate driver for a gauge tamper canary's lifecycle
+    row (§5 pattern, alongside :class:`OperatorHostDriver`). A canary is
+    never dispatched through ``spawn_session``; its row is minted directly
+    by ``register_synthetic_session`` in ``spawning``, and no process ever
+    exists behind it. ``terminate`` therefore has nothing to tear down and
+    says so the same way the operator driver does — ``HostCannotSpawnError``
+    is caught by ``terminate_session``'s own ``_terminate_host`` and treated
+    as "no host action available", letting the ledger transition land
+    without inventing a second no-op convention there."""
+
+    def spawn(self, spec: Mapping[str, object]) -> str:
+        del spec
+        raise HostCannotSpawnError(
+            "the synthetic host driver cannot spawn; a canary's lifecycle "
+            "row is minted directly by register_synthetic_session, never "
+            "through spawn_session.",
+        )
+
+    def alive(self, host_ref: str) -> bool:
+        del host_ref
+        return False
+
+    def terminate(self, host_ref: str, grace_seconds: int) -> None:
+        del host_ref, grace_seconds
+        raise HostCannotSpawnError(
+            "the synthetic host driver has no process to terminate; a "
+            "canary's row has none behind it by construction.",
+        )
+
+    def driver_channel(self, host_ref: str) -> DriverChannel | None:
+        del host_ref
+        return None
+
+    def capability_report(self) -> dict[str, object]:
+        return {"host": SYNTHETIC_HOST, "topology": "synthetic", "inspectable_via": []}
+
+    def verify_config(self) -> list[str]:
+        return []
+
+
 RegistryKey = str | tuple[str, str]
 
 
@@ -219,9 +304,11 @@ def _build_registry() -> dict[RegistryKey, HostDriver]:
         (AGENT_RUNTIME_CLAUDE_CODE, OPERATOR_HOST): OperatorHostDriver(),
         (AGENT_RUNTIME_CLAUDE_CODE, "headless"): HeadlessHostDriver(),
         (AGENT_RUNTIME_CLAUDE_CODE, "tmux"): TmuxHostDriver(),
+        (AGENT_RUNTIME_CLAUDE_CODE, SYNTHETIC_HOST): SyntheticHostDriver(),
         (AGENT_RUNTIME_CODEX, OPERATOR_HOST): OperatorHostDriver(),
         (AGENT_RUNTIME_CODEX, "headless"): CodexAppServerHostDriver(),
         (AGENT_RUNTIME_CODEX, "tmux"): CodexTmuxHostDriver(),
+        (AGENT_RUNTIME_CODEX, SYNTHETIC_HOST): SyntheticHostDriver(),
     }
 
 
@@ -310,8 +397,10 @@ __all__ = [
     "AGENT_RUNTIME_CODEX",
     "SUPPORTED_AGENT_RUNTIMES",
     "OPERATOR_HOST",
+    "SYNTHETIC_HOST",
     "AgentRuntimeNotSupportedError",
     "ClearVerifyingDriverChannel",
+    "DriveVerifyingDriverChannel",
     "DriverChannel",
     "DriverChannelSendError",
     "HostCannotSpawnError",
@@ -319,6 +408,7 @@ __all__ = [
     "HostMechanismMissingError",
     "HostNotDeclaredError",
     "OperatorHostDriver",
+    "SyntheticHostDriver",
     "resolve_host_driver",
     "shutdown_all_drivers",
 ]

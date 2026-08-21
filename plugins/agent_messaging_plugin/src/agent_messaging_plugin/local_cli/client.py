@@ -439,6 +439,7 @@ class BridgeClient:
         agent_instance_id: str,
         session_label: str,
         agent_session_id: str,
+        watcher_declared: bool = False,
     ) -> dict[str, Any]:
         """Register this bridge as a peer identity (the receive prerequisite).
 
@@ -446,7 +447,11 @@ class BridgeClient:
         anonymous bridge long-polls an empty queue. ``agent_session_id`` is the
         stable per-logical-session carrier the reconnect self-refresh and
         ``peer_claim_role`` key on (REL-07) — pass the launcher-exported value,
-        never a PID.
+        never a PID. ``watcher_declared`` (MSG-04/identity-unification,
+        2026-08-20): True for `solet watch`'s own registration, so
+        ``BridgeBinding.is_watcher`` still reads true when this caller
+        registers under a ledger ``AGENT_INSTANCE_ID`` that carries none of
+        the legacy ``agi-watch-`` prefix it used to infer that from.
         """
         bridge_id = self._require_bridge()
         return self._post_or_reject(
@@ -457,6 +462,7 @@ class BridgeClient:
                 "session_label": session_label,
                 "parent_pid": os.getpid(),
                 "agent_session_id": agent_session_id,
+                "watcher_declared": watcher_declared,
             },
         )
 

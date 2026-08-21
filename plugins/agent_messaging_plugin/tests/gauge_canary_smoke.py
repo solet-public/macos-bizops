@@ -77,6 +77,7 @@ from agent_messaging_plugin.gauge_canary import (  # noqa: E402
     canary_tick,
     direct_canary_arrest,
     register_synthetic_session,
+    retire_gauge_canary,
     verify_canary,
 )
 from agent_messaging_plugin.gauge_canary_store import (  # noqa: E402
@@ -90,6 +91,7 @@ from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.peer_registry import PeerRegistry  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     LIFECYCLE_LIVE,
+    LIFECYCLE_RETIRED,
     LIFECYCLE_SPAWNING,
     PEER_BINDING_NAMESPACE,
     TABLE_GAUGE_CANARY_REGISTRY,
@@ -97,6 +99,10 @@ from agent_messaging_plugin.schema import (  # noqa: E402
     TABLE_SESSION_CONTEXT_STATUS,
     WORK_CLASS_READ_ONLY,
     get_peer_binding_schema,
+)
+from agent_messaging_plugin.session_hosts import (  # noqa: E402
+    HostMechanismMissingError,
+    resolve_host_driver,
 )
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     ManagedSessionSpec,
@@ -203,15 +209,47 @@ def _wired() -> tuple[Any, PeerRegistry, Any, str]:
         spawned_by_instance_id=STEWARD, directed_by="role:lane-gau-store",
         report_by_seconds=5400,
     )
+    # GAU-22(c): AGE the registration. `register_synthetic_session` stamps
+    # `last_transition_at` at real wall-clock "now", while every exercise below
+    # ticks the gauge at a synthetic PAST time — so the row reads "transitioned
+    # just now, gauge already stale", which is exactly a /clear rotation and
+    # exactly what the grace window correctly holds fire on. A canary that has
+    # been standing watch is not one that just rotated; model that. This ages
+    # an existing row, it does not bypass the registration verb the comment
+    # above insists on.
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": CANARY}},
+        {"last_transition_at": (datetime.now(UTC) - timedelta(days=1)).isoformat()},
+    )
     return state, reg, mgr, bridge_id
 
 
 def _tick(state: Any, *, now: datetime, tokens: int = 120_000) -> dict[str, Any]:
-    return canary_tick(
+    """Tick the canary at a SYNTHETIC time, keeping the row's clocks coherent.
+
+    GAU-22(c): the tick writes the gauge at ``now`` (which callers set in the
+    past), but the lifecycle transition it drives stamps ``last_transition_at``
+    at REAL wall-clock now. That leaves the row reading "transitioned this
+    instant, gauge already hours old" — the exact rotation signature the
+    grace window holds fire on, and a state no real canary can be in: a
+    session that last ticked 5400s ago transitioned at or before then.
+    Ageing the transition to match the synthetic tick is what keeps this
+    fixture's two clocks on the same timeline. Production is unaffected —
+    only ``session_lifecycle_store``'s insert and ``transition_lifecycle_state``
+    ever write this column, never an ordinary gauge update.
+    """
+    result = canary_tick(
         state, agent_instance_id=CANARY, current_tokens=tokens, ceiling=1_000_000,
         model="claude-sonnet-5", claude_session_id="c-canary",
         directed_by="role:lane-gau-store", now=now,
     )
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": CANARY}},
+        {"last_transition_at": (now - timedelta(days=1)).isoformat()},
+    )
+    return result
 
 
 def _stale_lifecycle(state: Any, *, last_alive: datetime) -> None:
@@ -228,6 +266,13 @@ def _stale_lifecycle(state: Any, *, last_alive: datetime) -> None:
         {
             "report_by_seconds": 5400,
             "report_by": (last_alive + timedelta(seconds=5400)).isoformat(),
+            # GAU-22(c), same root fix as session_sweep_smoke.py's _ticking:
+            # the spawn helper stamps last_transition_at at real wall-clock
+            # "now", so a backdated gauge would read as "transitioned just
+            # now, gauge already stale" — indistinguishable from a /clear
+            # rotation, which the grace window correctly holds fire on. A
+            # genuinely long-lived canary transitioned long ago; model that.
+            "last_transition_at": (last_alive - timedelta(days=1)).isoformat(),
         },
     )
 
@@ -360,6 +405,88 @@ def test_a_retired_canary_still_explains_its_history() -> None:
            "and drops out of the operational filter list")
     _check(len(list_canaries(state, include_retired=True)) == 1,
            "but is still on the record for anyone reading its old alarms")
+
+
+def test_retire_gauge_canary_tears_down_the_ledger_row_too() -> None:
+    """★ GAU-24, THE LEAK THIS CLOSES. Before this fix `retire_session` on a
+    canary's ledger row raised `unsupported_on_host`, because `synthetic` had
+    no host driver — the store-level `retire_canary` above only ever touched
+    the registry mark, never the ledger row, so every exercise left one
+    permanently-`live` `managed_session` row nothing could retire.
+
+    This drives the row through `register_synthetic_session` + a tick (the
+    same path `test_the_synthetic_session_is_visible_to_the_detector` proves
+    the detector sees), then calls the new orchestration verb and checks BOTH
+    halves land: the ledger row reaches `retired`, and the registry mark is
+    stamped, in the ledger-first order the function's docstring commits to.
+
+    MUTATION: revert `SyntheticHostDriver.terminate` to not exist at all
+    (i.e. the host resolves to nothing) → `resolve_host_driver` raises
+    `HostMechanismMissingError`, `retire_session` raises `unsupported_on_host`
+    inside `retire_gauge_canary`, and this test's first `_check` goes red —
+    the exact regression GAU-24 exists to prevent.
+    """
+    state, _, _, _ = _wired()
+    now = datetime.now(UTC)
+    _tick(state, now=now)
+    _check(read_managed_session(state, CANARY)["lifecycle_state"] == LIFECYCLE_LIVE,
+           "fixture precondition: the canary's ledger row is live before retiring")
+    result = retire_gauge_canary(
+        state, agent_instance_id=CANARY, directed_by="role:lane-canary-retire",
+    )
+    _check(result["session_row_existed"] is True,
+           "the verb found the ledger row minted by register_synthetic_session")
+    _check(
+        read_managed_session(state, CANARY)["lifecycle_state"] == LIFECYCLE_RETIRED,
+        "★ and the no-op synthetic host driver let retire_session reach "
+        "'retired' instead of raising unsupported_on_host — the ledger-side "
+        "half of the leak is closed",
+    )
+    _check(not is_active_canary(state, CANARY),
+           "the registry mark was stamped too, ledger-first as documented")
+
+
+def test_retiring_a_canary_with_no_ledger_row_only_touches_the_registry() -> None:
+    """A canary registered but never given a synthetic session (no ledger row
+    yet) must still retire cleanly — the ledger step is conditional, not
+    assumed."""
+    state = _state()
+    register_canary(
+        state, agent_instance_id=CANARY, purpose="never spawned",
+        registered_by="role:lane-canary-retire",
+    )
+    result = retire_gauge_canary(
+        state, agent_instance_id=CANARY, directed_by="role:lane-canary-retire",
+    )
+    _check(result["session_row_existed"] is False,
+           "no managed_session row existed, so retire_session was never called")
+    _check(not is_active_canary(state, CANARY), "the registry mark is still retired")
+
+
+def test_synthetic_is_a_declared_no_op_not_a_resolution_bypass() -> None:
+    """★ NEGATIVE CONTROL for GAU-24's central safety claim: registering a
+    no-op driver for the literal name 'synthetic' must not widen into "any
+    host that fails to resolve gets a free pass". A host name that is
+    genuinely unregistered — a typo, a future host not yet built — must still
+    raise `HostMechanismMissingError`, exactly as before this fix.
+
+    MUTATION: collapse `_driver_for` to return the synthetic driver for ANY
+    unrecognised host (e.g. `_REGISTRY.get(key, _REGISTRY[SYNTHETIC_HOST])`)
+    → this test's `HostMechanismMissingError` never raises and it fails,
+    catching the exact regression this control exists to prevent: a real
+    orphaned session on an unresolvable host getting silently marked
+    retirable without anything being torn down.
+    """
+    _check(resolve_host_driver(SYNTHETIC_HOST, "claude_code")[1] == SYNTHETIC_HOST,
+           "the declared literal 'synthetic' resolves to a registered driver")
+    raised: HostMechanismMissingError | None = None
+    try:
+        resolve_host_driver("gau24-typo-host-never-registered", "claude_code")
+    except HostMechanismMissingError as exc:
+        raised = exc
+    _check(raised is not None,
+           "a genuinely unregistered host name still raises "
+           "HostMechanismMissingError — the no-op path did not widen")
 
 
 # ---------------------------------------------------------------------------
@@ -804,9 +931,11 @@ def test_the_synthetic_session_is_visible_to_the_detector() -> None:
            "the row is minted in SPAWNING, exactly where spawn_session leaves "
            "it — no bespoke promotion rule is invented here")
     _check(minted["host"] == SYNTHETIC_HOST,
-           "declaring a host with NO registered driver, so every verb that "
-           "would touch a process refuses this row loudly instead of pointing "
-           "a kill or a keystroke at a pane that does not exist")
+           "declaring a host whose driver is registered but DEGENERATE "
+           "(GAU-24), so spawn/drive/clear still refuse this row loudly "
+           "instead of pointing a keystroke at a pane that does not exist — "
+           "only terminate/retire get a no-op path, see "
+           "test_retire_gauge_canary_tears_down_the_ledger_row_too")
     now = datetime.now(UTC)
     _tick(state, now=now - timedelta(seconds=5400))
     _check(read_managed_session(state, CANARY)["lifecycle_state"] == LIFECYCLE_LIVE,
@@ -960,6 +1089,9 @@ def main() -> int:
         test_the_detector_is_blind_to_the_canary,
         test_the_mark_is_not_on_the_gauge_row,
         test_a_retired_canary_still_explains_its_history,
+        test_retire_gauge_canary_tears_down_the_ledger_row_too,
+        test_retiring_a_canary_with_no_ledger_row_only_touches_the_registry,
+        test_synthetic_is_a_declared_no_op_not_a_resolution_bypass,
         test_every_tamper_is_attributable,
         test_a_tamper_may_only_target_a_canary,
         test_an_unbounded_or_backwards_window_is_refused,

@@ -300,6 +300,48 @@ def test_worker_ignores_jobs_from_other_plugins() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Boot-ordering race (CON-07 / public issue #23, §47.5): orchestrator_ref is
+# set before EventOrchestrator._delegate_service_attributes() has run, so
+# `async_job_manager` does not exist on it yet — not None, ABSENT. A direct
+# `self.orchestrator_ref.async_job_manager` read raises AttributeError in
+# that window; every sibling connector (external_postgres_plugin,
+# g_suite_plugin) reads it with getattr(..., None) instead. `_BareOrchestrator`
+# below has no such attribute at all, reproducing that exact window without a
+# real EventOrchestrator.
+# ---------------------------------------------------------------------------
+
+
+class _BareOrchestrator:
+    """Stand-in for an EventOrchestrator before service-attribute delegation
+    has run: genuinely has no `async_job_manager` attribute (not None)."""
+
+
+def test_worker_survives_orchestrator_before_service_delegation() -> None:
+    """The mutation this catches: reverting either read below back to a bare
+    `self.orchestrator_ref.async_job_manager` reintroduces an uncaught
+    AttributeError here instead of a clean early return."""
+    plugin = MarketoPlugin()
+    plugin.logger = MagicMock()
+    plugin.orchestrator_ref = _BareOrchestrator()
+    plugin._process_pending_jobs()  # must not raise AttributeError
+    _assert("worker tolerates orchestrator_ref before service delegation (no crash)", True)
+
+
+def test_require_async_job_manager_raises_runtime_error_not_attribute_error() -> None:
+    """Same boot-race window, through the request-path wrapper: it must raise
+    its own documented RuntimeError, not leak the platform's AttributeError."""
+    plugin = MarketoPlugin()
+    plugin.orchestrator_ref = _BareOrchestrator()
+    try:
+        plugin._require_async_job_manager()
+        _assert("_require_async_job_manager raises when manager absent", False, "no exception raised")
+    except AttributeError as exc:
+        _assert("_require_async_job_manager raises RuntimeError, not AttributeError", False, str(exc))
+    except RuntimeError:
+        _assert("_require_async_job_manager raises RuntimeError, not AttributeError", True)
+
+
+# ---------------------------------------------------------------------------
 # check_marketo_job_status: every schema key present in every reachable state
 # (coordinator-seat advisory, 2026-08-09: an absent schema-declared key bricks the
 # verb on every ExecutionContext.store_result call, not just some.)
@@ -365,6 +407,8 @@ def main() -> int:
     test_worker_processes_single_call_verb_to_completion()
     test_worker_routes_vendor_failure_to_error_status()
     test_worker_ignores_jobs_from_other_plugins()
+    test_worker_survives_orchestrator_before_service_delegation()
+    test_require_async_job_manager_raises_runtime_error_not_attribute_error()
     test_check_job_status_schema_keys_present_when_queued()
     test_check_job_status_schema_keys_present_when_processing()
     test_check_job_status_schema_keys_present_when_completed()

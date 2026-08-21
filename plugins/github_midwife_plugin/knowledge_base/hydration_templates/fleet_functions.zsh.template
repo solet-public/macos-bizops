@@ -4,10 +4,13 @@
 # Lives in the deployment directory, same as the single-session launcher, so it arrives
 # via `git pull`, never another ~/.zshrc replacement.
 #
-# This is a DIFFERENT trust level than claude-{{SOLET_NAME}} (the
-# Step 2 single-session launcher). That launcher NEVER passes
-# --dangerously-skip-permissions (a fixed invariant) --
-# it is the safe default for one operator running one session.
+# The Step 2 single-session launcher (claude-{{SOLET_NAME}}) skips permission
+# prompts by default; set SOLET_PERMISSION_PROMPTS=1 there to get them back.
+# The functions below are for running SEVERAL concurrent named sessions, which
+# is a different thing from permission posture — they add --remote-control so a
+# coordinator session can drive workers. Their own
+# {{SOLET_NAME}}_FLEET_SKIP_PERMISSIONS knob is kept for compatibility and is
+# redundant with the launcher default.
 # The functions below are for an operator who has explicitly chosen to run
 # SEVERAL concurrent named sessions against {{SOLET_NAME}} (a
 # coordinator-style fleet) and has been walked through what
