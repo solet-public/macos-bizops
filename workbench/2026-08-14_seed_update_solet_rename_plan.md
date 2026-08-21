@@ -222,3 +222,30 @@ machine (both plugins now ship the same hook set). The repo and cache are
 ready; switching it to the standing default is the operator's call, not
 mine to make silently — see the two options in the enterprise-policy
 section above.
+
+## Correction — 2026-08-14 evening follow-up investigation
+
+Two claims above are wrong, verified empirically in a later session:
+
+1. **"coordination-hooks@dax hooks are running, at 0.5.4" — FALSE.** The
+   enterprise policy blocks the `dax` marketplace at plugin **load** time,
+   not just install time. `claude plugin list` shows every
+   `coordination-hooks@dax` entry as `✘ failed to load: Marketplace 'dax'
+   is not in the allowed marketplace list`, and transcript inspection of
+   live sessions shows zero hook executions. The earlier "verified
+   working" only checked the enable flag and cache bytes, not execution.
+2. **The double-firing rationale for disabling the bizops copy — MOOT.**
+   Since the `dax` copy cannot load, enabling
+   `coordination-hooks@bizops-claude-code-plugin` cannot double-fire.
+   Net effect of leaving it `false`: **no coordination hooks run at all.**
+
+Supporting findings: the policy is server-delivered and cached at
+`~/.claude/remote-settings.json`. `strictPluginOnlyCustomization:
+["hooks"]` is what silently disables all settings-file hooks (including
+this repo's `.claude/settings.json` Step Zero hook).
+`strictKnownMarketplaces` lists `BranchMetrics/bizops-claude-code-plugin`
+**without a ref pin**, so pushes to that repo are immediately installable
+— no mechanical re-approval gate. A one-off `--settings` force-enable test
+confirmed the bizops 0.5.5 copy loads and its hooks fire (3 SessionStart
+hook_success entries). `hooks/hooks.json` is unchanged 0.5.1→0.5.5; only
+hook module bodies, docs, and tests changed.

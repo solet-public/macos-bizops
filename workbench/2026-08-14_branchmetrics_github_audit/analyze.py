@@ -10,6 +10,16 @@ import json, sys
 ORG_ADMIN_TEAMS = {"saas-gh-admins", "disco-gh-admins", "infra-gh-admins"}
 BIZOPS_TEAM = "business-solutions"
 
+# Operator ruling 2026-08-14 (David Westgate, business-solutions owner): the
+# doc's model (owning team holds Maintain, an org-admin team holds sole
+# Admin) is declined for business-solutions' own repos. bizops is not
+# relinquishing Admin/ownership on its repos to an org-admin team -- Admin
+# held by business-solutions itself is a deliberate stance, not a compliance
+# gap, and should not keep resurfacing across audit re-runs. Only flag if
+# business-solutions holds neither Maintain nor Admin (i.e. is missing
+# owning-team-level access entirely). This is scoped to business-solutions'
+# own repos specifically, not a blanket read of the doc for every team.
+
 # Doc's PR-settings auto-delete-branch exception is scoped to whichever team
 # owns the dashboard repo, not to a repo literally named "dashboard". There is
 # no clean API signal for "which team is 'the dashboard team'" today, so this
@@ -35,6 +45,7 @@ def main():
 
         bs_role = team_perm.get(BIZOPS_TEAM)
         owning_team_has_maintain = bs_role == "maintain"
+        owning_team_ok = bs_role in ("maintain", "admin")
 
         org_admin_with_admin = [s for s, p in team_perm.items() if s in ORG_ADMIN_TEAMS and p == "admin"]
         infra_admin = "infra-gh-admins" in org_admin_with_admin
@@ -89,7 +100,7 @@ def main():
         gaps = []
         if not internal_ok: gaps.append(f"visibility={visibility}")
         if not branch_main_ok: gaps.append(f"default branch={default_branch}")
-        if not owning_team_has_maintain: gaps.append(f"owning team role={bs_role or 'none'} (not Maintain)")
+        if not owning_team_ok: gaps.append(f"owning team role={bs_role or 'none'} (not Maintain/Admin)")
         if not org_admin_with_admin: gaps.append("no org-admin team has Admin")
         if individual_only: gaps.append(f"individual grants: {','.join(individual_only)}")
         if not codeowners_ok: gaps.append("CODEOWNERS required but missing")
@@ -111,6 +122,7 @@ def main():
             "repo": repo,
             "url": e.get("html_url"),
             "owning_team_has_maintain": owning_team_has_maintain,
+            "owning_team_ok": owning_team_ok,
             "owning_team_role": bs_role,
             "org_admin_with_admin": org_admin_with_admin,
             "infra_admin": infra_admin,

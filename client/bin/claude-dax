@@ -10,9 +10,13 @@
 #
 # Works standalone by absolute path — no shell integration required.
 #
-# INVARIANT (do not edit this away): this launcher never passes
-# --dangerously-skip-permissions. Your tool-approval flow is the safety
-# boundary between the agent and your machine.
+# OPERATOR RULING 2026-08-21 (supersedes the seed's original "never pass
+# --dangerously-skip-permissions" invariant): this launcher ALWAYS passes
+# --dangerously-skip-permissions. The operator declared bypass the only
+# authorized permission setting for this deployment after the CLI's
+# auto-mode classifier began blocking sanctioned production work despite
+# defaultMode=bypassPermissions in user settings. Do not revert this on a
+# seed update without an explicit operator decision.
 
 label="${1:-Operator}"
 model="$2"
@@ -34,6 +38,53 @@ typeset -a extra_flags
 # search the knowledge base for "structured-choice prompt default deny".
 [[ "$SOLET_ALLOW_ASKUSERQUESTION" != "1" ]] && \
   extra_flags+=(--settings "/Users/david.westgate/Workspace/dax/client/claude-session-overlay.json")
+
+# LAUNCHER-ONLY CLAUDE CODE SELF-UPDATE CHECK (operator decision 2026-08-21;
+# do not drop this block on a seed re-render without an explicit operator
+# decision — same durability class as the --dangerously-skip-permissions
+# ruling above). Deliberately lives here and nowhere else: a session spun up
+# dynamically (Task/Agent tool) never execs this script, so it never runs
+# this check — that's the whole mechanism for "launcher sessions only,"
+# no extra guard needed.
+#
+# Split by cost so an update never delays getting to a prompt:
+#   - foreground, every launch: a local, no-network "is it outdated" check
+#     (cheap — no tap refresh) and, only when genuinely outdated, the actual
+#     upgrade (bounded, happens every few days, done before exec so the
+#     session never runs on a binary whose install dir got rug-pulled out
+#     from under it mid-session).
+#   - background, throttled: the slow part (refreshing brew's tap metadata)
+#     runs detached so it never blocks this launch — it only makes the
+#     NEXT launch's cheap check accurate.
+# Resolve the cask from the binary PATH actually resolves, not a guess/grep:
+# guarantees we upgrade the exact thing about to be exec'd, and gives us a
+# free signal for "not Homebrew-managed" (native/npm installs self-update on
+# their own — nothing for this launcher to do, and we say so instead of
+# silently skipping, since a silent skip is how the dual-install ambiguity
+# this launcher used to have would defeat this without anyone noticing).
+_claude_bin=${$(command -v claude):A}
+if [[ "$_claude_bin" == */Caskroom/* ]]; then
+  _cask=${${_claude_bin#*/Caskroom/}%%/*}
+
+  _outdated=$(HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --cask "$_cask" --quiet 2>/dev/null)
+  if [[ -n "$_outdated" ]]; then
+    echo "claude-dax: $_cask is outdated — upgrading before launch..." >&2
+    HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --cask "$_cask" --quiet ||
+      echo "claude-dax: brew upgrade failed — launching with the existing install" >&2
+  fi
+
+  _stamp="$HOME/.cache/claude-code/last-brew-update"
+  _throttle_secs=43200  # 12h — matches brew's own auto-update default order
+  mkdir -p "${_stamp:h}"
+  _last=$(cat "$_stamp" 2>/dev/null); _last=${_last:-0}
+  _now=$(date +%s)
+  if (( _now - _last >= _throttle_secs )); then
+    echo "$_now" > "$_stamp"
+    ( brew update --quiet ) >> "$HOME/.cache/claude-code/update.log" 2>&1 </dev/null &
+  fi
+else
+  echo "claude-dax: active \`claude\` ($_claude_bin) is not Homebrew-managed — skipping the brew update check (native/npm installs self-update on their own)." >&2
+fi
 
 # Session label: read by the optional peer bridge for role identity and by the
 # coordination-hooks plugin's role-binding reminder for the role re-claim.
@@ -63,4 +114,4 @@ AGENT_SESSION_LABEL="$label" \
 AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
 AGENT_WAKE_CLI="dax" \
 GIT_CONTROLLER_NAME="Git-Controller" \
-exec claude --name "$label" "${extra_flags[@]}"
+exec claude --name "$label" --dangerously-skip-permissions "${extra_flags[@]}"

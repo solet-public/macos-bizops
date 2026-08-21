@@ -1,0 +1,30 @@
+users/david.westgate/from_claude/2026-07-09_mass-deleted-contacts-restore-audit.tsv
+users/david.westgate/from_claude/2026-07-09_purged-tasks-worklist.tsv
+users/david.westgate/from_claude/2026-07-06_zuora_account_backfill_touch_list.csv
+users/david.westgate/from_claude/2026-07-09_unrestorable-contacts-duplicate-value.tsv
+users/david.westgate/from_claude/2026-07-09_lost-campaign-memberships-worklist.tsv
+users/david.westgate/from_claude/2026-07-09_lost-campaign-memberships-sample.tsv
+users/david.westgate/from_claude/2026-07-09_purged-events-worklist.tsv
+users/david.westgate/from_claude/2026-07-09_purged-ocr-worklist.tsv
+users/david.westgate/from_claude/2026-08-07_core_sync_endpoint_payload_multi_pair_account.json
+users/david.westgate/from_claude/2026-08-07_core_sync_endpoint_payload_nextdoor.json
+users/david.westgate/from_claude/2026-08-07_core_sync_endpoint_payload_migrated_account.json
+users/david.westgate/from_claude/2026-08-03_marketo_lead_field_descriptors_872.tsv
+users/david.westgate/work_items/2026-06-17_core_query_inventory.md
+users/david.westgate/work_items/2026-06-18_cake_monetization_spec.md
+users/david.westgate/work_items/2026-07-10_prod_share_branch_model_inventory.tsv
+task_list/R2G SOP V1. .pdf
+task_list/Renewal_Summary/R2G SOP V1. .pdf
+task_list/Renewal_Summary/Renewal Kick-Off - Ban Ban (0013Z00001jyVumQAE).pdf
+task_list/Renewal_Summary/Renewal Kick-Off - Cars24 (001f100001VSsCyAAL).pdf
+task_list/Renewal_Summary/Renewal Kick-Off - Template.pdf
+users/david.westgate/task_list/Renewal_Summary/R2G SOP V1. .pdf
+users/david.westgate/task_list/Renewal_Summary/Renewal Kick-Off - Ban Ban (0013Z00001jyVumQAE).pdf
+users/david.westgate/task_list/Renewal_Summary/Renewal Kick-Off - Cars24 (001f100001VSsCyAAL).pdf
+users/david.westgate/task_list/Renewal_Summary/Renewal Kick-Off - Template.pdf
+users/david.westgate/task_list/2026-04-17_contract_renewal_brief/R2G SOP V1. .pdf
+users/david.westgate/task_list/2026-04-17_contract_renewal_brief/Renewal Kick-Off - Ban Ban (0013Z00001jyVumQAE).pdf
+users/david.westgate/task_list/2026-04-17_contract_renewal_brief/Renewal Kick-Off - Cars24 (001f100001VSsCyAAL).pdf
+users/david.westgate/task_list/2026-04-17_contract_renewal_brief/Renewal Kick-Off - Template.pdf
+users/david.westgate/docs/example_zshrc.txt
+python_scripts/cake_tools/test_accounts.tsv

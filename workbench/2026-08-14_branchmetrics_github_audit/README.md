@@ -60,6 +60,21 @@ people the operator named (Sushant Yadav, Jitender Yadav, Hasan Caliskan,
 David Westgate) — if the team's membership or purpose changes, re-verify this
 assumption before trusting a re-run's repo list.
 
+## `business-solutions` keeps Admin, not Maintain (2026-08-14 operator ruling)
+
+The doc's Repository Permissions model wants the owning team at **Maintain**
+and an org-admin team (`saas-gh-admins`/`disco-gh-admins`/`infra-gh-admins`)
+holding sole **Admin**. The operator (David Westgate, a `business-solutions`
+owner) explicitly declined this for bizops' own repos: business-solutions is
+not relinquishing Admin/ownership on its repos to an org-admin team. This is
+a deliberate stance, not a compliance gap — `analyze.py`'s
+`owning_team_ok` check accepts either `maintain` or `admin` for
+`business-solutions` and only flags a real gap if the team holds neither
+(i.e. is missing owning-team-level access entirely). Scoped to
+business-solutions' own repos specifically — this isn't a read that the doc's
+Maintain/Admin separation is wrong for every team, just that bizops isn't
+adopting it for itself.
+
 ## Known platform gap (reported upstream, fix said to be imminent)
 
 Every `g_suite_plugin` verb (as of 2026-08) dispatches as an async job — the
