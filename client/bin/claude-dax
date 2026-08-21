@@ -17,6 +17,16 @@
 # auto-mode classifier began blocking sanctioned production work despite
 # defaultMode=bypassPermissions in user settings. Do not revert this on a
 # seed update without an explicit operator decision.
+#
+# UPSTREAM CONVERGED 2026-08-20 (seed release 2026-08-20, commit 5319656):
+# the seed dropped that original invariant and now passes
+# `--permission-mode bypassPermissions` by default, honouring
+# SOLET_PERMISSION_PROMPTS=1 as the opt back IN to per-action approval. The
+# local ruling is the STRONGER of the two and stands — re-rendering this
+# launcher from claude_launcher.template would DOWNGRADE it, because the
+# measured 2026-08-21 failure was auto-mode overriding a bypassPermissions
+# setting. What is adopted from upstream is only the escape hatch below, so
+# a supervised session has the documented route the seed advertises.
 
 label="${1:-Operator}"
 model="$2"
@@ -38,6 +48,24 @@ typeset -a extra_flags
 # search the knowledge base for "structured-choice prompt default deny".
 [[ "$SOLET_ALLOW_ASKUSERQUESTION" != "1" ]] && \
   extra_flags+=(--settings "/Users/david.westgate/Workspace/dax/client/claude-session-overlay.json")
+
+# Permission mode. Bypass is the DEFAULT and the only authorized setting here
+# (see the operator ruling at the top of this file); SOLET_PERMISSION_PROMPTS=1
+# is the seed's documented opt back IN to per-action approval for a session you
+# intend to supervise. Held in its own array, not appended to extra_flags,
+# because "which permission flag did this session get" must stay readable at
+# the exec line rather than buried in an accumulating list.
+#
+# Note this launcher takes POSITIONAL arguments (label, model, effort) and
+# forwards no arbitrary flags, so `claude-dax --permission-mode ...` is read as
+# label="--permission-mode" and fails with an error naming neither cause. Use
+# the environment variable.
+typeset -a permission_flags
+if [[ "$SOLET_PERMISSION_PROMPTS" == "1" ]]; then
+  echo "claude-dax: SOLET_PERMISSION_PROMPTS=1 — per-action approval prompts ON for this session." >&2
+else
+  permission_flags+=(--dangerously-skip-permissions)
+fi
 
 # LAUNCHER-ONLY CLAUDE CODE SELF-UPDATE CHECK (operator decision 2026-08-21;
 # do not drop this block on a seed re-render without an explicit operator
@@ -114,4 +142,4 @@ AGENT_SESSION_LABEL="$label" \
 AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
 AGENT_WAKE_CLI="dax" \
 GIT_CONTROLLER_NAME="Git-Controller" \
-exec claude --name "$label" --dangerously-skip-permissions "${extra_flags[@]}"
+exec claude --name "$label" "${permission_flags[@]}" "${extra_flags[@]}"
