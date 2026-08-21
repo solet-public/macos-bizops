@@ -143,6 +143,46 @@ one router (`36596`), active color `solet-blue-890ede34`, health `healthy`, KB
 live path returning results.** This state is self-healing across reboot because
 the surviving process is the launchd-managed one.
 
+### ⚠ Standing condition this convergence leaves behind — read before the next deploy
+
+The release ledger and the running process now disagree, and that must not be
+discovered by surprise:
+
+```
+~/.ananta/releases/dax/current  -> rel-20260821T211746Z-0f00fe7   (materialized; NOT running)
+~/.ananta/releases/dax/previous -> rel-20260820T190035Z-2329ea4
+running process 38323            -> the git working tree, /Users/david.westgate/Workspace/dax
+```
+
+`apply_manifest` materialized `rel-20260821T211746Z-0f00fe7` and pointed
+`current` at it; converging on the launchd process means nothing is executing
+that tree. **No behavioural divergence** — the release was materialized from
+`0f00fe7` and the working tree is `0f00fe7` plus `2f30304`, which touches only
+`client/bin/claude-dax`, not platform code. But two things to check rather than
+assume next time:
+
+- `rollback_release` CASes the caller's `expected_current_release` against the
+  live `ReleaseManager.current_release`. Read it, don't guess it.
+- The next `apply_manifest` takes its baseline from `current`, not from what is
+  running.
+
+**Consequence to hold in mind: the git working tree is now what runs in
+production on this box.** An edit to `dax/` is live platform code after the next
+restart. The blue-green release path is effectively bypassed until
+`complete_swap` is bound — that is a standing condition created by defect (a)
+above, not by this cleanup.
+
+### Also open: this session held no role binding all session
+
+`plugin::agent_messaging_plugin::peer_list` returned an empty roster
+(`agent_ids: []`, `instances: {}`). That was the citable solo-fleet basis for
+the git-controller exemption, and it is *also* the disclosure that this seat
+holds no durable `Operator` claim — so anything `peer_send_by_name`'d to
+`Operator` was delivered nowhere, silently. Deliberately NOT armed during this
+session: arming a watcher would have invalidated the solo-fleet basis being
+cited for the gated git work. Arm it via the `rename` skill when the fleet
+actually needs to reach this seat.
+
 ---
 
 ## 3. Second instance of a known defect class: undeclared args silently dropped
