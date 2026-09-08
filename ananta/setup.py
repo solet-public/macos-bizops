@@ -17,6 +17,7 @@ setup(
         "requests>=2.32.0",
         "python-dotenv>=1.0.0",
         "click>=8.0.0",
+        "solet-setup-contracts",
     ],
     extras_require={
         # The platform commit gate's own toolchain (git-controller-commit

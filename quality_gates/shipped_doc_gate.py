@@ -82,7 +82,11 @@ if TYPE_CHECKING:
     # checked against the real measurement shape instead of being written
     # against `object` and reaching into it with getattr, which would type
     # -check a gate that had stopped being verifiable.
-    from seed_factory_plugin.shipped_doc_lint import LintReport, ProfileReport
+    from seed_factory_plugin.shipped_doc_lint import (
+        LintReport,
+        ProfileReport,
+        ToleratedSubject,
+    )
 
 EXIT_OK: Final[int] = 0
 EXIT_BLOCKING: Final[int] = 2
@@ -103,7 +107,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--allowlist", type=Path, default=None,
                         help=f"tracked-debt register (default: <repo-root>/{_DEFAULT_ALLOWLIST_RELPATH})")
     parser.add_argument("--baseline", type=Path, default=None,
-                        help=f"declared tolerated counts (default: <repo-root>/{_DEFAULT_BASELINE_RELPATH})")
+                        help=f"declared tolerated subjects (default: <repo-root>/{_DEFAULT_BASELINE_RELPATH})")
     parser.add_argument("--profile", action="append", default=[], metavar="BUNDLE",
                         help="capability bundle to measure; repeatable "
                              "(default: every bundle in capability_bundles.yaml)")
@@ -129,30 +133,38 @@ def _render_profile(report: ProfileReport) -> str:
     )
 
 
-def _baseline_violations(report: LintReport, declared: dict[str, int]) -> list[str]:
-    """Tolerated-count drift, in BOTH directions.
+def _render_subject(subject: ToleratedSubject) -> str:
+    check_id, key, occurrence = subject
+    return f"{check_id} {key} (occurrence {occurrence})"
 
-    Growth is new tracked debt landing without a register change — the shape
-    that moves a count while every BLOCKING check stays green. A SHRINK is
-    blocking too, and deliberately: debt that disappears inside an unrelated
-    commit is remediation nobody reviewed, and leaves the register describing a
-    tree that no longer exists. Baseline, not better.
+
+def _baseline_violations(
+    report: LintReport, declared: dict[str, frozenset[ToleratedSubject]],
+) -> list[str]:
+    """Tolerated-subject drift, in BOTH directions.
+
+    A subject set retains the profile, finding key, and occurrence ordinal.
+    Unlike the old count pin, it refuses a same-count substitution and still
+    detects a repeated occurrence of one tolerated citation.
     """
     violations: list[str] = []
     for profile_report in report.profiles:
         name = profile_report.profile
-        measured = profile_report.tolerated_count
+        measured = frozenset(profile_report.tolerated_subjects)
         if name not in declared:
-            violations.append(
-                f"{name}: tolerated={measured} but no baseline is declared. Add "
-                f"'{name}={measured}' to a '# tolerated-baseline:' line in the allowlist."
-            )
-        elif declared[name] != measured:
-            direction = "GREW" if measured > declared[name] else "SHRANK"
-            violations.append(
-                f"{name}: tolerated debt {direction} {declared[name]} -> {measured}. "
-                "De-path the new occurrence, or declare the new baseline in the same commit."
-            )
+            if measured:
+                violations.append(f"{name}: tolerated subjects present but no baseline is declared")
+            continue
+        unexpected = measured - declared[name]
+        missing = declared[name] - measured
+        violations.extend(
+            f"{name}: unexpected tolerated subject {_render_subject(subject)}"
+            for subject in sorted(unexpected)
+        )
+        violations.extend(
+            f"{name}: declared tolerated subject missing {_render_subject(subject)}"
+            for subject in sorted(missing)
+        )
     return violations
 
 
@@ -162,7 +174,29 @@ def _print_findings(header: str, lines: Sequence[str]) -> None:
         print(f"    {line}")
 
 
-def _verdict(report: LintReport, declared: dict[str, int]) -> int:
+def _identity_verdict_lines(report: LintReport) -> tuple[list[str], list[str]]:
+    blocking: list[str] = []
+    classified: list[str] = []
+    for finding in report.identity:
+        destination = classified if finding.classification is not None else blocking
+        destination.append(finding.render())
+    return blocking, classified
+
+
+def _print_classified_identity(lines: Sequence[str]) -> None:
+    if not lines:
+        return
+    print(
+        f"\nℹ️  CLASSIFIED: reason-bearing reserved-identity findings "
+        f"({len(lines)})"
+    )
+    for line in lines:
+        print(f"    {line}")
+
+
+def _verdict(
+    report: LintReport, declared: dict[str, frozenset[ToleratedSubject]],
+) -> int:
     """Print the measurement, then the blocking policy's answer to it."""
     print(f"📊 shipped_doc_gate — {len(report.profiles)} profile(s), "
           f"{report.union_file_count} distinct shipped files")
@@ -173,18 +207,20 @@ def _verdict(report: LintReport, declared: dict[str, int]) -> int:
         f"[{profile_report.profile}] {line}"
         for profile_report in report.profiles for line in profile_report.blocking
     ]
-    identity = [finding.render() for finding in report.identity]
+    identity, classified_identity = _identity_verdict_lines(report)
+    _print_classified_identity(classified_identity)
     drift = _baseline_violations(report, declared)
 
     for header, lines in (
         ("non-allowlisted cited-path findings in shipped markdown", citations),
         ("reserved-identity matches in shipped files", identity),
+        ("folded identity classification anchor drift", report.identity_anchor_violations),
         ("tolerated-debt baseline drift", drift),
     ):
         if lines:
             _print_findings(header, lines)
 
-    if citations or identity or drift:
+    if citations or identity or report.identity_anchor_violations or drift:
         return EXIT_BLOCKING
     print("✅ shipped_doc_gate: no blocking findings; tolerated debt at declared baseline")
     return EXIT_OK

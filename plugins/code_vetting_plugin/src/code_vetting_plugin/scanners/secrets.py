@@ -35,7 +35,7 @@ from ..models import (
     Severity,
 )
 from ..targets import TargetTree
-from ..toolrun import run, tool_available, tool_version
+from ..toolrun import run, tool_available, tool_unavailable_reason, tool_version
 
 _GITLEAKS = "gitleaks"
 _TRUFFLEHOG = "trufflehog"
@@ -239,7 +239,7 @@ def scan_gitleaks(tree: TargetTree, run_id: str) -> ScannerResult:
         return ScannerResult(
             findings=[],
             coverage=CoverageRecord(
-                scanner=_GITLEAKS, ran=False, files_examined=0, gap_reason="gitleaks not installed"
+                scanner=_GITLEAKS, ran=False, files_examined=0, gap_reason=tool_unavailable_reason(_GITLEAKS)
             ),
         )
     version = tool_version(_GITLEAKS)
@@ -260,7 +260,7 @@ def scan_trufflehog(tree: TargetTree, run_id: str) -> ScannerResult:
                 scanner=_TRUFFLEHOG,
                 ran=False,
                 files_examined=0,
-                gap_reason="trufflehog not installed — verified-secret cross-check not run",
+                gap_reason=f"{tool_unavailable_reason(_TRUFFLEHOG)} — verified-secret cross-check not run",
             ),
         )
     version = tool_version(_TRUFFLEHOG)

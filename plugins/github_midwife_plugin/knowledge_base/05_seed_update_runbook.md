@@ -159,7 +159,7 @@ The script boots out the affected LaunchAgents (with a bounded wait for the
 old label to actually clear `launchctl print` before bootstrapping — never
 an unbounded spin, fails loud if it doesn't clear in time), rewrites their
 labels, filenames, environment keys, and arguments, flips the launcher shell
-functions, reinstalls the messaging plugin so `<clone>/.venv/bin/solet`
+functions, reinstalls the messaging plugin so `<clone>/.venv/bin/solet-bridge`
 replaces the old console script (the old shim is removed, not aliased), and
 bootstraps the agents back. Idempotent: re-running reports already-migrated
 pieces and changes nothing — re-running `--apply` against an already-migrated
@@ -169,7 +169,7 @@ plan and you move on.
 
 After the platform is back (Step 4), run the residual guard: enumerate the
 plugin-config store and fail loud on any `homunculus_name` key it still
-carries (`solet call` a config listing if the release provides one, or ask
+carries (`<solet-name> call` a config listing if the release provides one, or ask
 the solet directly to enumerate its plugin-config keys). A hit means a
 plugin carried deployment-local config this script does not know about —
 stop and repair before continuing, do not rename it ad hoc.
@@ -313,6 +313,33 @@ idempotent by design: probes first, marker-based structural merges, never
 clobber. Re-run its Step 2 (and Step 4a if the operator uses fleet roles);
 the markers replace the old solet-owned pieces in place and leave
 everything else alone.
+
+**Evaluated, not built: can the update flow detect a stale rendered launcher
+itself, rather than relying on this paragraph being read?** (seed feedback
+#30/§48.3, 2026-08-24). The shape that would work: stamp each rendered
+launcher with a comment naming a content hash of the template it was
+rendered from (`# rendered-from: claude_launcher.template@<sha256>`), then a
+Step 7 check re-hashes the CURRENT template and compares against the
+deployed launcher's stamped value — a mismatch means the template moved and
+the launcher didn't follow. **Deliberately not implemented this pass**,
+for three reasons that together move this past "small": (1) it requires
+changing `_rendered_files`/`_render` in
+`plugins/github_midwife_plugin/src/github_midwife_plugin/setup_shell_operations.py`
+— genesis-path code shared
+by every render this runbook's Step 5 also depends on, not a leaf function;
+(2) every EXISTING install predates the stamp and would need a defined
+"unknown, assume stale, recommend re-hydration" reading rather than a false
+"not stale" default — the failure-mode cost of getting that fallback wrong
+is an operator trusting a launcher that silently is not the one they think;
+(3) the comment must land somewhere `_merge_block`/marker-based re-render
+won't treat as an operator edit to preserve across the NEXT hydration run,
+which is exactly the kind of interaction this doc's own marker-merge
+machinery has previously gotten subtly wrong. **Recommendation:** worth
+building once another release needs the same genesis-render touch point
+(amortizing the shared-function risk across two reasons to touch it), not
+as a standalone change justified by this one gap alone. Until then, this
+paragraph — read at update time, not detected at runtime — is the
+mechanism.
 
 A release that ADDS a plugin needs one more route. Step 3's editable install
 puts the new code in the venv, but the pull never touches the clone's
@@ -498,7 +525,7 @@ re-ingestion step, for every knowledge base the release notes name as
 having content removed, is a re-install:
 
 ```bash
-solet call service_interface::knowledge_service::install '{"name": "<kb-name>"}'
+<solet-name> call service_interface::knowledge_service::install '{"name": "<kb-name>"}'
 ```
 
 Re-install is the documented idempotent path: it drops the KB's entire
@@ -553,6 +580,65 @@ LaunchAgent alone either way.
   AFTER Step 6's re-install — before it, a hit is the expected stale-copy
   signal, not evidence the update failed.
 
+## What changed in this release — worker hooks now also fire as plugin hooks (`coordination-hooks` 0.8.0, 2026-08-24 update)
+
+Closes seed feedback #40 (§51.1): a spawned worker on a host whose managed
+policy sets `strictPluginOnlyCustomization: ["hooks"]` previously got a
+worker that spawned healthy-looking and silently never registered, never
+heartbeat, and never captured its session mapping — the policy strips the
+host adapter's own `--settings`-injected copy of
+`headless_tool_allowlist_gate.py` and `capture_session_mapping.py`, and
+neither hook was registered anywhere else. `0.8.0` registers both directly
+in `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks/hooks.json`
+(`PreToolUse` for the allowlist gate, `SessionStart` for the session-mapping
+capture, both unconditional —
+no matcher), which is what survives that exact policy for a plugin already
+listed in the operator's `strictKnownMarketplaces` (§43.1/#8's Case C
+already proved this route for this plugin's other hooks).
+
+**This is a plugin-cache update like any other — Step 6's bump/fire/verify
+sequence applies as written, target version `0.8.0`.** After pulling this
+release and refreshing the plugin cache (`claude plugin update
+coordination-hooks@<marketplace-name>`, or the uninstall/install pair if the
+version didn't move), re-run the spawn-time probe below to confirm the gap
+is actually closed for your policy, not just that the version string moved.
+
+**What a currently-running, already-spawned worker sees: nothing, either
+way.** A live worker's hooks were fixed into its own `--settings` blob (or,
+under the strict policy, silently absent) at spawn time; refreshing the
+plugin cache underneath it does not reach into a process that is already
+running and does not change what that process does before it next respawns.
+The benefit of this update applies to workers spawned AFTER the refresh —
+there is no in-place remediation for one already spawned degraded, only a
+respawn.
+
+**On whether the refresh itself can disrupt an unrelated live worker (a
+worker running fine, on a host that never carried the strict policy, that
+happens to be using this SAME plugin's already-registered hooks — e.g. the
+git-mutation gate): measured on this checkout's own cache as of this
+writing, no.** `~/.claude/plugins/cache/<marketplace>/coordination-hooks/`
+carries eight prior version directories going back to `0.3.0`
+(oldest orphan mark 13 days old at measurement time), each marked with an
+`.orphaned_at` timestamp but **not deleted** — the superseded version's
+files stay on disk. This is offered as a direct measurement on one
+deployment, not a guaranteed platform contract: if your own cache shows
+different retention behavior (an orphaned version actually removed), that
+is worth a fresh report rather than assuming this note still holds — Claude
+Code's own retention/GC policy for orphaned plugin cache versions is not
+documented anywhere this runbook cites, and this note does not assert one.
+
+**Verify the fix actually reaches your policy** (host adapters, not just the
+installed cache): re-run §43.1/#8's own policy probe against a real spawn on
+the affected host after the refresh lands, per the hydration runbook's Step
+4a-ii. A `hooks.json` diff (Step 6 point 1's usual check) confirms the
+CACHE holds the new registration; it does not confirm a spawned worker on
+your specific managed-policy host actually benefits — those are different
+questions, and only the spawn-time probe answers the second one.
+
+Full detail: this release's `RELEASE_NOTES.md` at the repo root; closed
+issues #40 (§51.1) and #28 (§48.1, the `degraded_hooks_acknowledged`
+parameter-stripping rider that shipped in the same release).
+
 ## What changed in this release — the seed's new home and a new feedback channel (2026-08-13 final update at the old repository)
 
 Two adopter-facing changes ride along with this release, neither of which
@@ -597,7 +683,7 @@ the superseded conventions instead — pull-request-per-round, or the
 re-index did not take, and that is when Step 6's re-install applies:
 
 ```bash
-solet call service_interface::knowledge_service::install '{"name": "github_midwife_plugin"}'
+<solet-name> call service_interface::knowledge_service::install '{"name": "github_midwife_plugin"}'
 ```
 
 ## What changed in this release — the solet rename identifier cutover (2026-08-13 update)
@@ -641,8 +727,8 @@ still answering searches. After the restart, run the re-install pair,
 then the negative check:
 
 ```bash
-solet call service_interface::knowledge_service::install '{"name": "thinking_plans"}'
-solet call service_interface::knowledge_service::install '{"name": "plan_templates"}'
+<solet-name> call service_interface::knowledge_service::install '{"name": "thinking_plans"}'
+<solet-name> call service_interface::knowledge_service::install '{"name": "plan_templates"}'
 ```
 
 Then search for a phrase only the removed corpus contained (any
@@ -786,6 +872,23 @@ zero-risk verification recipe. Verifying THIS table (an installed
 `hooks.json` diff) tells you nothing about whether a spawned worker's
 hooks are wired correctly — that needs the spawn-time probe Step 4a-ii
 describes, not a cache-copy diff.
+
+⚠ **SUPERSEDED, `0.8.0` (2026-08-24, seed feedback #40/§51.1).** The
+paragraph above was true for `0.5.0` through `0.7.0` and is false from
+`0.8.0` on: both hooks are now ALSO registered in `hooks.json` (`SessionStart`
+for `capture_session_mapping.py`, `PreToolUse` for
+`headless_tool_allowlist_gate.py`, both unconditional — no matcher). The
+reason is a gap `0.5.0`'s design didn't anticipate: a managed policy setting
+`strictPluginOnlyCustomization: ["hooks"]` strips a spawned worker's own
+`--settings`-injected copy of every hook, these two included, so a worker
+spawned on a host carrying that policy got silent no-ops — no registration,
+no heartbeat, no session mapping, ever (§43.1/#8's original report). A
+plugin already listed in the operator's `strictKnownMarketplaces` keeps
+firing its OWN `hooks.json`-registered hooks under that same policy
+(proven for this plugin's other hooks in §43.1/#8's Case C), so registering
+these two closes the gap for exactly the host class that needed it. See the
+0.8.0 entry below for the full table and the double-fire note for hosts
+where BOTH routes are still live.
 
 A quick self-check any adopter can run against their own installed cache
 copy, not just the source tree: `python3 -c 'import json; d=json.load(open("<installed cache

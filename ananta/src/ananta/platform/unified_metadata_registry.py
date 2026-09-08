@@ -53,12 +53,18 @@ class UnifiedMetadataRegistry:
         self._app_metadata: AppMetadataManager | None = None
 
         self._initialized = False
+        self._layer_initialization_results: dict[str, bool] = {
+            "platform": False,
+            "plugin": False,
+            "app": False,
+        }
         self._layer_precedence = [MetadataLayer.APP, MetadataLayer.PLUGIN, MetadataLayer.PLATFORM]
 
     def initialize(self) -> bool:
         if self._initialized:
             return True
 
+        self._layer_initialization_results = {"platform": False, "plugin": False, "app": False}
         try:
             # CRITICAL FIX: platform_path contains ".../schemas" but MetadataRegistry adds "/schemas" internally
             # Remove trailing "/schemas" to prevent double schemas directory
@@ -69,12 +75,15 @@ class UnifiedMetadataRegistry:
                 platform_metadata_path = platform_metadata_path[:-8]  # Remove "\schemas" on Windows
             self._platform_metadata = MetadataRegistry(platform_metadata_path)
             platform_success = self._platform_metadata.initialize()
+            self._layer_initialization_results["platform"] = platform_success
 
             self._plugin_metadata = PluginMetadataManager(self.plugins_path)
             plugin_success = self._plugin_metadata.initialize()
+            self._layer_initialization_results["plugin"] = plugin_success
 
             self._app_metadata = AppMetadataManager(self.app_path)
             app_success = self._app_metadata.initialize()
+            self._layer_initialization_results["app"] = app_success
 
             initialization_results = {
                 "platform": platform_success,
@@ -87,12 +96,21 @@ class UnifiedMetadataRegistry:
             if overall_success:
                 self._initialized = True
             else:
-                pass
+                self._initialized = False
 
             return overall_success
 
         except Exception:
+            self._initialized = False
+            logger.exception(
+                "Unified metadata registry initialization raised; layer_results=%s",
+                self._layer_initialization_results,
+            )
             return False
+
+    def get_initialization_results(self) -> dict[str, bool]:
+        """Return the latest per-layer initialization results."""
+        return self._layer_initialization_results.copy()
 
     def resolve_metadata(self, request: MetadataRequest) -> MetadataResponse:
         if not self._initialized:
@@ -238,9 +256,8 @@ class UnifiedMetadataRegistry:
 
     def _populate_layer_status(self, layer_status: dict[str, object]) -> None:
         """Populate initialization status for each layer."""
-        layer_status["platform"] = {"initialized": self._platform_metadata is not None}
-        layer_status["plugin"] = {"initialized": self._plugin_metadata is not None}
-        layer_status["app"] = {"initialized": self._app_metadata is not None}
+        for layer_name, initialized in self._layer_initialization_results.items():
+            layer_status[layer_name] = {"initialized": initialized}
 
     def _validate_plugin_layer(self, result: dict[str, object], errors: list[object]) -> None:
         """Validate plugin layer dependencies."""

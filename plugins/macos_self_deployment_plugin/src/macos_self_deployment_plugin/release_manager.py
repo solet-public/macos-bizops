@@ -108,6 +108,10 @@ from pathlib import Path
 from typing import Final
 
 from macos_self_deployment_plugin.constants import PLUGIN_NAME
+from macos_self_deployment_plugin.venv_interpreter_pin import (
+    VenvInterpreterPinError,
+    pin_and_report,
+)
 
 # --- Layout tokens (design §4.2). Kept local to this module so the
 # component stays self-contained; no foreign-file edits. -------------------
@@ -120,20 +124,41 @@ VENV_DIRNAME: Final[str] = "venv"
 VENV_BIN_DIRNAME: Final[str] = "bin"
 VENV_PYTHON_BASENAME: Final[str] = "python3"
 VERSION_FILENAME: Final[str] = "VERSION"
+
+#: Why ``VERSION.reconciliation_provenance`` exists and why it is written even
+#: when empty. A seed-materialized target has no git identity to appeal to, so
+#: the approved reconciliation's fingerprint IS the provenance for its bytes;
+#: without it an attestation can say WHAT is served but not WHICH approved act
+#: put it there. The field is ``null`` on every ordinary deploy rather than
+#: absent, so "built by a reconciliation" stays a positive, readable claim
+#: instead of an inference from absence — the same rule ``tree_state`` follows.
+RECONCILIATION_PROVENANCE_NOTE: Final[str] = (
+    "reconciliation_provenance is null on ordinary deploys and carries "
+    "{reconciliation_id, source_surface_sha256, release_surface_sha256} on "
+    "releases built by an approved reconciliation cutover."
+)
 STATE_FILENAME: Final[str] = "state.json"
 CURRENT_LINK_NAME: Final[str] = "current"
 PREVIOUS_LINK_NAME: Final[str] = "previous"
 
 # Source-tree subdirectories that make up the first-party ``code/`` clone
-# (design §4.2: ``code/`` = ``ananta/`` + ``plugins/``, NOT ``.git``).
+# (design §4.2: ``code/`` = ``ananta/`` + ``plugins/`` + ``solet_cli/`` +
+# ``solet_setup_contracts/``, NOT ``.git``). ``solet_cli`` and
+# ``solet_setup_contracts`` ship because each is an ananta runtime dependency:
+# session_ledger_service/selected_sources.py loads manager transactions as
+# consent proof and imports setup contracts. A release without either fails the
+# L1.1 fresh-source import probe — the same root cause the born-clone gate's
+# layer-0 installs fixed on the clone path.
 #
 # ONE constant, deliberately: it is the clone loop's path list AND the
 # dirty-tree gate's porcelain scope (Architect's dirty-tree ruling §2). Two
-# separate lists would mean that the day someone adds a third cloned subtree
+# separate lists would mean that the day someone adds a fourth cloned subtree
 # the gate silently under-covers it — the same failure shape as a gate
 # registration that lands without its file. Both readers dereference this
 # module global at call time, so widening it widens both at once.
-CODE_SUBTREES: Final[tuple[str, ...]] = ("ananta", "plugins")
+CODE_SUBTREES: Final[tuple[str, ...]] = (
+    "ananta", "plugins", "solet_cli", "solet_setup_contracts",
+)
 VENV_SUBTREE: Final[str] = ".venv"
 
 # ``VERSION.tree_state`` tokens (dirty-tree ruling §3). The attestation is
@@ -695,6 +720,22 @@ class ReleaseGc:
         return sorted(finalized, reverse=True)
 
 
+def _pin_staged_interpreter(venv_dir: Path, logger: logging.Logger) -> None:
+    """Freeze the staged venv's base interpreter, in this module's error type.
+
+    Module-level rather than a ``ReleaseBuilder`` method: it needs nothing from
+    the builder's state, and the builder is already at the god-class gate's
+    ceiling — a helper that only translates an exception type does not belong in
+    that budget.
+    """
+    try:
+        pin_and_report(venv_dir, logger)
+    except VenvInterpreterPinError as exc:
+        raise ReleaseManagerError(
+            f"could not pin the staged venv's interpreter: {exc}",
+        ) from exc
+
+
 class ReleaseBuilder:
     """Materializes one immutable release from the working tree (§4.4 / §4.7).
 
@@ -734,10 +775,11 @@ class ReleaseBuilder:
         manifest_plugins: tuple[str, ...] | None = None,
         schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = None,
         allow_dirty: bool = False,
+        reconciliation_provenance: dict[str, str] | None = None,
     ) -> CandidatePaths:
         """CoW-clone the working tree into a fresh immutable release.
 
-        Steps (§4.7): ``cp -c`` the ``ananta/`` + ``plugins/`` subtrees
+        Steps (§4.7): ``cp -c`` the :data:`CODE_SUBTREES` subtrees
         into ``code/`` and ``.venv`` into ``venv/``; re-point every
         ``.pth`` repo-root prefix at the final ``code/``; capture the
         optional schema snapshot; validate every ``.pth`` target
@@ -747,7 +789,7 @@ class ReleaseBuilder:
         inverted so the platform ``collect_schemas`` import stays in the
         caller, NOT here) is invoked ONCE after ``code/`` is materialized,
         receiving the staging ``code/`` root (the physical location of the
-        cloned ``ananta/`` + ``plugins/`` at that moment — the final path
+        cloned :data:`CODE_SUBTREES` at that moment — the final path
         does not exist until the atomic rename). Its return value is
         stored verbatim in ``VERSION`` under ``schema_snapshot`` and on
         ``CandidatePaths``. A raise propagates and fails the build (a
@@ -770,6 +812,9 @@ class ReleaseBuilder:
         (no environment-variable back door: a knob an env var passes
         invisibly is worse than no knob). Its intended caller is the
         operator-confirmation path.
+
+        ``reconciliation_provenance`` is persisted verbatim into ``VERSION``;
+        see :data:`RECONCILIATION_PROVENANCE_NOTE`.
         """
         # THE WRITE END of the same invariant the read side enforces. `()` is
         # not `None`, so an empty tuple would serialize as `[]` — the exact
@@ -821,6 +866,7 @@ class ReleaseBuilder:
             schema_snapshot=schema_snapshot,
             tree_state=tree_state,
             dirty_paths=dirty_paths,
+            reconciliation_provenance=reconciliation_provenance,
         )
         self._fsync_staging(staging)
         os.replace(staging, final_dir)
@@ -899,12 +945,20 @@ class ReleaseBuilder:
         )
 
     def _build_into_staging(self, staging: Path) -> None:
-        """CoW-clone the code subtrees + venv into the staging dir."""
+        """CoW-clone the code subtrees + venv into the staging dir, then pin.
+
+        The cloned venv inherits the checkout's FLOATING base-interpreter
+        symlink, which Homebrew repoints on every patch upgrade. Pinning it here
+        makes the interpreter a property of the release rather than of the
+        host's current brew state.
+        """
         code_root = staging / CODE_DIRNAME
         code_root.mkdir(parents=True)
         for subtree in CODE_SUBTREES:
             self._clone_tree(self._source_root / subtree, code_root / subtree)
         self._clone_tree(self._source_root / VENV_SUBTREE, staging / VENV_DIRNAME)
+        _pin_staged_interpreter(staging / VENV_DIRNAME, self._logger)
+
 
     def _clone_tree(self, src: Path, dst: Path) -> None:
         """``cp -cR src dst`` (APFS copy-on-write clone, design §4.4).
@@ -1020,6 +1074,7 @@ class ReleaseBuilder:
         schema_snapshot: dict[str, object] | None,
         tree_state: str,
         dirty_paths: tuple[str, ...],
+        reconciliation_provenance: dict[str, str] | None,
     ) -> None:
         payload = {
             "release_id": release_id,
@@ -1046,6 +1101,8 @@ class ReleaseBuilder:
             # the scope keeps "tree_state: clean" from being read as "artifact
             # fully attested".
             "tree_state_scope": list(CODE_SUBTREES),
+            # See RECONCILIATION_PROVENANCE_NOTE: null on ordinary deploys.
+            "reconciliation_provenance": reconciliation_provenance,
         }
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
@@ -1301,7 +1358,10 @@ class ReleaseSwapper:
            reorder would forward-complete to it — the intent encodes the
            *direction*, so reconcile is direction-correct with no new branch.
         2. Restore both symlinks to their prior targets.
-        3. CLEAR ``in_progress`` last.
+        3. CLEAR ``in_progress`` last, but only after BOTH symlinks were
+           restored successfully. A failed restore leaves the compensate
+           intent intact for :meth:`reconcile` to finish driving back to the
+           prior pair.
 
         Residual (BENIGN — Architect Q3 disposition): under a *persistent*
         ledger-write failure (disk full), step 1's intent write also fails,
@@ -1329,13 +1389,24 @@ class ReleaseSwapper:
             self._logger.error(
                 "swap compensation: writing compensate-intent failed: %s", exc,
             )
-        try:
-            self._symlinks.restore(self._symlinks.current, prior_current)
-            self._symlinks.restore(self._symlinks.previous, prior_previous)
-        except OSError as exc:
+        restore_failed = False
+        for link, target in (
+            (self._symlinks.current, prior_current),
+            (self._symlinks.previous, prior_previous),
+        ):
+            try:
+                self._symlinks.restore(link, target)
+            except OSError as exc:
+                restore_failed = True
+                self._logger.error(
+                    "swap compensation: restoring symlink %s failed: %s", link, exc,
+                )
+        if restore_failed:
             self._logger.error(
-                "swap compensation: restoring symlinks failed: %s", exc,
+                "swap compensation: preserving compensate intent after incomplete "
+                "symlink restoration",
             )
+            return
         try:
             self._ledger_write(
                 _Ledger(current=prior_current, previous=prior_previous, in_progress=None),
@@ -1600,6 +1671,7 @@ class ReleaseManager:
         manifest_plugins: tuple[str, ...] | None = None,
         schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = None,
         allow_dirty: bool = False,
+        reconciliation_provenance: dict[str, str] | None = None,
     ) -> CandidatePaths:
         """Materialize a fresh immutable release; see :meth:`ReleaseBuilder.build`.
 
@@ -1617,12 +1689,16 @@ class ReleaseManager:
         :meth:`ReleaseBuilder.build`). No production call site passes it
         today — by design, since it is the operator-confirmation path's
         knob, not a deploy-verb default.
+
+        ``reconciliation_provenance`` is forwarded unchanged; see
+        :meth:`ReleaseBuilder.build`.
         """
         return self._builder.build(
             manifest_etag=manifest_etag,
             manifest_plugins=manifest_plugins,
             schema_snapshot_fn=schema_snapshot_fn,
             allow_dirty=allow_dirty,
+            reconciliation_provenance=reconciliation_provenance,
         )
 
     def candidate_for(self, release_id: str) -> CandidatePaths:

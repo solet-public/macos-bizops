@@ -59,58 +59,13 @@ class ServiceTransitionCoordinator:
         self.plugin_manager = plugin_manager
         self.config_manager = config_manager
 
-    async def execute_full_transition(self) -> dict[str, object]:
-        """Complete transition from bootstrap to plugin-backed services - ASYNC event processing"""
-        import logging
-
-        logger = logging.getLogger(__name__)
-
-        # Honor the profile manifest's plugin allowlist on this bootstrap
-        # plugin_manager — same gating startup_sequence._init_plugin_manager
-        # applies. The bootstrap path runs on a separate plugin_manager
-        # instance whose _allowed_plugins is uninitialized, so omitting this
-        # arg loads every installed entry point. 2026-05-31 incident: that
-        # path loaded rds_pgvector_service_plugin into a local solet and
-        # cratered boot through the state-service upsert cascade.
-        self.plugin_manager.discover_plugins(
-            allowed_plugins=self._load_allowed_plugins(),
-        )
-
-        # Transition each service atomically - services are now available in orchestrator
-        services = self.orchestrator.services_collection
-        for service in services.values():
-            transition_func = getattr(service, "transition_to_plugin", None)
-            if callable(transition_func):
-                # Check if service is already in plugin mode (EventOrchestrator creates services in plugin mode)
-                bootstrap_mode_attr = getattr(service, "bootstrap_mode", None)
-                if bootstrap_mode_attr is not None and not bootstrap_mode_attr:
-                    pass
-                else:
-                    transition_func(self.plugin_manager)
-
-        # Schema initialization is handled by startup_sequence step 8 via the
-        # plugin-schema lifecycle. See ananta.core.orchestration.startup_sequence
-        # ._initialize_schemas — it resolves plugin_schema_service from the
-        # binding and routes through install_plugin_schema, which writes
-        # qualified CREATE TABLE + indexes in one transaction. Doing it again
-        # here via the legacy SchemaManager (no lifecycle) emitted unqualified
-        # CREATE INDEX statements that failed on RDS connections whose
-        # search_path defaulted to public, blocking betty's birth.
-        self._initialize_process_registry()
-
-        self._bind_services_for_plugin_initialization(logger)
-        init_results = self.plugin_manager.initialize_all_plugins(self.config_manager)
-        self._log_plugin_initialization_summary(init_results, logger)
-
-        return dict(services)
-
     def execute_full_transition_sync(self) -> dict[str, object]:
         """Complete transition from bootstrap to plugin-backed services - SYNCHRONOUS version"""
         import logging
 
         logger = logging.getLogger(__name__)
 
-        # See execute_full_transition for the manifest-gating rationale.
+        # The manifest-gating rationale is retained on this sole transition path.
         self.plugin_manager.discover_plugins(
             allowed_plugins=self._load_allowed_plugins(),
         )
@@ -130,7 +85,7 @@ class ServiceTransitionCoordinator:
                 pass
 
         # Schema initialization is handled by startup_sequence step 8 via the
-        # plugin-schema lifecycle. See execute_full_transition above for context.
+        # plugin-schema lifecycle. See this method's discovery path for context.
         self._initialize_process_registry()
 
         self._bind_services_for_plugin_initialization(logger)

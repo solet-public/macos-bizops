@@ -118,6 +118,7 @@ class SessionLedgerReadAPI(ABC):
     def list_sources(self) -> dict[str, Any]:
         """Return ingest source descriptors joined with their DB-registered rows."""
 
+
     @service_interface_process(
         name="census",
         is_discoverable=True,
@@ -537,6 +538,80 @@ class SessionLedgerReadAPI(ABC):
     @abstractmethod
     def list_canonical_contributors(self, session_id: str) -> dict[str, Any]:
         """Per-canonical-group provenance projection (W5.B §3.3)."""
+
+
+class SessionLedgerQualificationAPI(ABC):
+    """Bounded setup qualification backed by the authoritative manager journal."""
+
+    @service_interface_process(
+        name="qualify_selected_sources",
+        is_discoverable=True,
+        provider=_PROVIDER,
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "target": ParameterMetadata(
+                type=ParameterType.STRING,
+                description="Absolute target path named by the doctor probe.",
+                required=True,
+            ),
+            "name": ParameterMetadata(
+                type=ParameterType.STRING,
+                description="Managed solet name named by the doctor probe.",
+                required=True,
+            ),
+            "answers_fingerprint": ParameterMetadata(
+                type=ParameterType.STRING,
+                description="Canonical fingerprint carried by the doctor request.",
+                required=True,
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            description=(
+                "Bounded per-source setup facts from the manager transaction and "
+                "source-local ledger observations; never returns answer or event content."
+            ),
+            type=ParameterType.OBJECT,
+            properties={
+                "record_source": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Authoritative record provenance; currently manager_transaction.",
+                ),
+                "target_identity_matched": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="Whether transaction target/name matches the doctor request.",
+                ),
+                "answers_fingerprint_matched": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="Whether the loaded answers fingerprint matches the doctor request.",
+                ),
+                "qualification_reason": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Null on trusted proof, otherwise a bounded negative reason.",
+                ),
+                "sources": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description=(
+                        "At most codex_local and claude_local rows: selected, consented, "
+                        "registered, backfill_count, retrieval_ok. Empty when answers are untrusted."
+                    ),
+                ),
+            },
+        ),
+        result_processor_customizations=MergeResultProcessorCustomizations(
+            action_label="Qualify Selected Session Sources",
+            result_type="selected_session_sources_qualification",
+            result_description="Bounded selected-source registration, backfill, and retrieval proof.",
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+    )
+    @abstractmethod
+    def qualify_selected_sources(
+        self,
+        target: str,
+        name: str,
+        answers_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Qualify selected local session sources against manager-recorded answers."""
 
 
 class SessionLedgerIngestAPI(ABC):

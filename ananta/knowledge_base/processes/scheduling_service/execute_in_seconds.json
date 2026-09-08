@@ -1,8 +1,8 @@
 {
   "process_key": "service_interface::scheduling_service::execute_in_seconds",
   "display_name": "Execute In Seconds",
-  "description": "Schedule a one-time wake-up after a delay, keyed by a memory tag (memory_tag). If you include both memory_tag and content, the scheduling plugin will stash content as a tagged memory automatically (one-step pattern). When the wake-up fires, the platform retrieves memories tagged with memory_tag (via get_memories_by_tag) and the model decides what to do next. Typical uses: progress check-ins, timeouts, simple polling loops, and \"always-on\" ticks. memory_tag is commonly also used as the schedule tag for cleanup (clear_scheduled_actions_by_tag).",
-  "embedding_description": "Schedule a wake-up in N seconds using memory_tag. Optional content enables one-step pattern: stash follow-up instructions as a tagged memory + schedule the wake-up in the same call. Wake-up retrieves memories with that tag (get_memories_by_tag) and the model decides. Use for check-ins, timeouts, polling, self-rescheduling ticks. Cleanup via clear_scheduled_actions_by_tag.",
+  "description": "Schedule one-time executable work after a delay. Configure exactly one execution mode: provide a non-empty action_definitions list of syntactically valid {process_key, arguments} objects, or provide memory_tag for the terminal get_memories_by_tag read. Registration validates entry shape and scheduled-action policy; execution resolves process_key against processes registered at fire time. Content is valid only with memory_tag and is stored only after the complete request validates; the later lookup result is written to the schedule result row and does not start a model turn. Use direct action definitions for deterministic notifications, mechanizable Joseki runs, timeouts, polling actions, and other mechanizable work. Cancel via clear_scheduled_actions_by_tag.",
+  "embedding_description": "Schedule one-time executable work in N seconds. action_definitions requires non-empty, syntactically valid {process_key, arguments} entries; execution resolves each process_key against processes registered at fire time. memory_tag is the mutually exclusive terminal mode: it performs get_memories_by_tag, records the result, and does not start a model turn. Content is valid only with memory_tag. Cancel via clear_scheduled_actions_by_tag.",
   "result_processor_customizations": {
     "action_label": "Delayed Execution Scheduled",
     "result_type": "schedule_created",
@@ -11,8 +11,8 @@
     "output_action_guidance": "A delayed execution schedule has been created. Consider whether you should inform the requester when the check-in/reminder will occur, and retain the schedule_id or tags so it can be cancelled or replaced once underlying work completes."
   },
   "error_processor_customizations": {
-    "action_context": "Scheduling a one-time delayed wake-up keyed by memory_tag",
-    "error_interpretation": "ValidationError with 'seconds': delay must be a positive integer. ValidationError with 'memory_tag': memory_tag is missing or invalid. SchedulerError: scheduling service unavailable or failed to register schedule.",
-    "recovery_guidance": "For seconds errors: provide a positive integer for the delay. For memory_tag errors: provide a non-empty memory_tag and ensure the follow-up memory is tagged with it. For scheduler errors: verify the scheduling service is running."
+    "action_context": "Scheduling one-time delayed execution with direct action definitions or a terminal memory lookup",
+    "error_interpretation": "default_scheduling_plugin.parameter_error: non-positive seconds, malformed or inference-bearing action definition, empty action list, invalid memory_tag, content outside memory_tag mode, or an execution-mode conflict. default_scheduling_plugin.schedule_create_error: persistence or scheduler registration failed after valid parameters.",
+    "recovery_guidance": "For seconds errors: provide a positive integer for the delay. For execution-mode errors: use non-empty {process_key, arguments} action definitions for executable work, or a non-empty memory_tag only when a terminal tagged-memory read is the complete intent. For scheduler errors: verify the scheduling service is running."
   }
 }

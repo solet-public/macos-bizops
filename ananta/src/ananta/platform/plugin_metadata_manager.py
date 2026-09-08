@@ -20,24 +20,10 @@ class ValidationResult(TypedDict):
     missing_dependencies: list[MissingDependencyInfo]
 
 
-class InstalledSchemaInfo(TypedDict):
-    plugin_id: str
-    namespace: str
-    tables: list[str]
-
-
-class InstallationResult(TypedDict):
-    success: bool
-    installed_schemas: list[InstalledSchemaInfo]
-    failed_schemas: list[str]
-    errors: list[str]
-
-
 class SummaryResult(TypedDict):
     plugins_discovered: int
     plugins_with_schemas: int
     plugins_with_actions: int
-    load_order_length: int
     circular_dependencies: int
     initialized: bool
 
@@ -45,7 +31,7 @@ class SummaryResult(TypedDict):
 @dataclass
 class PluginPackage:
     plugin_id: str
-    version: str
+    version: str | None
     metadata_path: Path
     database_schema: dict[str, object] | None = None
     capabilities: list[str] = field(default_factory=list)
@@ -57,7 +43,6 @@ class PluginPackage:
 class DependencyGraph:
     nodes: set[str]
     edges: dict[str, set[str]]
-    resolved_order: list[str]
     circular_dependencies: list[list[str]]
 
 
@@ -83,11 +68,13 @@ class PluginMetadataManager:
             return True
 
         except Exception:
+            logger.exception(
+                "Plugin metadata initialization failed for plugin_id=<metadata-registry> root=%s",
+                self.plugins_root,
+            )
             return False
 
     def _discover_plugins(self) -> None:
-        plugin_count = 0
-
         for plugin_dir in self.plugins_root.iterdir():
             if not plugin_dir.is_dir():
                 continue
@@ -103,10 +90,11 @@ class PluginMetadataManager:
                 plugin_package = self._load_plugin_metadata(plugin_dir.name, metadata_dir)
                 if plugin_package:
                     self._discovered_plugins[plugin_package.plugin_id] = plugin_package
-                    plugin_count += 1
 
             except Exception:
-                pass
+                logger.exception(
+                    "Plugin metadata discovery failed for plugin_id=%s", plugin_dir.name
+                )
 
     def _load_plugin_metadata(self, plugin_name: str, metadata_dir: Path) -> PluginPackage | None:
         schema_file = metadata_dir / "schema.json"
@@ -120,7 +108,9 @@ class PluginMetadataManager:
 
             plugin_package = PluginPackage(
                 plugin_id=schema_data.get("plugin_id", plugin_name),
-                version=schema_data.get("version", "1.0.0"),
+                version=(
+                    schema_data["version"] if isinstance(schema_data.get("version"), str) else None
+                ),
                 metadata_path=metadata_dir,
                 database_schema=schema_data.get("database_schema"),
                 capabilities=schema_data.get("dependencies", {}).get("provides", []),
@@ -132,6 +122,7 @@ class PluginMetadataManager:
             return plugin_package
 
         except Exception:
+            logger.exception("Plugin metadata parsing failed for plugin_id=%s", plugin_name)
             return None
 
     def _load_plugin_actions(self, plugin_package: PluginPackage, metadata_dir: Path) -> None:
@@ -140,7 +131,6 @@ class PluginMetadataManager:
         if not actions_dir.exists():
             return
 
-        action_count = 0
         for action_file in actions_dir.glob("*.json"):
             try:
                 with open(action_file, encoding="utf-8") as f:
@@ -148,10 +138,13 @@ class PluginMetadataManager:
 
                 action_name = action_file.stem
                 plugin_package.actions[action_name] = action_data
-                action_count += 1
 
             except Exception:
-                pass
+                logger.exception(
+                    "Plugin action metadata parsing failed for plugin_id=%s action=%s",
+                    plugin_package.plugin_id,
+                    action_file.name,
+                )
 
     def _build_dependency_graph(self) -> None:
         nodes = set(self._discovered_plugins.keys())
@@ -166,41 +159,13 @@ class PluginMetadataManager:
                 else:
                     pass
 
-        resolved_order = self._topological_sort(nodes, edges)
         circular_deps = self._detect_circular_dependencies(nodes, edges)
 
         self._dependency_graph = DependencyGraph(
             nodes=nodes,
             edges=edges,
-            resolved_order=resolved_order,
             circular_dependencies=circular_deps,
         )
-
-        if circular_deps:
-            pass
-        else:
-            pass
-
-    def _topological_sort(self, nodes: set[str], edges: dict[str, set[str]]) -> list[str]:
-        in_degree = dict.fromkeys(nodes, 0)
-
-        for node in nodes:
-            for dependency in edges[node]:
-                in_degree[dependency] += 1
-
-        queue = [node for node in nodes if in_degree[node] == 0]
-        result = []
-
-        while queue:
-            node = queue.pop(0)
-            result.append(node)
-
-            for dependency in edges[node]:
-                in_degree[dependency] -= 1
-                if in_degree[dependency] == 0:
-                    queue.append(dependency)
-
-        return result
 
     def _detect_circular_dependencies(
         self, nodes: set[str], edges: dict[str, set[str]]
@@ -240,11 +205,6 @@ class PluginMetadataManager:
             self.initialize()
         return self._discovered_plugins.get(plugin_id)
 
-    def get_plugin_load_order(self) -> list[str]:
-        if not self._initialized:
-            self.initialize()
-        return self._dependency_graph.resolved_order.copy() if self._dependency_graph else []
-
     def validate_plugin_dependencies(self) -> ValidationResult:
         if not self._initialized:
             self.initialize()
@@ -270,9 +230,10 @@ class PluginMetadataManager:
                     validation_result["missing_dependencies"].append(
                         {"plugin": plugin_id, "missing_requirement": requirement}
                     )
-                    validation_result["warnings"].append(
-                        f"Plugin {plugin_id} requires missing plugin {requirement}"
-                    )
+                    message = f"Plugin {plugin_id} requires missing plugin {requirement}"
+                    validation_result["valid"] = False
+                    validation_result["errors"].append(message)
+                    validation_result["warnings"].append(message)
 
         return validation_result
 
@@ -287,51 +248,6 @@ class PluginMetadataManager:
 
         return matching_plugins
 
-    def install_plugin_schemas(self) -> InstallationResult:
-        if not self._initialized:
-            self.initialize()
-
-        installation_result: InstallationResult = {
-            "success": True,
-            "installed_schemas": [],
-            "failed_schemas": [],
-            "errors": [],
-        }
-
-        for plugin_id, plugin_package in self._discovered_plugins.items():
-            if not plugin_package.database_schema:
-                continue
-
-            try:
-                # Type narrowing: we know database_schema is not None due to the check above
-                db_schema = plugin_package.database_schema
-                assert db_schema is not None  # For type checker
-
-                # Extract namespace with proper type handling
-                namespace_value = db_schema.get("namespace", plugin_id)
-                namespace = namespace_value if isinstance(namespace_value, str) else plugin_id
-
-                # Extract tables with proper type handling
-                tables_value = db_schema.get("tables", {})
-                if isinstance(tables_value, dict):
-                    table_keys = list(tables_value.keys())
-                else:
-                    table_keys = []
-
-                installed_schema_info: InstalledSchemaInfo = {
-                    "plugin_id": plugin_id,
-                    "namespace": namespace,
-                    "tables": table_keys,
-                }
-                installation_result["installed_schemas"].append(installed_schema_info)
-
-            except Exception as e:
-                installation_result["success"] = False
-                installation_result["failed_schemas"].append(plugin_id)
-                installation_result["errors"].append(f"Plugin {plugin_id}: {str(e)}")
-
-        return installation_result
-
     def get_summary(self) -> SummaryResult:
         if not self._initialized:
             self.initialize()
@@ -343,9 +259,6 @@ class PluginMetadataManager:
             ),
             "plugins_with_actions": len(
                 [p for p in self._discovered_plugins.values() if p.actions]
-            ),
-            "load_order_length": (
-                len(self._dependency_graph.resolved_order) if self._dependency_graph else 0
             ),
             "circular_dependencies": (
                 len(self._dependency_graph.circular_dependencies) if self._dependency_graph else 0

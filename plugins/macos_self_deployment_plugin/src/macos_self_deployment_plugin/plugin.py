@@ -30,13 +30,17 @@ See ``workbench/2026-06-01_local_blue_green_L3_implementation_plan.md``
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import signal
+import sys
 import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
@@ -67,6 +71,7 @@ from ananta.interfaces.local_self_deployment_service_interface import (
 from ananta.interfaces.self_deployment_service_interface import (
     SelfDeploymentServiceInterface,
 )
+from ananta.utils.dry_run import coerce_dry_run
 
 from macos_self_deployment_plugin import (
     drain_sentinel,
@@ -90,6 +95,7 @@ from macos_self_deployment_plugin.constants import (
     ENV_SOLET_COLOR,
     ENV_SOLET_INSTANCE_ID,
     ENV_SOLET_NAME,
+    ENV_SOLET_RELEASE_ID,
     PLUGIN_NAME,
     RESULT_TYPE_AUTOSTART_INSTALL,
     RESULT_TYPE_AUTOSTART_STATUS,
@@ -119,6 +125,16 @@ from macos_self_deployment_plugin.preflight_probe_runner import (
     ProbeOutcome,
     run_preflight_probe,
 )
+from macos_self_deployment_plugin.reconciliation_cutover import (
+    CutoverProvenance,
+    CutoverRefusalError,
+    ReconciliationCutoverController,
+    ReconciliationCutoverRequest,
+    SwapEvidence,
+    TargetRuntimeObservation,
+    observation_from_attestation,
+    swap_evidence_from_restart_result,
+)
 from macos_self_deployment_plugin.release_manager import (
     CandidatePaths,
     ReleaseManager,
@@ -135,6 +151,10 @@ from macos_self_deployment_plugin.schema_preflight import (
     SchemaChange,
     SchemaSnapshot,
     classify_snapshot_diff,
+)
+from macos_self_deployment_plugin.surface_digest import (
+    reconciliation_surface_digest,
+    release_surface_digest,
 )
 from macos_self_deployment_plugin.swap_orchestrator import (
     SetActiveTarget,
@@ -157,6 +177,21 @@ if TYPE_CHECKING:
 # the heartbeat backstop can retry (symmetry with the backstop's TERMINATE_FAILED
 # which likewise preserves the record).
 _PRIOR_SIGTERM_DENIED: Final[str] = "prior_sigterm_denied"
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeAttestationContext:
+    """Immutable facts read once while constructing a runtime attestation."""
+
+    release_id: str
+    code_root: Path
+    current_release_id: str
+    active_instance_id: str
+    active_color: str
+    self_instance_id: str
+    self_color: str
+    version_raw: bytes
+    version: dict[str, Any]
 
 
 _NEW_MANIFEST_PARAM = ParameterMetadata(
@@ -189,10 +224,10 @@ _EXPECTED_CURRENT_RELEASE_PARAM = ParameterMetadata(
     type=ParameterType.STRING,
 )
 _DRY_RUN_PARAM = ParameterMetadata(
-    description="If true, plan + report without spawning or activating.",
+    description="Omitting dry_run performs no action. If true, plan + report without spawning or activating.",
     required=False,
     type=ParameterType.BOOLEAN,
-    default=False,
+    default=True,
 )
 _PRIOR_PID_PARAM = ParameterMetadata(
     description="OS pid of the prior color, recorded at enqueue time.",
@@ -214,14 +249,47 @@ _ROLLBACK_REASON_PARAM = ParameterMetadata(
     required=True,
     type=ParameterType.STRING,
 )
+_RECONCILIATION_ID_PARAM = ParameterMetadata(
+    description="Reconciliation operation identity for provenance correlation.",
+    required=False,
+    type=ParameterType.STRING,
+    default="",
+)
+_CUTOVER_ID_PARAM = ParameterMetadata(
+    description="Approved reconciliation identity authorizing this cutover.",
+    required=True,
+    type=ParameterType.STRING,
+)
+_CUTOVER_EXPECT_PARAMS: Final[dict[str, ParameterMetadata]] = {
+    name: ParameterMetadata(description=description, required=True, type=ParameterType.STRING)
+    for name, description in (
+        ("expected_source_surface_sha256", "Approved reconciliation-surface digest."),
+        ("expected_release_surface_sha256", "Approved complete release-surface digest."),
+        ("expected_manifest_etag", "Manifest ETag observed at approval time."),
+        ("expected_current_release_id", "Release the caller observed as current."),
+        ("expected_active_instance_id", "Router-active instance observed at approval time."),
+        ("expected_active_start_token", "Start token of that exact active instance."),
+    )
+}
+_CUTOVER_DRY_RUN_PARAM = ParameterMetadata(
+    description="If true, run every compare-and-swap leg and plan without touching router state.",
+    required=False,
+    type=ParameterType.BOOLEAN,
+    default=False,
+)
+_VERIFICATION_MODULES_PARAM = ParameterMetadata(
+    description="Closed list of already-loaded module names to attest without importing.",
+    required=True,
+    type=ParameterType.LIST,
+)
 _AUTOSTART_DRY_RUN_PARAM = ParameterMetadata(
     description=(
-        "If true, plan + report without writing the LaunchAgent plist "
+        "Omitting dry_run performs no action. If true, plan + report without writing the LaunchAgent plist "
         "or invoking launchctl."
     ),
     required=False,
     type=ParameterType.BOOLEAN,
-    default=False,
+    default=True,
 )
 _STOP_SELF_REASON_PARAM = ParameterMetadata(
     description=(
@@ -233,12 +301,12 @@ _STOP_SELF_REASON_PARAM = ParameterMetadata(
 )
 _STOP_SELF_DRY_RUN_PARAM = ParameterMetadata(
     description=(
-        "If true, plan + report without writing the drain sentinel or "
+        "Omitting dry_run performs no action. If true, plan + report without writing the drain sentinel or "
         "spawning the SIGTERM watchdog."
     ),
     required=False,
     type=ParameterType.BOOLEAN,
-    default=False,
+    default=True,
 )
 
 
@@ -306,6 +374,53 @@ def _swap_status_return_schema() -> ReturnValueSchema:
     )
 
 
+def _runtime_attestation_return_schema() -> ReturnValueSchema:
+    return ReturnValueSchema(
+        type=ParameterType.OBJECT,
+        description="Router-served immutable release and live-module attestation.",
+        properties={
+            "schema_version": ParameterMetadata(type=ParameterType.INTEGER, description="."),
+            "status": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "solet_name": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "served_by_self": ParameterMetadata(type=ParameterType.BOOLEAN, description="."),
+            "self_instance_id": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "self_color": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "self_pid": ParameterMetadata(type=ParameterType.INTEGER, description="."),
+            "self_start_token": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "router_active_instance_id": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "router_active_color": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "release_id": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "current_release_id": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "manifest_etag": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "reconciliation_id": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "source_surface_sha256": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "release_surface_sha256": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "release_version_sha256": ParameterMetadata(type=ParameterType.STRING, description="."),
+            "modules": ParameterMetadata(type=ParameterType.LIST, description="."),
+            "sample_basis": ParameterMetadata(type=ParameterType.STRING, description="."),
+        },
+    )
+
+
+def _cutover_release_return_schema() -> ReturnValueSchema:
+    return ReturnValueSchema(
+        type=ParameterType.OBJECT,
+        description="Reconciliation-authorized cutover outcome.",
+        properties={
+            "status": ParameterMetadata(type=ParameterType.STRING, description="Terminal or queued cutover status."),
+            "reason_code": ParameterMetadata(type=ParameterType.STRING, description="Machine-readable outcome cause."),
+            "reconciliation_id": ParameterMetadata(type=ParameterType.STRING, description="Authorizing reconciliation."),
+            "prior_release_id": ParameterMetadata(type=ParameterType.STRING, description="Release serving before the swap."),
+            "prior_instance_id": ParameterMetadata(type=ParameterType.STRING, description="Exact prior router instance."),
+            "prior_color": ParameterMetadata(type=ParameterType.STRING, description="Prior router colour."),
+            "provenance": ParameterMetadata(type=ParameterType.OBJECT, description="Provenance stamped into the candidate VERSION."),
+            "expected": ParameterMetadata(type=ParameterType.STRING, description="Asserted value on a stale-approval refusal."),
+            "observed": ParameterMetadata(type=ParameterType.STRING, description="Measured value on a stale-approval refusal."),
+            "dry_run": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether this was a planning run."),
+        },
+    )
+
+
 def _swap_rollback_return_schema() -> ReturnValueSchema:
     return ReturnValueSchema(
         type=ParameterType.OBJECT,
@@ -366,6 +481,105 @@ def _runtime_dir() -> Path:
 
 def _router_socket_path(solet_name: str) -> Path:
     return _runtime_dir() / f"{solet_name}{ROUTER_SOCKET_SUFFIX}"
+
+
+def run_cutover_preflight_probe(
+    *,
+    candidate: CandidatePaths,
+    app_home: Path,
+    solet_name: str,
+    runtime_dir: Path,
+    timeout_seconds: float,
+    logger: logging.Logger,
+) -> ProbeOutcome:
+    """Run the shared fresh-source probe without a platform-bound plugin instance."""
+    log_path = app_home / "data" / "logs" / f"preflight_probe_{uuid.uuid4().hex[:8]}.log"
+    return run_preflight_probe(
+        candidate=candidate,
+        app_home=app_home,
+        solet_name=solet_name,
+        cwd=runtime_dir,
+        log_path=log_path,
+        timeout_seconds=timeout_seconds,
+        logger=logger,
+    )
+
+
+def classify_cutover_schema_preflight(
+    candidate: CandidatePaths,
+    *,
+    current_snapshot: dict[str, object] | None,
+    current_release_exists: bool,
+    logger: logging.Logger,
+) -> PreflightVerdict:
+    """Classify the shared candidate/current schema gate without platform state.
+
+    The service plugin and the refreshed target-local adapter must use this
+    same fail-closed decision; neither may grow a parallel schema policy.
+    """
+    cand_snapshot = candidate.schema_snapshot
+    if cand_snapshot is None:
+        if not current_release_exists:
+            logger.info(
+                "§3 schema preflight: candidate %s has no snapshot and no current "
+                "release exists (first/seed deploy); allowing as baseline.",
+                candidate.release_id,
+            )
+            return PreflightVerdict(is_additive=True, breaking_changes=())
+        logger.error(
+            "§3 schema preflight FAIL-CLOSED: candidate %s carries no snapshot but "
+            "a current release exists (producer failed); refusing the deploy — "
+            "cannot certify the change rollback-safe.",
+            candidate.release_id,
+        )
+        return PreflightVerdict(
+            is_additive=False,
+            breaking_changes=(
+                SchemaChange(
+                    kind=KIND_CANDIDATE_SNAPSHOT_MISSING,
+                    namespace="", table=None, column=None,
+                    detail=(
+                        "candidate has no declared-schema snapshot in steady state "
+                        "(producer failed) — fail-closed"
+                    ),
+                ),
+            ),
+        )
+    if current_snapshot is None:
+        if not current_release_exists:
+            logger.info(
+                "§3 schema preflight: candidate %s has a snapshot but no current "
+                "release exists (true bootstrap); allowing as baseline.",
+                candidate.release_id,
+            )
+            return PreflightVerdict(is_additive=True, breaking_changes=())
+        logger.error(
+            "§3 schema preflight FAIL-CLOSED: candidate %s has a snapshot and a "
+            "current release exists, but the current snapshot is unresolved "
+            "(the baseline derive returned None instead of a snapshot or a raise); "
+            "refusing the deploy.",
+            candidate.release_id,
+        )
+        return PreflightVerdict(
+            is_additive=False,
+            breaking_changes=(
+                SchemaChange(
+                    kind=KIND_CURRENT_SNAPSHOT_UNRESOLVED,
+                    namespace="", table=None, column=None,
+                    detail=(
+                        "current release exists but its schema snapshot is unresolved "
+                        "(derive returned None) — fail-closed"
+                    ),
+                ),
+            ),
+        )
+    verdict = classify_snapshot_diff(
+        cast("SchemaSnapshot", current_snapshot),
+        cast("SchemaSnapshot", cand_snapshot),
+    )
+    log = logger.info if verdict.is_additive else logger.error
+    log("§3 schema preflight: %s", verdict.summary())
+    return verdict
 
 
 def _wait_for_router_socket(socket_path: Path) -> None:
@@ -573,7 +787,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         self._autostart_manager = manager
 
     def prepare_for_readiness(self) -> None:
-        """Validate router socket exists, build client + orchestrator, kick off self-register.
+        """Validate router socket and prepare the later self-registration lifecycle.
 
         Per L3 plan §3.5: fail loudly if the router socket is absent — after a
         bounded wait (`_wait_for_router_socket`) that tolerates the birth-time
@@ -632,8 +846,19 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         # use time; plugins must read self.action_factory at each call." We
         # mirror `aws_self_deployment_plugin._build_deployer` — the deployer
         # is constructed per-verb with the live factory; same pattern here.
-        self._spawn_heartbeat_thread()
         self.set_ready()
+
+    def arm_registration_deadline(self) -> None:
+        """Start strict-I2 only when runtime action dispatch has begun.
+
+        ``prepare_for_readiness`` runs before synchronous inference prewarm and
+        knowledge-base hydration.  The bridge is instead a starting action,
+        dispatched only after the runtime starts the action-queue poller.  Arm
+        the unified bind/register budget at that dispatch boundary so it keeps
+        bounding a missing bridge without charging deterministic hydration work
+        to the registration invariant.
+        """
+        self._spawn_heartbeat_thread()
 
     def _spawn_heartbeat_thread(self) -> None:
         """Spawn the daemon thread that runs the heartbeat lifecycle.
@@ -694,6 +919,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
                 "pending_finisher_file": pending_finisher_file,
                 "current_release_lookup": current_release_lookup,
                 "logger": logger,
+                "set_color_active": self._set_color_active,
                 "streamable_port_lookup": streamable_port_lookup,
             }
             if budget_override is not None:
@@ -828,6 +1054,27 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
                     retryable=True,
                 ),
             ),
+            "attest_runtime_code": EdgeProcessDefinition(
+                name="attest_runtime_code",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                    result_type="local_runtime_code_attestation",
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            "cutover_release": EdgeProcessDefinition(
+                name="cutover_release",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                    result_type="local_reconciliation_cutover",
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    # A refused or unproven cutover must not be retried
+                    # automatically: the expected values it was approved
+                    # against are exactly what the target has moved away from.
+                    retryable=False,
+                ),
+            ),
             "swap_rollback": EdgeProcessDefinition(
                 name="swap_rollback",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(
@@ -898,6 +1145,9 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
                 app_home=app_home,
                 self_instance_id=self._self_instance_id,
                 self_color=self._self_color,
+                prior_pid=os.getpid(),
+                prior_start_token=process_identity.start_token(os.getpid()),
+                poller_gate="local_service_quiesced",
                 set_active_targets=targets,
             )
         finally:
@@ -935,6 +1185,8 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
                 app_home=app_home,
                 self_instance_id=self._self_instance_id,
                 self_color=self._self_color,
+                prior_pid=os.getpid(),
+                prior_start_token=process_identity.start_token(os.getpid()),
                 set_active_targets=targets,
             )
         finally:
@@ -1056,6 +1308,206 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
             "self_instance_id": self._self_instance_id,
         }
 
+    def attest_runtime_code(
+        self,
+        *,
+        reconciliation_id: str,
+        verification_modules: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Return a read-only attestation of this process's immutable release.
+
+        Requested modules are observed only in ``sys.modules``.  In
+        particular, this method never imports a module merely to make a
+        reconciliation proof pass.
+        """
+        self._validate_verification_modules(verification_modules)
+        context = self._runtime_attestation_context()
+        return self._runtime_attestation_payload(
+            reconciliation_id,
+            verification_modules,
+            context,
+        )
+
+    @staticmethod
+    def _validate_verification_modules(verification_modules: tuple[str, ...]) -> None:
+        if len(set(verification_modules)) != len(verification_modules):
+            raise ValueError("verification_modules must not contain duplicates")
+        if any(not module or not module.replace(".", "").isidentifier() for module in verification_modules):
+            raise ValueError("verification_modules must contain qualified Python module names")
+
+    def _runtime_attestation_context(self) -> _RuntimeAttestationContext:
+        release_id = self._attestation_release_id()
+        manager = self._get_release_manager()
+        code_root = (manager.releases_root / release_id / "code").resolve(strict=True)
+        router_status = self._require_client().status()
+        version_path = manager.releases_root / release_id / "VERSION"
+        version_raw = version_path.read_bytes()
+        version = json.loads(version_raw)
+        if not isinstance(version, dict):
+            raise RuntimeError(f"release VERSION must be an object: {version_path}")
+        return _RuntimeAttestationContext(
+            release_id=release_id,
+            code_root=code_root,
+            current_release_id=manager.current_release or "",
+            active_instance_id=str(router_status.get("active_instance_id") or ""),
+            active_color=str(router_status.get("active_color") or ""),
+            self_instance_id=self._self_instance_id or os.environ.get(ENV_SOLET_INSTANCE_ID, ""),
+            self_color=self._self_color or os.environ.get(ENV_SOLET_COLOR, ""),
+            version_raw=version_raw,
+            version=version,
+        )
+
+    @staticmethod
+    def _attestation_release_id() -> str:
+        release_id = os.environ.get(ENV_SOLET_RELEASE_ID, "")
+        if not release_id:
+            raise RuntimeError(f"{ENV_SOLET_RELEASE_ID} is required for runtime attestation")
+        return release_id
+
+    def _runtime_attestation_payload(
+        self,
+        reconciliation_id: str,
+        verification_modules: tuple[str, ...],
+        context: _RuntimeAttestationContext,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "status": "attested",
+            "solet_name": self._solet_name or os.environ.get(ENV_SOLET_NAME, ""),
+            "served_by_self": (
+                context.active_instance_id == context.self_instance_id
+                and context.active_color == context.self_color
+            ),
+            "self_instance_id": context.self_instance_id,
+            "self_color": context.self_color,
+            "self_pid": os.getpid(),
+            "self_start_token": process_identity.start_token(os.getpid()) or "",
+            "router_active_instance_id": context.active_instance_id,
+            "router_active_color": context.active_color,
+            "release_id": context.release_id,
+            "current_release_id": context.current_release_id,
+            "manifest_etag": str(context.version.get("manifest_etag") or ""),
+            "reconciliation_id": reconciliation_id,
+            "source_surface_sha256": reconciliation_surface_digest(context.code_root),
+            "release_surface_sha256": release_surface_digest(context.code_root),
+            "release_version_sha256": f"sha256:{hashlib.sha256(context.version_raw).hexdigest()}",
+            "modules": [
+                self._module_attestation(name, context.code_root)
+                for name in verification_modules
+            ],
+            "sample_basis": "verification_modules_full",
+        }
+
+    @staticmethod
+    def _module_attestation(name: str, code_root: Path) -> dict[str, Any]:
+        module = sys.modules.get(name)
+        if module is None:
+            return {"name": name, "loaded": False, "origin_realpath": "", "content_sha256": ""}
+        raw_origin = getattr(module, "__file__", None)
+        if not isinstance(raw_origin, str) or not raw_origin:
+            return {"name": name, "loaded": True, "origin_realpath": "", "content_sha256": ""}
+        origin = Path(raw_origin).resolve(strict=True)
+        if not origin.is_relative_to(code_root) or not origin.is_file():
+            return {"name": name, "loaded": True, "origin_realpath": str(origin), "content_sha256": ""}
+        digest = hashlib.sha256(origin.read_bytes()).hexdigest()
+        return {
+            "name": name,
+            "loaded": True,
+            "origin_realpath": str(origin),
+            "content_sha256": f"sha256:{digest}",
+        }
+
+    def cutover_release(
+        self,
+        *,
+        reconciliation_id: str,
+        expected_source_surface_sha256: str,
+        expected_release_surface_sha256: str,
+        expected_manifest_etag: str,
+        expected_current_release_id: str,
+        expected_active_instance_id: str,
+        expected_active_start_token: str,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """LocalSelfDeploymentServiceInterface impl — reconciliation-authorized cutover.
+
+        The PUBLIC face of the shared cutover machinery, for targets that
+        already run this interface.  The reconciliation path proper does NOT
+        come through here: a pre-interface target cannot answer a new verb, so
+        the refreshed adapter drives :class:`ReconciliationCutoverController`
+        in-process instead (adjudication D4).  Both routes share this one state
+        machine; neither reimplements it.
+
+        Every compare-and-swap leg is evaluated before any spawn, so an
+        ``approval_stale`` return means nothing was built and nothing moved.
+        """
+        request = ReconciliationCutoverRequest(
+            reconciliation_id=reconciliation_id,
+            expected_source_surface_sha256=expected_source_surface_sha256,
+            expected_release_surface_sha256=expected_release_surface_sha256,
+            expected_manifest_etag=expected_manifest_etag,
+            expected_current_release_id=expected_current_release_id,
+            expected_active_instance_id=expected_active_instance_id,
+            expected_active_start_token=expected_active_start_token,
+        )
+        controller = ReconciliationCutoverController(
+            observe=self._reconciliation_observation,
+            execute_swap=self._reconciliation_swap,
+        )
+        try:
+            outcome = controller.cutover(request, dry_run=dry_run)
+        except CutoverRefusalError as refusal:
+            return {
+                "status": "approval_stale",
+                "reason_code": refusal.code,
+                "reconciliation_id": reconciliation_id,
+                "expected": refusal.expected,
+                "observed": refusal.observed,
+                "dry_run": dry_run,
+            }
+        return outcome.to_dict()
+
+    def _reconciliation_observation(self) -> TargetRuntimeObservation:
+        """CAS observation read through the T1 attestation — one identity reader."""
+        return observation_from_attestation(
+            self.attest_runtime_code(reconciliation_id="", verification_modules=()),
+        )
+
+    def _reconciliation_swap(
+        self,
+        *,
+        reason: str,
+        expected_etag: str,
+        dry_run: bool,
+        provenance: CutoverProvenance,
+        prior_pid: int,
+        prior_instance_id: str,
+        prior_color: str,
+        prior_start_token: str,
+    ) -> SwapEvidence:
+        """Bind the controller to the ONE swap implementation (never a second)."""
+        orchestrator = self._require_orchestrator()
+        app_home = Path(os.environ.get("APP_HOME") or "/app")
+        targets = list(self._collect_set_active_targets())
+        self._swap_in_progress = True
+        try:
+            result = orchestrator.restart(
+                reason=reason,
+                expected_etag=expected_etag,
+                dry_run=dry_run,
+                app_home=app_home,
+                self_instance_id=prior_instance_id,
+                self_color=prior_color,
+                prior_pid=prior_pid,
+                prior_start_token=prior_start_token,
+                poller_gate="local_service_quiesced",
+                set_active_targets=targets,
+                reconciliation_provenance=provenance.to_dict(),
+            )
+        finally:
+            self._swap_in_progress = False
+        return swap_evidence_from_restart_result(result)
+
     def swap_rollback(self, reason: str) -> dict[str, Any]:
         """LocalSelfDeploymentServiceInterface impl — drain-window rollback."""
         client = self._require_client()
@@ -1067,8 +1519,8 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
                 "rolled_back_to": "",
                 "reason": f"router status() failed: {exc}",
             }
-        prior_color = self._resolve_prior_color(snap)
-        if prior_color is None:
+        prior_target = self._resolve_prior_target(snap)
+        if prior_target is None:
             return {
                 "status": STATUS_ROLLBACK_NOT_APPLICABLE,
                 "rolled_back_to": "",
@@ -1077,8 +1529,9 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
                     "rollback is no longer applicable."
                 ),
             }
+        prior_color, prior_instance_id = prior_target
         try:
-            result = client.rollback(prior_color)
+            result = client.rollback(prior_color, prior_instance_id)
         except RouterClientError as exc:
             return {
                 "status": STATUS_FAILED,
@@ -1091,10 +1544,10 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
                 "rolled_back_to": "",
                 "reason": str(result.get("reason") or "router refused rollback"),
             }
-        # C2: the prior color is router-active again, so restore this process's
-        # action-queue poller gate (the swap set it False during quiesce). The
-        # flag is per-process; this restores it on the reactivated instance.
-        self._set_color_active(True)
+        # C2: the router now points at the prior process, but this action is
+        # running on the formerly active process.  The gate is process-local,
+        # so the reactivated process's heartbeat observes that router
+        # transition and restores its own gate; never flip ``self`` here.
         return {
             "status": STATUS_ROLLED_BACK,
             "rolled_back_to": str(result.get("active_color") or prior_color),
@@ -1134,7 +1587,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         new_manifest = new_manifest_raw if isinstance(new_manifest_raw, dict) else {}
         expected_etag = str(params.get("expected_etag") or "")
         reason = str(params.get("reason") or "operator-restart")
-        dry_run = bool(params.get("dry_run") or False)
+        dry_run = coerce_dry_run(params.get("dry_run"))
         try:
             result = self.restart_with_manifest(
                 new_manifest=new_manifest,
@@ -1208,7 +1661,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
     ) -> dict[str, Any]:
         del state
         reason = str(params.get("reason") or "")
-        dry_run = bool(params.get("dry_run") or False)
+        dry_run = coerce_dry_run(params.get("dry_run"))
         if not reason:
             return self._error_envelope(
                 "missing_args",
@@ -1293,6 +1746,91 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
             data = self.swap_status()
         except Exception as err:  # noqa: BLE001 — return structured failure
             self.logger.exception("swap_status crashed")
+            return self._error_envelope(STATUS_FAILED, str(err))
+        return self._success_envelope(data)
+
+    @platform_process(
+        name="attest_runtime_code",
+        context_handling=ContextHandling.NONE,
+        parameters={
+            "reconciliation_id": _RECONCILIATION_ID_PARAM,
+            "verification_modules": _VERIFICATION_MODULES_PARAM,
+        },
+        output_type="object",
+        output_description="Router-served runtime code attestation.",
+        return_value_schema=_runtime_attestation_return_schema(),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(
+            result_type="local_runtime_code_attestation",
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+    )
+    def attest_runtime_code_action(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        del state
+        raw_modules = params.get("verification_modules")
+        if not isinstance(raw_modules, list) or not all(isinstance(item, str) for item in raw_modules):
+            return self._error_envelope("invalid_args", "verification_modules must be a list of strings")
+        try:
+            data = self.attest_runtime_code(
+                reconciliation_id=str(params.get("reconciliation_id") or ""),
+                verification_modules=tuple(raw_modules),
+            )
+        except Exception as err:  # noqa: BLE001 — return structured failure
+            self.logger.exception("attest_runtime_code crashed")
+            return self._error_envelope(STATUS_FAILED, str(err))
+        return self._success_envelope(data)
+
+    @platform_process(
+        name="cutover_release",
+        context_handling=ContextHandling.NONE,
+        parameters={
+            "reconciliation_id": _CUTOVER_ID_PARAM,
+            **_CUTOVER_EXPECT_PARAMS,
+            "dry_run": _CUTOVER_DRY_RUN_PARAM,
+        },
+        output_type="object",
+        output_description="Reconciliation-authorized cutover outcome.",
+        return_value_schema=_cutover_release_return_schema(),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(
+            result_type="local_reconciliation_cutover",
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+    )
+    def cutover_release_action(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        del state
+        missing = [name for name in _CUTOVER_EXPECT_PARAMS if not params.get(name)]
+        if not params.get("reconciliation_id"):
+            missing.append("reconciliation_id")
+        if missing:
+            return self._error_envelope(
+                "missing_args",
+                f"cutover_release requires: {', '.join(sorted(missing))}",
+            )
+        try:
+            data = self.cutover_release(
+                reconciliation_id=str(params["reconciliation_id"]),
+                expected_source_surface_sha256=str(params["expected_source_surface_sha256"]),
+                expected_release_surface_sha256=str(params["expected_release_surface_sha256"]),
+                expected_manifest_etag=str(params["expected_manifest_etag"]),
+                expected_current_release_id=str(params["expected_current_release_id"]),
+                expected_active_instance_id=str(params["expected_active_instance_id"]),
+                expected_active_start_token=str(params["expected_active_start_token"]),
+                dry_run=coerce_dry_run(params.get("dry_run")),
+            )
+        except ValueError as err:
+            # A malformed identity is the caller's error, not a crashed cutover.
+            return self._error_envelope("invalid_args", str(err))
+        except Exception as err:  # noqa: BLE001 — return structured failure
+            self.logger.exception("cutover_release crashed")
             return self._error_envelope(STATUS_FAILED, str(err))
         return self._success_envelope(data)
 
@@ -1406,7 +1944,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         state: dict[str, Any],
     ) -> dict[str, Any]:
         del state
-        dry_run = bool(params.get("dry_run") or False)
+        dry_run = coerce_dry_run(params.get("dry_run"))
         try:
             result = self.install_autostart(dry_run=dry_run)
         except Exception as err:  # noqa: BLE001 — return structured failure
@@ -1433,7 +1971,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         state: dict[str, Any],
     ) -> dict[str, Any]:
         del state
-        dry_run = bool(params.get("dry_run") or False)
+        dry_run = coerce_dry_run(params.get("dry_run"))
         try:
             result = self.uninstall_autostart(dry_run=dry_run)
         except Exception as err:  # noqa: BLE001 — return structured failure
@@ -1547,23 +2085,12 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
     def _run_preflight_probe(
         self, *, candidate: CandidatePaths, app_home: Path
     ) -> ProbeOutcome:
-        """Production ``PreflightProbeFn`` seam (GTE-06).
-
-        Spawns the release-side probe entrypoint under the CANDIDATE's
-        own interpreter, mirroring the green spawn env/cwd contract
-        (inherited env + ``SOLET_NAME``; out-of-tree runtime-dir
-        cwd). NEVER raises — the runner classifies every failure mode.
-        """
-        log_path = (
-            app_home / "data" / "logs"
-            / f"preflight_probe_{uuid.uuid4().hex[:8]}.log"
-        )
-        return run_preflight_probe(
+        """Bind the platform entry to the shared target-local probe function."""
+        return run_cutover_preflight_probe(
             candidate=candidate,
             app_home=app_home,
             solet_name=self._solet_name,
-            cwd=_runtime_dir(),
-            log_path=log_path,
+            runtime_dir=_runtime_dir(),
             timeout_seconds=self._preflight_probe_timeout_seconds(),
             logger=self.logger,
         )
@@ -1664,103 +2191,12 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         current_snapshot: dict[str, object] | None,
         current_release_exists: bool,
     ) -> PreflightVerdict:
-        """§3 DDL-free gate: classify candidate-vs-current schema, FAIL-CLOSED.
-
-        The durable code-rollback guarantee only holds over an unchanged or
-        additive schema (a rolled-back binary cannot undo a DROP COLUMN / type
-        change / new ``NOT NULL`` it never learned to populate), so the deploy
-        is refused unless the candidate's declared schema is provably additive
-        vs the current release's.
-
-        PURE: this gate takes the already-resolved ``current_snapshot`` (the
-        orchestrator reads it from the current ``VERSION``, or DERIVES it from
-        ``current/code`` when the current release predates the producer — the
-        B1·1 baseline derive) plus ``current_release_exists``. Keeping the I/O in
-        the orchestrator (next to the candidate-snapshot producer it reuses)
-        makes this gate trivially testable, but the fail-closed DECISION stays
-        HERE — the derive MUST return a non-None snapshot or raise, so a None
-        ``current_snapshot`` alongside an existing current release is a derive
-        regression, not a bootstrap (the ``KIND_CURRENT_SNAPSHOT_UNRESOLVED``
-        cell). Five cells, all on ``is None`` IDENTITY (an empty ``{}`` is a
-        valid snapshot — an old tree that declared nothing):
-
-        * candidate=None, no current release → baseline allow (first/seed deploy).
-        * candidate=None, current release EXISTS → **FAIL CLOSED**: the producer
-          failed to snapshot the candidate; a missing snapshot cannot be
-          certified rollback-safe (``candidate_schema_snapshot_missing``).
-        * candidate=present, current=present → classify; non-additive → REFUSE.
-        * candidate=present, current=None, no current release → true bootstrap
-          allow (candidate becomes the baseline).
-        * candidate=present, current=None, current release EXISTS → **FAIL
-          CLOSED**: the derive returned None instead of a snapshot-or-raise
-          (``current_schema_snapshot_unresolved``).
-
-        ``cast`` reinterprets the JSON-able dicts as the canonical typed snapshot
-        at this trust boundary.
-        """
-        cand_snapshot = candidate.schema_snapshot
-        if cand_snapshot is None:
-            if not current_release_exists:
-                self.logger.info(
-                    "§3 schema preflight: candidate %s has no snapshot and no "
-                    "current release exists (first/seed deploy); allowing as baseline.",
-                    candidate.release_id,
-                )
-                return PreflightVerdict(is_additive=True, breaking_changes=())
-            self.logger.error(
-                "§3 schema preflight FAIL-CLOSED: candidate %s carries no "
-                "schema_snapshot but a current release exists (producer failed); "
-                "refusing the deploy — cannot certify the change rollback-safe.",
-                candidate.release_id,
-            )
-            return PreflightVerdict(
-                is_additive=False,
-                breaking_changes=(
-                    SchemaChange(
-                        kind=KIND_CANDIDATE_SNAPSHOT_MISSING,
-                        namespace="", table=None, column=None,
-                        detail=(
-                            "candidate has no declared-schema snapshot in steady "
-                            "state (producer failed) — fail-closed"
-                        ),
-                    ),
-                ),
-            )
-        if current_snapshot is None:
-            if not current_release_exists:
-                self.logger.info(
-                    "§3 schema preflight: candidate %s has a snapshot but no current "
-                    "release exists (true bootstrap); allowing as baseline.",
-                    candidate.release_id,
-                )
-                return PreflightVerdict(is_additive=True, breaking_changes=())
-            self.logger.error(
-                "§3 schema preflight FAIL-CLOSED: candidate %s has a snapshot and a "
-                "current release exists, but the current snapshot is unresolved "
-                "(the baseline derive returned None instead of a snapshot or a "
-                "raise); refusing the deploy.",
-                candidate.release_id,
-            )
-            return PreflightVerdict(
-                is_additive=False,
-                breaking_changes=(
-                    SchemaChange(
-                        kind=KIND_CURRENT_SNAPSHOT_UNRESOLVED,
-                        namespace="", table=None, column=None,
-                        detail=(
-                            "current release exists but its schema snapshot could "
-                            "not be resolved (derive returned None) — fail-closed"
-                        ),
-                    ),
-                ),
-            )
-        verdict = classify_snapshot_diff(
-            cast("SchemaSnapshot", current_snapshot),
-            cast("SchemaSnapshot", cand_snapshot),
+        return classify_cutover_schema_preflight(
+            candidate,
+            current_snapshot=current_snapshot,
+            current_release_exists=current_release_exists,
+            logger=self.logger,
         )
-        log = self.logger.info if verdict.is_additive else self.logger.error
-        log("§3 schema preflight: %s", verdict.summary())
-        return verdict
 
     def _create_swap_session(self) -> str:
         """Mint a real ``core.sessions`` row via the orchestrator's SessionManager.
@@ -1859,8 +2295,8 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
             return "unregister_succeeded"
         return "unregister_noop"
 
-    def _resolve_prior_color(self, snap: dict[str, Any]) -> str | None:
-        """Pick the most-recent drain entry — that's the rollback target."""
+    def _resolve_prior_target(self, snap: dict[str, Any]) -> tuple[str, str] | None:
+        """Pick the most-recent drain entry's exact rollback target."""
         drain_entries = snap.get("drain_entries") or []
         if not isinstance(drain_entries, list) or not drain_entries:
             return None
@@ -1868,8 +2304,14 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         if not isinstance(last, dict):
             return None
         color = last.get("color")
-        if isinstance(color, str) and is_valid_color(color):
-            return color
+        instance_id = last.get("instance_id")
+        if (
+            isinstance(color, str)
+            and is_valid_color(color)
+            and isinstance(instance_id, str)
+            and instance_id
+        ):
+            return color, instance_id
         return None
 
     def _success_envelope(self, data: dict[str, Any]) -> dict[str, Any]:

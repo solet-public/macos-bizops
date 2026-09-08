@@ -20,7 +20,9 @@ Run:
 
 from __future__ import annotations
 
+import hashlib
 import sys
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -34,14 +36,26 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _recorded_lane_worktree_fixture import RecordedLaneWorktreeFixture  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from ananta.services.store import Store, open_store  # noqa: E402
 
+import agent_messaging_plugin.overdue_notice as overdue_notice  # noqa: E402
+import agent_messaging_plugin.session_hosts as session_hosts  # noqa: E402
 from agent_messaging_plugin.bridge_sessions import BridgeSessionManager  # noqa: E402
 from agent_messaging_plugin.gauge_notice_record_store import (  # noqa: E402
     read_gauge_notice_records,
 )
 from agent_messaging_plugin.local_cli.spool import watch_instance_digest  # noqa: E402
+from agent_messaging_plugin.managed_dispatch import (  # noqa: E402
+    DISPATCH_WORKER_LOST,
+    DispatchSpec,
+    managed_dispatch_status,
+    prepare_managed_dispatch,
+    read_managed_dispatch,
+    record_first_turn_evidence,
+    supervise_managed_dispatches,
+)
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.peer_registry import PeerRegistry  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
@@ -71,6 +85,7 @@ from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     backfill_registration,
     insert_managed_session,
     read_managed_session,
+    set_host_ref,
     transition_lifecycle_state,
 )
 from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
@@ -79,6 +94,7 @@ from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
 )
 from agent_messaging_plugin.session_sweep import (  # noqa: E402
     DEFAULT_REGISTRATION_BOUND_S,
+    EVENT_DISPATCH_POLICY_UNPAIRED,
     EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE,
     GAUGE_COVERAGE_GRACE_S,
     GAUGE_STALE_LAG_S,
@@ -92,9 +108,11 @@ from agent_messaging_plugin.session_sweep import (  # noqa: E402
     sweep_gauge_coverage,
     sweep_gauge_staleness,
     sweep_lane_closed_dependencies,
+    sweep_managed_dispatches,
     sweep_overdue_sessions,
     sweep_rotation_due_sessions,
     sweep_ttl_overdue_sessions,
+    sweep_unpaired_dispatch_policy,
     sweep_unregistered_spawning_sessions,
 )
 
@@ -129,6 +147,257 @@ def _check(condition: object, label: str) -> None:
 
 def _state() -> StateManagementInterface:
     return cast("StateManagementInterface", RealShapeState())
+
+
+_TEST_MANAGED_HOST = "test-managed-dispatch-host"
+
+
+class _LivenessDriver:
+    def __init__(self, outcome: bool | Exception) -> None:
+        self.outcome = outcome
+
+    def verify_config(self) -> None:
+        return
+
+    def spawn(self, spec: dict[str, Any]) -> str:  # noqa: ARG002
+        return "managed-host-ref"
+
+    def terminate(self, host_ref: str) -> None:  # noqa: ARG002
+        return
+
+    def alive(self, host_ref: str) -> bool:  # noqa: ARG002
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+    def driver_channel(self, agent_instance_id: str, host_ref: str) -> None:  # noqa: ARG002
+        return None
+
+
+def _dispatch_spec(tmp: Path, dispatch_id: str, *, uptake_seconds: int = 60) -> DispatchSpec:
+    brief = tmp / "brief.md"
+    if not brief.exists():
+        brief.write_text("supervisor fixture\n", encoding="utf-8")
+    return DispatchSpec(
+        dispatch_id=dispatch_id,
+        lane_id=dispatch_id,
+        role_name="Managed-Worker",
+        role_class="project",
+        work_class="production_mutation",
+        budget_line="managed-dispatch-smoke",
+        brief_ref=str(brief),
+        brief_sha256=hashlib.sha256(brief.read_bytes()).hexdigest(),
+        expected_path=str(tmp / f"{dispatch_id}.md"),
+        completion_contract={
+            "evidence_obligations": [
+                {"id": "focused", "allowed_statuses": ["pass"]},
+            ],
+            "allowed_verdicts": ["READY-FOR-REVIEW", "BLOCKED"],
+        },
+        model="gpt-5.6-sol",
+        effort="xhigh",
+        agent_runtime="codex",
+        allowed_hosts=[_TEST_MANAGED_HOST],
+        host=_TEST_MANAGED_HOST,
+        visibility="headless",
+        local_name="Managed-Worker",
+        report_by_seconds=900,
+        ttl_seconds=14400,
+        allowed_tools=("Read",),
+        permission_mode="bypassPermissions",
+        transport="mcp",
+        allow_askuserquestion=False,
+        degraded_hooks_acknowledged=False,
+        spawned_by_instance_id="agi-steward",
+        spawned_by_role="Coordinator-Main",
+        directed_by="operator:seat",
+        uptake_due_at=(T0 + timedelta(seconds=uptake_seconds)).isoformat(),
+        report_by=(T0 + timedelta(minutes=15)).isoformat(),
+        watchdog_due_at=(T0 + timedelta(minutes=3)).isoformat(),
+        expires_at=(T0 + timedelta(hours=4)).isoformat(),
+    )
+
+
+def _linked_live_attempt(
+    state: StateManagementInterface,
+    tmp: Path,
+    *,
+    dispatch_id: str,
+    agent_instance_id: str,
+) -> None:
+    prepare_managed_dispatch(state, _dispatch_spec(tmp, dispatch_id), now=T0)
+    insert_managed_session(
+        state,
+        ManagedSessionSpec(
+            agent_instance_id=agent_instance_id,
+            lane_id=dispatch_id,
+            brief_ref=str(tmp / "brief.md"),
+            work_class="production_mutation",
+            budget_line="managed-dispatch-smoke",
+            host=_TEST_MANAGED_HOST,
+            agent_runtime="codex",
+            dispatch_id=dispatch_id,
+        ),
+    )
+    set_host_ref(state, agent_instance_id=agent_instance_id, host_ref="managed-host-ref")
+    transition_lifecycle_state(
+        state,
+        agent_instance_id=agent_instance_id,
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE,
+        directed_by="fixture",
+    )
+    record_first_turn_evidence(
+        state,
+        dispatch_id=dispatch_id,
+        agent_instance_id=agent_instance_id,
+        source="charter",
+        delivered=True,
+        error="",
+        host=_TEST_MANAGED_HOST,
+        host_ref="managed-host-ref",
+        agent_runtime="codex",
+        observed_at=T0 + timedelta(seconds=1),
+    )
+
+
+def test_managed_tmux_death_converges_and_deduplicates() -> None:
+    """Fixture 4: definitive native death ends false-live within one sweep."""
+    with tempfile.TemporaryDirectory() as raw:
+        state = _state()
+        tmp = Path(raw)
+        _linked_live_attempt(
+            state,
+            tmp,
+            dispatch_id="mdp-dead",
+            agent_instance_id="agi-dead",
+        )
+        key = (session_hosts.AGENT_RUNTIME_CODEX, _TEST_MANAGED_HOST)
+        prior = session_hosts._REGISTRY.get(key)  # noqa: SLF001
+        session_hosts._REGISTRY[key] = _LivenessDriver(False)  # noqa: SLF001
+        registry = _peer_registry()
+        manager = _bridge_manager()
+        steward_bridge_id = _register_live_binding(
+            registry,
+            manager,
+            agent_instance_id="agi-steward",
+        )
+        try:
+            first = sweep_managed_dispatches(
+                state,
+                peer_registry=registry,
+                bridge_manager=manager,
+                now=T0 + timedelta(seconds=2),
+            )
+            second = sweep_managed_dispatches(
+                state,
+                peer_registry=registry,
+                bridge_manager=manager,
+                now=T0 + timedelta(seconds=3),
+            )
+        finally:
+            if prior is None:
+                session_hosts._REGISTRY.pop(key, None)  # noqa: SLF001
+            else:
+                session_hosts._REGISTRY[key] = prior  # noqa: SLF001
+        _check(first["dead"] == 1, "04 definitive dead host is found in one interval")
+        _check(
+            read_managed_session(state, "agi-dead")["lifecycle_state"] == LIFECYCLE_TERMINATED,
+            "04 false-live attempt converges to terminated",
+        )
+        _check(
+            read_managed_dispatch(state, "mdp-dead")["state"] == DISPATCH_WORKER_LOST,
+            "04 dispatch converges to worker_lost",
+        )
+        _check(second["dead"] == 0, "04 terminal attempt is not noticed twice")
+        _, notices = manager.get(steward_bridge_id).events_after(-1)
+        _check(
+            len(notices) == 1 and notices[0].event_type == "managed_dispatch_notice",
+            "04 steward receives exactly one deduplicated worker-lost notice",
+        )
+
+
+def test_managed_probe_fault_is_unknown() -> None:
+    """Fixture 5: a driver exception is neither alive nor dead."""
+    with tempfile.TemporaryDirectory() as raw:
+        state = _state()
+        tmp = Path(raw)
+        _linked_live_attempt(
+            state,
+            tmp,
+            dispatch_id="mdp-unknown",
+            agent_instance_id="agi-unknown",
+        )
+        key = (session_hosts.AGENT_RUNTIME_CODEX, _TEST_MANAGED_HOST)
+        prior = session_hosts._REGISTRY.get(key)  # noqa: SLF001
+        driver = _LivenessDriver(RuntimeError("probe fault"))
+        session_hosts._REGISTRY[key] = driver  # noqa: SLF001
+        try:
+            result = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=2))
+            unknown_projection = read_managed_dispatch(state, "mdp-unknown")
+            status = managed_dispatch_status(
+                state,
+                "mdp-unknown",
+                now=T0 + timedelta(seconds=2),
+            )
+            reprobe = supervise_managed_dispatches(
+                state,
+                now=T0 + timedelta(seconds=33),
+            )
+            repeated = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=40))
+            escalated = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=123))
+            driver.outcome = True
+            recovered = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=124))
+        finally:
+            if prior is None:
+                session_hosts._REGISTRY.pop(key, None)  # noqa: SLF001
+            else:
+                session_hosts._REGISTRY[key] = prior  # noqa: SLF001
+        row = read_managed_session(state, "agi-unknown")
+        _check(result["unknown"] == 1, "05 probe fault counts as unknown")
+        _check(row["lifecycle_state"] == LIFECYCLE_LIVE, "05 unknown does not terminate live row")
+        _check(status["host_liveness"] == "unknown", "05 aggregate status is explicitly unknown")
+        _check(
+            bool(unknown_projection.get("next_liveness_probe_at"))
+            and bool(unknown_projection.get("liveness_escalation_due_at")),
+            "05 unknown liveness persists a bounded re-probe obligation",
+        )
+        _check(
+            [item["condition"] for item in reprobe["conditions"]]
+            == ["liveness_reprobe_due"],
+            "05 elapsed re-probe deadline surfaces the exact action",
+        )
+        _check(repeated["unknown"] == 1, "05 repeated probe fault remains unknown")
+        _check(
+            any(
+                item["condition"] == "liveness_unknown_escalation"
+                for item in escalated["conditions"]
+            ),
+            "05 repeated faults reach bounded coordinator escalation",
+        )
+        _check(
+            recovered["alive"] == 1
+            and not read_managed_dispatch(state, "mdp-unknown").get(
+                "next_liveness_probe_at"
+            ),
+            "05 a successful re-probe clears unknown obligations",
+        )
+
+
+def test_managed_dispatch_sweep_is_uncapped() -> None:
+    """Fixture 14: every owed row beyond the normal query page is evaluated."""
+    with tempfile.TemporaryDirectory() as raw:
+        state = _state()
+        tmp = Path(raw)
+        for index in range(125):
+            prepare_managed_dispatch(
+                state,
+                _dispatch_spec(tmp, f"mdp-page-{index}", uptake_seconds=10),
+                now=T0,
+            )
+        result = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=20))
+        _check(result["dispatches_evaluated"] == 125, "14 all 125 dispatches are evaluated")
+        _check(result["notices_emitted"] == 125, "14 every owed dispatch gets one notice")
 
 
 def _peer_registry() -> PeerRegistry:
@@ -325,6 +594,134 @@ def test_overdue_notifies_steward() -> None:
         "-- before this fix, sweep_overdue_sessions sent NO notification "
         "of any kind",
     )
+
+
+def test_overdue_fresh_heartbeat_is_quiet_but_the_row_stays_lapsed() -> None:
+    """iss_8126960b: a fresh passive heartbeat suppresses only the direct wake.
+
+    Killing mutation: route every lapsed row through ``EVENT_SESSION_OVERDUE_NOTICE``
+    (the former implementation).  This emits the wake-class event and calls the
+    managed-driver nudge despite the fresh server stamp.
+    """
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    steward_bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-steward")
+    report_by = (T0 - timedelta(seconds=1)).isoformat()
+    _spawn_live(
+        state,
+        agent_instance_id="agi-fresh-late",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=report_by,
+        spawned_by_instance_id="agi-steward",
+    )
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-fresh-late"}},
+        {"last_heartbeat_at": (T0 - timedelta(seconds=1)).isoformat()},
+    )
+    drive_calls: list[str] = []
+    original_drive = overdue_notice.drive_on_delivery
+    overdue_notice.drive_on_delivery = lambda _state, **kwargs: drive_calls.append(
+        str(kwargs["recipient_agent_instance_id"]),
+    )
+    try:
+        marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
+    finally:
+        overdue_notice.drive_on_delivery = original_drive
+    _, events = mgr.get(steward_bridge_id).events_after(-1)
+    row = read_managed_session(state, "agi-fresh-late")
+    _check(marked == 1 and row["lifecycle_state"] == LIFECYCLE_OVERDUE, "fresh heartbeat leaves the report_by-lapsed row honestly overdue")
+    _check(row["report_by"] == report_by, "fresh heartbeat does not re-arm or otherwise alter report_by")
+    _check(
+        len(events) == 1 and events[0].event_type == overdue_notice.EVENT_SESSION_OVERDUE_QUIET_NOTICE and "quiet low-priority line" in events[0].content,
+        "fresh heartbeat emits one visible quiet line, never the wake-class event",
+    )
+    _check(not drive_calls, "fresh-heartbeat quiet line never invokes the direct driver wake")
+
+
+def test_overdue_stale_heartbeat_keeps_the_full_alarm_and_wake() -> None:
+    """iss_8126960b: a stamp just beyond the 180s hook cadence stays urgent."""
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    steward_bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-steward")
+    _spawn_live(
+        state,
+        agent_instance_id="agi-stale-late",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=(T0 - timedelta(seconds=1)).isoformat(),
+        spawned_by_instance_id="agi-steward",
+    )
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-stale-late"}},
+        {"last_heartbeat_at": (T0 - timedelta(seconds=181)).isoformat()},
+    )
+    drive_calls: list[str] = []
+    original_drive = overdue_notice.drive_on_delivery
+    overdue_notice.drive_on_delivery = lambda _state, **kwargs: drive_calls.append(
+        str(kwargs["recipient_agent_instance_id"]),
+    )
+    try:
+        marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
+    finally:
+        overdue_notice.drive_on_delivery = original_drive
+    _, events = mgr.get(steward_bridge_id).events_after(-1)
+    _check(marked == 1, "stale-heartbeat lapsed row is still marked overdue")
+    _check(
+        len(events) == 1 and events[0].event_type == overdue_notice.EVENT_SESSION_OVERDUE_NOTICE,
+        "stale heartbeat keeps the existing wake-class overdue event",
+    )
+    _check(drive_calls == ["agi-steward"], "stale heartbeat keeps the existing direct driver wake")
+
+
+def test_dispatch_policy_unpaired_notifies_after_ten_minutes_but_not_for_a_pair() -> None:
+    """A lone live diagnose row is an owed two-producer notice, not a completed report."""
+    state = _state()
+    reg = _peer_registry()
+    mgr = _bridge_manager()
+    bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-pair-steward")
+    _spawn_live(
+        state, agent_instance_id="agi-lone-producer", lifecycle_state=LIFECYCLE_LIVE,
+        spawned_by_instance_id="agi-pair-steward",
+    )
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-lone-producer"}},
+        {
+            "dispatch_kind": "diagnose", "pair_id": "pair-1", "agent_runtime": "codex",
+            "created_at": (T0 - timedelta(seconds=601)).isoformat(),
+        },
+    )
+    latch = NoticeLatch()
+    sent = sweep_unpaired_dispatch_policy(
+        state, now=T0, peer_registry=reg, bridge_manager=mgr, latch=latch,
+    )
+    _check(sent == 1, "lone diagnose producer after ten minutes emits a notice")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(
+        len(events) == 1 and events[0].event_type == EVENT_DISPATCH_POLICY_UNPAIRED
+        and "pair-1" in events[0].content,
+        "unpaired notice carries the pair identity through the normal steward delivery path",
+    )
+
+    _spawn_live(
+        state, agent_instance_id="agi-partner-producer", lifecycle_state=LIFECYCLE_LIVE,
+        spawned_by_instance_id="agi-pair-steward",
+    )
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-partner-producer"}},
+        {
+            "dispatch_kind": "diagnose", "pair_id": "pair-1", "agent_runtime": "claude_code",
+            "created_at": (T0 - timedelta(seconds=590)).isoformat(),
+        },
+    )
+    paired = sweep_unpaired_dispatch_policy(
+        state, now=T0, peer_registry=reg, bridge_manager=mgr, latch=NoticeLatch(),
+    )
+    _check(paired == 0, "cross-vendor partner in the ten-minute window suppresses the notice")
 
 
 def test_overdue_notifies_unmanaged_steward() -> None:
@@ -1353,27 +1750,33 @@ def test_retire_session_crash_mid_retire_is_redrivable() -> None:
     still un-fired (step 3 not done) — re-running retire_session must finish
     the job: fire the pending edge and complete terminated -> retired.
     """
-    state = _state()
-    _spawn_live(state, agent_instance_id="agi-crash")
-    terminate_session(state, agent_instance_id="agi-crash", directed_by="operator:none")
-    _seed_dependency(
-        state, row_id="sdp-crash", condition_kind=CONDITION_SESSION_TERMINAL,
-        condition_ref="agi-crash", waiter_instance_id="agi-waiter-crash",
-    )
-    _check(
-        read_managed_session(state, "agi-crash")["lifecycle_state"] == LIFECYCLE_TERMINATED,
-        "setup: the row is 'terminated' but NOT yet 'retired' (simulating the crash point)",
-    )
-    result = retire_session(state, agent_instance_id="agi-crash", directed_by="operator:none")
-    _check(
-        result == {"already_retired": False, "dependencies_fired": 1},
-        f"re-running retire_session finishes the job: fires the pending edge and "
-        f"completes the transition (got {result!r})",
-    )
-    _check(
-        read_managed_session(state, "agi-crash")["lifecycle_state"] == LIFECYCLE_RETIRED,
-        "the row reaches 'retired' despite the simulated mid-retire crash",
-    )
+    with tempfile.TemporaryDirectory() as raw:
+        with RecordedLaneWorktreeFixture(Path(raw)) as fixture:
+            state = _state()
+            _spawn_live(state, agent_instance_id="agi-crash")
+            terminate_session(state, agent_instance_id="agi-crash", directed_by="operator:none")
+            _seed_dependency(
+                state, row_id="sdp-crash", condition_kind=CONDITION_SESSION_TERMINAL,
+                condition_ref="agi-crash", waiter_instance_id="agi-waiter-crash",
+            )
+            _check(
+                read_managed_session(state, "agi-crash")["lifecycle_state"] == LIFECYCLE_TERMINATED,
+                "setup: the row is 'terminated' but NOT yet 'retired' (simulating the crash point)",
+            )
+            result = retire_session(state, agent_instance_id="agi-crash", directed_by="operator:none")
+            _check(
+                result == {"already_retired": False, "dependencies_fired": 1},
+                f"re-running retire_session finishes the job: fires the pending edge and "
+                f"completes the transition (got {result!r})",
+            )
+            _check(
+                read_managed_session(state, "agi-crash")["lifecycle_state"] == LIFECYCLE_RETIRED,
+                "the row reaches 'retired' despite the simulated mid-retire crash",
+            )
+            _check(
+                fixture.has_recorded_provisioning() is False and bool(fixture.retirement_calls),
+                "crash-mid-retire teardown is recorded through a temp-root-contained fixture",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1615,7 +2018,7 @@ def _wired() -> tuple[StateManagementInterface, PeerRegistry, BridgeSessionManag
 
 
 def test_rotation_due_notice_carries_the_measured_number() -> None:
-    """The charter: never a bare 'you should rotate'."""
+    """The steward path shares the same one-line durability notice."""
     state, reg, mgr, bridge_id = _wired()
     _gauge(state, "agi-worker")
     n = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
@@ -1624,16 +2027,17 @@ def test_rotation_due_notice_carries_the_measured_number() -> None:
     body = events[0].content if events else ""
     _check(events and events[0].event_type == "rotation_due_notice",
            "the event is typed rotation_due_notice, distinct from the overdue notice")
-    _check("900000" in body, "the notice carries the MEASURED token count, not a bare verdict")
-    _check("claude-sonnet-5" in body,
-           "the notice names the MODEL beside the band -- the bands are model-blind")
+    _check(body == "context is 900,000 — make sure everything is durable.",
+           "the notice contains only current context and the durability instruction")
+    _check(not any(term in body.lower() for term in ("warm_", "rotate at", "pays for itself", "break-even")),
+           "the steward path contains none of the retired economics vocabulary")
 
 
 def test_rotation_due_is_silent_below_the_threshold() -> None:
     state, reg, mgr, bridge_id = _wired()
-    _gauge(state, "agi-worker", current_tokens=1_000)
+    _gauge(state, "agi-worker", current_tokens=319_999)
     n = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
-    _check(n == 0, "a session well under the threshold produces no notice")
+    _check(n == 0, "319,999 is below the derived 320,000 notice point")
     _, events = mgr.get(bridge_id).events_after(-1)
     _check(not events, "and nothing is delivered -- a notice that always fires is ignored")
 
@@ -1660,6 +2064,17 @@ def test_the_saturated_band_below_the_fraction_now_reaches_the_steward() -> None
     _check("0.300" in body,
            "...beside the fraction 0.300, which is BELOW the 0.5 hint: the two "
            "numbers now appear together without contradicting the decision")
+
+
+def test_rotation_due_uses_the_runtime_window_minimum() -> None:
+    state, reg, mgr, bridge_id = _wired()
+    _gauge(state, "agi-worker", current_tokens=144_000, ceiling=200_000,
+           model="claude-haiku-4-5")
+    n = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
+    _, events = mgr.get(bridge_id).events_after(-1)
+    _check(n == 1 and events and events[0].content == (
+        "context is 144,000 — make sure everything is durable."
+    ), "the steward uses the 200K runtime window and notices at 144K")
 
 
 def test_consumer_4_prose_names_an_axis_the_decision_actually_used() -> None:
@@ -1953,6 +2368,7 @@ def test_gauge_coverage_notice_says_when_no_reporter_has_run_at_all() -> None:
         {
             "report_by_seconds": 300,
             "report_by": (became_live + timedelta(seconds=300)).isoformat(),
+            "report_by_source": "explicit_self_report",
         },
     )
     sweep_gauge_coverage(state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr)
@@ -1993,6 +2409,7 @@ def test_gauge_coverage_notice_names_the_evidence_when_the_session_has_ticked()\
         {
             "report_by_seconds": 300,
             "report_by": (ticked_at + timedelta(seconds=300)).isoformat(),
+            "report_by_source": "explicit_self_report",
         },
     )
     sweep_gauge_coverage(state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr)
@@ -2358,6 +2775,7 @@ def _ticking(
         {
             "report_by_seconds": window_s,
             "report_by": (last_alive + timedelta(seconds=window_s)).isoformat(),
+            "report_by_source": "explicit_self_report",
             "last_transition_at": (last_alive - timedelta(days=1)).isoformat(),
         },
     )
@@ -2367,8 +2785,17 @@ def test_last_report_alive_derives_the_tick_moment() -> None:
     """The identity the whole leg rests on, pinned on its own before anything
     composes it: report_by minus report_by_seconds IS the last report_alive."""
     moment = datetime(2026, 8, 18, 12, 0, 0, tzinfo=UTC)
-    row = {"report_by": (moment + timedelta(seconds=300)).isoformat(), "report_by_seconds": 300}
+    row = {
+        "report_by": (moment + timedelta(seconds=300)).isoformat(),
+        "report_by_seconds": 300,
+        "report_by_source": "explicit_self_report",
+    }
     _check(last_report_alive(row) == moment, "the derived tick moment is exact")
+    for source in ("confirmed_drive", "observed_spawning", ""):
+        _check(
+            last_report_alive({**row, "report_by_source": source}) is None,
+            f"report_by provenance {source!r} is not misidentified as report_alive",
+        )
     _check(
         last_report_alive({"report_by": moment.isoformat(), "report_by_seconds": 0}) is None,
         "a zero window is NO EVIDENCE (None), never a datetime — absence of the "
@@ -2389,6 +2816,33 @@ def test_gauge_stale_fires_when_alive_and_the_gauge_arrested() -> None:
     _check(
         events and events[0].event_type == "gauge_stale_notice",
         "and it arrives as its OWN event type, not the missing-row one",
+    )
+
+
+def test_gauge_stale_names_carried_forward_heartbeat_failures() -> None:
+    """D-5.3: a passive heartbeat that transports failures is evidence of a
+    failing heartbeat path, not an explicit report_alive identity and not a
+    confident claim that the gauge alone froze."""
+    state, reg, mgr, bridge_id = _wired()
+    now = datetime.now(UTC)
+    _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
+    state.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-worker"}},
+        {
+            "last_heartbeat_at": (now - timedelta(seconds=30)).isoformat(),
+            "heartbeat_failures_since_last": 1,
+            "heartbeat_failure_first_at": (now - timedelta(seconds=60)).isoformat(),
+            "last_transition_at": (now - timedelta(days=1)).isoformat(),
+        },
+    )
+    n = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
+    _check(n == 1, "a carried-forward heartbeat failure is detected against the frozen gauge")
+    _, events = mgr.get(bridge_id).events_after(-1)
+    body = events[0].content if events else ""
+    _check(
+        "heartbeat-FAILING" in body and "gauge reporter alone froze" in body,
+        "the notice diagnoses the recorded heartbeat failure rather than asserting gauge-only failure",
     )
 
 
@@ -2472,10 +2926,10 @@ def test_gauge_stale_notice_states_both_clocks_and_names_no_cause() -> None:
     """The GAU-13 prose rule, one leg over: state the measurement, diagnose only
     as far as the evidence carries, assert no negative the next tick falsifies.
 
-    The divergence DOES establish which reporter is implicated (both fire on the
-    same completed tool call), so naming the gauge reporter is measured. WHY it
-    stopped is not visible from here, and a notice asserting it would be a guess
-    wearing a measurement's clothes."""
+    The divergence DOES establish which runtime's gauge reporter is implicated.
+    WHY it stopped is not visible from here, and a notice asserting it would be
+    a guess wearing a measurement's clothes. The prose must not point Codex to
+    a Claude-specific hook, and must direct the reader to retained history."""
     state, reg, mgr, bridge_id = _wired()
     now = datetime.now(UTC)
     measured_at = now - timedelta(seconds=5400)
@@ -2489,7 +2943,12 @@ def test_gauge_stale_notice_states_both_clocks_and_names_no_cause() -> None:
         measured_at.isoformat() in body and last_alive.isoformat() in body,
         f"BOTH measured timestamps appear in the notice. Got: {body!r}",
     )
-    _check("rotation_due_watch" in body, "the implicated reporter is named")
+    _check(
+        "that session's gauge reporter" in body
+        and "session_context_status_history" in body
+        and "upsert-only and keeps no history" not in body,
+        "the runtime-neutral gauge writer and GAU-15 history verb are named",
+    )
     _check(
         "likeliest cause" not in body and "transcript_path" not in body,
         "but no CAUSE is asserted — the leg cannot see which, and the detector "
@@ -2859,10 +3318,16 @@ def test_the_rider_actually_passes_the_sink_and_prints_both_numbers() -> None:
 
 
 def main() -> int:
+    test_managed_tmux_death_converges_and_deduplicates()
+    test_managed_probe_fault_is_unknown()
+    test_managed_dispatch_sweep_is_uncapped()
     test_overdue_no_report_by_never_swept()
     test_overdue_marks_past_deadline_live_and_idle()
     test_overdue_skips_future_deadline()
     test_overdue_notifies_steward()
+    test_overdue_fresh_heartbeat_is_quiet_but_the_row_stays_lapsed()
+    test_overdue_stale_heartbeat_keeps_the_full_alarm_and_wake()
+    test_dispatch_policy_unpaired_notifies_after_ten_minutes_but_not_for_a_pair()
     test_overdue_notifies_unmanaged_steward()
     test_overdue_notifies_a_watch_id_registered_steward()
     test_overdue_join_reads_the_session_id_and_never_derives_it()
@@ -2908,9 +3373,7 @@ def main() -> int:
 
     test_rotation_due_notice_carries_the_measured_number()
     test_rotation_due_is_silent_below_the_threshold()
-    test_the_saturated_band_below_the_fraction_now_reaches_the_steward()
-    test_consumer_4_prose_names_an_axis_the_decision_actually_used()
-    test_rotation_due_flags_an_unattributable_reporter()
+    test_rotation_due_uses_the_runtime_window_minimum()
     test_gauge_coverage_catches_a_live_session_with_no_row()
     test_gauge_coverage_is_silent_when_the_row_exists()
     test_l4a_legs_no_op_without_a_bridge()
@@ -2923,7 +3386,6 @@ def main() -> int:
     test_gauge_coverage_notice_says_when_no_reporter_has_run_at_all()
     test_gauge_coverage_notice_names_the_evidence_when_the_session_has_ticked()
 
-    test_a_broken_notice_message_surfaces_instead_of_being_swallowed()
 
     test_ttl_overdue_notifies_the_steward()
     test_ttl_notice_names_both_clocks_and_the_measured_overdue()
@@ -2942,6 +3404,7 @@ def main() -> int:
 
     test_last_report_alive_derives_the_tick_moment()
     test_gauge_stale_fires_when_alive_and_the_gauge_arrested()
+    test_gauge_stale_names_carried_forward_heartbeat_failures()
     test_gauge_stale_is_silent_when_both_clocks_stopped()
     test_gauge_stale_is_silent_on_a_healthy_throttle_skew()
     test_gauge_stale_threshold_is_a_boundary_not_a_vibe()

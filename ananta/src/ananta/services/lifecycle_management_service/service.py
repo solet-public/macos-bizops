@@ -1330,12 +1330,11 @@ class LifecycleManagementService(LifecycleManagementAPI):
             )
         if restart_status not in _RESTART_STATUSES_THAT_APPLIED_THE_MANIFEST:
             return self._restart_failed_after_manifest_commit_envelope(
+                app_home=app_home,
                 diff=diff,
-                current_etag=current.etag,
-                new_etag=outcome.new_etag,
-                manifest_path=outcome.manifest_path,
-                bindings_path=outcome.bindings_path,
+                current=current,
                 restart=restart,
+                outcome=outcome,
             )
         data: dict[str, Any] = {
             "status": "applied",
@@ -1412,47 +1411,106 @@ class LifecycleManagementService(LifecycleManagementAPI):
     def _restart_failed_after_manifest_commit_envelope(
         self,
         *,
+        app_home: Path,
         diff: ManifestDiff,
-        current_etag: str,
-        new_etag: str,
-        manifest_path: Path,
-        bindings_path: Path,
+        current: CurrentManifestState,
         restart: dict[str, Any],
+        outcome: ManifestWriteOutcome,
     ) -> dict[str, Any]:
-        """Build the envelope for a successful local write + failed restart.
+        """Restore a failed restart's manifest commit and build its envelope.
 
         Codex review #2 Finding 1: when the manifest write succeeds but
         ``self_deployment_service::restart_with_manifest`` cannot schedule the
         cutover, the running color still has the old in-memory config but
-        the on-disk (and on-S3, for cloud) manifest now points future
-        boots at the new shape. That's a partial remote commit; the
-        operator needs both the failure reason AND the durable paths so
-        they can roll back manually or re-invoke once the underlying
-        deploy problem is fixed.
+        the on-disk manifest would otherwise point future boots at the new
+        shape. Restore the CAS-time snapshot just as the probe-failure path
+        does. The etag guard avoids overwriting another caller's acknowledged
+        manifest commit during the restart window.
         """
+        on_disk = read_current_manifest_state(app_home)
+        if on_disk.etag != outcome.new_etag:
+            return {
+                "action_status": ActionStatus.COMPLETED.value,
+                "data": {
+                    "status": "restart_failed_after_manifest_commit",
+                    "diff": _diff_to_dict(diff),
+                    "current_etag": current.etag,
+                    "new_etag": outcome.new_etag,
+                    "on_disk_etag": on_disk.etag,
+                    "manifest_written_to": str(outcome.manifest_path),
+                    "service_bindings_written_to": str(outcome.bindings_path),
+                    "restart_action_id": restart["restart_action_id"],
+                    "restart_status": restart["status"],
+                    "rejection_reasons": [
+                        "restart_failed_after_manifest_commit: deployment plugin "
+                        f"returned status={restart['status']!r}: {restart['message']}",
+                        "manifest_rollback_skipped: on-disk manifest changed after "
+                        "this flow wrote it; refusing to overwrite a concurrent commit",
+                    ],
+                    "message": (
+                        "Deployment restart failed after this flow wrote the manifest, "
+                        "but the on-disk manifest changed before rollback. It was not "
+                        "overwritten; inspect the current commit before retrying."
+                    ),
+                },
+                "actions": [],
+            }
+        try:
+            bindings_path, manifest_path = restore_previous_manifest(
+                app_home,
+                manifest_bytes=outcome.pre_write_state.manifest_bytes,
+                bindings_bytes=outcome.pre_write_state.bindings_bytes,
+            )
+        except OSError as restore_exc:
+            logger.exception("Restart-failed rollback could not restore prior manifest")
+            return {
+                "action_status": ActionStatus.COMPLETED.value,
+                "data": {
+                    "status": "restart_failed_after_manifest_commit",
+                    "diff": _diff_to_dict(diff),
+                    "current_etag": current.etag,
+                    "new_etag": outcome.new_etag,
+                    "manifest_written_to": str(outcome.manifest_path),
+                    "service_bindings_written_to": str(outcome.bindings_path),
+                    "restart_action_id": restart["restart_action_id"],
+                    "restart_status": restart["status"],
+                    "rejection_reasons": [
+                        "restart_failed_after_manifest_commit: deployment plugin "
+                        f"returned status={restart['status']!r}: {restart['message']}",
+                        "manifest_rollback_failed: "
+                        f"{type(restore_exc).__name__}: {restore_exc}",
+                    ],
+                    "message": (
+                        "Deployment restart failed and restoration of the pre-swap "
+                        "manifest also failed. The running color remains unchanged; "
+                        "operator intervention is required before a future boot."
+                    ),
+                },
+                "actions": [],
+            }
         return {
             "action_status": ActionStatus.COMPLETED.value,
             "data": {
                 "status": "restart_failed_after_manifest_commit",
                 "diff": _diff_to_dict(diff),
-                "current_etag": current_etag,
-                "new_etag": new_etag,
-                "manifest_written_to": str(manifest_path),
-                "service_bindings_written_to": str(bindings_path),
+                "current_etag": current.etag,
+                "new_etag": outcome.new_etag,
+                "manifest_written_to": str(outcome.manifest_path),
+                "service_bindings_written_to": str(outcome.bindings_path),
+                "manifest_restored_to": str(manifest_path),
+                "service_bindings_restored_to": str(bindings_path),
                 "restart_action_id": restart["restart_action_id"],
                 "restart_status": restart["status"],
                 "rejection_reasons": [
                     f"restart_failed_after_manifest_commit: deployment plugin "
-                    f"returned status={restart['status']!r}: {restart['message']}"
+                    f"returned status={restart['status']!r}: {restart['message']}",
+                    "manifest_rolled_back: restored the CAS-time pre-write snapshot",
                 ],
                 "message": (
-                    "Manifest written locally (and to S3 for cloud) but the "
-                    "deployment plugin could not schedule the restart. The "
-                    "running color still has the old config; future boots "
-                    "will pick up the new manifest. Resolve the underlying "
-                    "deploy failure (see restart_status + rejection_reasons) "
-                    "and re-invoke apply_manifest, OR manually roll the "
-                    "on-disk / S3 manifest back to the prior shape."
+                    "Deployment restart failed after the manifest write. The running "
+                    "color remains on the old config and the on-disk profile manifest "
+                    "was restored to its CAS-time pre-write snapshot. Resolve the "
+                    "underlying deploy failure and re-invoke apply_manifest."
                 ),
             },
             "actions": [],

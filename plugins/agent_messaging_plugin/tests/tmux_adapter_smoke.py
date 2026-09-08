@@ -105,6 +105,7 @@ class _FakeCompleted:
 
 
 def _executable_stub(tmp_dir: Path, name: str = "fake-tmux") -> str:
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     stub = tmp_dir / name
     # The "fake-tmux" stub answers -V with a real, current version string so
     # a default (real subprocess.run) run_fn's version check passes -- tests
@@ -142,12 +143,15 @@ def _configured_driver(
         "solet_name": "testhom",
         # Injected, never resolved from the ambient environment: the CLI/PATH
         # and presence-sidecar assertions would otherwise pass or fail on
-        # whether the machine running the gate happens to have a `solet` on
+        # whether the machine running the gate happens to have a `solet-bridge` on
         # PATH or beside its interpreter.
-        "solet_bin": _executable_stub(tmp_dir, "fake-solet"),
+        "solet_bin": _executable_stub(
+            tmp_dir / "venv" / "bin", "solet-bridge",
+        ),
         "permission_mode": "bypassPermissions",
         "mcp_config_path": mcp_config,
         "cwd": tmp_dir,
+        "python_executable": str(tmp_dir / "venv" / "bin" / "python3"),
         # No real waiting in unit smokes -- the confirm-loop's own poll
         # cadence is exercised by the dedicated confirm-flow tests below,
         # not by every spawn-shape test that happens to go through it.
@@ -170,7 +174,7 @@ def _check_wake_cli_and_path(cmd: list[str]) -> None:
         (v.split("=", 1)[1] for v in cmd if v.startswith("AGENT_WAKE_CLI=")), "",
     )
     _check(
-        Path(wake_cli).name == "fake-solet" and "testhom" not in wake_cli,
+        Path(wake_cli).name == "solet-bridge" and "testhom" not in wake_cli,
         "AGENT_WAKE_CLI is the wake-CLI EXECUTABLE, never the solet instance "
         "name -- `which <instance-name>` cannot resolve, so a value that "
         "tracked solet_name (e.g. 'testhom' here) silently broke every "
@@ -179,7 +183,7 @@ def _check_wake_cli_and_path(cmd: list[str]) -> None:
     _check(
         Path(wake_cli).is_absolute(),
         "AGENT_WAKE_CLI is ABSOLUTE, not the bare name -- a tmux pane "
-        "inherits the tmux SERVER's minimal PATH, under which a bare 'solet' "
+        "inherits the tmux SERVER's minimal PATH, under which a bare 'solet-bridge' "
         "is unresolvable, and both the Stop-hook waker and the PostToolUse "
         "heartbeat then died silently (FileNotFoundError, exit 0); "
         "registration-loss fix, 2026-08-14",
@@ -190,7 +194,7 @@ def _check_wake_cli_and_path(cmd: list[str]) -> None:
     _check(
         pane_path.split(os.pathsep)[0] == str(Path(wake_cli).parent),
         "PATH crosses the `new-session -e` allowlist boundary with the CLI's "
-        "directory first, so hooks and skills invoking a BARE `solet` resolve "
+        "directory first, so hooks and skills invoking a BARE `solet-bridge` resolve "
         "it too",
     )
 
@@ -200,7 +204,7 @@ def _check_presence_sidecar(pane_command: str) -> None:
     presence sidecar -- the step that actually puts this worker in
     ``peer_list`` -- and only then the exec."""
     _check(
-        "fake-solet" in pane_command and " watch " in pane_command
+        "/solet-bridge" in pane_command and " watch " in pane_command
         and "--no-claim" in pane_command,
         "the pane arms the --no-claim presence sidecar before exec",
     )
@@ -470,6 +474,16 @@ def test_spawn_command_and_env_wiring() -> None:
         )
         _check("AGENT_SESSION_LABEL=lane-x" in env_str, "label prefers lane_id when given")
         _check("SOLET_NAME=testhom" in env_str, "SOLET_NAME flows from driver config")
+        designated_reporter = next(
+            (value.split("=", 1)[1] for value in cmd
+             if value.startswith("AGENT_CONTEXT_GAUGE_REPORTER_PATH=")),
+            "",
+        )
+        _check(
+            Path(designated_reporter).is_absolute()
+            and designated_reporter.endswith("rotation_due_watch.py"),
+            "the tmux worker receives an absolute designated gauge-reporter path",
+        )
         _check_wake_cli_and_path(cmd)
         _check(
             "FLEET_TRANSPORT=watch" in env_str,
@@ -490,6 +504,165 @@ def test_spawn_command_and_env_wiring() -> None:
             len(allow_passthrough_calls) == 1 and allow_passthrough_calls[0][-1] == "on",
             "allow-passthrough is set to 'on' exactly once, after session creation",
         )
+
+
+def _fake_lane_worktree(root: Path, name: str) -> Path:
+    """A provisioned lane worktree in exactly the shape ``spawn_worktree_cwd``
+    checks for: a real directory carrying a ``.git`` entry. A linked worktree's
+    ``.git`` is a FILE (a ``gitdir:`` pointer), which is the shape this builds
+    -- the main checkout's directory form is the case the helper also accepts,
+    and neither is what the pre-fix driver looked at, because it looked at
+    nothing."""
+    worktree = root / "lane_worktrees" / name
+    worktree.mkdir(parents=True, exist_ok=True)
+    (worktree / ".git").write_text(f"gitdir: {root}/.git/worktrees/{name}\n")
+    return worktree
+
+
+def _spawn_cwd_and_import_root(cmd: list[str]) -> tuple[str, str]:
+    """``(tmux new-session -c <cwd>, first PYTHONPATH entry)`` -- the two
+    halves of one isolation decision, read back out of the recorded argv."""
+    cwd_arg = cmd[cmd.index("-c") + 1]
+    pythonpath = next(
+        (v.split("=", 1)[1] for v in cmd if v.startswith("PYTHONPATH=")), "",
+    )
+    return cwd_arg, pythonpath.split(os.pathsep)[0]
+
+
+def test_spawn_runs_in_the_provisioned_lane_worktree() -> None:
+    """iss_2236d297 (2026-09-07): ``spawn_session`` provisions a lane worktree
+    and hands it to the host driver as ``worktree_path``. Every other driver
+    honours it (``codex_tmux``, ``codex_app_server``, ``headless_adapter``);
+    this one passed its OWN default cwd to ``tmux new-session -c``, so the
+    worktree was created, registered and silently abandoned and every Claude
+    lane's WIP landed in the shared checkout instead.
+
+    FAILING MUTATIONS, one per leg: restoring ``"-c", str(self._cwd)`` in
+    :meth:`TmuxHostDriver.spawn` reds the cwd leg; dropping the ``PYTHONPATH``
+    entry from ``_env_pairs`` reds the import-root leg -- a pane whose cwd is
+    the lane tree but whose imports still resolve out of the shared tree is
+    the same contamination, quieter."""
+    calls: list[list[str]] = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        worktree = _fake_lane_worktree(root, "lane-x--agi-abc123ef")
+        driver = _configured_driver(root, run_fn=_confirm_flow_run_fn(calls))
+        driver.spawn(
+            {
+                "agent_instance_id": "agi-abc123ef", "lane_id": "lane-x",
+                "worktree_path": str(worktree),
+            },
+        )
+        cmd = next(c for c in calls if "new-session" in c)
+        cwd_arg, import_root = _spawn_cwd_and_import_root(cmd)
+        _check(
+            cwd_arg == str(worktree.resolve()),
+            f"tmux new-session -c is the PROVISIONED lane worktree "
+            f"(got {cwd_arg!r}, wanted {str(worktree.resolve())!r})",
+        )
+        _check(
+            cwd_arg != str(root.resolve()),
+            "the pane does NOT open in the driver's own shared checkout when a "
+            "worktree was provisioned -- the defect's exact signature was every "
+            "Claude pane's pane_current_path being the shared root",
+        )
+        _check(
+            import_root == str(worktree.resolve()),
+            f"PYTHONPATH is anchored at the lane worktree ahead of anything "
+            f"inherited -- a worktree isolates FILES, not IMPORTS "
+            f"(got {import_root!r})",
+        )
+
+
+def test_spawn_without_a_worktree_keeps_the_drivers_default_cwd() -> None:
+    """The other half of the same contract, held to the shape the Codex
+    drivers are already held to: no ``worktree_path`` in the spec means the
+    driver's own configured cwd, unchanged. This is the leg that proves the
+    fix is a resolution, not an unconditional redirect.
+
+    FAILING MUTATION: making the cwd/PYTHONPATH resolution require a
+    ``worktree_path`` (or defaulting it to some other root) reds this."""
+    calls: list[list[str]] = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        driver = _configured_driver(root, run_fn=_confirm_flow_run_fn(calls))
+        driver.spawn({"agent_instance_id": "agi-abc123ef", "lane_id": "lane-x"})
+        cmd = next(c for c in calls if "new-session" in c)
+        cwd_arg, import_root = _spawn_cwd_and_import_root(cmd)
+        _check(
+            cwd_arg == str(root.resolve()),
+            f"a spawn with no declared worktree keeps the driver's own cwd "
+            f"(got {cwd_arg!r}, wanted {str(root.resolve())!r})",
+        )
+        _check(
+            import_root == str(root.resolve()),
+            f"PYTHONPATH follows the same root the pane opened in, with no "
+            f"worktree in play (got {import_root!r})",
+        )
+
+
+def test_spawn_refuses_a_declared_worktree_that_is_not_a_checkout() -> None:
+    """A declared-but-unusable worktree must fail the spawn LOUDLY. Falling
+    back to the shared root here would reproduce the original defect with the
+    ledger still recording a worktree -- the silent-abandonment shape this
+    unit exists to remove.
+
+    FAILING MUTATION: catching ``LaneWorktreeError`` in ``_resolve_spawn_cwd``
+    and returning ``self._cwd`` reds both legs."""
+    calls: list[list[str]] = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        not_a_checkout = root / "lane_worktrees" / "lane-x--agi-abc123ef"
+        not_a_checkout.mkdir(parents=True)
+        driver = _configured_driver(root, run_fn=_confirm_flow_run_fn(calls))
+        refused = False
+        try:
+            driver.spawn(
+                {
+                    "agent_instance_id": "agi-abc123ef", "lane_id": "lane-x",
+                    "worktree_path": str(not_a_checkout),
+                },
+            )
+        except HostCannotSpawnError as exc:
+            refused = True
+            _check(
+                str(not_a_checkout.resolve()) in str(exc),
+                "the refusal names the worktree it could not use",
+            )
+        _check(refused, "a declared worktree that is not a checkout refuses the spawn")
+        _check(
+            not [c for c in calls if "new-session" in c],
+            "no pane is created at all -- never one silently opened in the "
+            "shared checkout",
+        )
+
+
+def test_spawn_carries_designated_git_controller_name() -> None:
+    """A born, armed solet must pass its gate identity to tmux workers.
+
+    FAILING MUTATION: removing ``GIT_CONTROLLER_NAME`` from ``_env_pairs``
+    makes this records-only assertion fail before an unrestrained worker ships.
+    """
+    calls: list[list[str]] = []
+    previous = os.environ.get("GIT_CONTROLLER_NAME")
+    os.environ["GIT_CONTROLLER_NAME"] = "Git-Controller"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
+            driver.spawn({"agent_instance_id": "agi-git-controller-1"})
+    finally:
+        if previous is None:
+            os.environ.pop("GIT_CONTROLLER_NAME", None)
+        else:
+            os.environ["GIT_CONTROLLER_NAME"] = previous
+    new_session_call = next(call for call in calls if "new-session" in call)
+    _check(
+        "GIT_CONTROLLER_NAME=Git-Controller" in " ".join(new_session_call),
+        "an armed tmux worker receives the designated Git controller name",
+    )
 
 
 def test_spawn_local_name_drives_label_session_name_and_claude_name() -> None:
@@ -1381,12 +1554,26 @@ def test_real_tmux_spawn_alive_driver_channel_terminate() -> None:
         fake_claude.chmod(0o755)
         (tmp_dir / ".mcp.json").write_text("{}")
         _stub_worker_hook_files(tmp_dir)
+        spawn_commands: list[list[str]] = []
+
+        def recording_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            command = args[0]
+            if "new-session" in command:
+                spawn_commands.append(command)
+            return subprocess.run(*args, **kwargs)
+
         driver = TmuxHostDriver(
             tmux_bin=tmux_bin, claude_bin=str(fake_claude), solet_name="testhom",
-            permission_mode="default", mcp_config_path=tmp_dir / ".mcp.json", cwd=tmp_dir,
+            permission_mode="default", transport="mcp", mcp_config_path=tmp_dir / ".mcp.json",
+            cwd=tmp_dir, run_fn=recording_run,
         )
         host_ref = driver.spawn({"agent_instance_id": "agi-realtmux01", "lane_id": "smoke-real"})
         try:
+            pane_command = next(command[-1] for command in spawn_commands)
+            _check(
+                "solet-bridge watch" not in pane_command,
+                "the MCP-only real-tmux fixture does not arm a live watch sidecar",
+            )
             deadline = time.monotonic() + 5
             while not driver.alive(host_ref) and time.monotonic() < deadline:
                 time.sleep(0.1)
@@ -1722,6 +1909,10 @@ def main() -> int:
     test_spawn_refuses_when_unconfigured()
     test_spawn_refuses_without_agent_instance_id()
     test_spawn_command_and_env_wiring()
+    test_spawn_runs_in_the_provisioned_lane_worktree()
+    test_spawn_without_a_worktree_keeps_the_drivers_default_cwd()
+    test_spawn_refuses_a_declared_worktree_that_is_not_a_checkout()
+    test_spawn_carries_designated_git_controller_name()
     test_spawn_local_name_drives_label_session_name_and_claude_name()
     test_spawn_without_local_name_keeps_lane_id_behaviour()
     test_spawn_threads_allowed_tools_into_env()

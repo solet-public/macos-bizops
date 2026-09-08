@@ -80,7 +80,7 @@ from ananta.interfaces.midwife_service_interface import MidwifeServiceInterface
 
 from . import venv_provision
 from .constants import REQUIRED_CLONE_MARKERS
-from .genesis import GenesisError, run_genesis
+from .genesis import GenesisError, resolve_profile_name, run_genesis
 
 _PLUGIN_NAME = "github_midwife_plugin"
 
@@ -249,7 +249,6 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
         that is absent/empty or not a valid clone raises `ValueError` (fail loud,
         never guess or clobber).
         """
-        idempotency_key = _compute_idempotency_key(name, profile_template, environment_config)
         target_raw = environment_config.get("target")
         if not target_raw:
             raise ValueError(
@@ -259,6 +258,23 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
             )
         target = Path(str(target_raw)).expanduser().resolve()
         self._require_existing_clone(target)
+        idempotency_key = _compute_idempotency_key(name, profile_template, environment_config)
+        try:
+            resolved_profile = resolve_profile_name(target, profile_template)
+        except GenesisError as exc:
+            return BirthResult(
+                status=BirthStatus.FAILED,
+                solet_name=name,
+                idempotency_key=idempotency_key,
+                dry_run=dry_run,
+                steps=(),
+                new_solet_endpoint="",
+                manifest_path="",
+                iam_roles_created=(),
+                rds_endpoint="",
+                kms_key_arn="",
+                message=str(exc),
+            )
 
         if dry_run:
             return BirthResult(
@@ -279,7 +295,12 @@ class GithubMidwifePlugin(PluginBase, EdgeProcessProvider, MidwifeServiceInterfa
             )
 
         try:
-            result = self._run_genesis_against_clone(name, target, profile_template, provision_venv)
+            result = self._run_genesis_against_clone(
+                name,
+                target,
+                resolved_profile,
+                provision_venv,
+            )
         except (GenesisError, venv_provision.VerbModeProvisionError) as exc:
             return BirthResult(
                 status=BirthStatus.FAILED,

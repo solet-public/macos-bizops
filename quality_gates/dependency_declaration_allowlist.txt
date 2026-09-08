@@ -1,0 +1,70 @@
+# GTE-15 dependency-declaration gate tracked-debt allowlist.
+# Authored by lane-gte15-campaign, 2026-08-24, per operator ruling 5
+# (workbench/2026-08-24_operator_rulings_test_seed_dependencies_codex_deafness.md):
+# entries earn their place through a documented skeptical review by whoever
+# adds them, not operator sign-off. That review is recorded at
+# workbench/2026-08-24_lane_gte15_campaign_plan.md section 1d.
+#
+# Format: <package>::<import_root>  # migrate-with: <wave-ref> — <note>
+# Content-anchored (package + import root), never a line number — an import
+# moving within its file does not change which package is missing which
+# declaration. Every line below is a genuine missing_required_dependency
+# finding measured 2026-08-24 by:
+#   .venv/bin/python3 quality_gates/dependency_declaration_gate.py --repo-root .
+# Removing an entry is the unit of remediation progress (add the import root's
+# distribution to that package's project.dependencies and drop the line).
+# Adding an entry without operator ratification defeats the gate — see the
+# platform's Gate Allowlist Conventions article.
+#
+# 48 entries cover all 360 findings measured at registration (most plugins
+# are missing exactly one declaration — commonly "ananta" itself, the host
+# package every plugin runs inside but does not always declare).
+
+plugins/actr_memory_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/agent_messaging_plugin::pydantic  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/agent_messaging_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/audio_processing_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/audio_separation_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/aws_midwife_plugin::yaml  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/aws_self_deployment_plugin::botocore  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/aws_undertaker_plugin::botocore  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/chatgpt_export_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/claude_ai_export_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/claude_code_cloud_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/claude_code_cloud_session_source_plugin::httpx  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/claude_code_filesystem_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/claude_code_history_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/claude_code_pushed_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/claude_code_tasks_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/codex_ambient_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/codex_cloud_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/codex_cloud_session_source_plugin::httpx  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/codex_filesystem_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/codex_goals_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/codex_history_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/codex_memories_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/codex_pushed_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/codex_state_session_source_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/default_inference_plugin::requests  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/default_knowledge_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/default_scheduling_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/default_scheduling_plugin::pydantic  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/default_thinking_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/default_thinking_plugin::default_knowledge_plugin  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/generative_composition_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/generative_composition_plugin::music21  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/macos_vault_plugin::postgres_state_management_plugin  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/musical_synthesis_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/pedalboard_effects_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/pgvector_service_plugin::psycopg  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/postgres_state_management_plugin::psycopg_pool  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/rds_pgvector_service_plugin::psycopg  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/rds_postgres_state_management_plugin::psycopg_pool  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/secrets_manager_vault_plugin::rds_postgres_state_management_plugin  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/session_bridge_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/session_shipper_bootstrap_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/session_shipper_bootstrap_plugin::pydantic  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/snowflake_plugin::cryptography  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/sound_effects_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/titanv2_embeddings_plugin::botocore  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1
+plugins/whisper_asr_plugin::ananta  # migrate-with: lane-gte15-campaign | legacy: 2026-09-03 W2-1

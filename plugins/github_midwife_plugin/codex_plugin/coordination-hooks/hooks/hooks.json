@@ -37,6 +37,26 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/context_status_reporter.py",
+            "timeout": 30,
+            "async": true,
+            "statusMessage": "Reporting fresh Codex context status"
+          },
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/inbox_consumer.py",
+            "timeout": 2430,
+            "statusMessage": "Checking peer inbox before ending turn"
+          }
+        ]
+      }
     ]
   }
 }

@@ -20,7 +20,7 @@
       },
       "user": {
         "instructions": [
-          "Communication happens through plugin-provided post_message actions in the actions array.",
+          "For user-visible communication, first use query_process_registry to resolve the active IO plugin namespace, then invoke plugin::<namespace>::post_message with message in the actions array. Resolve any namespace-specific arguments from the returned schema.",
           "An empty actions array ends the flow silently.",
           "",
           "If RESULT.data contains available_attachments, include those names in attachments.",

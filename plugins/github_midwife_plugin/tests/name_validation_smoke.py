@@ -23,6 +23,7 @@ plugins/github_midwife_plugin/tests/name_validation_smoke.py``.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import importlib.util
 import os
 import sys
@@ -30,6 +31,11 @@ from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from github_midwife_plugin import steps, venv_provision  # noqa: E402
 from github_midwife_plugin.constants import NAME_PATTERN, is_valid_solet_name  # noqa: E402

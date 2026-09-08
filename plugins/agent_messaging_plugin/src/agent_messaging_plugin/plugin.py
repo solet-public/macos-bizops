@@ -36,9 +36,11 @@ import logging
 import os
 import secrets
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from ananta.constants import FRAMEWORK_ASYNC_JOBS_TABLE, FRAMEWORK_NAMESPACE
@@ -90,6 +92,7 @@ from ananta.llm.agent_messaging.service import (
     AgentMessagingService,
     AgentRequestInvalidError,
 )
+from ananta.llm.session_ledger.trigger_data import extract_authenticated_principal
 from ananta.services.inference_service.completion_request_queue import (
     SERVE_SERVED,
     serve_completion_request,
@@ -123,6 +126,12 @@ from .bridge_sessions import (
     BridgeSessionManager,
 )
 from .budget_report import build_budget_report as lifecycle_build_budget_report
+from .caller_provenance import (
+    CallerProvenanceError,
+)
+from .caller_provenance import (
+    resolve_caller_provenance as lifecycle_resolve_caller_provenance,
+)
 from .choreography_verbs import (
     ACTION_GENERATE_CURATION_REPORT,
     ACTION_RESTART_SESSION,
@@ -148,6 +157,8 @@ from .constants import (
 )
 from .context_status_verbs import report_context_status as lifecycle_report_context_status
 from .context_status_verbs import session_context_status as lifecycle_session_context_status
+from .fleet_status import FleetStatusError
+from .fleet_status import fleet_status as lifecycle_fleet_status
 from .gauge_canary import (
     direct_canary_arrest as canary_direct_arrest,
 )
@@ -178,6 +189,30 @@ from .held_authorization_verbs import (
     retire_held_authorization as lifecycle_retire_held_authorization,
 )
 from .http_routes import register_routes
+from .inbox_consumption_verbs import (
+    report_inbox_consumption as lifecycle_report_inbox_consumption,
+)
+from .inbox_consumption_verbs import (
+    session_inbox_consumption_status as lifecycle_session_inbox_consumption_status,
+)
+from .managed_dispatch import (
+    DispatchActor,
+    DispatchError,
+    DispatchSpec,
+    mint_dispatch_id,
+)
+from .managed_dispatch import (
+    dispatch_managed_work as lifecycle_dispatch_managed_work,
+)
+from .managed_dispatch import (
+    managed_dispatch_status as lifecycle_managed_dispatch_status,
+)
+from .managed_dispatch import (
+    report_managed_dispatch as lifecycle_report_managed_dispatch,
+)
+from .managed_dispatch import (
+    resolve_managed_dispatch as lifecycle_resolve_managed_dispatch,
+)
 from .mcp_streamable import (
     BearerVerifier,
     StreamableSessionManager,
@@ -200,6 +235,9 @@ from .memory_curation_verbs import (
     slug_to_slot_tag,
 )
 from .message_important_backfill import backfill_message_important
+from .operator_session_liveness_reconciliation import (
+    reconcile_operator_session_liveness as lifecycle_reconcile_operator_session_liveness,
+)
 from .peer_dispatch import (
     EVENT_POST_MESSAGE,
     NativeWakeError,
@@ -247,6 +285,11 @@ from .schema import (
     get_role_model_schema_definition,
     get_session_lifecycle_schema_definition,
 )
+from .sender_provenance import (
+    SENDER_PRINCIPAL_KIND_OAUTH_CLIENT,
+    SENDER_PRINCIPAL_KIND_STDIO_AGENT,
+    SENDER_PRINCIPAL_KIND_SYSTEM,
+)
 from .session_claude_mapping_ingest import (
     detect_hook_absent_sessions as lifecycle_detect_hook_absent_sessions,
 )
@@ -261,6 +304,8 @@ from .session_inference_provider import SessionInferenceProvider
 from .session_lifecycle_store import format_directed_by
 from .session_lifecycle_store import resolve_lane_charter as lifecycle_resolve_lane_charter
 from .session_lifecycle_verbs import (
+    LIST_SESSIONS_DEFAULT_LIMIT,
+    LIST_SESSIONS_MAX_LIMIT,
     ArmSessionDependencyRequest,
     CaptureLaneCharterRequest,
     LegislateRoleRequest,
@@ -275,6 +320,10 @@ from .session_lifecycle_verbs import drive_session as lifecycle_drive_session
 from .session_lifecycle_verbs import legislate_role as lifecycle_legislate_role
 from .session_lifecycle_verbs import list_sessions as lifecycle_list_sessions
 from .session_lifecycle_verbs import report_alive as lifecycle_report_alive
+from .session_lifecycle_verbs import resolve_local_name as lifecycle_resolve_local_name
+from .session_lifecycle_verbs import (
+    resolve_provisioned_role_class as lifecycle_resolve_provisioned_role_class,
+)
 from .session_lifecycle_verbs import retire_session as lifecycle_retire_session
 from .session_lifecycle_verbs import session_status as lifecycle_session_status
 from .session_lifecycle_verbs import spawn_session as lifecycle_spawn_session
@@ -288,9 +337,11 @@ from .session_sweep import (
     sweep_gauge_coverage,
     sweep_gauge_staleness,
     sweep_lane_closed_dependencies,
+    sweep_managed_dispatches,
     sweep_overdue_sessions,
     sweep_rotation_due_sessions,
     sweep_ttl_overdue_sessions,
+    sweep_unpaired_dispatch_policy,
     sweep_unregistered_spawning_sessions,
 )
 from .system_slots import (
@@ -340,6 +391,142 @@ PEER_INBOX_DEFAULT_LIMIT: Final[int] = 5
 PEER_INBOX_MIN_LIMIT: Final[int] = 1
 # Parity with the /peer/inbox route's own clamp — one ceiling, both surfaces.
 PEER_INBOX_MAX_LIMIT: Final[int] = 100
+
+
+def _git_controller_launcher_report(role_name: str) -> dict[str, object]:
+    """Report the rendered launcher gate state without changing it.
+
+    The on-request provisioning verb may create a controller, but an unarmed
+    launcher gate remains an operator-visible deployment condition.  Reading
+    the two generated coding-agent launchers keeps that distinction explicit;
+    this helper never repairs their contents.
+    """
+    app_home = os.environ.get("APP_HOME", "").strip()
+    codex_line = f'export GIT_CONTROLLER_NAME="{role_name}"'
+    if not app_home:
+        return {
+            "status": "unavailable",
+            "armed": False,
+            "reason": "APP_HOME is unset, so this deployment's launcher paths cannot be resolved.",
+            "manual_remedy_lines": [],
+            "launchers": [],
+        }
+    root = Path(app_home).resolve().parent
+    solet_name = os.environ.get("SOLET_NAME", "").strip()
+    if not solet_name:
+        return {
+            "status": "unavailable",
+            "armed": False,
+            "reason": "SOLET_NAME is unset, so this deployment's launcher names cannot be resolved.",
+            "manual_remedy_lines": [],
+            "launchers": [],
+        }
+    launchers = [
+        (root / "client" / "bin" / f"claude-{solet_name}", f'GIT_CONTROLLER_NAME="{role_name}" \\'),
+        (root / "client" / "bin" / f"codex-{solet_name}", codex_line),
+    ]
+    details: list[dict[str, object]] = []
+    for path, manual_remedy_line in launchers:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            details.append(
+                {
+                    "path": str(path),
+                    "armed": False,
+                    "manual_remedy_line": manual_remedy_line,
+                    "error": str(exc),
+                }
+            )
+            continue
+        details.append(
+            {
+                "path": str(path),
+                "armed": 'GIT_CONTROLLER_NAME="' in content
+                and 'GIT_CONTROLLER_NAME=""' not in content,
+                "manual_remedy_line": manual_remedy_line,
+            }
+        )
+    armed = bool(details) and all(item["armed"] is True for item in details)
+    return {
+        "status": "armed" if armed else "not_armed",
+        "armed": armed,
+        "launchers": details,
+    }
+
+
+def _require_provisioner_authority(
+    state_service: Any,
+    spawned_by_role: str,
+    actor: DispatchActor,
+) -> None:
+    if not holds_role(state_service, spawned_by_role, actor.agent_session_id):
+        raise DispatchError(
+            "coordinator_authority_denied",
+            "Authenticated caller does not hold spawned_by_role.",
+        )
+
+
+def _provisioned_live_role_holder(
+    plugin: AgentMessagingPlugin,
+    state_service: Any,
+    role_name: str,
+) -> dict[str, object] | None:
+    """Return the current live holder before provisioning a named role.
+
+    The durable binding supplies the holder instance id; ``peer_holds_role``
+    then derives that instance's current stable session id from the live peer
+    registry and re-checks the binding. A stale binding remains replaceable,
+    while a live one is returned without starting another worker.
+    """
+    try:
+        binding = resolve_role_binding(state_service, role_name)
+    except (RoleBindingVacantError, RoleBindingMalformedError):
+        return None
+    if not binding.agent_instance_id:
+        return None
+    outcome = plugin.peer_holds_role(
+        {
+            "parameters": {
+                "name": role_name,
+                "agent_instance_id": binding.agent_instance_id,
+            },
+        },
+        {},
+    )
+    data = outcome.get("data")
+    if outcome.get("action_status") != "completed" or not isinstance(data, dict):
+        return None
+    if data.get("holds") is not True:
+        return None
+    return {
+        "name": role_name,
+        "agent_instance_id": binding.agent_instance_id,
+        "agent_session_id": str(data.get("agent_session_id") or ""),
+        "delivery_route_attached": data.get("delivery_route_attached") is True,
+    }
+
+
+def _provision_legislation(
+    state_service: Any,
+    *,
+    needs_legislation: bool,
+    role_name: str,
+    role_class: str,
+    brief_ref: str,
+    directed_by: str,
+) -> dict[str, object]:
+    if not needs_legislation:
+        return {"action": "not_required"}
+    return lifecycle_legislate_role(
+        state_service,
+        LegislateRoleRequest(
+            name=role_name,
+            role_class=role_class,
+            brief_ref=brief_ref,
+            directed_by=directed_by,
+        ),
+    )
 
 
 class _UploadRouteAuth(Protocol):
@@ -394,6 +581,7 @@ _SERVER_JOIN_TIMEOUT_S = 5.0
 # codebase imports another plugin's package directly).
 _ROUTER_PLUGIN_NAME = "macos_self_deployment_plugin"
 
+
 # Vault entry holding the HMAC secret that signs Streamable HTTP MCP
 # bearer tokens (HS256). Generated on first solet boot if absent;
 # never rotated except by explicit operator action (vault entry
@@ -428,6 +616,26 @@ def _coerce_takeover(raw: object) -> bool:
     if isinstance(raw, str):
         return raw.strip().lower() == "true"
     return False
+
+
+def _coerce_dry_run(raw: object) -> bool:
+    """Return a safe ``dry_run`` value from a public process parameter.
+
+    Omission and ``None`` are report-only. JSON booleans retain their value;
+    bridge strings are accepted only for their spelled boolean values. Any
+    other value fails before the reconciliation engine can apply a transition.
+    """
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    raise ValueError("dry_run must be a boolean or the string 'true' or 'false'")
 
 
 def _bearer_hmac_key_vault_name() -> str:
@@ -474,8 +682,7 @@ def _vault_retrieve_value(vault: Any, name: str) -> str | None:
     retrieved = vault.retrieve(name)
     if not isinstance(retrieved, dict):
         raise VaultEnvelopeError(
-            f"vault.retrieve({name!r}) returned "
-            f"{type(retrieved).__name__}, not a dict envelope",
+            f"vault.retrieve({name!r}) returned {type(retrieved).__name__}, not a dict envelope",
         )
     if retrieved.get("action_status") != ActionStatus.COMPLETED.value:
         raise VaultEnvelopeError(
@@ -846,6 +1053,7 @@ class AgentMessagingPlugin(
         # condition can never clear on its own (expires_at is frozen, the clock
         # only advances), so an unlatched leg would notify every tick forever.
         self._ttl_overdue_latch: NoticeLatch = NoticeLatch()
+        self._dispatch_policy_pair_latch: NoticeLatch = NoticeLatch()
         self._platform_surface: PlatformSurface | None = None
         # D-IF7/D-IF8 sidecar: per-bridge SessionInferenceProvider keyed
         # by agent_instance_id. Populated post-success in the stdio
@@ -1044,6 +1252,7 @@ class AgentMessagingPlugin(
         # burning tokens with nothing tracking it (start_new_session=True
         # detaches it from this process's own group on purpose).
         from .session_hosts import shutdown_all_drivers  # noqa: PLC0415
+
         shutdown_all_drivers()
         self._stop_choreography_worker()
         self._services_started = False
@@ -1091,13 +1300,17 @@ class AgentMessagingPlugin(
         self._choreography_worker_thread = None
 
     def _next_queued_choreography_job(
-        self, job_manager: AsyncJobManager, provider_name: str,
+        self,
+        job_manager: AsyncJobManager,
+        provider_name: str,
     ) -> dict[str, Any] | None:
         """The oldest queued job for one provider_name, or ``None``. Split out
         of :func:`_choreography_worker_loop` to keep it a straight-line
         dispatcher (radon cc)."""
         jobs_result = job_manager.list_jobs(
-            status=JOB_STATUS_QUEUED, provider_name=provider_name, limit=1,
+            status=JOB_STATUS_QUEUED,
+            provider_name=provider_name,
+            limit=1,
             order_by="created_at ASC",
         )
         jobs = (jobs_result.get("data") or {}).get("jobs", [])
@@ -1107,7 +1320,9 @@ class AgentMessagingPlugin(
         return job if isinstance(job, dict) else None
 
     def _poll_and_process_one_choreography_job(
-        self, job_manager: AsyncJobManager, state_service: Any,
+        self,
+        job_manager: AsyncJobManager,
+        state_service: Any,
     ) -> None:
         """One tick's worth of work: check rotate, restart, then
         curation-report's queue for a single oldest job and process it —
@@ -1143,7 +1358,12 @@ class AgentMessagingPlugin(
         logger.debug("%s choreography worker loop exited", self.name)
 
     def _update_choreography_progress(
-        self, job_manager: AsyncJobManager, job_id: str, *, progress_percent: int, leg: str,
+        self,
+        job_manager: AsyncJobManager,
+        job_id: str,
+        *,
+        progress_percent: int,
+        leg: str,
     ) -> None:
         """One ``update_status`` call per choreography leg, per the D0.3-ratified
         shape. Logs the leg name for operator observability — the job ledger's
@@ -1151,23 +1371,34 @@ class AgentMessagingPlugin(
         ``AsyncJobManager`` exposes; there is no free-text leg-name column."""
         logger.info("%s choreography job %s: leg=%s", self.name, job_id, leg)
         job_manager.update_job(
-            job_id, {"status": JOB_STATUS_PROCESSING, "progress_percent": progress_percent},
+            job_id,
+            {"status": JOB_STATUS_PROCESSING, "progress_percent": progress_percent},
         )
 
     def _complete_choreography_job(
-        self, job_manager: AsyncJobManager, job_id: str, result: dict[str, Any],
+        self,
+        job_manager: AsyncJobManager,
+        job_id: str,
+        result: dict[str, Any],
     ) -> None:
         job_manager.update_job(job_id, {"status": JOB_STATUS_COMPLETED, "result": result})
 
     def _fail_choreography_job(
-        self, job_manager: AsyncJobManager, job_id: str, code: str, message: str,
+        self,
+        job_manager: AsyncJobManager,
+        job_id: str,
+        code: str,
+        message: str,
     ) -> None:
         job_manager.update_job(
-            job_id, {"status": JOB_STATUS_ERROR, "error": {"code": code, "message": message}},
+            job_id,
+            {"status": JOB_STATUS_ERROR, "error": {"code": code, "message": message}},
         )
 
     def _resolve_choreography_job_request(
-        self, job: dict[str, Any], job_manager: AsyncJobManager,
+        self,
+        job: dict[str, Any],
+        job_manager: AsyncJobManager,
     ) -> tuple[str, str, dict[str, Any]] | None:
         """``(job_id, provider_name, request_data)``, or ``None`` after
         already failing the job itself — split out of
@@ -1182,7 +1413,9 @@ class AgentMessagingPlugin(
         payload_result = job_manager.get_job_payload(job_id, "request")
         if payload_result.get("action_status") != "completed":
             self._fail_choreography_job(
-                job_manager, job_id, "request_payload_missing",
+                job_manager,
+                job_id,
+                "request_payload_missing",
                 "could not read the job's own request payload",
             )
             return None
@@ -1190,14 +1423,19 @@ class AgentMessagingPlugin(
         request_data = payload_data.get("payload") if isinstance(payload_data, dict) else None
         if not isinstance(request_data, dict):
             self._fail_choreography_job(
-                job_manager, job_id, "request_payload_invalid",
+                job_manager,
+                job_id,
+                "request_payload_invalid",
                 "job request payload was not an object",
             )
             return None
         return job_id, provider_name, request_data
 
     def _process_choreography_job(
-        self, job: dict[str, Any], job_manager: AsyncJobManager, state_service: Any,
+        self,
+        job: dict[str, Any],
+        job_manager: AsyncJobManager,
+        state_service: Any,
     ) -> None:
         """Dispatch one queued job to the rotate/restart/curation-report
         runner by ``provider_name`` suffix, and guarantee it reaches a
@@ -1219,13 +1457,18 @@ class AgentMessagingPlugin(
                 self._run_generate_curation_report_job(job_id, request_data, job_manager)
             else:
                 self._fail_choreography_job(
-                    job_manager, job_id, "unknown_action",
+                    job_manager,
+                    job_id,
+                    "unknown_action",
                     f"unrecognized provider_name {provider_name!r}",
                 )
         except VerbError as exc:
             logger.error(
                 "%s choreography job %s failed: code=%s message=%s",
-                self.name, job_id, exc.code, exc.message,
+                self.name,
+                job_id,
+                exc.code,
+                exc.message,
             )
             self._fail_choreography_job(job_manager, job_id, exc.code, exc.message)
         except Exception as exc:  # noqa: BLE001 — a job must reach a terminal status, never strand
@@ -1249,7 +1492,10 @@ class AgentMessagingPlugin(
     _RESTART_VERIFY_POLL_INTERVAL_SECONDS = 5.0
 
     def _check_for_new_claude_session(
-        self, state_service: Any, agent_instance_id: str, existing_ids: set[str],
+        self,
+        state_service: Any,
+        agent_instance_id: str,
+        existing_ids: set[str],
     ) -> list[str]:
         """One point-in-time check for a ``claude_session_id`` outside
         ``existing_ids`` — split out of :func:`_wait_for_new_claude_session`
@@ -1264,8 +1510,12 @@ class AgentMessagingPlugin(
         return sorted(new_ids)
 
     def _wait_for_new_claude_session(
-        self, state_service: Any, agent_instance_id: str, existing_ids: set[str],
-        max_wait_seconds: float, poll_interval_seconds: float,
+        self,
+        state_service: Any,
+        agent_instance_id: str,
+        existing_ids: set[str],
+        max_wait_seconds: float,
+        poll_interval_seconds: float,
     ) -> list[str]:
         """Poll ``list_session_claude_mappings`` until a ``claude_session_id``
         outside ``existing_ids`` appears, or the deadline passes — plus ONE
@@ -1278,11 +1528,12 @@ class AgentMessagingPlugin(
         bare status re-read or a fixed sleep."""
         deadline = datetime.now(UTC).timestamp() + max_wait_seconds
         while (
-            datetime.now(UTC).timestamp() < deadline
-            and not self._choreography_stop_event.is_set()
+            datetime.now(UTC).timestamp() < deadline and not self._choreography_stop_event.is_set()
         ):
             new_ids = self._check_for_new_claude_session(
-                state_service, agent_instance_id, existing_ids,
+                state_service,
+                agent_instance_id,
+                existing_ids,
             )
             if new_ids:
                 return new_ids
@@ -1296,11 +1547,11 @@ class AgentMessagingPlugin(
         ``role_name``, or the deadline passes."""
         deadline = datetime.now(UTC).timestamp() + self._RESTART_VERIFY_MAX_WAIT_SECONDS
         while (
-            datetime.now(UTC).timestamp() < deadline
-            and not self._choreography_stop_event.is_set()
+            datetime.now(UTC).timestamp() < deadline and not self._choreography_stop_event.is_set()
         ):
             result = self.peer_holds_role(
-                {"parameters": {"name": role_name, "agent_instance_id": agent_instance_id}}, {},
+                {"parameters": {"name": role_name, "agent_instance_id": agent_instance_id}},
+                {},
             )
             if result.get("action_status") == "completed":
                 data = result.get("data")
@@ -1310,7 +1561,10 @@ class AgentMessagingPlugin(
         return False
 
     def _run_rotate_session_job(
-        self, job_id: str, request_data: dict[str, Any], job_manager: AsyncJobManager,
+        self,
+        job_id: str,
+        request_data: dict[str, Any],
+        job_manager: AsyncJobManager,
         state_service: Any,
     ) -> None:
         """§2.1 choreography, run OFF the dispatch path: resolve -> durable
@@ -1324,7 +1578,10 @@ class AgentMessagingPlugin(
         park_first = bool(request_data.get("park_first", False))
 
         self._update_choreography_progress(
-            job_manager, job_id, progress_percent=10, leg="resolve_ledger_row",
+            job_manager,
+            job_id,
+            progress_percent=10,
+            leg="resolve_ledger_row",
         )
         row = lifecycle_session_status(state_service, agent_instance_id)
         agent_runtime = _str_field(row.get("agent_runtime")) or "claude_code"
@@ -1334,15 +1591,20 @@ class AgentMessagingPlugin(
             existing_ids = {
                 str(m.get("claude_session_id") or "")
                 for m in lifecycle_list_session_claude_mappings(
-                    state_service, agent_instance_id,
+                    state_service,
+                    agent_instance_id,
                 )
             }
 
         self._update_choreography_progress(
-            job_manager, job_id, progress_percent=25, leg="durable_pickup_dispatch",
+            job_manager,
+            job_id,
+            progress_percent=25,
+            leg="durable_pickup_dispatch",
         )
         send_result = self.peer_send_by_name(
-            {"parameters": {"name": role_name, "content": pickup_text}}, {},
+            {"parameters": {"name": role_name, "content": pickup_text}},
+            {},
         )
         if send_result.get("action_status") != "completed":
             raise VerbError(
@@ -1352,18 +1614,28 @@ class AgentMessagingPlugin(
             )
 
         self._update_choreography_progress(
-            job_manager, job_id, progress_percent=45, leg="clear_session",
+            job_manager,
+            job_id,
+            progress_percent=45,
+            leg="clear_session",
         )
         lifecycle_clear_session(
-            state_service, agent_instance_id=agent_instance_id, park=park_first,
+            state_service,
+            agent_instance_id=agent_instance_id,
+            park=park_first,
             directed_by=self._CHOREOGRAPHY_DIRECTED_BY,
         )
 
         self._update_choreography_progress(
-            job_manager, job_id, progress_percent=65, leg="drive_session",
+            job_manager,
+            job_id,
+            progress_percent=65,
+            leg="drive_session",
         )
         lifecycle_drive_session(
-            state_service, agent_instance_id=agent_instance_id, text=pickup_text,
+            state_service,
+            agent_instance_id=agent_instance_id,
+            text=pickup_text,
             directed_by=self._CHOREOGRAPHY_DIRECTED_BY,
         )
 
@@ -1386,8 +1658,11 @@ class AgentMessagingPlugin(
             )
             return
         new_ids = self._wait_for_new_claude_session(
-            state_service, agent_instance_id, existing_ids,
-            self._ROTATE_VERIFY_MAX_WAIT_SECONDS, self._ROTATE_VERIFY_POLL_INTERVAL_SECONDS,
+            state_service,
+            agent_instance_id,
+            existing_ids,
+            self._ROTATE_VERIFY_MAX_WAIT_SECONDS,
+            self._ROTATE_VERIFY_POLL_INTERVAL_SECONDS,
         )
         if not new_ids:
             raise VerbError(
@@ -1397,11 +1672,17 @@ class AgentMessagingPlugin(
                 "may not have started (ARMED ≠ FIRED).",
             )
         self._complete_choreography_job(
-            job_manager, job_id, {"turn_observed": True, "new_claude_session_ids": new_ids},
+            job_manager,
+            job_id,
+            {"turn_observed": True, "new_claude_session_ids": new_ids},
         )
 
     def _build_restart_spawn_params(
-        self, old_row: dict[str, Any], role_class: str, lane_id: str, role_name: str,
+        self,
+        old_row: dict[str, Any],
+        role_class: str,
+        lane_id: str,
+        role_name: str,
     ) -> dict[str, Any]:
         """Carry the old ledger row's dispatch config forward into the fresh
         spawn's raw params — split out of :func:`_run_restart_session_job` to
@@ -1419,6 +1700,7 @@ class AgentMessagingPlugin(
             "role_class": role_class,
             "lane_id": lane_id,
             "brief_ref": _str_field(old_row.get("brief_ref")),
+            "unit_id": _str_field(old_row.get("unit_id")),
             "work_class": _str_field(old_row.get("work_class")),
             "budget_line": _str_field(old_row.get("budget_line")),
             # Runtime is restart-sticky for the same reason host/model/effort
@@ -1430,11 +1712,17 @@ class AgentMessagingPlugin(
             "visibility": _str_field(old_row.get("visibility")),
             "model": _str_field(old_row.get("model")),
             "effort": _str_field(old_row.get("effort")),
+            "dispatch_kind": _str_field(old_row.get("dispatch_kind")),
+            "reviewed_report_vendor": _str_field(old_row.get("reviewed_report_vendor")),
+            "pair_id": _str_field(old_row.get("pair_id")),
             "spawned_by_role": self._CHOREOGRAPHY_DIRECTED_BY,
         }
 
     def _run_restart_session_job(
-        self, job_id: str, request_data: dict[str, Any], job_manager: AsyncJobManager,
+        self,
+        job_id: str,
+        request_data: dict[str, Any],
+        job_manager: AsyncJobManager,
         state_service: Any,
     ) -> None:
         """§2.2 choreography, run OFF the dispatch path: capture -> terminate
@@ -1450,40 +1738,58 @@ class AgentMessagingPlugin(
         grace_seconds = grace_seconds_raw if isinstance(grace_seconds_raw, int) else 30
 
         self._update_choreography_progress(
-            job_manager, job_id, progress_percent=10, leg="capture_old_row",
+            job_manager,
+            job_id,
+            progress_percent=10,
+            leg="capture_old_row",
         )
         old_row = lifecycle_session_status(state_service, old_agent_instance_id)
         lane_id = _str_field(old_row.get("lane_id"))
 
         self._update_choreography_progress(
-            job_manager, job_id, progress_percent=25, leg="terminate_session",
+            job_manager,
+            job_id,
+            progress_percent=25,
+            leg="terminate_session",
         )
         lifecycle_terminate_session(
-            state_service, agent_instance_id=old_agent_instance_id,
-            directed_by=self._CHOREOGRAPHY_DIRECTED_BY, grace_seconds=grace_seconds,
+            state_service,
+            agent_instance_id=old_agent_instance_id,
+            directed_by=self._CHOREOGRAPHY_DIRECTED_BY,
+            grace_seconds=grace_seconds,
         )
 
         self._update_choreography_progress(
-            job_manager, job_id, progress_percent=45, leg="spawn_session",
+            job_manager,
+            job_id,
+            progress_percent=45,
+            leg="spawn_session",
         )
         raw_params = self._build_restart_spawn_params(old_row, role_class, lane_id, role_name)
         spawn_req = _spawn_session_request_from_params(raw_params, self._CHOREOGRAPHY_DIRECTED_BY)
-        spawn_req = _apply_spawn_session_policy(spawn_req, self._build_session_lifecycle_policy_config())
+        spawn_req = _apply_spawn_session_policy(
+            spawn_req, self._build_session_lifecycle_policy_config()
+        )
         spawn_result = lifecycle_spawn_session(state_service, spawn_req)
         new_agent_instance_id = str(spawn_result.get("agent_instance_id") or "")
         if not new_agent_instance_id:
             raise VerbError(
-                "spawn_failed", "restart_session: spawn_session returned no agent_instance_id.",
+                "spawn_failed",
+                "restart_session: spawn_session returned no agent_instance_id.",
             )
 
         self._update_choreography_progress(
-            job_manager, job_id, progress_percent=65, leg="role_reclaim_drive",
+            job_manager,
+            job_id,
+            progress_percent=65,
+            leg="role_reclaim_drive",
         )
         charter = lifecycle_resolve_lane_charter(state_service, lane_id) if lane_id else None
         role_reclaim_driven = charter is None
         if role_reclaim_driven:
             lifecycle_drive_session(
-                state_service, agent_instance_id=new_agent_instance_id,
+                state_service,
+                agent_instance_id=new_agent_instance_id,
                 text=(
                     f"claim role '{role_name}' via the rename skill / arm a watch "
                     f"process for it — this is a restart continuing lane {lane_id!r}, "
@@ -1502,7 +1808,8 @@ class AgentMessagingPlugin(
                 "spawn (claim circle not broken — ARMED ≠ FIRED).",
             )
         self._complete_choreography_job(
-            job_manager, job_id,
+            job_manager,
+            job_id,
             {
                 "old_agent_instance_id": old_agent_instance_id,
                 "new_agent_instance_id": new_agent_instance_id,
@@ -1512,7 +1819,10 @@ class AgentMessagingPlugin(
         )
 
     def _run_generate_curation_report_job(
-        self, job_id: str, request_data: dict[str, Any], job_manager: AsyncJobManager,
+        self,
+        job_id: str,
+        request_data: dict[str, Any],
+        job_manager: AsyncJobManager,
     ) -> None:
         """M2.2 choreography, run OFF the dispatch path: fetch this origin's
         memory records once, build the fact index, rank the caller-supplied
@@ -1531,11 +1841,15 @@ class AgentMessagingPlugin(
         line_budget = line_budget_raw if isinstance(line_budget_raw, int) else 132
 
         self._update_choreography_progress(
-            job_manager, job_id, progress_percent=25, leg="fetch_memory_records",
+            job_manager,
+            job_id,
+            progress_percent=25,
+            leg="fetch_memory_records",
         )
         if self._memory_service is None:
             raise VerbError(
-                "memory_service_unavailable", "memory_service is not bound on this solet.",
+                "memory_service_unavailable",
+                "memory_service is not bound on this solet.",
             )
         solet_name = _resolve_solet_name_for_memory_tags()
         if not solet_name:
@@ -1555,12 +1869,18 @@ class AgentMessagingPlugin(
             )
 
         self._update_choreography_progress(
-            job_manager, job_id, progress_percent=65, leg="build_index_and_rank",
+            job_manager,
+            job_id,
+            progress_percent=65,
+            leg="build_index_and_rank",
         )
         fact_index = build_fact_index(records, solet_name)
         report = build_curation_report(
-            head_lines, fact_index,
-            bottom_n=bottom_n, byte_budget=byte_budget, line_budget=line_budget,
+            head_lines,
+            fact_index,
+            bottom_n=bottom_n,
+            byte_budget=byte_budget,
+            line_budget=line_budget,
         )
         self._complete_choreography_job(job_manager, job_id, report)
 
@@ -1586,6 +1906,7 @@ class AgentMessagingPlugin(
         config.
         """
         from ananta.core.config.config_provider import ConfigProvider  # noqa: PLC0415
+
         self.config_provider = ConfigProvider(self.name, config)
 
     def prepare_for_readiness(self) -> None:
@@ -1665,24 +1986,21 @@ class AgentMessagingPlugin(
         return {
             "send_peer_message": EdgeProcessDefinition(
                 name="send_peer_message",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "peer_send_by_name": EdgeProcessDefinition(
                 name="peer_send_by_name",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "deliver_job_completion": EdgeProcessDefinition(
                 name="deliver_job_completion",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     # Matches its role-send sibling: a failed delivery leaves
                     # the unreached stamp in place and the drain owns recovery,
@@ -1693,48 +2011,77 @@ class AgentMessagingPlugin(
             ),
             "peer_claim_role": EdgeProcessDefinition(
                 name="peer_claim_role",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "peer_release_role": EdgeProcessDefinition(
                 name="peer_release_role",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "peer_holds_role": EdgeProcessDefinition(
                 name="peer_holds_role",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "spawn_session": EdgeProcessDefinition(
                 name="spawn_session",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
+            "dispatch_managed_work": EdgeProcessDefinition(
+                name="dispatch_managed_work",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "provision_role_session": EdgeProcessDefinition(
+                name="provision_role_session",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "report_managed_dispatch": EdgeProcessDefinition(
+                name="report_managed_dispatch",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "resolve_managed_dispatch": EdgeProcessDefinition(
+                name="resolve_managed_dispatch",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "managed_dispatch_status": EdgeProcessDefinition(
+                name="managed_dispatch_status",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
             "legislate_role": EdgeProcessDefinition(
                 name="legislate_role",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "capture_lane_charter": EdgeProcessDefinition(
                 name="capture_lane_charter",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     # A fresh INSERT, not idempotent on conflict -- an
                     # automatic retry after an uncertain result would write
@@ -1746,8 +2093,7 @@ class AgentMessagingPlugin(
             ),
             "arm_session_dependency": EdgeProcessDefinition(
                 name="arm_session_dependency",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     # A fresh INSERT, not idempotent on conflict (unlike
                     # legislate_role's on_conflict=do_nothing) -- an
@@ -1758,16 +2104,23 @@ class AgentMessagingPlugin(
             ),
             "list_sessions": EdgeProcessDefinition(
                 name="list_sessions",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
+            # Read-only existing-data projection: a retry after a transient
+            # state-read fault cannot create, wake, or reclassify anything.
+            "fleet_status": EdgeProcessDefinition(
+                name="fleet_status",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
             "budget_report": EdgeProcessDefinition(
                 name="budget_report",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     # Read-only (issues no writes) -- always safe to retry.
                     retryable=True,
@@ -1775,8 +2128,7 @@ class AgentMessagingPlugin(
             ),
             "drain_session_claude_mapping_spool": EdgeProcessDefinition(
                 name="drain_session_claude_mapping_spool",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     # Idempotent by construction (upsert on the spool
                     # filename's own conflict triple) -- an automatic retry
@@ -1793,8 +2145,7 @@ class AgentMessagingPlugin(
             # D1/D2 had to).
             "list_session_claude_mappings": EdgeProcessDefinition(
                 name="list_session_claude_mappings",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     # Read-only (issues no writes) -- always safe to retry.
                     retryable=True,
@@ -1802,56 +2153,56 @@ class AgentMessagingPlugin(
             ),
             "session_status": EdgeProcessDefinition(
                 name="session_status",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
                 ),
+            ),
+            "reconcile_operator_session_liveness": EdgeProcessDefinition(
+                name="reconcile_operator_session_liveness",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "clear_session": EdgeProcessDefinition(
                 name="clear_session",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "compact_session": EdgeProcessDefinition(
                 name="compact_session",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "drive_session": EdgeProcessDefinition(
                 name="drive_session",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "terminate_session": EdgeProcessDefinition(
                 name="terminate_session",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "retire_session": EdgeProcessDefinition(
                 name="retire_session",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "report_alive": EdgeProcessDefinition(
                 name="report_alive",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
@@ -1864,8 +2215,7 @@ class AgentMessagingPlugin(
             # double-record or corrupt an earlier value.
             "report_context_status": EdgeProcessDefinition(
                 name="report_context_status",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
                 ),
@@ -1873,8 +2223,7 @@ class AgentMessagingPlugin(
             # Read-only (issues no writes) -- always safe to retry.
             "session_context_status": EdgeProcessDefinition(
                 name="session_context_status",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
                 ),
@@ -1883,8 +2232,25 @@ class AgentMessagingPlugin(
             # like its sibling -- a bounded ordered page plus one lifecycle row.
             "session_context_status_history": EdgeProcessDefinition(
                 name="session_context_status_history",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
                 ),
+            ),
+            # CDX-06 part C (2026-08-24) — the honesty field. Retryable: an
+            # overwrite upsert of the caller's OWN latest row is
+            # idempotent-on-repeat, same posture as report_context_status.
+            "report_inbox_consumption": EdgeProcessDefinition(
+                name="report_inbox_consumption",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # Read-only (issues no writes) -- always safe to retry.
+            "session_inbox_consumption_status": EdgeProcessDefinition(
+                name="session_inbox_consumption_status",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
                 ),
@@ -1895,8 +2261,7 @@ class AgentMessagingPlugin(
             # it reads.
             "gauge_notice_records": EdgeProcessDefinition(
                 name="gauge_notice_records",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
                 ),
@@ -1910,16 +2275,14 @@ class AgentMessagingPlugin(
             # prevent. verify is read-only and retries safely.
             "register_gauge_canary": EdgeProcessDefinition(
                 name="register_gauge_canary",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "arrest_gauge_canary": EdgeProcessDefinition(
                 name="arrest_gauge_canary",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
@@ -1933,8 +2296,7 @@ class AgentMessagingPlugin(
             # duplicating a write.)
             "register_synthetic_session": EdgeProcessDefinition(
                 name="register_synthetic_session",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
@@ -1948,16 +2310,14 @@ class AgentMessagingPlugin(
             # sequence rather than a clean single act.
             "retire_gauge_canary": EdgeProcessDefinition(
                 name="retire_gauge_canary",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "verify_gauge_canary": EdgeProcessDefinition(
                 name="verify_gauge_canary",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
                 ),
@@ -1970,8 +2330,7 @@ class AgentMessagingPlugin(
             # respectively, so they retry safely; record does not.
             "record_held_authorization": EdgeProcessDefinition(
                 name="record_held_authorization",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
@@ -1979,8 +2338,7 @@ class AgentMessagingPlugin(
             # Read-only (issues no writes) -- always safe to retry.
             "list_held_authorizations": EdgeProcessDefinition(
                 name="list_held_authorizations",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
                 ),
@@ -1990,8 +2348,7 @@ class AgentMessagingPlugin(
             # rather than double-acting, so it is safe to retry.
             "retire_held_authorization": EdgeProcessDefinition(
                 name="retire_held_authorization",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
                 ),
@@ -2004,16 +2361,14 @@ class AgentMessagingPlugin(
             # via check_choreography_job_status before ever re-dispatching.
             "rotate_session": EdgeProcessDefinition(
                 name="rotate_session",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
             "restart_session": EdgeProcessDefinition(
                 name="restart_session",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
@@ -2024,8 +2379,7 @@ class AgentMessagingPlugin(
             # rotate/restart specifically (verified at source).
             "check_choreography_job_status": EdgeProcessDefinition(
                 name="check_choreography_job_status",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
                 ),
@@ -2037,8 +2391,7 @@ class AgentMessagingPlugin(
             # check_choreography_job_status before ever re-dispatching.
             "generate_curation_report": EdgeProcessDefinition(
                 name="generate_curation_report",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
@@ -2051,8 +2404,7 @@ class AgentMessagingPlugin(
             # peer_claim_role's own "side effect, so don't auto-retry" stance.
             "reinforce_by_slug": EdgeProcessDefinition(
                 name="reinforce_by_slug",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
@@ -2063,8 +2415,7 @@ class AgentMessagingPlugin(
             # value harmlessly rather than double-advancing anything.
             "peer_mark_role_covered": EdgeProcessDefinition(
                 name="peer_mark_role_covered",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
                 ),
@@ -2074,8 +2425,7 @@ class AgentMessagingPlugin(
             # harmless and a transient state-read fault is worth re-running.
             "peer_inbox": EdgeProcessDefinition(
                 name="peer_inbox",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
                 ),
@@ -2088,8 +2438,7 @@ class AgentMessagingPlugin(
             # always harmless.
             "peer_list": EdgeProcessDefinition(
                 name="peer_list",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
                 ),
@@ -2099,8 +2448,7 @@ class AgentMessagingPlugin(
             # claim-outcome shape as peer_claim_role).
             "set_autonomic_slot": EdgeProcessDefinition(
                 name="set_autonomic_slot",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
@@ -2112,8 +2460,38 @@ class AgentMessagingPlugin(
             # already_served.
             "submit_autonomic_completion": EdgeProcessDefinition(
                 name="submit_autonomic_completion",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
                 ),
+            ),
+            # Fleet-qualification pair (landing 35). peer_identity is a pure
+            # read of the call's own server-supplied attribution context —
+            # no write at all, so a repeat after a transient state-read
+            # fault is always harmless.
+            "peer_identity": EdgeProcessDefinition(
+                name="peer_identity",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            "resolve_caller_provenance": EdgeProcessDefinition(
+                name="resolve_caller_provenance",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                    result_type="caller_provenance",
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # qualify_fleet spawns, drives, and retires a real bounded
+            # worker; a retry after an ambiguous failure would mint a
+            # second spawn, so the caller decides, never the error
+            # processor.
+            "qualify_fleet": EdgeProcessDefinition(
+                name="qualify_fleet",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
@@ -2125,12 +2503,14 @@ class AgentMessagingPlugin(
     # ------------------------------------------------------------------
 
     def list_threads(
-        self, request: ListAgentThreadsRequest,
+        self,
+        request: ListAgentThreadsRequest,
     ) -> AgentThreadsPage:
         return self._require_service().list_threads(request)
 
     def read_thread_messages(
-        self, request: ReadThreadMessagesRequest,
+        self,
+        request: ReadThreadMessagesRequest,
     ) -> AgentThreadMessagesPage:
         return self._require_service().read_thread_messages(request)
 
@@ -2150,6 +2530,7 @@ class AgentMessagingPlugin(
                 recipient_agent_id=request.recipient_agent_id,
                 entries=(),
                 next_after_created_at=None,
+                instance_exhausted=True,
             )
         return self._require_service().peer_inbox(request)
 
@@ -2186,6 +2567,15 @@ class AgentMessagingPlugin(
                 required=False,
                 type=ParameterType.STRING,
             ),
+            "peer_agent_session_id": ParameterMetadata(
+                description=(
+                    "Stable recipient session ID from peer_list. Used only if "
+                    "peer_agent_instance_id cannot resolve a live binding, which "
+                    "reaches a no-claim watcher registration without inventing a role."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
             "content": ParameterMetadata(
                 description="Message text to deliver to the peer.",
                 required=True,
@@ -2201,6 +2591,7 @@ class AgentMessagingPlugin(
                 "thread_id": ParameterMetadata(type=ParameterType.STRING),
                 "message_id": ParameterMetadata(type=ParameterType.STRING),
                 "delivery": ParameterMetadata(type=ParameterType.STRING),
+                "drive_on_delivery": ParameterMetadata(type=ParameterType.STRING),
                 "delivered_to_agent_id": ParameterMetadata(type=ParameterType.STRING),
                 "delivered_to_agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
             },
@@ -2235,6 +2626,7 @@ class AgentMessagingPlugin(
         raw = params.get("parameters", params)
         peer_id = str(raw.get("peer_id", ""))
         peer_agent_instance_id = raw.get("peer_agent_instance_id") or None
+        peer_agent_session_id = raw.get("peer_agent_session_id") or None
         content_text = str(raw.get("content", ""))
         content: list[TextPart] = [TextPart(type="text", text=content_text)]
         # Unchanged from before this lane: state_service may be None (not yet
@@ -2257,13 +2649,15 @@ class AgentMessagingPlugin(
                 sender_parent_pid=None,
                 peer_id=peer_id,
                 peer_agent_instance_id=peer_agent_instance_id,
+                peer_agent_session_id=peer_agent_session_id,
                 content=content,
                 # WS-2c V4: resolved from the SENDER's registered instance, not
                 # from ``sender.reply_to_role`` — the ladder's role rung takes
                 # ``sorted(roles)[0]``, which is fine as a flow tag but would
                 # misroute a multi-role sender's replies (DEF-3).
                 reply_to_role=sole_role_for_reply_address(
-                    self._get_state_service(), sender.agent_instance_id,
+                    self._get_state_service(),
+                    sender.agent_instance_id,
                 ),
             )
         except (
@@ -2322,6 +2716,7 @@ class AgentMessagingPlugin(
                 "thread_id": ParameterMetadata(type=ParameterType.STRING),
                 "message_id": ParameterMetadata(type=ParameterType.STRING),
                 "delivery": ParameterMetadata(type=ParameterType.STRING),
+                "drive_on_delivery": ParameterMetadata(type=ParameterType.STRING),
                 "resolved_agent_id": ParameterMetadata(type=ParameterType.STRING),
                 "resolved_agent_instance_id": ParameterMetadata(
                     type=ParameterType.STRING,
@@ -2401,6 +2796,7 @@ class AgentMessagingPlugin(
             sender_agent_id=sender.agent_id,
             sender_agent_instance_id=sender.agent_instance_id,
             sender_session_label=sender.session_label,
+            sender_principal_kind=_sender_principal_kind_from_state(state),
             sender_parent_pid=None,
             reply_to_role=sender.reply_to_role,
             content=content,
@@ -2458,6 +2854,7 @@ class AgentMessagingPlugin(
                 "thread_id": ParameterMetadata(type=ParameterType.STRING),
                 "message_id": ParameterMetadata(type=ParameterType.STRING),
                 "delivery": ParameterMetadata(type=ParameterType.STRING),
+                "drive_on_delivery": ParameterMetadata(type=ParameterType.STRING),
                 "resolved_agent_id": ParameterMetadata(type=ParameterType.STRING),
                 "resolved_agent_instance_id": ParameterMetadata(
                     type=ParameterType.STRING,
@@ -2507,10 +2904,7 @@ class AgentMessagingPlugin(
         if not name or not job_id:
             return _failure_result(
                 code="missing_arguments",
-                message=(
-                    "deliver_job_completion requires a non-empty 'name' and "
-                    "'job_id'."
-                ),
+                message=("deliver_job_completion requires a non-empty 'name' and 'job_id'."),
             )
         state_service = self._get_state_service()
         if state_service is None:
@@ -2554,6 +2948,7 @@ class AgentMessagingPlugin(
             sender_agent_id=SYSTEM_AGENT_ID,
             sender_agent_instance_id=SYSTEM_JOB_COMPLETION_ID,
             sender_session_label=SYSTEM_JOB_COMPLETION_LABEL,
+            sender_principal_kind=SENDER_PRINCIPAL_KIND_SYSTEM,
             sender_parent_pid=None,
             # A completion has no conversational counterpart to reply to; the
             # job row and its payloads remain the authoritative record.
@@ -2617,6 +3012,38 @@ class AgentMessagingPlugin(
         if self._peer_registry is None:
             return ""
         return self._peer_registry.agent_session_id_for_instance(agent_instance_id)
+
+    def _dispatch_actor_from_state(self, state: dict[str, Any]) -> DispatchActor:
+        """Derive managed-dispatch authority from a server-derived identity."""
+        try:
+            principal = extract_authenticated_principal(state)
+        except PermissionError as exc:
+            instance_id = str(state.get("inference_vertex_session_id") or "").strip()
+            if not instance_id:
+                raise DispatchError("dispatch_authentication_required", str(exc)) from exc
+            session_id = self._claimant_session_id(instance_id)
+            if not session_id:
+                raise DispatchError(
+                    "dispatch_identity_unregistered",
+                    "Registered local bridge identity has no live peer binding.",
+                ) from exc
+            return DispatchActor(
+                agent_instance_id=instance_id,
+                agent_session_id=session_id,
+                authority_source="live_peer_binding",
+            )
+        instance_id = principal.agent_instance_id.strip()
+        session_id = self._claimant_session_id(instance_id)
+        if not instance_id or not session_id:
+            raise DispatchError(
+                "dispatch_identity_unregistered",
+                "Authenticated caller has no registered durable session identity.",
+            )
+        return DispatchActor(
+            agent_instance_id=instance_id,
+            agent_session_id=session_id,
+            authority_source="oauth_principal",
+        )
 
     @platform_process(
         name="peer_claim_role",
@@ -2757,8 +3184,7 @@ class AgentMessagingPlugin(
         },
         output_type="object",
         output_description=(
-            "agent_role_binding release outcome (v10): the released flag and "
-            "the role name."
+            "agent_role_binding release outcome (v10): the released flag and the role name."
         ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -2813,7 +3239,9 @@ class AgentMessagingPlugin(
         outcome = release_role_binding_v4(state_service, name)
         if prior_session_id and not is_system_role(name):
             delete_session_role_claim_if_still_holds(
-                state_service, agent_session_id=prior_session_id, expected_held_role=name,
+                state_service,
+                agent_session_id=prior_session_id,
+                expected_held_role=name,
             )
         return _success_result(data=outcome)
 
@@ -2837,6 +3265,11 @@ class AgentMessagingPlugin(
             "brief_ref": ParameterMetadata(
                 description="Workbench path or dispatch id backing the spawn (provenance).",
                 required=True,
+                type=ParameterType.STRING,
+            ),
+            "unit_id": ParameterMetadata(
+                description="Optional project-solet work-unit identity resolvable by the spawned lane.",
+                required=False,
                 type=ParameterType.STRING,
             ),
             "work_class": ParameterMetadata(
@@ -2880,10 +3313,29 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "model": ParameterMetadata(
-                description="Dispatch model override.", required=False, type=ParameterType.STRING,
+                description="Dispatch model override.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "dispatch_kind": ParameterMetadata(
+                description="Required assignment kind: diagnose | design | review | fix | infrastructure.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "reviewed_report_vendor": ParameterMetadata(
+                description="For review: vendor that authored the reviewed report (codex | claude_code).",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "pair_id": ParameterMetadata(
+                description="For diagnose/design: shared cross-vendor producer pair identity.",
+                required=False,
+                type=ParameterType.STRING,
             ),
             "effort": ParameterMetadata(
-                description="Dispatch effort override.", required=False, type=ParameterType.STRING,
+                description="Dispatch effort override.",
+                required=False,
+                type=ParameterType.STRING,
             ),
             "allowed_tools": ParameterMetadata(
                 description=(
@@ -2947,6 +3399,27 @@ class AgentMessagingPlugin(
                 required=False,
                 type=ParameterType.STRING,
             ),
+            "dispatch_id": ParameterMetadata(
+                description=(
+                    "Server-issued preparing managed_dispatch identity. Required for "
+                    "project-class work; ordinary callers use dispatch_managed_work."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "local_name": ParameterMetadata(
+                description=(
+                    "Exact name the worker answers to and registers locally; explicit "
+                    "Git-Controller preserves the mutation guard identity."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "degraded_hooks_acknowledged": ParameterMetadata(
+                description="Explicit acknowledgement that required worker hooks are degraded.",
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
         },
         output_type="object",
         output_description=(
@@ -2960,6 +3433,7 @@ class AgentMessagingPlugin(
                 "agent_runtime": ParameterMetadata(type=ParameterType.STRING),
                 "host": ParameterMetadata(type=ParameterType.STRING),
                 "host_ref": ParameterMetadata(type=ParameterType.STRING),
+                "dispatch_id": ParameterMetadata(type=ParameterType.STRING),
                 "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
                 "first_turn_source": ParameterMetadata(
                     description="charter | fallback — which text was driven as turn 1 "
@@ -2999,10 +3473,386 @@ class AgentMessagingPlugin(
                 message="state_service is not bound on this solet.",
             )
         req = _spawn_session_request_from_params(raw, format_directed_by(state.get("call_context")))
+        if req.role_class == "project":
+            return _failure_result(
+                code="managed_dispatch_required",
+                message=(
+                    "Public spawn_session cannot create project work, even with a prepared ID; "
+                    "use dispatch_managed_work or resolve_managed_dispatch(request_retry)."
+                ),
+            )
         req = _apply_spawn_session_policy(req, self._build_session_lifecycle_policy_config())
         try:
             result = lifecycle_spawn_session(state_service, req)
         except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="dispatch_managed_work",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "role_class": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "lane_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "role_name": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "brief_ref": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "brief_sha256": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "expected_path": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "completion_contract": ParameterMetadata(required=True, type=ParameterType.OBJECT),
+            "work_class": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "budget_line": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "model": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "dispatch_kind": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "reviewed_report_vendor": ParameterMetadata(required=False, type=ParameterType.STRING),
+            "pair_id": ParameterMetadata(required=False, type=ParameterType.STRING),
+            "effort": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "agent_runtime": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "allowed_hosts": ParameterMetadata(required=True, type=ParameterType.LIST),
+            "host": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "spawned_by_role": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "visibility": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "local_name": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "report_by_seconds": ParameterMetadata(required=True, type=ParameterType.INTEGER),
+            "ttl_seconds": ParameterMetadata(required=True, type=ParameterType.INTEGER),
+            "allowed_tools": ParameterMetadata(required=True, type=ParameterType.LIST),
+            "permission_mode": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "transport": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "allow_askuserquestion": ParameterMetadata(required=True, type=ParameterType.BOOLEAN),
+            "degraded_hooks_acknowledged": ParameterMetadata(
+                required=True,
+                type=ParameterType.BOOLEAN,
+            ),
+            "uptake_due_at": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "report_by": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "watchdog_due_at": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "expires_at": ParameterMetadata(required=True, type=ParameterType.STRING),
+        },
+        output_type="object",
+        output_description="Prepared dispatch plus linked current attempt and first-turn evidence.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Managed dispatch plus linked current attempt.",
+            properties={
+                "dispatch": ParameterMetadata(type=ParameterType.OBJECT),
+                "attempt": ParameterMetadata(type=ParameterType.OBJECT),
+            },
+        ),
+    )
+    def dispatch_managed_work(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        directed_by = format_directed_by(state.get("call_context"))
+        spawn_req = _spawn_session_request_from_params(raw, directed_by)
+        spawn_req = _apply_spawn_session_policy(
+            spawn_req,
+            self._build_session_lifecycle_policy_config(),
+        )
+        try:
+            actor = self._dispatch_actor_from_state(state)
+            spawn_req = replace(
+                spawn_req,
+                spawned_by_instance_id=actor.agent_instance_id,
+            )
+            if not holds_role(state_service, spawn_req.spawned_by_role, actor.agent_session_id):
+                raise DispatchError(
+                    "coordinator_authority_denied",
+                    "Authenticated caller does not hold spawned_by_role.",
+                )
+            spec = _dispatch_spec_from_params(raw, spawn_req, directed_by)
+            result = lifecycle_dispatch_managed_work(state_service, spec, spawn_req)
+        except (DispatchError, VerbError) as exc:
+            return _failure_result(
+                code=exc.code,
+                message=exc.message,
+                data=exc.data if isinstance(exc, DispatchError) else None,
+            )
+        return _success_result(data=result)
+
+    @platform_process(
+        name="provision_role_session",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "role_name": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "requested_role_class": ParameterMetadata(required=False, type=ParameterType.STRING),
+            "lane_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "brief_ref": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "brief_sha256": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "expected_path": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "completion_contract": ParameterMetadata(required=True, type=ParameterType.OBJECT),
+            "work_class": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "budget_line": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "model": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "dispatch_kind": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "reviewed_report_vendor": ParameterMetadata(required=False, type=ParameterType.STRING),
+            "pair_id": ParameterMetadata(required=False, type=ParameterType.STRING),
+            "effort": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "agent_runtime": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "allowed_hosts": ParameterMetadata(required=True, type=ParameterType.LIST),
+            "host": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "spawned_by_role": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "visibility": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "report_by_seconds": ParameterMetadata(required=True, type=ParameterType.INTEGER),
+            "ttl_seconds": ParameterMetadata(required=True, type=ParameterType.INTEGER),
+            "allowed_tools": ParameterMetadata(required=True, type=ParameterType.LIST),
+            "permission_mode": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "transport": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "allow_askuserquestion": ParameterMetadata(required=True, type=ParameterType.BOOLEAN),
+            "degraded_hooks_acknowledged": ParameterMetadata(
+                required=True,
+                type=ParameterType.BOOLEAN,
+            ),
+            "uptake_due_at": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "report_by": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "watchdog_due_at": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "expires_at": ParameterMetadata(required=True, type=ParameterType.STRING),
+        },
+        output_type="object",
+        output_description=(
+            "One-call role provisioning: resolved class, optional principal legislation, "
+            "managed dispatch attempt, and read-only Git-controller gate status."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Provisioned role-session outcome.",
+            properties={
+                "provisioning_action": ParameterMetadata(type=ParameterType.STRING),
+                "resolved_role_class": ParameterMetadata(type=ParameterType.STRING),
+                "legislation": ParameterMetadata(type=ParameterType.OBJECT),
+                "existing_holder": ParameterMetadata(type=ParameterType.OBJECT),
+                "dispatch": ParameterMetadata(type=ParameterType.OBJECT),
+                "attempt": ParameterMetadata(type=ParameterType.OBJECT),
+                "git_controller_gate": ParameterMetadata(type=ParameterType.OBJECT),
+            },
+        ),
+    )
+    def provision_role_session(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Provision a routable project role without making callers guess its class.
+
+        The worker, not this composing verb, claims the durable binding: the
+        shared first-turn frame always tells named workers to claim first.
+        """
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            data = self._provision_role_session_data(state_service, raw, state)
+        except (DispatchError, VerbError) as exc:
+            return _failure_result(
+                code=exc.code,
+                message=exc.message,
+                data=exc.data if isinstance(exc, DispatchError) else None,
+            )
+        return _success_result(data=data)
+
+    def _provision_role_session_data(
+        self,
+        state_service: Any,
+        raw: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, object]:
+        directed_by = format_directed_by(state.get("call_context"))
+        role_name = str(raw.get("role_name") or "").strip()
+        resolved_role_class, needs_legislation = lifecycle_resolve_provisioned_role_class(
+            state_service,
+            role_name=role_name,
+            requested_role_class=str(raw.get("requested_role_class") or ""),
+        )
+        actor = self._dispatch_actor_from_state(state)
+        _require_provisioner_authority(
+            state_service,
+            str(raw.get("spawned_by_role") or ""),
+            actor,
+        )
+        existing_holder = _provisioned_live_role_holder(self, state_service, role_name)
+        if existing_holder is not None:
+            return {
+                "provisioning_action": "existing_live_holder",
+                "resolved_role_class": resolved_role_class,
+                "legislation": {"action": "not_required"},
+                "existing_holder": existing_holder,
+                "dispatch": {},
+                "attempt": {},
+                "git_controller_gate": _git_controller_launcher_report(role_name),
+            }
+        legislation = _provision_legislation(
+            state_service,
+            needs_legislation=needs_legislation,
+            role_name=role_name,
+            role_class=resolved_role_class,
+            brief_ref=str(raw.get("brief_ref") or ""),
+            directed_by=directed_by,
+        )
+        spawn_raw = dict(raw)
+        spawn_raw["role_class"] = resolved_role_class
+        spawn_raw["local_name"] = lifecycle_resolve_local_name(
+            role_class=resolved_role_class,
+            role_name=role_name,
+            lane_id=str(raw.get("lane_id") or ""),
+        )
+        spawn_req = _spawn_session_request_from_params(spawn_raw, directed_by)
+        spawn_req = _apply_spawn_session_policy(
+            spawn_req,
+            self._build_session_lifecycle_policy_config(),
+        )
+        spawn_req = replace(spawn_req, spawned_by_instance_id=actor.agent_instance_id)
+        result = lifecycle_dispatch_managed_work(
+            state_service,
+            _dispatch_spec_from_params(spawn_raw, spawn_req, directed_by),
+            spawn_req,
+        )
+        return {
+            "provisioning_action": "spawned",
+            "resolved_role_class": resolved_role_class,
+            "legislation": legislation,
+            "existing_holder": {},
+            "dispatch": result["dispatch"],
+            "attempt": result["attempt"],
+            "git_controller_gate": _git_controller_launcher_report(role_name),
+        }
+
+    @platform_process(
+        name="report_managed_dispatch",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "dispatch_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "event_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "event_kind": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "attempt_agent_instance_id": ParameterMetadata(
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "prior_version": ParameterMetadata(required=True, type=ParameterType.INTEGER),
+            "payload": ParameterMetadata(required=True, type=ParameterType.OBJECT),
+        },
+        output_type="object",
+        output_description="Validated worker event and resulting dispatch projection.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Validated worker event projection.",
+        ),
+    )
+    def report_managed_dispatch(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            actor = self._dispatch_actor_from_state(state)
+            result = lifecycle_report_managed_dispatch(
+                state_service,
+                dispatch_id=str(raw.get("dispatch_id") or ""),
+                event_id=str(raw.get("event_id") or ""),
+                event_kind=str(raw.get("event_kind") or ""),
+                attempt_agent_instance_id=str(raw.get("attempt_agent_instance_id") or ""),
+                actor=actor,
+                prior_version=int(raw.get("prior_version") or 0),
+                payload=_as_object(raw.get("payload")),
+                observed_at=datetime.now(UTC),
+            )
+        except DispatchError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="resolve_managed_dispatch",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "dispatch_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "event_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "action": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "prior_version": ParameterMetadata(required=True, type=ParameterType.INTEGER),
+            "payload": ParameterMetadata(required=True, type=ParameterType.OBJECT),
+        },
+        output_type="object",
+        output_description="Coordinator decision and resulting dispatch projection.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Coordinator decision projection.",
+        ),
+    )
+    def resolve_managed_dispatch(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            actor = self._dispatch_actor_from_state(state)
+            result = lifecycle_resolve_managed_dispatch(
+                state_service,
+                dispatch_id=str(raw.get("dispatch_id") or ""),
+                event_id=str(raw.get("event_id") or ""),
+                action=str(raw.get("action") or ""),
+                actor=actor,
+                prior_version=int(raw.get("prior_version") or 0),
+                payload=_as_object(raw.get("payload")),
+                observed_at=datetime.now(UTC),
+            )
+        except DispatchError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="managed_dispatch_status",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "dispatch_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+        },
+        output_type="object",
+        output_description="Decision-oriented aggregate managed-dispatch status.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Decision-oriented dispatch aggregate.",
+        ),
+    )
+    def managed_dispatch_status(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            result = lifecycle_managed_dispatch_status(
+                state_service,
+                str(raw.get("dispatch_id") or ""),
+            )
+        except DispatchError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
@@ -3185,8 +4035,7 @@ class AgentMessagingPlugin(
         },
         output_type="object",
         output_description=(
-            "arm_session_dependency outcome (drive-on-delivery lane rider) — "
-            "the armed wake edge."
+            "arm_session_dependency outcome (drive-on-delivery lane rider) — the armed wake edge."
         ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -3200,7 +4049,9 @@ class AgentMessagingPlugin(
         ),
     )
     def arm_session_dependency(
-        self, params: dict[str, Any], state: dict[str, Any],
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
     ) -> dict[str, Any]:
         """Rider verb (drive-on-delivery lane, slice 2, 2026-08-04) — the
         FIRST caller of the D1 ``session_dependency`` wake-edge machinery.
@@ -3246,7 +4097,9 @@ class AgentMessagingPlugin(
         ),
     )
     def drain_session_claude_mapping_spool(
-        self, params: dict[str, Any], state: dict[str, Any],
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
     ) -> dict[str, Any]:
         """T1 usage-capture lane (ruling 2026-08-05) — testable/on-demand
         entry point for :func:`session_claude_mapping_ingest.
@@ -3268,18 +4121,37 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "lane_id": ParameterMetadata(
-                description="Filter to one lane_id.", required=False, type=ParameterType.STRING,
+                description="Filter to one lane_id.",
+                required=False,
+                type=ParameterType.STRING,
             ),
             "work_class": ParameterMetadata(
-                description="Filter to one work_class.", required=False, type=ParameterType.STRING,
+                description="Filter to one work_class.",
+                required=False,
+                type=ParameterType.STRING,
             ),
             "host": ParameterMetadata(
-                description="Filter to one host.", required=False, type=ParameterType.STRING,
+                description="Filter to one host.",
+                required=False,
+                type=ParameterType.STRING,
             ),
             "lifecycle_state": ParameterMetadata(
                 description="Filter to one lifecycle_state.",
                 required=False,
                 type=ParameterType.STRING,
+            ),
+            "live_only": ParameterMetadata(
+                description="When true, include only non-terminal lifecycle states.",
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
+            "limit": ParameterMetadata(
+                description=(
+                    f"Hard result bound; defaults to {LIST_SESSIONS_DEFAULT_LIMIT} and may not "
+                    f"exceed {LIST_SESSIONS_MAX_LIMIT}. Over-limit matches refuse, never truncate."
+                ),
+                required=False,
+                type=ParameterType.INTEGER,
             ),
         },
         output_type="object",
@@ -3293,8 +4165,11 @@ class AgentMessagingPlugin(
         ),
     )
     def list_sessions(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
-        """§4 ``list_sessions`` — the ONE fleet list (operator-managed rows
-        included by construction, via the normal registration path)."""
+        """§4 ``list_sessions`` — the ONE fleet list.
+
+        Operator registrations appear as inventory rows through the normal
+        registration path, but carry no invented report-by or TTL contract.
+        """
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
@@ -3307,14 +4182,68 @@ class AgentMessagingPlugin(
             for key in ("lane_id", "work_class", "host", "lifecycle_state")
             if raw.get(key)
         }
-        return _success_result(data=lifecycle_list_sessions(state_service, filters or None))
+        raw_limit = raw.get("limit", LIST_SESSIONS_DEFAULT_LIMIT)
+        try:
+            result = lifecycle_list_sessions(
+                state_service,
+                filters or None,
+                live_only=raw.get("live_only") is True,
+                limit=raw_limit,
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="fleet_status",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "scope": ParameterMetadata(
+                description="Fleet population: 'lanes' (default) or 'all'.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "Bounded read-only fleet classification over managed sessions, armed "
+            "dependencies, context gauges, and role-message owed records."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="fleet_status outcome",
+            properties={
+                "sessions": ParameterMetadata(type=ParameterType.LIST),
+                "class_counts": ParameterMetadata(type=ParameterType.OBJECT),
+                "unregistered": ParameterMetadata(type=ParameterType.OBJECT),
+                "owed_messages": ParameterMetadata(type=ParameterType.LIST),
+                "legacy_direct_delivery_unknown": ParameterMetadata(type=ParameterType.BOOLEAN),
+            },
+        ),
+    )
+    def fleet_status(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+        """U1 fleet status: a read-only, bounded existing-data projection."""
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        raw = params.get("parameters", params)
+        try:
+            result = lifecycle_fleet_status(state_service, scope=raw.get("scope", "lanes"))
+        except FleetStatusError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
 
     @platform_process(
         name="budget_report",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "lane_id": ParameterMetadata(
-                description="Filter to one lane_id.", required=False, type=ParameterType.STRING,
+                description="Filter to one lane_id.",
+                required=False,
+                type=ParameterType.STRING,
             ),
             "budget_line": ParameterMetadata(
                 description="Filter to one budget_line.",
@@ -3418,7 +4347,9 @@ class AgentMessagingPlugin(
         ),
     )
     def list_session_claude_mappings(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """usage-capture-attribution D2 follow-on (workbench
         2026-08-06_usage_capture_attribution_findings_usage-capture-impl.md)
@@ -3498,6 +4429,74 @@ class AgentMessagingPlugin(
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=row)
+
+    @platform_process(
+        name="reconcile_operator_session_liveness",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "dry_run": ParameterMetadata(
+                description=(
+                    "True = classify and report only; pass false to act. When true, report "
+                    "every operator managed_session classification and proposed transition "
+                    "without writing."
+                ),
+                default=True,
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "R3-U1 operator presence reconciliation: classifications, proposed "
+            "terminal transitions, and the rows applied when dry_run is false."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Operator managed_session liveness reconciliation result.",
+            properties={
+                "dry_run": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "classifications": ParameterMetadata(type=ParameterType.LIST),
+                "applied": ParameterMetadata(type=ParameterType.LIST),
+            },
+        ),
+    )
+    def reconcile_operator_session_liveness(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """R3-U1's explicit, dry-run-first backfill surface.
+
+        This is intentionally a caller-driven one-time operation, not a sweep
+        rider.  R3s owns the later periodic schedule and calls the shared
+        library primitive directly.
+        """
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        if self._peer_registry is None or self._bridge_manager is None:
+            return _failure_result(
+                code="liveness_services_unavailable",
+                message="peer registry or bridge manager is not bound on this solet.",
+            )
+        try:
+            result = lifecycle_reconcile_operator_session_liveness(
+                state_service,
+                peer_registry=self._peer_registry,
+                bridge_manager=self._bridge_manager,
+                dry_run=_coerce_dry_run(raw.get("dry_run", True)),
+            )
+        except Exception as exc:  # noqa: BLE001 -- surface a failed reconciliation loudly
+            logger.exception("operator session liveness reconciliation failed")
+            return _failure_result(
+                code="operator_liveness_reconciliation_failed",
+                message=f"{type(exc).__name__}: {exc}",
+            )
+        return _success_result(data=result)
 
     @platform_process(
         name="clear_session",
@@ -3607,7 +4606,8 @@ class AgentMessagingPlugin(
             )
         try:
             result = lifecycle_compact_session(
-                state_service, agent_instance_id=str(raw.get("agent_instance_id", "")),
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -3687,8 +4687,7 @@ class AgentMessagingPlugin(
             ),
             "grace_seconds": ParameterMetadata(
                 description=(
-                    "Seconds to wait for a graceful host-level stop before "
-                    "SIGKILL. Default 30."
+                    "Seconds to wait for a graceful host-level stop before SIGKILL. Default 30."
                 ),
                 required=False,
                 type=ParameterType.INTEGER,
@@ -3793,10 +4792,27 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "status": ParameterMetadata(
-                description="working | idle.", required=True, type=ParameterType.STRING,
+                description="working | idle | heartbeat.",
+                required=True,
+                type=ParameterType.STRING,
             ),
             "status_note": ParameterMetadata(
                 description="Optional free-text note, recorded on the audit trail.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "heartbeat_failures_since_last": ParameterMetadata(
+                description="Failures carried forward by this successful heartbeat.",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+            "heartbeat_failure_first_at": ParameterMetadata(
+                description="First timestamp of the carried-forward failure episode.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "heartbeat_failure_last_reason": ParameterMetadata(
+                description="Most recent carried-forward failure reason.",
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -3813,7 +4829,8 @@ class AgentMessagingPlugin(
         ),
     )
     def report_alive(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        """§4 ``report_alive`` — re-arms ``report_by``; a late report from
+        """§4 explicit ``report_alive`` re-arms ``report_by``; passive
+        heartbeats record liveness only. A late explicit report from
         ``overdue`` recovers and sets ``recovered=True``."""
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
@@ -3822,16 +4839,29 @@ class AgentMessagingPlugin(
                 code="state_service_unavailable",
                 message="state_service is not bound on this solet.",
             )
+        status = str(raw.get("status", ""))
         try:
             result = lifecycle_report_alive(
                 state_service,
                 agent_instance_id=str(raw.get("agent_instance_id", "")),
-                status=str(raw.get("status", "")),
+                status=status,
                 status_note=str(raw.get("status_note", "") or ""),
+                heartbeat_failures_since_last=int(raw.get("heartbeat_failures_since_last", 0) or 0),
+                heartbeat_failure_first_at=_heartbeat_failure_first_at(
+                    status=status,
+                    raw=raw.get("heartbeat_failure_first_at"),
+                ),
+                heartbeat_failure_last_reason=str(raw.get("heartbeat_failure_last_reason", "") or ""),
                 directed_by=format_directed_by(state.get("call_context")),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
+        except Exception as exc:  # noqa: BLE001 -- a heartbeat write must fail loud
+            logger.exception("report_alive heartbeat write failed")
+            return _failure_result(
+                code="heartbeat_write_failed",
+                message=f"{type(exc).__name__}: {exc}",
+            )
         return _success_result(data=result)
 
     @platform_process(
@@ -3994,7 +5024,9 @@ class AgentMessagingPlugin(
         ),
     )
     def check_choreography_job_status(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """Read-only poll of a rotate_session/restart_session/
         generate_curation_report job's ledger row + terminal payload, if
@@ -4009,7 +5041,8 @@ class AgentMessagingPlugin(
             )
         try:
             result = lifecycle_check_choreography_job_status(
-                job_manager, str(raw.get("job_id", "")),
+                job_manager,
+                str(raw.get("job_id", "")),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -4061,7 +5094,9 @@ class AgentMessagingPlugin(
         ),
     )
     def generate_curation_report(
-        self, params: dict[str, Any], state: dict[str, Any],
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
     ) -> dict[str, Any]:
         """M2.2 ``generate_curation_report`` — ms-scale dispatch only (D0.3
         mechanic 1, same shape as rotate/restart_session); the actual
@@ -4075,7 +5110,9 @@ class AgentMessagingPlugin(
                 message="AsyncJobManager is not available on this solet.",
             )
         head_lines_raw = raw.get("head_lines")
-        head_lines = tuple(str(x) for x in head_lines_raw) if isinstance(head_lines_raw, list) else ()
+        head_lines = (
+            tuple(str(x) for x in head_lines_raw) if isinstance(head_lines_raw, list) else ()
+        )
         req = GenerateCurationReportDispatchRequest(
             head_lines=head_lines,
             bottom_n=int(raw.get("bottom_n") or 10),
@@ -4118,7 +5155,9 @@ class AgentMessagingPlugin(
         ),
     )
     def reinforce_by_slug(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """M2.2 cite->reinforce wiring: resolves ``slug`` to a ``memory_id``
         via ``get_memories_by_tag`` on the fact's own slot tag (never a local
@@ -4132,7 +5171,8 @@ class AgentMessagingPlugin(
         slug = str(raw.get("slug", "")).strip()
         if not slug:
             return _failure_result(
-                code="missing_argument", message="reinforce_by_slug requires a non-empty slug.",
+                code="missing_argument",
+                message="reinforce_by_slug requires a non-empty slug.",
             )
         if self._memory_service is None:
             return _failure_result(
@@ -4152,7 +5192,9 @@ class AgentMessagingPlugin(
         lookup = self._memory_service.get_memories_by_tag(tag=tag)
         matches = lookup.get("memories") if isinstance(lookup, dict) else None
         try:
-            memory_id = resolve_memory_id_by_slug(matches if isinstance(matches, list) else [], slug)
+            memory_id = resolve_memory_id_by_slug(
+                matches if isinstance(matches, list) else [], slug
+            )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         self._memory_service.reinforce(memory_id=memory_id)
@@ -4168,8 +5210,18 @@ class AgentMessagingPlugin(
                 required=True,
                 type=ParameterType.STRING,
             ),
-            "claude_session_id": ParameterMetadata(
-                description="The Claude Code session_id this snapshot was measured against.",
+            "runtime_session_id": ParameterMetadata(
+                description="The reporting runtime's native stable session/thread identity.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "provider": ParameterMetadata(
+                description="The model provider at measurement time (for example openai).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "runtime": ParameterMetadata(
+                description="The reporting agent runtime (for example codex or claude_code).",
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -4178,13 +5230,25 @@ class AgentMessagingPlugin(
                 required=True,
                 type=ParameterType.STRING,
             ),
+            "effort": ParameterMetadata(
+                description="The runtime's selected reasoning-effort value.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
             "current_tokens": ParameterMetadata(
-                description="input+cache_creation+cache_read tokens from the most recent turn.",
+                description=(
+                    "Model-visible input tokens for the most recent assistant call, "
+                    "using the reporting runtime's native counter. Cache counters are "
+                    "reported separately and must not be added twice."
+                ),
                 required=True,
                 type=ParameterType.INTEGER,
             ),
             "ceiling": ParameterMetadata(
-                description="rotation_thresholds.resolve_ceiling(model) at measurement time.",
+                description=(
+                    "Positive effective context capacity reported by the active runtime. "
+                    "This is distinct from a provider API maximum."
+                ),
                 required=True,
                 type=ParameterType.INTEGER,
             ),
@@ -4219,6 +5283,15 @@ class AgentMessagingPlugin(
                     "the same call current_tokens is summed from. 0 means that "
                     "call read nothing from cache and paid full price. Omit if "
                     "not measured; omission records NOT REPORTED, never 'warm'."
+                ),
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+            "cache_write_tokens": ParameterMetadata(
+                description=(
+                    "Cache-write tokens on the same measured call. Omit when "
+                    "the runtime does not expose the counter; never derive it "
+                    "from total input."
                 ),
                 required=False,
                 type=ParameterType.INTEGER,
@@ -4303,7 +5376,9 @@ class AgentMessagingPlugin(
         ),
     )
     def report_context_status(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """maintenance-verbs M1 — plain state upsert of a measurement the
         CALLER already took client-side; this handler does no file/subprocess
@@ -4320,11 +5395,15 @@ class AgentMessagingPlugin(
             result = lifecycle_report_context_status(
                 state_service,
                 agent_instance_id=str(raw.get("agent_instance_id", "")),
-                claude_session_id=str(raw.get("claude_session_id", "")),
+                runtime_session_id=str(raw.get("runtime_session_id", "")),
+                provider=str(raw.get("provider", "")),
+                runtime=str(raw.get("runtime", "")),
                 model=str(raw.get("model", "")),
+                effort=str(raw.get("effort", "")),
                 current_tokens=int(raw.get("current_tokens", 0) or 0),
                 ceiling=int(raw.get("ceiling", 0) or 0),
                 cache_read_tokens=_opt_int(raw.get("cache_read_tokens")),
+                cache_write_tokens=_opt_int(raw.get("cache_write_tokens")),
                 cache_cold=_opt_bool(raw.get("cache_cold")),
                 cache_overage_signature=_opt_bool(raw.get("cache_overage_signature")),
                 reporter_surface=_opt_str(raw.get("reporter_surface")),
@@ -4345,6 +5424,15 @@ class AgentMessagingPlugin(
                 description="The session to read the cached context-status snapshot for.",
                 required=True,
                 type=ParameterType.STRING,
+            ),
+            "calculation_request": ParameterMetadata(
+                description=(
+                    "Optional explicit N-aware calculation inputs: required_actions, "
+                    "measured action calibrations, cache multiplier, and versioned "
+                    "capability/economics profile identities. Omit for gauge-only readback."
+                ),
+                required=False,
+                type=ParameterType.OBJECT,
             ),
         },
         output_type="object",
@@ -4381,8 +5469,11 @@ class AgentMessagingPlugin(
                     ),
                     type=ParameterType.STRING,
                 ),
-                "claude_session_id": ParameterMetadata(type=ParameterType.STRING),
+                "runtime_session_id": ParameterMetadata(type=ParameterType.STRING),
+                "provider": ParameterMetadata(type=ParameterType.STRING),
+                "runtime": ParameterMetadata(type=ParameterType.STRING),
                 "model": ParameterMetadata(type=ParameterType.STRING),
+                "effort": ParameterMetadata(type=ParameterType.STRING),
                 "current_tokens": ParameterMetadata(type=ParameterType.INTEGER),
                 "ceiling": ParameterMetadata(type=ParameterType.INTEGER),
                 "fraction": ParameterMetadata(type=ParameterType.FLOAT),
@@ -4395,6 +5486,7 @@ class AgentMessagingPlugin(
                 # schema describes what the verb ACTUALLY returns; the fields
                 # shipped in the return dict ahead of this declaration.
                 "cache_read_tokens": ParameterMetadata(type=ParameterType.INTEGER),
+                "cache_write_tokens": ParameterMetadata(type=ParameterType.INTEGER),
                 "cache_cold": ParameterMetadata(type=ParameterType.BOOLEAN),
                 "cache_overage_signature": ParameterMetadata(type=ParameterType.BOOLEAN),
                 "rotation_band": ParameterMetadata(type=ParameterType.STRING),
@@ -4405,11 +5497,14 @@ class AgentMessagingPlugin(
                 # The routing join (2026-08-18): null means the reporter
                 # predates the column, NOT that the session has no bridge.
                 "agent_session_id": ParameterMetadata(type=ParameterType.STRING),
+                "calculated_verdict": ParameterMetadata(type=ParameterType.OBJECT),
             },
         ),
     )
     def session_context_status(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """maintenance-verbs M1 — trivial state read of the cached snapshot
         `report_context_status` writes; this handler never reads a
@@ -4423,7 +5518,13 @@ class AgentMessagingPlugin(
             )
         try:
             result = lifecycle_session_context_status(
-                state_service, agent_instance_id=str(raw.get("agent_instance_id", "")),
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                calculation_request=(
+                    dict(raw["calculation_request"])
+                    if isinstance(raw.get("calculation_request"), dict)
+                    else None
+                ),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -4529,7 +5630,9 @@ class AgentMessagingPlugin(
         ),
     )
     def session_context_status_history(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """GAU-15 — read the bounded gauge series behind the cached snapshot.
 
@@ -4549,9 +5652,168 @@ class AgentMessagingPlugin(
             result = gauge_session_context_status_history(
                 state_service,
                 agent_instance_id=str(raw.get("agent_instance_id", "")),
-                limit=int(limit) if isinstance(limit, (int, str)) and str(limit).strip()
+                limit=int(limit)
+                if isinstance(limit, (int, str)) and str(limit).strip()
                 else GAUGE_HISTORY_RETENTION,
                 peer_registry=self._peer_registry,
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="report_inbox_consumption",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The reporting session's own id (ledger id for a worker).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "runtime": ParameterMetadata(
+                description="The reporting agent runtime (for example codex).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "checked_at": ParameterMetadata(
+                description=(
+                    "When the consumer hook last actually performed its "
+                    "existence check (ISO timestamp), REGARDLESS of what it "
+                    "found. Stamped on every call — this is the honesty "
+                    "mechanism itself."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "pending_found_at": ParameterMetadata(
+                description=(
+                    "ISO timestamp of the last time this check found a "
+                    "pending delivery and forced a Stop-hook block/continue. "
+                    "Omit when this check found nothing."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "pending_reason": ParameterMetadata(
+                description=(
+                    "The fixed nudge text last delivered via decision:block. "
+                    "Requires pending_found_at to be present alongside it."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "reporter_surface": ParameterMetadata(
+                description=(
+                    "checkout | plugin_cache | vendored | release | unknown "
+                    "-- which copy of the hook wrote this row, same closed "
+                    "vocabulary as report_context_status's field of the same "
+                    "name. Omit only if the reporter predates attribution."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "agent_session_id": ParameterMetadata(
+                description=(
+                    "The reporting session's STABLE $AGENT_SESSION_ID, "
+                    "captured for a future routing join. Omit if the "
+                    "reporter has no session id."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "CDX-06 part C — overwrite the caller's own latest inbox-consumption-check snapshot."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="report_inbox_consumption outcome",
+            properties={
+                "status": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def report_inbox_consumption(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """CDX-06 part C — plain state upsert of a check the CALLER already
+        performed; this handler does no subprocess I/O of its own."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            result = lifecycle_report_inbox_consumption(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
+                runtime=str(raw.get("runtime", "")),
+                checked_at=str(raw.get("checked_at", "")),
+                pending_found_at=_opt_str(raw.get("pending_found_at")),
+                pending_reason=_opt_str(raw.get("pending_reason")),
+                reporter_surface=_opt_str(raw.get("reporter_surface")),
+                agent_session_id=_opt_str(raw.get("agent_session_id")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="session_inbox_consumption_status",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(
+                description="The session to read the cached inbox-consumption snapshot for.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "CDX-06 part C — the cached inbox-consumption-check state for "
+            "one session; resolved=False (never a raised error, never a "
+            "defaulted True) when no check has landed for it yet."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="session_inbox_consumption_status outcome",
+            properties={
+                "resolved": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "resolution_error": ParameterMetadata(type=ParameterType.STRING),
+                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "runtime": ParameterMetadata(type=ParameterType.STRING),
+                "checked_at": ParameterMetadata(type=ParameterType.STRING),
+                "pending_found_at": ParameterMetadata(type=ParameterType.STRING),
+                "pending_reason": ParameterMetadata(type=ParameterType.STRING),
+                "reporter_surface": ParameterMetadata(type=ParameterType.STRING),
+                "agent_session_id": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def session_inbox_consumption_status(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """CDX-06 part C — trivial state read of the cached snapshot
+        `report_inbox_consumption` writes; never estimates a fallback when
+        `resolved=False`."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            result = lifecycle_session_inbox_consumption_status(
+                state_service,
+                agent_instance_id=str(raw.get("agent_instance_id", "")),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -4583,8 +5845,7 @@ class AgentMessagingPlugin(
             ),
             "since": ParameterMetadata(
                 description=(
-                    "ISO-8601 lower bound on emitted_at, inclusive. Omit for "
-                    "everything retained."
+                    "ISO-8601 lower bound on emitted_at, inclusive. Omit for everything retained."
                 ),
                 required=False,
                 type=ParameterType.STRING,
@@ -4657,10 +5918,7 @@ class AgentMessagingPlugin(
                     type=ParameterType.STRING,
                 ),
                 "retention": ParameterMetadata(
-                    description=(
-                        "Records the store keeps per subject per type (the "
-                        "hard bound)."
-                    ),
+                    description=("Records the store keeps per subject per type (the hard bound)."),
                     type=ParameterType.INTEGER,
                 ),
                 "delivery_outcomes": ParameterMetadata(
@@ -4678,7 +5936,9 @@ class AgentMessagingPlugin(
         ),
     )
     def gauge_notice_records(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """GAU-21 — read which gauge notices actually fired, durably.
 
@@ -4704,7 +5964,8 @@ class AgentMessagingPlugin(
                 notice_type=str(notice_type) if notice_type else None,
                 agent_instance_id=str(agent_instance_id) if agent_instance_id else None,
                 since=str(since) if since else None,
-                limit=int(limit) if isinstance(limit, (int, str)) and str(limit).strip()
+                limit=int(limit)
+                if isinstance(limit, (int, str)) and str(limit).strip()
                 else GAUGE_NOTICE_READ_ROWS,
             )
         except VerbError as exc:
@@ -4763,7 +6024,9 @@ class AgentMessagingPlugin(
         ),
     )
     def register_gauge_canary(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """GAU-15 item 4 — mark an identity as a canary, at the store plane."""
         raw = params.get("parameters", params)
@@ -4862,7 +6125,9 @@ class AgentMessagingPlugin(
         ),
     )
     def arrest_gauge_canary(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """GAU-15 item 4 — the audited tamper. Constraint (d) in one verb."""
         raw = params.get("parameters", params)
@@ -4921,9 +6186,7 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "directed_by": ParameterMetadata(
-                description=(
-                    "Who ordered this synthetic identity into the fleet ledger."
-                ),
+                description=("Who ordered this synthetic identity into the fleet ledger."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -4986,8 +6249,7 @@ class AgentMessagingPlugin(
                 ),
                 "lifecycle_state": ParameterMetadata(
                     description=(
-                        "'spawning' — the first canary tick's report_alive "
-                        "promotes it to live."
+                        "'spawning' — the first canary tick's report_alive promotes it to live."
                     ),
                     type=ParameterType.STRING,
                 ),
@@ -5002,7 +6264,9 @@ class AgentMessagingPlugin(
         ),
     )
     def register_synthetic_session(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """GAU-15 item 4 follow-up — a canary's lifecycle row, no process."""
         raw = params.get("parameters", params)
@@ -5020,8 +6284,7 @@ class AgentMessagingPlugin(
                 lane_id=str(raw.get("lane_id", "")),
                 spawned_by_instance_id=str(raw.get("spawned_by_instance_id", "")),
                 directed_by=str(raw.get("directed_by", "")),
-                report_by_seconds=int(window) if str(window).strip().lstrip("-").isdigit()
-                else 0,
+                report_by_seconds=int(window) if str(window).strip().lstrip("-").isdigit() else 0,
                 brief_ref=str(raw.get("brief_ref", "")),
                 budget_line=str(raw.get("budget_line", "")),
                 model=str(raw.get("model", "")),
@@ -5068,10 +6331,7 @@ class AgentMessagingPlugin(
                     type=ParameterType.BOOLEAN,
                 ),
                 "session_retire_result": ParameterMetadata(
-                    description=(
-                        "retire_session's own outcome when a row existed, "
-                        "else null."
-                    ),
+                    description=("retire_session's own outcome when a row existed, else null."),
                     type=ParameterType.OBJECT,
                 ),
                 "canary_mark_retired": ParameterMetadata(type=ParameterType.BOOLEAN),
@@ -5079,7 +6339,9 @@ class AgentMessagingPlugin(
         ),
     )
     def retire_gauge_canary(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """GAU-24 — retire a canary's ledger row (if any) and its registry
         mark, ledger first."""
@@ -5120,9 +6382,7 @@ class AgentMessagingPlugin(
                 type=ParameterType.BOOLEAN,
             ),
             "since": ParameterMetadata(
-                description=(
-                    "ISO-8601 lower bound on the windows and alarms examined."
-                ),
+                description=("ISO-8601 lower bound on the windows and alarms examined."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -5183,8 +6443,7 @@ class AgentMessagingPlugin(
                 "scheduled_alarms": ParameterMetadata(type=ParameterType.INTEGER),
                 "unattributed_alarms": ParameterMetadata(
                     description=(
-                        "Alarms outside every logged window. NOT canary noise "
-                        "to dismiss."
+                        "Alarms outside every logged window. NOT canary noise to dismiss."
                     ),
                     type=ParameterType.INTEGER,
                 ),
@@ -5194,7 +6453,9 @@ class AgentMessagingPlugin(
         ),
     )
     def verify_gauge_canary(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """GAU-15 item 4 — both edges, judged against the durable record."""
         raw = params.get("parameters", params)
@@ -5262,7 +6523,9 @@ class AgentMessagingPlugin(
         ),
     )
     def record_held_authorization(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """R1 held-authorization queue — plain state insert of one refusal
         event. No caller-identity check (seat ruling 2026-08-17):
@@ -5323,7 +6586,9 @@ class AgentMessagingPlugin(
         ),
     )
     def list_held_authorizations(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """R1 held-authorization queue — trivial state read, no side effects.
         Never filters by staleness itself (no silent TTL in this queue) —
@@ -5388,7 +6653,9 @@ class AgentMessagingPlugin(
         ),
     )
     def retire_held_authorization(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         """R1 held-authorization queue — predicated state update
         (`retired_at IS NULL` -> set), so a double-retire is a loud
@@ -5489,7 +6756,8 @@ class AgentMessagingPlugin(
                 "name": name,
                 "agent_session_id": agent_session_id,
                 "delivery_route_attached": self._role_delivery_route_attached(
-                    state_service, name,
+                    state_service,
+                    name,
                 ),
             },
         )
@@ -5551,7 +6819,7 @@ class AgentMessagingPlugin(
         ._lift_inference_vertex_identity`` ONLY for a call dispatched through
         a registered bridge's ``process_call`` (``PlatformSurface
         ._build_process_call_trigger_data``). A caller arriving over an
-        unregistered route — a one-shot ``solet call`` from the local
+        unregistered route — a one-shot ``solet-bridge call`` from the local
         CLI, which stamps the DIFFERENT ``caller_attribution_*`` family
         instead (§34.6) — is refused loud with ``unregistered_route``. That
         family is deliberately NEVER consulted here, even as a fallback.
@@ -5627,7 +6895,9 @@ class AgentMessagingPlugin(
         )
 
     def _role_delivery_route_attached(
-        self, state_service: Any, name: str,
+        self,
+        state_service: Any,
+        name: str,
     ) -> bool:
         """Does the role's CURRENT holder have a live bridge bound right now?
 
@@ -5726,9 +6996,11 @@ class AgentMessagingPlugin(
         output_type="object",
         output_description=(
             "One page of the caller's peer inbox: an instance section (entries "
-            "+ next_after_created_at) and an independently-cursored role "
+            "+ next_after_created_at + instance_exhausted) and an independently-cursored role "
             "section (role_entries + next_role_cursor + its fault-domain "
-            "status), plus the resolved recipient identity. Pull-surface "
+            "status), plus role_limit and truncation metadata. A successful "
+            "page is not a drain; continue until next_role_cursor is "
+            "null. Pull-surface "
             "boundary (design §5): role_floor_applied is True when the "
             "default drain's mark-bounded floor removed already-covered "
             "rows this call; role_history_cursor, populated only on a "
@@ -5750,10 +7022,23 @@ class AgentMessagingPlugin(
                 "next_after_created_at": ParameterMetadata(
                     type=ParameterType.STRING,
                 ),
+                "instance_exhausted": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description=(
+                        "Whether the newest-first instance section is exhausted "
+                        "under its backward timestamp cursor."
+                    ),
+                ),
                 "role_entries": ParameterMetadata(type=ParameterType.LIST),
                 "next_role_cursor": ParameterMetadata(type=ParameterType.STRING),
                 "role_section_status": ParameterMetadata(type=ParameterType.STRING),
                 "role_section_error": ParameterMetadata(type=ParameterType.STRING),
+                "role_limit": ParameterMetadata(type=ParameterType.INTEGER),
+                "role_page_truncated": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "role_truncation_reason": ParameterMetadata(
+                    type=ParameterType.STRING,
+                ),
+                "role_byte_ceiling": ParameterMetadata(type=ParameterType.INTEGER),
                 "role_floor_applied": ParameterMetadata(type=ParameterType.BOOLEAN),
                 "role_history_cursor": ParameterMetadata(type=ParameterType.STRING),
             },
@@ -5776,9 +7061,9 @@ class AgentMessagingPlugin(
 
         Before this verb the ONLY read of the durable inbox was
         the ``GET .../peer/inbox`` bridge route, whose identity comes from the
-        CALLING bridge's peer registration. ``solet call`` opens a fresh,
+        CALLING bridge's peer registration. ``solet-bridge call`` opens a fresh,
         unregistered bridge, so a no-MCP session had no pull path at all —
-        streaming ``solet watch`` was the only receive, and a session
+        streaming ``solet-bridge watch`` was the only receive, and a session
         without a live watcher simply could not read its backlog.
 
         Identity is therefore an explicit argument, but a caller may only name
@@ -5889,12 +7174,12 @@ class AgentMessagingPlugin(
     ) -> dict[str, Any]:
         """No-MCP peer enumeration — closes the peer-enumeration asymmetry.
 
-        WS-1a's ``peer_inbox`` gave a no-MCP session (``solet call``, no
+        WS-1a's ``peer_inbox`` gave a no-MCP session (``solet-bridge call``, no
         registered bridge) a way to read its OWN mail. It left a companion
         gap open: that same session had no way to see who ELSE was live —
         ``peer_list`` existed only as an MCP-bridge HTTP route and its
         Streamable/stdio MCP mirrors, all of which resolve identity from the
-        CALLING bridge's registration, something ``solet call`` never
+        CALLING bridge's registration, something ``solet-bridge call`` never
         has. This verb needs no such resolution: it is a global, unfiltered
         registry snapshot, identical for every caller regardless of identity
         — there is nothing to scope BY, so unlike ``peer_inbox`` it takes no
@@ -5920,6 +7205,272 @@ class AgentMessagingPlugin(
             )
         snapshot = self._peer_registry.list_agent_ids()
         return _success_result(data=serialize_peer_list(snapshot))
+
+    @platform_process(
+        name="peer_identity",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        output_type="object",
+        output_description="Bounded caller identity qualification without exposing its stable key.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Caller-scoped bridge identity qualification.",
+            properties={
+                "caller_identity_available": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "registered_bridge": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "bridge_identity": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def peer_identity(
+        self,
+        params: dict[str, Any],  # noqa: ARG002
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Qualify only identity facts the bridge supplied for this call."""
+        registered = bool(str(state.get("inference_vertex_session_id") or "").strip())
+        attributed = bool(str(state.get("caller_attribution_instance_id") or "").strip())
+        available = registered or attributed
+        return _success_result(
+            data={
+                "caller_identity_available": available,
+                "registered_bridge": registered,
+                "bridge_identity": "registered_bridge"
+                if registered
+                else ("one_shot_attributed" if attributed else "unavailable"),
+            }
+        )
+
+    @platform_process(
+        name="resolve_caller_provenance",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        output_type="object",
+        output_description="Server-derived caller provenance for an application adapter.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Managed-session provenance resolved without caller identity input.",
+            properties={
+                "managed_session_id": ParameterMetadata(type=ParameterType.STRING),
+                "agent_session_id": ParameterMetadata(type=ParameterType.STRING),
+                "directed_by": ParameterMetadata(type=ParameterType.STRING),
+                "directed_by_encoding": ParameterMetadata(type=ParameterType.STRING),
+                "session_role_claim_id": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def resolve_caller_provenance(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve the calling bridge's managed-session provenance or refuse."""
+        del params
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            provenance = lifecycle_resolve_caller_provenance(state_service, state)
+        except CallerProvenanceError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=provenance.as_dict())
+
+    @platform_process(
+        name="qualify_fleet",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        output_type="object",
+        output_description="Run the bounded no-worktree fleet lifecycle qualification.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Fleet lifecycle qualification outcome.",
+            properties={
+                "host": ParameterMetadata(type=ParameterType.STRING),
+                "spawned": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "role_claimed": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "addressed_delivery_confirmed": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "retired": ParameterMetadata(type=ParameterType.BOOLEAN),
+            },
+        ),
+    )
+    def qualify_fleet(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Exercise the entire bounded no-worktree fleet lifecycle."""
+        del params
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state service is not bound",
+            )
+        request = SpawnSessionRequest(
+            role_class="ephemeral",
+            lane_id="qualify-fleet",
+            brief_ref="internal:qualify_fleet",
+            work_class="read_only",
+            budget_line="qualification",
+            host="qualification",
+            role_name="qualify-fleet-worker",
+            local_name="qualify-fleet-worker",
+            directed_by=format_directed_by(state.get("call_context")),
+            synthetic_qualification_no_worktree=True,
+            dispatch_kind="infrastructure",
+        )
+        try:
+            spawned = lifecycle_spawn_session(state_service, request)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        agent_instance_id = str(spawned.get("agent_instance_id") or "")
+        agent_session_id = f"ases-{agent_instance_id}"
+        role_name = "qualify-fleet-worker"
+        role_claimed, delivery_confirmed, failure = self._qualify_fleet_worker(
+            state_service,
+            state,
+            agent_instance_id,
+            agent_session_id,
+            role_name,
+        )
+        try:
+            if role_claimed:
+                release = self.peer_release_role({"name": role_name}, state)
+                if release.get("action_status") != "completed" and failure is None:
+                    failure = self._qualification_action_error(
+                        release,
+                        "qualification_release_failed",
+                        "qualification role release failed",
+                    )
+        finally:
+            failure = self._retire_qualification_worker(
+                state_service,
+                state,
+                agent_instance_id,
+                failure,
+            )
+        if failure is not None:
+            return _failure_result(code=failure[0], message=failure[1])
+        return _success_result(
+            data={
+                "host": "qualification",
+                "spawned": True,
+                "role_claimed": role_claimed,
+                "addressed_delivery_confirmed": delivery_confirmed,
+                "retired": True,
+            }
+        )
+
+    def _qualify_fleet_worker(
+        self,
+        state_service: Any,
+        state: dict[str, Any],
+        agent_instance_id: str,
+        agent_session_id: str,
+        role_name: str,
+    ) -> tuple[bool, bool, tuple[str, str] | None]:
+        if self._peer_registry is None:
+            return (
+                False,
+                False,
+                ("bridge.not_running", "qualification requires an active peer registry"),
+            )
+        binding = self._wait_for_qualification_binding(agent_session_id)
+        if binding is None:
+            return (
+                False,
+                False,
+                (
+                    "qualification_registration_timeout",
+                    "qualification watch did not register its expected stable session identity",
+                ),
+            )
+        claim = claim_role_for_session(
+            origin=RoleClaimOrigin.INFRA,
+            name=role_name,
+            agent_id=binding.agent_id,
+            agent_instance_id=binding.agent_instance_id,
+            agent_session_id=binding.agent_session_id,
+            session_label=binding.session_label,
+            state_service=state_service,
+            bridge_manager=self._bridge_manager,
+            peer_registry=self._peer_registry,
+            agent_messaging_service=self._handover_service(),
+            call_context=state.get("call_context"),
+        )
+        if isinstance(claim, RoleClaimFailure):
+            return False, False, (claim.code, claim.message)
+        sent = self.peer_send_by_name(
+            {"name": role_name, "content": "fleet qualification delivery probe"},
+            state,
+        )
+        sent_data = sent.get("data") if sent.get("action_status") == "completed" else None
+        if not isinstance(sent_data, dict):
+            return (
+                True,
+                False,
+                self._qualification_action_error(
+                    sent,
+                    "qualification_delivery_failed",
+                    "role delivery failed",
+                ),
+            )
+        if sent_data.get("resolved_agent_instance_id") != agent_instance_id:
+            return (
+                True,
+                False,
+                (
+                    "qualification_delivery_unobserved",
+                    "role delivery resolved to a different qualification worker",
+                ),
+            )
+        if sent_data.get("delivery") != "queued_watcher":
+            return (
+                True,
+                False,
+                (
+                    "qualification_delivery_unobserved",
+                    "role delivery did not reach the registered qualification watcher",
+                ),
+            )
+        return True, True, None
+
+    def _wait_for_qualification_binding(self, agent_session_id: str) -> Any | None:
+        assert self._peer_registry is not None
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            binding = self._peer_registry.resolve_by_agent_session_id(agent_session_id)
+            if binding is not None:
+                return binding
+            time.sleep(0.05)
+        return None
+
+    @staticmethod
+    def _qualification_action_error(
+        result: dict[str, Any],
+        default_code: str,
+        default_message: str,
+    ) -> tuple[str, str]:
+        error = result.get("error")
+        if not isinstance(error, dict):
+            return default_code, default_message
+        return str(error.get("code") or default_code), str(error.get("message") or default_message)
+
+    @staticmethod
+    def _retire_qualification_worker(
+        state_service: Any,
+        state: dict[str, Any],
+        agent_instance_id: str,
+        failure: tuple[str, str] | None,
+    ) -> tuple[str, str] | None:
+        try:
+            lifecycle_retire_session(
+                state_service,
+                agent_instance_id=agent_instance_id,
+                directed_by=format_directed_by(state.get("call_context")),
+            )
+        except VerbError as exc:
+            return failure if failure is not None else (exc.code, exc.message)
+        return failure
 
     # dead post-S3; removed with the full AB-role-WRITE retirement follow-up
     def _get_address_book_service(self) -> Any:
@@ -5970,8 +7521,7 @@ class AgentMessagingPlugin(
         orchestrator = getattr(self, "orchestrator_ref", None)
         if orchestrator is None:
             raise RuntimeError(
-                f"{self.name}: orchestrator_ref not injected — cannot run the "
-                "startup backfills",
+                f"{self.name}: orchestrator_ref not injected — cannot run the startup backfills",
             )
         state_service = orchestrator.get_service("state_service")
         if state_service is None:
@@ -6009,8 +7559,7 @@ class AgentMessagingPlugin(
         consumed = backfill_role_message_consumed(state_service)
         consumed_updated = consumed.get("updated")
         logger.info(
-            "%s: agent_role_message consumed backfill status=%s (%d row(s) "
-            "grandfathered)",
+            "%s: agent_role_message consumed backfill status=%s (%d row(s) grandfathered)",
             self.name,
             consumed.get("status"),
             len(consumed_updated) if isinstance(consumed_updated, list) else 0,
@@ -6039,7 +7588,8 @@ class AgentMessagingPlugin(
     # ------------------------------------------------------------------
 
     def get_inference_provider(
-        self, agent_instance_id: str,
+        self,
+        agent_instance_id: str,
     ) -> SessionInferenceProvider | None:
         """Public accessor for the per-bridge inference vertex sidecar.
 
@@ -6121,7 +7671,9 @@ class AgentMessagingPlugin(
         return self.get_inference_provider(agent_instance_id) is not None
 
     def _forward_completion_request(
-        self, agent_instance_id: str, row: dict[str, object],
+        self,
+        agent_instance_id: str,
+        row: dict[str, object],
     ) -> None:
         """Carry one durable completion-request row to a holder's bridge.
 
@@ -6187,7 +7739,8 @@ class AgentMessagingPlugin(
                 logger.warning(
                     "INF-06 RESUBMIT flow=%s (method=%s): collaborators not "
                     "injected — cannot re-drive; row stays queued.",
-                    flow_id, method,
+                    flow_id,
+                    method,
                 )
                 return False
             session_id = flow_manager.get_flow_session_id(flow_id)
@@ -6195,26 +7748,33 @@ class AgentMessagingPlugin(
                 logger.warning(
                     "INF-06 RESUBMIT flow=%s (method=%s): no owning session "
                     "(flow unknown) — cannot re-drive; row stays queued.",
-                    flow_id, method,
+                    flow_id,
+                    method,
                 )
                 return False
             action_def = build_initial_vertex_action(
-                session_id=session_id, flow_id=flow_id, orchestrator=orchestrator,
+                session_id=session_id,
+                flow_id=flow_id,
+                orchestrator=orchestrator,
             )
             context = builder.build_context(session_id=session_id, flow_id=flow_id)
             action_factory.submit_action_definition(
-                action_definition=action_def, context=context,
+                action_definition=action_def,
+                context=context,
             )
             logger.info(
                 "INF-06 RESUBMIT flow=%s session=%s method=%s: fresh vertex "
                 "submitted (fresh decode of current durable state).",
-                flow_id, session_id, method,
+                flow_id,
+                session_id,
+                method,
             )
         except Exception:  # noqa: BLE001 — per-row isolation: never abort the sweep/drain
             logger.exception(
                 "INF-06 RESUBMIT flow=%s (method=%s) FAULTED — row stays "
                 "durably queued for the next tick.",
-                flow_id, method,
+                flow_id,
+                method,
             )
             return False
         return True
@@ -6234,8 +7794,7 @@ class AgentMessagingPlugin(
             ),
             "text": ParameterMetadata(
                 description=(
-                    "The completion text the holder produced for the "
-                    "request's messages payload."
+                    "The completion text the holder produced for the request's messages payload."
                 ),
                 required=True,
                 type=ParameterType.STRING,
@@ -6248,9 +7807,7 @@ class AgentMessagingPlugin(
         ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description=(
-                "submit_autonomic_completion outcome (INF-02 serve verb)"
-            ),
+            description=("submit_autonomic_completion outcome (INF-02 serve verb)"),
             properties={
                 "status": ParameterMetadata(type=ParameterType.STRING),
                 "request_id": ParameterMetadata(type=ParameterType.STRING),
@@ -6285,25 +7842,21 @@ class AgentMessagingPlugin(
         if not request_id or not text.strip():
             return _failure_result(
                 code="missing_argument",
-                message=(
-                    "submit_autonomic_completion requires non-empty "
-                    "'request_id' and 'text'."
-                ),
+                message=("submit_autonomic_completion requires non-empty 'request_id' and 'text'."),
             )
         verdict, row = serve_completion_request(
-            self._get_state_service(), request_id=request_id, result_text=text,
+            self._get_state_service(),
+            request_id=request_id,
+            result_text=text,
         )
         if verdict != SERVE_SERVED or row is None:
             return _failure_result(
                 code=verdict,
-                message=(
-                    f"completion request {request_id!r} not served: {verdict}"
-                ),
+                message=(f"completion request {request_id!r} not served: {verdict}"),
             )
         resume_action = _build_resume_action(row)
         self.logger.info(
-            "completion request %s SERVED (purpose=%s) — submitting resume "
-            "continuation %s",
+            "completion request %s SERVED (purpose=%s) — submitting resume continuation %s",
             request_id,
             row.get(COL_ICR_PURPOSE),
             row.get(COL_ICR_RESUME_PROCESS_KEY),
@@ -6335,8 +7888,7 @@ class AgentMessagingPlugin(
         },
         output_type="object",
         output_description=(
-            "sys:autonomic manual-set outcome: the claim action and the "
-            "bound agent_instance_id."
+            "sys:autonomic manual-set outcome: the claim action and the bound agent_instance_id."
         ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -6381,11 +7933,13 @@ class AgentMessagingPlugin(
                 code=str(outcome.get("code") or "set_autonomic_slot_failed"),
                 message=str(outcome.get("message") or "set_autonomic_slot failed"),
             )
-        return _success_result(data={
-            "action": outcome.get("action"),
-            "name": outcome.get("name"),
-            "agent_instance_id": outcome.get("agent_instance_id"),
-        })
+        return _success_result(
+            data={
+                "action": outcome.get("action"),
+                "name": outcome.get("name"),
+                "agent_instance_id": outcome.get("agent_instance_id"),
+            }
+        )
 
     def resolve_role_to_instance(self, role: str) -> str | None:
         """◆R2 resolve-by-role: current instance holding ``role``, or ``None``.
@@ -6471,7 +8025,8 @@ class AgentMessagingPlugin(
                     # resolver DEFERs (not silent-Qwen) a flow explicitly bound
                     # to it. LRU-evict the oldest tombstone past the cap.
                     self._inference_provider_tombstones.pop(
-                        binding.agent_instance_id, None,
+                        binding.agent_instance_id,
+                        None,
                     )
                     self._inference_provider_tombstones[binding.agent_instance_id] = None
                     while len(self._inference_provider_tombstones) > _INFERENCE_TOMBSTONE_CAP:
@@ -6503,7 +8058,8 @@ class AgentMessagingPlugin(
             inference_provider_clear=self._clear_inference_providers_for_bridge,
             autonomic_on_close=(
                 self._autonomic_assignment.on_bridge_close
-                if self._autonomic_assignment is not None else None
+                if self._autonomic_assignment is not None
+                else None
             ),
             unregister=peer_registry.unregister,
         )
@@ -6685,7 +8241,9 @@ class AgentMessagingPlugin(
         # lanes holding surgical leases on this file.
         due_counts = StewardNoticeCounts()
         _run_counted_leg(
-            legs, "L4a", "rotation-due",
+            legs,
+            "L4a",
+            "rotation-due",
             lambda: (
                 sweep_rotation_due_sessions(
                     state_service,
@@ -6705,12 +8263,16 @@ class AgentMessagingPlugin(
                 "L4 sweep: %d session(s) due to rotate; %d steward(s) notified, "
                 "%d NOT reached — an undelivered rotation notice is an alarm "
                 "nobody received, not a quiet tick",
-                due_counts.detected, due_counts.delivered, due_counts.undelivered,
+                due_counts.detected,
+                due_counts.delivered,
+                due_counts.undelivered,
             ),
         )
         dark_counts = StewardNoticeCounts()
         _run_counted_leg(
-            legs, "L4b", "gauge-coverage",
+            legs,
+            "L4b",
+            "gauge-coverage",
             lambda: (
                 sweep_gauge_coverage(
                     state_service,
@@ -6738,7 +8300,9 @@ class AgentMessagingPlugin(
                 "context-gauge row; %d steward(s) notified, %d NOT reached; "
                 "each notice names what was measured for that session and how "
                 "far the evidence identifies the cause",
-                dark_counts.detected, dark_counts.delivered, dark_counts.undelivered,
+                dark_counts.detected,
+                dark_counts.delivered,
+                dark_counts.undelivered,
             ),
         )
         # L4c is fault-isolated INSIDE the rider rather than promoted to a
@@ -6770,7 +8334,8 @@ class AgentMessagingPlugin(
                 f"L4c={counts.appended} appended"
                 f"({counts.watcher_held} watcher-held)/"
                 f"{counts.unroutable} unroutable/"
-                f"{counts.undeliverable} undeliverable",
+                f"{counts.undeliverable} undeliverable/"
+                f"{counts.gauge_silent} gauge-silent",
             )
             self._log_self_notice_counts(counts)
         # L4d (GAU-01(b)): the gauge row that STOPPED, as distinct from the one
@@ -6787,7 +8352,9 @@ class AgentMessagingPlugin(
         # the operator was the DELIVERY count. Both numbers now print.
         stale_counts = StewardNoticeCounts()
         _run_counted_leg(
-            legs, "L4d", "gauge-staleness",
+            legs,
+            "L4d",
+            "gauge-staleness",
             lambda: (
                 sweep_gauge_staleness(
                     state_service,
@@ -6809,7 +8376,8 @@ class AgentMessagingPlugin(
                 "context-gauge row has stopped advancing; %d steward(s) "
                 "notified, %d NOT reached; each notice carries the two "
                 "timestamps it compared and the gap between them",
-                stale_counts.detected, stale_counts.delivered,
+                stale_counts.detected,
+                stale_counts.delivered,
                 stale_counts.undelivered,
             ),
         )
@@ -6827,7 +8395,7 @@ class AgentMessagingPlugin(
 
     @staticmethod
     def _log_self_notice_counts(counts: SelfNoticeCounts) -> None:
-        """ALL FOUR counts, always, and never one without the others.
+        """ALL FIVE counts, always, and never one without the others.
 
         ``appended`` replaced ``notified`` on 2026-08-19 (GAU-06 G1) because the
         old word claimed something this leg cannot observe: whether anybody read
@@ -6848,7 +8416,9 @@ class AgentMessagingPlugin(
         WARNING with a traceback. Naming only the first, as an earlier draft
         did, would have attributed every delivery fault to the join gap.
         """
-        if not (counts.appended or counts.unroutable or counts.undeliverable):
+        if not (
+            counts.appended or counts.unroutable or counts.undeliverable or counts.gauge_silent
+        ):
             # ★ GAU-02, the half found first. This used to `return` and log
             # NOTHING, which made a healthy leg that found nobody identical in
             # the log to a leg that never ran. All-zero is not an edge case
@@ -6860,7 +8430,7 @@ class AgentMessagingPlugin(
             # reader can trust.
             logger.info(
                 "L4c sweep: 0 session(s) appended (0 watcher-held), 0 unroutable, "
-                "0 undeliverable "
+                "0 undeliverable, 0 gauge-silent "
                 "— the leg RAN and had no eligible subject (every gauge row was "
                 "stale, below band, or already latched for this episode); this "
                 "is the expected quiet-fleet result, not a failure",
@@ -6876,9 +8446,13 @@ class AgentMessagingPlugin(
             "2026-08-18 this means a row written by a reporter predating the "
             "join column, and it should decay to 0 as reporters upgrade); "
             "%d undeliverable (binding resolved, the durable write raised — see "
-            "the WARNING above for each)",
-            counts.appended, counts.watcher_held, counts.unroutable,
+            "the WARNING above for each); %d gauge-silent since registration "
+            "(detected before their first context-gauge row landed)",
+            counts.appended,
+            counts.watcher_held,
+            counts.unroutable,
             counts.undeliverable,
+            counts.gauge_silent,
         )
 
     def _run_session_lifecycle_sweep(self) -> None:
@@ -6895,16 +8469,37 @@ class AgentMessagingPlugin(
         # rows on an early-boot tick before the bridge service is up; it
         # just skips the notify step internally when either is None.
         overdue = sweep_overdue_sessions(
-            state_service, peer_registry=self._peer_registry, bridge_manager=self._bridge_manager,
+            state_service,
+            peer_registry=self._peer_registry,
+            bridge_manager=self._bridge_manager,
         )
         if overdue:
             logger.info("D1 sweep: marked %d session(s) overdue", overdue)
+        unpaired = sweep_unpaired_dispatch_policy(
+            state_service,
+            peer_registry=self._peer_registry,
+            bridge_manager=self._bridge_manager,
+            # The sweep is also deliberately called against early-boot and
+            # test duck-types, whose older minimal shape does not include
+            # this new process-lifetime deduplication latch.
+            latch=getattr(self, "_dispatch_policy_pair_latch", None),
+        )
+        if unpaired:
+            logger.warning("dispatch policy sweep: notified %d unpaired producer(s)", unpaired)
+        managed = sweep_managed_dispatches(
+            state_service,
+            peer_registry=self._peer_registry,
+            bridge_manager=self._bridge_manager,
+        )
+        _log_managed_dispatch_sweep(managed)
         # W4A registration watchdog — same optional-collaborator contract as
         # sweep_overdue_sessions above (mark always, notify when possible).
         # Runs BEFORE the mapping riders so a row that is about to register
         # this tick is not marked on the strength of a stale read.
         unregistered = sweep_unregistered_spawning_sessions(
-            state_service, peer_registry=self._peer_registry, bridge_manager=self._bridge_manager,
+            state_service,
+            peer_registry=self._peer_registry,
+            bridge_manager=self._bridge_manager,
         )
         if unregistered:
             logger.warning(
@@ -6931,7 +8526,8 @@ class AgentMessagingPlugin(
                 logger.info("D1 sweep: fired %d 'lane_closed' dependency edge(s)", lane_fired)
             if self._session_role_claim_pruner is not None:
                 pruned = self._session_role_claim_pruner.sweep(
-                    state_service, peer_registry=self._peer_registry,
+                    state_service,
+                    peer_registry=self._peer_registry,
                 )
                 if pruned:
                     logger.info("D1 sweep: pruned %d stale session_role_claim row(s)", pruned)
@@ -7042,16 +8638,20 @@ class AgentMessagingPlugin(
             description="Bridge API host, port, and endpoint prefix.",
             properties={
                 "host": ParameterMetadata(
-                    type=ParameterType.STRING, required=True,
+                    type=ParameterType.STRING,
+                    required=True,
                 ),
                 "port": ParameterMetadata(
-                    type=ParameterType.INTEGER, required=True,
+                    type=ParameterType.INTEGER,
+                    required=True,
                 ),
                 "bridge_url": ParameterMetadata(
-                    type=ParameterType.STRING, required=True,
+                    type=ParameterType.STRING,
+                    required=True,
                 ),
                 "started_at": ParameterMetadata(
-                    type=ParameterType.STRING, required=True,
+                    type=ParameterType.STRING,
+                    required=True,
                 ),
             },
         ),
@@ -7166,8 +8766,7 @@ class AgentMessagingPlugin(
             return _failure_result(
                 code="bridge.startup_failed",
                 message=(
-                    f"Bridge API server did not signal startup within "
-                    f"{_SERVER_START_TIMEOUT_S}s"
+                    f"Bridge API server did not signal startup within {_SERVER_START_TIMEOUT_S}s"
                 ),
             )
         # D11 (workbench/2026-07-13_d11_bridge_port_discovery_routerless_ruling.md):
@@ -7192,12 +8791,13 @@ class AgentMessagingPlugin(
         }
         if bridge_config.streamable_enabled:
             result_data["streamable_url"] = (
-                f"http://{self._streamable_host}:{self._streamable_port}"
-                "/api/v1/mcp/streamable"
+                f"http://{self._streamable_host}:{self._streamable_port}/api/v1/mcp/streamable"
             )
         logger.info(
             "%s: bridge API started on %s:%s%s",
-            self.name, self._host, self._port,
+            self.name,
+            self._host,
+            self._port,
             (
                 f" + streamable HTTP MCP on {self._streamable_host}:{self._streamable_port}"
                 if bridge_config.streamable_enabled
@@ -7217,7 +8817,8 @@ class AgentMessagingPlugin(
             description="Shutdown confirmation.",
             properties={
                 "status": ParameterMetadata(
-                    type=ParameterType.STRING, required=True,
+                    type=ParameterType.STRING,
+                    required=True,
                 ),
             },
         ),
@@ -7249,8 +8850,7 @@ class AgentMessagingPlugin(
         listener exists to race against.
         """
         return (
-            self._server_started_event.is_set()
-            and self._streamable_server_started_event.is_set()
+            self._server_started_event.is_set() and self._streamable_server_started_event.is_set()
         )
 
     # ------------------------------------------------------------------
@@ -7289,7 +8889,9 @@ class AgentMessagingPlugin(
         requires_result_processor=False,
     )
     def post_message(
-        self, params: dict[str, Any], state: dict[str, Any],
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
     ) -> dict[str, Any]:
         # Text-only channel — silently strip attachment hints.
         params.pop("attachments", None)
@@ -7358,21 +8960,23 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         parameters={
             "result_payload": ParameterMetadata(
-                type=ParameterType.DICT, required=True,
+                type=ParameterType.DICT,
+                required=True,
                 description=(
-                    "Raw structured result payload to deliver to the "
-                    "originating bridge channel."
+                    "Raw structured result payload to deliver to the originating bridge channel."
                 ),
             ),
             "source_process_key": ParameterMetadata(
-                type=ParameterType.STRING, required=True,
+                type=ParameterType.STRING,
+                required=True,
                 description=(
                     "Process key of the action whose result is being "
                     "delivered (informational; surfaced to the MCP caller)."
                 ),
             ),
             "bridge_id": ParameterMetadata(
-                type=ParameterType.STRING, required=True,
+                type=ParameterType.STRING,
+                required=True,
                 description="ID of the originating bridge session.",
             ),
         },
@@ -7411,21 +9015,20 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         parameters={
             "error_payload": ParameterMetadata(
-                type=ParameterType.DICT, required=True,
+                type=ParameterType.DICT,
+                required=True,
                 description=(
-                    "Raw structured error payload to deliver to the "
-                    "originating bridge channel."
+                    "Raw structured error payload to deliver to the originating bridge channel."
                 ),
             ),
             "source_process_key": ParameterMetadata(
-                type=ParameterType.STRING, required=True,
-                description=(
-                    "Process key of the action whose failure is being "
-                    "delivered."
-                ),
+                type=ParameterType.STRING,
+                required=True,
+                description=("Process key of the action whose failure is being delivered."),
             ),
             "bridge_id": ParameterMetadata(
-                type=ParameterType.STRING, required=True,
+                type=ParameterType.STRING,
+                required=True,
                 description="ID of the originating bridge session.",
             ),
         },
@@ -7504,12 +9107,9 @@ class AgentMessagingPlugin(
         )
         if bridge is None:
             raise RuntimeError(
-                f"no open claude_code bridge with "
-                f"parent_pid={recipient_parent_pid}",
+                f"no open claude_code bridge with parent_pid={recipient_parent_pid}",
             )
-        label_segment = (
-            f' "{sender_session_label}"' if sender_session_label else ""
-        )
+        label_segment = f' "{sender_session_label}"' if sender_session_label else ""
         reply_hint = build_wake_reply_hint(
             reply_to_role=reply_to_role,
             sender_agent_id=sender_agent_id,
@@ -7538,7 +9138,10 @@ class AgentMessagingPlugin(
         if delivery_meta:
             meta.update(delivery_meta)
         manager.append_event(
-            bridge.bridge_id, EVENT_POST_MESSAGE, envelope, meta=meta,
+            bridge.bridge_id,
+            EVENT_POST_MESSAGE,
+            envelope,
+            meta=meta,
         )
         manager.touch(bridge.bridge_id)
         return bridge.bridge_id
@@ -7589,14 +9192,15 @@ class AgentMessagingPlugin(
                 f"{self.name}: orchestrator_ref not injected",
             )
         action_factory = getattr(self, "action_factory", None) or getattr(
-            orchestrator, "action_factory", None,
+            orchestrator,
+            "action_factory",
+            None,
         )
         flow_manager = self._flow_manager or orchestrator.get_service(
             "flow_service",
         )
-        compilation_context_builder = (
-            self._compilation_context_builder
-            or getattr(orchestrator, "compilation_context_builder", None)
+        compilation_context_builder = self._compilation_context_builder or getattr(
+            orchestrator, "compilation_context_builder", None
         )
         process_registry = self._resolve_process_registry(orchestrator)
         export_policy = self._build_export_policy()
@@ -7637,7 +9241,8 @@ class AgentMessagingPlugin(
             self._populate_config_provider_from_orchestrator()
             provider = getattr(self, "config_provider", None)
         enabled = _as_bool(
-            _provider_get(provider, "process_export_enabled"), True,
+            _provider_get(provider, "process_export_enabled"),
+            True,
         )
         allow = _as_str_tuple(
             _provider_get(provider, "process_export_allow_patterns"),
@@ -7703,14 +9308,13 @@ class AgentMessagingPlugin(
         if not isinstance(payload, dict):
             return _failure_result(
                 code=_ERR_PROCESS_CALL_FAILED,
-                message=(
-                    f"{payload_key} must be a dict; got {type(payload).__name__}"
-                ),
+                message=(f"{payload_key} must be a dict; got {type(payload).__name__}"),
             )
         # ``QueuedEvent.content`` is a string field; structured payloads
         # are JSON-serialized so the MCP client can decode the
         # event_type-discriminated body on receipt.
         import json  # noqa: PLC0415 — keep heavy imports local to the path
+
         content_json = json.dumps(
             {
                 "payload": dict(payload),
@@ -7743,8 +9347,7 @@ class AgentMessagingPlugin(
             # irreversible transport drop loudly, then complete terminally
             # with zero continuation actions.
             logger.warning(
-                "%s: dropping %s for closed or missing bridge %s "
-                "(source_process_key=%s)",
+                "%s: dropping %s for closed or missing bridge %s (source_process_key=%s)",
                 self.name,
                 event_type,
                 bridge_id,
@@ -7771,6 +9374,7 @@ class AgentMessagingPlugin(
         bridge_config: _BridgeRuntimeConfig,
     ) -> FastAPI:
         from fastapi import FastAPI  # noqa: PLC0415
+
         app = FastAPI(
             title="Solet Bridge API",
             version="1.0.0",
@@ -7791,9 +9395,7 @@ class AgentMessagingPlugin(
             config=bridge_config,
             state_service=self._get_state_service(),
             readiness_probe=(
-                self._is_full_surface_ready
-                if bridge_config.streamable_enabled
-                else None
+                self._is_full_surface_ready if bridge_config.streamable_enabled else None
             ),
             # D-IF7 / D-IF8 sidecar wiring (v4 §4-5). Streamable transport
             # paths (mcp_streamable/{session,dispatch}.py) DO NOT receive
@@ -7807,11 +9409,13 @@ class AgentMessagingPlugin(
             # paths stay scoped out with the sidecar (D-IF11).
             autonomic_on_register=(
                 self._autonomic_assignment.on_register
-                if self._autonomic_assignment is not None else None
+                if self._autonomic_assignment is not None
+                else None
             ),
             autonomic_on_close=(
                 self._autonomic_assignment.on_bridge_close
-                if self._autonomic_assignment is not None else None
+                if self._autonomic_assignment is not None
+                else None
             ),
         )
         # M5 §13.6 ONE-TIME EXCEPTION to the no-edits-to-god-file-plugins
@@ -7985,7 +9589,8 @@ class AgentMessagingPlugin(
         return get_service("blob_storage_service")
 
     def _make_upload_route_auth(
-        self, bridge_config: _BridgeRuntimeConfig,
+        self,
+        bridge_config: _BridgeRuntimeConfig,
     ) -> _UploadRouteAuth:
         """Build the AuthCheckProtocol callable for M4/M9 upload routes.
 
@@ -8013,12 +9618,11 @@ class AgentMessagingPlugin(
         Raises ``PermissionError`` on any failure — the upload-route
         handler catches every exception and maps it to HTTP 401.
         """
-        if (
-            not bridge_config.streamable_enabled
-            or bridge_config.streamable_no_auth
-        ):
+        if not bridge_config.streamable_enabled or bridge_config.streamable_no_auth:
+
             def _no_op(authorization_header: str | None) -> object:  # noqa: ARG001  # pyright: ignore[reportUnusedParameter]
                 return None
+
             return _no_op
 
         def _verify(authorization_header: str | None) -> object:
@@ -8057,6 +9661,7 @@ class AgentMessagingPlugin(
 
     def _run_server(self) -> None:
         import uvicorn  # noqa: PLC0415
+
         app = self._app
         if app is None:
             logger.error("%s: FastAPI app not constructed", self.name)
@@ -8142,7 +9747,8 @@ class AgentMessagingPlugin(
             return
         config_manager = getattr(orchestrator, "config", None)
         if config_manager is None or not hasattr(
-            config_manager, "get_plugin_config_provider",
+            config_manager,
+            "get_plugin_config_provider",
         ):
             return
         provider = config_manager.get_plugin_config_provider(self.name)
@@ -8162,16 +9768,20 @@ class AgentMessagingPlugin(
                 default=(),
             ),
             max_message_bytes=_as_int(
-                _provider_get(provider, "max_message_bytes"), 65_536,
+                _provider_get(provider, "max_message_bytes"),
+                65_536,
             ),
             max_thread_messages=_as_int(
-                _provider_get(provider, "max_thread_messages"), 1_000,
+                _provider_get(provider, "max_thread_messages"),
+                1_000,
             ),
             default_timeout_seconds=_as_int(
-                _provider_get(provider, "default_timeout_seconds"), 600,
+                _provider_get(provider, "default_timeout_seconds"),
+                600,
             ),
             max_timeout_seconds=_as_int(
-                _provider_get(provider, "max_timeout_seconds"), 1_800,
+                _provider_get(provider, "max_timeout_seconds"),
+                1_800,
             ),
         )
 
@@ -8179,57 +9789,69 @@ class AgentMessagingPlugin(
         provider = self._resolve_config_provider()
         return _BridgeRuntimeConfig(
             host=_as_str(
-                _provider_get(provider, "host"), "127.0.0.1",
+                _provider_get(provider, "host"),
+                "127.0.0.1",
             ),
             port=_as_optional_int(_provider_get(provider, "port")),
             long_poll_timeout_seconds=_as_int(
-                _provider_get(provider, "long_poll_timeout_seconds"), 25,
+                _provider_get(provider, "long_poll_timeout_seconds"),
+                25,
             ),
             bridge_idle_timeout_seconds=_as_int(
                 _provider_get(provider, "bridge_idle_timeout_seconds"),
                 3_600,
             ),
             max_pending_events=_as_int(
-                _provider_get(provider, "max_pending_events"), 200,
+                _provider_get(provider, "max_pending_events"),
+                200,
             ),
             max_message_chars=_as_int(
                 _provider_get(provider, "max_message_chars"),
                 _DEFAULT_MAX_MESSAGE_CHARS,
             ),
             autonomic_grace_seconds=_as_int(
-                _provider_get(provider, "autonomic_grace_seconds"), 120,
+                _provider_get(provider, "autonomic_grace_seconds"),
+                120,
             ),
             bridge_sweep_interval_seconds=_as_int(
-                _provider_get(provider, "bridge_sweep_interval_seconds"), 300,
+                _provider_get(provider, "bridge_sweep_interval_seconds"),
+                300,
             ),
             completion_serve_window_seconds=_as_int(
                 _provider_get(provider, "completion_serve_window_seconds"),
                 900,
             ),
             forward_serve_window_seconds=_as_int(
-                _provider_get(provider, "forward_serve_window_seconds"), 900,
+                _provider_get(provider, "forward_serve_window_seconds"),
+                900,
             ),
             forward_attempts_cap=_as_int(
-                _provider_get(provider, "forward_attempts_cap"), 5,
+                _provider_get(provider, "forward_attempts_cap"),
+                5,
             ),
             terminal_gc_after_seconds=_as_int(
-                _provider_get(provider, "terminal_gc_after_seconds"), 172_800,
+                _provider_get(provider, "terminal_gc_after_seconds"),
+                172_800,
             ),
             re_emit_window_seconds=_as_int(
-                _provider_get(provider, "re_emit_window_seconds"), 300,
+                _provider_get(provider, "re_emit_window_seconds"),
+                300,
             ),
             re_emit_cap=_as_int(
-                _provider_get(provider, "re_emit_cap"), 3,
+                _provider_get(provider, "re_emit_cap"),
+                3,
             ),
             streamable_enabled=_as_bool(
-                _provider_get(provider, "streamable_enabled"), False,
+                _provider_get(provider, "streamable_enabled"),
+                False,
             ),
             streamable_host=_as_str(
                 _provider_get(provider, "streamable_host"),  # noqa: S104
                 "0.0.0.0",  # noqa: S104
             ),
             streamable_port=_as_int(
-                _provider_get(provider, "streamable_port"), 9000,
+                _provider_get(provider, "streamable_port"),
+                9000,
             ),
             streamable_allowed_origins=_as_str_tuple(
                 _provider_get(provider, "streamable_allowed_origins"),
@@ -8240,10 +9862,12 @@ class AgentMessagingPlugin(
                 300,
             ),
             oauth_enabled=_as_bool(
-                _provider_get(provider, "oauth_enabled"), False,
+                _provider_get(provider, "oauth_enabled"),
+                False,
             ),
             oauth_issuer_url=_as_str(
-                _provider_get(provider, "oauth_issuer_url"), "",
+                _provider_get(provider, "oauth_issuer_url"),
+                "",
             ),
             oauth_resource_aliases=_as_str_tuple(
                 _provider_get(provider, "oauth_resource_aliases"),
@@ -8278,7 +9902,8 @@ class AgentMessagingPlugin(
                 default=(),
             ),
             streamable_no_auth=_as_bool(
-                _provider_get(provider, "streamable_no_auth"), False,
+                _provider_get(provider, "streamable_no_auth"),
+                False,
             ),
         )
 
@@ -8292,10 +9917,12 @@ class AgentMessagingPlugin(
                 _provider_get(provider, "work_class_tool_allowlists"),
             ),
             headless_permission_mode=_as_str(
-                _provider_get(provider, "headless_permission_mode"), "bypassPermissions",
+                _provider_get(provider, "headless_permission_mode"),
+                "bypassPermissions",
             ),
             default_fleet_transport=_as_str(
-                _provider_get(provider, "default_fleet_transport"), "watch",
+                _provider_get(provider, "default_fleet_transport"),
+                "watch",
             ),
         )
 
@@ -8304,7 +9931,8 @@ class AgentMessagingPlugin(
     # ------------------------------------------------------------------
 
     def _build_oauth_surface(
-        self, bridge_config: _BridgeRuntimeConfig,
+        self,
+        bridge_config: _BridgeRuntimeConfig,
     ) -> tuple[OAuthEndpoints | None, str, tuple[str, ...]]:
         """Derive OAuth endpoints + resource-metadata URL + audiences.
 
@@ -8312,18 +9940,13 @@ class AgentMessagingPlugin(
         issuer URL is unset; the bearer verifier and the streamable
         router both treat those as "OAuth not mounted".
         """
-        if not (
-            bridge_config.oauth_enabled and bridge_config.oauth_issuer_url
-        ):
+        if not (bridge_config.oauth_enabled and bridge_config.oauth_issuer_url):
             return None, "", ()
         oauth_endpoints = build_endpoints(
             issuer=bridge_config.oauth_issuer_url,
             streamable_path=STREAMABLE_PATH,
         )
-        resource_metadata_url = (
-            oauth_endpoints.issuer
-            + "/.well-known/oauth-protected-resource"
-        )
+        resource_metadata_url = oauth_endpoints.issuer + "/.well-known/oauth-protected-resource"
         accepted_audiences: tuple[str, ...] = ()
         if bridge_config.oauth_require_audience:
             # The streamable router answers at both the primary path
@@ -8365,8 +9988,8 @@ class AgentMessagingPlugin(
         vault = self._resolve_vault_plugin(
             require_refresh_token_methods=require_refresh,
         )
-        oauth_endpoints, resource_metadata_url, accepted_audiences = (
-            self._build_oauth_surface(bridge_config)
+        oauth_endpoints, resource_metadata_url, accepted_audiences = self._build_oauth_surface(
+            bridge_config
         )
         bearer_verifier, hmac_key = self._build_streamable_bearer_verifier(
             bridge_config=bridge_config,
@@ -8490,9 +10113,7 @@ class AgentMessagingPlugin(
         ``streamable_no_auth`` is what stranded the connector at a 404 on
         the enforcement cutover.
         """
-        refresh_token_store = (
-            vault if bridge_config.oauth_refresh_tokens_enabled else None
-        )
+        refresh_token_store = vault if bridge_config.oauth_refresh_tokens_enabled else None
         if oauth_endpoints is not None:
             oauth_router = build_oauth_router(
                 endpoints=oauth_endpoints,
@@ -8501,9 +10122,7 @@ class AgentMessagingPlugin(
                 hmac_key=hmac_key,
                 token_ttl_seconds=bridge_config.oauth_token_ttl_seconds,
                 auth_code_ttl_seconds=bridge_config.oauth_auth_code_ttl_seconds,
-                refresh_token_ttl_seconds=(
-                    bridge_config.oauth_refresh_token_ttl_seconds
-                ),
+                refresh_token_ttl_seconds=(bridge_config.oauth_refresh_token_ttl_seconds),
             )
             app.include_router(oauth_router)
             logger.info(
@@ -8524,9 +10143,7 @@ class AgentMessagingPlugin(
             resource_aliases=bridge_config.oauth_resource_aliases,
             token_ttl_seconds=bridge_config.oauth_token_ttl_seconds,
             auth_code_ttl_seconds=bridge_config.oauth_auth_code_ttl_seconds,
-            refresh_token_ttl_seconds=(
-                bridge_config.oauth_refresh_token_ttl_seconds
-            ),
+            refresh_token_ttl_seconds=(bridge_config.oauth_refresh_token_ttl_seconds),
         )
         app.include_router(oauth_router)
         logger.info(
@@ -8537,7 +10154,9 @@ class AgentMessagingPlugin(
         )
 
     def _resolve_vault_plugin(
-        self, *, require_refresh_token_methods: bool = False,
+        self,
+        *,
+        require_refresh_token_methods: bool = False,
     ) -> Any:
         """Return the plugin bound to ``vault_service`` via the injected proxy.
 
@@ -8583,10 +10202,12 @@ class AgentMessagingPlugin(
             "verify_oauth_client_credentials",
         ]
         if require_refresh_token_methods:
-            required_methods.extend([
-                "issue_oauth_refresh_token",
-                "consume_oauth_refresh_token",
-            ])
+            required_methods.extend(
+                [
+                    "issue_oauth_refresh_token",
+                    "consume_oauth_refresh_token",
+                ]
+            )
         missing = [m for m in required_methods if not hasattr(vault, m)]
         if missing:
             plugin_name = getattr(vault, "name", type(vault).__name__)
@@ -8595,15 +10216,15 @@ class AgentMessagingPlugin(
                 f"missing required structural methods: {missing}. "
                 "Streamable HTTP MCP transport requires HMAC key "
                 "storage (retrieve/store) + OAuth client lookup"
-                + (" + refresh-token rotation"
-                   if require_refresh_token_methods else "")
+                + (" + refresh-token rotation" if require_refresh_token_methods else "")
                 + ". Bind a different plugin via service_bindings or "
                 "extend the current one with the missing methods.",
             )
         return vault
 
     def _start_streamable_server(
-        self, bridge_config: _BridgeRuntimeConfig,
+        self,
+        bridge_config: _BridgeRuntimeConfig,
     ) -> dict[str, Any] | None:
         """Start the streamable HTTP listener; return failure dict on error.
 
@@ -8660,6 +10281,7 @@ class AgentMessagingPlugin(
     def _run_streamable_server(self) -> None:
         """Uvicorn entry point for the streamable HTTP listener thread."""
         import uvicorn  # noqa: PLC0415
+
         app = self._app
         if app is None:
             logger.error(
@@ -8670,8 +10292,7 @@ class AgentMessagingPlugin(
         streamable_port = self._streamable_port
         if streamable_port is None:
             logger.error(
-                "%s: streamable server thread started before "
-                "_start_streamable_server bound a port",
+                "%s: streamable server thread started before _start_streamable_server bound a port",
                 self.name,
             )
             return
@@ -8695,7 +10316,8 @@ class AgentMessagingPlugin(
             self._streamable_server_loop.run_until_complete(server.serve())
         except Exception:
             logger.exception(
-                "%s: streamable HTTP server crashed", self.name,
+                "%s: streamable HTTP server crashed",
+                self.name,
             )
         finally:
             self._streamable_server_loop.close()
@@ -8717,6 +10339,23 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _log_managed_dispatch_sweep(result: Mapping[str, Any]) -> None:
+    """Log only actionable reconciliation outcomes, never a false all-clear."""
+    if not (result["dead"] or result["unknown"] or result["conditions"]):
+        return
+    logger.warning(
+        "managed-dispatch sweep: attempts=%d alive=%d dead=%d unknown=%d "
+        "dispatches=%d conditions=%d notices=%d",
+        result["attempts_evaluated"],
+        result["alive"],
+        result["dead"],
+        result["unknown"],
+        result["dispatches_evaluated"],
+        len(result["conditions"]),
+        result["notices_emitted"],
+    )
+
+
 def _run_session_claude_mapping_riders(state_service: Any) -> None:
     """Split out of ``_run_session_lifecycle_sweep`` to keep it under the
     radon cc threshold (mirrors ``session_sweep.py``'s own
@@ -8733,7 +10372,8 @@ def _run_session_claude_mapping_riders(state_service: Any) -> None:
         logger.info(
             "D1 sweep: session_claude_mapping spool drain -- files_seen=%d "
             "upserted=%d skipped_malformed=%d",
-            drain_result["files_seen"], drain_result["upserted"],
+            drain_result["files_seen"],
+            drain_result["upserted"],
             drain_result["skipped_malformed"],
         )
     # S2c: detects a genuinely BROKEN SessionStart hook installation (as
@@ -8761,36 +10401,107 @@ def _spawn_dispatch_overrides_from_params(raw: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def _param_text(raw: dict[str, Any], name: str) -> str:
+    value = raw.get(name)
+    return str(value) if value else ""
+
+
+def _param_positive_int(raw: dict[str, Any], name: str) -> int:
+    value = raw.get(name)
+    return int(value) if value else 0
+
+
+def _spawn_session_identity_params(raw: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "role_class": _param_text(raw, "role_class"),
+        "lane_id": _param_text(raw, "lane_id"),
+        "brief_ref": _param_text(raw, "brief_ref"),
+        "unit_id": _param_text(raw, "unit_id"),
+        "work_class": _param_text(raw, "work_class"),
+        "budget_line": _param_text(raw, "budget_line"),
+        "dispatch_id": _param_text(raw, "dispatch_id"),
+        "role_name": _param_text(raw, "role_name"),
+        "visibility": _param_text(raw, "visibility"),
+    }
+
+
+def _spawn_session_lifecycle_params(raw: dict[str, Any], directed_by: str) -> dict[str, Any]:
+    return {
+        "report_by_seconds": _param_positive_int(raw, "report_by_seconds"),
+        "ttl_seconds": _param_positive_int(raw, "ttl_seconds"),
+        "spawned_by_instance_id": _param_text(raw, "spawned_by_instance_id"),
+        "spawned_by_role": _param_text(raw, "spawned_by_role"),
+        "directed_by": directed_by,
+        "local_name": _param_text(raw, "local_name"),
+        "degraded_hooks_acknowledged": bool(raw.get("degraded_hooks_acknowledged")),
+        "dispatch_kind": _param_text(raw, "dispatch_kind"),
+        "reviewed_report_vendor": _param_text(raw, "reviewed_report_vendor"),
+        "pair_id": _param_text(raw, "pair_id"),
+    }
+
+
 def _spawn_session_request_from_params(
-    raw: dict[str, Any], directed_by: str,
+    raw: dict[str, Any],
+    directed_by: str,
 ) -> SpawnSessionRequest:
     """Build the ``spawn_session`` verb's typed request from raw transport
     params. Split out of the ``spawn_session`` method so the transport shim
     stays a thin dispatch (radon cc)."""
     return SpawnSessionRequest(
-        role_class=str(raw.get("role_class", "")),
-        lane_id=str(raw.get("lane_id", "")),
-        brief_ref=str(raw.get("brief_ref", "")),
-        work_class=str(raw.get("work_class", "")),
-        budget_line=str(raw.get("budget_line", "")),
-        role_name=str(raw.get("role_name", "") or ""),
-        visibility=str(raw.get("visibility", "") or ""),
-        report_by_seconds=int(raw.get("report_by_seconds") or 0),
-        ttl_seconds=int(raw.get("ttl_seconds") or 0),
-        spawned_by_instance_id=str(raw.get("spawned_by_instance_id", "") or ""),
-        spawned_by_role=str(raw.get("spawned_by_role", "") or ""),
-        directed_by=directed_by,
-        # W6: an explicit override; omitted means spawn_session resolves it
-        # (role_name for a project-class role, else lane_id).
-        local_name=str(raw.get("local_name", "") or ""),
-        # W4A item 3: default OFF — running degraded is opt-in, per spawn.
-        degraded_hooks_acknowledged=bool(raw.get("degraded_hooks_acknowledged") or False),
+        **_spawn_session_identity_params(raw),
+        **_spawn_session_lifecycle_params(raw, directed_by),
         **_spawn_dispatch_overrides_from_params(raw),
     )
 
 
+def _dispatch_spec_from_params(
+    raw: dict[str, Any],
+    req: SpawnSessionRequest,
+    directed_by: str,
+) -> DispatchSpec:
+    """Build the immutable contract from policy-resolved spawn inputs."""
+    return DispatchSpec(
+        dispatch_id=mint_dispatch_id(),
+        lane_id=req.lane_id,
+        role_name=req.role_name,
+        role_class=req.role_class,
+        work_class=req.work_class,
+        budget_line=req.budget_line,
+        brief_ref=req.brief_ref,
+        unit_id=req.unit_id,
+        brief_sha256=str(raw.get("brief_sha256") or ""),
+        expected_path=str(raw.get("expected_path") or ""),
+        completion_contract=_as_object(raw.get("completion_contract")),
+        model=req.model,
+        effort=req.effort,
+        agent_runtime=req.agent_runtime,
+        allowed_hosts=list(_as_str_tuple(raw.get("allowed_hosts"))),
+        host=str(req.host or ""),
+        visibility=req.visibility,
+        local_name=req.local_name,
+        report_by_seconds=req.report_by_seconds,
+        ttl_seconds=req.ttl_seconds,
+        allowed_tools=req.allowed_tools,
+        permission_mode=req.permission_mode,
+        transport=req.transport,
+        allow_askuserquestion=req.allow_askuserquestion,
+        degraded_hooks_acknowledged=req.degraded_hooks_acknowledged,
+        spawned_by_instance_id=req.spawned_by_instance_id,
+        spawned_by_role=req.spawned_by_role,
+        directed_by=directed_by,
+        uptake_due_at=str(raw.get("uptake_due_at") or ""),
+        report_by=str(raw.get("report_by") or ""),
+        watchdog_due_at=str(raw.get("watchdog_due_at") or ""),
+        expires_at=str(raw.get("expires_at") or ""),
+        dispatch_kind=req.dispatch_kind,
+        reviewed_report_vendor=req.reviewed_report_vendor,
+        pair_id=req.pair_id,
+    )
+
+
 def _apply_work_class_defaults(
-    req: SpawnSessionRequest, defaults: Mapping[str, Mapping[str, str]],
+    req: SpawnSessionRequest,
+    defaults: Mapping[str, Mapping[str, str]],
 ) -> SpawnSessionRequest:
     """§6 L3 rule 1 — fill an OMITTED ``model``/``effort`` from the
     operator-configured per-``work_class`` default (``plugin.yaml``'s
@@ -8809,7 +10520,8 @@ def _apply_work_class_defaults(
 
 
 def _apply_tool_allowlist(
-    req: SpawnSessionRequest, allowlists: Mapping[str, tuple[str, ...]],
+    req: SpawnSessionRequest,
+    allowlists: Mapping[str, tuple[str, ...]],
 ) -> SpawnSessionRequest:
     """§6 permission-mode ruling (2026-08-03) — fill an OMITTED
     ``allowed_tools`` from the operator-configured per-``work_class``
@@ -8852,7 +10564,8 @@ def _resolve_transport(req: SpawnSessionRequest, policy_transport: str) -> Spawn
 
 
 def _apply_spawn_session_policy(
-    req: SpawnSessionRequest, policy: _SessionLifecyclePolicyConfig,
+    req: SpawnSessionRequest,
+    policy: _SessionLifecyclePolicyConfig,
 ) -> SpawnSessionRequest:
     """The four spawn-config-resolution steps every ``spawn_session``
     dispatch must run — model/effort defaults, tool allowlist, permission
@@ -8941,7 +10654,8 @@ def _build_resume_action(row: dict[str, object]) -> dict[str, Any]:
 
 
 def _build_peer_inbox_request(
-    raw: dict[str, Any], binding: BridgeBinding,
+    raw: dict[str, Any],
+    binding: BridgeBinding,
 ) -> PeerInboxRequest:
     """Coerce caller args + the resolved binding into one ``PeerInboxRequest``.
 
@@ -8955,13 +10669,11 @@ def _build_peer_inbox_request(
     after_raw = raw.get("after")
     try:
         after_created_at = (
-            datetime.fromisoformat(str(after_raw))
-            if after_raw not in (None, "")
-            else None
+            datetime.fromisoformat(str(after_raw)) if after_raw not in (None, "") else None
         )
     except ValueError as exc:
         message = (
-            f"'after' must be an ISO-8601 datetime (the previous page's "
+            f"'after' must be an ISO-8601 datetime (the previous newest-first page's "
             f"next_after_created_at): {exc}"
         )
         raise ValueError(message) from exc
@@ -8978,9 +10690,7 @@ def _build_peer_inbox_request(
         # 3 closes send_peer_message's: the schema entry AND the
         # read-and-branch code both go, not just one.
         include_important=True,
-        role_after=(
-            str(role_after_raw) if role_after_raw not in (None, "") else None
-        ),
+        role_after=(str(role_after_raw) if role_after_raw not in (None, "") else None),
     )
 
 
@@ -9045,7 +10755,29 @@ def _opt_str(raw: object) -> str | None:
     return raw if isinstance(raw, str) and raw.strip() else None
 
 
-def _failure_result(*, code: str, message: str) -> dict[str, Any]:
+def _heartbeat_failure_first_at(*, status: str, raw: object) -> str | None:
+    """Preserve an omitted healthy failure timestamp as typed ``NULL``.
+
+    A supplied empty string is distinct from omission: it is an invalid
+    timestamp that must fail before it can reach the database serializer.
+    """
+    if status != "heartbeat" or raw is None:
+        return None
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    raise VerbError(
+        "invalid_heartbeat_failure_first_at",
+        "heartbeat_failure_first_at must be omitted for a healthy heartbeat or be a "
+        "non-empty failure timestamp; empty strings are not timestamps.",
+    )
+
+
+def _failure_result(
+    *,
+    code: str,
+    message: str,
+    data: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build a failed ``ActionResult`` dict with all required keys."""
     timestamp = _now_iso()
     error: ErrorDetail = {
@@ -9058,7 +10790,7 @@ def _failure_result(*, code: str, message: str) -> dict[str, Any]:
     }
     return {
         "action_status": "failed",
-        "data": {},
+        "data": dict(data or {}),
         "actions": [],
         "error": error,
         "timestamp": timestamp,
@@ -9071,7 +10803,8 @@ def _extract_message(params: dict[str, Any]) -> str:
 
 
 def _find_bridge_by_session(
-    manager: BridgeSessionManager, session_id: str,
+    manager: BridgeSessionManager,
+    session_id: str,
 ) -> BridgeSessionState | None:
     for bridge in manager.list_active():
         if bridge.session_id == session_id:
@@ -9127,6 +10860,15 @@ class _RoleSendSender:
 def _str_field(value: object) -> str:
     """Return ``value`` if it is a non-empty string, else ``""``."""
     return value if isinstance(value, str) and value else ""
+
+
+def _sender_principal_kind_from_state(state: dict[str, Any]) -> str:
+    """Classify a role send from server-authenticated process context only."""
+    try:
+        extract_authenticated_principal(state)
+    except PermissionError:
+        return SENDER_PRINCIPAL_KIND_STDIO_AGENT
+    return SENDER_PRINCIPAL_KIND_OAUTH_CLIENT
 
 
 def _sender_from_role(
@@ -9197,10 +10939,7 @@ def _format_job_completion_message(
     one.
     """
     origin = provider_name or "unknown provider"
-    header = (
-        f"Job {job_id} finished with status '{status or 'unknown'}' "
-        f"(from {origin})."
-    )
+    header = f"Job {job_id} finished with status '{status or 'unknown'}' (from {origin})."
     if not payload:
         body = (
             "No payload was attached. "
@@ -9294,7 +11033,8 @@ def _stamp_role_inbox_delivered(state_service: Any, job_id: str) -> bool:
 
 
 def _resolve_role_send_sender(
-    state: dict[str, Any], state_service: Any,
+    state: dict[str, Any],
+    state_service: Any,
 ) -> _RoleSendSender:
     """REL-01 Fork 4 resolution ladder for a role-addressed send's sender identity.
 
@@ -9340,10 +11080,7 @@ def _resolve_role_send_sender(
         )
     if attributed_instance:
         return _RoleSendSender(
-            agent_id=(
-                _str_field(state.get("caller_attribution_agent_id"))
-                or SYSTEM_AGENT_ID
-            ),
+            agent_id=(_str_field(state.get("caller_attribution_agent_id")) or SYSTEM_AGENT_ID),
             agent_instance_id=attributed_instance,
             session_label=_str_field(state.get("caller_attribution_label")),
             bridge_id=SYSTEM_SCHEDULER_ID,
@@ -9422,7 +11159,9 @@ def _as_str(value: object, default: str) -> str:
 
 
 def _as_str_tuple(
-    value: object, *, default: tuple[str, ...] = (),
+    value: object,
+    *,
+    default: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     if value is None:
         return default
@@ -9430,6 +11169,11 @@ def _as_str_tuple(
         items = tuple(str(v) for v in value)
         return items or default
     return (str(value),)
+
+
+def _as_object(value: object) -> dict[str, Any]:
+    """Return a shallow object mapping or an empty mapping for validation."""
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _as_work_class_defaults(value: object) -> dict[str, dict[str, str]]:
@@ -9450,9 +11194,7 @@ def _as_work_class_defaults(value: object) -> dict[str, dict[str, str]]:
                 work_class,
             )
             continue
-        result[work_class] = {
-            str(k): str(v) for k, v in entry.items() if k in {"model", "effort"}
-        }
+        result[work_class] = {str(k): str(v) for k, v in entry.items() if k in {"model", "effort"}}
     return result
 
 
@@ -9487,6 +11229,7 @@ def _resolve_solet_name() -> str:
     dev mode); downstream callers apply their own fallback.
     """
     import os  # noqa: PLC0415 — kept local so the import is greppable here
+
     return os.environ.get("SOLET_NAME", "").strip()
 
 

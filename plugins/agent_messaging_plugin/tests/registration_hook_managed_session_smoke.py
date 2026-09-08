@@ -77,7 +77,9 @@ def _fresh_peer_registry() -> PeerRegistry:
     from ananta.services.store import Store, open_store  # noqa: PLC0415
 
     store: Store = open_store(
-        get_peer_binding_schema(), namespace=PEER_BINDING_NAMESPACE, backend="in_memory",
+        get_peer_binding_schema(),
+        namespace=PEER_BINDING_NAMESPACE,
+        backend="in_memory",
     )
     return PeerRegistry(bindings_store=store)
 
@@ -103,7 +105,9 @@ class _NoOwedDirectWakeService:
 
 
 def _client(
-    manager: BridgeSessionManager, registry: PeerRegistry, state: StateManagementInterface,
+    manager: BridgeSessionManager,
+    registry: PeerRegistry,
+    state: StateManagementInterface,
 ) -> TestClient:
     app = FastAPI()
     register_routes(
@@ -123,7 +127,11 @@ def _open_bridge(manager: BridgeSessionManager) -> str:
 
 
 def _register(
-    client: TestClient, bridge_id: str, *, agent_instance_id: str, agent_session_id: str,
+    client: TestClient,
+    bridge_id: str,
+    *,
+    agent_instance_id: str,
+    agent_session_id: str,
 ) -> Any:
     return client.post(
         f"/api/v1/bridge/{bridge_id}/peer/register",
@@ -141,14 +149,20 @@ def test_first_registration_fires_spawning_to_live_and_backfills() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-hook-1", lane_id="lane-hook", brief_ref="",
-            work_class="read_only", budget_line="budget-hook", host="headless",
+            agent_instance_id="agi-hook-1",
+            lane_id="lane-hook",
+            brief_ref="",
+            work_class="read_only",
+            budget_line="budget-hook",
+            host="headless",
         ),
     )
     client = _client(manager, registry, state)
     resp = _register(
-        client, _open_bridge(manager),
-        agent_instance_id="agi-hook-1", agent_session_id="sess-hook-1",
+        client,
+        _open_bridge(manager),
+        agent_instance_id="agi-hook-1",
+        agent_session_id="sess-hook-1",
     )
     _check(resp.status_code == 200, "registration with a spawning-state row still returns 200")
     row = read_managed_session(state, "agi-hook-1")
@@ -171,8 +185,12 @@ def test_reconnect_does_not_refire_edge_or_clobber_later_state() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-hook-2", lane_id="lane-hook", brief_ref="",
-            work_class="read_only", budget_line="budget-hook", host="headless",
+            agent_instance_id="agi-hook-2",
+            lane_id="lane-hook",
+            brief_ref="",
+            work_class="read_only",
+            budget_line="budget-hook",
+            host="headless",
         ),
     )
     client = _client(manager, registry, state)
@@ -191,7 +209,10 @@ def test_reconnect_does_not_refire_edge_or_clobber_later_state() -> None:
         if r["agent_instance_id"] == "agi-hook-2":
             r["lifecycle_state"] = LIFECYCLE_TERMINATED
     resp = _register(
-        client, bridge_id, agent_instance_id="agi-hook-2", agent_session_id="sess-hook-2b",
+        client,
+        bridge_id,
+        agent_instance_id="agi-hook-2",
+        agent_session_id="sess-hook-2b",
     )
     _check(
         resp.status_code == 200,
@@ -210,15 +231,15 @@ def test_reconnect_does_not_refire_edge_or_clobber_later_state() -> None:
     )
 
 
-def test_registration_with_no_managed_session_row_is_unaffected() -> None:
-    """The overwhelming common case: an operator-launched session has no
-    spawn_session lineage at all. Registration must behave exactly as
-    before this fix — no exception, no phantom row created."""
+def test_hand_launched_registration_creates_operator_inventory_row() -> None:
+    """A registration with no spawn lineage creates a real, no-contract row."""
     manager, registry, state = _bridge_manager(), _fresh_peer_registry(), _state()
     client = _client(manager, registry, state)
     resp = _register(
-        client, _open_bridge(manager),
-        agent_instance_id="agi-no-lineage", agent_session_id="sess-no-lineage",
+        client,
+        _open_bridge(manager),
+        agent_instance_id="agi-no-lineage",
+        agent_session_id="sess-no-lineage",
     )
     _check(resp.status_code == 200, "registration with no managed_session row returns 200")
     result = state.query_state(
@@ -226,16 +247,27 @@ def test_registration_with_no_managed_session_row_is_unaffected() -> None:
         {"table": "managed_session", "filters": {"agent_instance_id": "agi-no-lineage"}},
     )
     _check(
-        require_records(result) == [],
-        "no managed_session row is created as a side effect of an ordinary registration",
+        len(require_records(result)) == 1,
+        "an ordinary hand-launched registration creates exactly one inventory row",
     )
+    rows = require_records(result)
+    if rows:
+        row = rows[0]
+        _check(
+            row["host"] == "operator" and row["lifecycle_state"] == "live",
+            "the inventory row is an active operator session, not a fabricated spawn",
+        )
+        _check(
+            row.get("report_by") is None and row.get("expires_at") is None,
+            "the row carries no report-by or TTL deadline the session never agreed to",
+        )
 
 
 def main() -> int:
     print("=== D1 registration-hook (managed_session backfill) acceptance smoke ===")
     test_first_registration_fires_spawning_to_live_and_backfills()
     test_reconnect_does_not_refire_edge_or_clobber_later_state()
-    test_registration_with_no_managed_session_row_is_unaffected()
+    test_hand_launched_registration_creates_operator_inventory_row()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

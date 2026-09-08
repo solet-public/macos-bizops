@@ -22,6 +22,7 @@ from typing import Final
 from ananta.core.runtime.port_manager import get_runtime_dir
 
 from ..env_contract import AGENT_SESSION_ID_ENV, AGENT_SESSION_LABEL_ENV
+from ..models import WATCH_AGENT_INSTANCE_PREFIX
 
 # Launcher-exported per-session identity (see hydration TEMPLATE_VARS.md —
 # these names are part of the seed contract; env_contract.py is the single
@@ -42,6 +43,21 @@ def watch_instance_digest(agent_session_id: str) -> str:
     return hashlib.sha256(
         agent_session_id.encode("utf-8"),
     ).hexdigest()[:_DIGEST_LENGTH]
+
+
+def resolve_watch_instance_id(
+    agent_session_id: str,
+    agent_instance_id: str | None,
+) -> str:
+    """Resolve the shared watch/wake spool identity (managed id wins).
+
+    Managed launchers provide the ledger's concrete ``AGENT_INSTANCE_ID``.
+    Bare watches have no ledger row, so they retain the deterministic derived
+    identity that lets their watch and wake halves meet without a handshake.
+    """
+    return (agent_instance_id or "").strip() or (
+        f"{WATCH_AGENT_INSTANCE_PREFIX}{watch_instance_digest(agent_session_id)}"
+    )
 
 
 def default_spool_path(solet_name: str, agent_instance_id: str) -> Path:

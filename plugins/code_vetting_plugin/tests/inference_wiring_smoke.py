@@ -20,10 +20,16 @@ a capturing test-double transport. Run directly or via run_smokes.py.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import asyncio
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from code_vetting_plugin.driver import L1Output, VettingDriver
 from code_vetting_plugin.inference_wiring import (

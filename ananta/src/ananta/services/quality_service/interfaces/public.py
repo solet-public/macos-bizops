@@ -129,6 +129,57 @@ def _run_return_schema(target_field: str, target_desc: str) -> ReturnValueSchema
     )
 
 
+def _hash_verify_return_schema() -> ReturnValueSchema:
+    return ReturnValueSchema(
+        type=ParameterType.OBJECT,
+        description="Per-file SHA-256 verification and editable-install shadowing warnings.",
+        properties={
+            "unit_id": ParameterMetadata(type=ParameterType.STRING, description="Declared work-unit id."),
+            "root_path": ParameterMetadata(type=ParameterType.STRING, description="Absolute root inspected."),
+            "files": ParameterMetadata(type=ParameterType.LIST, description="[{path, expected_sha256, actual_sha256|null, status}]."),
+            "all_exact": ParameterMetadata(type=ParameterType.BOOLEAN, description="True iff every declared path matched."),
+            "editable_install_warnings": ParameterMetadata(type=ParameterType.LIST, description="Pointer rows that resolve outside the inspected root."),
+            "editable_install_shadowing_detected": ParameterMetadata(type=ParameterType.BOOLEAN, description="True iff a venv/pointer can resolve code outside the root."),
+        },
+    )
+
+
+def _merge_predict_return_schema() -> ReturnValueSchema:
+    return ReturnValueSchema(
+        type=ParameterType.OBJECT,
+        description="No-write append-only register merge prediction with exact candidate content.",
+        properties={
+            "base_ref": ParameterMetadata(type=ParameterType.STRING, description="Base revision read."),
+            "current_master": ParameterMetadata(type=ParameterType.STRING, description="Current master revision read."),
+            "lane_root_path": ParameterMetadata(type=ParameterType.STRING, description="Lane worktree inspected."),
+            "register_path": ParameterMetadata(type=ParameterType.STRING, description="Tracked register path."),
+            "master_drifted_since_base": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether current master differs from base."),
+            "lane_change_is_append_only": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether lane content preserves the base as a prefix."),
+            "lane_hunk": ParameterMetadata(type=ParameterType.STRING, description="Lane-only appended text, or empty when not append-only."),
+            "lane_registrations": ParameterMetadata(type=ParameterType.LIST, description="Non-comment registrations in the lane hunk."),
+            "duplicate_registrations_on_master": ParameterMetadata(type=ParameterType.LIST, description="Lane registrations already present on current master."),
+            "missing_registrations_on_master": ParameterMetadata(type=ParameterType.LIST, description="Lane registrations absent from current master."),
+            "merged_candidate_content": ParameterMetadata(type=ParameterType.STRING, description="git merge-file -p output; contains conflict markers when verdict is conflict."),
+            "merge_verdict": ParameterMetadata(type=ParameterType.STRING, description="clean or conflict."),
+            "git_merge_file_exit_code": ParameterMetadata(type=ParameterType.INTEGER, description="0 clean, 1 conflict."),
+        },
+    )
+
+
+def _scope_gap_return_schema() -> ReturnValueSchema:
+    return ReturnValueSchema(
+        type=ParameterType.OBJECT,
+        description="Per-file static-gate scope classification.",
+        properties={
+            "paths": ParameterMetadata(type=ParameterType.LIST, description="Normalized paths inspected."),
+            "in_scope": ParameterMetadata(type=ParameterType.LIST, description="Paths covered by per-file static gates."),
+            "out_of_scope": ParameterMetadata(type=ParameterType.LIST, description="Paths requiring a manual static-analysis supplement."),
+            "manual_static_analysis_needed": ParameterMetadata(type=ParameterType.BOOLEAN, description="True iff out_of_scope is non-empty."),
+            "scope_source": ParameterMetadata(type=ParameterType.STRING, description="The exact quality-gate predicate consulted."),
+        },
+    )
+
+
 class QualityServicePublicAPI(ABC):
     """AI-discoverable quality-gate + smoke execution surface.
 
@@ -193,3 +244,68 @@ class QualityServicePublicAPI(ABC):
         self, smoke: str | None = None, *, call_context: CallContext | None = None
     ) -> dict[str, Any]:
         """Run the gate-eligible smoke suite, or one registered smoke by path."""
+
+    @service_interface_process(
+        name="verify_hash_manifest",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "unit_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Work-unit id for the report."),
+            "root_path": ParameterMetadata(type=ParameterType.STRING, required=True, description="Existing absolute worktree/candidate-tree root."),
+            "manifest": ParameterMetadata(type=ParameterType.DICT, required=True, description="Declared {repo_relative_path: lowercase_sha256} manifest."),
+        },
+        return_value_schema=_hash_verify_return_schema(),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="gc_hash_verify_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def verify_hash_manifest(
+        self, unit_id: str, root_path: str, manifest: dict[str, str], *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        """Rehash a declared manifest under one root; never changes Git or files."""
+
+    @service_interface_process(
+        name="predict_gate_smokes_merge",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "base_ref": ParameterMetadata(type=ParameterType.STRING, required=True, description="Common base Git revision."),
+            "lane_root_path": ParameterMetadata(type=ParameterType.STRING, required=True, description="Existing absolute lane worktree root."),
+            "current_master": ParameterMetadata(type=ParameterType.STRING, required=True, description="Current master revision in that worktree."),
+            "register_path": ParameterMetadata(type=ParameterType.STRING, required=False, default="quality_gates/gate_smokes.txt", description="Repo-relative append-only tracked-debt register."),
+        },
+        return_value_schema=_merge_predict_return_schema(),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="gc_gate_smokes_merge_prediction"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def predict_gate_smokes_merge(
+        self, base_ref: str, lane_root_path: str, current_master: str,
+        register_path: str = "quality_gates/gate_smokes.txt", *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        """Predict a no-write merge of one append-only tracked-debt register."""
+
+    @service_interface_process(
+        name="detect_scope_regex_gaps",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "paths": ParameterMetadata(type=ParameterType.LIST, required=True, description="Repo-relative changed paths to classify."),
+        },
+        return_value_schema=_scope_gap_return_schema(),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="gc_scope_regex_gap_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def detect_scope_regex_gaps(
+        self, paths: list[str], *, call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        """Report paths not covered by the exact per-file static-gate predicate."""

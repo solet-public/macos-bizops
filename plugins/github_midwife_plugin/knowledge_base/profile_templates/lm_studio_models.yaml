@@ -1,0 +1,87 @@
+# LM Studio artifact map — serve-time identifier -> download source -> load command.
+#
+# WHY THIS FILE EXISTS: the `model` value in every profile template and in
+# profile_baseline/openai_embeddings_plugin.json is the SERVE-TIME KEY — what LM Studio
+# calls the model on its OpenAI-compatible endpoint. LM Studio DERIVES that key from the
+# download source (lowercase the repo, drop the owner org, strip -GGUF/-8bit/-4bit, and
+# prefix text-embedding- for embedding models). The derivation is LOSSY: the owner org and
+# the format token are gone, so you cannot work backwards from the config value to the
+# thing you have to download. Running `lms get` on a config value fails — observed on a
+# fresh VM 2026-08-30: "No staff picks found with the specified search criteria".
+#
+# TWO COMMAND-FORM TRAPS, both measured on the reference machine 2026-08-31:
+#   1. The bare org/repo shorthand FAILS even when the repo is correct:
+#        lms get gaianet/Nomic-embed-text-v1.5-Embedding-GGUF --yes
+#        -> "artifact does not exist or permission denied"
+#      Use the full https://huggingface.co/<owner>/<repo> URL. That form resolves.
+#   2. You do NOT need `lms load --identifier`. Because the key is derived, a plain
+#      `lms get` of the right repo already yields exactly the key the config expects.
+#
+# HOW TO VERIFY A VALUE YOURSELF on a machine that already has the model:
+#   ~/.lmstudio/.internal/model-data.json records provenance per model.
+#   source.type == "hub"         -> the key IS the catalog name; `lms get <key>` works.
+#   source.type == "huggingface" -> download source is source.owner/source.repo, and
+#                                   uiIdentifier is the derived serve-time key.
+#
+# Verified 2026-08-31 against the reference machine's LM Studio install.
+
+models:
+  embeddings:
+    api_identifier: text-embedding-nomic-embed-text-v1.5-embedding
+    identifier_class: derived_from_download_source
+    download_source: gaianet/Nomic-embed-text-v1.5-Embedding-GGUF
+    download_file: nomic-embed-text-v1.5.f16.gguf
+    get: lms get "https://huggingface.co/gaianet/Nomic-embed-text-v1.5-Embedding-GGUF" --yes
+    load: not required — `lms get` yields the api_identifier above directly
+    required: true
+    consumed_by: openai_embeddings_plugin
+    warning: >-
+      Do NOT substitute nomic-ai/nomic-embed-text-v1.5-GGUF. It is a different build
+      (Q4_K_M, ~84MB, vs the required f16, ~274MB), it satisfies bootstrap.py's
+      substring guard, and it produces different vectors with no fail-loud signal.
+
+  inference:
+    api_identifier: qwen/qwen3-30b-a3b-2507
+    identifier_class: hub_catalog_name
+    download_source: qwen/qwen3-30b-a3b-2507
+    get: lms get qwen/qwen3-30b-a3b-2507 --yes
+    load: not required
+    required: true
+    consumed_by: default_inference_plugin
+    note: >-
+      This one IS a catalog name (lmstudio.ai/models/qwen/qwen3-30b-a3b-2507), so the
+      identifier and the download source coincide. That is a coincidence of this model,
+      not a rule — the embeddings entry above is the same shape of config field and does
+      not behave this way.
+
+  chatmusician:
+    api_identifier: chatmusician-hf-mlx
+    identifier_class: derived_from_download_source
+    download_source: mlx-community/ChatMusician-hf-4bit-mlx
+    get: lms get "https://huggingface.co/mlx-community/ChatMusician-hf-4bit-mlx" --yes
+    load: not required — `lms get` yields the api_identifier above directly
+    required: false
+    consumed_by: generative_composition_plugin::generate_musical_phrase
+
+  thinking:
+    api_identifier: qwen3-30b-a3b-thinking-2507-mlx
+    identifier_class: derived_from_download_source
+    download_source: lmstudio-community/Qwen3-30B-A3B-Thinking-2507-MLX-8bit
+    get: lms get "https://huggingface.co/lmstudio-community/Qwen3-30B-A3B-Thinking-2507-MLX-8bit" --yes
+    load: not required — `lms get` yields the api_identifier above directly
+    required: false
+    consumed_by: none
+    note: >-
+      Present in the reference machine's live default_thinking_plugin.json but read by
+      nothing: default_thinking_plugin owns no model path (DEP-01 Phase-2b) and its
+      base_url/model/inference_backend fields are dead config. Recorded here so the next
+      person who finds that string knows where it came from and that they need not
+      download 32GB for it. See profile_baseline/README.md.
+
+unverified:
+  # qwen/qwen3-14b is what profile_baseline/default_inference_plugin.json actually gives a
+  # newborn, but it is not installed on the reference machine and its identifier_class was
+  # NOT verified. It is hub-SHAPED, which is not evidence — the thinking model above is the
+  # same shape and is an alias. Verify against model-data.json on a machine that has it, or
+  # with a catalog lookup, before relying on it.
+  - qwen/qwen3-14b

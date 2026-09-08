@@ -241,6 +241,7 @@ ERROR_RESULT_TOO_LARGE: Final[str] = "gsuite.result_too_large"
 # Result types
 # ---------------------------------------------------------------------------
 RESULT_TYPE_CONNECT: Final[str] = "g_suite_connect_account_result"
+RESULT_TYPE_TEST_CONNECTION: Final[str] = "g_suite_test_connection_result"
 RESULT_TYPE_INTERFACE_START: Final[str] = "g_suite_interface_start_result"
 RESULT_TYPE_INTERFACE_STOP: Final[str] = "g_suite_interface_stop_result"
 RESULT_TYPE_GMAIL_LIST: Final[str] = "g_suite_gmail_list_result"

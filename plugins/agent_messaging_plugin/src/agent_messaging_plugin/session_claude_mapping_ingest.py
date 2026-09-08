@@ -25,6 +25,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
+from ananta.llm.agent_messaging.state_results import require_updated
+from ananta.services.state_service.bounded_read import iter_table_rows
+
 from .schema import (
     CAPTURE_SOURCE_HOOK_STARTUP,
     CAPTURE_SOURCE_INIT_EVENT,
@@ -33,13 +37,14 @@ from .schema import (
     LIFECYCLE_OVERDUE,
     LIFECYCLE_PARKED,
     SESSION_HOST_HEADLESS,
+    SESSION_HOST_OPERATOR,
     SESSION_HOST_TMUX,
+    TABLE_MANAGED_SESSION,
 )
 from .session_claude_mapping_store import (
     list_session_claude_mappings,
     upsert_session_claude_mapping,
 )
-from .session_lifecycle_store import list_managed_sessions
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -59,17 +64,27 @@ _REQUIRED_FIELDS = ("agent_instance_id", "claude_session_id", "captured_at", "ca
 # hasn't been OBSERVED yet.
 DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S: float = 600.0
 
-# host='operator' rows (schema.py's get_managed_session_schema docstring)
-# are never spawned through either adapter, so the SessionStart-hook
-# contract never applies to them -- they are never eligible for this check.
-_HOOK_ABSENCE_ELIGIBLE_HOSTS = (SESSION_HOST_TMUX, SESSION_HOST_HEADLESS)
+# A lifecycle sweep is shared with action-path work.  The absence detector is
+# deliberately limited to one fixed page, so a growing unresolved population
+# cannot turn one tick into unbounded mapping reads and synchronous log I/O.
+MAX_HOOK_ABSENCE_CHECKS_PER_TICK = 25
+
+# Operator registrations now create an inventory row too. Its absent dispatch
+# contract does not make a missing SessionStart hook unobservable, so every
+# live host is eligible for this detector.
+_HOOK_ABSENCE_ELIGIBLE_HOSTS = (SESSION_HOST_TMUX, SESSION_HOST_HEADLESS, SESSION_HOST_OPERATOR)
 
 # 'spawning' is too early to judge (the grace window already covers that);
 # 'terminated'/'retired' are no longer actionable -- the worker is gone, so
 # re-warning about them every tick forever would be pure noise with nothing
 # anyone could still do about it. Only the currently-live, still-actionable
 # states are eligible.
-_HOOK_ABSENCE_ELIGIBLE_STATES = (LIFECYCLE_LIVE, LIFECYCLE_IDLE, LIFECYCLE_OVERDUE, LIFECYCLE_PARKED)
+_HOOK_ABSENCE_ELIGIBLE_STATES = (
+    LIFECYCLE_LIVE,
+    LIFECYCLE_IDLE,
+    LIFECYCLE_OVERDUE,
+    LIFECYCLE_PARKED,
+)
 
 
 def _resolve_spool_dir() -> Path | None:
@@ -98,13 +113,16 @@ def _load_record(path: Path) -> dict[str, str] | None:
         raw = json.loads(path.read_text())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         logger.warning(
-            "session_claude_mapping spool file %s unreadable/invalid JSON: %s", path, exc,
+            "session_claude_mapping spool file %s unreadable/invalid JSON: %s",
+            path,
+            exc,
         )
         return None
     if not isinstance(raw, dict) or not all(raw.get(field) for field in _REQUIRED_FIELDS):
         logger.warning(
             "session_claude_mapping spool file %s missing required field(s) %s",
-            path, _REQUIRED_FIELDS,
+            path,
+            _REQUIRED_FIELDS,
         )
         return None
     return {field: str(raw[field]) for field in _REQUIRED_FIELDS}
@@ -128,6 +146,52 @@ def _parse_iso(value: object) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
+def _is_structurally_hookless(row: dict[str, Any]) -> bool:
+    """Whether the registered worker cannot emit a Claude SessionStart hook.
+
+    ``agent_id`` is the peer registry's actual runtime identity.  The
+    spawn-time ``agent_runtime`` remains a supporting discriminator for rows
+    not yet backfilled by registration; legacy operator rows may carry its
+    historical ``claude_code`` default even while ``agent_id`` correctly says
+    ``codex``.
+    """
+    return (
+        str(row.get("agent_id") or "") == "codex"
+        or str(
+            row.get("agent_runtime") or "",
+        )
+        == "codex"
+    )
+
+
+def _claim_hook_absence_check(
+    state: StateManagementInterface,
+    *,
+    agent_instance_id: str,
+    checked_at: str,
+    warned: bool,
+) -> bool:
+    """Atomically consume one absence candidate; only its winner may warn."""
+    updates: dict[str, object] = {"hook_absence_checked_at": checked_at}
+    if warned:
+        updates["hook_absence_warned_at"] = checked_at
+    updated = require_updated(
+        state.update_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {
+                "table": TABLE_MANAGED_SESSION,
+                "filters": {
+                    "agent_instance_id": agent_instance_id,
+                    "is_deleted": 0,
+                    "hook_absence_checked_at": {"op": "is_null"},
+                },
+            },
+            updates,
+        ),
+    )
+    return updated == 1
+
+
 def _warn_if_hook_absent(
     state: StateManagementInterface,
     row: dict[str, Any],
@@ -143,8 +207,27 @@ def _warn_if_hook_absent(
     created_at = _parse_iso(row.get("created_at"))
     if created_at is None or (clock - created_at).total_seconds() < grace_window_s:
         return False
+    checked_at = clock.isoformat()
+    if _is_structurally_hookless(row):
+        _claim_hook_absence_check(
+            state,
+            agent_instance_id=agent_instance_id,
+            checked_at=checked_at,
+            warned=False,
+        )
+        return False
     mappings = list_session_claude_mappings(state, agent_instance_id)
-    if any(m.get("capture_source") == CAPTURE_SOURCE_HOOK_STARTUP for m in mappings):
+    warning_needed = not any(
+        m.get("capture_source") == CAPTURE_SOURCE_HOOK_STARTUP for m in mappings
+    )
+    if not _claim_hook_absence_check(
+        state,
+        agent_instance_id=agent_instance_id,
+        checked_at=checked_at,
+        warned=warning_needed,
+    ):
+        return False
+    if not warning_needed:
         return False
     logger.warning(
         "session_claude_mapping: HOOK ABSENCE for agent_instance_id=%s "
@@ -154,8 +237,11 @@ def _warn_if_hook_absent(
         "injection, the spool-dir env var, APP_HOME on this host) -- usage "
         "for this worker cannot be attributed via the mapping-table join "
         "until this is fixed",
-        agent_instance_id, row.get("host"), row.get("lifecycle_state"),
-        row.get("created_at"), grace_window_s,
+        agent_instance_id,
+        row.get("host"),
+        row.get("lifecycle_state"),
+        row.get("created_at"),
+        grace_window_s,
     )
     return True
 
@@ -175,30 +261,49 @@ def detect_hook_absent_sessions(
     signal, ever. This is the distinct positive check the ruling names as
     its own follow-up, not a substitute for the cross-check.
 
-    Scope: only ``host in (tmux, headless)`` -- ``host='operator'`` rows are
-    never spawned through either adapter, so the hook contract does not
-    apply to them. Only the currently-actionable non-terminal
+    Scope: all host topologies except registered Codex workers, which cannot
+    fire the Claude hook by construction. Only the currently-actionable non-terminal
     ``lifecycle_state`` values (live/idle/overdue/parked) are checked --
     ``spawning`` is too early (the grace window already covers that) and
     terminated/retired rows are no longer actionable.
 
     A row younger than ``grace_window_s`` is never flagged -- the ordinary
     spawn -> hook-fires -> spool-write -> next-drain-tick latency is not
-    absence. Read-only and non-fatal: this only logs a WARNING per absent
-    row; it writes no state and never raises. Returns the count of rows
-    flagged this call, for the caller's own tick-summary log line (mirrors
+    absence. Eligible rows are atomically checked once, which provides both
+    the warning latch and the page cursor: each tick handles at most
+    :data:`MAX_HOOK_ABSENCE_CHECKS_PER_TICK` unchecked rows, and the next tick
+    progresses to the remainder. Returns the count of warnings fired this
+    call, for the caller's own tick-summary log line (mirrors
     :func:`drain_session_claude_mapping_spool`'s own return-a-count shape).
     """
     clock = now or datetime.now(UTC)
     warned = 0
+    checked = 0
     for host in _HOOK_ABSENCE_ELIGIBLE_HOSTS:
         for lifecycle_state in _HOOK_ABSENCE_ELIGIBLE_STATES:
-            rows = list_managed_sessions(state, {"host": host, "lifecycle_state": lifecycle_state})
+            rows = iter_table_rows(
+                state,
+                namespace=AGENT_ROLE_BINDING_NAMESPACE,
+                table=TABLE_MANAGED_SESSION,
+                filters={
+                    "host": host,
+                    "lifecycle_state": lifecycle_state,
+                    "hook_absence_checked_at": {"op": "is_null"},
+                },
+                ceiling=MAX_HOOK_ABSENCE_CHECKS_PER_TICK,
+                reason="hook-absence detection has a fixed per-tick work budget",
+            )
             for row in rows:
+                checked += 1
                 if _warn_if_hook_absent(
-                    state, row, clock=clock, grace_window_s=grace_window_s,
+                    state,
+                    row,
+                    clock=clock,
+                    grace_window_s=grace_window_s,
                 ):
                     warned += 1
+                if checked >= MAX_HOOK_ABSENCE_CHECKS_PER_TICK:
+                    return warned
     return warned
 
 
@@ -214,7 +319,9 @@ def _cross_check_init_event(state: StateManagementInterface, agent_instance_id: 
     independent witnesses and are never merged into one row."""
     rows = list_session_claude_mappings(state, agent_instance_id)
     startup_ids = {
-        r["claude_session_id"] for r in rows if r.get("capture_source") == CAPTURE_SOURCE_HOOK_STARTUP
+        r["claude_session_id"]
+        for r in rows
+        if r.get("capture_source") == CAPTURE_SOURCE_HOOK_STARTUP
     }
     init_event_ids = {
         r["claude_session_id"] for r in rows if r.get("capture_source") == CAPTURE_SOURCE_INIT_EVENT
@@ -225,7 +332,9 @@ def _cross_check_init_event(state: StateManagementInterface, agent_instance_id: 
         logger.warning(
             "session_claude_mapping cross-check MISMATCH for agent_instance_id=%s: "
             "hook:startup claude_session_id(s)=%s vs init_event claude_session_id(s)=%s",
-            agent_instance_id, sorted(startup_ids), sorted(init_event_ids),
+            agent_instance_id,
+            sorted(startup_ids),
+            sorted(init_event_ids),
         )
 
 
@@ -267,7 +376,8 @@ def drain_session_claude_mapping_spool(state: StateManagementInterface) -> dict[
             # next drain, never a lost or duplicated row.
             logger.warning(
                 "session_claude_mapping spool file %s upserted but could not be deleted: %s",
-                path, exc,
+                path,
+                exc,
             )
 
     # Slice D (ruling addendum): the cross-check only needs to re-evaluate
@@ -281,6 +391,7 @@ def drain_session_claude_mapping_spool(state: StateManagementInterface) -> dict[
 
 __all__ = [
     "DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S",
+    "MAX_HOOK_ABSENCE_CHECKS_PER_TICK",
     "detect_hook_absent_sessions",
     "drain_session_claude_mapping_spool",
 ]

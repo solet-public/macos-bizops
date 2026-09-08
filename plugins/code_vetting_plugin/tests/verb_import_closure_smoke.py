@@ -15,9 +15,17 @@ first-import closure of the verb surface. Run directly or via run_smokes.py.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
 
 # Import ONLY the verb surface — nothing from the inference seam.
+from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 import code_vetting_plugin.plugin  # noqa: F401 — imported for its transitive closure, asserted below
 
 # Modules that would mean inference leaked into the L1-only verbs' import path.

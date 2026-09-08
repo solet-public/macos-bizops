@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from ..run_context import repo_root
-from ..verify.lenses import _REFUTE_CLAUSES  # noqa: PLC2701 — the directive clauses ARE the assembler source
-from ..verify.rulebook import _KEYWORD_RULES, _SCOPE_RULE, _TEST_ANY_RULE, DoNotFlagRule  # noqa: PLC2701 — DNF source
+from ..verify.lenses import REFUTE_CLAUSES
+from ..verify.rulebook import KEYWORD_RULES, SCOPE_RULE, TEST_ANY_RULE, DoNotFlagRule
 from ..verify.tiers import PolicyTier
 from .manifest import build_artifact
 
@@ -52,13 +52,13 @@ def _directives_content() -> dict[str, list[list[str]]]:
     loader renders byte-identical to ``lenses.refute_directive`` (the regression bar)."""
     return {
         lens.value: [[clause.tier.value, clause.text] for clause in clauses]
-        for lens, clauses in _REFUTE_CLAUSES.items()
+        for lens, clauses in REFUTE_CLAUSES.items()
     }
 
 
 def _dnf_content() -> list[dict[str, Any]]:
-    keyword = [_dnf_entry(rule, "keyword") for rule in _KEYWORD_RULES]
-    structural = [_dnf_entry(_SCOPE_RULE, "scope"), _dnf_entry(_TEST_ANY_RULE, "test_any")]
+    keyword = [_dnf_entry(rule, "keyword") for rule in KEYWORD_RULES]
+    structural = [_dnf_entry(SCOPE_RULE, "scope"), _dnf_entry(TEST_ANY_RULE, "test_any")]
     return keyword + structural
 
 
@@ -123,7 +123,7 @@ def assemble(root: Path | None = None) -> dict[str, Any]:
         "guidance": _guidance_content(resolved),
     }
     sources = [
-        {"anchor": "verify/lenses.py::_REFUTE_CLAUSES", "content": content["directives"]},
+        {"anchor": "verify/lenses.py::REFUTE_CLAUSES", "content": content["directives"]},
         {"anchor": "verify/rulebook.py::DNF", "content": content["dnf_rules"]},
         *({"anchor": f"rulebook_doc::{section['heading']}", "content": section} for section in content["preamble_sections"]),
         *({"anchor": f"guidance::{article['name']}", "content": article} for article in content["guidance"]),

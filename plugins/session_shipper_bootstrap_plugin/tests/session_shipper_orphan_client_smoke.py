@@ -103,6 +103,16 @@ class _StubVaultClientStore:
         row["redirect_uris"] = redirect_uris
         return True
 
+    def record_client_token_use(
+        self, client_id: str, fields: Mapping[str, str],
+    ) -> bool:
+        """Record last-use evidence on the in-memory record."""
+        record = self.rows.get(client_id)
+        if record is None:
+            return False
+        record.update(dict(fields))
+        return True
+
     def insert_token(self, row: dict[str, Any]) -> None:
         self.tokens[row["token_hash"]] = dict(row)
 

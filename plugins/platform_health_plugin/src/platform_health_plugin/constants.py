@@ -34,3 +34,22 @@ STATUS_FAILED: Final[str] = "failed"
 STATUS_SKIPPED_WRITE: Final[str] = "skipped_write"
 STATUS_SKIPPED_SELF: Final[str] = "skipped_self"
 STATUS_SKIPPED_UNRESOLVED: Final[str] = "skipped_unresolved"
+STATUS_SKIPPED_SCOPE: Final[str] = "skipped_scope"
+STATUS_DRY_RUN: Final[str] = "dry_run"
+
+# This is declared safety data, not a heuristic. These provider names were
+# measured from the live registry/plugin roster and their manifests declare an
+# external credential, endpoint, or third-party integration. A plugin provider
+# outside this table remains fail-closed: it is never in the default live scope.
+OUTWARD_FACING_PLUGIN_NAMESPACES: Final[frozenset[str]] = frozenset({
+    "discord_plugin",
+    "g_suite_plugin",
+    "jira_plugin",
+    "marketo_plugin",
+    "salesforce_plugin",
+    "schwab_market_data_plugin",
+    "signal_plugin",
+    "snowflake_plugin",
+    "soundcloud_artist_studio_plugin",
+    "zuora_plugin",
+})

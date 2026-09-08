@@ -6,11 +6,18 @@ plugin end-to-end path uses a stub scanner and an in-memory state-service fake.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import json
+import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 import code_vetting_plugin.plugin as plugin_module
 from code_vetting_plugin.live_state import read_vetting_run

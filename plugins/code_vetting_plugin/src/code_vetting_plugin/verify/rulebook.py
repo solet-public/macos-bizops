@@ -7,7 +7,7 @@ unambiguous false-positive classes cheaply, before spending any inference.
 
 Source of truth at runtime: ``rulebook/assembled_rulebook.json`` — a committed, in-package build
 artifact whose whole-artifact hash is verified FAIL-LOUD at every load (a corrupt/tampered moat
-raises rather than silently seeding skeptics wrong). The in-code ``_KEYWORD_RULES`` / directive
+raises rather than silently seeding skeptics wrong). The in-code ``KEYWORD_RULES`` / directive
 clauses (``verify/lenses``) are the ASSEMBLER's SOURCE (W3-C); the runtime reconstructs from the
 artifact. This RETIRES two interims: B3a's ``workbench/``-anchored doc path (the artifact ships IN
 the package, release-copy safe via ``importlib.resources``) and FT-2 §40's non-tier-filtered
@@ -60,7 +60,7 @@ class DoNotFlagRule:
 
 # --- ASSEMBLER SOURCE (W3-C): the in-code DNF rules the assembler reads into the artifact. The
 # runtime reconstructs equivalents FROM the artifact; rulebook_sync (W3C-1b) verifies they match. ---
-_KEYWORD_RULES: tuple[DoNotFlagRule, ...] = (
+KEYWORD_RULES: tuple[DoNotFlagRule, ...] = (
     DoNotFlagRule(
         "F2§4.1-FASTFAIL-RECOVERY",
         "Missing try/except / absent fallback / 'add error recovery' — RB-FASTFAIL policy, not a bug",
@@ -109,12 +109,12 @@ _KEYWORD_RULES: tuple[DoNotFlagRule, ...] = (
         ("too many methods", "class is too large", "class is too big", "large class with", "split this class", "too many public methods"),
     ),
 )
-_SCOPE_RULE = DoNotFlagRule(
+SCOPE_RULE = DoNotFlagRule(
     "F2§4.8-SCOPE",
     "Gate-style nit in operator-tooling (workbench/deployment/research/tools/migrations/parity_tests) — RB-SCOPE",
     PolicyTier.PROJECT_LOCAL,
 )
-_TEST_ANY_RULE = DoNotFlagRule(
+TEST_ANY_RULE = DoNotFlagRule(
     "F2§4.10-TEST-ANY",
     "Any/broad types in a test file — the pyright gate excludes tests",
     PolicyTier.PROJECT_LOCAL,

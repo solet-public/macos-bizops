@@ -40,12 +40,19 @@ Cases:
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import logging
 import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import jwt as pyjwt
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from agent_messaging_plugin.bridge_sessions import (
     _UNRESTRICTED,

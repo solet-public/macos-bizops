@@ -33,7 +33,7 @@
           "     [ ] 6. <original failed step, renumbered>",
           "     [ ] 7. <original step 6, renumbered>",
           "",
-          "3. Inform the user via post_message",
+          "3. Inform the user: resolve the active IO plugin namespace with query_process_registry, then invoke plugin::<namespace>::post_message with message and any namespace-specific arguments from its schema",
           "   — Brief, non-technical explanation of what went wrong",
           "   — Do NOT include system internals, stack traces, or raw error messages",
           "",

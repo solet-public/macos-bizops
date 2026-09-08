@@ -315,7 +315,7 @@ class BridgeClient:
         The action-event row is marked completed immediately before the result
         row is written. A snapshot in that narrow window has
         ``status=completed`` but no ``result`` key; treating it as terminal
-        makes ``solet call`` nondeterministically omit successful output.
+        makes ``solet-bridge call`` nondeterministically omit successful output.
         """
         deadline = time.monotonic() + poll_timeout_s
         while True:
@@ -448,7 +448,7 @@ class BridgeClient:
         stable per-logical-session carrier the reconnect self-refresh and
         ``peer_claim_role`` key on (REL-07) — pass the launcher-exported value,
         never a PID. ``watcher_declared`` (MSG-04/identity-unification,
-        2026-08-20): True for `solet watch`'s own registration, so
+        2026-08-20): True for `solet-bridge watch`'s own registration, so
         ``BridgeBinding.is_watcher`` still reads true when this caller
         registers under a ledger ``AGENT_INSTANCE_ID`` that carries none of
         the legacy ``agi-watch-`` prefix it used to infer that from.

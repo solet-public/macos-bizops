@@ -23,18 +23,32 @@ Run directly or via run_smokes.py.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import hashlib
 import sys
 import tempfile
 from pathlib import Path
 
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 from code_vetting_plugin.coverage import CoverageRecord
-from code_vetting_plugin.models import ContextProfile, Dimension, Finding, Layer, Provenance, Severity
+from code_vetting_plugin.models import (
+    ContextProfile,
+    Dimension,
+    Finding,
+    Layer,
+    Provenance,
+    Severity,
+)
 from code_vetting_plugin.report import ReportRenderer
 from code_vetting_plugin.run_record import coverage_gaps
 from code_vetting_plugin.runner import SCANNERS, Applicability, run_all
 from code_vetting_plugin.scanners.ts_toolchain import (  # noqa: PLC2701 — pin the internal parse/gate/cap logic
     _MAX_TOOL_FINDINGS,
+    _NODE_GAP,
     _cap,
     _disclosure,
     _eslint_findings,
@@ -109,7 +123,7 @@ def _check_optin_present(with_nm: TargetTree) -> None:
 def _check_optin_absent(without_nm: TargetTree) -> None:
     # BRANCH 2 (flag-without-node_modules): flag set + node_modules absent → materialization gap
     # (node present) or node gap (node absent) — absence-tolerant on host node.
-    expected = "not materialized" if _NODE_PRESENT else "node runtime not installed"
+    expected = "not materialized" if _NODE_PRESENT else _NODE_GAP
     tsc_nonm = scan_tsc(without_nm, "vr-r74", execute_target_toolchain=True).coverage
     _check("scan_tsc: flag on + no node_modules → ran=False gap", tsc_nonm.ran is False, str(tsc_nonm))
     _check("scan_tsc: flag-without-node_modules gap names the missing prerequisite", expected in _reason(tsc_nonm), f"node_present={_NODE_PRESENT} :: {tsc_nonm.gap_reason}")

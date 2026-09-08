@@ -42,6 +42,7 @@ _TEMPLATE_VARS = _TEMPLATES_DIR / "TEMPLATE_VARS.md"
 _RENDER_TOKENS = {
     "{{SOLET_NAME}}": "iris",
     "{{CLONE_DIR}}": "/Users/example/Workspace/iris",
+    "{{CLONE_DIR_ZSH}}": "'/Users/example/Workspace/iris'",
     "{{HYDRATION_DATE}}": "2026-07-13",
     "{{BACKUP_PATH}}": "/Users/example/.zshrc.pre-iris-hydration-20260713",
     # DERIVED from {{SOLET_NAME}} by the documented `_` -> `-` transform, not a
@@ -383,11 +384,25 @@ def _missing_and_forbidden(
 # one only carries that already-written text to the session. Belongs here for
 # the reason the bucket exists (it no-ops cleanly in an unlabeled user-scope
 # install), not as an exemption from the opposite branch.
+#
+# capture_session_mapping.py and headless_tool_allowlist_gate.py (0.8.0,
+# seed feedback #40/§51.1, 2026-08-24 -- newly REGISTERED in hooks.json this
+# release, previously never in this smoke's derived roster at all) are the
+# same env-presence shape as heartbeat_report_alive.py, on their OWN
+# spawn-only env vars rather than AGENT_INSTANCE_ID alone:
+# capture_session_mapping.py no-ops unless BOTH
+# ANANTA_SESSION_MAPPING_SPOOL_DIR and AGENT_INSTANCE_ID are set;
+# headless_tool_allowlist_gate.py no-ops (allows) unless
+# FLEET_HEADLESS_TOOL_ALLOWLIST is set. Neither references AGENT_SESSION_LABEL
+# in its source. An ordinary unlabeled user-scope session carries none of
+# those three spawn-only env vars either, so both no-op cleanly there --
+# label-independent by a different, but equally real, arming boundary.
 _LABEL_INDEPENDENT_HOOKS = frozenset(
     {
         "git_controller_gate.py", "check_messages_reminder.py", "wake_waiter.py",
         "heartbeat_report_alive.py", "capture.py", "session_context.py",
-        "rotation_due_notice.py",
+        "rotation_due_notice.py", "capture_session_mapping.py",
+        "headless_tool_allowlist_gate.py",
     },
 )
 _PLUGIN_HOOKS_DIR = (

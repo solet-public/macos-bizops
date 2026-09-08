@@ -45,7 +45,7 @@ from .constants import (
 )
 from .rotation_notice_retention import prune_rotation_notices
 from .session_context_status_store import list_session_context_statuses
-from .session_sweep import live_lifecycle_rows_by_instance
+from .session_sweep import GAUGE_COVERAGE_GRACE_S, live_lifecycle_rows_by_instance
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -134,14 +134,19 @@ reporting cadence while still excluding sessions that ended, which is the only
 distinction this constant has to make.
 """
 
-ROTATION_SELF_NOTICE_BANDS: frozenset[str] = frozenset({
-    "warm_task_boundary",
-    "warm_safe_checkpoint",
-    "warm_immediate",
-    "cold_above_h",
-    "capacity_approaching",
-    "capacity_critical",
-})
+GAUGE_SILENT_REGISTRATION_GRACE_S: float = GAUGE_COVERAGE_GRACE_S
+"""How long a registered session may lack its first context-gauge row.
+
+This is the same startup question and the same measured 600-second window as
+the managed-row gauge-coverage leg. Reusing its declared policy avoids making
+an operator inventory row silently obey a second, competing boot deadline.
+"""
+
+ROTATION_SELF_NOTICE_BANDS: frozenset[str] = frozenset(
+    {
+        "notice_due",
+    }
+)
 """The effective bands worth interrupting nobody for.
 
 `warm_keep`, `cold_below_h` and `capacity_ok` are the "carry on" verdicts, and
@@ -192,6 +197,7 @@ class SelfNoticeCounts:
     watcher_held: int = 0
     unroutable: int = 0
     undeliverable: int = 0
+    gauge_silent: int = 0
 
 
 class BandEdgeLatch:
@@ -228,14 +234,11 @@ class BandEdgeLatch:
         self._sent: dict[str, tuple[str, datetime]] = {}
 
     def suppressed(self, key: str, band: str, *, now: datetime) -> bool:
-        """True when ``key`` should NOT be notified about ``band`` right now."""
+        """True after this session generation has received its one notice."""
         previous = self._sent.get(key)
         if previous is None:
             return False
-        last_band, last_at = previous
-        if last_band != band:
-            return False
-        return (now - last_at).total_seconds() < self._floor_seconds
+        return True
 
     def record_sent(self, key: str, band: str, *, now: datetime) -> None:
         """Latch ``key`` at ``band`` -- call only after delivery succeeded.
@@ -293,48 +296,7 @@ def _measured_age_seconds(row: dict[str, Any], *, clock: datetime) -> float | No
     return (clock - stamp).total_seconds()
 
 
-def _provenance_note(row: dict[str, Any]) -> str:
-    """The notice's two clocks, and the gap between them (GAU-14 D3).
-
-    ``measured_at`` is when the reporter LOOKED. ``reading_at`` is when the
-    number it carries was PRODUCED. Reporting only the first is what made two
-    notices about one strictly-monotone series read as later-but-LOWER on
-    2026-08-19: the copy with the later stamp carried the earlier reading, by
-    107 seconds, and nothing in either notice let a reader see that.
-
-    NULL ``reading_at`` is NOT REPORTED and is SAID SO rather than elided. A
-    silent omission would leave the reader with a lone timestamp and the same
-    wrong inference the field exists to prevent -- and this branch is the
-    normal one for every reporter generation predating the column, so it is
-    the branch most readers will meet first.
-    """
-    measured = str(row.get("measured_at") or "").strip()
-    raw_reading = str(row.get("reading_at") or "").strip()
-    if not raw_reading:
-        return (
-            f"Measured at {measured} (that is when the reporter LOOKED; the "
-            "reading's own time was NOT REPORTED by this reporter, so the "
-            "observation lag is unknown -- it is not zero)."
-        )
-    lag = ""
-    try:
-        m = datetime.fromisoformat(measured)
-        r = datetime.fromisoformat(raw_reading)
-    except ValueError:
-        m = r = None
-    if m is not None and r is not None:
-        if m.tzinfo is None:
-            m = m.replace(tzinfo=UTC)
-        if r.tzinfo is None:
-            r = r.replace(tzinfo=UTC)
-        lag = f", an observation lag of {(m - r).total_seconds():.0f}s"
-    return (
-        f"Reading produced at {raw_reading}, observed at {measured}{lag}. The "
-        "number above is as of the READING, not the observation."
-    )
-
-
-def _gauge_verdict(row: dict[str, Any]) -> rotation_thresholds.RotationVerdict | None:
+def _gauge_verdict(row: dict[str, Any]) -> rotation_thresholds.RotationNoticeDecision | None:
     """The two-axis verdict for one gauge row, or ``None`` when the row cannot
     support one.
 
@@ -349,117 +311,22 @@ def _gauge_verdict(row: dict[str, Any]) -> rotation_thresholds.RotationVerdict |
     current = int(row.get("current_tokens") or 0)
     if ceiling <= 0 or current <= 0:
         return None
-    return rotation_thresholds.rotation_surface_verdict(
+    return rotation_thresholds.rotation_notice_verdict(
+        model=str(row.get("model") or ""),
+        effort=str(row.get("effort") or ""),
         current_tokens=current,
-        ceiling=ceiling,
-        cache_cold=bool(row.get("cache_cold")),
-        overage=bool(row.get("cache_overage_signature")),
+        runtime_window_tokens=ceiling,
     )
 
 
-def _self_notice_prose(row: dict[str, Any], verdict: rotation_thresholds.RotationVerdict) -> str:
-    """The notice text, in the shape the operator asked for.
-
-    The operator's own words were: *"context has reached xxx tokens, clearing
-    is recommended after XXX tokens and strongly recommended after XXX
-    tokens"* -- a measured number and the two thresholds ahead of it. This
-    carries that, plus the thing that makes a threshold arguable rather than
-    arbitrary: the HORIZON each one was derived from. "Rotate at 300,000" is a
-    rule to be obeyed or ignored; "at 300,000 a clear pays for itself with as
-    few as ~12 calls left" is a claim a reader can check.
-
-    Composed OUTSIDE its caller's delivery `try` for the reason
-    :func:`_notify_rotation_due` records: a notice family whose whole purpose
-    is to be the thing that speaks up must not be able to eat its own message
-    bug and log it as a delivery failure.
-    """
+def _self_notice_prose(
+    row: dict[str, Any],
+    verdict: rotation_thresholds.RotationNoticeDecision,
+) -> str:
+    """Return the sole durability notice text for a due session."""
+    del verdict
     current = int(row["current_tokens"])
-    ceiling = int(row["ceiling"])
-    model = row.get("model") or "unknown model"
-    # The horizon is stated ONCE, inside the band's own guidance, which
-    # `rotation_surface_verdict` computes against the SAME overage flag as
-    # `verdict.horizon_calls`. An earlier draft printed it a second time from
-    # `horizon_calls` directly and the two disagreed under overage (~4 vs ~3),
-    # because the guidance was still using the nominal premium. One quantity,
-    # one number, one source.
-    ttl_note = (
-        " Note: the prompt-cache TTL is showing the overage signature (~5 min "
-        "rather than 1 hour), so the horizon above is computed against the "
-        f"cheaper {rotation_thresholds.CACHE_WRITE_PREMIUM_MULTIPLIER_OVERAGE:g}x "
-        "rewrite premium -- clearing wins SOONER than the nominal thresholds "
-        "below suggest."
-        if verdict.overage else ""
-    )
-    # The two POLICY thresholds' own horizons, bound to locals so the f-string
-    # below stays inside the line limit AND so the reader can see that both are
-    # derived from the same function the session's own horizon came from --
-    # never transcribed.
-    recommended = rotation_thresholds.WARM_BAND_TASK_BOUNDARY_TOKENS
-    strongly = rotation_thresholds.WARM_BAND_SAFE_CHECKPOINT_TOKENS
-    recommended_n = rotation_thresholds.break_even_horizon(recommended)
-    strongly_n = rotation_thresholds.break_even_horizon(strongly)
-    if recommended_n is None or strongly_n is None:  # pragma: no cover - both are > H
-        raise ValueError(
-            "the ratified bands must sit above H for their horizons to exist; "
-            f"got recommended={recommended}, strongly={strongly}, "
-            f"H={rotation_thresholds.POLICY_H_TOKENS}",
-        )
-    # ★ GAU-14 (B2), 2026-08-19 -- THE FLOOR, STATED BESIDE THE ABSOLUTE BAND.
-    #
-    # The bands are absolute counts by design (see `rotation_thresholds`: the
-    # economics they encode are model-independent). But an absolute count read
-    # on its own invites a wrong inference, and the wrong inference was measured
-    # four times on the night of 2026-08-18/19: every fresh session in this
-    # checkout crossed `warm_task_boundary` within its first quarter hour, and
-    # "you have reached 164,118 tokens" read to its recipient as "you have DONE
-    # 164,118 tokens of work" when most of it was the prefix the session was
-    # born carrying. H is now 146,139 (GAU-05) against a first warm band of
-    # 150,000 -- 3,861 tokens of headroom -- so the notice fires on a session
-    # with essentially no work behind it and says nothing that lets the reader
-    # tell that from a session with 150,000 tokens of real work behind it.
-    #
-    # This does NOT change a single threshold. It states the quantity that makes
-    # the number triageable in one read: what a clear would have to re-write
-    # (H), and therefore what this session would actually be shedding.
-    #
-    # ★ WHAT IT DELIBERATELY DOES NOT CLAIM. It does not say "your boot floor
-    # was H". That would be false for most sessions and it was measured false:
-    # this lane booted at `POLICY_H_BOOT_TOKENS` ~44.7K, nowhere near H, and
-    # reached the band by reading its brief. H is the POST-ROTATION PREFIX --
-    # what a `/clear` re-writes -- which is well defined for every session
-    # regardless of how it got here, and it is the exact quantity the
-    # break-even rule already compares against. Saying more than that would
-    # manufacture a per-session measurement nobody took.
-    #
-    # H is also the fable-5 seat-class figure; `POLICY_H_BOOT_TOKENS` measurably
-    # varies ~9.2K between model tiers (GAU-05). Whether H becomes per-tier is
-    # an open operator question (GAU-14 axis 2, candidate B3), so the line names
-    # H as the policy constant it is and claims nothing per-tier.
-    floor = rotation_thresholds.POLICY_H_TOKENS
-    above_floor = current - floor
-    floor_note = (
-        f"Of that, {floor:,} is H -- the prefix a clear would have to re-write "
-        f"before you did any work at all -- so about {above_floor:,} is what "
-        "rotating would actually shed.\n"
-        if above_floor > 0 else
-        f"You are still BELOW H ({floor:,}, the prefix a clear would have to "
-        "re-write), so a clear would cost more than it could save.\n"
-    )
-    return (
-        f"rotation_self_notice: YOUR context has reached {current:,} tokens on "
-        f"{model} ({current / ceiling:.1%} of its {ceiling:,} ceiling).\n"
-        f"{floor_note}"
-        f"Band: {verdict.effective_band} -- {verdict.headline}.{ttl_note}\n"
-        f"The ratified thresholds and the horizons they came from: clearing is "
-        f"RECOMMENDED past {recommended:,} (pays off with ~{recommended_n:.0f} "
-        f"calls left) and STRONGLY RECOMMENDED past {strongly:,} (pays off "
-        f"with ~{strongly_n:.0f} calls left).\n"
-        f"Economics axis: {verdict.economics_band}. Capacity axis: "
-        f"{verdict.capacity_band} -- {verdict.capacity_guidance}\n"
-        f"{_provenance_note(row)} NOTHING HAS BEEN CLEARED AND "
-        "NOTHING WILL BE: this is a notice, the decision and the action are "
-        "yours."
-    )
+    return f"context is {current:,} — make sure everything is durable."
 
 
 def _resolve_self_binding(
@@ -524,7 +391,9 @@ def _resolve_self_binding(
 
 
 def _prune_notice_thread(
-    state: StateManagementInterface, *, thread_id: str,
+    state: StateManagementInterface,
+    *,
+    thread_id: str,
 ) -> None:
     """Bound this recipient's notice thread, without letting it fail the notice.
 
@@ -545,19 +414,19 @@ def _prune_notice_thread(
             "rotation self-notice thread %s could not be pruned; the notice "
             "itself was delivered and this thread is now unbounded until the "
             "next successful prune",
-            thread_id, exc_info=True,
+            thread_id,
+            exc_info=True,
         )
 
 
-def _notify_rotation_self(
+def _notify_self_binding(
     *,
     state: StateManagementInterface,
     agent_messaging_service: AgentMessagingService,
-    peer_registry: PeerRegistry,
     bridge_manager: BridgeSessionManager,
-    row: dict[str, Any],
+    binding: BridgeBinding,
     agent_instance_id: str,
-    verdict: rotation_thresholds.RotationVerdict,
+    prose: str,
 ) -> tuple[Literal["appended", "unroutable", "undeliverable"], bool]:
     """Best-effort notice to the session itself, PERSIST-FIRST (GAU-06 G2).
 
@@ -627,13 +496,7 @@ def _notify_rotation_self(
     rejection satisfied honestly: the sender is the platform, not the measured
     session talking to itself.
     """
-    binding = _resolve_self_binding(
-        peer_registry, row=row, agent_instance_id=agent_instance_id,
-    )
-    if binding is None:
-        return "unroutable", False
     watcher_held = binding.is_watcher
-    prose = _self_notice_prose(row, verdict)
     try:
         persisted = agent_messaging_service.peer_send(
             PeerSendRequest(
@@ -656,7 +519,8 @@ def _notify_rotation_self(
     except Exception:  # noqa: BLE001 — best-effort notify, never fails the sweep
         logger.warning(
             "session %s rotation self-notice durable write failed",
-            agent_instance_id, exc_info=True,
+            agent_instance_id,
+            exc_info=True,
         )
         return "undeliverable", watcher_held
     _prune_notice_thread(state, thread_id=str(persisted.thread_id))
@@ -676,13 +540,86 @@ def _notify_rotation_self(
         logger.warning(
             "session %s rotation self-notice persisted but its bridge append "
             "failed; the notice is readable from that session's inbox",
-            agent_instance_id, exc_info=True,
+            agent_instance_id,
+            exc_info=True,
         )
     return "appended", watcher_held
 
 
+def _notify_rotation_self(
+    *,
+    state: StateManagementInterface,
+    agent_messaging_service: AgentMessagingService,
+    peer_registry: PeerRegistry,
+    bridge_manager: BridgeSessionManager,
+    row: dict[str, Any],
+    agent_instance_id: str,
+    verdict: rotation_thresholds.RotationNoticeDecision,
+) -> tuple[Literal["appended", "unroutable", "undeliverable"], bool]:
+    """Persist and surface one context-band notice when its binding resolves."""
+    binding = _resolve_self_binding(
+        peer_registry,
+        row=row,
+        agent_instance_id=agent_instance_id,
+    )
+    if binding is None:
+        return "unroutable", False
+    return _notify_self_binding(
+        state=state,
+        agent_messaging_service=agent_messaging_service,
+        bridge_manager=bridge_manager,
+        binding=binding,
+        agent_instance_id=agent_instance_id,
+        prose=_self_notice_prose(row, verdict),
+    )
+
+
+def _registration_age_seconds(binding: BridgeBinding, *, clock: datetime) -> float | None:
+    """Seconds since the live binding registered, or ``None`` if unreadable."""
+    raw = binding.created_at.strip()
+    if not raw:
+        return None
+    try:
+        registered_at = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if registered_at.tzinfo is None:
+        registered_at = registered_at.replace(tzinfo=UTC)
+    return (clock - registered_at).total_seconds()
+
+
+def _gauge_silent_prose(*, agent_instance_id: str, age_seconds: float) -> str:
+    """State only the registered-and-gauge-silent fact the rider measured."""
+    return (
+        f"gauge_silent_since_registration: {agent_instance_id} has no "
+        f"session_context_status row {age_seconds:,.0f}s after registration "
+        f"(grace is {GAUGE_SILENT_REGISTRATION_GRACE_S:,.0f}s)."
+    )
+
+
+def _gauge_silent_bindings(
+    peer_registry: PeerRegistry,
+    *,
+    reported_instance_ids: set[str],
+    clock: datetime,
+) -> list[tuple[BridgeBinding, float]]:
+    """Live bindings past grace whose first gauge row has not landed."""
+    candidates: list[tuple[BridgeBinding, float]] = []
+    for bindings in peer_registry.list_agent_ids().values():
+        for binding in bindings:
+            if binding.agent_instance_id in reported_instance_ids:
+                continue
+            age_seconds = _registration_age_seconds(binding, clock=clock)
+            if age_seconds is None or age_seconds < GAUGE_SILENT_REGISTRATION_GRACE_S:
+                continue
+            candidates.append((binding, age_seconds))
+    return candidates
+
+
 def _session_still_live(
-    lifecycle_row: dict[str, Any] | None, *, clock: datetime,
+    lifecycle_row: dict[str, Any] | None,
+    *,
+    clock: datetime,
 ) -> bool:
     """Whether this session is currently MEETING its reporting obligation.
 
@@ -745,7 +682,7 @@ def _self_notice_candidate(
     *,
     clock: datetime,
     lifecycle: dict[str, dict[str, Any]],
-) -> tuple[str, rotation_thresholds.RotationVerdict] | None:
+) -> tuple[str, rotation_thresholds.RotationNoticeDecision] | None:
     """``(agent_instance_id, verdict)`` for a row worth notifying, else None.
 
     Split out of :func:`sweep_rotation_self_notice`'s loop so that loop reads
@@ -777,7 +714,8 @@ def _self_notice_candidate(
     if age_seconds is None:
         return None
     if age_seconds > SELF_NOTICE_STALENESS_S and not _session_still_live(
-        lifecycle.get(agent_instance_id), clock=clock,
+        lifecycle.get(agent_instance_id),
+        clock=clock,
     ):
         # ★ GAU-01(c). The bound still fires -- it is the only thing keeping
         # this scan off the unpruned gauge table's entire history -- but it is
@@ -791,7 +729,7 @@ def _self_notice_candidate(
     verdict = _gauge_verdict(row)
     if verdict is None:
         return None
-    if verdict.effective_band not in ROTATION_SELF_NOTICE_BANDS:
+    if not verdict.due:
         return None
     return (agent_instance_id, verdict)
 
@@ -832,17 +770,102 @@ def _consider_one_row(
     if candidate is None:
         return None
     agent_instance_id, verdict = candidate
-    if gate.suppressed(agent_instance_id, verdict.effective_band, now=clock):
+    if gate.suppressed(agent_instance_id, "notice_due", now=clock):
         return agent_instance_id, None
     outcome, is_watcher_held = _notify_rotation_self(
         state=state,
         agent_messaging_service=agent_messaging_service,
-        peer_registry=peer_registry, bridge_manager=bridge_manager,
-        row=row, agent_instance_id=agent_instance_id, verdict=verdict,
+        peer_registry=peer_registry,
+        bridge_manager=bridge_manager,
+        row=row,
+        agent_instance_id=agent_instance_id,
+        verdict=verdict,
     )
     if outcome == "appended":
-        gate.record_sent(agent_instance_id, verdict.effective_band, now=clock)
+        gate.record_sent(agent_instance_id, "notice_due", now=clock)
     return agent_instance_id, (outcome, is_watcher_held)
+
+
+def _sweep_context_band_notices(
+    context_rows: list[dict[str, Any]],
+    *,
+    clock: datetime,
+    lifecycle: dict[str, dict[str, Any]],
+    gate: BandEdgeLatch,
+    state: StateManagementInterface,
+    agent_messaging_service: AgentMessagingService,
+    peer_registry: PeerRegistry,
+    bridge_manager: BridgeSessionManager,
+) -> tuple[dict[str, int], int, set[str]]:
+    """Deliver the existing context-band notices and retain their latch keys."""
+    tally = {"appended": 0, "unroutable": 0, "undeliverable": 0}
+    watcher_held = 0
+    notifiable: set[str] = set()
+    for row in context_rows:
+        considered = _consider_one_row(
+            row,
+            clock=clock,
+            lifecycle=lifecycle,
+            gate=gate,
+            state=state,
+            agent_messaging_service=agent_messaging_service,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
+        )
+        if considered is None:
+            continue
+        agent_instance_id, delivered = considered
+        notifiable.add(agent_instance_id)
+        if delivered is None:
+            continue
+        outcome, is_watcher_held = delivered
+        tally[outcome] += 1
+        if outcome == "appended":
+            watcher_held += int(is_watcher_held)
+    return tally, watcher_held, notifiable
+
+
+def _sweep_gauge_silent_notices(
+    peer_registry: PeerRegistry,
+    *,
+    reported_instance_ids: set[str],
+    clock: datetime,
+    gate: BandEdgeLatch,
+    state: StateManagementInterface,
+    agent_messaging_service: AgentMessagingService,
+    bridge_manager: BridgeSessionManager,
+) -> tuple[dict[str, int], int, int, set[str]]:
+    """Deliver the registered-but-gauge-silent rider and retain its latch keys."""
+    tally = {"appended": 0, "unroutable": 0, "undeliverable": 0}
+    watcher_held = 0
+    detected = 0
+    notifiable: set[str] = set()
+    for binding, age_seconds in _gauge_silent_bindings(
+        peer_registry,
+        reported_instance_ids=reported_instance_ids,
+        clock=clock,
+    ):
+        latch_key = f"gauge-silent:{binding.agent_instance_id}"
+        notifiable.add(latch_key)
+        if gate.suppressed(latch_key, "gauge_silent", now=clock):
+            continue
+        detected += 1
+        outcome, is_watcher_held = _notify_self_binding(
+            state=state,
+            agent_messaging_service=agent_messaging_service,
+            bridge_manager=bridge_manager,
+            binding=binding,
+            agent_instance_id=binding.agent_instance_id,
+            prose=_gauge_silent_prose(
+                agent_instance_id=binding.agent_instance_id,
+                age_seconds=age_seconds,
+            ),
+        )
+        tally[outcome] += 1
+        if outcome == "appended":
+            watcher_held += int(is_watcher_held)
+            gate.record_sent(latch_key, "gauge_silent", now=clock)
+    return tally, watcher_held, detected, notifiable
 
 
 def sweep_rotation_self_notice(
@@ -929,11 +952,7 @@ def sweep_rotation_self_notice(
     WRONG for a repeating tick -- the composed production caller always
     supplies one.
     """
-    if (
-        peer_registry is None
-        or bridge_manager is None
-        or agent_messaging_service is None
-    ):
+    if peer_registry is None or bridge_manager is None or agent_messaging_service is None:
         # UNWIRED, not broken: the composed production caller passes all three,
         # and a test or one-shot that passes none gets an empty tally rather
         # than an import-time dependency. ``agent_messaging_service`` joins the
@@ -945,39 +964,49 @@ def sweep_rotation_self_notice(
         return SelfNoticeCounts()
     clock = now or datetime.now(UTC)
     gate = latch if latch is not None else BandEdgeLatch()
-    tally = {"appended": 0, "unroutable": 0, "undeliverable": 0}
-    watcher_held = 0
-    notifiable: set[str] = set()
     lifecycle = live_lifecycle_rows_by_instance(state)
-    for row in list_session_context_statuses(state):
-        considered = _consider_one_row(
-            row,
+    context_rows = list_session_context_statuses(state)
+    context_tally, context_watcher_held, context_notifiable = _sweep_context_band_notices(
+        context_rows,
+        clock=clock,
+        lifecycle=lifecycle,
+        gate=gate,
+        state=state,
+        agent_messaging_service=agent_messaging_service,
+        peer_registry=peer_registry,
+        bridge_manager=bridge_manager,
+    )
+    reported_instance_ids = {
+        str(row.get("agent_instance_id") or "")
+        for row in context_rows
+        if str(row.get("agent_instance_id") or "")
+    }
+    silent_tally, silent_watcher_held, gauge_silent, silent_notifiable = (
+        _sweep_gauge_silent_notices(
+            peer_registry,
+            reported_instance_ids=reported_instance_ids,
             clock=clock,
-            lifecycle=lifecycle,
             gate=gate,
             state=state,
             agent_messaging_service=agent_messaging_service,
-            peer_registry=peer_registry,
             bridge_manager=bridge_manager,
         )
-        if considered is None:
-            continue
-        agent_instance_id, delivered = considered
-        notifiable.add(agent_instance_id)
-        if delivered is None:
-            continue
-        outcome, is_watcher_held = delivered
-        tally[outcome] += 1
-        if outcome == "appended":
-            watcher_held += int(is_watcher_held)
-    gate.retain_active(notifiable)
-    return SelfNoticeCounts(watcher_held=watcher_held, **tally)
+    )
+    gate.retain_active(context_notifiable | silent_notifiable)
+    return SelfNoticeCounts(
+        appended=context_tally["appended"] + silent_tally["appended"],
+        watcher_held=context_watcher_held + silent_watcher_held,
+        unroutable=context_tally["unroutable"] + silent_tally["unroutable"],
+        undeliverable=context_tally["undeliverable"] + silent_tally["undeliverable"],
+        gauge_silent=gauge_silent,
+    )
 
 
 __all__ = [
     "EVENT_ROTATION_SELF_NOTICE",
     "ROTATION_SELF_NOTICE_BANDS",
     "ROTATION_SELF_NOTICE_FLOOR_S",
+    "GAUGE_SILENT_REGISTRATION_GRACE_S",
     "SELF_NOTICE_STALENESS_S",
     "BandEdgeLatch",
     "SelfNoticeCounts",

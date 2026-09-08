@@ -133,6 +133,40 @@ class PlatformDevSurfacePlugin(PluginBase, QualityServiceInterface, RepoServiceI
         )
         return self._quality_ops().run_test(smoke)
 
+    def verify_hash_manifest(
+        self,
+        unit_id: str,
+        root_path: str,
+        manifest: dict[str, str],
+        *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        self.logger.info("quality_service.verify_hash_manifest unit=%s by %s", unit_id, _principal_label(call_context))
+        return self._quality_ops().verify_hash_manifest(unit_id, root_path, manifest)
+
+    def predict_gate_smokes_merge(
+        self,
+        base_ref: str,
+        lane_root_path: str,
+        current_master: str,
+        register_path: str = "quality_gates/gate_smokes.txt",
+        *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        self.logger.info("quality_service.predict_gate_smokes_merge by %s", _principal_label(call_context))
+        return self._quality_ops().predict_gate_smokes_merge(
+            base_ref, lane_root_path, current_master, register_path,
+        )
+
+    def detect_scope_regex_gaps(
+        self,
+        paths: list[str],
+        *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        self.logger.info("quality_service.detect_scope_regex_gaps by %s", _principal_label(call_context))
+        return self._quality_ops().detect_scope_regex_gaps(paths)
+
     # ------------------------------------------------------------------
     # RepoServiceInterface (read-only)
     # ------------------------------------------------------------------

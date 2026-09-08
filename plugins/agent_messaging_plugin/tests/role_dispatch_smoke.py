@@ -56,6 +56,7 @@ from agent_messaging_plugin.peer_dispatch import (  # noqa: E402
     DELIVERY_QUEUED_FOR_REPLAY,
     DELIVERY_QUEUED_NOTIFICATION,
     DELIVERY_QUEUED_WAKE,
+    DELIVERY_QUEUED_WATCHER,
     dispatch_role_send,
 )
 from agent_messaging_plugin.peer_registry import PeerUnreachableError  # noqa: E402
@@ -119,18 +120,37 @@ class _WakeAdapter:
 
 class _FakePeerRegistry:
     def __init__(
-        self, *, online: bool, adapter: _WakeAdapter | None, stale: bool = False,
+        self,
+        *,
+        online: bool,
+        adapter: _WakeAdapter | None,
+        stale: bool = False,
+        session_fallback: bool = False,
     ) -> None:
         self._online = online
         self._adapter = adapter
         self._stale = stale
+        self._session_fallback = session_fallback
 
     def resolve(self, agent_id: str, agent_instance_id: str | None) -> BridgeBinding:
-        if not self._online:
+        if not self._online or self._session_fallback:
             raise PeerUnreachableError(
                 f"no live binding for {agent_id}/{agent_instance_id}",
             )
         return _binding(stale=self._stale)
+
+    def resolve_by_agent_session_id(self, agent_session_id: str) -> BridgeBinding | None:
+        if not self._session_fallback or agent_session_id != "ases-holder":
+            return None
+        return BridgeBinding(
+            bridge_id="agc-live",
+            agent_id="claude_code",
+            agent_instance_id="agi-watch-holder",
+            session_label="Architect watch",
+            parent_pid=4242,
+            agent_session_id=agent_session_id,
+            watcher_declared=True,
+        )
 
     def wake_adapter_for(self, agent_id: str) -> _WakeAdapter | None:
         return self._adapter
@@ -176,6 +196,7 @@ _ROLE = ResolvedRole(
     agent_id="claude_code",
     agent_instance_id="agi-holder",
     session_label="Architect",
+    agent_session_id="ases-holder",
 )
 
 
@@ -184,11 +205,21 @@ def _content(text: str) -> list[TextPart]:
 
 
 def _dispatch(
-    *, text: str, online: bool, adapter: _WakeAdapter | None, stale: bool = False,
+    *,
+    text: str,
+    online: bool,
+    adapter: _WakeAdapter | None,
+    stale: bool = False,
+    session_fallback: bool = False,
 ) -> tuple[Any, _FakeService, _FakeBridgeManager]:
     service = _FakeService()
     manager = _FakeBridgeManager()
-    registry = _FakePeerRegistry(online=online, adapter=adapter, stale=stale)
+    registry = _FakePeerRegistry(
+        online=online,
+        adapter=adapter,
+        stale=stale,
+        session_fallback=session_fallback,
+    )
     outcome = dispatch_role_send(
         bridge_manager=manager,  # type: ignore[arg-type]
         peer_registry=registry,  # type: ignore[arg-type]
@@ -265,6 +296,34 @@ def test_important_offline_queues() -> None:
     _check(
         not service.delivered and not manager.events,
         "offline → delivered NOT flipped, nothing emitted",
+    )
+
+
+def test_role_send_reaches_watcher_via_stable_session_fallback() -> None:
+    """A parked role holder rotates from its managed id to an ``agi-watch`` id.
+
+    The role row preserves the holder's stable session key, so a role send must
+    use it after the stale managed instance no longer resolves. Without that
+    fallback, the durable envelope is falsely left ``queued_for_replay`` while
+    the live watcher waits on its bridge queue.
+    """
+    outcome, service, manager = _dispatch(
+        text="wake the parked Codex lane",
+        online=True,
+        adapter=None,
+        session_fallback=True,
+    )
+    _check(
+        outcome.delivery == DELIVERY_QUEUED_WATCHER,
+        "role send resolves the parked watcher by the holder stable session key",
+    )
+    _check(
+        outcome.delivered_to_bridge_id == "agc-live" and len(manager.events) == 1,
+        "stable-session fallback appends to the live watcher bridge",
+    )
+    _check(
+        len(service.persisted) == 1,
+        "watcher fallback preserves persist-first role delivery",
     )
 
 
@@ -347,6 +406,7 @@ def main() -> int:
     test_markerless_send_is_delivered_not_silent()
     test_stale_binding_degrades_to_replay()
     test_important_offline_queues()
+    test_role_send_reaches_watcher_via_stable_session_fallback()
     test_important_live_channel_event()
     test_important_native_wake()
     print(f"\n{_passed} passed, {len(_failed)} failed")

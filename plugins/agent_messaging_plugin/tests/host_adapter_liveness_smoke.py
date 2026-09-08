@@ -47,7 +47,7 @@ from agent_messaging_plugin.session_hosts import (  # noqa: E402
     resolve_host_driver,
 )
 from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
-    spawn_session as lifecycle_spawn_session,
+    _resolve_spawn_host,
 )
 
 # The module docstring's own claims (session_hosts.py, read at authoring
@@ -82,10 +82,10 @@ def test_a_real_consumer_is_wired_to_the_interface() -> None:
     ``resolve_host_driver``, an empty registry would be dead code, not the
     now-retired-BackendRouter-shape hazard. ``spawn_session`` is the real, live consumer
     (§4) — confirm it, structurally, rather than assuming it."""
-    source = inspect.getsource(lifecycle_spawn_session)
+    source = inspect.getsource(_resolve_spawn_host)
     _check(
         "resolve_host_driver" in source,
-        "spawn_session (a real, dispatched L1 verb) calls resolve_host_driver "
+        "spawn_session's real host-resolution helper calls resolve_host_driver "
         "-- the interface has a wired consumer, not just a declared Protocol",
     )
 
@@ -180,7 +180,7 @@ def test_registry_is_never_empty_while_a_consumer_is_wired() -> None:
     state, after the self-proving mutations above have restored it): a
     consumer is wired (proven structurally above) AND the registry holds
     >=1 live implementer, simultaneously, always."""
-    consumer_wired = "resolve_host_driver" in inspect.getsource(lifecycle_spawn_session)
+    consumer_wired = "resolve_host_driver" in inspect.getsource(_resolve_spawn_host)
     _check(
         consumer_wired and len(session_hosts._REGISTRY) > 0,
         "the HostDriver interface has >=1 live registered implementer while "

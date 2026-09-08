@@ -18,10 +18,11 @@ This requires only a Salesforce user account and one browser login — no new Co
 
 Full step-by-step detail lives in this plugin's own overview article (`plugins/salesforce_plugin/knowledge_base/01_salesforce_overview.md`, "One-time operator setup") — this is the condensed version for the hydration conversation:
 
-1. Agent installs the **standalone** sf CLI bundle (ships its own Node — never npm onto the machine's ambient Node; that clash broke live) and pins its absolute path in the plugin config (`sf_cli_path`).
+1. Agent calls `plugin::salesforce_plugin::provision_cli` only after explicit system-change acknowledgement. It probes first, installs the Homebrew `sf` formula and its declared Node closure only when absent, then binds the verified absolute path in `sf_cli_path`; the returned boundary states that no reload or restart is hidden.
 2. Operator logs in once: `sf org login web --alias <alias>` — the CLI keeps a keychain-backed refresh token; nothing re-prompts until logout or revocation.
 3. Agent verifies the session token-safely (JSON-filter to instanceUrl/username — never echo raw `sf org display` output, it contains the access token).
 4. Agent registers the `salesforce_org` address-book entry: `target_org` (the alias) + `instance_host` (the pinned my-domain host) — two literals, no secrets; the platform stores no Salesforce credential at all.
 5. If the plugin is not in the live manifest, add it via the blue-green manifest deploy; then verify with `test_connection` — expect the operator's own username back.
+6. If the operator wants Bulk API v2 ingest (large insert/update/upsert/delete jobs from a CSV — `bulk_ingest_submit` and friends), also set `import_allowed_roots` in the plugin config to the workspace directory (or directories) ingest CSVs will be read from, alongside `export_allowed_roots` for `bulk_job_results`' output CSVs. Both default to `[]` (refuse-all); absent this step every bulk ingest job is refused before it reaches Salesforce.
 
 On decline: stop, leave the plugin dormant. `sf.not_configured` on every verb is the fully-supported steady state, not a broken one — and the same dormancy returns automatically whenever the operator logs the CLI out of the org.

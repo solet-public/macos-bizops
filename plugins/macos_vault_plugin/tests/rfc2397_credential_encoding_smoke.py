@@ -29,6 +29,7 @@ Standalone — not pytest. Run with::
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import base64
 import os
 import sys
@@ -40,6 +41,13 @@ from collections.abc import Callable
 # never touches a live ``solet.*`` / ``smoke.*`` entry. Set BEFORE importing the
 # keychain module (SystemKeychain resolves SOLET_NAME eagerly).
 os.environ["SOLET_NAME"] = "rfc2397smoke"
+
+from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from macos_vault_plugin.keychain import (  # noqa: E402
     SystemKeychain,

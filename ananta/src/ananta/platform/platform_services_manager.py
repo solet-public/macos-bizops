@@ -24,6 +24,11 @@ class PlatformServicesManager:
 
         # Step 3: Create UnifiedMetadataRegistry object but don't call initialize()
         self._unified_metadata_registry: UnifiedMetadataRegistry | None = None
+        self._unified_metadata_registry_status: dict[str, object] = {
+            "enabled": False,
+            "initialized": None,
+            "layer_results": {},
+        }
 
     def initialize(self) -> bool:
         try:
@@ -44,6 +49,8 @@ class PlatformServicesManager:
         if new_metadata_system.lower() != "true":
             return
 
+        self._unified_metadata_registry_status["enabled"] = True
+
         app_home_path = self._get_app_home_path()
         platform_path = str(Path(__file__).parent / "metadata")
         plugins_path = self._get_plugins_path()
@@ -54,7 +61,18 @@ class PlatformServicesManager:
             plugins_path=plugins_path,
             app_path=app_path,
         )
-        self._unified_metadata_registry.initialize()
+        registry_initialized = self._unified_metadata_registry.initialize()
+        layer_results = self._unified_metadata_registry.get_initialization_results()
+        self._unified_metadata_registry_status = {
+            "enabled": True,
+            "initialized": registry_initialized,
+            "layer_results": layer_results,
+        }
+        if not registry_initialized:
+            logger.error(
+                "Unified metadata registry initialization failed; layer_results=%s",
+                layer_results,
+            )
 
     def _get_app_home_path(self) -> Path:
         """Get and validate APP_HOME path."""
@@ -162,6 +180,7 @@ class PlatformServicesManager:
             "metadata_registry_available": self._metadata_registry is not None,
             "json_validator_available": self._json_validator is not None,
             "code_generator_available": self._code_generator is not None,
+            "unified_metadata_registry": self._unified_metadata_registry_status.copy(),
             "feature_flags": {
                 "use_metadata_registry": OrchestrationFeatureFlags.use_metadata_registry(),
                 "use_new_template_engine": OrchestrationFeatureFlags.use_new_template_engine(),

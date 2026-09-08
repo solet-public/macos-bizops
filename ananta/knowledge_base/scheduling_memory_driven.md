@@ -102,7 +102,7 @@ Note: `memory_service::remember` does not replace by tag; reusing a tag can crea
   "arguments": {
     "seconds": 60,
     "memory_tag": "followup:job-job_abc123",
-    "content": "Follow-up: check job status for job_abc123. If completed, deliver output via post_message using job_result_ref. If still processing, send a brief status update and schedule another check in 60 seconds."
+    "content": "Follow-up: check job status for job_abc123. For any user-visible update, resolve the active IO namespace with query_process_registry, then invoke plugin::<namespace>::post_message; SESSION_AWARE binds the session, so never pass session_id. Use attachments or job_result_ref only when that namespace schema declares them. If still processing, send a brief status update and schedule another check in 60 seconds."
   }
 }
 ```
@@ -113,7 +113,7 @@ Note: `memory_service::remember` does not replace by tag; reusing a tag can crea
 {
   "process_key": "service_interface::memory_service::remember",
   "arguments": {
-    "content": "Follow-up: check job status for job_abc123. If completed, deliver output via post_message using job_result_ref. If still processing, send a brief status update and schedule another check in 60 seconds.",
+    "content": "Follow-up: check job status for job_abc123. For any user-visible update, resolve the active IO namespace with query_process_registry, then invoke plugin::<namespace>::post_message; SESSION_AWARE binds the session, so never pass session_id. Use attachments or job_result_ref only when that namespace schema declares them. If still processing, send a brief status update and schedule another check in 60 seconds.",
     "tags": ["followup:job-job_abc123", "job:job_abc123", "session:sess-abc123"]
   }
 }

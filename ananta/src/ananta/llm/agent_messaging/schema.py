@@ -96,6 +96,20 @@ ROLE_THREAD_PREFIX = "role:"
 
 _RECIPIENT_KIND_VALUES = (RECIPIENT_KIND_ROLE, RECIPIENT_KIND_INSTANCE)
 
+# Immutable transport provenance for ``core__agent_role_message`` envelopes.
+# ``unknown`` is the safe default for rows written before this column existed:
+# historical traffic must never be retroactively presented as stdio traffic.
+SENDER_PRINCIPAL_KIND_OAUTH_CLIENT = "oauth_client"
+SENDER_PRINCIPAL_KIND_STDIO_AGENT = "stdio_agent"
+SENDER_PRINCIPAL_KIND_SYSTEM = "system"
+SENDER_PRINCIPAL_KIND_UNKNOWN = "unknown"
+_SENDER_PRINCIPAL_KIND_VALUES = (
+    SENDER_PRINCIPAL_KIND_OAUTH_CLIENT,
+    SENDER_PRINCIPAL_KIND_STDIO_AGENT,
+    SENDER_PRINCIPAL_KIND_SYSTEM,
+    SENDER_PRINCIPAL_KIND_UNKNOWN,
+)
+
 # v10 Control #5 role-delivery wire contract — the channel-event ``meta`` keys
 # the server stamps on a role-addressed ``peer_message`` (peer_dispatch writer)
 # and the bridge forwarder reads to recognise a role delivery and flip its
@@ -514,6 +528,38 @@ def get_agent_role_message_schema() -> SchemaDefinition:
             "sender_session_label": ColumnDefinition(
                 type=ColumnType.TEXT,
                 description="Sender's human session label at send time (nullable).",
+            ),
+            "sender_principal_kind": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                default=SENDER_PRINCIPAL_KIND_UNKNOWN,
+                check=(
+                    "sender_principal_kind IN "
+                    f"({_quoted_csv(_SENDER_PRINCIPAL_KIND_VALUES)})"
+                ),
+                description=(
+                    "Immutable sender transport provenance: oauth_client, "
+                    "stdio_agent, system, or unknown for pre-provenance rows."
+                ),
+            ),
+            "sender_transport_principal": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                default="unknown",
+                description=(
+                    "Immutable authenticated transport principal, distinct from "
+                    "the sender identity. Unknown is retained for legacy or "
+                    "non-attested paths."
+                ),
+            ),
+            "sender_identity_trust": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                default="unknown",
+                description=(
+                    "What the transport actually verified about the sender "
+                    "identity; never an inferred authority level."
+                ),
             ),
             "thread_id": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -1008,6 +1054,10 @@ __all__ = [
     "RECIPIENT_KIND_INSTANCE",
     "RECIPIENT_KIND_ROLE",
     "ROLE_THREAD_PREFIX",
+    "SENDER_PRINCIPAL_KIND_OAUTH_CLIENT",
+    "SENDER_PRINCIPAL_KIND_STDIO_AGENT",
+    "SENDER_PRINCIPAL_KIND_SYSTEM",
+    "SENDER_PRINCIPAL_KIND_UNKNOWN",
     "TABLE_AGENT_DIRECT_WAKE",
     "TABLE_AGENT_MESSAGE",
     "TABLE_AGENT_ROLE_MESSAGE",

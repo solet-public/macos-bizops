@@ -18,6 +18,11 @@ from typing import Any
 
 from platform_dev_surface_plugin.bounded_subprocess import run_bounded
 from platform_dev_surface_plugin.quality import gate_registry
+from platform_dev_surface_plugin.quality.landing_verify import (
+    detect_scope_regex_gaps,
+    predict_append_only_register_merge,
+    verify_hash_manifest,
+)
 
 # run_test bounds: the full suite runs 60+ smokes in series (is_long_running);
 # each smoke carries its own per-smoke timeout inside run_smokes.py.
@@ -166,3 +171,30 @@ class QualityOperations:
             "truncated": result.truncated,
             "output_chars_total": result.output_chars_total,
         }
+
+    def verify_hash_manifest(
+        self, unit_id: str, root_path: str, manifest: dict[str, str],
+    ) -> dict[str, Any]:
+        """Rehash a landing manifest and disclose editable-install shadowing."""
+        return verify_hash_manifest(
+            unit_id=unit_id, root_path=root_path, manifest=manifest,
+        )
+
+    def predict_gate_smokes_merge(
+        self,
+        base_ref: str,
+        lane_root_path: str,
+        current_master: str,
+        register_path: str = "quality_gates/gate_smokes.txt",
+    ) -> dict[str, Any]:
+        """Predict a tracked-debt-register merge without changing any Git state."""
+        return predict_append_only_register_merge(
+            base_ref=base_ref,
+            lane_root_path=lane_root_path,
+            current_master=current_master,
+            register_path=register_path,
+        )
+
+    def detect_scope_regex_gaps(self, paths: list[str]) -> dict[str, Any]:
+        """Report landing paths which need static analysis beyond the aggregate gate."""
+        return detect_scope_regex_gaps(paths)

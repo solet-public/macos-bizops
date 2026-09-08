@@ -8,7 +8,7 @@
     "result_type": "process_schema",
     "result_description": "Schema result with action_status and data wrapper. data contains: process_key (the process identifier), description (what the process does), invocation_schema (full JSON Schema defining required and optional parameters), is_long_running (boolean indicating if user should be notified before invocation)",
     "presentation_guidance": "",
-    "output_action_guidance": "Use invocation_schema to construct valid arguments when invoking a tool, or to explain parameters/usage when answering questions. Copy provider_type/provider/function_name exactly from schema const values. For outbound communication, use the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message) when available."
+    "output_action_guidance": "Use invocation_schema to construct valid arguments when invoking a tool, or to explain parameters/usage when answering questions. Copy provider_type/provider/function_name exactly from schema const values. For outbound communication, resolve the active IO plugin namespace with query_process_registry, then invoke plugin::<namespace>::post_message with message and any namespace-specific arguments from its schema."
   },
   "error_processor_customizations": {
     "action_context": "Retrieves the full JSON Schema for a process from the registry",

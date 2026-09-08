@@ -98,7 +98,7 @@ class _StubRouter:
     def __init__(self, rollback_mode: str) -> None:
         self._rollback_mode = rollback_mode
         self.registered: dict[str, int] = {}
-        self.rollback_calls: list[str] = []
+        self.rollback_calls: list[tuple[str, str]] = []
         self.unregister_calls: list[str] = []
 
     def status(self) -> dict[str, Any]:
@@ -121,8 +121,8 @@ class _StubRouter:
         del color, instance_id
         return {"activated": True, "previous_color": COLOR_BLUE, "drain_window_seconds": 30}
 
-    def rollback(self, color: str) -> dict[str, Any]:
-        self.rollback_calls.append(color)
+    def rollback(self, color: str, instance_id: str) -> dict[str, Any]:
+        self.rollback_calls.append((color, instance_id))
         if self._rollback_mode == _ROLLBACK_RPC_ERROR:
             raise RouterClientError("rollback", "injected rollback RPC failure")
         if self._rollback_mode == _ROLLBACK_REFUSED:
@@ -294,7 +294,7 @@ def _f1_cases() -> None:
         _check(
             obs["status"] == "failed"
             and obs["reason_code"] == "cutover_compensated"
-            and obs["rollback_calls"] == [COLOR_BLUE]
+            and obs["rollback_calls"] == [(COLOR_BLUE, "blue-id")]
             and obs["candidate_alive"] is False
             and len(unreg) == 1
             and unreg[0].startswith("solet-green-"),

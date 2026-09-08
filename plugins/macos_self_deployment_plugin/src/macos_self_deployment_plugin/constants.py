@@ -332,6 +332,12 @@ class RestartReasonCode(StrEnum):
     # retryable after the source (or probe) is fixed.
     PROBE_REJECTED = "probe_rejected"
     SPAWN_FAILED = "spawn_failed"
+    # The candidate process started but EXITED before registering with the
+    # router. Distinct from REGISTER_TIMEOUT, which means it was still alive
+    # and simply never finished coming up: a dead candidate is detected within
+    # a poll interval instead of costing the swap its full ready-timeout (and
+    # holding the action queue for all of it).
+    SPAWN_DIED = "spawn_died"
     REGISTER_TIMEOUT = "register_timeout"
     ACTIVATE_REFUSED = "activate_refused"
     # The post-activate symlink swap failed but the F2-gated compensation

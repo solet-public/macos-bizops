@@ -19,9 +19,11 @@ description: >
   touches the platform state DB.
 
   FULL R/W INCLUDING DELETE (operator-ratified RATIFY-2): record deletion is
-  an acceptable-loss class, unlike database destruction. run_apex,
-  bulk_query/bulk_load, and ContentVersion file verbs are out of v1 for
-  build-effort reasons only (pullable into v1 on request).
+  an acceptable-loss class, unlike database destruction. Bulk API v2 ingest
+  (insert/update/upsert/delete, submitted --async and polled — never
+  hardDelete) is also in scope. run_apex, bulk query, and ContentVersion
+  file verbs remain out of v1 for build-effort reasons only (pullable into
+  v1 on request).
 optional: true
 
 implements:
@@ -54,6 +56,18 @@ config:
       opts workspace roots in here (operator ruling 2026-07-15 — bulk query
       data lands in the operator's own workspace, never context or platform
       blob storage). Prefer the exact export directories over broad parents.
+      Also governs bulk_job_results' three CSV outputs (successful/failed/
+      unprocessed records).
+  import_allowed_roots:
+    type: list
+    required: false
+    default: []
+    description: >
+      Absolute workspace directories bulk_ingest_submit may read ingest CSVs
+      from (realpath + commonpath containment, the read-side mirror of
+      export_allowed_roots). Empty by default = REFUSE-ALL: every Bulk API
+      v2 ingest job is refused until the operator opts workspace roots in
+      here. Prefer the exact ingest directories over broad parents.
 
 # Org binding lives in the address book entry "salesforce_org": two literal
 # fields, target_org (the sf CLI alias or username every verb is invoked

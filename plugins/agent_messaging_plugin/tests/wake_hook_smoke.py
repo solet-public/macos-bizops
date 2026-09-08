@@ -9,12 +9,18 @@ Everything here runs against temp files — no bridge, no network, no sleep.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import fcntl
 import json
 import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from ananta.constants import ExitCodes
 from click.testing import CliRunner, Result
@@ -26,6 +32,10 @@ import agent_messaging_plugin.local_cli.wake as wake_mod
 _FLEET_ENV = {
     "AGENT_SESSION_LABEL": "Worker-A",
     "AGENT_SESSION_ID": "ases-1753200000-101-11111",
+}
+_MANAGED_FLEET_ENV = {
+    **_FLEET_ENV,
+    "AGENT_INSTANCE_ID": "agi-2fa825900c217a86ccd05479b3667e2d",
 }
 _BARE_ENV = {
     "AGENT_SESSION_LABEL": "",
@@ -243,14 +253,55 @@ def test_watch_spools_deliveries_but_not_armed_line() -> None:
 
 def test_watch_and_wake_derive_the_same_spool_path() -> None:
     # The pairing contract: watch (writer) and wake (reader) must meet at the
-    # SAME derived path with no flags — both key on the launcher session id.
-    digest = spool_mod.watch_instance_digest(
-        _FLEET_ENV["AGENT_SESSION_ID"],
-    )
-    instance_id = f"{cli_mod.WATCH_AGENT_INSTANCE_PREFIX}{digest}"
-    path = spool_mod.default_spool_path("testling", instance_id)
-    assert path.name == f"testling.{instance_id}.spool"
-    assert instance_id.startswith("agi-watch-")
+    # SAME derived path with no flags — both use the unmanaged fallback.
+    with tempfile.TemporaryDirectory() as temporary_dir:
+        runtime_dir = Path(temporary_dir)
+        with (
+            patch.dict("os.environ", _FLEET_ENV, clear=True),
+            patch.object(spool_mod, "get_runtime_dir", lambda _name: runtime_dir),
+            patch.object(wake_mod, "resolve_solet_name", lambda: "testling"),
+        ):
+            watch_identity = cli_mod._resolve_watch_identity(None, "codex")
+            watch_spool = spool_mod.default_spool_path(
+                "testling",
+                watch_identity.agent_instance_id,
+            )
+            wake_target = wake_mod._resolve_target(None)
+    assert wake_target is not None
+    assert wake_target.spool == watch_spool
+    assert watch_identity.agent_instance_id.startswith("agi-watch-")
+
+
+def test_managed_session_halves_pair_on_the_ledger_id_spool() -> None:
+    """Managed watch and wake halves must use the launcher's ledger identity.
+
+    Fails before the shared resolver: watch writes the ledger-id spool while
+    wake derives an ``agi-watch-<digest>`` spool and parks there until timeout.
+    """
+    with tempfile.TemporaryDirectory() as temporary_dir:
+        runtime_dir = Path(temporary_dir)
+        with (
+            patch.dict("os.environ", _MANAGED_FLEET_ENV, clear=True),
+            patch.object(spool_mod, "get_runtime_dir", lambda _name: runtime_dir),
+            patch.object(wake_mod, "resolve_solet_name", lambda: "testling"),
+        ):
+            watch_identity = cli_mod._resolve_watch_identity(None, "codex")
+            watch_spool = spool_mod.default_spool_path(
+                "testling",
+                watch_identity.agent_instance_id,
+            )
+            spool_mod.write_watch_pairing(
+                spool_mod.watch_pairing_path(
+                    "testling",
+                    watch_identity.agent_instance_id,
+                ),
+                watch_spool,
+            )
+            watch_spool.write_text('{"watch": "event"}\n', encoding="utf-8")
+            wake_target = wake_mod._resolve_target(None)
+            assert watch_spool.read_text(encoding="utf-8") == '{"watch": "event"}\n'
+    assert wake_target is not None
+    assert wake_target.spool == watch_spool
 
 
 def test_wake_identity_error_is_not_a_wake_exit() -> None:

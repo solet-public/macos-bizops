@@ -97,7 +97,7 @@ from ananta.llm.session_ledger.types import SourceVendor
 
 from .schema import SESSION_HOST_OPERATOR
 from .session_claude_mapping_store import list_session_claude_mappings
-from .session_lifecycle_store import list_managed_sessions
+from .session_lifecycle_store import iter_managed_sessions_unbounded, list_managed_sessions
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -456,7 +456,19 @@ def build_budget_report(
         filters["lane_id"] = lane_id
     if budget_line:
         filters["budget_line"] = budget_line
-    managed_rows = list_managed_sessions(state, filters or None)
+    managed_rows = (
+        list_managed_sessions(state, filters)
+        if filters
+        else list(
+            iter_managed_sessions_unbounded(
+                state,
+                reason=(
+                    "an unscoped budget_report intentionally aggregates every managed session "
+                    "into budget-line totals"
+                ),
+            )
+        )
+    )
 
     top_buckets: dict[str, _Bucket] = {}
     model_buckets: dict[tuple[str, str], _Bucket] = {}

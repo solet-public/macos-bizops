@@ -119,9 +119,11 @@ ignored: named here so it isn't rediscovered as a surprise.
 
 `_TmuxSendKeysDriverChannel.send()` (the `DriverChannel` behind
 `drive_session`/`clear_session`/`compact_session`, and drive-on-delivery's
-own notice) injects literal keystrokes via `tmux send-keys -l` followed by a
-separate `send-keys Enter`. tmux exposes no submission acknowledgement for
-either call — there is no protocol-level way to confirm the target pane's
+own notice) loads the payload into a private tmux buffer and BRACKETED-pastes
+it, followed by a separate `send-keys Enter`. It injected literal keystrokes
+via `tmux send-keys -l` until 2026-09-07; see the amendment below for the
+measurement that retired that mechanism. tmux exposes no submission
+acknowledgement for either call — there is no protocol-level way to confirm the target pane's
 application actually consumed and submitted what was sent. This is stated
 plainly rather than papered over: **submission failure at this layer is
 undetectable, by construction, not by omission.**
@@ -139,9 +141,51 @@ keystrokes into a live, non-empty session on the common case, not just an
 edge case. Mechanism analysis also found no actual swallow path for
 `send-keys -l` (raw literal key events plus a separate `Enter` key event —
 not a paste buffer, so there is no bracketed-paste boundary to lose an
-`Enter` at) and **zero confirmed field failures as of 2026-08-04**. The
-channel ships exactly as it always has: two `send-keys` calls, no confirm,
-no retry.
+`Enter` at) and **zero confirmed field failures as of 2026-08-04**.
+
+### AMENDMENT 2026-09-07 — two of those three findings are now retired
+
+The park on **confirm-and-retry** STANDS, and on its original merits: a retry
+deposits a second copy of real text into a live input buffer and still cannot
+confirm itself, which is why `session_lifecycle_verbs._verify_drive_effect`
+carries its own NO RETRY, EVER rule. Nothing below reopens that.
+
+The two supporting claims underneath it do not survive measurement, and a
+reader leaning on this section needs to know which parts are still load-
+bearing:
+
+* **"Zero confirmed field failures" is retired.** Near-identical
+  text-not-delivered reports were recorded on 2026-08-24, 08-30, 09-02,
+  09-06 and three times on 09-07.
+* **"No actual swallow path for `send-keys -l`" is retired — measured
+  false.** The reasoning was sound about the `Enter`, and wrong about the
+  PAYLOAD. Against a real Claude Code TUI pane on 2026-09-07, a 10.8KB /
+  142-line payload sent with `send-keys -l` arrived HEAD-TRUNCATED: the
+  receiving model, asked for the first and last 25 characters of what it had
+  received, reported filler from the middle of the payload plus the intact
+  tail, and the head marker appeared nowhere in the pane's full scrollback.
+  The identical payload delivered by `load-buffer` plus `paste-buffer -p`
+  arrived intact. The loss is in the receiving TUI's raw-mode reader, not in
+  tmux: the same `send-keys -l` burst into a plain `cat` delivered all 10829
+  bytes, and into a Codex TUI pane arrived intact — which is why the
+  bracketed-paste change is scoped to the Claude channel and `codex_tmux`
+  was deliberately left on `send-keys -l` rather than changed by symmetry.
+
+So the mitigation that was actually missing was never a confirm loop. It was
+(a) an insert mechanism that does not lose the payload, and (b) a verifier
+able to SEE a realistic payload — `verify_driven`'s population anchor required
+the composer row to be a prefix of the driven text, which a collapsed
+multi-line paste never is, so every large drive polled its full 120s deadline
+and then reported a delivered drive as `drive_unverified`. Both landed
+2026-09-07 with their own killing regressions. The confirm-loop objections
+that parked the 2026-08-04 proposal do not apply to either: there is no added
+latency (a confirmed drive now returns in ~2s where it previously burned the
+full 120s timeout before failing), and no new false-positive surface (the
+collapsed-paste anchor is keyed on the payload's OWN line count, with a
+control regression proving it rejects another writer's paste).
+
+The channel ships with one `load-buffer` plus one `paste-buffer -p` plus one
+`send-keys Enter`: no confirm loop, no retry.
 
 **Why this is acceptable — the safety net is the design, not a confirm
 loop:**

@@ -6,7 +6,7 @@ Article Role: plugin_reference
 
 Article Tags: planning-stage:execution, evidence-category:capability-reference, domain:salesforce, domain:local-solet, domain:cloud-solet
 
-Embedding Description: Salesforce plugin reference — the one-time operator setup for connecting a Salesforce org via the operator's sf CLI login (standalone CLI bundle install, one browser login via sf org login web, two-field salesforce_org address-book registration with a pinned instance host), the eight verbs with argument shapes (SOQL query, record get/describe/list/create/update/delete, test_connection), typed sf.* errors with recovery when the CLI has no live session, and the full-CRUD-including-delete posture under full CLI delegation.
+Embedding Description: Salesforce plugin reference — the one-time operator setup for connecting a Salesforce org via the operator's sf CLI login (standalone CLI bundle install, one browser login via sf org login web, two-field salesforce_org address-book registration with a pinned instance host), the thirteen verbs with argument shapes (SOQL query, record get/describe/list/create/update/delete, test_connection, and Bulk API v2 ingest submit/status/results/abort), typed sf.* errors with recovery when the CLI has no live session, and the full-CRUD-including-delete posture under full CLI delegation.
 
 A full read/write connector over the operator's Salesforce org. Executor:
 full CLI delegation — every verb shells out to the operator's `sf` CLI
@@ -27,9 +27,12 @@ The operator's dividing line: *"document/ticket deletion is an acceptable
 loss class, database destruction is not."* Salesforce is a SaaS workflow
 tool, not the developer database connectors are — so, unlike
 `snowflake_plugin`/`external_postgres_plugin`, this connector ships **full
-CRUD including `delete_record`**. `run_apex`, `bulk_query`/`bulk_load`, and
-ContentVersion file-upload verbs are **out of v1 for build-effort reasons
-only** (not a risk exclusion) — pullable into v1 on operator request.
+CRUD including `delete_record`**, and — as of 2026-08-24 — **Bulk API v2
+ingest** (`bulk_ingest_submit`/`bulk_job_status`/`bulk_job_results`/
+`bulk_job_abort`; insert/update/upsert/delete, never `hardDelete` — see
+"Bulk API v2 ingest" below). `run_apex`, bulk **query**, and ContentVersion
+file-upload verbs remain **out of v1 for build-effort reasons only** (not a
+risk exclusion) — pullable into v1 on operator request.
 
 ## Executor model — full CLI delegation, no token ever enters this process
 
@@ -86,28 +89,22 @@ already-blessed Salesforce CLI app, exactly like the operator's own `sf`
 usage. The solet acts as the operator's user — its permissions are
 that user's permissions, and its audit trail shows that user.
 
-### Stage 1 — install the sf CLI (agent-executed)
+### Stage 1 — provision the sf CLI on consent (agent-executed)
 
-1. Install the **standalone bundle** — never npm-onto-ambient-Node (a
-   version clash between the CLI's HTTP stack and the machine's Node broke
-   exactly this way live; the standalone bundle ships its own Node):
-   ```
-   mkdir -p ~/.local/share/sf
-   curl -fsSL "https://developer.salesforce.com/media/salesforce-cli/sf/channels/stable/sf-darwin-arm64.tar.xz" \
-     | tar -xJ -C ~/.local/share/sf --strip-components=1
-   ~/.local/share/sf/bin/sf version   # expect @salesforce/cli/2.x
-   ```
-2. Pin the absolute path in the plugin's machine config
-   (`<APP_HOME>/config/plugins/salesforce_plugin.json`):
-   `{"sf_cli_path": "/Users/<user>/.local/share/sf/bin/sf"}` — the platform
-   process's PATH (LaunchAgent) does not carry it. Adding the bin dir to
-   the operator's own PATH is optional and offer-only.
+1. Call `plugin::salesforce_plugin::provision_cli` with
+   `acknowledge_system_change: true`. It probes first; when sf is missing it
+   authorizes only `brew install sf` and Homebrew's declared `node` closure,
+   refusing upgrades, reinstalls, removals, unlinks, and extra packages.
+2. The process re-probes `sf --version`, persists the resolved absolute path
+   as `sf_cli_path`, and rebinds the running plugin. It explicitly reports
+   that this configuration update has no hidden reload or restart boundary.
+   A compliant sf executable is not reinstalled.
 
 ### Stage 2 — one browser login (operator)
 
 3. Run (agent may launch it; the browser opens for the operator):
    ```
-   ~/.local/share/sf/bin/sf org login web --alias <alias>
+   sf org login web --alias <alias>
    ```
    The operator signs in once (SSO/MFA fine). The CLI stores its
    keychain-backed refresh token; nothing re-prompts until logout or
@@ -162,7 +159,7 @@ that user's permissions, and its audit trail shows that user.
   org-side revocation turns the connector off until the next login — the
   fully-supported dormant state, not a breakage.
 
-## Verbs (built — 9 total)
+## Verbs (built — 13 total)
 
 | Verb | Args | Returns |
 |---|---|---|
@@ -175,6 +172,10 @@ that user's permissions, and its audit trail shows that user.
 | `create_record` | `sobject`, `fields` | `{id, success}` |
 | `update_record` | `sobject`, `id`, `fields` | `{success}` |
 | `delete_record` | `sobject`, `id` | `{success}` (permanent — see read/write posture) |
+| `bulk_ingest_submit` | `operation`, `sobject`, `csv_path`, `external_id_field?` | `{job_id, state, processed_records, failed_records, error_message}` — submits a Bulk v2 ingest job `--async`; `csv_path` is read-contained under `import_allowed_roots` |
+| `bulk_job_status` | `job_id` | `{job_id, state, processed_records, failed_records, error_message}` — the poll target for a submitted job |
+| `bulk_job_results` | `job_id`, `successful_results_path`, `failed_results_path`, `unprocessed_results_path` | `{successful_results_path, failed_results_path, unprocessed_results_path}` — three CSVs written under `export_allowed_roots` |
+| `bulk_job_abort` | `job_id` | `{job_id, state, processed_records, failed_records, error_message}` |
 
 Both `soql_query` and `export_soql` ALWAYS write their result to the
 caller's `output_tsv_path` — never records inline, at any size
@@ -196,10 +197,50 @@ does not apply; the actual Salesforce fact for this call path is a
 2,000-record REST query batch size with no vendor total ceiling, and
 jsforce's `autoFetch` already pages past that internally.
 
+## Bulk API v2 ingest (2026-08-24 — wave 1: ingest only, bulk query is wave 2)
+
+Four verbs cover the write side of Bulk API v2 — submitting large insert/
+update/upsert/delete jobs from a CSV file, polling them, fetching their
+result CSVs, and aborting them. All four are, like every verb in this
+plugin, on the D0.3 deferred-completion shape: the dispatch returns a
+plugin-level `job_id`/`status: queued` in milliseconds, and the *Salesforce*
+Bulk job's own id/state is delivered separately when that dispatch's job
+completes — two independent async layers, never conflate the two ids.
+
+- **`bulk_ingest_submit`** runs `sf data <operation> bulk --async --json` and
+  returns the instant Salesforce ACKNOWLEDGES the job (state `Open` or
+  similar) — never `--wait`, because a Bulk v2 job can run minutes, well past
+  this connector's 30s per-call subprocess bound (`SF_CLI_TIMEOUT_SECONDS`).
+  `operation` is one of `insert`/`update`/`upsert`/`delete`. **`hardDelete` is
+  explicitly excluded** — it bypasses the recycle bin and needs a separate org
+  permission, and is not obviously inside the standing delete ratification
+  (RATIFY-2); add it later only on explicit operator say-so. `external_id_field`
+  is required if, and only if, `operation` is `upsert` — supplying it for any
+  other operation is refused, not silently ignored. `csv_path` must be an
+  ABSOLUTE path already on disk, contained under an operator-configured
+  `import_allowed_roots` entry (empty by default = refuse every ingest).
+- **`bulk_job_status`** is the poll target: `GET /jobs/ingest/{id}` via
+  `run_rest`, an honest passthrough of the Salesforce job's `state`
+  (`Open` → `UploadComplete` → `InProgress` → `JobComplete`/`Failed`/
+  `Aborted`) plus processed/failed record counts.
+- **`bulk_job_results`** fetches the job's three result CSVs — successful,
+  failed, and unprocessed records — and writes each to a caller-supplied
+  ABSOLUTE path under `export_allowed_roots` (the same config `export_soql`
+  uses, admitted with a `.csv` suffix instead of `.tsv`). The CSV bodies come
+  back via `run_rest`'s raw-text mode rather than JSON-decoded — the measured
+  design choice over the CLI's own `sf data bulk results --job-id`, which
+  writes into its own resolved cwd outside this plugin's containment
+  boundary; REST + our own contained file write keeps every byte this verb
+  writes inside the same gate `export_soql` already uses.
+- **`bulk_job_abort`** does `PATCH /jobs/ingest/{id}` with `state: Aborted` —
+  the recovery lever for a job submitted in error. Records already processed
+  before the abort are NOT rolled back.
+
 Errors are typed with the `sf.*` prefix: `sf.not_configured`,
 `sf.invalid_params`, `sf.auth_failed`, `sf.session_expired`,
 `sf.permission_denied`, `sf.not_found`, `sf.malformed_query`,
-`sf.rate_limited`, `sf.api_error`, `sf.export_path_refused`.
+`sf.rate_limited`, `sf.api_error`, `sf.export_path_refused`,
+`sf.import_path_refused`.
 
 ## Security posture (mirrors the Jira/Snowflake/external-Postgres wave)
 
@@ -247,8 +288,10 @@ false positive the gate cannot resolve statically. One whole-file
 |---|---|
 | `src/salesforce_plugin/constants.py` | Every magic value: address-book field names, error codes, result types, caps. |
 | `src/salesforce_plugin/app_config.py` | Resolves `salesforce_org` (target_org + instance_host, both literal) from the address book. |
-| `src/salesforce_plugin/client.py` | `SalesforceCliExecutor` — `run_json()` (envelope commands) + `run_rest()` (`api request rest` with a JSON body file); verifies the org-binding host pin once, lazily, via `org display --json`. No rebuild-on-expiry — the CLI manages its own credential refresh. |
+| `src/salesforce_plugin/client.py` | `SalesforceCliExecutor` — `run_json()` (envelope commands) + `run_rest()` (`api request rest` with a JSON body file, or `raw_response=True` for a CSV body — `bulk_job_results`); verifies the org-binding host pin once, lazily, via `org display --json`. No rebuild-on-expiry — the CLI manages its own credential refresh. |
 | `src/salesforce_plugin/errors.py` | Topology-safe error classification (`classify_salesforce_error`) over `SalesforceCliCallError` (error_code + detail_message from the CLI's `--json` error envelope or the `api request rest` raw error array). |
 | `src/salesforce_plugin/soql_actions.py` | `soql_query` — file-based query, `SF_ORG_MAX_QUERY_LIMIT` env cap + client-side slice; no manual pagination (the CLI autofetches). |
 | `src/salesforce_plugin/record_actions.py` | `get_record`/`describe_sobject`/`delete_record` via stable ID-based commands; `create_record`/`update_record`/`list_sobjects` via `run_rest` (the `--values` mini-language's `stringToDictionary` parser has a proven correctness bug — see the executor model section above). |
+| `plugins/salesforce_plugin/src/salesforce_plugin/bulk_actions.py` | Bulk API v2 ingest — `bulk_ingest_submit` (`data <op> bulk --async`), `bulk_job_status`/`bulk_job_abort` (`run_rest` against `/jobs/ingest/{id}`), `bulk_job_results` (raw-text `run_rest` → three contained CSV writes). |
+| `plugins/salesforce_plugin/src/salesforce_plugin/import_containment.py` | Read-side mirror of `export_containment.py` for `bulk_ingest_submit`'s `csv_path` — `import_allowed_roots`, refuse-all default, plus an existence check (an ingest source must already be a real file). |
 | `src/salesforce_plugin/plugin.py` | The `SalesforcePlugin` EDGE provider — error mapping, EDGE registration. No retry wrapper: a CLI invocation either succeeds or fails classified, never a stale-session mid-flight fault to retry. |

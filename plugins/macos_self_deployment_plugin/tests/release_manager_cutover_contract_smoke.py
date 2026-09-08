@@ -313,6 +313,53 @@ def _case_compensate_intent_two_real(rec: support.SmokeRecorder, scratch: Path) 
     )
 
 
+def _case_compensation_restore_oserror_preserves_intent(
+    rec: support.SmokeRecorder, scratch: Path
+) -> None:
+    """A restore fault must leave the compensate intent for reconcile.
+
+    The failed DONE write enters compensation. Injecting an ``OSError`` into
+    current-link restoration leaves a partially restored pair; clearing the
+    ledger marker here would make ``reconcile`` incorrectly no-op.
+    """
+    source = support.build_fake_source(scratch)
+    releases = scratch / "releases"
+    rel_a, cand_b = _seed(source, releases)
+    mgr = support.make_manager(
+        source, releases, ledger_write_hook=_raise_oserror_on(LEDGER_STEP_DONE),
+    )
+    original_restore = mgr._symlinks.restore  # noqa: SLF001 - fixture seam
+
+    def fail_current_restore(link: Path, target: str | None) -> None:
+        if link == mgr._symlinks.current:  # noqa: SLF001 - fixture seam
+            raise OSError("simulated compensation current-link restore failure")
+        original_restore(link, target)
+
+    mgr._symlinks.restore = fail_current_restore  # type: ignore[method-assign]  # noqa: SLF001
+    try:
+        exc = _capture(lambda: mgr.cutover(cand_b))
+    finally:
+        mgr._symlinks.restore = original_restore  # type: ignore[method-assign]  # noqa: SLF001
+    rec.check(
+        isinstance(exc, ReleaseManagerError),
+        f"[restore-fault] cutover raises ReleaseManagerError ({type(exc).__name__})",
+    )
+    surviving = _ledger(releases).get("in_progress")
+    rec.check(
+        isinstance(surviving, dict) and surviving.get("phase") == PHASE_COMPENSATE,
+        "[restore-fault] incomplete compensation preserves PHASE_COMPENSATE intent",
+    )
+    result = support.make_manager(source, releases).reconcile()
+    rec.check(
+        result.action == "compensated",
+        "[restore-fault] reconcile consumes the surviving compensate intent",
+    )
+    rec.check(
+        _symlink_target(releases / "current") == rel_a,
+        "[restore-fault] reconcile restores current to the prior release",
+    )
+
+
 def _case_corrupt_ledger_read(rec: support.SmokeRecorder, scratch: Path) -> None:
     source = support.build_fake_source(scratch)
     releases = scratch / "releases"
@@ -440,6 +487,9 @@ def main() -> int:
         _case_write_after_swaps(rec, scratch / "after")
         _case_compensate_intent_produced(rec, scratch / "comp_produced")
         _case_compensate_intent_two_real(rec, scratch / "comp_two_real")
+        _case_compensation_restore_oserror_preserves_intent(
+            rec, scratch / "restore_fault"
+        )
         _case_corrupt_ledger_read(rec, scratch / "corrupt")
         _case_malformed_ledger_shape(rec, scratch / "malformed")
         _case_reconcile_write_fault(rec, scratch / "reconcile")

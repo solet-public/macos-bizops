@@ -54,13 +54,19 @@ def _load_snapshot(path: str) -> list[dict[str, object]]:
     return [m for m in memories if isinstance(m, dict)]
 
 
-def _render(snapshot_path: str) -> dict[str, int]:
+def _render(snapshot_path: str) -> dict[str, object]:
     memories = _load_snapshot(snapshot_path)
     mem_dir = _journal.memory_dir()
     mem_dir.mkdir(parents=True, exist_ok=True)
 
     written_hashes: dict[str, str] = {}
     facts: list[index_render.Fact] = []
+    pending_paths = {
+        path
+        for entry in _journal.pending_entries()
+        if isinstance(path := entry.get("path"), str)
+    }
+    skipped_pending: list[str] = []
 
     for record in memories:
         slot_tag = _journal.slot_tag_of(record.get("tags"))
@@ -77,11 +83,18 @@ def _render(snapshot_path: str) -> dict[str, int]:
         # so a record that indexes one way cannot hydrate another.
         name, description, kind = index_render.parse_frontmatter(content, slot_tag)
 
-        # Write the fact file VERBATIM (never rewrite frontmatter on render).
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, "w", encoding="utf-8") as handle:
-            handle.write(content)
-        written_hashes[str(target.resolve())] = _journal.sha256_file(target) or ""
+        target_path = str(target.resolve())
+        if target_path in pending_paths:
+            # A captured edit is in-flight to the canonical store. Rendering an
+            # older export over it would turn the next drain into a stale write.
+            # Leave it intact and report the omission rather than losing data.
+            skipped_pending.append(target_path)
+        else:
+            # Write the fact file VERBATIM (never rewrite frontmatter on render).
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            written_hashes[target_path] = _journal.sha256_file(target) or ""
 
         facts.append(
             index_render.Fact(
@@ -113,6 +126,7 @@ def _render(snapshot_path: str) -> dict[str, int]:
     return {
         "records": len(memories),
         "files_written": len(written_hashes),
+        "skipped_pending": skipped_pending,
         "indexed": report.indexed,
         # Surfaced, never silent: a hydrate that could not index every fact
         # must say so in its own output, or a truncated index reads as complete.

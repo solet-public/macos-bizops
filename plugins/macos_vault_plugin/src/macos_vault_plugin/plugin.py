@@ -17,6 +17,7 @@ import getpass
 import hashlib
 import logging
 import os
+import secrets
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -34,6 +35,7 @@ from ananta.core.services.call_context import (
     VaultKeyMalformedError,  # noqa: F401  # pyright: ignore[reportUnusedImport]
 )
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
+from ananta.interfaces.vault_qualification_interface import VaultQualificationInterface
 from ananta.interfaces.vault_service_interface import VaultServiceInterface
 from ananta.logging_setup import configure_plugin_logging
 from ananta.services.store import Store, open_store
@@ -41,7 +43,7 @@ from ananta.services.vault_service.enforcement import (
     enforce_namespace,
     requires_operator_principal,
 )
-from ananta.services.vault_service.interfaces.public import VaultServiceAPI
+from ananta.services.vault_service.interfaces.public import VaultQualificationAPI, VaultServiceAPI
 from ananta.types.schema_types import SchemaDefinition
 from ananta.vault_core import (
     AUDIT_DIRECTION_EXPORT,
@@ -62,7 +64,7 @@ from ananta.vault_core import (
 from nacl.exceptions import CryptoError
 from nacl.public import PrivateKey, PublicKey, SealedBox
 
-from . import macos_keychain
+from . import keychain_interaction, macos_keychain
 from .constants import (
     _LEGACY_ENCRYPTION_KEYPAIR_PRIVATE_KEY,
     _LEGACY_ENCRYPTION_KEYPAIR_PUBLIC_KEY,
@@ -100,7 +102,13 @@ from .schema import (
 )
 
 
-class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
+class MacosVaultPlugin(
+    PluginBase,
+    VaultServiceInterface,
+    VaultQualificationInterface,
+    VaultServiceAPI,
+    VaultQualificationAPI,
+):
     """Secure credential storage with AES-256-GCM encryption.
 
     Implements both the runtime service interface (VaultServiceInterface, returning
@@ -476,11 +484,14 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         - Validated at load time to ensure it inherits from VaultServiceInterface
         - Accessed via service_interface::vault_service::* process keys
         """
-        return (VaultServiceInterface,)
+        return (VaultServiceInterface, VaultQualificationInterface)
 
     @property
     def supported_interface_versions(self) -> dict[type, str]:
-        return {VaultServiceInterface: VaultServiceInterface.INTERFACE_VERSION}
+        return {
+            VaultServiceInterface: VaultServiceInterface.INTERFACE_VERSION,
+            VaultQualificationInterface: VaultQualificationInterface.INTERFACE_VERSION,
+        }
 
     def get_config_schema(self) -> dict[str, object]:
         """Declare configuration schema for the vault plugin.
@@ -509,6 +520,39 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         """Get the global VaultKeyManager instance."""
         return get_key_manager()
 
+    def _passphrase_file_path(self) -> Path | None:
+        """Return the persistent local passphrase path when APP_HOME is configured."""
+        app_home = os.environ.get("APP_HOME")
+        if not app_home:
+            return None
+        return Path(app_home) / "config" / "plugins" / self.name / "passphrase"
+
+    @staticmethod
+    def _stage_rotated_passphrase(passphrase_file: Path, new_passphrase: str) -> Path:
+        """Create the replacement passphrase file securely before rewrapping.
+
+        ``O_EXCL`` and mode ``0600`` make the temporary file private at birth;
+        the caller publishes it with :func:`os.replace` only after the Keychain
+        envelope has been successfully rewrapped.
+        """
+        staged_file = passphrase_file.with_name(
+            f".{passphrase_file.name}.rotate-{secrets.token_hex(16)}",
+        )
+        descriptor = os.open(
+            staged_file,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(new_passphrase)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            staged_file.unlink(missing_ok=True)
+            raise
+        return staged_file
+
     def _get_passphrase(self) -> str | None:
         """Get vault passphrase from environment or file.
 
@@ -520,21 +564,15 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         Returns:
             Passphrase string, or None if not available
         """
-        from pathlib import Path
-
         # 1. Environment variable (for CI/automated deployments)
         passphrase = os.environ.get(passphrase_env_var())
         if passphrase:
             return passphrase
 
         # 2. Passphrase file (for local development)
-        app_home = os.environ.get("APP_HOME")
-        if app_home:
-            passphrase_file = (
-                Path(app_home) / "config" / "plugins" / "macos_vault_plugin" / "passphrase"
-            )
-            if passphrase_file.exists():
-                return passphrase_file.read_text().strip()
+        passphrase_file = self._passphrase_file_path()
+        if passphrase_file is not None and passphrase_file.exists():
+            return passphrase_file.read_text().strip()
 
         return None
 
@@ -711,6 +749,78 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         enforce_namespace(key, call_context)
         return self._exists_impl(key)
 
+    def qualify_keychain(
+        self,
+        *,
+        call_context: CallContext | None = None,
+    ) -> ActionResult:
+        """Return bounded evidence that this user's Keychain namespace is readable."""
+        del call_context
+        if self._keychain is None:
+            return self._success({
+                "backend": "macos_keychain",
+                "available": False,
+                "current_user_accessible": False,
+            })
+        try:
+            available = self._keychain.is_available()
+            if not available:
+                return self._success({
+                    "backend": "macos_keychain",
+                    "available": False,
+                    "current_user_accessible": False,
+                })
+            self._keychain.list_credentials_under_solet()
+        except Exception:
+            return self._success({
+                "backend": "macos_keychain",
+                "available": True,
+                "current_user_accessible": False,
+            })
+        return self._success({
+            "backend": "macos_keychain",
+            "available": True,
+            "current_user_accessible": True,
+        })
+
+    def qualify_round_trip(
+        self,
+        *,
+        call_context: CallContext | None = None,
+    ) -> ActionResult:
+        """Prove the Keychain round trip using a private canary deleted before return."""
+        del call_context
+        solet = os.environ.get("SOLET_NAME", "").strip()
+        if not solet:
+            return self._success({"stored": False, "retrieved": False, "matched": False, "deleted": False})
+        key = f"{solet}.{PLUGIN_NAME}.qualify_round_trip_{secrets.token_hex(16)}"
+        value = secrets.token_urlsafe(32)
+        stored = False
+        retrieved = False
+        matched = False
+        deleted = False
+        try:
+            stored = self._store_impl(key, value, [], {}).get("action_status") == ActionStatus.COMPLETED.value
+            if stored:
+                result = self._retrieve_impl(key)
+                retrieved = result.get("action_status") == ActionStatus.COMPLETED.value
+                data = result.get("data", {})
+                matched = retrieved and data.get("value") == value
+        except Exception:
+            pass
+        finally:
+            try:
+                result = self._delete_impl(key)
+                deleted = result.get("action_status") == ActionStatus.COMPLETED.value
+            except Exception:
+                deleted = False
+        return self._success({
+            "stored": stored,
+            "retrieved": retrieved,
+            "matched": matched,
+            "deleted": deleted,
+        })
+
     def rotate(
         self,
         key: str,
@@ -870,9 +980,39 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         call_context: CallContext | None = None,
     ) -> ActionResult:
         """Rotate vault passphrase. Operator-only."""
+        if os.environ.get(passphrase_env_var()):
+            return self._error(
+                ErrorCode.PASSPHRASE_MISMATCH,
+                "Passphrase rotation is refused while the vault unlocks from "
+                f"{passphrase_env_var()}; update the persistent environment "
+                "configuration and restart instead.",
+            )
+        passphrase_file = self._passphrase_file_path()
+        if passphrase_file is None or not passphrase_file.exists():
+            return self._error(
+                ErrorCode.PASSPHRASE_MISMATCH,
+                "Passphrase rotation requires the persistent passphrase file at "
+                "$APP_HOME/config/plugins/macos_vault_plugin/passphrase.",
+            )
+        try:
+            staged_file = self._stage_rotated_passphrase(
+                passphrase_file, new_passphrase,
+            )
+        except OSError:
+            self.logger.error("Passphrase rotation could not stage passphrase file")
+            return self._error(
+                ErrorCode.ENCRYPTION_FAILED,
+                "Passphrase rotation could not prepare its persistent file; "
+                "no rotation was performed.",
+            )
         try:
             key_manager = self._get_key_manager()
             key_manager.rotate_passphrase(old_passphrase, new_passphrase)
+            try:
+                os.replace(staged_file, passphrase_file)
+            except OSError:
+                key_manager.rotate_passphrase(new_passphrase, old_passphrase)
+                raise
             self._crypto = None
             return self._success(
                 {
@@ -891,6 +1031,8 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
             return self._error(
                 ErrorCode.ENCRYPTION_FAILED, "Passphrase rotation failed",
             )
+        finally:
+            staged_file.unlink(missing_ok=True)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Sealed-box + OAuth interface methods — match VaultServiceAPI abstract
@@ -1289,6 +1431,30 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         ``@platform_process``.
         """
         return self._oauth_registry.lookup_client(client_id)
+
+    def record_oauth_client_token_use(
+        self,
+        client_id: str,
+        *,
+        client_ip: str = "",
+        user_agent: str = "",
+        transport: str = "",
+        call_context: CallContext | None = None,
+    ) -> bool:
+        """Record last-use evidence after a successful token issuance.
+
+        Thin registry delegation, called in-process by
+        ``/oauth/token`` on every success (initial grant and silent
+        refresh alike). Not a ``@platform_process``. Returns True iff
+        a client row matched; a miss is logged by the registry and
+        never raised, because the token is already issued by then.
+        """
+        return self._oauth_registry.record_token_use(
+            client_id,
+            client_ip=client_ip,
+            user_agent=user_agent,
+            transport=transport,
+        )
 
     def verify_oauth_client_credentials(
         self,
@@ -1773,9 +1939,15 @@ class MacosVaultPlugin(PluginBase, VaultServiceInterface, VaultServiceAPI):
         return self._lookup_via_keyring(service, account)
 
     def _lookup_darwin(self, service: str, account: str) -> str | None | ActionResult:
-        """Darwin path: query both iCloud and login keychains via Security framework."""
+        """Darwin path: query both iCloud and login keychains via Security framework.
+
+        Runs under the no-prompt gate: this is a daemon read, so an item whose
+        ACL does not authorize the running binary must fail loud rather than
+        block on a SecurityAgent dialog nobody will answer.
+        """
         try:
-            return macos_keychain.get_password(service, account)
+            with keychain_interaction.user_interaction_disallowed():
+                return macos_keychain.get_password(service, account)
         except ImportError as exc:
             return self._error(
                 ErrorCode.KEYCHAIN_UNAVAILABLE,
@@ -2035,6 +2207,13 @@ class _StoreOAuthClientStorage:
                 {"client_id": client_id},
                 {"redirect_uris": redirect_uris},
             ),
+        )
+
+    def record_client_token_use(
+        self, client_id: str, fields: Mapping[str, str],
+    ) -> bool:
+        return bool(
+            self._store.update({"client_id": client_id}, dict(fields)),
         )
 
 

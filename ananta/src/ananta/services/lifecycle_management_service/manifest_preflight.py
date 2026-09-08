@@ -66,6 +66,7 @@ from ananta.core.process_registry.plugin_registration_validator import (
 )
 from ananta.core.services.service_interface_decorator import (
     ServiceInterfaceActionMetadata,
+    is_service_interface_process_enabled,
 )
 
 if TYPE_CHECKING:
@@ -381,6 +382,8 @@ def _emit_service_interface_entries(
     for _name, member in inspect.getmembers(cls):
         metadata = getattr(member, "_service_interface_metadata", None)
         if not isinstance(metadata, ServiceInterfaceActionMetadata):
+            continue
+        if not is_service_interface_process_enabled(metadata):
             continue
         key = f"service_interface::{metadata.provider}::{metadata.name}"
         processes[key] = {

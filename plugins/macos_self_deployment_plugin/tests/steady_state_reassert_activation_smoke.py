@@ -114,6 +114,7 @@ def _run_loop(client: object, stop_event: threading.Event) -> None:
             pending_finisher_file=None,
             current_release_lookup=None,
             logger=logger,
+            set_color_active=lambda _active: None,
         ),
         name="reassert-smoke",
         daemon=True,

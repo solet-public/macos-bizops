@@ -48,6 +48,7 @@ from .state_aware_plugin import StateAwarePlugin as StateAwarePlugin
 from .state_management_interface import StateManagementInterface as StateManagementInterface
 from .state_provider_interface import ActionExecutionRecord as ActionExecutionRecord
 from .state_provider_interface import StateProviderInterface as StateProviderInterface
+from .vault_qualification_interface import VaultQualificationInterface as VaultQualificationInterface
 from .vault_service_interface import VaultServiceInterface as VaultServiceInterface
 from .vector_service_interface import VectorServiceInterface as VectorServiceInterface
 

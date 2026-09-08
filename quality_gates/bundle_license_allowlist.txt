@@ -16,7 +16,7 @@
 # macos_samantha is a personal profile sealed `internal_private` (see the seed
 # publish runbook's license_policy contract), not part of the public Apache
 # distribution, so it may legitimately carry a separately-licensed connector.
-B1 macos_samantha::schwab_market_data_plugin
+B1 macos_samantha::schwab_market_data_plugin  # legacy: 2026-09-03 W2-1
 
 # PENDING OPERATOR/COORDINATOR RULING (raised 2026-07-26, Claude-Reviewer-B).
 # Found by this gate on its first run; NOT in the bizops_standard audit scope.
@@ -26,4 +26,4 @@ B1 macos_samantha::schwab_market_data_plugin
 # internal tooling -> `LicenseRef-Proprietary`. That is the recommendation, but
 # the bucket was not ruled, so it is parked here rather than guessed. Remove
 # this line and stamp the plugin once the bucket is ruled.
-B0 macos_samantha::chatgpt_export_session_source_plugin
+B0 macos_samantha::chatgpt_export_session_source_plugin  # legacy: 2026-09-03 W2-1

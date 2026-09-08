@@ -105,6 +105,9 @@ from agent_messaging_plugin.schema import (  # noqa: E402
     PEER_BINDING_NAMESPACE,
     get_peer_binding_schema,
 )
+from agent_messaging_plugin.sender_provenance import (  # noqa: E402
+    SENDER_PRINCIPAL_KIND_STDIO_AGENT,
+)
 
 T0 = datetime(2026, 7, 23, 12, 0, 0, tzinfo=UTC)
 WATCHER_AGI = f"{WATCH_AGENT_INSTANCE_PREFIX}0123456789abcdef01234567"
@@ -788,6 +791,10 @@ def test_peer_send_by_name_route_dispatches_from_bridge_identity() -> None:
         and row["sender_session_label"] == "Sender"
         and row["important"] is True,
         "A4: peer_send_by_name HTTP route stamps sender bridge identity",
+    )
+    _check(
+        row["sender_principal_kind"] == SENDER_PRINCIPAL_KIND_STDIO_AGENT,
+        "A4: peer_send_by_name HTTP route persists stdio_agent provenance",
     )
 
 

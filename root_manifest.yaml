@@ -33,11 +33,18 @@ universal:
     - bootstrap.py
     - pyproject.toml           # gate-parity ruff/pyright config (born-clone-gates fix, 2026-08-10); moved here FROM sanctioned: below — that entry's absence-tolerance was written for the packaging-install angle only and predates this gate-config dependency
   directories:
+    # Layer-0 operation adapter ships with bootstrap.py in development and seed clones.
+    - bootstrap_adapter
     - ananta
+    - solet_setup_contracts
     - plugins
     - knowledge_bases
     - profile
     - quality_gates
+    # Homebrew manager source ships in both the development checkout and every
+    # seed release that supports `solet create`; the packaging lane adds the
+    # matching seed allowlist entry before this release is assembled.
+    - solet_cli
 
 platform_managed:
   directories:

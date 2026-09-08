@@ -165,6 +165,53 @@ def get_oauth_client_schema() -> TableSchema:
                 ),
                 data_sensitivity=0.2,
             ),
+            "last_used_at": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "ISO-8601 UTC timestamp of the most recent access-token "
+                    "issuance for this client, written by "
+                    "VaultOAuthRegistry.record_token_use on every "
+                    "/oauth/token success. Empty until the client's first "
+                    "token. Before this column existed the field was "
+                    "documented on OauthClientRecord and projected by "
+                    "list_clients but had nowhere to persist, so it read "
+                    "as '' forever and no operator could date a client's "
+                    "last use."
+                ),
+                data_sensitivity=0.2,
+            ),
+            "last_use_ip": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "Peer IP observed on the most recent successful "
+                    "/oauth/token request. Corroborating evidence about who "
+                    "actually used the credential, as opposed to the "
+                    "self-descriptive client_name supplied at registration."
+                ),
+                data_sensitivity=0.6,
+            ),
+            "last_use_user_agent": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "User-Agent header observed on the most recent "
+                    "successful /oauth/token request, truncated to "
+                    "MAX_LAST_USE_USER_AGENT_LEN. Client-controlled and "
+                    "therefore evidence, never proof — recorded so an "
+                    "operator can compare what a client CLAIMS to be "
+                    "(client_name) against what it PRESENTS as."
+                ),
+                data_sensitivity=0.6,
+            ),
+            "last_use_transport": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "Which OAuth grant minted the most recent successful "
+                    "token (authorization_code, client_credentials or "
+                    "refresh_token). Distinguishes an interactive browser "
+                    "exchange from silent machine renewal."
+                ),
+                data_sensitivity=0.2,
+            ),
         },
         indexes=[
             IndexDefinition("idx_oauth_client_id", ["client_id"]),

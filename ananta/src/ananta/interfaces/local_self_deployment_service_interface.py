@@ -63,8 +63,50 @@ from ananta.interfaces.self_deployment_service_interface import (
 class LocalSelfDeploymentServiceInterface(SelfDeploymentServiceInterface):
     """Local extension: blue-green-on-localhost swap on top of restart-with-manifest."""
 
-    INTERFACE_VERSION: ClassVar[str] = "1.0.0"
+    INTERFACE_VERSION: ClassVar[str] = "1.2.0"
     LOCAL_INTERFACE_VERSION: ClassVar[str] = INTERFACE_VERSION
+
+    @abstractmethod
+    def attest_runtime_code(
+        self,
+        *,
+        reconciliation_id: str,
+        verification_modules: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Attest the immutable release and already-loaded module provenance.
+
+        This read-only verb inspects ``sys.modules`` without importing a
+        requested module.  It is the independent router-served witness used by
+        reconciliation, and is also useful to doctor shipped-but-unread code.
+        """
+
+    @abstractmethod
+    def cutover_release(
+        self,
+        *,
+        reconciliation_id: str,
+        expected_source_surface_sha256: str,
+        expected_release_surface_sha256: str,
+        expected_manifest_etag: str,
+        expected_current_release_id: str,
+        expected_active_instance_id: str,
+        expected_active_start_token: str,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Cut over to a candidate built from already-refreshed bytes.
+
+        The public face of the shared cutover machinery, for targets that
+        already expose this interface — idempotent re-runs and cutover-only
+        plans.  The reconciliation path itself does NOT depend on this verb: a
+        pre-interface target cannot answer a verb it has never heard of, and
+        requiring one would leave exactly the stranded targets that motivated
+        this channel unrepairable.  Those go through the in-process controller
+        invoked by the refreshed target-local adapter instead.  One state
+        machine, two entry points.
+
+        Every compare-and-swap leg is checked before anything is spawned, so a
+        stale-approval return means nothing was built and nothing moved.
+        """
 
     @abstractmethod
     def complete_swap(

@@ -479,6 +479,8 @@ def _tool_current_identity(
         "roles_held": _read_roles_held(context, session.agent_instance_id),
         "identity_trust": _identity_trust(session),
         "streamable_no_auth": _is_no_auth_sentinel(session),
+        "sender_principal_kind": session.sender_principal_kind,
+        "sender_transport_principal": session.sender_transport_principal,
     }
 
 
@@ -606,21 +608,37 @@ def _tool_peer_register(
     session: StreamableSession,
     context: DispatchContext,
 ) -> dict[str, Any]:
-    """Relabel the session's existing peer binding.
+    """Relabel the session's existing peer binding without changing identity.
 
     The session's ``agent_instance_id`` is fixed by the bearer-token
-    claim, so this call cannot mint a new instance — it can only
-    rename ``session_label`` or change ``agent_id`` (rare, but kept
-    for parity with the stdio tool).  The cross-bucket sweep inside
-    :meth:`PeerRegistry.register` handles the rebinding cleanly.
+    claim, so this call cannot mint a new instance or principal. A
+    streamable bearer may not relabel its sender identity or human display
+    label; doing so would turn a shared OAuth bearer into a caller-selected
+    masquerade.
     """
     new_agent_id = arguments.get("agent_id")
     if not isinstance(new_agent_id, str) or not new_agent_id:
         raise JsonRpcError(
             _INVALID_PARAMS, "peer_register.agent_id must be a non-empty string",
         )
+    authenticated_agent_id = session.authenticated_agent_id or session.agent_id
+    if new_agent_id != authenticated_agent_id:
+        raise JsonRpcError(
+            _INVALID_PARAMS,
+            "streamable HTTP peer_register cannot relabel the authenticated sender",
+            data={"code": "streamable_http.identity_relabel_refused"},
+        )
     new_label = arguments.get("session_label")
     label = new_label if isinstance(new_label, str) else session.session_label
+    authenticated_session_label = (
+        session.authenticated_session_label or session.session_label
+    )
+    if label != authenticated_session_label:
+        raise JsonRpcError(
+            _INVALID_PARAMS,
+            "streamable HTTP peer_register cannot relabel the authenticated sender",
+            data={"code": "streamable_http.identity_relabel_refused"},
+        )
     from ..models import BridgeBinding  # noqa: PLC0415 — break import cycle
     binding = BridgeBinding(
         bridge_id=session.bridge_id,
@@ -772,6 +790,9 @@ def _tool_peer_send_by_name(
         sender_agent_id=session.agent_id,
         sender_agent_instance_id=session.agent_instance_id,
         sender_session_label=session.session_label,
+        sender_principal_kind=session.sender_principal_kind,
+        sender_transport_principal=session.sender_transport_principal,
+        sender_identity_trust=session.sender_identity_trust,
         sender_parent_pid=None,
         content=content,
         message_id=f"arm-{secrets.token_hex(16)}",
@@ -905,7 +926,7 @@ def _read_roles_held(
 def _identity_trust(session: StreamableSession) -> str:
     if _is_no_auth_sentinel(session):
         return "outer_boundary_only"
-    return "bearer_verified"
+    return session.sender_identity_trust
 
 
 def _is_no_auth_sentinel(session: StreamableSession) -> bool:

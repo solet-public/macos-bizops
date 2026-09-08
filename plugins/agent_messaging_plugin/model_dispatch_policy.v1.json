@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "policy_version": "model-dispatch-policy-v1",
+  "orchestrator": {
+    "role_names": ["Main"],
+    "allowed_models": ["claude-sonnet-5", "claude-fable-5", "claude-fable-5-1"]
+  },
+  "dispatch_kinds": {
+    "diagnose": {
+      "allowed_pairs": [
+        {"agent_runtime": "codex", "model": "gpt-5.6-sol"},
+        {"agent_runtime": "codex", "model": "gpt-6-astra"},
+        {"agent_runtime": "codex", "model": "gpt-5.6-luna"},
+        {"agent_runtime": "claude_code", "model": "claude-opus-5"}
+      ],
+      "pair_requirement": "cross_vendor"
+    },
+    "design": {
+      "allowed_pairs": [
+        {"agent_runtime": "codex", "model": "gpt-5.6-sol"},
+        {"agent_runtime": "codex", "model": "gpt-6-astra"},
+        {"agent_runtime": "claude_code", "model": "claude-opus-5"}
+      ],
+      "pair_requirement": "cross_vendor"
+    },
+    "review": {
+      "allowed_pairs": [
+        {"agent_runtime": "codex", "model": "gpt-5.6-terra"},
+        {"agent_runtime": "codex", "model": "gpt-6-astra"},
+        {"agent_runtime": "claude_code", "model": "claude-sonnet-5"},
+        {"agent_runtime": "claude_code", "model": "claude-opus-5"}
+      ],
+      "review_requirement": "cross_vendor"
+    },
+    "fix": {
+      "allowed_pairs": [
+        {"agent_runtime": "codex", "model": "gpt-5.6-terra"},
+        {"agent_runtime": "codex", "model": "gpt-6-astra"},
+        {"agent_runtime": "codex", "model": "gpt-5.6-luna"},
+        {"agent_runtime": "codex", "model": "gpt-5.3-codex-spark"},
+        {"agent_runtime": "claude_code", "model": "claude-opus-5"},
+        {"agent_runtime": "claude_code", "model": "claude-fable-5-1"}
+      ]
+    },
+    "infrastructure": {
+      "allow_any_pair": true
+    }
+  }
+}

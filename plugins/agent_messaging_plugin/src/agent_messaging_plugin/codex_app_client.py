@@ -12,10 +12,13 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .codex_common import _DEFAULT_RPC_TIMEOUT_SECONDS
 from .headless_adapter import _sigterm_then_kill
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class _RpcError(RuntimeError):
@@ -62,6 +65,7 @@ class _CodexAppServerClient:
         self._stderr_tail: deque[str] = deque(maxlen=200)
         self._thread_id = ""
         self._active_turn_id = ""
+        self._pending_driver_text: str | None = None
         self._completed_turn_ids: set[str] = set()
         self._proc: subprocess.Popen[str] | None = None
 
@@ -104,8 +108,18 @@ class _CodexAppServerClient:
         return self._proc is not None and self._proc.poll() is None
 
     def send(self, text: str) -> None:
+        self.insert(text)
+        self.submit()
+
+    def insert(self, text: str) -> None:
+        self._pending_driver_text = text
+
+    def submit(self) -> None:
         from .session_hosts import DriverChannelSendError  # noqa: PLC0415
 
+        text = self._pending_driver_text
+        if text is None:
+            raise DriverChannelSendError("Codex app-server submit called before insert")
         try:
             with self._dispatch_lock:
                 if text == "/clear":

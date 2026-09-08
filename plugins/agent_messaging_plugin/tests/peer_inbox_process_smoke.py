@@ -54,6 +54,7 @@ from ananta.llm.agent_messaging.models import (  # noqa: E402
     PeerInboxEntry,
     PeerInboxRequest,
     RoleSectionStatus,
+    RoleTruncationReason,
     TextPart,
 )
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
@@ -161,14 +162,25 @@ def _page(
     *,
     next_role_cursor: str | None = "rc-2",
     status: RoleSectionStatus = RoleSectionStatus.OK,
+    role_limit: int = 5,
+    role_page_truncated: bool = True,
+    role_truncation_reason: RoleTruncationReason | None = (
+        RoleTruncationReason.ROW_LIMIT
+    ),
+    role_byte_ceiling: int | None = None,
 ) -> PeerInbox:
     return PeerInbox(
         recipient_agent_id=_AGENT_ID,
         entries=(_entry("msg-i", "instance mail", _CREATED_AT),),
         next_after_created_at=_CREATED_AT,
+        instance_exhausted=False,
         role_entries=(_entry("msg-r", "role mail", _CREATED_AT),),
         next_role_cursor=next_role_cursor,
         role_section_status=status,
+        role_limit=role_limit,
+        role_page_truncated=role_page_truncated,
+        role_truncation_reason=role_truncation_reason,
+        role_byte_ceiling=role_byte_ceiling,
     )
 
 
@@ -440,6 +452,7 @@ def test_a_failed_role_section_still_serves_instance_mail() -> None:
         recipient_agent_id=_AGENT_ID,
         entries=(_entry("msg-i", "instance mail", _CREATED_AT),),
         next_after_created_at=_CREATED_AT,
+        instance_exhausted=False,
         role_entries=(),
         next_role_cursor=None,
         role_section_status=RoleSectionStatus.ERROR,
@@ -545,10 +558,15 @@ _EXPECTED_KEYS = {
     "recipient_agent_instance_id",
     "entries",
     "next_after_created_at",
+    "instance_exhausted",
     "role_entries",
     "next_role_cursor",
     "role_section_status",
     "role_section_error",
+    "role_limit",
+    "role_page_truncated",
+    "role_truncation_reason",
+    "role_byte_ceiling",
     # Pull-surface boundary (design workbench/2026-08-02_pull_surface_boundary_design_claude_d.md
     # §5) — additive, False/None until a session calls peer_mark_role_covered.
     "role_floor_applied",
@@ -610,6 +628,39 @@ def test_role_section_status_serializes_to_its_lowercase_value() -> None:
     )
 
 
+def test_role_page_truncation_metadata_serializes() -> None:
+    registry = _registry()
+    registry.register(_binding())
+    row_limited = _call(
+        _plugin(_RecordingService(_page()), registry=registry),
+        agent_session_id=_SESSION_ID,
+    )["data"]
+    _check(
+        row_limited["role_limit"] == 5
+        and row_limited["role_page_truncated"] is True
+        and row_limited["role_truncation_reason"] == "row_limit"
+        and row_limited["role_byte_ceiling"] is None,
+        "a row-limited role page carries its effective limit and reason",
+    )
+    byte_limited = _call(
+        _plugin(
+            _RecordingService(
+                _page(
+                    role_truncation_reason=RoleTruncationReason.BYTE_CEILING,
+                    role_byte_ceiling=200_000,
+                ),
+            ),
+            registry=registry,
+        ),
+        agent_session_id=_SESSION_ID,
+    )["data"]
+    _check(
+        byte_limited["role_truncation_reason"] == "byte_ceiling"
+        and byte_limited["role_byte_ceiling"] == 200_000,
+        "a byte-limited role page carries the applicable ceiling",
+    )
+
+
 def test_entries_carry_sender_identity_and_isoformat_timestamps() -> None:
     registry = _registry()
     registry.register(_binding())
@@ -633,6 +684,10 @@ def test_entries_carry_sender_identity_and_isoformat_timestamps() -> None:
     _check(
         data["next_after_created_at"] == _CREATED_AT.isoformat(),
         "the instance cursor is a round-trippable ISO-8601 string",
+    )
+    _check(
+        data["instance_exhausted"] is False,
+        "instance_exhausted is emitted as a boolean progress signal",
     )
     _check(
         data["role_entries"][0]["message"]["id"] == "msg-r",
@@ -1025,6 +1080,7 @@ def main() -> int:
         test_include_important_is_always_true_now,
         test_serialized_page_matches_the_declared_schema,
         test_role_section_status_serializes_to_its_lowercase_value,
+        test_role_page_truncation_metadata_serializes,
         test_entries_carry_sender_identity_and_isoformat_timestamps,
         test_read_touches_the_callers_binding,
         test_delivery_route_attached_reports_the_holders_route,

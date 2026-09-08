@@ -2,6 +2,7 @@ import logging
 from collections.abc import Awaitable
 from typing import Protocol, cast, runtime_checkable
 
+from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
 from ananta.error_handling import FrameworkError
 from ananta.types.schema_types import SchemaDefinition
 
@@ -22,7 +23,12 @@ class PluginManagerProtocol(Protocol):
     def are_all_plugins_ready(self) -> bool: ...
     def get_unready_plugins(self) -> list[str]: ...
     def get_plugin_readiness_status(self) -> dict[str, object]: ...
-    def discover_plugins(self, config_manager: object | None = None) -> None: ...
+    def discover_plugins(
+        self,
+        config_manager: object | None = None,
+        *,
+        allowed_plugins: set[str] | None = None,
+    ) -> None: ...
     def set_orchestrator_ref(self, orchestrator_ref: object) -> None: ...
     def set_event_bus_ref(self, event_bus: object) -> None: ...
 
@@ -203,7 +209,14 @@ class PluginLifecycleManager(IPluginLifecycleManager):
         ):
             raise TypeError("plugin_manager must have set_orchestrator_ref method")
 
-        typed_pm.discover_plugins(config_manager)
+        # Mirror ServiceTransitionCoordinator: the 2026-05-31 incident showed
+        # that an uninitialized manager without this argument loads every entry
+        # point, including plugins outside the profile manifest.
+        app_home = getattr(orchestrator_ref, "APP_HOME", None)
+        allowed_plugins = (
+            load_manifest_plugin_set(app_home) if app_home is not None else None
+        )
+        typed_pm.discover_plugins(config_manager, allowed_plugins=allowed_plugins)
 
         typed_pm.set_orchestrator_ref(orchestrator_ref)
 

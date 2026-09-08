@@ -10,7 +10,7 @@ with two actionable role-inbox messages unserved, until the operator manually
 before this watcher). The watcher issues ZERO model/inference calls ever --
 pure polling, cost bounded per tick (one ``ps eww``, one file stat, and only
 when the idle signal alone suggests it's worth looking closer, one iTerm2
-screen read and/or one ``peer_inbox`` call).
+screen read and/or one merged ``solet-bridge inbox`` drain).
 
 Two actions, mutually exclusive per tick, poke evaluated first (P4(a).4
 precedence, verbatim): ``poke`` -- pending role-inbox items AND idle past
@@ -31,8 +31,8 @@ Hard design rules, each individually ratified (not self-imposed):
   fresh each tick via :func:`resolve_seat_identity`.
 - **Pending-COUNT only, message bodies never logged/persisted/forwarded**
   (condition 2, HARD design rule): :func:`resolve_pending_count` returns a
-  bare ``int | None`` -- the ``peer_inbox`` envelope and its
-  ``role_entries`` list exist only inside that one function's local scope
+  bare ``int | None`` -- the merged inbox payload exists only inside that one
+  function's local scope
   and are never returned, printed, or otherwise carried past it. The poke
   message itself is a fixed, operator-authored constant
   (:data:`DEFAULT_POKE_MESSAGE`) that takes no inbox-derived input at all --
@@ -53,13 +53,8 @@ Hard design rules, each individually ratified (not self-imposed):
   runbook (P3, watcher section) must name this limitation explicitly, never
   claim standing coverage.
 
-Cursor-safety (condition 1) was independently measured and closed BEFORE
-this file was written -- see the findings file's "P4(a) ratification
-condition 1" section: three consecutive ``peer_inbox`` reads (default,
-explicit ``role_after`` page, default again) against the same
-``agent_session_id`` returned identical results throughout, confirming a
-default-mode pending-count read has zero durable side effect on the seat's
-own later drain.
+The pending check uses ``solet-bridge inbox`` so it reaches the same merged,
+fully-paged frontier a seat later reads; it has no consumption side effect.
 """
 
 from __future__ import annotations
@@ -68,6 +63,7 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -77,6 +73,8 @@ from typing import Any, Final
 
 from agent_messaging_plugin import rotation_thresholds as _rotation_thresholds
 from agent_messaging_plugin import seat_rotation_helper as _rotation_helper
+
+from .driver_texts import render_driver_text
 
 try:
     import iterm2 as _iterm2_module  # pyright: ignore[reportMissingImports]
@@ -105,17 +103,12 @@ ACTION_POKE = "poke"
 ACTION_ROTATE = "rotate"
 ACTION_NONE = "none"
 
-DEFAULT_POKE_MESSAGE = (
-    "You have pending role-inbox messages and have been idle for a while. "
-    "Please drain your role inbox and continue."
-)
+DEFAULT_POKE_MESSAGE = render_driver_text("seat.poke")
 """Fixed, operator-authored constant -- takes no inbox-derived input at all
 (condition 2). This is the ENTIRE text ever injected on a poke; it is never
 built from, or interpolated with, anything read from ``peer_inbox``."""
 
 _STATUS_IDLE = "idle"
-_PEER_INBOX_PROCESS_KEY = "plugin::agent_messaging_plugin::peer_inbox"
-
 _AGENT_SESSION_ID_ENV = "AGENT_SESSION_ID"
 _AGENT_INSTANCE_ID_ENV = "AGENT_INSTANCE_ID"
 
@@ -329,45 +322,48 @@ def cross_check_idle(
     return mtime_ms - identity.status_updated_at_ms <= agreement_tolerance_seconds * 1000.0
 
 
-def _solet_call(process_key: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
-    """Same subprocess-dispatch shape as ``heartbeat_report_alive.py`` and
-    ``rotation_due_watch.py`` -- duplicated deliberately, matching this
-    checkout's own existing precedent of each hook/script owning its own
-    small copy rather than sharing one (those two files are not a common
-    importable module either)."""
+def _solet_inbox() -> dict[str, Any] | None:
+    """Run the merged, frontier-paged inbox reader for this seat session."""
+    if shutil.which("solet-bridge") is None:
+        _log("solet-bridge is unavailable on PATH; refusing the seat-idle inbox read")
+        return None
     try:
         result = subprocess.run(
-            ["solet", "call", process_key, json.dumps(arguments)],
-            capture_output=True, text=True, timeout=20, check=False,
+            ["solet-bridge", "inbox"], capture_output=True, text=True,
+            timeout=20, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        _log(f"solet call {process_key} failed to run: {exc}")
+        _log(f"solet-bridge inbox failed to run: {exc}")
         return None
     if result.returncode != 0:
-        _log(f"solet call {process_key} exited {result.returncode}")
+        _log(f"solet-bridge inbox exited {result.returncode}")
         return None
     try:
-        return json.loads(result.stdout)
+        payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        _log(f"solet call {process_key} returned unparseable output: {exc}")
+        _log(f"solet-bridge inbox returned unparseable output: {exc}")
         return None
+    if not isinstance(payload, dict) or payload.get("complete") is not True:
+        _log("solet-bridge inbox did not report a complete merged drain")
+        return None
+    return payload
 
 
 def resolve_pending_count(agent_session_id: str) -> int | None:
-    """A bare pending-COUNT, nothing else (condition 2, hard rule). The
-    envelope and its ``role_entries`` list are strictly local to this
-    function's own stack frame -- neither is ever returned, logged, or
-    stored. ``None`` means "couldn't determine" (call failed / malformed
-    response) -- callers must treat that as 0 pending, never as a reason to
-    poke on an unknown state."""
-    envelope = _solet_call(_PEER_INBOX_PROCESS_KEY, {"agent_session_id": agent_session_id})
-    if envelope is None or envelope.get("status") != "completed":
+    """Return the full merged drain's role count without retaining its content.
+
+    ``agent_session_id`` remains an explicit argument because this caller
+    resolved it fresh immediately before the poll; the CLI independently
+    verifies the same environment-derived identity. ``None`` means the
+    frontier could not be established, never "empty".
+    """
+    if not agent_session_id:
         return None
-    data = ((envelope.get("result") or {}).get("data")) or {}
-    role_entries = data.get("role_entries")
-    if not isinstance(role_entries, list):
+    payload = _solet_inbox()
+    if payload is None:
         return None
-    return len(role_entries)
+    role_count = payload.get("role_count")
+    return role_count if isinstance(role_count, int) and role_count >= 0 else None
 
 
 _NO_AGENT_INSTANCE_ID_PLACEHOLDER = "no-agent-instance-id"

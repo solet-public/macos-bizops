@@ -25,6 +25,7 @@ Run from repo root:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -88,9 +89,11 @@ class _NoRipgrep:
         def fake(cmd: str, *a: object, **k: object) -> str | None:
             return None if cmd == "rg" else self._real(cmd, *a, **k)  # type: ignore[arg-type]
         ops_mod.shutil.which = fake  # type: ignore[assignment]
+        ops_mod._rg_qualification = None  # noqa: SLF001
 
     def __exit__(self, *_: object) -> None:
         ops_mod.shutil.which = self._real  # type: ignore[assignment]
+        ops_mod._rg_qualification = None  # noqa: SLF001
 
 
 def _check_primary(ops: RepoOperations) -> set[tuple[str, int]]:
@@ -111,7 +114,7 @@ def _check_fallback_declares(ops: RepoOperations, baseline: set[tuple[str, int]]
     _check(res["engine"] == "git-grep", "falls back to git grep when rg is absent",
            str(res["engine"]))
     reason = res.get("engine_reason")
-    _check(isinstance(reason, str) and "ripgrep is not installed" in reason,
+    _check(isinstance(reason, str) and "ripgrep absent from PATH" in reason,
            "the fallback DECLARES itself and its reason in the envelope", str(reason)[:90])
     _check(isinstance(reason, str) and "superset" in reason,
            "the declaration states how the fallback's results differ")
@@ -143,6 +146,59 @@ def _check_fallback_semantics(ops: RepoOperations) -> None:
     _check(raised, "fallback: a malformed pattern raises, never collapses to no-hits")
 
 
+def _check_hung_qualification_fallback(ops: RepoOperations, tmp: Path) -> None:
+    """A PATH-present ripgrep that hangs before it can run must not reach the 60s search bound."""
+    fake_bin = tmp / "hung-bin"
+    fake_bin.mkdir()
+    fake_rg = fake_bin / "rg"
+    fake_rg.write_text("#!/bin/sh\nsleep 1000\n", encoding="utf-8")
+    fake_rg.chmod(0o755)
+    old_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{fake_bin}{os.pathsep}{old_path}"
+    ops_mod._rg_qualification = None  # noqa: SLF001
+    try:
+        res = ops.search("TOKEN_ALPHA")
+    finally:
+        os.environ["PATH"] = old_path
+        ops_mod._rg_qualification = None  # noqa: SLF001
+    _check(res["engine"] == "git-grep", "hung qualification falls back to git grep", str(res["engine"]))
+    reason = res.get("engine_reason")
+    _check(
+        isinstance(reason, str) and "hung past 2s" in reason,
+        "hung qualification is declared in the search envelope",
+        str(reason),
+    )
+
+
+def _check_primary_timeout_fallback(ops: RepoOperations, tmp: Path) -> None:
+    """A qualified primary that hangs on search must declare its per-call fallback."""
+    fake_bin = tmp / "bin"
+    fake_bin.mkdir()
+    fake_rg = fake_bin / "rg"
+    fake_rg.write_text(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-rg; exit 0; fi\nsleep 3\n",
+        encoding="utf-8",
+    )
+    fake_rg.chmod(0o755)
+    old_path, old_timeout = os.environ.get("PATH", ""), ops_mod._RG_TIMEOUT  # noqa: SLF001
+    os.environ["PATH"] = f"{fake_bin}{os.pathsep}{old_path}"
+    ops_mod._RG_TIMEOUT = 1  # noqa: SLF001
+    ops_mod._rg_qualification = None  # noqa: SLF001
+    try:
+        res = ops.search("TOKEN_ALPHA")
+    finally:
+        os.environ["PATH"] = old_path
+        ops_mod._RG_TIMEOUT = old_timeout  # noqa: SLF001
+        ops_mod._rg_qualification = None  # noqa: SLF001
+    _check(res["engine"] == "git-grep", "qualified primary timeout falls back to git grep", str(res["engine"]))
+    reason = res.get("engine_reason")
+    _check(
+        isinstance(reason, str) and "qualified usable but timed out after 1s" in reason,
+        "primary timeout is declared in the search envelope",
+        str(reason),
+    )
+
+
 def main() -> int:
     print("repo_service search fallback smoke")
     print("=" * 62)
@@ -157,6 +213,8 @@ def main() -> int:
         with _NoRipgrep():
             _check_fallback_declares(ops, baseline, rg_available)
             _check_fallback_semantics(ops)
+        _check_hung_qualification_fallback(ops, Path(tmp))
+        _check_primary_timeout_fallback(ops, Path(tmp))
 
     print("=" * 62)
     if _failed:

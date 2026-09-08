@@ -229,6 +229,7 @@ _SKIP_EXIT_CODE = 77
 def _unreachable_skip(detail: str) -> int:
     print("=" * 70)
     print("SKIPPED-LIVE-DB-UNREACHABLE")
+    print('BORN_CLONE_SKIP_WITNESS={"reason":"local_postgres_fixture_unreachable"}')
     print(f"  {detail}")
     print("  The LIVE write-capability proof DID NOT RUN. Bring up local Postgres")
     print("  (the local trust-auth user @ localhost:5432 + createdb/psql) and re-run.")

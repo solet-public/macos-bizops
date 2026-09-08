@@ -32,7 +32,9 @@ if str(_REPO_ROOT) not in sys.path:
 
 from macos_self_deployment_plugin.blue_green_router.service_install import (  # noqa: E402
     InstallError,
+    default_bridge_port_path,
     default_launchd_plist_path,
+    default_router_port_path,
     default_socket_path,
     default_systemd_unit_path,
     launchd_label,
@@ -44,14 +46,16 @@ SOCKET_CLEANUP_DEADLINE_SECONDS: float = 5.0
 SOCKET_CLEANUP_POLL_INTERVAL_SECONDS: float = 0.1
 
 
-def _remove_router_port_file(solet_name: str) -> None:
-    """Remove the router-port discovery file written by install_router.
+def _remove_router_port_files(solet_name: str) -> None:
+    """Remove both router-owned port-discovery files written by install_router.
 
-    Idempotent: missing file is a no-op success.
+    Missing files are no-op successes.
     """
-    port_file = Path.home() / ".ananta" / "runtime" / f"{solet_name}.router.port"
-    if port_file.exists():
-        port_file.unlink()
+    for port_file in (
+        default_router_port_path(solet_name),
+        default_bridge_port_path(solet_name),
+    ):
+        port_file.unlink(missing_ok=True)
 
 # launchctl exits 3 (ESRCH "No such process") when bootout-ing a label that
 # isn't loaded. Treat it as the no-op success we want for idempotent uninstall.
@@ -74,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         socket_path = args.socket_path or default_socket_path(args.solet_name)
         _verify_socket_gone(socket_path)
-        _remove_router_port_file(args.solet_name)
+        _remove_router_port_files(args.solet_name)
     except InstallError as exc:
         print(f"uninstall_router: {exc}", file=sys.stderr)
         return 1

@@ -34,26 +34,26 @@ CASE A1 - Discovery + ACTION INTENT (user wants to DO something):
   → Return get_process_schema action with process_key argument
 
 CASE A2 - Discovery + INFO INTENT (user wants information about capabilities):
-  → Use the post_message process from POST_MESSAGE to REPORT the findings
+  → Resolve the active IO namespace with query_process_registry, then use plugin::<namespace>::post_message to REPORT the findings
   → List the discovered processes with their names and descriptions
   → DO NOT execute any of the discovered processes
-  → arguments MUST include: session_id AND message (list of what was found)
+  → arguments MUST include: message (list of what was found); SESSION_AWARE binds the session from context
 
 CASE B - Tool completed successfully (no 'processes' key AND result looks successful):
-  → Use the post_message process from POST_MESSAGE to tell the user what was accomplished
+  → Resolve the active IO namespace with query_process_registry, then use plugin::<namespace>::post_message to tell the user what was accomplished
   → CRITICAL: Copy ACTUAL VALUES from action_result into your message text
   → NEVER use placeholder syntax like ${...}, {{...}}, <<...>>, or variable references
   → Example: If action_result.file_path is 'data/blobs/gen-abc', write 'data/blobs/gen-abc' literally
-  → arguments MUST include: session_id AND message (the actual text to show the user)
+  → arguments MUST include: message (the actual text to show the user); SESSION_AWARE binds the session from context
 
 CASE C - Tool failed (result contains error or failure indicators):
-  → Use the post_message process from POST_MESSAGE to inform user of the error
-  → arguments MUST include: session_id AND message (the error explanation for the user)
+  → Resolve the active IO namespace with query_process_registry, then use plugin::<namespace>::post_message to inform the user of the error
+  → arguments MUST include: message (the error explanation for the user); SESSION_AWARE binds the session from context
 
 OUTPUT FORMAT:
   - reason: Brief internal note about why this step is taken (NOT the user message)
   - arguments.message: The actual text content to display to the user
-  - arguments.session_id: The session ID from context
+  - SESSION_AWARE binds the session ID from context; never pass arguments.session_id
 
 IMPORTANT: For discovery results, use get_process_schema to fetch the invocation schema before executing. Build 'process' object using provider_type/provider/function_name from available_processes or action_result.processes. Never invent process identifiers.
 If this result represents a novel technique or a correction to existing knowledge, consider updating the relevant knowledge base via edit_file or create_file.

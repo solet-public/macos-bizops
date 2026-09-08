@@ -34,16 +34,16 @@ from typing import IO, Final
 import click
 from ananta.constants import ExitCodes
 
-from ..env_contract import enforce_no_legacy_agent_env
+from ..env_contract import AGENT_INSTANCE_ID_ENV, enforce_no_legacy_agent_env
 from .client import SoletIdentityError, resolve_solet_name
 from .spool import (
     WATCH_SESSION_ID_ENV,
     WATCH_SESSION_LABEL_ENV,
     default_spool_path,
     read_watch_pairing,
+    resolve_watch_instance_id,
     spool_lock_path,
     spool_offset_path,
-    watch_instance_digest,
     watch_pairing_path,
 )
 
@@ -136,7 +136,7 @@ def _resolve_target(spool_override: Path | None) -> WakeTarget | None:
     try:
         enforce_no_legacy_agent_env()
     except RuntimeError as exc:
-        click.echo(f"solet wake: {exc}", err=True)
+        click.echo(f"solet-bridge wake: {exc}", err=True)
         # Same contract as the identity failure below: a plain non-blocking
         # hook error exit, never the wake/block signal.
         raise SystemExit(int(ExitCodes.UNKNOWN_ERROR)) from exc
@@ -154,7 +154,7 @@ def _resolve_target(spool_override: Path | None) -> WakeTarget | None:
         missing = WATCH_SESSION_LABEL_ENV if not role else WATCH_SESSION_ID_ENV
         present = WATCH_SESSION_ID_ENV if not role else WATCH_SESSION_LABEL_ENV
         click.echo(
-            f"solet wake: ${present} is set but ${missing} is not, so this "
+            f"solet-bridge wake: ${present} is set but ${missing} is not, so this "
             "session cannot be paired with its watcher and will never be woken. "
             "A launcher that exports one must export both.",
             err=True,
@@ -163,12 +163,15 @@ def _resolve_target(spool_override: Path | None) -> WakeTarget | None:
     try:
         name = resolve_solet_name()
     except SoletIdentityError as exc:
-        click.echo(f"solet wake: {exc}", err=True)
+        click.echo(f"solet-bridge wake: {exc}", err=True)
         # Deliberately NOT ExitCodes.CONNECTION_ERROR: that is 2, the hook
         # wake/block signal — an identity failure must surface as a plain
         # non-blocking hook error, never impersonate a wake.
         raise SystemExit(int(ExitCodes.UNKNOWN_ERROR)) from exc
-    instance_id = f"agi-watch-{watch_instance_digest(session_id)}"
+    instance_id = resolve_watch_instance_id(
+        session_id,
+        os.environ.get(AGENT_INSTANCE_ID_ENV),
+    )
     spool = spool_override or _paired_spool(name, instance_id)
     return WakeTarget(
         role=role,
@@ -195,7 +198,7 @@ def _paired_spool(name: str, instance_id: str) -> Path:
     found, spool = read_watch_pairing(watch_pairing_path(name, instance_id))
     if found and spool is None:
         click.echo(
-            "solet wake: this session's watcher armed with --no-spool, so "
+            "solet-bridge wake: this session's watcher armed with --no-spool, so "
             "no delivery can ever reach the wake hook. Re-arm `watch` without "
             "--no-spool to restore waking.",
             err=True,
@@ -297,7 +300,7 @@ def _read_offset(offset_file: Path) -> int:
         value = int(raw)
     except ValueError as exc:
         raise SystemExit(
-            f"solet wake: offset sidecar {offset_file} is corrupt "
+            f"solet-bridge wake: offset sidecar {offset_file} is corrupt "
             f"({raw!r}) — delete it to resurface the spool from the start.",
         ) from exc
     return max(value, 0)
@@ -311,7 +314,7 @@ def _compose_wake_packet(target: WakeTarget, lines: list[str]) -> str:
     """The stderr wake packet — shown to the model as its reason to act.
 
     The durable-copies command carries ``agent_session_id`` because the process
-    resolves the reader's identity from that argument alone: ``solet call``
+    resolves the reader's identity from that argument alone: ``solet-bridge call``
     opens a fresh, unregistered bridge, so unlike the ``/peer/inbox`` route
     there is no calling session for the server to recognise. This footer used to
     advertise the same key with no identity at all — which 500'd before Part 24

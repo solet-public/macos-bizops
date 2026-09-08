@@ -23,7 +23,8 @@ Exit codes:
   5 - Blocking-gate violations (non-allowlisted findings from any
       blocking structural gate: god_class_check / radon_cc_check /
       radon_mi_check / whole_tree_integration_gate /
-      service_interface_ast_check / return_shape_gate; the summary
+      service_interface_ast_check / return_shape_gate / bundle_license_gate;
+      the summary
       line names the specific failing gate(s))
 
 Note: codes 2 and 3 have historical drift from the original docstring
@@ -48,7 +49,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from gate_scope import (
     BUNDLED_VENV_PREFIX,
@@ -79,6 +80,8 @@ _EMBEDDING_BOUND_CHECK = _QUALITY_GATES_DIR / "embedding_description_bound_gate.
 _EMBEDDING_BOUND_ALLOWLIST = (
     _QUALITY_GATES_DIR / "embedding_description_bound_allowlist.txt"
 )
+_BUNDLE_LICENSE_CHECK = _QUALITY_GATES_DIR / "bundle_license_gate.py"
+_BUNDLE_LICENSE_ALLOWLIST = _QUALITY_GATES_DIR / "bundle_license_allowlist.txt"
 
 # Exit codes returned by the three wrapper scripts (see each script's
 # docstring): 0 = clean (or every finding allowlisted), 2 = one or more
@@ -177,6 +180,61 @@ _PER_FILE_GATE_PLUGIN_GLOBS = (
     # workbench/2026-08-08_gate_scope_widening_measurement_d3-impl.md.
     "plugins/*/tools",
 )
+
+
+def is_per_file_gate_scoped_path(path: str) -> bool:
+    """Whether one repo-relative Python path is in the per-file gate surface.
+
+    This is the programmatic form of the Git-Controller scope rule.  Keeping
+    it beside the roots consumed by :func:`_per_file_gate_paths` prevents a
+    landing helper from carrying a second, stale approximation of the gate
+    surface.  The predicate intentionally classifies by PATH SHAPE only: it
+    does not require the file to exist or be git-tracked, because callers use
+    it before staging to learn which supplemental checks they must run.
+    """
+    candidate = PurePosixPath(path)
+    if not _is_relative_python_path(candidate):
+        return False
+    return _matches_top_level_scope(candidate) or _matches_plugin_scope(candidate)
+
+
+def _is_relative_python_path(candidate: PurePosixPath) -> bool:
+    return not candidate.is_absolute() and ".." not in candidate.parts and candidate.suffix == ".py"
+
+
+def _matches_top_level_scope(candidate: PurePosixPath) -> bool:
+    for root in _PER_FILE_GATE_TOP_LEVEL:
+        if _matches_declared_root(candidate, root):
+            return True
+    return False
+
+
+def _matches_declared_root(candidate: PurePosixPath, root: Path) -> bool:
+    root_parts = root.parts
+    if candidate.parts[:len(root_parts)] != root_parts:
+        return False
+    if root.suffix == ".py":
+        return candidate.parts == root_parts
+    return len(candidate.parts) > len(root_parts)
+
+
+def _matches_plugin_scope(candidate: PurePosixPath) -> bool:
+    for pattern in _PER_FILE_GATE_PLUGIN_GLOBS:
+        if _matches_plugin_pattern(candidate, PurePosixPath(pattern)):
+            return True
+    return False
+
+
+def _matches_plugin_pattern(candidate: PurePosixPath, pattern: PurePosixPath) -> bool:
+    exact_file = pattern.parts[-1].endswith(".py")
+    if exact_file and len(candidate.parts) != len(pattern.parts):
+        return False
+    if not exact_file and len(candidate.parts) <= len(pattern.parts):
+        return False
+    return all(
+        expected == "*" or actual == expected
+        for actual, expected in zip(candidate.parts, pattern.parts, strict=False)
+    )
 
 # Path-segment prefix that flags a directory as a bundled venv (e.g.
 # `.venv`, `.venv_cosyvoice`). Bundled venvs ship vendored library code
@@ -514,6 +572,20 @@ _SHIPPED_DOC_GATE = _GateSpec(
     script=_SHIPPED_DOC_CHECK,
     allowlist=_SHIPPED_DOC_ALLOWLIST,
 )
+
+# Bundle-license gate (D-6.1). Tree-walking: its own bundle manifest is the
+# scope, and it resolves every member's transitive dependency closure. This is
+# deliberately BLOCKING: an Apache-2.0 bundle with a newly unlicensed plugin,
+# a non-Apache declaration, strong copyleft, or an incomplete closure must not
+# reach the quality summary as a warning-only observation. The gate returns 1
+# for non-allowlisted findings, so its wrapper code is explicit below.
+_BUNDLE_LICENSE_GATE = _GateSpec(
+    name="bundle_license",
+    description="bundle license compliance",
+    script=_BUNDLE_LICENSE_CHECK,
+    allowlist=_BUNDLE_LICENSE_ALLOWLIST,
+)
+_BUNDLE_LICENSE_WRAPPER_BLOCKING = 1
 
 
 def _scope_roots(project_root: Path) -> list[Path]:
@@ -894,6 +966,40 @@ def _check_shipped_doc_gate(project_root: Path, venv_python: Path,
     )
 
 
+def _check_bundle_license_gate(project_root: Path, venv_python: Path,
+                               results: _CheckResults) -> bool:
+    """Run the blocking bundle-license gate. True iff findings remain."""
+
+    artifacts = _resolve_gate_artifacts(project_root, _BUNDLE_LICENSE_GATE)
+    if artifacts is None:
+        return True
+    script, allowlist = artifacts
+
+    print(
+        f"\n📊 {_BUNDLE_LICENSE_GATE.description.title()} "
+        f"Gate ({_BUNDLE_LICENSE_GATE.name})...",
+    )
+    argv = [str(venv_python), str(script), "--allowlist", str(allowlist)]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        print(f"❌ BLOCKING: {_BUNDLE_LICENSE_GATE.name} gate timed out after 180s")
+        return True
+    except FileNotFoundError as exc:
+        print(f"❌ BLOCKING: {_BUNDLE_LICENSE_GATE.name} gate cannot invoke: {exc}")
+        return True
+
+    return _interpret_tree_gate_result(
+        _BUNDLE_LICENSE_GATE,
+        result,
+        venv_python,
+        script,
+        allowlist,
+        results,
+        blocking_code=_BUNDLE_LICENSE_WRAPPER_BLOCKING,
+    )
+
+
 def _check_embedding_bound_gate(project_root: Path, venv_python: Path,
                                 results: _CheckResults) -> bool:
     """Run the embedding_description bound gate. True iff non-allowlisted findings.
@@ -1123,7 +1229,7 @@ def _report_pyright_errors(output: str, error_count: int) -> None:
 def _run_blocking_gates(
     project_root: Path, venv_python: Path, results: _CheckResults,
 ) -> None:
-    """Run the five whole-tree blocking gates + the two warn-only gates into
+    """Run the six whole-tree blocking gates + the two warn-only gates into
     `results`. Split out of `main()` purely to keep its own branch count
     (and cyclomatic complexity) down -- no behavior change, same calls in
     the same order."""
@@ -1137,6 +1243,8 @@ def _run_blocking_gates(
         results.failed_blocking_gates.append(_EMBEDDING_BOUND_GATE.name)
     if _check_shipped_doc_gate(project_root, venv_python, results):
         results.failed_blocking_gates.append(_SHIPPED_DOC_GATE.name)
+    if _check_bundle_license_gate(project_root, venv_python, results):
+        results.failed_blocking_gates.append(_BUNDLE_LICENSE_GATE.name)
     # W-INT Cycle 2 driver-import gate runs in WARN mode per master plan
     # §1.7 — emits findings but never blocks. Mode flip at W-WINT2-FINAL.
     _check_wint2_driver_import_gate(project_root, venv_python)

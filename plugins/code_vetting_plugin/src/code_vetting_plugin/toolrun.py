@@ -11,12 +11,17 @@ with ``subprocess.run(timeout=...)`` instead of wrapping the command.
 
 from __future__ import annotations
 
+import logging
 import os
+import platform
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
 
 _DEFAULT_TIMEOUT_S = 900
+_QUALIFICATION_TIMEOUT_S = 2
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,9 +34,87 @@ class ToolOutcome:
     timed_out: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class ToolQualification:
+    """One process-lifetime usability verdict for a PATH-resolved external tool."""
+
+    name: str
+    path: str | None
+    usable: bool
+    reason: str
+
+
+_TOOL_QUALIFICATIONS: dict[str, ToolQualification] = {}
+
+
+def _quarantine_detail(path: str) -> str | None:
+    """Return the operator remedy when macOS has quarantined ``path``; never alter it."""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        checked = subprocess.run(
+            ["xattr", "-p", "com.apple.quarantine", path],
+            capture_output=True,
+            text=True,
+            timeout=_QUALIFICATION_TIMEOUT_S,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if checked.returncode != 0:
+        return None
+    return (
+        f"com.apple.quarantine is present on {path}; remedy: xattr -d "
+        f"com.apple.quarantine {shlex.quote(path)}"
+    )
+
+
+def _unusable(name: str, path: str, reason: str) -> ToolQualification:
+    detail = _quarantine_detail(path)
+    return ToolQualification(name, path, False, f"{reason}; {detail}" if detail else reason)
+
+
+def _qualify_path(name: str, path: str) -> ToolQualification:
+    try:
+        completed = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=_QUALIFICATION_TIMEOUT_S,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        return _unusable(name, path, f"{name} unusable: hung past {_QUALIFICATION_TIMEOUT_S}s during qualification")
+    except OSError as exc:
+        return _unusable(name, path, f"{name} unusable: failed to start ({exc})")
+    if completed.returncode != 0:
+        return _unusable(name, path, f"{name} unusable: exit {completed.returncode} during qualification")
+    return ToolQualification(name, path, True, f"{name} usable")
+
+
+def qualify_tool(name: str) -> ToolQualification:
+    """Trial-invoke a PATH tool once and cache an honest, bounded verdict."""
+    cached = _TOOL_QUALIFICATIONS.get(name)
+    if cached is not None:
+        return cached
+    path = shutil.which(name)
+    verdict = ToolQualification(name, None, False, f"{name} absent from PATH") if path is None else _qualify_path(name, path)
+    _TOOL_QUALIFICATIONS[name] = verdict
+    if not verdict.usable:
+        _logger.warning("external tool qualification: %s", verdict.reason)
+    return verdict
+
+
+def tool_unavailable_reason(name: str) -> str:
+    """The cached absence/unusability reason for a coverage-gap disclosure."""
+    return qualify_tool(name).reason
+
+
 def tool_available(name: str) -> bool:
-    """True when ``name`` resolves on PATH."""
-    return shutil.which(name) is not None
+    """True only when ``name`` resolves and answers a bounded trial invocation."""
+    return qualify_tool(name).usable
 
 
 def tool_version(name: str, version_arg: str = "--version") -> str | None:

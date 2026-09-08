@@ -21,7 +21,7 @@ dependencies = [
 # Non-MCP local-invocation CLI: drive a running solet over its
 # localhost bridge surface when the client's MCP-server allowlist blocks
 # the stdio bridge. Design: workbench/2026-07-18_mcp_free_local_invocation_cli_design.md
-solet = "agent_messaging_plugin.local_cli.cli:main"
+solet-bridge = "agent_messaging_plugin.local_cli.cli:main"
 
 [project.entry-points."ananta.plugins"]
 agent_messaging_plugin = "agent_messaging_plugin.plugin:AgentMessagingPlugin"

@@ -15,12 +15,19 @@ plugins/github_midwife_plugin/tests/profile_install_faildloud_smoke.py``.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
+import json
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from github_midwife_plugin.profile_install import (
     ProfileInstallError,
@@ -102,6 +109,41 @@ def _check_happy_path(root: Path) -> None:
     )
 
 
+def _check_setup_py_editable_is_detected(root: Path) -> None:
+    """The platform package uses setup.py metadata, not PEP 621 metadata.
+
+    Editable presence is a property of ``direct_url.json`` and its resolved
+    source path; it must not depend on a duplicate ``[project].name`` field in
+    the source tree's pyproject.toml.
+    """
+    target = _make_fixture_tree(root, ["foo_plugin"])
+    (target / "ananta" / "pyproject.toml").write_text("[tool.ruff]\nline-length=100\n")
+    (target / "ananta" / "setup.py").write_text("from setuptools import setup\nsetup(name='ananta')\n")
+    site_packages = target / ".venv" / "lib" / "python3.13" / "site-packages"
+    direct_url = site_packages / "ananta-2.0.0.dist-info" / "direct_url.json"
+    direct_url.parent.mkdir(parents=True)
+    direct_url.write_text(
+        json.dumps(
+            {
+                "url": target.joinpath("ananta").resolve().as_uri(),
+                "dir_info": {"editable": True},
+            }
+        )
+    )
+
+    with patch("subprocess.run", side_effect=_fake_run_all_succeed):
+        installed = install_profile_allowlist(
+            venv_dir=target / ".venv",
+            target=target,
+            plugin_allowlist=["foo_plugin"],
+        )
+    _check(
+        "setup.py-backed ananta editable is detected from direct_url without duplicate PEP 621 metadata",
+        installed == ["github_midwife_plugin", "foo_plugin"],
+        f"got {installed!r}",
+    )
+
+
 def _check_installs_build_backend_first(root: Path) -> None:
     """RED-FIRST (finding F8, 2026-07-11): stock py3.13 venvs ship pip but NOT
     setuptools (dropped from ensurepip in 3.12), so the `--no-build-isolation`
@@ -119,9 +161,9 @@ def _check_installs_build_backend_first(root: Path) -> None:
         )
     first_cmd = mock_run.call_args_list[0].args[0]
     _check(
-        "the FIRST pip call upgrades the build backend (pip+setuptools+wheel)",
+        "the FIRST pip call installs the missing build backend without upgrading it",
         all(pkg in first_cmd for pkg in ("pip", "setuptools", "wheel"))
-        and "install" in first_cmd and "--upgrade" in first_cmd,
+        and "install" in first_cmd and "--upgrade" not in first_cmd,
         f"got {first_cmd!r}",
     )
     _check(
@@ -248,6 +290,19 @@ def _check_load_plugin_allowlist(root: Path) -> None:
     else:
         raise SmokeFailureError("load_plugin_allowlist-malformed: did not raise")
 
+    invalid_yaml_path = root / "invalid.yaml"
+    invalid_yaml_path.write_text("plugins: [unterminated\n")
+    try:
+        load_plugin_allowlist(invalid_yaml_path)
+    except ProfileInstallError as exc:
+        _check(
+            "load_plugin_allowlist normalizes syntactically invalid YAML to ProfileInstallError",
+            "invalid YAML" in str(exc),
+            str(exc),
+        )
+    else:
+        raise SmokeFailureError("load-plugin-allowlist-invalid-yaml: did not raise")
+
 
 def _check_real_profile_a_allowlist_loads() -> None:
     """Sanity: the actual Slice A profile template loads through this path."""
@@ -269,6 +324,9 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _check_happy_path(root)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _check_setup_py_editable_is_detected(root)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _check_installs_build_backend_first(root)

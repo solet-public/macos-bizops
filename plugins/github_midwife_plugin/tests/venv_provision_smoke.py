@@ -16,12 +16,19 @@ plugins/github_midwife_plugin/tests/venv_provision_smoke.py``.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
+import json
 import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from github_midwife_plugin import venv_provision  # noqa: E402
 from github_midwife_plugin.plugin import GithubMidwifePlugin  # noqa: E402
@@ -41,6 +48,29 @@ def _check(label: str, condition: bool, detail: str = "") -> None:
 
 def _fake_completed(returncode: int, stderr: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr=stderr)
+
+
+def _is_build_backend_prep_call(call: list[str]) -> bool:
+    return all(
+        (
+            all(package in call for package in ("pip", "setuptools", "wheel")),
+            "install" in call,
+            "--upgrade" in call,
+        )
+    )
+
+
+def _has_expected_editable_install_order(calls: list[list[str]], target: Path) -> bool:
+    package_dirs = (
+        target / "solet_setup_contracts",
+        target / "ananta",
+        target / "plugins" / "macos_vault_plugin",
+        target / "plugins" / "github_midwife_plugin",
+    )
+    return all(
+        any(str(package_dir) in argument for argument in call)
+        for call, package_dir in zip(calls[2:], package_dirs, strict=True)
+    )
 
 
 # ── probe_target_absent_or_empty ────────────────────────────────────
@@ -76,9 +106,11 @@ def _check_create_venv_and_install_seed(root: Path) -> None:
 
     venv_dir = venv_provision.create_venv_and_install_seed(target, run=_fake_run)
     _check("create_venv_and_install_seed returns <target>/.venv", venv_dir == target / ".venv", str(venv_dir))
+    # c60455872 deliberately adds the solet_setup_contracts editable install.
+    # RED MUTATION: revert this expectation to 5 while that sixth install exists.
     _check(
-        "exactly 5 subprocess calls: venv create + build-backend prep + 3 editable installs (ananta, vault, seed plugin)",
-        len(calls) == 5,
+        "exactly 6 subprocess calls: venv create + build-backend prep + 4 editable installs (setup contracts, ananta, vault, seed plugin)",
+        len(calls) == 6,
         str(calls),
     )
     _check("the first call creates the venv", "venv" in calls[0], str(calls[0]))
@@ -90,8 +122,7 @@ def _check_create_venv_and_install_seed(root: Path) -> None:
     # ananta editable install (no setuptools) and this check fails RED.
     _check(
         "the build backend (pip+setuptools+wheel) is upgraded before any editable install",
-        all(pkg in calls[1] for pkg in ("pip", "setuptools", "wheel"))
-        and "install" in calls[1] and "--upgrade" in calls[1],
+        _is_build_backend_prep_call(calls[1]),
         str(calls[1]),
     )
     # RED-FIRST (finding F-5, 2026-07-12 cold run): the seed plugin's
@@ -100,10 +131,8 @@ def _check_create_venv_and_install_seed(root: Path) -> None:
     # between ananta and the seed plugin — the pre-fix body installed only
     # ananta + seed plugin, and pip failed resolving the pin from PyPI.
     _check(
-        "the seed installs target ananta/, plugins/macos_vault_plugin/, plugins/github_midwife_plugin/ in that order",
-        any(str(target / "ananta") in c for c in calls[2])
-        and any(str(target / "plugins" / "macos_vault_plugin") in c for c in calls[3])
-        and any(str(target / "plugins" / "github_midwife_plugin") in c for c in calls[4]),
+        "the seed installs target solet_setup_contracts/, ananta/, plugins/macos_vault_plugin/, plugins/github_midwife_plugin/ in that order",
+        _has_expected_editable_install_order(calls, target),
         str(calls),
     )
 
@@ -349,6 +378,40 @@ def _check_provision_venv_variant(root: Path) -> None:
     )
 
 
+def _check_birth_profile_mismatch_precedes_venv(root: Path) -> None:
+    plugin = GithubMidwifePlugin()
+    target = root / "canonical_seed"
+    for marker in ("ananta", "plugins"):
+        (target / marker).mkdir(parents=True)
+    (target / "PROVENANCE.json").write_text(
+        json.dumps({"bundle": {"name": "macos-bizops", "platform": "local"}}),
+        encoding="utf-8",
+    )
+    with patch.object(venv_provision, "create_venv_and_install_seed") as create_venv, \
+         patch("github_midwife_plugin.plugin.run_genesis") as run_genesis:
+        result = plugin.birth_solet(
+            name="bizops",
+            profile_template="macos_bizops",
+            environment_config={"target": str(target)},
+            provision_venv=True,
+        )
+    _check(
+        "birth_solet reports a declared provenance/profile mismatch as failed",
+        result.status.value == "failed" and "profile identity mismatch" in result.message,
+        result.message,
+    )
+    _check(
+        "birth_solet mismatch makes zero venv/package/genesis calls",
+        create_venv.call_count == 0 and run_genesis.call_count == 0,
+        f"venv={create_venv.call_count}, genesis={run_genesis.call_count}",
+    )
+    _check(
+        "birth_solet mismatch writes no venv or genesis marker",
+        not (target / ".venv").exists() and not (target / ".solet" / "genesis.json").exists(),
+        str(target),
+    )
+
+
 # ── verify_newborn_db_scram_gated (assumes-and-verifies, 2026-07-11) ──
 
 
@@ -357,7 +420,9 @@ def _check_verify_db_scram_gated_passes_when_wrong_pw_rejected() -> None:
     returns without raising. Per-role isolation: the negative probe connects as
     the newborn's OWN role (== the passed name) to the newborn db, password via
     PGPASSWORD, never argv."""
-    with patch("subprocess.run", return_value=_fake_completed(1)) as mock_run:
+    keg_only_psql = "/opt/homebrew/opt/postgresql@17/bin/psql"
+    with patch("subprocess.run", return_value=_fake_completed(1)) as mock_run, \
+         patch.object(venv_provision, "_resolve_psql_binary", return_value=keg_only_psql):
         venv_provision.verify_newborn_db_scram_gated("fern-fresh-forge", run=subprocess.run)
     cmd = mock_run.call_args.args[0]
     _, kwargs = mock_run.call_args
@@ -369,6 +434,11 @@ def _check_verify_db_scram_gated_passes_when_wrong_pw_rejected() -> None:
         # RED-FIRST: the pre-fix single conninfo token (`host=... dbname=... user=...`)
         # is exactly the space-keyword-injection sink F3 flagged; assert it is gone.
         and not any("dbname=" in str(a) or "host=" in str(a) for a in cmd),
+        f"cmd={cmd!r}",
+    )
+    _check(
+        "the verify probe uses the resolver's keg-only PostgreSQL 17 psql path, not bare PATH argv0",
+        cmd[0] == keg_only_psql,
         f"cmd={cmd!r}",
     )
     _check(
@@ -384,7 +454,12 @@ def _check_verify_db_scram_gated_refuses_when_wrong_pw_accepted() -> None:
     passwordless-accessible) -> refuse LOUD, naming the R3 default-scram lines
     wizard step 1 must add. This is the ONE invisible failure the verb keeps
     checking."""
-    with patch("subprocess.run", return_value=_fake_completed(0)):
+    with patch("subprocess.run", return_value=_fake_completed(0)), \
+         patch.object(
+             venv_provision,
+             "_resolve_psql_binary",
+             return_value="/opt/homebrew/opt/postgresql@17/bin/psql",
+         ):
         try:
             venv_provision.verify_newborn_db_scram_gated("fern-fresh-forge", run=subprocess.run)
         except venv_provision.VerbModeProvisionError as exc:
@@ -439,6 +514,8 @@ def main() -> int:
             _check_existing_clone_seeds_own_credential(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_provision_venv_variant(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_birth_profile_mismatch_precedes_venv(Path(tmp))
         _check_verify_db_scram_gated_passes_when_wrong_pw_rejected()
         _check_verify_db_scram_gated_refuses_when_wrong_pw_accepted()
         _check_verify_db_rejects_invalid_name_before_any_probe()

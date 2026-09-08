@@ -31,6 +31,7 @@ Run:
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -41,10 +42,9 @@ for _p in (str(_PLUGIN_SRC), str(_REPO_ROOT / "ananta" / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from macos_self_deployment_plugin import green_candidate  # noqa: E402
+from macos_self_deployment_plugin import green_candidate, heartbeat_lifecycle  # noqa: E402
 from macos_self_deployment_plugin.constants import (  # noqa: E402
     COLOR_BLUE,
-    STATUS_ROLLED_BACK,
 )
 from macos_self_deployment_plugin.plugin import MacosSelfDeploymentPlugin  # noqa: E402
 from macos_self_deployment_plugin.preflight_probe_runner import ProbeOutcome  # noqa: E402
@@ -229,29 +229,89 @@ def _part1_flip_before_enqueue() -> None:
 
 
 class _RollbackRouter:
-    """status() shows a blue drain entry; rollback(blue) confirms."""
+    """A live blue drain target is reactivated by a green rollback action."""
+
+    def __init__(self) -> None:
+        self.active_instance_id = "green-active"
 
     def status(self) -> dict[str, Any]:
-        return {"drain_entries": [{"color": COLOR_BLUE}]}
+        return {
+            "active_color": (
+                COLOR_BLUE
+                if self.active_instance_id == "blue-draining"
+                else "green"
+            ),
+            "active_instance_id": self.active_instance_id,
+            "drain_entries": [{"color": COLOR_BLUE, "instance_id": "blue-draining"}],
+        }
 
-    def rollback(self, color: str) -> dict[str, Any]:
+    def rollback(self, color: str, instance_id: str) -> dict[str, Any]:
+        if color != COLOR_BLUE or instance_id != "blue-draining":
+            return {"rolled_back": False, "reason": "wrong_target"}
+        self.active_instance_id = instance_id
         return {"rolled_back": True, "active_color": color}
 
 
-def _part2_rollback_restores_gate() -> None:
-    plugin = MacosSelfDeploymentPlugin()
-    plugin._router_client = cast("RouterClient", _RollbackRouter())  # noqa: SLF001
-    # Simulate the post-swap gated state on this (reactivating) process.
-    plugin.orchestrator_ref = SimpleNamespace(is_active_color=False)  # type: ignore[attr-defined]
+class _HeartbeatRollbackRouter(_RollbackRouter):
+    """Drive green → blue between real heartbeat-loop iterations."""
 
-    result = plugin.swap_rollback("operator-rollback")
+    def __init__(self, stop_event: threading.Event) -> None:
+        super().__init__()
+        self._stop_event = stop_event
+        self._heartbeat_count = 0
+        self._status_count = 0
+        self.executing_plugin: MacosSelfDeploymentPlugin | None = None
+
+    def heartbeat(self, _instance_id: str) -> dict[str, Any]:
+        self._heartbeat_count += 1
+        if self._heartbeat_count == 2:
+            if self.executing_plugin is None:
+                raise RuntimeError("test router has no executing plugin")
+            self.executing_plugin.swap_rollback("operator-rollback")
+        return {"alive": True}
+
+    def status(self) -> dict[str, Any]:
+        self._status_count += 1
+        snapshot = super().status()
+        if self.active_instance_id == "blue-draining" and self._status_count >= 5:
+            self._stop_event.set()
+        return snapshot
+
+
+def _part2_rollback_restores_gate() -> None:
+    stop_event = threading.Event()
+    router = _HeartbeatRollbackRouter(stop_event)
+    executing_plugin = MacosSelfDeploymentPlugin()
+    executing_plugin._router_client = cast("RouterClient", router)  # noqa: SLF001
+    executing_plugin.orchestrator_ref = SimpleNamespace(is_active_color=True)  # type: ignore[attr-defined]
+    reactivated_plugin = MacosSelfDeploymentPlugin()
+    reactivated_plugin.orchestrator_ref = SimpleNamespace(is_active_color=False)  # type: ignore[attr-defined]
+    executing_restore_calls: list[bool] = []
+    executing_plugin._set_color_active = executing_restore_calls.append  # type: ignore[method-assign]
+    router.executing_plugin = executing_plugin
+    original_interval = heartbeat_lifecycle.DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    heartbeat_lifecycle.DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 0.01
+    try:
+        heartbeat_lifecycle._run_steady_state_heartbeat(
+            client=cast("RouterClient", router),
+            port=0,
+            self_color=COLOR_BLUE,
+            self_instance_id="blue-draining",
+            stop_event=stop_event,
+            pending_finisher_file=None,
+            current_release_lookup=None,
+            logger=reactivated_plugin.logger,
+            set_color_active=reactivated_plugin._set_color_active,
+        )
+    finally:
+        heartbeat_lifecycle.DEFAULT_HEARTBEAT_INTERVAL_SECONDS = original_interval
     _check(
-        result["status"] == STATUS_ROLLED_BACK,
-        f"swap_rollback succeeded: {result['status']}",
+        executing_restore_calls == [],
+        "rollback action did NOT flip the executing process's already-active gate",
     )
     _check(
-        plugin.orchestrator_ref.is_active_color is True,  # type: ignore[attr-defined]
-        "swap_rollback restored the poller gate (is_active_color True)",
+        reactivated_plugin.orchestrator_ref.is_active_color is True,  # type: ignore[attr-defined]
+        "reactivated process restored its OWN poller gate after router transition",
     )
 
 

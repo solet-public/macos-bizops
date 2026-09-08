@@ -25,7 +25,10 @@ from ananta.core.process_registry.constants import SYSTEM_PROMPT_PROCESS_KEYS
 from ananta.core.process_registry.invocation_schema_generator import (
     InvocationSchemaGenerator,
 )
-from ananta.core.services.service_interface_decorator import ServiceInterfaceActionMetadata
+from ananta.core.services.service_interface_decorator import (
+    ServiceInterfaceActionMetadata,
+    is_service_interface_process_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +192,7 @@ class ServiceInterfaceScanner:
             metadata: ServiceInterfaceActionMetadata = method_any._service_interface_metadata
 
             # Skip disabled service interface processes (e.g., io_interface_service)
-            if not metadata.is_enabled:
+            if not is_service_interface_process_enabled(metadata):
                 logger.debug(
                     f"Skipping disabled service interface process: "
                     f"{metadata.provider}::{metadata.function_name}"

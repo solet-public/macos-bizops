@@ -118,7 +118,7 @@ Check each expected-good state read-only before writing anything.
 
 - `<clone>/client/` absent means hydration has not run; present means a re-run, so compare intended content before overwriting and prefer updating over clobbering.
 - `<clone>/CLAUDE.md` and `<clone>/AGENTS.md` may exist from a prior hydration; same re-run rule for both. Probe `~/.claude/settings.json` for the `SOLET_STEP_ZERO_HOOK=` / `SOLET_ROLE_RECLAIM_HOOK=` markers (this solet's or another's) and `~/.claude/skills/rename/SKILL.md` plus `~/.claude/skills/feedback/SKILL.md` for prior installs; a pre-2026-07-22 hydration may have left hook copies in `<clone>/.claude/settings.json` — migrate those to user scope on a re-run rather than leaving both.
-- Probe the GitHub CLI read-only: `gh --version`. The `/feedback` skill this ladder installs files upstream feedback through `gh issue create --web`, so a machine without `gh` has a shipped capability that fails at first use. Record present/absent for Step 2's offer; do not install anything during the probe.
+- Probe the GitHub CLI read-only: `gh --version`. The `/feedback` skill this ladder installs files upstream feedback non-interactively through `gh issue create --body-file`, so a machine without `gh` has a shipped capability that fails at first use. Record present/absent for Step 2's offer; do not install anything during the probe.
 - Read the shell templates that drive the integration: `zshrc.template`, `solet.zsh.template`, and any fleet/sample launcher file referenced by the clone or already present in the operator's startup file. Then inspect `~/.zshrc` or the active shell's startup file only far enough to classify its structure and choose an additive integration point. Do not print or copy secret-looking values into the transcript or generated files.
 - Confirm genesis actually finished: the newborn's LaunchAgent plist exists and the manifest marker `<clone>/profile/data/github_midwife/attempt.json` is present. If not, stop; hydration follows genesis, it does not replace it.
 
@@ -200,9 +200,10 @@ this table exists so nothing is invisible, not to replace those steps.
 
 ### GitHub CLI (`gh`) — the `/feedback` skill's filing tool
 
-The `/feedback` skill rendered above files upstream feedback through the seed
-repository's issue forms via `gh issue create --web`, so the GitHub CLI is a
-real dependency of a capability this ladder installs — not an optional nicety.
+The `/feedback` skill rendered above files upstream feedback non-interactively
+through the seed repository's issue endpoint, with a structured body that
+mirrors the required issue-form fields. The GitHub CLI is therefore a real
+dependency of a capability this ladder installs — not an optional nicety.
 If Step 1's probe found `gh` absent, offer its install now, under the user's
 normal tool-approval flow like every other action in this ladder:
 
@@ -210,12 +211,13 @@ normal tool-approval flow like every other action in this ladder:
 brew install gh
 ```
 
-Then verify `gh --version` answers. Authentication is not part of hydration:
-the `--web` filing path opens the browser, where the user's own GitHub login
-applies, and `gh auth login` can be run later if the user wants authenticated
-CLI operations. If the user declines the install, record the decline and move
-on — the skill's own filing step states the dependency again at first use, so
-nothing fails silently later.
+Then verify `gh --version` answers. Authentication is not part of hydration,
+but filing later requires a non-interactive authenticated `gh` session. An
+operator who wants to enable filing can arrange an approved token-backed CLI
+login (for example, `gh auth login --with-token` with the token supplied by the
+secret broker); never substitute browser authentication. If the user declines
+the install, record the decline and move on — the skill's own filing step states
+the dependency again at first use, so nothing fails silently later.
 
 ### Structured-choice prompts (`AskUserQuestion`) — default deny, launcher-enforced
 
@@ -430,12 +432,36 @@ The rules are the same shape as the deployment-directory managed block, with two
 ### Launcher permission mode
 
 `claude-<name>` passes `--permission-mode bypassPermissions` by default, so a
-fresh install can do work without an approval prompt on every action. To get
-prompts back for a session you want to supervise:
+fresh install can do work without an approval prompt on every action. That is
+the shipped default, not a fixed posture — **surface the choice explicitly
+rather than letting it pass unremarked** (seed feedback #30/§48.3, 2026-08-24:
+the operator who never heard this tradeoff is the one who later fights a CLI
+update that silently changes what an unset posture means). Ask, in plain
+words: "New sessions from this launcher start able to act without asking —
+want that, or should they ask before every tool use?" Three states exist,
+set via `SOLET_PERMISSION_POSTURE` in the operator's shell profile (see
+`TEMPLATE_VARS.md` for the full contract):
 
 ```bash
-SOLET_PERMISSION_PROMPTS=1 claude-<name>
+export SOLET_PERMISSION_POSTURE=bypass    # default — act immediately, no per-action prompt
+export SOLET_PERMISSION_POSTURE=prompt    # standard approval flow, forced regardless of global settings
+export SOLET_PERMISSION_POSTURE=inherit   # defer entirely to this machine's own Claude Code settings
 ```
+
+State the distinction between the last two plainly, because it is the one an
+operator cannot guess: `prompt` is a fixed request that does not depend on
+anything else on the machine; `inherit` follows whatever this machine's own
+global Claude Code configuration currently says, which can change meaning
+across a CLI update with no local signal that it did (the exact failure #30
+reported — a flagless-equivalent session came up auto-denying sanctioned
+work, with no approval path, after such an update). An operator who wants
+predictable behavior across updates wants `prompt`, not `inherit`, even
+though `inherit` sounds like the more conservative choice.
+
+`SOLET_PERMISSION_PROMPTS=1` still works (permanent alias for
+`SOLET_PERMISSION_POSTURE=inherit`, its exact pre-#30 meaning) — mention it
+only if the operator already has it set somewhere, not as the primary route
+for a new setup.
 
 `codex-<name>` is unchanged and still passes no dangerous approval, sandbox,
 hook-trust, or MCP bypass. `CODEX_BIN` may select an explicit stock executable;
@@ -615,7 +641,7 @@ Let the operator pick names and count; do not invent roles they did not ask for.
 **What accepting builds.** Render `fleet_functions.zsh.template` to `<clone>/client/{{SOLET_NAME}}-fleet.zsh` and add `source "<clone>/client/{{SOLET_NAME}}-fleet.zsh"` to `<clone>/client/{{SOLET_NAME}}.zsh` (the file Step 2 already installed). The template gives one shared `_claude_for_{{SOLET_NAME}}(role, model, effort)` launcher plus ONE example role function to copy per role the operator chose (a restart variant is included in the same comment block). This is a genuinely different trust level than the Step 2 launcher — read the template's own header comment and carry that reasoning into the conversation with the operator, don't just render it silently:
 
 - `--remote-control "$role"` makes the session addressable by Claude Code's remote-control feature from another session — what lets a coordinator drive or monitor workers. A Claude Code feature; no MCP involved.
-- `--dangerously-skip-permissions` is opt-in and separately gated in the template (an env var the operator sets, not a hardcoded flag). It removes the per-action tool-approval prompt — necessary for several sessions to run without an operator babysitting each confirmation, but it removes the safety boundary Step 2's invariant exists to protect. State this tradeoff to the operator in plain language and let them decide; do not default it on.
+- `--dangerously-skip-permissions` is opt-in and separately gated in the template (an env var the operator sets, not a hardcoded flag). When enabled, it selects the same effective `bypassPermissions` mode as `--permission-mode bypassPermissions`; on installed Claude Code 2.1.243 the two spellings are behaviorally equivalent. Neither spelling retains a permission classifier that the other removes — the background classifier belongs to `auto` mode, not bypass. The fleet flag still matters because the fleet launcher otherwise inherits this machine's resolved permission mode, while the Step 2 single-session launcher explicitly defaults to bypass; enabling the flag may therefore change a fleet session from its inherited mode to bypass, but it is never “more permissive than bypassPermissions.” If a session already in effective `bypassPermissions` is denied, do not switch spellings and call that a repair. Establish the effective mode, capture the exact independent denial, and classify the actual boundary (hook, managed policy, tool availability, OS/sandbox, credential, service, or another evidenced cause). For permission-mode facts, use this evidence order: installed-binary behavior first, current vendor documentation second, and this knowledge-base text last. Do not default the fleet opt-in on.
 - Peer messaging, role binding, AND idle wake come from each session's watcher (armed by the SessionStart hook → rename skill) plus the user-scope `<name> wake` Stop hook — not from any launcher flag — on the default transport. The template's `{{SOLET_NAME}}_FLEET_TRANSPORT` knob (default `watch`) declares the transport per Step 4a's offer paragraph; setting it to `mcp` re-points the rename skill to the MCP bridge and disarms the wake Stop hook via its guard. The optional MCP development-channel flag (`{{SOLET_NAME}}_FLEET_MCP_CHANNELS=1`) is the matching wake half and exists in the template gated OFF; the flag alone is inert (it also needs a registered MCP server via `claude mcp add` AND Anthropic-direct auth — unusable on Bedrock, impossible on an MCP-blocked machine), and it is only for an operator who explicitly asks for MCP and whose policy permits it — never suggest it unprompted.
 
 **Git safety when more than one session shares this deployment directory — a nameable gate that hydration arms, and whose ONLY exemption is leaving it unset.** If the operator is choosing more than one role, ask directly: will more than one of these sessions ever run git commands (commit, push, checkout, stash, branch) against the SAME directory? If yes, concurrent mutating git from several sessions is a real collision risk — a stash or checkout from one session can silently clobber another session's in-progress work. The gate for exactly this ships in the `coordination-hooks` plugin Step 2 installs (`hooks/git_controller_gate.py`, registered on `PreToolUse`); the operator names the controller themselves: designate ONE role — **any name they choose** (`Git-Controller`, `gitops`, whatever) — as the sole git-mutator, and every other session is blocked from mutating git.
@@ -777,7 +803,7 @@ Then, that the no-MCP command and session tooling work:
 - A fresh session started via `claude-<name>` carries the intended label and can use the `<name>` command without a venv activation.
 - `CLAUDE.md` and `AGENTS.md` each contain the `BEGIN SOLET HYDRATION` / `END SOLET HYDRATION` block, including the no-MCP Step Zero command, the access-mode contract (no-MCP CLI default, MCP by explicit operator request only, source-artifact recovery when the runtime is unavailable), the implementation/debugging KB-first rule, and the pointer to the router-vs-bridge distinction.
 - `~/.claude/settings.json` parses as JSON and contains exactly one `extraKnownMarketplaces` entry keyed to the rendered marketplace name (pointing at `<clone>` as a `directory` source) and exactly one `enabledPlugins.coordination-hooks@<marketplace-name>: true` entry — the session hooks moved into that plugin (Step 2), so this file no longer carries them and its own `hooks/hooks.json` roster is what determines which hooks execute, not a literal env-var-keyed command string here; `~/.claude/skills/rename/SKILL.md` and `~/.claude/skills/feedback/SKILL.md` both exist.
-- `gh --version` answers, unless the operator declined the Step 2 GitHub CLI offer — the `/feedback` skill's filing path is `gh issue create --web`, and a recorded decline is the only passing state other than presence.
+- `gh --version` answers, unless the operator declined the Step 2 GitHub CLI offer — the `/feedback` skill files non-interactively with `gh issue create --body-file`, and a recorded decline is the only passing state other than presence.
 - `<clone>/client/claude-session-overlay.json` exists, parses as JSON, and contains exactly the `AskUserQuestion` permissions deny; the rendered `claude-<name>` launcher carries the `--settings` overlay flag gated on `SOLET_ALLOW_ASKUSERQUESTION` — both halves, because an overlay file without the flag (or the reverse) is the prohibition in name only.
 - **The machine carries no managed policy that voids the deny.** Check the four canonical locations, remote-pulled first — on a machine that has that one, the system paths may not exist at all, so checking only the system paths reports "no managed policy" on exactly the deployments where one is in force:
   ```bash
@@ -812,7 +838,7 @@ fleet coordination, tmux worker hosting) visible instead of silently optional.
 
 ## Your blue-green router (auto-installed at birth)
 
-If your solet runs a **blue-green-capable profile** (its plugin allowlist includes `macos_self_deployment_plugin` — the `bizops`/standard tier), genesis **automatically installs a per-solet blue-green router** as the last birth step, right after the main autostart LaunchAgent. No operator action is needed: the router picks a free port in 8800-8999, writes its `<name>.router.port` + `<name>.bridge.port` discovery files, and loads under the label `local.solet.<name>.router`. That router is what lets the solet adopt new code with **zero downtime** via `apply_manifest` (blue-green swap). It is a separate KeepAlive LaunchAgent by design — it runs independently of Ananta and survives swaps untouched.
+If your solet runs a **blue-green-capable profile** (its plugin allowlist includes `macos_self_deployment_plugin` — the `macos-bizops` tier), genesis **automatically installs a per-solet blue-green router** as the last birth step, right after the main autostart LaunchAgent. No operator action is needed: the router picks a free port in 8800-8999, writes its `<name>.router.port` + `<name>.bridge.port` discovery files, and loads under the label `local.solet.<name>.router`. That router is what lets the solet adopt new code with **zero downtime** via `apply_manifest` (blue-green swap). It is a separate KeepAlive LaunchAgent by design — it runs independently of Ananta and survives swaps untouched.
 
 **Free-tier solets** (the `macos_free_minimal` profile, no self-deployment plugin) are **single-color by design** and have no router; their update path is a plain restart, not a blue-green swap. Genesis records the router step as `skipped` for them — that is expected, not a failure.
 

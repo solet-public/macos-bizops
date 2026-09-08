@@ -27,7 +27,7 @@ Exercises:
      passed, response parsed; 204 (empty stdout) -> None
  12. run_rest() REST-level failure -> SalesforceCliCallError from the raw
      JSON error array
- 13. EDGE parity: validate_edge_process_provider raises nothing, 9 verbs
+ 13. EDGE parity: validate_edge_process_provider raises nothing, including provision_cli
 
 Run:
     SOLET_NAME=<name> .venv/bin/python3 \
@@ -51,6 +51,7 @@ from salesforce_plugin.client import SalesforceCliExecutor  # noqa: E402
 from salesforce_plugin.constants import (  # noqa: E402
     ERROR_AUTH_FAILED,
     ERROR_NOT_CONFIGURED,
+    ERROR_PROVISION_CONSENT_REQUIRED,
 )
 from salesforce_plugin.errors import SalesforceCliCallError, SalesforceServiceError  # noqa: E402
 from salesforce_plugin.plugin import SalesforcePlugin  # noqa: E402
@@ -333,7 +334,71 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 9 verbs discovered", len(actions) == 9, str(len(actions)))
+    _assert("all 15 verbs discovered", len(actions) == 15, str(len(actions)))
+
+
+def test_cli_provisioning() -> None:
+    """Fixture-proof the formula route before its shipped documentation changes."""
+
+    existing = SalesforceCliExecutor(None, sf_cli_path="sf")  # type: ignore[arg-type]
+    with patch("salesforce_plugin.client.shutil.which", return_value="/fake/bin/sf"), patch(
+        "salesforce_plugin.client.subprocess.run",
+        return_value=_completed("@salesforce/cli/2.99.0\n"),
+    ) as run_mock:
+        observed = existing.provision_cli(acknowledge_system_change=False)
+    _assert("existing sf does not invoke Homebrew", observed["provisioned"] is False, str(observed))
+    _assert("existing sf has no package mutation", run_mock.call_count == 1, str(run_mock.call_args_list))
+
+    missing = SalesforceCliExecutor(None, sf_cli_path="sf")  # type: ignore[arg-type]
+    consent_code = ""
+    with patch("salesforce_plugin.client.shutil.which", return_value=None):
+        try:
+            missing.provision_cli(acknowledge_system_change=False)
+        except SalesforceServiceError as exc:
+            consent_code = exc.code
+    _assert("missing sf refuses without consent", consent_code == ERROR_PROVISION_CONSENT_REQUIRED, consent_code)
+
+    provisioned = SalesforceCliExecutor(None, sf_cli_path="sf")  # type: ignore[arg-type]
+    with patch(
+        "salesforce_plugin.client.shutil.which",
+        side_effect=[None, "/fake/bin/brew", "/fake/bin/sf"],
+    ), patch(
+        "salesforce_plugin.client.subprocess.run",
+        side_effect=[
+            _completed("Would install 2 formulae:\nnode\nsf\n"),
+            _completed(""),
+            _completed("@salesforce/cli/2.99.0\n"),
+        ],
+    ) as run_mock:
+        observed = provisioned.provision_cli(acknowledge_system_change=True)
+    _assert("missing sf installs only after consent", observed["provisioned"] is True, str(observed))
+    _assert(
+        "sf dry-run precedes exactly one install",
+        [call.args[0] for call in run_mock.call_args_list][:2]
+        == [["/fake/bin/brew", "install", "--dry-run", "sf"], ["/fake/bin/brew", "install", "sf"]],
+        str(run_mock.call_args_list),
+    )
+
+    plugin = SalesforcePlugin()
+    orchestrator = MagicMock()
+    orchestrator.config_manager.get_plugin_config.return_value = {"sf_cli_path": "sf"}
+    orchestrator.config_manager.save_plugin_config.return_value = True
+    plugin.orchestrator_ref = orchestrator
+    plugin._app_config_loader = MagicMock()  # noqa: SLF001 — fixture supplies ready plugin state
+    plugin._cli_executor = MagicMock()  # noqa: SLF001 — fixture isolates config binding
+    plugin._cli_executor.provision_cli.return_value = {
+        "provisioned": False,
+        "reason": "already_present",
+        "executable_path": "/fake/bin/sf",
+        "version": "@salesforce/cli/2.99.0",
+    }
+    response = plugin.provision_cli({"acknowledge_system_change": True}, {})
+    _assert("provisioner binds absolute sf path", response["action_status"] == "completed", str(response))
+    _assert(
+        "binding uses ordinary config update without restart",
+        response["data"]["configuration_boundary"] == "config_updated_and_executor_rebound_no_reload_or_restart",
+        str(response),
+    )
 
 
 def main() -> int:
@@ -354,6 +419,7 @@ def main() -> int:
     test_run_rest_error_array()
     test_readiness_pulls_config_from_manager()
     test_edge_parity()
+    test_cli_provisioning()
     print()
     print(f"Results: {_passed} passed, {len(_failed)} failed")
     if _failed:

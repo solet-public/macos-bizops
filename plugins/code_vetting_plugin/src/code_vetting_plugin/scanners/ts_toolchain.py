@@ -37,7 +37,7 @@ from ..models import (
     Severity,
 )
 from ..targets import TargetTree
-from ..toolrun import ToolOutcome, run, tool_available
+from ..toolrun import ToolOutcome, run, tool_available, tool_unavailable_reason
 
 _NODE = "node"
 _TSC = "tsc"
@@ -73,7 +73,7 @@ _OPTIN_GAP = (
     "target-controlled code — tsc/eslint config + binaries — on the scan host; prefer the "
     "Phase-2 sandbox)"
 )
-_NODE_GAP = "node runtime not installed on scan host"
+_NODE_GAP = "node runtime unavailable on scan host"
 _NODE_MODULES_GAP = (
     "node_modules not materialized — the target toolchain needs resolved dependencies; the "
     "read-only invariant forbids installing into the target (materialize a throwaway copy "
@@ -145,7 +145,7 @@ def _toolchain_precondition_gap(
     if node_modules.is_dir() and not execute_target_toolchain:
         return _gap(scanner, _OPTIN_GAP)
     if not tool_available(_NODE):
-        return _gap(scanner, _NODE_GAP)
+        return _gap(scanner, f"{_NODE_GAP}: {tool_unavailable_reason(_NODE)}")
     if not node_modules.is_dir():
         return _gap(scanner, _NODE_MODULES_GAP)
     return None
@@ -223,7 +223,10 @@ def scan_tsc(tree: TargetTree, run_id: str, *, execute_target_toolchain: bool = 
         return gap
     binary = _resolve_binary(tree, _TSC)
     if binary is None:
-        return _gap(_TSC, "typescript compiler not available (target node_modules/.bin + PATH)")
+        return _gap(
+            _TSC,
+            f"typescript compiler not available (target node_modules/.bin + PATH): {tool_unavailable_reason(_TSC)}",
+        )
     if not (tree.root / "tsconfig.json").is_file():
         return _gap(_TSC, "no tsconfig.json at target root — tsc honors the target's own config only (no synthesized config)")
     outcome = run(
@@ -315,7 +318,10 @@ def scan_eslint(tree: TargetTree, run_id: str, *, execute_target_toolchain: bool
         return gap
     binary = _resolve_binary(tree, _ESLINT)
     if binary is None:
-        return _gap(_ESLINT, "eslint not available (target node_modules/.bin + PATH)")
+        return _gap(
+            _ESLINT,
+            f"eslint not available (target node_modules/.bin + PATH): {tool_unavailable_reason(_ESLINT)}",
+        )
     if not _has_eslint_config(tree):
         return _gap(_ESLINT, "no eslint config in target — eslint honors the target's own config only")
     outcome = run([binary, "--format", "json", "."], cwd=str(tree.root), timeout_s=_TOOL_TIMEOUT_S, raise_on_timeout=False)

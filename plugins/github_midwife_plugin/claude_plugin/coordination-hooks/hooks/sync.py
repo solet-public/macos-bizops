@@ -40,6 +40,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from shutil import which
 from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -54,18 +55,20 @@ _SOLET_TIMEOUT_SECONDS = 60
 
 
 def _solet_call(process_key: str, arguments: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
-    """Shell out to the ``solet`` CLI (this script has no MCP bridge of
+    """Shell out to the ``solet-bridge`` CLI (this script has no MCP bridge of
     its own, same reason ``drain``/``hydrate_render`` are agent-mediated
     rather than server-side). Returns ``(envelope, None)`` on a parseable
     response, or ``(None, <error text>)`` -- never raises, so callers decide
     fail-loud-and-stop vs. fail-loud-and-report per their own contract."""
+    if which("solet-bridge") is None:
+        return None, "solet-bridge is unavailable on PATH; refusing the memory sync call"
     try:
         result = subprocess.run(
-            ["solet", "call", process_key, json.dumps(arguments)],
+            ["solet-bridge", "call", process_key, json.dumps(arguments)],
             capture_output=True, text=True, timeout=_SOLET_TIMEOUT_SECONDS, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return None, f"solet call {process_key} failed to run: {exc}"
+        return None, f"solet-bridge call {process_key} failed to run: {exc}"
     if result.returncode != 0:
         # The CLI writes its JSON error envelope to STDOUT even on a non-zero
         # exit (measured live 2026-08-09 against export_memories' own
@@ -73,11 +76,11 @@ def _solet_call(process_key: str, arguments: dict[str, Any]) -> tuple[dict[str, 
         # surfacing only stderr here would silently swallow the actual
         # error_message every time.
         detail = result.stdout.strip() or result.stderr.strip()
-        return None, f"solet call {process_key} exited {result.returncode}: {detail[:400]}"
+        return None, f"solet-bridge call {process_key} exited {result.returncode}: {detail[:400]}"
     try:
         return json.loads(result.stdout), None
     except json.JSONDecodeError as exc:
-        return None, f"solet call {process_key} returned unparseable output: {exc}"
+        return None, f"solet-bridge call {process_key} returned unparseable output: {exc}"
 
 
 def _default_spool_path() -> Path:

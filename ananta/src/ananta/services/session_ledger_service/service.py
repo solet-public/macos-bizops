@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from ananta.llm.session_ledger.blob_adapter import SessionLedgerBlobAdapter
@@ -78,6 +79,7 @@ from ananta.services.session_ledger_service.interfaces.public import (
     SessionLedgerIngestAPI,
     SessionLedgerInvertedBoundsRepairAPI,
     SessionLedgerPollingDriverAPI,
+    SessionLedgerQualificationAPI,
     SessionLedgerReadAPI,
     SessionLedgerSearchAPI,
     SessionLedgerSessionSourceKindBackfillAPI,
@@ -87,6 +89,15 @@ from ananta.services.session_ledger_service.periodic_cron import (
 )
 from ananta.services.session_ledger_service.poll_drain import (
     start_importer_poll_drain,
+)
+from ananta.services.session_ledger_service.selected_sources import (
+    SelectedSourceRecord,
+    SelectedSourceRecordError,
+    load_selected_source_record,
+    selected_and_consented_source_kinds,
+)
+from ananta.services.session_ledger_service.selected_sources import (
+    qualify_selected_sources as build_selected_sources_qualification,
 )
 from ananta.services.session_ledger_service.summarize import (
     SessionLedgerSummarizeMixin,
@@ -118,6 +129,64 @@ logger = logging.getLogger(__name__)
 # reset KEEPS — their live counts are surfaced on the dry-run so the operator can
 # see the content the reset preserves (in contrast to the pre-GAP-5 hard-delete).
 _RESET_ACTION = "cursor_reset_replay"
+
+
+def _selected_source_failure(reason: str) -> dict[str, Any]:
+    """Return the fail-closed public shape when manager proof cannot load."""
+
+    return {
+        "record_source": "manager_transaction",
+        "target_identity_matched": False,
+        "answers_fingerprint_matched": False,
+        "qualification_reason": reason,
+        "sources": [],
+    }
+
+
+def _registered_source_kinds(source_rows: object) -> set[str]:
+    """Extract only durable registered source kinds from public source rows."""
+
+    if not isinstance(source_rows, list):
+        return set()
+    return {
+        source_kind
+        for row in source_rows
+        if isinstance(row, dict)
+        and isinstance(row.get("source_id"), str)
+        and isinstance((source_kind := row.get("source_kind")), str)
+    }
+
+
+def _backfill_counts(census_rows: object) -> dict[str, int]:
+    """Extract bounded per-kind session counts from the ledger census."""
+
+    if not isinstance(census_rows, list):
+        return {}
+    return {
+        source_kind: session_count
+        for row in census_rows
+        if isinstance(row, dict)
+        and isinstance((source_kind := row.get("source_kind")), str)
+        and isinstance((session_count := row.get("session_count")), int)
+    }
+
+
+def _retrieval_by_selected_kind(
+    service: Any,
+    record: SelectedSourceRecord,
+    registered_source_kinds: set[str],
+) -> dict[str, bool]:
+    """Probe one bounded event window only for trusted, registered selections."""
+
+    return {
+        source_kind: bool(
+            service.list_events_by_source_window(source_kind=source_kind, limit=1).get(
+                "events"
+            )
+        )
+        for source_kind in selected_and_consented_source_kinds(record)
+        if source_kind in registered_source_kinds
+    }
 _PRESERVED_CONTENT_TABLES = (
     "session_ledger__session",
     "session_ledger__event",
@@ -139,6 +208,7 @@ _LEDGER_PERIODIC_POLL_SESSION_ID = "sess-ledger-periodic-poll"
 
 class SessionLedgerService(
     SessionLedgerReadAPI,
+    SessionLedgerQualificationAPI,
     SessionLedgerIngestAPI,
     SessionLedgerPollingDriverAPI,
     SessionLedgerCanonicalPointerRepairAPI,
@@ -254,6 +324,34 @@ class SessionLedgerService(
     # ------------------------------------------------------------------
     # Read surface
     # ------------------------------------------------------------------
+
+    def qualify_selected_sources(
+        self,
+        target: str,
+        name: str,
+        answers_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Qualify only manager-recorded choices against bounded ledger observations."""
+
+        target_path = Path(target)
+        try:
+            record = load_selected_source_record(target=target_path, name=name)
+        except SelectedSourceRecordError as exc:
+            return _selected_source_failure(str(exc))
+        registered_source_kinds = _registered_source_kinds(self.list_sources().get("sources"))
+        backfill_counts = _backfill_counts(self.census().get("sources"))
+        retrieval_by_kind = _retrieval_by_selected_kind(
+            self, record, registered_source_kinds
+        )
+        return build_selected_sources_qualification(
+            target=target_path,
+            name=name,
+            requested_answers_fingerprint=answers_fingerprint,
+            record=record,
+            registered_source_kinds=registered_source_kinds,
+            backfill_counts=backfill_counts,
+            retrieval_by_kind=retrieval_by_kind,
+        )
 
     def list_sources(self) -> dict[str, Any]:
         """Return registered ingest sources joined with their plugin descriptors.

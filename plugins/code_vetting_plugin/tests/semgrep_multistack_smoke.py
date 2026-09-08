@@ -21,9 +21,15 @@ Run directly or via run_smokes.py.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
 import tempfile
 from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from code_vetting_plugin.models import Dimension
 from code_vetting_plugin.scanners.sast import (  # noqa: PLC2701 — pin the internal pack/target/count logic
@@ -150,6 +156,7 @@ def main() -> int:
         return 1
     print(f"semgrep_multistack_smoke OK: {len(_CHECKS_RUN)} checks passed")
     if _semgrep_check_skipped:
+        print('BORN_CLONE_SKIP_WITNESS={"reason":"ambient_executable_missing","executable":"semgrep"}')
         print(
             "SKIP: semgrep not on PATH -- the semgrep-specific gap-reason "
             "assertion disclosed a gap rather than running; every other "

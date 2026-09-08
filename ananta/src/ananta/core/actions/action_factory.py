@@ -27,6 +27,47 @@ logger = logging.getLogger(__name__)
 # Type alias for JSON-like config/template data that is dynamically typed at runtime
 JsonDict = dict[str, Any]
 
+UNKNOWN_ARGUMENTS_ERROR_CODE = "action.unknown_arguments"
+
+
+def validate_process_arguments(
+    process_key: str,
+    parameters: dict[str, object],
+    arguments: dict[str, object],
+) -> None:
+    """Reject missing required or undeclared arguments for a registered process."""
+    declared = list(parameters.keys())
+    unknown = [name for name in arguments if name not in parameters]
+    if unknown:
+        raise FrameworkError(
+            message=f"Unknown arguments: {unknown}. Declared arguments: {declared}",
+            error_code=UNKNOWN_ARGUMENTS_ERROR_CODE,
+            details={
+                CONTEXT_KEY_PROCESS_KEY: process_key,
+                "unknown_arguments": unknown,
+                "declared_arguments": declared,
+                "provided_arguments": list(arguments.keys()),
+            },
+        )
+
+    required = [
+        name
+        for name, meta in parameters.items()
+        if isinstance(meta, dict) and meta.get("required")
+    ]
+    missing = [name for name in required if name not in arguments]
+    if missing:
+        raise FrameworkError(
+            message=f"Missing required arguments: {missing}",
+            error_code="action.missing_required_arguments",
+            details={
+                CONTEXT_KEY_PROCESS_KEY: process_key,
+                "missing_arguments": missing,
+                "required_arguments": required,
+                "provided_arguments": list(arguments.keys()),
+            },
+        )
+
 
 def _deep_merge(base: JsonDict, overrides: JsonDict) -> JsonDict:
     """Deep merge two dictionaries, with overrides taking precedence.
@@ -443,26 +484,7 @@ class ActionFactory:
                 details={CONTEXT_KEY_PROCESS_KEY: process_key},
             )
 
-        # Extract all required argument names from registry metadata
-        # Note: Injected parameters should have required=False in registry, not excluded here
-        required = [
-            name
-            for name, meta in parameters.items()
-            if isinstance(meta, dict) and meta.get("required")
-        ]
-
-        missing = [name for name in required if name not in arguments]
-        if missing:
-            raise FrameworkError(
-                message=f"Missing required arguments: {missing}",
-                error_code="action.missing_required_arguments",
-                details={
-                    CONTEXT_KEY_PROCESS_KEY: process_key,
-                    "missing_arguments": missing,
-                    "required_arguments": required,
-                    "provided_arguments": list(arguments.keys()),
-                },
-            )
+        validate_process_arguments(process_key, parameters, arguments)
 
     def _get_action_definition_template(self, process_key: str) -> JsonDict | None:
         """Get action_definition_template for a process from registry.

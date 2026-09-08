@@ -12,8 +12,12 @@ permits, and propose_patch is artifact-only (no apply verb exists).
 from __future__ import annotations
 
 import logging
+import platform
+import shlex
 import shutil
+import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -38,10 +42,73 @@ _MAX_PATCH_INPUT_CHARS = 500_000
 _MAX_PATCH_PATHS = 100
 _GIT_TIMEOUT = 60
 _RG_TIMEOUT = 60
+_RG_QUALIFICATION_TIMEOUT = 2
 
 # rg exclusion globs mirroring the path-security denylist (belt-and-suspenders;
 # hits are ALSO post-filtered through assert_not_denylisted).
 _logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolQualification:
+    """A cached usability verdict: PATH presence is deliberately insufficient."""
+
+    path: str | None
+    usable: bool
+    reason: str
+
+
+_rg_qualification: _ToolQualification | None = None
+
+
+def _quarantine_detail(path: str) -> str | None:
+    """Name a macOS quarantine attribute and its operator remedy; never remove it."""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        result = subprocess.run(
+            ["xattr", "-p", "com.apple.quarantine", path],
+            capture_output=True,
+            text=True,
+            timeout=_RG_QUALIFICATION_TIMEOUT,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return (
+        f"com.apple.quarantine is present on {path}; remedy: xattr -d "
+        f"com.apple.quarantine {shlex.quote(path)}"
+    )
+
+
+def _qualify_ripgrep(root: Path) -> _ToolQualification:
+    """Trial ``rg --version`` once per process before selecting it as the primary engine."""
+    global _rg_qualification
+    if _rg_qualification is not None:
+        return _rg_qualification
+    path = shutil.which("rg")
+    if path is None:
+        verdict = _ToolQualification(None, False, "ripgrep absent from PATH")
+    else:
+        result = run_bounded([path, "--version"], cwd=root, timeout=_RG_QUALIFICATION_TIMEOUT)
+        if result.timed_out:
+            reason = f"ripgrep unusable: hung past {_RG_QUALIFICATION_TIMEOUT}s during qualification"
+            detail = _quarantine_detail(path)
+            verdict = _ToolQualification(path, False, f"{reason}; {detail}" if detail else reason)
+        elif result.exit_code != 0:
+            reason = f"ripgrep unusable: exit {result.exit_code} during qualification"
+            detail = _quarantine_detail(path)
+            verdict = _ToolQualification(path, False, f"{reason}; {detail}" if detail else reason)
+        else:
+            verdict = _ToolQualification(path, True, "ripgrep qualified usable by rg --version")
+    _rg_qualification = verdict
+    if not verdict.usable:
+        _logger.warning("repo_service.search tool qualification: %s", verdict.reason)
+    return verdict
+
 
 _RG_EXCLUDE_GLOBS: tuple[str, ...] = (
     "!.git", "!profile", "!.ananta", "!node_modules", "!.venv*", "!venv_*",
@@ -91,14 +158,14 @@ class RepoOperations:
         result so a caller is never guessing which produced its hits.
         """
         cap = min(max(max_results, 1), _MAX_SEARCH_RESULTS)
-        rg = shutil.which("rg")
-        if rg is not None:
-            result, engine = self._search_ripgrep(rg, query, path_glob), "ripgrep"
-            reason = "ripgrep is installed and was used"
+        qualification = _qualify_ripgrep(self._root)
+        if qualification.usable and qualification.path is not None:
+            result, engine = self._search_ripgrep(qualification.path, query, path_glob), "ripgrep"
+            reason = qualification.reason
         else:
-            result, engine = self._search_git_grep(query, path_glob), "git-grep"
+            result, engine = self._search_git_grep(query, path_glob, qualification.reason), "git-grep"
             reason = (
-                "ripgrep is not installed; served by the git-native grep instead, which "
+                f"{qualification.reason}; served by the git-native grep instead, which "
                 "genesis guarantees by git-initialising every born tree. Hits are a strict "
                 "superset of ripgrep's: nothing ripgrep finds is missed, and hidden-path "
                 "files ripgrep skips by default are additionally included."
@@ -106,6 +173,11 @@ class RepoOperations:
             # DECLARED, never silent: the envelope carries it for programmatic
             # callers and this carries it for whoever is reading logs. A fallback
             # a caller cannot see is indistinguishable from the primary having run.
+            _logger.warning("repo_service.search fell back to the git-native grep: %s", reason)
+        if result.timed_out and engine == "ripgrep":
+            fallback_reason = f"ripgrep qualified usable but timed out after {_RG_TIMEOUT}s on this search"
+            result = self._search_git_grep(query, path_glob, fallback_reason)
+            engine, reason = "git-grep", fallback_reason
             _logger.warning("repo_service.search fell back to the git-native grep: %s", reason)
         if result.timed_out:
             raise RepoToolError(f"search timed out after {_RG_TIMEOUT}s ({engine})")
@@ -131,7 +203,9 @@ class RepoOperations:
         argv += ["--regexp", query, "."]
         return run_bounded(argv, cwd=self._root, timeout=_RG_TIMEOUT)
 
-    def _search_git_grep(self, query: str, path_glob: str | None) -> SubprocessResult:
+    def _search_git_grep(
+        self, query: str, path_glob: str | None, fallback_reason: str
+    ) -> SubprocessResult:
         r"""The guaranteed fallback. ``-P`` is REQUIRED, never downgraded to ``-E``.
 
         Measured: against ripgrep's Rust regex, ``git grep -E`` agrees on 0% of
@@ -149,7 +223,7 @@ class RepoOperations:
         result = run_bounded(argv, cwd=self._root, timeout=_RG_TIMEOUT)
         if result.exit_code >= 2 and "PCRE" in result.output.upper():
             raise RepoToolError(
-                "search fell back to `git grep` because ripgrep is not installed, but this "
+                f"search fell back to `git grep` because {fallback_reason}, but this "
                 "git was built without PCRE support (-P), and the POSIX alternative returns "
                 "WRONG results for common patterns rather than fewer. Install ripgrep, or a "
                 f"git with PCRE. Underlying error: {result.output[:200].strip()}"

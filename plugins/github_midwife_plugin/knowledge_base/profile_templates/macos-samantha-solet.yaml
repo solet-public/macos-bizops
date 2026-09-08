@@ -144,6 +144,7 @@ service_bindings:
   knowledge_service: default_knowledge_plugin
   thinking_service: default_thinking_plugin
   self_deployment_service: macos_self_deployment_plugin
+  local_self_deployment_service: macos_self_deployment_plugin
 
 notes:
   excluded:

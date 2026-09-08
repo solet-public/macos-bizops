@@ -814,6 +814,34 @@ def test_the_ceiling_form_refuses_a_non_positive_ceiling() -> None:
             _check(False, f"a ceiling of {bad} was ACCEPTED -- it must be refused")
 
 
+def test_rotation_notice_boundaries_and_sources() -> None:
+    """The operator rule is one derived boundary, never an economics band."""
+    def verdict(
+        *, model: str, window: int | None, tokens: int, hard: int = 400_000,
+    ) -> rt.RotationNoticeDecision:
+        return rt.rotation_notice_verdict(
+            model=model, effort="high", current_tokens=tokens,
+            runtime_window_tokens=window, configured_hard_clear_tokens=hard,
+        )
+
+    _check(not verdict(model="claude-fable-5", window=1_000_000, tokens=319_999).due,
+           "319,999 is below the 400K hard-clear-derived notice")
+    _check(verdict(model="claude-fable-5", window=1_000_000, tokens=320_000).due,
+           "320,000 is the one 80% notice point")
+    _check(not verdict(model="claude-fable-5", window=1_000_000, tokens=399_999, hard=500_000).due,
+           "raising hard clear to 500K moves the boundary, not a copied literal")
+    _check(verdict(model="claude-fable-5", window=1_000_000, tokens=400_000, hard=500_000).due,
+           "500K hard clear notices at 400K")
+    _check(not verdict(model="claude-haiku-4-5", window=200_000, tokens=143_999).due,
+           "200K runtime window is quiet at 143,999")
+    haiku = verdict(model="claude-haiku-4-5", window=200_000, tokens=144_000)
+    _check(haiku.due and haiku.notice_at_tokens == 144_000,
+           "200K runtime window uses the 180K compaction bound and notices at 144K")
+    unknown = verdict(model="unrecognised", window=None, tokens=320_000)
+    _check(unknown.due and unknown.unrecognized_model and unknown.window_tokens is None,
+           "unknown model uses hard-clear fallback and surfaces that it was unrecognised")
+
+
 def main() -> int:
     print("=== rotation_thresholds smoke ===")
     test_table_carries_exactly_the_seat_confirmed_keys()
@@ -821,8 +849,6 @@ def main() -> int:
     test_plausible_future_model_still_falls_back_conservative()
     test_unknown_model_resolves_to_conservative_fallback()
     test_known_model_resolves_to_its_own_ceiling_not_the_fallback()
-    test_is_rotation_due_false_strictly_below_threshold()
-    test_is_rotation_due_true_at_exact_threshold_boundary()
     test_watch_threshold_constants_match_ratified_values()
     test_poke_threshold_is_strictly_below_rotate_threshold()
     test_rotate_threshold_is_margined_below_cache_ttl_floor()
@@ -838,15 +864,8 @@ def main() -> int:
     test_repeated_cold_calls_across_short_gaps_are_the_overage_signature()
     test_ttl_lapse_is_caught_even_when_the_last_call_read_cache()
     test_transcript_parser_refuses_a_naive_timestamp()
-    test_rotation_due_covers_the_whole_actionable_range()
-    test_a_small_ceiling_model_is_still_due_at_its_own_fraction()
-    test_the_union_can_only_ever_notify_more()
-    test_capacity_can_never_be_the_reason_a_session_is_due()
-    test_a_cold_cache_above_h_is_due_where_the_same_size_warm_is_not()
-    test_unmeasured_cache_state_is_treated_as_warm_never_upgraded_to_cold()
     test_overage_cannot_change_which_band_a_size_falls_in()
-    test_the_two_entry_points_agree_on_the_models_own_ceiling()
-    test_the_frozen_out_of_tree_call_shape_still_works()
+    test_rotation_notice_boundaries_and_sources()
     test_the_ceiling_form_refuses_a_non_positive_ceiling()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:

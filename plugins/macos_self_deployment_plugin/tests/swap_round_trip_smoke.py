@@ -34,8 +34,10 @@ and exits with code 0 on success, 1 on any failure with stderr detail.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -43,6 +45,7 @@ import tempfile
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -93,15 +96,58 @@ from macos_self_deployment_plugin.swap_orchestrator import (  # noqa: E402
 )
 
 # Slice 3 of the bridge-port-routing design eliminated the hardcoded
-# 8101-8198 port bands; ``register_color`` accepts any port now. The
-# smoke deliberately uses high-range literals (50000+) so it actively
-# regresses if a future change reintroduces band validation.
-_BLUE_TEST_PORT = 50001
-_GREEN_TEST_PORT = 50002
+# 8101-8198 port bands; ``register_color`` accepts arbitrary high-range ports.
+# Each smoke run allocates its own ports so concurrently-running smoke processes
+# cannot collide on a fleet-global fixture literal.
+_MIN_TEST_PORT = 50000
 
 
 class _FailureError(RuntimeError):
     """Raised by ``expect`` when an assertion fails."""
+
+
+@dataclass
+class _SmokeResources:
+    """Private resources for one smoke run, released in one finalizer."""
+
+    scratch_root: Path
+    tmpdir: Path
+    harness: _RouterHarness
+    green_listener: socket.socket | None = None
+    green_health_stop: threading.Event | None = None
+    green_health_thread: threading.Thread | None = None
+    prior_proc: Any | None = None
+
+
+def _remove_private_scratch(resources: _SmokeResources, *, retain_artifacts: bool) -> None:
+    """Remove only this run's tempfile-owned directory unless explicitly retained."""
+
+    if retain_artifacts:
+        print(f"[smoke] retaining private scratch: {resources.tmpdir}")
+        return
+    if resources.tmpdir.parent != resources.scratch_root or not resources.tmpdir.name.startswith("lbg_smoke_"):
+        raise _FailureError(f"refusing to remove non-private scratch path: {resources.tmpdir}")
+    shutil.rmtree(resources.tmpdir)
+
+
+def _close_private_resources(resources: _SmokeResources, *, retain_artifacts: bool) -> None:
+    """Close only objects created by this smoke before removing its private scratch."""
+
+    try:
+        if resources.green_health_stop is not None:
+            resources.green_health_stop.set()
+        if resources.green_listener is not None:
+            resources.green_listener.close()
+        if resources.green_health_thread is not None:
+            resources.green_health_thread.join(timeout=1.0)
+        if resources.prior_proc is not None and resources.prior_proc.poll() is None:
+            resources.prior_proc.terminate()
+            resources.prior_proc.wait(timeout=5)
+    finally:
+        try:
+            resources.harness.stop()
+        finally:
+            _remove_private_scratch(resources, retain_artifacts=retain_artifacts)
 
 
 
@@ -224,20 +270,77 @@ def _allocate_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _listening_socket(port: int) -> socket.socket:
-    """Bind + listen on ``port`` so a TCP reachability probe succeeds.
+def _allocate_high_range_port() -> int:
+    """Allocate a free port while preserving the high-range routing regression."""
+    for _ in range(64):
+        port = _MIN_TEST_PORT + (int.from_bytes(os.urandom(2)) % (65536 - _MIN_TEST_PORT))
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+        return port
+    raise _FailureError("could not allocate a high-range smoke port")
 
-    ``SwapOrchestrator._wait_for_register`` opens a brief TCP connection to
-    the green's registered port as a belt-and-suspenders reachability check.
+
+def _high_range_listening_socket() -> tuple[socket.socket, threading.Event, threading.Thread]:
+    """Create a high-range listener that answers the candidate bridge health probe."""
+    for _ in range(64):
+        port = _MIN_TEST_PORT + (int.from_bytes(os.urandom(2)) % (65536 - _MIN_TEST_PORT))
+        try:
+            listener = _listening_socket(port)
+        except OSError:
+            continue
+        else:
+            stop_event = threading.Event()
+            thread = threading.Thread(
+                target=_serve_bridge_health,
+                args=(listener, stop_event),
+                name="swap-smoke-bridge-health",
+                daemon=True,
+            )
+            thread.start()
+            return listener, stop_event, thread
+    raise _FailureError("could not allocate a high-range green listener")
+
+
+def _listening_socket(port: int) -> socket.socket:
+    """Bind + listen on ``port`` for the bridge-health stand-in.
+
+    ``GreenCandidate.wait_until_registered`` requires a bounded
+    ``GET /api/v1/bridge/health`` response from the green's registered port.
     The smoke's ``fake_spawn_green`` registers a router binding but launches
-    no real solet, so nothing would be listening; this supplies a real
-    listener on the green test port. The caller closes it at teardown.
+    no real solet, so this listener plus its responder models that bridge
+    surface. The caller closes it at teardown.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", port))
     sock.listen(8)
+    sock.settimeout(0.1)
     return sock
+
+
+def _serve_bridge_health(listener: socket.socket, stop_event: threading.Event) -> None:
+    """Answer bridge health requests until the smoke finalizer stops the listener."""
+    response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Length: 0\r\n"
+        b"Connection: close\r\n\r\n"
+    )
+    while not stop_event.is_set():
+        try:
+            connection, _address = listener.accept()
+        except TimeoutError:
+            continue
+        except OSError:
+            return
+        with connection:
+            try:
+                connection.recv(4096)
+                connection.sendall(response)
+            except OSError:
+                continue
 
 
 def _spawn_sleep_child() -> subprocess.Popen[bytes]:
@@ -375,22 +478,29 @@ def _make_plugin(
     return plugin
 
 
-def run_smoke() -> None:  # noqa: C901, PLR0915 — long-form smoke
+def _run_smoke_body(
+    resources: _SmokeResources,
+    *,
+    fail_after_router: bool,
+) -> None:  # noqa: C901, PLR0915 — long-form smoke
     print("[smoke] starting local_blue_green swap round-trip smoke")
-    # Operator NO-/tmp rule: scratch lives under ~/.ananta, never $TMPDIR.
-    _ananta_scratch = Path.home() / ".ananta"
-    _ananta_scratch.mkdir(exist_ok=True)
-    tmpdir = Path(tempfile.mkdtemp(prefix="lbg_smoke_", dir=str(_ananta_scratch)))
+    tmpdir = resources.tmpdir
     socket_path = tmpdir / "smoke.router.sock"
-    public_port = _allocate_free_port()
-    harness = _RouterHarness(socket_path, public_port)
-    harness.start()
+    public_port = resources.harness._public_port  # noqa: SLF001 -- smoke-owned harness
     print(f"[smoke] router up on port={public_port} socket={socket_path}")
 
     client = RouterClient(socket_path)
+    if fail_after_router:
+        raise _FailureError("injected post-router failure")
 
     # ---- Pre-state: register + activate blue ----
-    blue_port = _BLUE_TEST_PORT
+    blue_port = _allocate_high_range_port()
+    green_listener, green_health_stop, green_health_thread = _high_range_listening_socket()
+    green_port = int(green_listener.getsockname()[1])
+    expect(blue_port != green_port, "blue and green smoke ports must be distinct")
+    resources.green_listener = green_listener
+    resources.green_health_stop = green_health_stop
+    resources.green_health_thread = green_health_thread
     blue_instance_id = f"example-blue-{uuid.uuid4().hex[:8]}"
     reg = client.register_color(blue_port, COLOR_BLUE, blue_instance_id)
     expect(bool(reg.get("accepted")), f"register blue: {reg}")
@@ -399,6 +509,7 @@ def run_smoke() -> None:  # noqa: C901, PLR0915 — long-form smoke
 
     # Stand-in for the prior-blue OS process (for SIGTERM verification).
     prior_proc = _spawn_sleep_child()
+    resources.prior_proc = prior_proc
     prior_pid = prior_proc.pid
     print(f"[smoke] prior-blue sleep child pid={prior_pid}")
 
@@ -434,7 +545,7 @@ def run_smoke() -> None:  # noqa: C901, PLR0915 — long-form smoke
             },
         )
         result = client.register_color(
-            _GREEN_TEST_PORT, next_color, next_instance_id,
+            green_port, next_color, next_instance_id,
         )
         expect(bool(result.get("accepted")), f"fake_spawn register: {result}")
         return _SYNTHETIC_GREEN_PID
@@ -451,10 +562,9 @@ def run_smoke() -> None:  # noqa: C901, PLR0915 — long-form smoke
         runtime_dir=tmpdir,
     )
 
-    # The orchestrator's _wait_for_register TCP-probes the green's
-    # registered port; bind a real listener so the probe succeeds (kept
-    # open through the swap, closed at teardown below).
-    green_listener = _listening_socket(_GREEN_TEST_PORT)
+    # The candidate readiness gate sends its bridge-health request to the
+    # green's registered port; the per-run responder remains live through the
+    # swap and is stopped at teardown below.
 
     # ----------------------------------------------------------------
     # Verb 1 — restart_with_manifest
@@ -631,7 +741,7 @@ def run_smoke() -> None:  # noqa: C901, PLR0915 — long-form smoke
     expect(bool(act.get("activated")), f"re-activate blue: {act}")
     # Register a brand-new green and activate so blue drops into drain.
     new_green_id = f"example-green-{uuid.uuid4().hex[:8]}"
-    reg = client.register_color(_GREEN_TEST_PORT + 1, COLOR_GREEN, new_green_id)
+    reg = client.register_color(green_port, COLOR_GREEN, new_green_id)
     expect(bool(reg.get("accepted")), f"re-register green: {reg}")
     act = client.activate(COLOR_GREEN, new_green_id)
     expect(bool(act.get("activated")), f"re-activate green: {act}")
@@ -666,14 +776,34 @@ def run_smoke() -> None:  # noqa: C901, PLR0915 — long-form smoke
     # registered a router binding; the returned pid is a fixed sentinel
     # never tied to a real OS process. The prior-blue sleep child was
     # already reaped above by ``complete_swap``.
-    green_listener.close()
-    harness.stop()
     print("[smoke] ALL VERBS PASS")
 
 
-if __name__ == "__main__":
+def run_smoke(*, retain_artifacts: bool = False, fail_after_router: bool = False) -> None:
+    """Run the smoke with a private scratch lifetime closed on every exit path."""
+
+    scratch_root = Path.home() / ".ananta"
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    tmpdir = Path(tempfile.mkdtemp(prefix="lbg_smoke_", dir=str(scratch_root)))
+    harness = _RouterHarness(tmpdir / "smoke.router.sock", _allocate_free_port())
+    resources = _SmokeResources(scratch_root, tmpdir, harness)
+    harness.start()
     try:
-        run_smoke()
+        _run_smoke_body(resources, fail_after_router=fail_after_router)
+    finally:
+        _close_private_resources(resources, retain_artifacts=retain_artifacts)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--retain-artifacts", action="store_true")
+    parser.add_argument("--fail-after-router", action="store_true")
+    args = parser.parse_args()
+    try:
+        run_smoke(
+            retain_artifacts=args.retain_artifacts,
+            fail_after_router=args.fail_after_router,
+        )
     except _FailureError as exc:
         print(f"[smoke] FAILED: {exc}", file=sys.stderr)
         sys.exit(1)

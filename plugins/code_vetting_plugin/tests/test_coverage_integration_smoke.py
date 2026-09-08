@@ -4,7 +4,14 @@ harness artifact. House _check harness; run directly or via run_smokes.py."""
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
+from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from code_vetting_plugin.models import ContextProfile, Dimension, Layer, Severity
 from code_vetting_plugin.report import ReportRenderer

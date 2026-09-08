@@ -127,8 +127,11 @@ class _RecordingState:
 def _report(state: _RecordingState, **overrides: Any) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "agent_instance_id": "agi-test",
-        "claude_session_id": "sess-1",
+        "runtime_session_id": "sess-1",
+        "provider": "anthropic",
+        "runtime": "claude_code",
         "model": "claude-opus-5",
+        "effort": "high",
         "current_tokens": 250_000,
         "ceiling": 1_000_000,
         "measured_at": "2026-08-16T20:00:00+00:00",
@@ -146,6 +149,8 @@ def test_report_round_trips() -> None:
     out = session_context_status(state, agent_instance_id="agi-test")
     _check(out["resolved"] is True, "a reported snapshot reads back as resolved")
     _check(out["current_tokens"] == 250_000, "current_tokens survives the round trip")
+    _check(out["runtime_session_id"] == "sess-1", "runtime-neutral session identity round-trips")
+    _check(out["runtime"] == "claude_code", "the reporter's runtime is explicit")
 
 
 def test_cache_fields_are_tri_state_not_boolean() -> None:
@@ -175,9 +180,16 @@ def test_reported_cache_state_survives_including_the_falsy_values() -> None:
     truthiness test anywhere in the chain -- cache_read_tokens=0 is the
     strongest cold signal there is."""
     state = _RecordingState()
-    _report(state, cache_read_tokens=0, cache_cold=True, cache_overage_signature=False)
+    _report(
+        state,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        cache_cold=True,
+        cache_overage_signature=False,
+    )
     out = session_context_status(state, agent_instance_id="agi-test")
     _check(out["cache_read_tokens"] == 0, "a reported ZERO cache read survives as 0, not None")
+    _check(out["cache_write_tokens"] == 0, "a reported ZERO cache write survives as 0")
     _check(out["cache_cold"] is True, "a reported cold cache reads back True")
     _check(
         out["cache_overage_signature"] is False,
@@ -219,7 +231,7 @@ def test_rotation_due_and_the_band_can_no_longer_contradict_each_other() -> None
     different inputs, which is the defect itself.
     """
     state = _RecordingState()
-    _report(state, current_tokens=300_000, cache_cold=False)
+    _report(state, current_tokens=336_000, cache_cold=False)
     row = session_context_status(state, agent_instance_id="agi-test")
     _check(row["rotation_band"] == "warm_immediate",
            "300K warm is the most urgent band the policy has")
@@ -258,6 +270,257 @@ def test_the_verdict_is_decided_on_the_ceiling_the_row_publishes() -> None:
            "rotation_due follows the STORED ceiling too: 0.06 is under the hint and "
            "60,000 is warm_keep. Deciding on resolve_ceiling(model) instead would "
            "have called this row DUE at 0.6 of a ceiling the response never showed")
+
+
+def _codex_report(state: _RecordingState) -> None:
+    _report(
+        state,
+        runtime_session_id="019d-codex-thread",
+        provider="openai",
+        runtime="codex",
+        model="gpt-5.6-sol",
+        effort="xhigh",
+        current_tokens=200_000,
+        ceiling=258_400,
+        cache_read_tokens=100_000,
+        cache_write_tokens=0,
+        cache_cold=False,
+    )
+
+
+def _trusted_codex_request() -> dict[str, Any]:
+    return {
+        "expected_calls_after": 10,
+        "required_actions": ["compact", "clear"],
+        "capability_profile_id": "openai-gpt-5.6-capabilities-v1",
+        "capability_profile_version": "openai-gpt-5.6-capabilities-v1",
+        "usage_economics_profile_id": "openai-metered-gpt-5.6-sol-2026-08-22",
+        "usage_economics_profile_version": "openai-gpt-5.6-sol-prices-v1",
+        "objective": "metered_api:minimize_expected_monetary_cost",
+        "calibrations": [],
+    }
+
+
+def test_fabricated_calibration_and_profile_claims_are_rejected() -> None:
+    state = _RecordingState()
+    _codex_report(state)
+    fabricated = _trusted_codex_request()
+    fabricated["cache_read_multiplier"] = 0.1
+    fabricated["calibrations"] = [
+        {
+            "action": "compact",
+            "post_action_prefix_tokens": 25_844,
+            "one_time_cost_units": 1,
+            "calibration_profile_id": "fabricated",
+            "calibration_profile_version": "fabricated",
+        },
+    ]
+    try:
+        session_context_status(
+            state,
+            agent_instance_id="agi-test",
+            calculation_request=fabricated,
+        )
+    except VerbError as exc:
+        _check(
+            exc.code == "untrusted_calculation_request",
+            "caller-supplied calibration values are rejected before calculation",
+        )
+    else:
+        _check(False, "fabricated calibration values must never produce a verdict")
+
+    wrong_version = _trusted_codex_request()
+    wrong_version["usage_economics_profile_version"] = "caller-invented-v1"
+    try:
+        session_context_status(
+            state,
+            agent_instance_id="agi-test",
+            calculation_request=wrong_version,
+        )
+    except VerbError as exc:
+        _check(
+            exc.code == "calculation_profile_mismatch",
+            "caller-claimed profile versions must match the resolved catalog row",
+        )
+    else:
+        _check(False, "a fabricated profile version must be rejected")
+
+
+def test_current_codex_catalog_is_unpriced_and_strategy_explanation_is_exposed() -> None:
+    state = _RecordingState()
+    _codex_report(state)
+    out = session_context_status(
+        state,
+        agent_instance_id="agi-test",
+        calculation_request=_trusted_codex_request(),
+    )
+    calculated = out["calculated_verdict"]
+    economics = calculated["economics_decision"]
+    _check(calculated["resolved"] is False, "current unpriced Codex actions stay unresolved")
+    _check(
+        "not priced" in calculated["economic_cause"],
+        "the unresolved cause names missing priced action evidence",
+    )
+    _check(calculated["runtime"] == "codex", "the trusted verdict carries runtime identity")
+    _check(calculated["ceiling"] == 258_400, "the verdict uses active runtime capacity")
+    _check(
+        economics["profile_version"] == "openai-gpt-5.6-sol-prices-v1",
+        "the selected economics profile version comes from the catalog",
+    )
+    _check(
+        economics["explanation_version"] == "usage-economics-explanation-v1",
+        "the strategy explanation contract is explicitly versioned",
+    )
+    _check(
+        bool(economics["projected_constraints"]),
+        "the external result exposes the projected constraint inputs",
+    )
+    _check(
+        "binding_pool_id" in economics and "crossover_profile_id" in economics,
+        "binding and crossover pool identities are always explicit",
+    )
+
+
+def test_public_projection_binds_only_supplied_dimensions() -> None:
+    """Unknown projection inputs must not become favorable constants."""
+    cases = (
+        ("absent", {}, "None", "None"),
+        ("quarter floor", {"quality_floor": 0.25}, "0.25", "None"),
+        ("high floor", {"quality_floor": 0.9}, "0.9", "None"),
+        (
+            "supplied latency",
+            {"quality_floor": 0.25, "keep_latency_seconds": 17.5},
+            "0.25",
+            "17.5",
+        ),
+    )
+    for label, overrides, expected_floor, expected_latency in cases:
+        state = _RecordingState()
+        _codex_report(state)
+        request = _trusted_codex_request()
+        request.update(overrides)
+        result = session_context_status(
+            state,
+            agent_instance_id="agi-test",
+            calculation_request=request,
+        )
+        economics = result["calculated_verdict"]["economics_decision"]
+        constraints = economics["projected_constraints"]
+        _check(
+            f"quality_floor={expected_floor}" in constraints,
+            f"{label}: the supplied-or-absent quality floor is projected exactly; "
+            f"got {constraints!r}",
+        )
+        keep = next(constraint for constraint in constraints if constraint.startswith("keep:"))
+        _check(
+            f"latency_seconds={expected_latency}" in keep,
+            f"{label}: keep latency is the supplied value or stays absent; got {keep}",
+        )
+        _check(
+            "quality_score=None" in keep,
+            f"{label}: absent keep quality stays unresolved; got {keep}",
+        )
+        _check(
+            economics["status"] == "projection_unresolved",
+            f"{label}: incomplete constraints keep the public strategy unresolved",
+        )
+        if expected_floor == "None":
+            _check(
+                "quality_floor is missing" in economics["explanation"],
+                "an absent floor is named as a projection gap; got "
+                f"{economics['explanation']}",
+            )
+
+
+def test_invalid_reading_clocks_fail_before_first_or_new_runtime_writes() -> None:
+    """The store validates a clock before every acceptance short-circuit."""
+    for bad_clock in ("garbage-clock", "2026-08-22T20:00:04"):
+        first = _RecordingState()
+        try:
+            _report(first, reading_at=bad_clock)
+        except VerbError as exc:
+            _check(
+                exc.code == "stale_context_reading",
+                f"first {bad_clock!r} reading fails with the clock error",
+            )
+        else:
+            _check(False, f"first {bad_clock!r} reading must fail before storage")
+        _check(not first.rows, f"first {bad_clock!r} reading writes no snapshot")
+
+        new_runtime = _RecordingState()
+        _report(
+            new_runtime,
+            runtime_session_id="prior-runtime",
+            reading_at="2026-08-22T20:00:03+00:00",
+        )
+        try:
+            _report(
+                new_runtime,
+                runtime_session_id="new-runtime",
+                reading_at=bad_clock,
+            )
+        except VerbError as exc:
+            _check(
+                exc.code == "stale_context_reading",
+                f"new-runtime {bad_clock!r} reading fails with the clock error",
+            )
+        else:
+            _check(False, f"new-runtime {bad_clock!r} reading must fail before storage")
+        _check(
+            new_runtime.rows["agi-test"]["claude_session_id"] == "prior-runtime",
+            f"new-runtime {bad_clock!r} reading cannot replace the earlier snapshot",
+        )
+
+
+def test_reading_identity_is_monotone_within_one_runtime_session() -> None:
+    state = _RecordingState()
+    first = _report(
+        state,
+        reading_at="2026-08-22T20:00:04+00:00",
+        current_tokens=25_844,
+    )
+    repeated = _report(
+        state,
+        reading_at="2026-08-22T20:00:04+00:00",
+        current_tokens=99_999,
+    )
+    _check(first["status"] == "recorded", "the first reading identity is recorded")
+    _check(repeated["status"] == "unchanged", "an equal reading identity is an idempotent no-op")
+    _check(len(state.history) == 1, "the replay writes no duplicate history row")
+    _check(state.rows["agi-test"]["current_tokens"] == 25_844, "the replay cannot overwrite the snapshot")
+    try:
+        _report(
+            state,
+            reading_at="2026-08-22T20:00:03+00:00",
+            current_tokens=10,
+        )
+    except VerbError as exc:
+        _check(exc.code == "stale_context_reading", "an older reading identity fails loud")
+    else:
+        _check(False, "an older reading identity must not regress the snapshot")
+
+
+def test_calculated_verdict_preserves_unknown_cache() -> None:
+    state = _RecordingState()
+    _report(
+        state,
+        runtime_session_id="019d-codex-thread",
+        provider="openai",
+        runtime="codex",
+        model="gpt-5.6-sol",
+        effort="xhigh",
+        current_tokens=200_000,
+        ceiling=258_400,
+    )
+    request = _trusted_codex_request()
+    out = session_context_status(
+        state,
+        agent_instance_id="agi-test",
+        calculation_request=request,
+    )
+    calculated = out["calculated_verdict"]
+    _check(calculated["resolved"] is False, "unknown cache prevents a priced verdict")
+    _check(calculated["cache_state"] == "unknown", "missing cache evidence stays explicit unknown")
 
 
 def test_unresolved_shape_carries_the_same_keys() -> None:
@@ -429,6 +692,12 @@ def main() -> int:
         test_band_is_derived_at_read_time_not_stored,
         test_rotation_due_and_the_band_can_no_longer_contradict_each_other,
         test_the_verdict_is_decided_on_the_ceiling_the_row_publishes,
+        test_fabricated_calibration_and_profile_claims_are_rejected,
+        test_current_codex_catalog_is_unpriced_and_strategy_explanation_is_exposed,
+        test_public_projection_binds_only_supplied_dimensions,
+        test_invalid_reading_clocks_fail_before_first_or_new_runtime_writes,
+        test_reading_identity_is_monotone_within_one_runtime_session,
+        test_calculated_verdict_preserves_unknown_cache,
         test_unresolved_shape_carries_the_same_keys,
         test_policy_constants_are_the_live_ones,
         test_reporter_attribution_round_trips,

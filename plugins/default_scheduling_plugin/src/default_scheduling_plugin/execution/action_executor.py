@@ -177,12 +177,8 @@ class ActionExecutor:
         """Apply session and flow context to action definition."""
         if session_id:
             action_definition["session_id"] = session_id
-            if "session_id" not in action_arguments:
-                action_arguments["session_id"] = session_id
         if flow_id:
             action_definition["flow_id"] = flow_id
-            if "flow_id" not in action_arguments:
-                action_arguments["flow_id"] = flow_id
 
     def _build_template_context(
         self,

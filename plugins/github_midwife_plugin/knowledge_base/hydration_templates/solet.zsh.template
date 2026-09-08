@@ -11,4 +11,14 @@
 #       run {{SOLET_NAME}} in the foreground (debugging; launchd is the
 #       normal run mode — see the hydration runbook before using this)
 
-export PATH="{{CLONE_DIR}}/client/bin:$PATH"
+path_prepend_once() {
+  local path_entry="$1"
+  local existing_path_entry
+  for existing_path_entry in ${(s/:/)PATH}; do
+    [[ "$existing_path_entry" == "$path_entry" ]] && return 0
+  done
+  export PATH="${path_entry}${PATH:+:${PATH}}"
+}
+
+path_prepend_once {{CLONE_DIR_ZSH}}/client/bin
+path_prepend_once "$HOME/.local/bin"

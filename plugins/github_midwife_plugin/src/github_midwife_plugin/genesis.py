@@ -41,6 +41,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -63,10 +64,11 @@ from .vault_passphrase_seed import seed_vault_passphrase
 
 _DEFAULT_PROFILE_NAME = "macos-free-solet"
 _PROFILE_ENV_VAR = "SOLET_PROFILE"
+_AUTOSTART_ENV_VAR = "SOLET_AUTOSTART"
 _PROVENANCE_FILENAME = "PROVENANCE.json"
 _PROFILE_TEMPLATE_BY_BUNDLE = {
     "macos_free_minimal": "macos-free-solet",
-    "bizops_standard": "macos-bizops-solet",
+    "macos-bizops": "macos-bizops",
     "macos_samantha": "macos-samantha-solet",
 }
 
@@ -97,21 +99,10 @@ def _resolve_kb_root(clone_root: Path) -> Path:
     return clone_root / "plugins" / "github_midwife_plugin" / "knowledge_base"
 
 
-def _resolve_profile_name(clone_root: Path) -> str:
-    """Choose the profile for the stock ``bootstrap.py`` -> ``genesis.main`` path.
-
-    Older seeds had no provenance and were free-tier by default. Sealed named
-    bundles now declare their bundle in ``PROVENANCE.json``; birthing such a seed
-    under the free profile silently drops capabilities, so unknown declared
-    bundles fail loud instead of falling back.
-    """
-    env_profile = os.environ.get(_PROFILE_ENV_VAR, "").strip()
-    if env_profile:
-        return env_profile
-
+def _declared_bundle_name(clone_root: Path) -> str | None:
     provenance_path = clone_root / _PROVENANCE_FILENAME
     if not provenance_path.is_file():
-        return _DEFAULT_PROFILE_NAME
+        return None
     try:
         provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -121,18 +112,42 @@ def _resolve_profile_name(clone_root: Path) -> str:
 
     bundle = provenance.get("bundle")
     if not isinstance(bundle, dict):
-        return _DEFAULT_PROFILE_NAME
+        return None
     bundle_name = bundle.get("name")
-    if not isinstance(bundle_name, str) or not bundle_name.strip():
-        return _DEFAULT_PROFILE_NAME
+    return bundle_name.strip() if isinstance(bundle_name, str) and bundle_name.strip() else None
 
-    profile_name = _PROFILE_TEMPLATE_BY_BUNDLE.get(bundle_name.strip())
+
+def resolve_profile_name(
+    clone_root: Path,
+    requested_profile: str | None = None,
+) -> str:
+    """Resolve and validate one profile without mutating the target.
+
+    Older seeds had no provenance and were free-tier by default. Sealed named
+    bundles now declare their bundle in ``PROVENANCE.json``; birthing such a seed
+    under a different profile silently drops or adds capabilities. A declared
+    bundle therefore selects its matching profile and cannot be overridden.
+    Provenance-less source trees retain the free default and may select an
+    explicit custom template.
+    """
+    requested = (requested_profile or "").strip()
+
+    bundle_name = _declared_bundle_name(clone_root)
+    if bundle_name is None:
+        return requested or _DEFAULT_PROFILE_NAME
+
+    profile_name = _PROFILE_TEMPLATE_BY_BUNDLE.get(bundle_name)
     if profile_name is None:
         known = ", ".join(sorted(_PROFILE_TEMPLATE_BY_BUNDLE))
         raise GenesisError(
             f"{_PROVENANCE_FILENAME} declares unknown bundle {bundle_name!r}; "
-            f"known bundles: {known}. Set {_PROFILE_ENV_VAR}=<profile-template> "
-            "if this seed intentionally uses a new profile."
+            f"known bundles: {known}. Declared seed bundles cannot be overridden."
+        )
+    if requested and requested != profile_name:
+        raise GenesisError(
+            "seed profile identity mismatch: "
+            f"{_PROVENANCE_FILENAME} bundle {bundle_name!r} requires "
+            f"profile {profile_name!r}, but {requested!r} was requested"
         )
     return profile_name
 
@@ -142,6 +157,7 @@ def run_genesis(
     name: str,
     clone_root: Path,
     profile_name: str = _DEFAULT_PROFILE_NAME,
+    autostart: bool = True,
     keychain: PerCredentialKeychain | None = None,
     alter_role_password: Callable[[str], None] | None = None,
     role_authenticates: Callable[[str], bool] | None = None,
@@ -186,6 +202,7 @@ def run_genesis(
     tmpfs plist_dir + tmpfs home_dir, never touching the real Keychain,
     Postgres, or `~/Library/LaunchAgents`.
     """
+    profile_name = resolve_profile_name(clone_root, profile_name)
     kb_root = _resolve_kb_root(clone_root)
     venv_dir = clone_root / ".venv"
 
@@ -250,7 +267,9 @@ def run_genesis(
     # at readiness ("vault not initialized and no passphrase available")
     # unless the passphrase file already exists. Idempotent write-if-absent;
     # the generated value never touches this function's logs or return value.
-    vault_passphrase_created = seed_vault_passphrase(clone_root)
+    vault_passphrase_created = _run_vault_passphrase_phase(
+        clone_root, phases, _finalize_marker,
+    )
     phases.append({
         "step_name": "vault_passphrase", "status": "completed",
         "seeded": vault_passphrase_created,
@@ -261,16 +280,16 @@ def run_genesis(
     )
     phases.append(vault_stale_record)
 
-    try:
-        autostart_result = _install_autostart(name, clone_root, plist_dir, home_dir, launchctl_run)
-    except GenesisError as exc:
-        phases.append({"step_name": "install_autostart", "status": "failed", "error": str(exc)})
-        _finalize_marker("failed")
-        raise
-    phases.append({
-        "step_name": "install_autostart", "status": "completed",
-        "autostart_status": autostart_result.status, "label": autostart_result.label,
-    })
+    autostart_status, autostart_label = _run_autostart_phase(
+        name=name,
+        clone_root=clone_root,
+        enabled=autostart,
+        plist_dir=plist_dir,
+        home_dir=home_dir,
+        launchctl_run=launchctl_run,
+        phases=phases,
+        finalize_marker=_finalize_marker,
+    )
 
     # SEED-06: install the blue-green router right after the main autostart
     # LaunchAgent (design 2026-07-18 §4 D1, Q1 RULED — genesis auto-step, zero
@@ -296,7 +315,12 @@ def run_genesis(
     # identity resolves by install location so it reaches only its own solet.
     # Fail-loud if the console script is missing or a real file blocks the path.
     launcher_result = _run_command_launcher_phase(
-        name, clone_root, command_launcher_bin_dir, phases, _finalize_marker,
+        name,
+        clone_root,
+        command_launcher_bin_dir,
+        (home_dir or Path.home()) / ".codex" / "config.toml",
+        phases,
+        _finalize_marker,
     )
     phases.append({
         "step_name": "install_command_launcher", "status": "completed",
@@ -320,7 +344,7 @@ def run_genesis(
         "clone_root": str(clone_root),
         "steps": steps,
         "vault_passphrase": {"seeded": vault_passphrase_created},
-        "autostart": {"status": autostart_result.status, "label": autostart_result.label},
+        "autostart": {"status": autostart_status, "label": autostart_label},
         "router": {"status": router_result.status, "reason": router_result.reason},
         "command_launcher": {
             "status": launcher_result.status, "path": launcher_result.launcher_path,
@@ -347,6 +371,39 @@ def _install_autostart(
         return renderer.install()
     except AutostartError as exc:
         raise GenesisError(f"autostart install failed: {exc}") from exc
+
+
+def _run_autostart_phase(
+    *,
+    name: str,
+    clone_root: Path,
+    enabled: bool,
+    plist_dir: Path | None,
+    home_dir: Path | None,
+    launchctl_run: Runner | None,
+    phases: list[dict[str, Any]],
+    finalize_marker: Callable[[str], None],
+) -> tuple[str, str | None]:
+    if not enabled:
+        phases.append({
+            "step_name": "install_autostart",
+            "status": "skipped",
+            "reason": "autostart_disabled",
+        })
+        return "not_requested", None
+    try:
+        installed = _install_autostart(name, clone_root, plist_dir, home_dir, launchctl_run)
+    except GenesisError as exc:
+        phases.append({"step_name": "install_autostart", "status": "failed", "error": str(exc)})
+        finalize_marker("failed")
+        raise
+    phases.append({
+        "step_name": "install_autostart",
+        "status": "completed",
+        "autostart_status": installed.status,
+        "label": installed.label,
+    })
+    return installed.status, installed.label
 
 
 def _run_git_init_phase(
@@ -393,6 +450,7 @@ def _run_command_launcher_phase(
     name: str,
     clone_root: Path,
     bin_dir: Path | None,
+    codex_config_path: Path,
     phases: list[dict[str, Any]],
     finalize: Callable[[str], None],
 ) -> CommandLauncherResult:
@@ -406,6 +464,7 @@ def _run_command_launcher_phase(
             name=name,
             clone_root=clone_root,
             bin_dir=bin_dir if bin_dir is not None else DEFAULT_BIN_DIR,
+            codex_config_path=codex_config_path,
         )
     except CommandLauncherError as exc:
         error = GenesisError(f"command launcher install failed: {exc}")
@@ -433,6 +492,21 @@ def _run_vault_stale_check_phase(
         phases.append({"step_name": "vault_stale_check", "status": "failed", "error": str(exc)})
         finalize("failed")
         raise
+
+
+def _run_vault_passphrase_phase(
+    clone_root: Path,
+    phases: list[dict[str, Any]],
+    finalize: Callable[[str], None],
+) -> bool:
+    """Seed the vault passphrase and finalize the existing attempt on failure."""
+    try:
+        return seed_vault_passphrase(clone_root)
+    except OSError as exc:
+        error = GenesisError(f"vault passphrase seed failed: {exc}")
+        phases.append({"step_name": "vault_passphrase", "status": "failed", "error": str(error)})
+        finalize("failed")
+        raise error from exc
 
 
 def _check_for_stale_vault_master(
@@ -480,6 +554,41 @@ def _check_for_stale_vault_master(
     }
 
 
+def _write_genesis_marker(
+    *, name: str, clone_root: Path, profile_name: str, result: dict[str, Any]
+) -> None:
+    """Write ``.solet/genesis.json``, the durable completion fact.
+
+    The manager's ``genesis_artifacts_valid`` probe and the installation
+    doctor both key on this file; genesis is its ONLY writer, so a genesis
+    that returns 0 without it strands every driven create at a probe that can
+    never verify (first measured on a real driven create, 2026-08-25). The
+    marker is written after ``run_genesis`` returns and before the summary
+    prints -- a summary for a marker-less genesis would announce a completion
+    nothing downstream can verify. A write failure is a genesis failure, not
+    a warning: the fact is load-bearing, so it fails loud.
+    """
+    marker_dir = clone_root / ".solet"
+    payload = {
+        "schema_version": 1,
+        "solet_name": name,
+        "profile": profile_name,
+        "completed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "steps": [
+            {"step_name": step["step_name"], "status": step["status"]}
+            for step in result["steps"]
+        ],
+    }
+    try:
+        marker_dir.mkdir(mode=0o700, exist_ok=True)
+        marker_dir.chmod(0o700)
+        (marker_dir / "genesis.json").write_text(
+            json.dumps(payload, indent=1, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        raise GenesisError(f"genesis completion marker write failed: {exc}") from exc
+
+
 def main() -> int:
     name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
@@ -493,8 +602,19 @@ def main() -> int:
 
     try:
         clone_root = _resolve_clone_root()
-        profile_name = _resolve_profile_name(clone_root)
-        result = run_genesis(name=name, clone_root=clone_root, profile_name=profile_name)
+        profile_name = resolve_profile_name(
+            clone_root,
+            os.environ.get(_PROFILE_ENV_VAR, ""),
+        )
+        result = run_genesis(
+            name=name,
+            clone_root=clone_root,
+            profile_name=profile_name,
+            autostart=_autostart_from_environment(),
+        )
+        _write_genesis_marker(
+            name=name, clone_root=clone_root, profile_name=profile_name, result=result
+        )
     except GenesisError as exc:
         print(f"FATAL: genesis failed: {exc}", file=sys.stderr)
         return 1
@@ -509,6 +629,17 @@ def main() -> int:
     print(f"  [{result['git_init']['status']}] git-init (born worktree)")
     print(_mcp_register_suggestion(name, Path(str(result["clone_root"]))))
     return 0
+
+
+def _autostart_from_environment() -> bool:
+    value = os.environ.get(_AUTOSTART_ENV_VAR, "enabled")
+    if value == "enabled":
+        return True
+    if value == "disabled":
+        return False
+    raise GenesisError(
+        f"{_AUTOSTART_ENV_VAR} must be exactly 'enabled' or 'disabled', got {value!r}"
+    )
 
 
 def _mcp_register_suggestion(name: str, clone_root: Path) -> str:

@@ -176,6 +176,7 @@ def _start_loop(
             pending_finisher_file=path,
             current_release_lookup=current_lookup,
             logger=logger,
+            set_color_active=lambda _active: None,
         )
 
     thread = threading.Thread(target=_run, name="loop-int-smoke", daemon=True)

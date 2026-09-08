@@ -96,7 +96,13 @@ from .role_claim import (
     RoleClaimOrigin,
     claim_role_for_session,
 )
-from .session_lifecycle_store import backfill_registration
+from .sender_provenance import SENDER_PRINCIPAL_KIND_STDIO_AGENT
+from .session_hosts import OPERATOR_HOST
+from .session_lifecycle_store import (
+    ManagedSessionSpec,
+    backfill_registration,
+    insert_managed_session,
+)
 
 if TYPE_CHECKING:
     from .models import BridgeBinding, QueuedEvent
@@ -195,7 +201,7 @@ class PeerRegisterBody(BaseModel):
     # matching BridgeBinding.wake_capable's own default. See models.py for
     # the full field rationale.
     wake_capable: bool = True
-    # MSG-04/identity-unification (2026-08-20): declared by `solet watch`
+    # MSG-04/identity-unification (2026-08-20): declared by `solet-bridge watch`
     # itself (local_cli/cli.py's peer_register call), matching
     # BridgeBinding.watcher_declared's own default. See models.py for the
     # full field rationale — this is the explicit signal that replaces the
@@ -328,7 +334,9 @@ def register_routes(
         autonomic_on_close=autonomic_on_close,
     )
     _register_platform_surface_routes(
-        app, platform_surface=platform_surface, bridge_manager=bridge_manager,
+        app,
+        platform_surface=platform_surface,
+        bridge_manager=bridge_manager,
     )
     _register_peer_routes(
         app,
@@ -341,11 +349,13 @@ def register_routes(
         re_emit_window_s=re_emit_window_s,
         re_emit_cap=re_emit_cap,
     )
+
     @app.get(f"{API_PREFIX}/health")
     async def health() -> JSONResponse:
         if readiness_probe is not None and not readiness_probe():
             return JSONResponse(
-                content={"status": "starting"}, status_code=503,
+                content={"status": "starting"},
+                status_code=503,
             )
         # D5 (INCIDENT.md 2026-08-15): this endpoint answered ``healthy`` for
         # 3h20m through a total action-queue freeze because it never touched
@@ -363,7 +373,8 @@ def register_routes(
         # code stays honest about what this endpoint can actually attest.
         status = "degraded" if liveness["action_path_stalled"] else "healthy"
         return JSONResponse(
-            content={"status": status, "action_path": liveness}, status_code=200,
+            content={"status": status, "action_path": liveness},
+            status_code=200,
         )
 
 
@@ -390,7 +401,8 @@ def _register_bridge_lifecycle_routes(
         # name — the session_id_factory bound onto the manager closes
         # over it, so the handler doesn't need it explicitly.
         bridge = bridge_manager.open(
-            solet_name="", parent_pid=body.parent_pid,
+            solet_name="",
+            parent_pid=body.parent_pid,
         )
         # §34.6 sender attribution: park the caller's opaque session key on the
         # in-memory bridge state ONLY. No registry write, no agent_instance_id,
@@ -431,11 +443,14 @@ def _register_bridge_lifecycle_routes(
 
     @app.get(f"{API_PREFIX}/{{bridge_id}}/events")
     async def events_bridge(
-        bridge_id: str, after: int = -1,
+        bridge_id: str,
+        after: int = -1,
     ) -> JSONResponse:
         try:
             acked, events = await bridge_manager.events_after(
-                bridge_id, after, timeout_s=long_poll_timeout_s,
+                bridge_id,
+                after,
+                timeout_s=long_poll_timeout_s,
             )
         except BridgeNotFoundError:
             return _bridge_not_found(bridge_id)
@@ -478,13 +493,15 @@ def _register_platform_surface_routes(
 ) -> None:
     @app.post(f"{API_PREFIX}/{{bridge_id}}/process/search")
     async def process_search_route(
-        bridge_id: str, body: ProcessSearchBody,
+        bridge_id: str,
+        body: ProcessSearchBody,
     ) -> JSONResponse:
         # M5 §14.7: pass bridge_id through so process_search applies the
         # bridge session's per-session allowlist on top of global policy.
         try:
             payload = platform_surface.process_search(
-                query=body.query, max_results=body.max_results,
+                query=body.query,
+                max_results=body.max_results,
                 bridge_id=bridge_id,
             )
         except BridgeError as exc:
@@ -493,13 +510,15 @@ def _register_platform_surface_routes(
 
     @app.post(f"{API_PREFIX}/{{bridge_id}}/process/schema")
     async def process_schema_route(
-        bridge_id: str, body: ProcessSchemaBody,
+        bridge_id: str,
+        body: ProcessSchemaBody,
     ) -> JSONResponse:
         # M5 §14.7: pass bridge_id so the schema lookup is gated by the
         # bridge session's allowlist before the discovery call runs.
         try:
             payload = platform_surface.process_schema(
-                process_key=body.process_key, bridge_id=bridge_id,
+                process_key=body.process_key,
+                bridge_id=bridge_id,
             )
         except BridgeError as exc:
             return _bridge_error_response(exc)
@@ -507,7 +526,8 @@ def _register_platform_surface_routes(
 
     @app.post(f"{API_PREFIX}/{{bridge_id}}/process/call")
     async def process_call_route(
-        bridge_id: str, body: ProcessCallBody,
+        bridge_id: str,
+        body: ProcessCallBody,
     ) -> JSONResponse:
         bridge = bridge_manager.get(bridge_id)
         if bridge is None or bridge.closed:
@@ -530,7 +550,8 @@ def _register_platform_surface_routes(
 
     @app.get(f"{API_PREFIX}/{{bridge_id}}/process/result/{{action_id}}")
     async def process_result_route(
-        bridge_id: str, action_id: str,
+        bridge_id: str,
+        action_id: str,
     ) -> JSONResponse:
         _ = bridge_id
         try:
@@ -541,7 +562,8 @@ def _register_platform_surface_routes(
 
     @app.get(f"{API_PREFIX}/{{bridge_id}}/download/{{blob_id}}")
     async def download_route(
-        bridge_id: str, blob_id: str,
+        bridge_id: str,
+        blob_id: str,
     ) -> Response:
         _ = bridge_id
         try:
@@ -552,9 +574,7 @@ def _register_platform_surface_routes(
             content=blob.content,
             media_type=blob.mime_type,
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="{blob.filename}"'
-                ),
+                "Content-Disposition": (f'attachment; filename="{blob.filename}"'),
             },
         )
 
@@ -573,30 +593,57 @@ def _managed_session_registration_backfill(
 ) -> None:
     """Fleet session-management D1 (§3.2/§5) registration-hook fix: fires the
     ``spawning -> live`` edge and backfills ``agent_session_id``/``agent_id``
-    on the ``managed_session`` row this ``agent_instance_id`` was spawned
-    into (a no-op when there is none — most registrations are ordinary
-    operator-launched sessions, not spawn_session lineage). NEVER raises: a
-    fault here is loud but registration MUST still succeed, mirroring
+    on an existing spawned row. When neither primary nor recovered spawn
+    identity resolves, it creates the honest operator inventory row: it has
+    identity and joinability, but no fabricated report-by or TTL contract.
+    NEVER raises: a fault here is loud but registration MUST still succeed, mirroring
     :func:`_state_table_self_refresh`'s posture.
     """
     if state_service is None:
         logger.warning(
             "peer/register: state_service unbound — managed_session "
-            "registration backfill skipped (agi=%s)", agent_instance_id,
+            "registration backfill skipped (agi=%s)",
+            agent_instance_id,
         )
         return
     try:
-        backfill_registration(
+        matched_existing = backfill_registration(
             state_service,
             agent_instance_id=agent_instance_id,
             agent_id=agent_id,
             agent_session_id=agent_session_id,
         )
+        if matched_existing:
+            return
+        insert_managed_session(
+            state_service,
+            ManagedSessionSpec(
+                agent_instance_id=agent_instance_id,
+                lane_id="",
+                brief_ref="",
+                work_class="",
+                budget_line="",
+                host=OPERATOR_HOST,
+                report_by_seconds=0,
+                ttl_seconds=0,
+                directed_by="registration",
+            ),
+        )
+        if not backfill_registration(
+            state_service,
+            agent_instance_id=agent_instance_id,
+            agent_id=agent_id,
+            agent_session_id=agent_session_id,
+        ):
+            raise RuntimeError(
+                "peer/register: inserted operator managed_session row could not be backfilled"
+            )
     except Exception:  # noqa: BLE001 — best-effort; registration MUST still succeed
         logger.exception(
             "peer/register: managed_session registration backfill FAULTED "
             "(agi=%s) — registration kept 200, but the session's ledger row "
-            "(if any) was NOT updated", agent_instance_id,
+            "(if any) was NOT updated",
+            agent_instance_id,
         )
 
 
@@ -631,8 +678,8 @@ def _state_table_self_refresh(
         return "no_session_key"
     if state_service is None:
         logger.warning(
-            "peer/register: state_service unbound — role self-refresh skipped "
-            "(session %r)", agent_session_id,
+            "peer/register: state_service unbound — role self-refresh skipped (session %r)",
+            agent_session_id,
         )
         return "no_state_service"
     try:
@@ -649,13 +696,17 @@ def _state_table_self_refresh(
         logger.exception(
             "peer/register: state-table role self-refresh FAULTED (session %r, new "
             "agi=%s); registration kept 200 but held roles were NOT re-pointed and "
-            "will strand until re-claim", agent_session_id, new_agent_instance_id,
+            "will strand until re-claim",
+            agent_session_id,
+            new_agent_instance_id,
         )
         return "error"
     if rerouted >= 1:
         logger.info(
             "peer/register: re-pointed %d role(s) to agent_instance_id=%s on "
-            "reconnect (session %r)", rerouted, new_agent_instance_id,
+            "reconnect (session %r)",
+            rerouted,
+            new_agent_instance_id,
             agent_session_id,
         )
         return f"rerouted:{rerouted}"
@@ -709,7 +760,9 @@ def _session_role_held_token(
         logger.exception(
             "peer/register: session_role_held probe FAULTED for role %r "
             "(session %r); registration kept 200 and the caller will re-claim "
-            "as before", session_role, agent_session_id,
+            "as before",
+            session_role,
+            agent_session_id,
         )
         return "unknown"
     return "held" if held else "not_held"
@@ -730,10 +783,7 @@ def _effective_registration_agent_session_id(
     incoming_agent_session_id: str,
 ) -> str:
     """Preserve a known logical-session key across empty auto-registers."""
-    if (
-        incoming_agent_session_id
-        and incoming_agent_session_id != UNCLAIMED_SESSION_ID
-    ):
+    if incoming_agent_session_id and incoming_agent_session_id != UNCLAIMED_SESSION_ID:
         return incoming_agent_session_id
     stored_agent_session_id = peer_registry.agent_session_id_for_instance(
         agent_instance_id,
@@ -757,7 +807,8 @@ def _register_peer_routes(
 ) -> None:
     @app.post(f"{API_PREFIX}/{{bridge_id}}/peer/register")
     async def peer_register_route(
-        bridge_id: str, body: PeerRegisterBody,
+        bridge_id: str,
+        body: PeerRegisterBody,
     ) -> JSONResponse:
         bridge = bridge_manager.get(bridge_id)
         if bridge is None or bridge.closed:
@@ -796,9 +847,40 @@ def _register_peer_routes(
         )
         if refusal is not None:
             return refusal
+        # iss_0cc6f884 — a DEAD incumbent under this session id is ordinarily
+        # subprocess succession and is deliberately allowed above. When the dead
+        # incumbent belonged to a DIFFERENT host process, this registration is
+        # adopting an inherited id, not resuming its own: downgrade to the
+        # degraded (self-refresh-disabled) binding so the CAS below cannot hand
+        # it that session's roles. The row still registers and still appears in
+        # peer_list — labelled, never hidden.
+        orphan_session_id_downgraded = _orphan_session_id_downgrade(
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
+            agent_session_id=effective_agent_session_id,
+            agent_instance_id=agent_instance_id,
+            parent_pid=body.parent_pid,
+        )
+        if orphan_session_id_downgraded:
+            logger.warning(
+                "orphan_session_id: bridge %s agi=%s parent_pid=%s registered "
+                "under agent_session_id %r last held by a DEAD binding of a "
+                "DIFFERENT host process; clearing the session id for this "
+                "registration so the reconnect self-refresh cannot re-point "
+                "that session's role bindings to it. The peer row is kept and "
+                "remains addressable by agent_instance_id; claim any role "
+                "explicitly. Export a distinct AGENT_SESSION_ID for this "
+                "process to register without the downgrade (iss_0cc6f884).",
+                bridge_id,
+                agent_instance_id,
+                body.parent_pid,
+                effective_agent_session_id,
+            )
+            effective_agent_session_id = ""
         # Import here to avoid a circular import at module load time;
         # models is pulled in via TYPE_CHECKING for the type hints.
         from .models import BridgeBinding  # noqa: PLC0415
+
         binding = BridgeBinding(
             bridge_id=bridge_id,
             agent_id=agent_id,
@@ -828,17 +910,6 @@ def _register_peer_routes(
             ),
         )
         bridge.session_label = effective_label
-        # D1 registration hook (§3.2/§5, Dawn ruling arm-11511b07) — fires
-        # spawning->live and backfills agent_session_id/agent_id on this
-        # agent_instance_id's managed_session row, if one exists. Runs AFTER
-        # peer_registry.register succeeds, same ordering rationale as the
-        # D-IF7 sidecar populate below.
-        _managed_session_registration_backfill(
-            state_service,
-            agent_instance_id=agent_instance_id,
-            agent_id=agent_id,
-            agent_session_id=effective_agent_session_id,
-        )
         # D-IF7 sidecar populate (v4 §4) — bind the per-bridge inference
         # vertex AFTER peer_registry.register succeeds so the wrapper can
         # resolve a provider for this agent_instance_id on its next
@@ -857,12 +928,26 @@ def _register_peer_routes(
                     "inference_provider_register raised for bridge %s "
                     "agent_instance_id=%s; registration kept; provider sidecar "
                     "WILL be missing for this peer",
-                    bridge_id, agent_instance_id, exc_info=True,
+                    bridge_id,
+                    agent_instance_id,
+                    exc_info=True,
                 )
         self_refresh_action = _state_table_self_refresh(
             state_service,
             agent_session_id=effective_agent_session_id,
             new_agent_instance_id=agent_instance_id,
+        )
+        # D1 registration hook (§3.2/§5, Dawn ruling arm-11511b07) — fires
+        # spawning->live and backfills agent_session_id/agent_id on this
+        # agent_instance_id's managed_session row, or births an honest
+        # operator inventory row when no spawn lineage exists. It deliberately
+        # runs after S2's reconnect CAS: registration must preserve that
+        # recovery operation's state-write and failure semantics.
+        _managed_session_registration_backfill(
+            state_service,
+            agent_instance_id=agent_instance_id,
+            agent_id=agent_id,
+            agent_session_id=effective_agent_session_id,
         )
         # Steady-state re-assert support: answer "do I still hold my configured
         # role?" HERE, on the INFRA route, so the caller never has to ask via the
@@ -893,9 +978,10 @@ def _register_peer_routes(
                 )
             except Exception:  # noqa: BLE001 — lifecycle policy never blocks a registration
                 logger.warning(
-                    "autonomic_on_register raised for bridge %s agi=%s; "
-                    "registration kept",
-                    bridge_id, agent_instance_id, exc_info=True,
+                    "autonomic_on_register raised for bridge %s agi=%s; registration kept",
+                    bridge_id,
+                    agent_instance_id,
+                    exc_info=True,
                 )
                 autonomic_action = "error"
         return JSONResponse(
@@ -910,6 +996,13 @@ def _register_peer_routes(
                 "self_refresh": self_refresh_action,
                 "autonomic": autonomic_action,
                 "session_role_held": session_role_held,
+                # Named so the registering peer can SEE the downgrade rather
+                # than infer it from an unexpectedly empty agent_session_id.
+                "session_id_downgrade": (
+                    ORPHAN_SESSION_ID_DOWNGRADE
+                    if orphan_session_id_downgraded
+                    else ""
+                ),
             },
             status_code=200,
         )
@@ -929,8 +1022,7 @@ def _register_peer_routes(
         if binding is None:
             return _validation_error(
                 "identity_not_registered",
-                "this bridge has not registered an agent_id; "
-                "POST /peer/register first",
+                "this bridge has not registered an agent_id; POST /peer/register first",
             )
         roles_or_error = _read_roles_held(
             state_service,
@@ -957,7 +1049,8 @@ def _register_peer_routes(
 
     @app.post(f"{API_PREFIX}/{{bridge_id}}/peer/send")
     async def peer_send_route(
-        bridge_id: str, body: PeerSendBody,
+        bridge_id: str,
+        body: PeerSendBody,
     ) -> JSONResponse:
         return _peer_send_impl(
             bridge_id=bridge_id,
@@ -970,7 +1063,8 @@ def _register_peer_routes(
 
     @app.post(f"{API_PREFIX}/{{bridge_id}}/peer/claim_role")
     async def peer_claim_role_route(
-        bridge_id: str, body: PeerClaimRoleBody,
+        bridge_id: str,
+        body: PeerClaimRoleBody,
     ) -> JSONResponse:
         return _peer_claim_role_impl(
             bridge_id=bridge_id,
@@ -983,7 +1077,8 @@ def _register_peer_routes(
 
     @app.post(f"{API_PREFIX}/{{bridge_id}}/peer/send_by_name")
     async def peer_send_by_name_route(
-        bridge_id: str, body: PeerSendByNameBody,
+        bridge_id: str,
+        body: PeerSendByNameBody,
     ) -> JSONResponse:
         return _peer_send_by_name_impl(
             bridge_id=bridge_id,
@@ -1009,8 +1104,7 @@ def _register_peer_routes(
         if sender_binding is None:
             return _validation_error(
                 "identity_not_registered",
-                "this bridge has not registered an agent_id; "
-                "POST /peer/register first",
+                "this bridge has not registered an agent_id; POST /peer/register first",
             )
         try:
             after_dt = _parse_iso_after(after)
@@ -1049,7 +1143,8 @@ def _register_peer_routes(
 
     @app.post(f"{API_PREFIX}/{{bridge_id}}/peer/drain")
     async def peer_drain_route(
-        bridge_id: str, body: PeerDrainBody,
+        bridge_id: str,
+        body: PeerDrainBody,
     ) -> JSONResponse:
         # v10 Control #5: return the oldest page of un-CONSUMED IMPORTANT ROLE
         # messages owed to the roles this bridge holds. The binding is derived
@@ -1070,8 +1165,7 @@ def _register_peer_routes(
         if sender_binding is None:
             return _validation_error(
                 "identity_not_registered",
-                "this bridge has not registered an agent_id; "
-                "POST /peer/register first",
+                "this bridge has not registered an agent_id; POST /peer/register first",
             )
         agent_instance_id = sender_binding.agent_instance_id
         limit = max(1, min(body.limit, 100))
@@ -1097,7 +1191,8 @@ def _register_peer_routes(
 
     @app.post(f"{API_PREFIX}/{{bridge_id}}/peer/delivered")
     async def peer_delivered_route(
-        bridge_id: str, body: PeerDeliveredBody,
+        bridge_id: str,
+        body: PeerDeliveredBody,
     ) -> JSONResponse:
         # v10 Control #5: flip ``delivered=true`` after a successful emit.
         # Idempotent + ownership-fenced (a displaced holder can't mark
@@ -1111,8 +1206,7 @@ def _register_peer_routes(
         if sender_binding is None:
             return _validation_error(
                 "identity_not_registered",
-                "this bridge has not registered an agent_id; "
-                "POST /peer/register first",
+                "this bridge has not registered an agent_id; POST /peer/register first",
             )
         try:
             flagged = agent_messaging_service.mark_delivered_for_instance(
@@ -1165,8 +1259,7 @@ def _peer_send_impl(
     if sender_binding is None:
         return _validation_error(
             "identity_not_registered",
-            "this bridge has not registered an agent_id; "
-            "POST /peer/register first",
+            "this bridge has not registered an agent_id; POST /peer/register first",
         )
     try:
         content = _parse_text_parts(body.content)
@@ -1192,7 +1285,8 @@ def _peer_send_impl(
             # reconnect. Previously omitted entirely, so every direct send handed
             # out an instance id that a restart wave invalidates.
             reply_to_role=sole_role_for_reply_address(
-                state_service, sender_binding.agent_instance_id,
+                state_service,
+                sender_binding.agent_instance_id,
             ),
         )
     except PeerAmbiguousError as exc:
@@ -1219,9 +1313,7 @@ def _peer_send_impl(
         return JSONResponse(
             content={
                 "code": "peer_unreachable",
-                "message": (
-                    f"recipient bridge is no longer registered: {exc}"
-                ),
+                "message": (f"recipient bridge is no longer registered: {exc}"),
             },
             status_code=404,
         )
@@ -1229,9 +1321,7 @@ def _peer_send_impl(
         return JSONResponse(
             content={
                 "code": "peer_queue_full",
-                "message": (
-                    f"recipient {body.peer_id} event queue is full"
-                ),
+                "message": (f"recipient {body.peer_id} event queue is full"),
             },
             status_code=503,
         )
@@ -1261,8 +1351,7 @@ def _peer_send_by_name_sender(
     if sender_binding is None:
         return _validation_error(
             "identity_not_registered",
-            "this bridge has not registered an agent_id; "
-            "POST /peer/register first",
+            "this bridge has not registered an agent_id; POST /peer/register first",
         )
     if not body.name.strip():
         return _validation_error(
@@ -1282,7 +1371,8 @@ def _peer_send_by_name_sender(
 
 
 def _resolve_role_for_send(
-    state_service: Any, role_name: str,
+    state_service: Any,
+    role_name: str,
 ) -> ResolvedRole | JSONResponse:
     """Resolve ``role_name`` to a routable target, or return an error response."""
     try:
@@ -1421,6 +1511,7 @@ def _peer_send_by_name_impl(
             sender_agent_id=sender.agent_id,
             sender_agent_instance_id=sender.agent_instance_id,
             sender_session_label=sender.session_label,
+            sender_principal_kind=SENDER_PRINCIPAL_KIND_STDIO_AGENT,
             sender_parent_pid=sender.parent_pid,
             content=[TextPart(type="text", text=body.content)],
             message_id=f"arm-{secrets.token_hex(16)}",
@@ -1431,7 +1522,8 @@ def _peer_send_by_name_impl(
             # (``plugin.py::peer_send_by_name``); only this transport caller froze
             # the default.
             reply_to_role=sole_role_for_reply_address(
-                state_service, sender.agent_instance_id,
+                state_service,
+                sender.agent_instance_id,
             ),
         )
     except AgentMessagingError as exc:
@@ -1469,8 +1561,6 @@ def _parse_iso_after(value: str | None) -> _dt | None:
         raise ValueError(f"after must be ISO-8601 datetime: {exc}") from exc
 
 
-
-
 # ---------------------------------------------------------------------------
 # Helpers — serialization
 # ---------------------------------------------------------------------------
@@ -1493,14 +1583,10 @@ def _role_drain_prose(content_raw: object) -> str:
     """
     if not isinstance(content_raw, list):
         return ""
-    prose = "\n".join(
-        str(part.get("text") or "")
-        for part in content_raw
-        if isinstance(part, dict)
-    )
+    prose = "\n".join(str(part.get("text") or "") for part in content_raw if isinstance(part, dict))
     marker_match = IMPORTANT_MARKER_RE.match(prose)
     if marker_match is not None:
-        return prose[marker_match.end():]
+        return prose[marker_match.end() :]
     return prose
 
 
@@ -1579,6 +1665,106 @@ def _validation_error(code: str, message: str) -> JSONResponse:
 SESSION_ID_BOUND_TO_LIVE_SESSION: Final[str] = "session_id_bound_to_live_session"
 
 
+ORPHAN_SESSION_ID_DOWNGRADE: Final[str] = "orphan_session_id"
+
+
+def _orphan_session_id_downgrade(
+    *,
+    peer_registry: PeerRegistry,
+    bridge_manager: BridgeSessionManager,
+    agent_session_id: str,
+    agent_instance_id: str,
+    parent_pid: int | None,
+) -> bool:
+    """Is this registration ADOPTING a dead session's id rather than resuming
+    its own? (iss_0cc6f884, measured 2026-09-05)
+
+    THE DEFECT THIS EXISTS TO CLOSE. ``_resolve_agent_session_id`` in the MCP
+    bridge reads ``AGENT_SESSION_ID`` from the environment unconditionally, so
+    ANY long-lived parent that once had it exported leaks it to every child
+    that does not override it — measured live on two unrelated parents: a
+    Claude Code pre-warmed spare forked from ``claude daemon run`` (which
+    captured the fleet's primary coordination role, refused the real seat's
+    ``peer_claim_role`` with
+    ``role_held_live``, and left 40 role-addressed messages unread), and the
+    tmux server at pid 36540, whose argv still carries Git-Controller's
+    ``AGENT_SESSION_ID`` for every pane it hosts (iss_c2a66577). Registering
+    under an inherited id is not merely an extra row: ``refresh_role_binding_cas``
+    re-points EVERY role binding filtered on ``agent_session_id`` ALONE, with no
+    claim and no error, so inheriting the id silently inherits the ROLES.
+
+    WHY THIS IS NOT JUST A TIGHTER ``_session_id_conflict``. That gate refuses a
+    LIVE incumbent and deliberately waves through a DEAD one, because a dead
+    incumbent is the ordinary subprocess-succession path: the bridge subprocess
+    restarts under the same host process, minting a fresh ``agent_instance_id``
+    under the same session id. That allowance is CORRECT and must stay — removing
+    it would break every legitimate restart while still not stopping capture,
+    since capture happens through the CAS, not through the liveness check.
+
+    So the discriminator here is not liveness and not the host: it is whether the
+    dead incumbent was THIS host process. A bridge resuming its own session keeps
+    its ``parent_pid`` (the same ``claude``/``codex`` process re-spawned its MCP
+    child); a process that merely inherited the variable has a parent_pid of its
+    own. Same parent → succession, allowed unchanged. Different parent → adoption,
+    downgraded.
+
+    DOWNGRADE, NOT REFUSE, and the choice is load-bearing. Returning a 409 would
+    leave the process unregistered and therefore INVISIBLE in ``peer_list`` — and
+    a hidden row is worse than a labelled one for exactly this defect, whose whole
+    cost was an unexplained holder nobody could see. Instead the caller registers
+    normally and keeps its row, with its ``agent_session_id`` cleared to ``""`` —
+    the pre-existing, already-correct degraded binding whose self-refresh is
+    disabled. ``refresh_role_binding_cas`` fails closed on an empty id, so the
+    downgraded registration can inherit nothing, while remaining fully visible,
+    fully addressable by instance id, and free to claim a role EXPLICITLY.
+
+    Deliberately conservative — every ambiguous case allows, because this gate
+    can only ever subtract trust from a registration that would otherwise
+    succeed:
+
+    * no session id, or no incumbent under it — nothing to adopt;
+    * the SAME instance id — a re-arm/reconnect, untouched;
+    * a LIVE incumbent — ``_session_id_conflict``'s 409 owns that case. This
+      gate declines it explicitly rather than relying on running second: a
+      downgrade and a refusal are different answers, and whichever gate ran
+      first would silently win. Checking liveness here costs one call and makes
+      the two gates partition the space by MEANING (live conflict vs dead
+      adoption) instead of by call order;
+    * EITHER parent_pid unknown — no evidence to convict on, so the existing
+      succession behaviour is preserved (a client that sends no ``parent_pid``,
+      e.g. Streamable HTTP, is never downgraded by this rule). This is a real
+      residual: a caller that omits ``parent_pid`` keeps the old hole. Closing it
+      needs ``parent_pid`` to become mandatory on the register body, which is a
+      contract change and is NOT in this unit.
+
+    Residual risk, stated: pid REUSE could let an adopting process coincidentally
+    match a week-dead incumbent's ``parent_pid`` and be waved through. That is a
+    strictly smaller hole than the one being closed, and it fails in the safe
+    direction relative to refusing legitimate restarts.
+    """
+    if not agent_session_id or agent_session_id == UNCLAIMED_SESSION_ID:
+        return False
+    if parent_pid is None:
+        return False
+    try:
+        incumbent = peer_registry.resolve_by_agent_session_id(agent_session_id)
+    except PeerSessionAmbiguousError:
+        # Ambiguity is handled (and refused) by _session_id_conflict, which runs
+        # first. Reaching here would mean that gate changed; do not double-judge.
+        return False
+    if incumbent is None or incumbent.agent_instance_id == agent_instance_id:
+        return False
+    if binding_is_live(
+        bridge_manager=bridge_manager,
+        binding=incumbent,
+        window_seconds=bridge_manager.binding_liveness_window_s,
+    ):
+        return False
+    if incumbent.parent_pid is None:
+        return False
+    return incumbent.parent_pid != parent_pid
+
+
 def _session_id_conflict(
     *,
     peer_registry: PeerRegistry,
@@ -1649,7 +1835,9 @@ def _state_unavailable(message: str) -> JSONResponse:
 
 
 def _read_roles_held(
-    state_service: Any | None, *, agent_instance_id: str,
+    state_service: Any | None,
+    *,
+    agent_instance_id: str,
 ) -> list[str] | JSONResponse:
     if state_service is None:
         return _state_unavailable(
@@ -1667,7 +1855,8 @@ def _read_roles_held(
 
 
 def _lookup_binding_for_bridge(
-    peer_registry: PeerRegistry, bridge_id: str,
+    peer_registry: PeerRegistry,
+    bridge_id: str,
 ) -> BridgeBinding | None:
     """Find the BridgeBinding registered for ``bridge_id`` (linear scan)."""
     for bindings in peer_registry.list_agent_ids().values():
@@ -1721,7 +1910,9 @@ def _consume_watcher_inbox_page(
         role_name = str(entry.thread_id).removeprefix(ROLE_THREAD_PREFIX)
         agent_messaging_service.mark_role_consumed_on_ack(
             external_id=role_message_external_id(
-                RECIPIENT_KIND_ROLE, role_name, str(entry.message.id),
+                RECIPIENT_KIND_ROLE,
+                role_name,
+                str(entry.message.id),
             ),
         )
 

@@ -34,6 +34,7 @@ so the platform plumbing doesn't need to come up.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import base64
 import hashlib
 import logging
@@ -42,7 +43,13 @@ from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from ananta.core.services.call_context import CallContext
 from ananta.vault_core import (
@@ -84,6 +91,22 @@ class _FakeClientStore:
             return None
         out = {k: v for k, v in rec.items() if k != "secret"}
         return out
+
+    def record_oauth_client_token_use(
+        self,
+        client_id: str,
+        *,
+        client_ip: str = "",
+        user_agent: str = "",
+        transport: str = "",
+    ) -> bool:
+        rec = self.records.get(client_id)
+        if rec is None:
+            return False
+        rec["last_use_ip"] = client_ip
+        rec["last_use_user_agent"] = user_agent
+        rec["last_use_transport"] = transport
+        return True
 
     def verify_oauth_client_credentials(
         self, client_id: str, client_secret: str,
@@ -156,6 +179,16 @@ class _FakeOauthStore:
         if row is None:
             return False
         row["redirect_uris"] = redirect_uris
+        return True
+
+    def record_client_token_use(
+        self, client_id: str, fields: Mapping[str, str],
+    ) -> bool:
+        """Record last-use evidence on the in-memory record."""
+        record = self.rows.get(client_id)
+        if record is None:
+            return False
+        record.update(dict(fields))
         return True
 
     # RefreshTokenStorage:

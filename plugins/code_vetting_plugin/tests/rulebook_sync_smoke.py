@@ -21,18 +21,31 @@ via run_smokes.py.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import json
 import sys
 import tempfile
 from pathlib import Path
 
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 from code_vetting_plugin.models import ContextProfile, Dimension, Finding, Severity
 from code_vetting_plugin.report import ReportRenderer
-from code_vetting_plugin.rulebook.assembler import _GUIDANCE_RELPATHS, _RULEBOOK_DOC_RELPATH, write_artifact  # noqa: PLC2701 — the assembler source relpaths ARE the fixture contract
+from code_vetting_plugin.rulebook.assembler import (  # noqa: PLC2701 — the assembler source relpaths ARE the fixture contract
+    _GUIDANCE_RELPATHS,
+    _RULEBOOK_DOC_RELPATH,
+    write_artifact,
+)
 from code_vetting_plugin.run_record import RunTarget
 from code_vetting_plugin.runner import SCANNERS, Applicability
 from code_vetting_plugin.scanners import rulebook_sync
-from code_vetting_plugin.scanners.rulebook_sync import _ARTIFACT_RELPATH, STALE_RULEBOOK_CONSTRAINT  # noqa: PLC2701 — pin the scanner's own artifact path
+from code_vetting_plugin.scanners.rulebook_sync import (  # noqa: PLC2701 — pin the scanner's own artifact path
+    _ARTIFACT_RELPATH,
+    STALE_RULEBOOK_CONSTRAINT,
+)
 from code_vetting_plugin.targets import TargetTree
 
 _BANNER_MARK = "RULEBOOK INTEGRITY WARNING"

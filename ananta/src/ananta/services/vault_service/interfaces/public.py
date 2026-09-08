@@ -40,6 +40,55 @@ from ananta.core.services.call_context import CallContext
 from ananta.core.services.service_interface_decorator import service_interface_process
 
 
+class VaultQualificationAPI(ABC):
+    """Public qualification processes sharing the vault_service namespace."""
+
+    @service_interface_process(
+        name="qualify_keychain",
+        is_discoverable=True,
+        provider="vault_service",
+        parameters={},
+        return_value_schema=ReturnValueSchema(
+            description="Configured Keychain availability and current-user accessibility",
+            type=ParameterType.OBJECT,
+            properties={
+                "backend": ParameterMetadata(type=ParameterType.STRING, description="Vault substrate"),
+                "available": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether a usable Keychain backend is configured"),
+                "current_user_accessible": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the current user can read the configured Keychain namespace"),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def qualify_keychain(self, *, call_context: CallContext | None = None) -> ActionResult:
+        """Qualify the configured Keychain without exposing credential contents."""
+        pass
+
+    @service_interface_process(
+        name="qualify_round_trip",
+        is_discoverable=True,
+        provider="vault_service",
+        parameters={},
+        return_value_schema=ReturnValueSchema(
+            description="Private vault canary store, retrieve, compare, and deletion proof",
+            type=ParameterType.OBJECT,
+            properties={
+                "stored": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the private canary was stored"),
+                "retrieved": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the private canary was retrieved"),
+                "matched": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether retrieved bytes matched the private canary"),
+                "deleted": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether only the private canary was deleted before return"),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def qualify_round_trip(self, *, call_context: CallContext | None = None) -> ActionResult:
+        """Qualify the vault with a private canary that is deleted before return."""
+        pass
+
+
 class VaultServiceAPI(ABC):
     """Public vault operations - AI-discoverable via process registry.
 

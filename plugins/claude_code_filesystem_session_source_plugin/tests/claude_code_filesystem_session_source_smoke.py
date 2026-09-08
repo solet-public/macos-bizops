@@ -503,6 +503,66 @@ def test_read_events_stops_at_partial_trailing_line() -> None:
         _check(len(events) == 1, "consumed the one full line; left half-line unread")
 
 
+class _QualificationLedger:
+    def __init__(self, *, registered: bool = True) -> None:
+        self.registered = registered
+        self.polled_source_id: str | None = None
+
+    def list_sources(self) -> dict[str, object]:
+        rows: list[object] = []
+        if self.registered:
+            rows.append({
+                "source_kind": "claude_code_local",
+                "source_id": "src-claude-fixture",
+                "enabled": True,
+            })
+        return {"sources": rows}
+
+    def poll_source(self, source_id: str) -> dict[str, int]:
+        self.polled_source_id = source_id
+        return {"events_persisted": 4}
+
+    def list_sessions(self, **kwargs: object) -> dict[str, object]:
+        return {"sessions": [{"session_id": "les-claude-fixture"}]}
+
+    def get_session_timeline(self, **kwargs: object) -> dict[str, object]:
+        return {"events": [{"content_text": "fixture only"}]}
+
+
+class _QualificationOrchestrator:
+    def __init__(self, ledger: _QualificationLedger) -> None:
+        self._ledger = ledger
+
+    def get_service(self, name: str) -> _QualificationLedger | None:
+        return self._ledger if name == "session_ledger_service" else None
+
+
+def test_qualify_is_source_local_and_content_blind() -> None:
+    ledger = _QualificationLedger()
+    plugin = ClaudeCodeFilesystemSessionSourcePlugin()
+    plugin.orchestrator_ref = _QualificationOrchestrator(ledger)  # type: ignore[assignment]
+    result = plugin.qualify({}, {})
+    _check(result["action_status"] == "completed", "qualify completes for fixture source")
+    _check(ledger.polled_source_id == "src-claude-fixture", "qualify polls its registered source")
+    _check(
+        result["data"] == {
+            "source_registered": True,
+            "source_kind": "claude_code_local",
+            "backfill_count": 4,
+            "sample_content_retrieved": True,
+        },
+        "qualify returns the bounded proof shape without sample payload",
+    )
+
+
+def test_qualify_refuses_unregistered_source() -> None:
+    plugin = ClaudeCodeFilesystemSessionSourcePlugin()
+    plugin.orchestrator_ref = _QualificationOrchestrator(_QualificationLedger(registered=False))  # type: ignore[assignment]
+    result = plugin.qualify({}, {})
+    _check(result["action_status"] == "failed", "qualify fails without a registered source")
+    _check(result["data"] == {}, "failed qualification does not fabricate proof fields")
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
@@ -525,6 +585,8 @@ def main() -> int:
     test_discover_high_water_skips_unchanged_files()
     test_read_events_resumes_from_offset()
     test_read_events_stops_at_partial_trailing_line()
+    test_qualify_is_source_local_and_content_blind()
+    test_qualify_refuses_unregistered_source()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

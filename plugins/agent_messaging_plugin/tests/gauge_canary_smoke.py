@@ -49,6 +49,7 @@ Run:
 from __future__ import annotations
 
 import sys
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -59,6 +60,7 @@ if str(_SRC) not in sys.path:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _recorded_lane_worktree_fixture import RecordedLaneWorktreeFixture  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     AGENT_ROLE_BINDING_NAMESPACE,
 )
@@ -426,24 +428,30 @@ def test_retire_gauge_canary_tears_down_the_ledger_row_too() -> None:
     inside `retire_gauge_canary`, and this test's first `_check` goes red —
     the exact regression GAU-24 exists to prevent.
     """
-    state, _, _, _ = _wired()
-    now = datetime.now(UTC)
-    _tick(state, now=now)
-    _check(read_managed_session(state, CANARY)["lifecycle_state"] == LIFECYCLE_LIVE,
-           "fixture precondition: the canary's ledger row is live before retiring")
-    result = retire_gauge_canary(
-        state, agent_instance_id=CANARY, directed_by="role:lane-canary-retire",
-    )
-    _check(result["session_row_existed"] is True,
-           "the verb found the ledger row minted by register_synthetic_session")
-    _check(
-        read_managed_session(state, CANARY)["lifecycle_state"] == LIFECYCLE_RETIRED,
-        "★ and the no-op synthetic host driver let retire_session reach "
-        "'retired' instead of raising unsupported_on_host — the ledger-side "
-        "half of the leak is closed",
-    )
-    _check(not is_active_canary(state, CANARY),
-           "the registry mark was stamped too, ledger-first as documented")
+    with tempfile.TemporaryDirectory() as raw:
+        with RecordedLaneWorktreeFixture(Path(raw)) as fixture:
+            state, _, _, _ = _wired()
+            now = datetime.now(UTC)
+            _tick(state, now=now)
+            _check(read_managed_session(state, CANARY)["lifecycle_state"] == LIFECYCLE_LIVE,
+                   "fixture precondition: the canary's ledger row is live before retiring")
+            result = retire_gauge_canary(
+                state, agent_instance_id=CANARY, directed_by="role:lane-canary-retire",
+            )
+            _check(result["session_row_existed"] is True,
+                   "the verb found the ledger row minted by register_synthetic_session")
+            _check(
+                read_managed_session(state, CANARY)["lifecycle_state"] == LIFECYCLE_RETIRED,
+                "★ and the no-op synthetic host driver let retire_session reach "
+                "'retired' instead of raising unsupported_on_host — the ledger-side "
+                "half of the leak is closed",
+            )
+            _check(not is_active_canary(state, CANARY),
+                   "the registry mark was stamped too, ledger-first as documented")
+            _check(
+                fixture.has_recorded_provisioning() is False and bool(fixture.retirement_calls),
+                "canary retirement is recorded through a temp-root-contained fixture",
+            )
 
 
 def test_retiring_a_canary_with_no_ledger_row_only_touches_the_registry() -> None:

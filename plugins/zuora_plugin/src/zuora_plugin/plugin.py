@@ -27,6 +27,7 @@ plugin — no allowlist entry needed.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -48,7 +49,7 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import billing_actions, export_containment
+from . import async_jobs, export_containment
 from .app_config import AppConfigError, AppConfigLoader
 from .billing_actions import ZuoraResponseError
 from .constants import (
@@ -98,6 +99,15 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         self._address_book_service: Any | None = None
         self._app_config_loader: AppConfigLoader | None = None
         self._client: ZuoraClient | None = None
+        # D0.3 deferred-completion machinery (async_jobs.py) — lazily acquired /
+        # started on first async-shaped dispatch, mirroring
+        # comfyui_image_generation_plugin's _try_acquire_job_manager /
+        # salesforce_plugin's own copy (boot order does not guarantee
+        # orchestrator_ref.async_job_manager is set yet at
+        # prepare_for_readiness time, but it always is by first dispatch).
+        self._async_job_manager: Any | None = None
+        self._worker_thread: threading.Thread | None = None
+        self._worker_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # VaultKeysProvider — no plugin-owned vault keys
@@ -232,6 +242,25 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             self.logger.debug("%s: success", endpoint_name)
         return self._success(data)
 
+    def _dispatch_async(
+        self, action_name: str, params: dict[str, Any], state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """D0.3 ms-scale dispatch: create the job, return immediately — no Zuora REST
+        call happens here."""
+        try:
+            create_result = async_jobs.create_job(
+                self, action_name=action_name, params=params, state=state,
+            )
+        except ValueError as exc:
+            return self._error(ERROR_INVALID_PARAMS, str(exc))
+        except RuntimeError as exc:
+            return self._error(ERROR_NOT_CONFIGURED, str(exc))
+        if create_result.get("action_status") != "completed":
+            error = create_result.get("error", {})
+            message = str(error.get("message", "failed to create async job"))
+            return self._error(ERROR_API_ERROR, message)
+        return self._success(create_result["data"])
+
     # ------------------------------------------------------------------
     # EdgeProcessProvider
     # ------------------------------------------------------------------
@@ -274,7 +303,9 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         display_name="Zuora: Data Query",
         description=(
             "Run a ZOQL query (e.g. \"SELECT Id, Name FROM Account\") against the configured Zuora "
-            "tenant. The result is ALWAYS written to the caller-supplied output_tsv_path, never "
+            "tenant. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion "
+            "shape) -- the dispatch returning is NOT the same as the job finishing. When the job "
+            "completes, the result is ALWAYS written to the caller-supplied output_tsv_path, never "
             "returned inline. Zuora's own ZOQL query call (POST /v1/action/query) returns at most "
             f"{ZUORA_QUERY_PAGE_ROW_CAP} records per call; this verb follows the vendor's own "
             "queryMore continuation automatically when more remain. The row limit below is "
@@ -322,33 +353,26 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV — never records inline, at any size.",
+            description="Dispatch envelope — job_id + status: queued. Not the TSV handle itself.",
             properties={
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
-                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of records written."),
-                "total_size": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Zuora's own total-match count from the last query page fetched.",
-                ),
-                "columns": ParameterMetadata(type=ParameterType.LIST, description="Field names, in ZOQL SELECT order."),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="True when row_count hit the effective limit — more records may exist.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def data_query(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda client: billing_actions.data_query(client, params, self._export_path_gate), "data_query",
-        )
+        return self._dispatch_async("data_query", params, state)
 
     @platform_process(
         name="get_object",
         display_name="Zuora: Get Object",
         description=(
             "Fetch one Account/Subscription/Invoice/Payment/Product object by type + id. "
-            "Requires type and id."
+            "Requires type and id. Returns immediately with a job_id and status 'queued' (D0.3 "
+            "deferred-completion shape) -- the dispatch returning is NOT the same as the job "
+            "finishing; the object's fields are delivered when the job completes."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -357,17 +381,29 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             ),
             "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The object id."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="The object's fields."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the object itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def get_object(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: billing_actions.get_object(client, params), "get_object")
+        return self._dispatch_async("get_object", params, state)
 
     @platform_process(
         name="create_object",
         display_name="Zuora: Create Object",
-        description="Create an Account/Subscription/Invoice/Payment/Product object with the given fields. Write action.",
+        description=(
+            "Create an Account/Subscription/Invoice/Payment/Product object with the given fields. "
+            "Write action. Returns immediately with a job_id and status 'queued' (D0.3 "
+            "deferred-completion shape) -- the dispatch returning is NOT the same as the object "
+            "being created; the new object id is delivered when the job completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "type": ParameterMetadata(
@@ -375,17 +411,29 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             ),
             "fields": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="Non-empty object of field values."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="New object id and success."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the created object's id.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def create_object(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: billing_actions.create_object(client, params), "create_object")
+        return self._dispatch_async("create_object", params, state)
 
     @platform_process(
         name="update_object",
         display_name="Zuora: Update Object",
-        description="Apply a non-empty fields object to an existing object by type + id. Write action.",
+        description=(
+            "Apply a non-empty fields object to an existing object by type + id. Write action. "
+            "Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion "
+            "shape) -- the dispatch returning is NOT the same as the update finishing; the "
+            "confirmation is delivered when the job completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "type": ParameterMetadata(
@@ -394,19 +442,28 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The object id."),
             "fields": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="Non-empty object of field values to set."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Confirmation the update was applied."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not update confirmation.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
     def update_object(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: billing_actions.update_object(client, params), "update_object")
+        return self._dispatch_async("update_object", params, state)
 
     @platform_process(
         name="list_subscriptions",
         display_name="Zuora: List Subscriptions",
         description=(
-            "List an account's subscriptions; ALWAYS writes the result to the caller-supplied "
-            "output_tsv_path, never inline. Requires account_id. Zuora's own endpoint "
+            "List an account's subscriptions. Returns immediately with a job_id and status "
+            "'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same "
+            "as the job finishing. When the job completes, the result is ALWAYS written to the "
+            "caller-supplied output_tsv_path, never inline. Requires account_id. Zuora's own endpoint "
             "(GET /v1/subscriptions/accounts/{account_id}) pages internally at "
             f"{ZUORA_LIST_PAGE_SIZE_MAX} subscriptions per call — this verb follows that "
             "pagination automatically up to the effective row limit. The row limit below is "
@@ -445,46 +502,52 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV — never records inline, at any size.",
+            description="Dispatch envelope — job_id + status: queued. Not the TSV handle itself.",
             properties={
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
-                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of subscriptions written."),
-                "columns": ParameterMetadata(type=ParameterType.LIST, description="Field names, in first-appearance order."),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="True when row_count hit the effective limit — more subscriptions may exist.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_subscriptions(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda client: billing_actions.list_subscriptions(client, params, self._export_path_gate),
-            "list_subscriptions",
-        )
+        return self._dispatch_async("list_subscriptions", params, state)
 
     @platform_process(
         name="get_invoice",
         display_name="Zuora: Get Invoice",
-        description="Fetch one invoice by id.",
+        description=(
+            "Fetch one invoice by id. Returns immediately with a job_id and status 'queued' "
+            "(D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the "
+            "job finishing; the invoice's fields are delivered when the job completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The invoice id."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="The invoice's fields."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the invoice itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def get_invoice(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(lambda client: billing_actions.get_invoice(client, params), "get_invoice")
+        return self._dispatch_async("get_invoice", params, state)
 
     @platform_process(
         name="list_invoices",
         display_name="Zuora: List Invoices",
         description=(
-            "List an account's invoices; ALWAYS writes the result to the caller-supplied "
-            "output_tsv_path, never inline. Requires account_id. NOTE on this call's ceiling: "
+            "List an account's invoices. Returns immediately with a job_id and status 'queued' "
+            "(D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the "
+            "job finishing. When the job completes, the result is ALWAYS written to the "
+            "caller-supplied output_tsv_path, never inline. Requires account_id. NOTE on this call's ceiling: "
             "Zuora's own pagination support for this specific endpoint "
             "(GET /v1/invoices/accounts/{account_id}) is not independently confirmed in current "
             "vendor documentation, so row_limit is applied as a cap on what is WRITTEN from "
@@ -525,32 +588,26 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV — never records inline, at any size.",
+            description="Dispatch envelope — job_id + status: queued. Not the TSV handle itself.",
             properties={
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
-                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of invoices written."),
-                "columns": ParameterMetadata(type=ParameterType.LIST, description="Field names, in first-appearance order."),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when row_count hit the effective limit — more invoices may exist (see the ceiling note above).",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def list_invoices(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda client: billing_actions.list_invoices(client, params, self._export_path_gate),
-            "list_invoices",
-        )
+        return self._dispatch_async("list_invoices", params, state)
 
     @platform_process(
         name="bulk_export",
         display_name="Zuora: Bulk Export",
         description=(
             "The N>>500 route: run a ZOQL query and write the result as ONE tab-separated .tsv "
-            "file at an ABSOLUTE output_tsv_path in the operator's workspace. The path must lie "
+            "file at an ABSOLUTE output_tsv_path in the operator's workspace. Returns immediately "
+            "with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch "
+            "returning is NOT the same as the job finishing. The path must lie "
             "under an operator-configured export_allowed_roots entry (empty config refuses every "
             "export). Nested objects are serialized as JSON text in their cells. Same read rules "
             "and override mechanism as data_query, with a higher hard cap: Zuora's own ZOQL query "
@@ -594,50 +651,42 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="A handle to the written TSV: path, columns, row_count, total_size, and truncated.",
+            description="Dispatch envelope — job_id + status: queued. Not the TSV handle itself.",
             properties={
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Absolute path of the written TSV file."),
-                "row_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of records written."),
-                "total_size": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Zuora's own total-match count from the last query page fetched.",
-                ),
-                "columns": ParameterMetadata(type=ParameterType.LIST, description="Field names, in ZOQL SELECT order."),
-                "truncated": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="True when row_count hit the effective limit — more records may exist.",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def bulk_export(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda client: billing_actions.bulk_export(client, params, self._export_path_gate), "bulk_export",
-        )
+        return self._dispatch_async("bulk_export", params, state)
 
     @platform_process(
         name="test_connection",
         display_name="Zuora: Test Connection",
-        description="Verify the configured Zuora credentials by minting a bearer token. Returns ok, base_url, client_id.",
+        description=(
+            "Verify the configured Zuora credentials by minting a bearer token. Returns "
+            "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- "
+            "the dispatch returning is NOT the same as the job finishing; ok/base_url/client_id "
+            "are delivered when the job completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="ok, base_url, client_id."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the connection check result.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def test_connection(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        loader = self._app_config_loader
-
-        def _do(client: ZuoraClient) -> dict[str, Any]:
-            config = loader.load() if loader is not None else None
-            client.ensure_authenticated()
-            return {
-                "ok": True,
-                "base_url": config.base_url if config is not None else "",
-                "client_id": config.client_id if config is not None else "",
-            }
-
-        return self._run(_do, "test_connection")
+        return self._dispatch_async("test_connection", params, state)
 
 
 def _edge(

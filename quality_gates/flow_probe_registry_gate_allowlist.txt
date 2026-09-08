@@ -1,0 +1,6 @@
+# Exact, source-absent registry keys and dedicated-handler declaration drift.
+# Remove one entry when its source declaration is repaired; wildcards are forbidden.
+plugin::macos_vault_plugin::qualify  # legacy: 2026-09-03 W2-1
+plugin::codex_filesystem_session_source_plugin::qualify  # legacy: 2026-09-03 W2-1
+plugin::claude_code_filesystem_session_source_plugin::qualify  # legacy: 2026-09-03 W2-1
+plugin::schwab_market_data_plugin::test_connection  # legacy: 2026-09-03 W2-1

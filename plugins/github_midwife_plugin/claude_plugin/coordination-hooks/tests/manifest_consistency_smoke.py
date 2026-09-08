@@ -77,17 +77,24 @@ AGENT_INVOKED_CLI_UTILITIES = frozenset(
     {"drain.py", "hydrate_render.py", "index_render.py", "sync.py"},
 )
 
-# R4 Package C (2026-08-10): files that are entry-point-SHAPED but are
-# invoked by a DIFFERENT plugin's spawn mechanism, never by this plugin's
-# own hooks.json at all -- a spawned headless/tmux worker's host adapter
-# (agent_messaging_plugin) references these by path in a generated Claude
-# Code `--settings` blob at spawn time. They ship here purely as the
-# fallback copy a born clone carries (rung 2 of the adapters' own
-# resolution ladder); the origin checkout's `.claude/hooks/<file>` is rung
-# 1 and the primary copy. Exempted ONLY from "must be wired in hooks.json"
-# -- every OTHER check (documentation, stdlib-only, no-network-unless-
-# disclosed, subprocess/file-write shape) still applies in full, same
-# contract as AGENT_INVOKED_CLI_UTILITIES above.
+# R4 Package C (2026-08-10): files that are entry-point-SHAPED and are ALSO
+# invoked by a DIFFERENT plugin's spawn mechanism -- a spawned headless/tmux
+# worker's host adapter (agent_messaging_plugin) references these by path in
+# a generated Claude Code `--settings` blob at spawn time, independent of
+# this plugin's own hooks.json wiring. They ship here purely as the fallback
+# copy a born clone carries (rung 2 of the adapters' own resolution ladder);
+# the origin checkout's `.claude/hooks/<file>` is rung 1 and the primary
+# copy. As of `0.8.0` (seed feedback #40/§51.1, 2026-08-24) both are ALSO
+# registered in hooks.json -- the two delivery routes are deliberately
+# independent, not mutually exclusive: a managed policy's
+# `strictPluginOnlyCustomization: ["hooks"]` strips the adapter's own
+# `--settings` injection, and the hooks.json registration is what survives
+# that policy for a plugin already in `strictKnownMarketplaces`. A session
+# under a policy that strips neither gets both -- harmless by design, see
+# each file's own module docstring. Kept as a named set (rather than folded
+# into the ordinary "must be wired" hooks) so the check below asserts BOTH
+# facts explicitly: registered here, AND still the adapter's own fallback
+# copy, never one or the other.
 SPAWN_INJECTED_HOOKS = frozenset(
     {"headless_tool_allowlist_gate.py", "capture_session_mapping.py"},
 )
@@ -408,12 +415,13 @@ def check_tree_matches_manifest(res: Results, entries: list[dict[str, object]], 
             continue
         if name in SPAWN_INJECTED_HOOKS:
             res.check(
-                name not in referenced,
-                f"spawn-injected worker hook is NOT wired in hooks.json: {name}",
-                "this file is documented as invoked only via a spawned worker's "
-                "adapter-generated --settings, never via this plugin's own "
-                "hooks.json -- a hooks.json entry for it would double-fire it "
-                "for every session that loads this plugin, not just spawned workers",
+                name in referenced,
+                f"spawn-injected worker hook IS ALSO wired in hooks.json: {name}",
+                "this file is documented as registered here specifically so it "
+                "survives a managed policy that strips a spawned worker's own "
+                "adapter-generated --settings copy (strictPluginOnlyCustomization) "
+                "-- a missing hooks.json entry would silently reopen seed feedback "
+                "#40/§51.1 for that exact host class",
             )
             continue
         res.check(name in referenced, f"hook is wired in hooks.json: {name}", "present on disk but never invoked")
@@ -552,9 +560,9 @@ def check_subprocess_capable_hooks(res: Results, hooks: list[str], siblings: lis
             f"expected {process_key!r} to appear in the source as a named constant",
         )
         res.check(
-            re.search(r'\["solet",\s*"call",', source) is not None,
+            re.search(r'\["solet-bridge",\s*"call",', source) is not None,
             f"{name} invokes solet via a fixed argv prefix",
-            'expected the literal ["solet", "call", ...] argument vector',
+            'expected the literal ["solet-bridge", "call", ...] argument vector',
         )
 
     waiter = (HOOKS_DIR / SUBPROCESS_OWNER).read_text(encoding="utf-8")

@@ -62,6 +62,39 @@ _AUTOSTART_DRY_RUN_PARAM = ParameterMetadata(
     type=ParameterType.BOOLEAN,
     default=False,
 )
+_RECONCILIATION_ID_PARAM = ParameterMetadata(
+    description="Reconciliation operation identity for provenance correlation.",
+    required=False,
+    type=ParameterType.STRING,
+    default="",
+)
+_CUTOVER_ID_PARAM = ParameterMetadata(
+    description="Approved reconciliation identity authorizing this cutover.",
+    required=True,
+    type=ParameterType.STRING,
+)
+_CUTOVER_EXPECT_PARAMS: dict[str, ParameterMetadata] = {
+    name: ParameterMetadata(description=description, required=True, type=ParameterType.STRING)
+    for name, description in (
+        ("expected_source_surface_sha256", "Approved reconciliation-surface digest."),
+        ("expected_release_surface_sha256", "Approved complete release-surface digest."),
+        ("expected_manifest_etag", "Manifest ETag observed at approval time."),
+        ("expected_current_release_id", "Release the caller observed as current."),
+        ("expected_active_instance_id", "Router-active instance observed at approval time."),
+        ("expected_active_start_token", "Start token of that exact active instance."),
+    )
+}
+_CUTOVER_DRY_RUN_PARAM = ParameterMetadata(
+    description="If true, run every compare-and-swap leg and plan without touching router state.",
+    required=False,
+    type=ParameterType.BOOLEAN,
+    default=False,
+)
+_VERIFICATION_MODULES_PARAM = ParameterMetadata(
+    description="Closed list of already-loaded module names to attest without importing.",
+    required=True,
+    type=ParameterType.LIST,
+)
 
 
 
@@ -87,6 +120,53 @@ def _swap_status_return_schema() -> ReturnValueSchema:
             "swap_in_progress": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether this plugin is mid-swap."),
             "self_color": ParameterMetadata(type=ParameterType.STRING, description="This process color."),
             "self_instance_id": ParameterMetadata(type=ParameterType.STRING, description="This router instance id."),
+        },
+    )
+
+
+def _runtime_attestation_return_schema() -> ReturnValueSchema:
+    return ReturnValueSchema(
+        type=ParameterType.OBJECT,
+        description="Router-served immutable release and live-module attestation.",
+        properties={
+            "schema_version": ParameterMetadata(type=ParameterType.INTEGER, description="Schema version."),
+            "status": ParameterMetadata(type=ParameterType.STRING, description="Attestation status."),
+            "solet_name": ParameterMetadata(type=ParameterType.STRING, description="Serving solet name."),
+            "served_by_self": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether router serves this process."),
+            "self_instance_id": ParameterMetadata(type=ParameterType.STRING, description="This router instance."),
+            "self_color": ParameterMetadata(type=ParameterType.STRING, description="This router color."),
+            "self_pid": ParameterMetadata(type=ParameterType.INTEGER, description="This process PID."),
+            "self_start_token": ParameterMetadata(type=ParameterType.STRING, description="This process start token."),
+            "router_active_instance_id": ParameterMetadata(type=ParameterType.STRING, description="Router active instance."),
+            "router_active_color": ParameterMetadata(type=ParameterType.STRING, description="Router active color."),
+            "release_id": ParameterMetadata(type=ParameterType.STRING, description="Serving immutable release."),
+            "current_release_id": ParameterMetadata(type=ParameterType.STRING, description="Current release pointer."),
+            "manifest_etag": ParameterMetadata(type=ParameterType.STRING, description="Release manifest ETag."),
+            "reconciliation_id": ParameterMetadata(type=ParameterType.STRING, description="Reconciliation identity."),
+            "source_surface_sha256": ParameterMetadata(type=ParameterType.STRING, description="Reconciliation surface digest."),
+            "release_surface_sha256": ParameterMetadata(type=ParameterType.STRING, description="Complete release surface digest."),
+            "release_version_sha256": ParameterMetadata(type=ParameterType.STRING, description="VERSION file digest."),
+            "modules": ParameterMetadata(type=ParameterType.LIST, description="Observed module provenance."),
+            "sample_basis": ParameterMetadata(type=ParameterType.STRING, description="Module sampling basis."),
+        },
+    )
+
+
+def _cutover_release_return_schema() -> ReturnValueSchema:
+    return ReturnValueSchema(
+        type=ParameterType.OBJECT,
+        description="Reconciliation-authorized cutover outcome.",
+        properties={
+            "status": ParameterMetadata(type=ParameterType.STRING, description="Terminal or queued cutover status."),
+            "reason_code": ParameterMetadata(type=ParameterType.STRING, description="Machine-readable outcome cause."),
+            "reconciliation_id": ParameterMetadata(type=ParameterType.STRING, description="Authorizing reconciliation."),
+            "prior_release_id": ParameterMetadata(type=ParameterType.STRING, description="Release serving before the swap."),
+            "prior_instance_id": ParameterMetadata(type=ParameterType.STRING, description="Exact prior router instance."),
+            "prior_color": ParameterMetadata(type=ParameterType.STRING, description="Prior router colour."),
+            "provenance": ParameterMetadata(type=ParameterType.OBJECT, description="Provenance stamped into the candidate VERSION."),
+            "expected": ParameterMetadata(type=ParameterType.STRING, description="Asserted value on a stale-approval refusal."),
+            "observed": ParameterMetadata(type=ParameterType.STRING, description="Measured value on a stale-approval refusal."),
+            "dry_run": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether this was a planning run."),
         },
     )
 
@@ -152,6 +232,61 @@ def _autostart_return_schema() -> ReturnValueSchema:
 
 class LocalSelfDeploymentServicePublicAPI(ABC):
     """AI-discoverable local self-deployment extension surface."""
+
+    @service_interface_process(
+        name="attest_runtime_code",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "reconciliation_id": _RECONCILIATION_ID_PARAM,
+            "verification_modules": _VERIFICATION_MODULES_PARAM,
+        },
+        return_value_schema=_runtime_attestation_return_schema(),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(
+            result_type="local_runtime_code_attestation",
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+    )
+    @abstractmethod
+    def attest_runtime_code(
+        self,
+        *,
+        reconciliation_id: str,
+        verification_modules: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Attest the router-served immutable release and loaded modules."""
+
+    @service_interface_process(
+        name="cutover_release",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "reconciliation_id": _CUTOVER_ID_PARAM,
+            **_CUTOVER_EXPECT_PARAMS,
+            "dry_run": _CUTOVER_DRY_RUN_PARAM,
+        },
+        return_value_schema=_cutover_release_return_schema(),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(
+            result_type="local_reconciliation_cutover",
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+    )
+    @abstractmethod
+    def cutover_release(
+        self,
+        *,
+        reconciliation_id: str,
+        expected_source_surface_sha256: str,
+        expected_release_surface_sha256: str,
+        expected_manifest_etag: str,
+        expected_current_release_id: str,
+        expected_active_instance_id: str,
+        expected_active_start_token: str,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Cut over to a candidate built from reconciliation-approved bytes."""
 
     @service_interface_process(
         name="complete_swap",

@@ -35,6 +35,13 @@ _SHELL_LONG_OPTS_NOARG = frozenset({
 })
 # Short opt-cluster letters that consume the NEXT token (e.g. `bash -O extglob`).
 _SHELL_SHORT_OPTS_WITH_ARG = frozenset({"O", "T", "D", "o"})
+_COMMAND_PREFIXES = frozenset({"command", "env", "exec"})
+_ENV_OPTIONS_WITH_ARG = frozenset({"-C", "-u", "--chdir", "--unset"})
+_NON_EXECUTING_ARGUMENT_CONSUMERS = frozenset({
+    "[", ":", "awk", "basename", "cat", "cut", "dirname", "echo", "false",
+    "file", "grep", "head", "jq", "ls", "printf", "read", "realpath", "rg",
+    "sed", "sort", "stat", "tail", "test", "tr", "true", "uniq", "wc",
+})
 
 
 def _token_is_git_command(token: str) -> bool:
@@ -58,6 +65,60 @@ def _collect_git_invocation(tokens: list[str], i: int) -> tuple[list[str], int]:
         collected.append(tokens[j])
         j += 1
     return collected, j
+
+
+def _is_shell_assignment(token: str) -> bool:
+    """Whether ``token`` is a leading shell variable assignment."""
+    name, separator, _ = token.partition("=")
+    return bool(separator) and name.isidentifier()
+
+
+def _is_command_segment_token(tokens: list[str], index: int) -> bool:
+    """Whether ``index`` is still inside the current simple command."""
+    return index < len(tokens) and tokens[index] not in _CHAIN_SEPARATORS
+
+
+def _is_command_prefix(token: str) -> bool:
+    """Whether ``token`` precedes, rather than names, an executable."""
+    return _is_shell_assignment(token) or (
+        token in _COMMAND_PREFIXES and token != "env"
+    )
+
+
+def _env_option_width(option: str) -> int:
+    """Return how many tokens one supported ``env`` option consumes."""
+    return 2 if option in _ENV_OPTIONS_WITH_ARG else 1
+
+
+def _skip_env_prefix(tokens: list[str], index: int) -> int:
+    """Skip leading ``env`` assignments and options to its executable."""
+    while _is_command_segment_token(tokens, index):
+        option = tokens[index]
+        if not (_is_shell_assignment(option) or option.startswith("-")):
+            return index
+        index += _env_option_width(option)
+    return index
+
+
+def _command_token_index(tokens: list[str], start: int) -> int | None:
+    """Find one simple command's executable token after safe prefixes.
+
+    A token spelling ``git`` is an invocation only when it is the executable
+    after leading assignments or command-selection wrappers. Treating every
+    argument token as an executable turns ``printf ... git reset --hard`` into
+    a false mutation while preserving direct and wrapped git commands.
+    """
+    index = start
+    while _is_command_segment_token(tokens, index):
+        token = tokens[index]
+        if token == "env":
+            index = _skip_env_prefix(tokens, index + 1)
+            continue
+        if _is_command_prefix(token):
+            index += 1
+            continue
+        return index
+    return None
 
 
 def _consume_shell_short_cluster(tok: str, j: int) -> tuple[int, bool] | None:
@@ -169,6 +230,42 @@ def heredoc_body_is_script_source(owner_line: str) -> bool:
     return any(posixpath.basename(tok) in SHELL_EVAL_BINARIES for tok in tokens)
 
 
+def _walk_tokenized_line(tokens: list[str], depth: int) -> list[list[str]]:
+    """Walk already-tokenized one-line shell source for git invocations."""
+    invocations: list[list[str]] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i] in _CHAIN_SEPARATORS:
+            i += 1
+            continue
+        segment_end = i
+        while segment_end < len(tokens) and tokens[segment_end] not in _CHAIN_SEPARATORS:
+            segment_end += 1
+        command_index = _command_token_index(tokens, i)
+        if command_index is None:
+            # An assignments-only segment has no executable of its own, but
+            # must not hide a later semicolon-separated command.
+            i = segment_end
+            continue
+        shell_eval = _handle_shell_eval_token(tokens, command_index, depth)
+        if shell_eval is not None:
+            inner_inv, _ = shell_eval
+            invocations.extend(inner_inv)
+            i = segment_end
+            continue
+        executable = posixpath.basename(tokens[command_index])
+        if executable in _NON_EXECUTING_ARGUMENT_CONSUMERS:
+            i = segment_end
+            continue
+        for token_index in range(i, segment_end):
+            if not _token_is_git_command(tokens[token_index]):
+                continue
+            collected, _ = _collect_git_invocation(tokens, token_index)
+            invocations.append(collected)
+        i = segment_end
+    return invocations
+
+
 def walk_git_invocations(
     command: str, depth: int = 0,
 ) -> tuple[list[list[str]], bool]:
@@ -182,31 +279,22 @@ def walk_git_invocations(
         return [], True
     retained, heredocs = _split_heredoc_bodies(command)
     outer, subst_pieces = _extract_subst_pieces(retained)
-    try:
-        tokens = _punctuation_tokenize(outer)
-    except ValueError:
-        return [], False
     invocations: list[list[str]] = []
-    i = 0
-    while i < len(tokens):
-        shell_eval = _handle_shell_eval_token(tokens, i, depth)
-        if shell_eval is not None:
-            inner_inv, new_i = shell_eval
-            invocations.extend(inner_inv)
-            i = new_i
-            continue
-        if _token_is_git_command(tokens[i]):
-            collected, new_i = _collect_git_invocation(tokens, i)
-            invocations.append(collected)
-            i = new_i
-            continue
-        i += 1
+    parsed_ok = True
+    for line in outer.splitlines() or [outer]:
+        try:
+            tokens = _punctuation_tokenize(line)
+        except ValueError:
+            return [], False
+        invocations.extend(_walk_tokenized_line(tokens, depth))
     for _, piece in subst_pieces:
-        inner_inv, _ = walk_git_invocations(piece, depth + 1)
+        inner_inv, inner_parsed_ok = walk_git_invocations(piece, depth + 1)
         invocations.extend(inner_inv)
+        parsed_ok = parsed_ok and inner_parsed_ok
     for owner_line, body in heredocs:
         if not heredoc_body_is_script_source(owner_line):
             continue
-        inner_inv, _ = walk_git_invocations(body, depth + 1)
+        inner_inv, inner_parsed_ok = walk_git_invocations(body, depth + 1)
         invocations.extend(inner_inv)
-    return invocations, True
+        parsed_ok = parsed_ok and inner_parsed_ok
+    return invocations, parsed_ok

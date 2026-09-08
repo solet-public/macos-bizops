@@ -188,7 +188,7 @@ def new_holder_prose(name: str) -> str:
     lives outside the instruction a reader actually receives gets followed
     unsafely. The transport caveat is equally explicit and load-bearing: a
     ``watch``-transport session's own outbound calls are a bare
-    ``solet call`` subprocess, which the platform stamps with
+    ``solet-bridge call`` subprocess, which the platform stamps with
     ``caller_attribution_*`` rather than ``inference_vertex_session_id`` — the
     field ``peer_mark_role_covered`` requires. Such a session CANNOT attest,
     ever, no matter how it tries; the prose says so plainly rather than
@@ -213,7 +213,7 @@ def new_holder_prose(name: str) -> str:
         f"boundary, and never the newest message in the whole backlog if your "
         f"last read did not return it. This requires a call dispatched through "
         f"your own registered bridge (a live MCP tool call) — a bare "
-        f"solet call subprocess cannot attest and is refused loud. If "
+        f"solet-bridge call subprocess cannot attest and is refused loud. If "
         f"your session has no registered bridge (e.g. watch transport with no "
         f"MCP route), you cannot perform this step; that is expected, not an "
         f"error — this role's covered mark will simply stay behind your reads, "
@@ -231,6 +231,7 @@ def send_handover_notice(
     peer_agent_instance_id: str,
     prose: str,
     kind: str,
+    peer_agent_session_id: str = "",
 ) -> bool:
     """Best-effort IMPORTANT role-handover notice to a specific instance (REL-04).
 
@@ -258,6 +259,7 @@ def send_handover_notice(
             sender_parent_pid=None,
             peer_id=peer_id,
             peer_agent_instance_id=peer_agent_instance_id,
+            peer_agent_session_id=peer_agent_session_id or None,
             content=[TextPart(type="text", text=prose)],
         )
     except (
@@ -368,6 +370,7 @@ def notify_role_handover(
             state_service=state_service,
             peer_id=target_agent_id or new_agent_id,
             peer_agent_instance_id=target_instance_id,
+            peer_agent_session_id=str(getattr(prior, "agent_session_id", "") or ""),
             prose=displaced_prose(name, new_agent_instance_id),
             kind="displaced-holder",
         )
@@ -378,6 +381,7 @@ def notify_role_handover(
         state_service=state_service,
         peer_id=new_agent_id,
         peer_agent_instance_id=new_agent_instance_id,
+        peer_agent_session_id=new_agent_session_id,
         prose=new_holder_prose(name),
         kind="new-holder",
     )

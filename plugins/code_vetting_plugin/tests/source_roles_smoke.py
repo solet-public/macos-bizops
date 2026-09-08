@@ -8,10 +8,16 @@ and the self-vet shape/report remain unchanged.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from code_vetting_plugin.live_state import read_vetting_run
 from code_vetting_plugin.models import (

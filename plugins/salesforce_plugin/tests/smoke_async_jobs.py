@@ -8,7 +8,7 @@ never calls ensure_worker_started for the thread-liveness checks it doesn't
 need).
 
 Exercises:
-  1. Dispatch (all 9 verbs) returns {job_id, status: queued} in the SAME
+  1. Dispatch (all 13 verbs) returns {job_id, status: queued} in the SAME
      call, WITHOUT ever touching SalesforceCliExecutor — the containment
      requirement this lane's brief named explicitly ("keep the executor,
      contain the dispatch"): plugin._cli_executor.run_json/run_rest are never
@@ -23,11 +23,18 @@ Exercises:
      test_connection wrapper, and a REST-level fault classifying
      topology-safe through the SAME path smoke_records.py already covers at
      the ``_run`` level — decoupled entirely from the dispatch call.
-  4. ACTION_HANDLERS carries all 9 migrated verbs — a name typo here would
-     silently strand a verb's queued jobs forever (the drain loop only polls
-     names present in this dict).
+  4. ACTION_HANDLERS carries all 13 migrated/added verbs (the 9 original
+     D0.3-migrated verbs plus the 4 lane-sf-bulk-v2 Bulk v2 ingest verbs) —
+     a name typo here would silently strand a verb's queued jobs forever
+     (the drain loop only polls names present in this dict).
   5. ensure_worker_started is idempotent: two calls produce the same thread
      object, not two threads.
+
+Bulk v2 ingest verb behavior (argv shapes, containment gates, CSV writes,
+etc.) is NOT re-covered here — see tests/smoke_bulk.py, the dedicated smoke
+for bulk_actions.py. This file only proves the 4 bulk verbs are correctly
+WIRED into the D0.3 dispatch/worker machinery, the same way it proves that
+for the 9 pre-existing verbs.
 
 Run:
     SOLET_NAME=<name> .venv/bin/python3 \
@@ -155,6 +162,17 @@ def test_all_verbs_dispatch_async() -> None:
         "update_record": {"sobject": "Account", "id": "001x", "fields": {"Name": "New"}},
         "delete_record": {"sobject": "Account", "id": "001x"},
         "test_connection": {},
+        "bulk_ingest_submit": {
+            "operation": "insert", "sobject": "Account", "csv_path": "/tmp/in.csv",
+        },
+        "bulk_job_status": {"job_id": "750xx"},
+        "bulk_job_results": {
+            "job_id": "750xx",
+            "successful_results_path": "/tmp/ok.csv",
+            "failed_results_path": "/tmp/failed.csv",
+            "unprocessed_results_path": "/tmp/unprocessed.csv",
+        },
+        "bulk_job_abort": {"job_id": "750xx"},
     }
     for action_name, params in calls.items():
         method = getattr(plugin, action_name)
@@ -164,7 +182,7 @@ def test_all_verbs_dispatch_async() -> None:
             result["action_status"] == "completed" and result["data"].get("status") == "queued",
             str(result),
         )
-    _assert("nine jobs created, one per verb", len(fake_manager._jobs) == 9)
+    _assert("thirteen jobs created, one per verb", len(fake_manager._jobs) == 13)
 
 
 def test_worker_completes_get_record_on_success() -> None:
@@ -272,16 +290,51 @@ def test_worker_completes_job_on_error_topology_safe() -> None:
     )
 
 
-def test_action_handlers_covers_all_nine_verbs() -> None:
+def test_action_handlers_covers_all_thirteen_verbs() -> None:
     expected = {
         "soql_query", "export_soql", "get_record", "describe_sobject", "list_sobjects",
         "create_record", "update_record", "delete_record", "test_connection",
+        "bulk_ingest_submit", "bulk_job_status", "bulk_job_results", "bulk_job_abort",
     }
     _assert(
-        "ACTION_HANDLERS carries exactly the 9 migrated verb names",
+        "ACTION_HANDLERS carries exactly the 13 migrated/added verb names",
         set(async_jobs.ACTION_HANDLERS.keys()) == expected,
         str(sorted(async_jobs.ACTION_HANDLERS.keys())),
     )
+
+
+def test_worker_bulk_job_results_writes_csvs_via_csv_export_path_gate() -> None:
+    """Proves bulk_job_results is wired to plugin._csv_export_path_gate (not _export_path_gate)."""
+    plugin, fake_manager = _plugin_with_fake_manager()
+    plugin._cli_executor = MagicMock()  # noqa: SLF001
+    with tempfile.TemporaryDirectory(prefix="sf_async_bulk_smoke_") as workspace:
+        successful_path = str(Path(workspace) / "ok.csv")
+        failed_path = str(Path(workspace) / "failed.csv")
+        unprocessed_path = str(Path(workspace) / "unprocessed.csv")
+        dispatch = plugin.bulk_job_results(
+            {
+                "job_id": "750xx",
+                "successful_results_path": successful_path,
+                "failed_results_path": failed_path,
+                "unprocessed_results_path": unprocessed_path,
+            },
+            {"session_id": "s1", "flow_id": "f1"},
+        )
+        job_id = dispatch["data"]["job_id"]
+
+        gate_calls: list[str] = []
+        plugin._csv_export_path_gate = lambda p: gate_calls.append(p) or p  # type: ignore[method-assign]  # noqa: SLF001
+        plugin._cli_executor.run_rest.return_value = "sf__Id,sf__Error\n001x,\n"  # noqa: SLF001
+        async_jobs._process_job(plugin, fake_manager, job_id, "bulk_job_results")
+
+        _assert(
+            "worker used the plugin's own _csv_export_path_gate for all three paths",
+            gate_calls == [successful_path, failed_path, unprocessed_path],
+            str(gate_calls),
+        )
+        statuses = [updates.get("status") for _, updates in fake_manager.update_calls]
+        _assert("bulk_job_results worker transitioned processing -> completed", statuses == ["processing", "completed"])
+        _assert("the worker actually wrote the successful-results CSV", Path(successful_path).read_text(encoding="utf-8").startswith("sf__Id"))
 
 
 def test_ensure_worker_started_idempotent() -> None:
@@ -305,7 +358,8 @@ def main() -> int:
     test_worker_soql_query_writes_tsv_via_export_path_gate()
     test_worker_completes_test_connection_on_success()
     test_worker_completes_job_on_error_topology_safe()
-    test_action_handlers_covers_all_nine_verbs()
+    test_worker_bulk_job_results_writes_csvs_via_csv_export_path_gate()
+    test_action_handlers_covers_all_thirteen_verbs()
     test_ensure_worker_started_idempotent()
     print()
     print(f"Results: {_passed} passed, {len(_failed)} failed")

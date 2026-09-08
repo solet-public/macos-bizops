@@ -19,9 +19,15 @@ quality-surface path (``plugins/<x>/src/...``). Run directly or via run_smokes.p
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
 import tempfile
 from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from code_vetting_plugin.models import Finding
 from code_vetting_plugin.scanners import duplication

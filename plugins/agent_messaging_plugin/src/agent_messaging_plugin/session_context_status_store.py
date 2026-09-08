@@ -82,6 +82,74 @@ class GaugeHistoryAppendError(Exception):
         )
 
 
+class StaleContextReadingError(Exception):
+    """A reporter attempted to replay or regress one session's reading."""
+
+
+def _incoming_reading_timestamp(raw: object, *, field: str) -> datetime:
+    """Parse a reporter-supplied clock without guessing its timezone."""
+    if not isinstance(raw, str) or not raw.strip():
+        raise StaleContextReadingError(f"{field} must be a non-empty timestamp")
+    try:
+        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise StaleContextReadingError(f"{field} is invalid: {raw!r}") from exc
+    if value.tzinfo is None:
+        raise StaleContextReadingError(f"{field} must be timezone-aware")
+    return value
+
+
+def _stored_reading_timestamp(raw: object, *, field: str) -> datetime:
+    """Parse a persisted UTC clock, restoring the offset stripped by DATETIME.
+
+    ``reading_at`` enters this module as an explicit reporter timestamp, but
+    the state schema stores it in a naive ``DATETIME`` cell. The two directions
+    deliberately have different contracts: accepting a naive incoming clock
+    would guess what a reporter meant, while accepting a naive value returned
+    by this column restores the schema's UTC representation before comparison.
+    """
+    if isinstance(raw, datetime):
+        value = raw
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise StaleContextReadingError(f"{field} is invalid: {raw!r}") from exc
+    else:
+        raise StaleContextReadingError(f"{field} must be a non-empty timestamp")
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
+def _reading_is_new(
+    state: StateManagementInterface,
+    *,
+    agent_instance_id: str,
+    claude_session_id: str,
+    reading_at: str | None,
+) -> bool:
+    incoming = None if reading_at is None else _incoming_reading_timestamp(
+        reading_at,
+        field="incoming reading_at",
+    )
+    if incoming is None:
+        return True
+    existing = read_session_context_status(state, agent_instance_id)
+    if existing is None or str(existing.get("claude_session_id") or "") != claude_session_id:
+        return True
+    prior_raw = existing.get("reading_at")
+    if prior_raw is None:
+        return True
+    prior = _stored_reading_timestamp(prior_raw, field="stored reading_at")
+    if incoming == prior:
+        return False
+    if incoming < prior:
+        raise StaleContextReadingError(
+            f"reading_at regressed for {agent_instance_id!r}/{claude_session_id!r}: "
+            f"{incoming.isoformat()} < {prior.isoformat()}",
+        )
+    return True
+
+
 def _history_record(
     record: dict[str, Any], *, recorded_at: str,
 ) -> dict[str, Any]:
@@ -190,7 +258,11 @@ def upsert_session_context_status(
     reporter_surface: str | None = None,
     reporter_generation: int | None = None,
     agent_session_id: str | None = None,
-) -> None:
+    provider: str | None = None,
+    runtime: str | None = None,
+    effort: str | None = None,
+    cache_write_tokens: int | None = None,
+) -> bool:
     """Overwrite the single latest snapshot for `agent_instance_id`. Conflicts
     on `agent_instance_id` alone (unlike `session_claude_mapping`'s
     per-firing history triple) — this table is a cache, not a log.
@@ -229,10 +301,10 @@ def upsert_session_context_status(
     the first reads as though the second were the same number. ``None`` is NOT
     REPORTED and must never be defaulted to ``measured_at``: that would
     fabricate a zero lag precisely where the lag is unknown -- the same
-    tri-state discipline ``_as_flag`` enforces above, for the same reason. It
-    is also NON-MONOTONE by construction, since consecutive rows legitimately
-    share one ``reading_at`` when the transcript did not advance between
-    ticks, so nothing may order on it.
+    tri-state discipline ``_as_flag`` enforces above, for the same reason.
+    Within one runtime session it is also the consumption identity: an equal
+    timestamp is an idempotent no-op and an older timestamp fails loud. A new
+    runtime session resets that monotone series, which preserves `/clear`.
 
     ``agent_session_id`` is the ROUTING JOIN (2026-08-18). This table keys on
     the reporting session's LEDGER id, while a watcher-held worker's live
@@ -244,6 +316,13 @@ def upsert_session_context_status(
     no bridge` -- the same tri-state discipline ``_as_flag`` enforces above,
     for the same reason: those are different facts with different fixes.
     """
+    if not _reading_is_new(
+        state,
+        agent_instance_id=agent_instance_id,
+        claude_session_id=claude_session_id,
+        reading_at=reading_at,
+    ):
+        return False
     record: dict[str, Any] = {
         _COL_AGENT_INSTANCE_ID: agent_instance_id,
         "claude_session_id": claude_session_id,
@@ -258,6 +337,10 @@ def upsert_session_context_status(
         "reporter_surface": reporter_surface,
         "reporter_generation": reporter_generation,
         "agent_session_id": agent_session_id,
+        "provider": provider,
+        "runtime": runtime,
+        "effort": effort,
+        "cache_write_tokens": cache_write_tokens,
     }
     require_completed(
         state.upsert_state(
@@ -271,6 +354,7 @@ def upsert_session_context_status(
         "upsert session_context_status",
     )
     _append_history(state, agent_instance_id=agent_instance_id, record=record)
+    return True
 
 
 def read_session_context_status(
@@ -446,6 +530,7 @@ __all__ = [
     "GAUGE_HISTORY_RETENTION",
     "AmbiguousAgentSessionIdError",
     "GaugeHistoryAppendError",
+    "StaleContextReadingError",
     "list_session_context_statuses",
     "read_agent_session_id_for_binding",
     "read_session_context_status_by_agent_session_id",

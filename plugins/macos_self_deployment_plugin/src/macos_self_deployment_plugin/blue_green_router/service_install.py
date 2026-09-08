@@ -69,6 +69,18 @@ def default_socket_path(solet: str) -> Path:
     return RUNTIME_DIR / f"{solet}.router.sock"
 
 
+def default_router_port_path(solet: str) -> Path:
+    """Return the router-owned port-discovery file for ``solet``."""
+
+    return RUNTIME_DIR / f"{solet}.router.port"
+
+
+def default_bridge_port_path(solet: str) -> Path:
+    """Return the bridge's canonical router-owned discovery file for ``solet``."""
+
+    return RUNTIME_DIR / f"{solet}.bridge.port"
+
+
 def render_template(template_name: str, context: dict[str, str]) -> str:
     template_path = Path(__file__).parent / template_name
     text = template_path.read_text(encoding="utf-8")

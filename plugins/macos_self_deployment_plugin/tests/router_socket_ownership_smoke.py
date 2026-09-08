@@ -55,11 +55,18 @@ Reclaim waits are constructor-injected sub-second so cases 4/5 are fast.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import asyncio
 import json
 import socket
+import sys
 import tempfile
 from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from macos_self_deployment_plugin.blue_green_router.router_mgmt import (
     MgmtServer,

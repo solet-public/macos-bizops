@@ -21,7 +21,29 @@ genesis time (macOS Keychain + PostgreSQL) in your own terminal — never embedd
 in this tree, never passed through an agent conversation. Inference stays local
 (a `nomic` embedding model served on your machine); there are zero API keys.
 
-## Getting this seed
+## Recommended installation on a Mac
+
+If you have Homebrew, install the global manager first:
+
+```console
+brew install solet-public/tap/solet
+```
+
+Then begin the separate, reviewed creation transaction:
+
+```console
+solet create bizops
+```
+
+These commands are deliberately separate. Homebrew installs only the manager;
+`solet create` previews its own machine and instance changes and asks before it
+writes them. Do not join the commands with `&&`.
+
+If Homebrew is not installed, start at [brew.sh](https://brew.sh). That is
+Homebrew's installer and canonical source. This seed does not provide a Solet
+installer script or a `curl | bash` alternative.
+
+## Getting this seed directly
 
 Clone this repository to your machine, then work from inside it:
 
@@ -38,9 +60,11 @@ the published seed, because a name is filled in when a solet is born, not when
 the seed is minted. Step 1 writes the same value as `<name>` in prose; the shell
 snippets write it as `{{SOLET_NAME}}`.
 
-Every command below runs from inside that clone. (If you received this seed as a
-plain local folder rather than a GitHub repository, just `cd` into it — there is
-nothing to clone.)
+Every command in the manual Genesis path below runs from inside that clone. (If
+you received this seed as a plain local folder rather than a GitHub repository,
+just `cd` into it — there is nothing to clone.) The direct-clone route remains
+for seed maintainers and offline handoffs; ordinary Mac installation uses the
+two Homebrew commands above.
 
 ## Prerequisites
 
@@ -60,10 +84,12 @@ the bootstrap reports as `needs_user_action`.
 
 The stock path is the cold path: `git clone` → `bootstrap.py`. No parent
 solet is required. `bootstrap.py` reads this seed's `PROVENANCE.json` and
-births the matching profile (for example, `bizops_standard` →
-`macos-bizops-solet`). Do not hand-edit `profile/config/manifest.yaml` to
-change tiers. If a maintainer explicitly tells you to override the selected
-profile, set `SOLET_PROFILE=<profile-template>` before bootstrap.
+births the matching profile (for example, `macos-bizops` →
+`macos-bizops`). Do not hand-edit `profile/config/manifest.yaml` to
+change tiers. A declared `PROVENANCE.json.bundle.name` is authoritative:
+bootstrap refuses a conflicting `SOLET_PROFILE`. An explicit `SOLET_PROFILE`
+selection is available only when the source tree has no declared provenance
+bundle.
 
 1. **Agree a name** for the new solet with the user. It must be lowercase
    and match `[a-z][a-z0-9_-]{1,62}` — called `<name>` in the prose below and

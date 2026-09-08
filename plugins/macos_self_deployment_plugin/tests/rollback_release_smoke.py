@@ -107,7 +107,7 @@ class _StubRouter:
         self._comp_mode = comp_mode
         self.registered: dict[str, int] = {}
         self.activate_calls: list[str] = []
-        self.rollback_calls: list[str] = []
+        self.rollback_calls: list[tuple[str, str]] = []
         self.unregister_calls: list[str] = []
 
     def status(self) -> dict[str, Any]:
@@ -133,8 +133,8 @@ class _StubRouter:
         del color
         return {"activated": True, "previous_color": COLOR_BLUE, "drain_window_seconds": 30}
 
-    def rollback(self, color: str) -> dict[str, Any]:
-        self.rollback_calls.append(color)
+    def rollback(self, color: str, instance_id: str) -> dict[str, Any]:
+        self.rollback_calls.append((color, instance_id))
         if self._comp_mode == _COMP_RPC:
             raise RouterClientError("rollback", "injected compensation RPC failure")
         if self._comp_mode == _COMP_REFUSED:
@@ -436,7 +436,8 @@ def _rollback_fail_compensation_clean() -> None:
         f"(got {obs['status']}/{obs['reason_code']!r})",
     )
     _check(
-        obs["router_rollback_calls"] == [COLOR_BLUE] and not obs["candidate_alive"],
+        obs["router_rollback_calls"] == [(COLOR_BLUE, "blue-id")]
+        and not obs["candidate_alive"],
         "rollback-fail/comp-clean: router rolled back to blue + candidate killed",
     )
 

@@ -155,6 +155,7 @@ def _unreachable_skip(detail: str) -> int:
     # absent dependency.
     print("=" * 70)
     print("SKIPPED-LIVE-DB-UNREACHABLE")
+    print('BORN_CLONE_SKIP_WITNESS={"reason":"local_postgres_fixture_unreachable"}')
     print(f"  {detail}")
     print("  The LIVE parser-bypass 25006 defense-in-depth proof DID NOT RUN.")
     print("  Bring up local Postgres (the local trust-auth user @ localhost:5432 + createdb/psql) and re-run.")

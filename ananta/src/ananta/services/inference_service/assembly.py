@@ -83,8 +83,8 @@ def _assemble_from_pre_built(
     to the pre-built messages.
     """
     from ananta.core.prompts.api_stage.serialization import (
-        _consolidate_system_messages,
-        _merge_adjacent_same_role,
+        consolidate_system_messages,
+        merge_adjacent_same_role,
     )
     from ananta.services.inference_service.assembly_types import SerializationSpec
 
@@ -98,8 +98,8 @@ def _assemble_from_pre_built(
     # guidance, specification, etc.).  Do not merge them — the artifact
     # authoring code already built the correct message array.
     if isinstance(spec, SerializationSpec) and not spec.supports_multiple_system_messages:
-        merged = _merge_adjacent_same_role(raw_pairs)
-        merged = _consolidate_system_messages(merged)
+        merged = merge_adjacent_same_role(raw_pairs)
+        merged = consolidate_system_messages(merged)
     else:
         merged = raw_pairs
 

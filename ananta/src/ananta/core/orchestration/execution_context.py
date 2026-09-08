@@ -124,12 +124,12 @@ class ExecutionContext:
         Behavior:
             pass
         - Extract properties from schema.properties
-        - For each property in schema, extract value from result[property_name]
+        - For each present property in schema, extract value from result[property_name]
         - Store as context[PROPERTY_NAME.upper()] = value (latest binding)
         - Phase 2: Also store as context[STEP_ID.PROPERTY_NAME.upper()] (step-specific binding)
         - Phase 2: Store full result as context[STEP_ID.RESULT] for dotted path navigation
         - If schema is None, store entire result as context["RESULT"] = result
-        - Fail fast if schema properties not found in result
+        - Skip missing schema properties declared optional; fail fast for required properties
 
         Example:
             >>> schema = {
@@ -146,7 +146,7 @@ class ExecutionContext:
             >>> #            "node_0.RESULT": {"process_count": 60, "process_keys": ["a", "b"]}}
 
         Raises:
-            PlaceholderResolutionError: If schema property not found in result
+            PlaceholderResolutionError: If a required schema property is not found in result
         """
         logger.debug(f"ExecutionContext[{self.flow_id}]: Storing result for step {step_id}")
 
@@ -172,8 +172,19 @@ class ExecutionContext:
             return
 
         # Extract each property from result based on schema
-        for prop_name in properties.keys():
+        for prop_name, property_metadata in properties.items():
             if prop_name not in result:
+                is_optional = (
+                    isinstance(property_metadata, dict)
+                    and property_metadata.get("required", False) is False
+                )
+                if is_optional:
+                    logger.debug(
+                        f"ExecutionContext[{self.flow_id}]: Optional schema property "
+                        f"'{prop_name}' not present in result; skipping storage"
+                    )
+                    continue
+
                 # Property defined in schema but not present in result
                 available_keys = ", ".join(sorted(result.keys()))
                 logger.error(

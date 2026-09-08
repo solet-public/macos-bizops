@@ -413,8 +413,8 @@ def _expand_targets(raw_paths: list[str]) -> list[Path]:
     return out
 
 
-def _load_allowlist(path: Path) -> frozenset[str]:
-    """Read a class-name allowlist file (one name per line; `#` comments).
+def _load_allowlist(path: Path) -> frozenset[tuple[str, str]]:
+    """Read ``<repo-relative-path>::<class-name>`` debt entries.
 
     The allowlist is a tracked-debt register documenting classes whose
     decomposition is deferred (per the plugin-god-class-remediation
@@ -426,19 +426,37 @@ def _load_allowlist(path: Path) -> frozenset[str]:
     """
     if not path.exists():
         raise FileNotFoundError(f"allowlist file not found: {path}")
-    names: set[str] = set()
+    entries: set[tuple[str, str]] = set()
     for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
+        line = raw_line.split("#", 1)[0].strip()
         if not line or line.startswith("#"):
             continue
-        names.add(line)
-    return frozenset(names)
+        entry_path, separator, class_name = line.rpartition("::")
+        if not separator or not entry_path or not class_name:
+            raise ValueError(
+                "malformed god-class allowlist entry "
+                f"(need <repo-relative-path>::<class-name>): {raw_line!r}"
+            )
+        entries.add((entry_path, class_name))
+    return frozenset(entries)
 
 
-def _print_findings(findings: list[Finding], allowlist: frozenset[str]) -> None:
+def _is_allowlisted(finding: Finding, allowlist: frozenset[tuple[str, str]]) -> bool:
+    """Return whether a finding matches its exact path-qualified debt entry."""
+    finding_path = finding.path.as_posix()
+    return any(
+        finding.class_name == class_name
+        and (finding_path == entry_path or finding_path.endswith(f"/{entry_path}"))
+        for entry_path, class_name in allowlist
+    )
+
+
+def _print_findings(
+    findings: list[Finding], allowlist: frozenset[tuple[str, str]],
+) -> None:
     for finding in findings:
         joined = ", ".join(finding.violations)
-        marker = " [allowlisted]" if finding.class_name in allowlist else ""
+        marker = " [allowlisted]" if _is_allowlisted(finding, allowlist) else ""
         print(
             f"GOD CLASS: {finding.path}:{finding.lineno} "
             f"{finding.class_name}: {joined}{marker}"
@@ -447,7 +465,7 @@ def _print_findings(findings: list[Finding], allowlist: frozenset[str]) -> None:
 
 def _summarize(
     findings: list[Finding],
-    allowlist: frozenset[str],
+    allowlist: frozenset[tuple[str, str]],
     allowlist_active: bool,
     target_count: int,
 ) -> int:
@@ -456,7 +474,7 @@ def _summarize(
         return 0
     total = len(findings)
     if allowlist_active:
-        allowlisted = sum(1 for f in findings if f.class_name in allowlist)
+        allowlisted = sum(1 for finding in findings if _is_allowlisted(finding, allowlist))
         failing = total - allowlisted
         print(
             f"\n{total} god-class violation(s) "
@@ -516,12 +534,12 @@ def main(argv: list[str]) -> int:
         attrs_max=args.attrs_max,
     )
 
-    allowlist: frozenset[str] = frozenset()
+    allowlist: frozenset[tuple[str, str]] = frozenset()
     allowlist_active = args.allowlist is not None
     if allowlist_active:
         try:
             allowlist = _load_allowlist(args.allowlist)
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, ValueError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 64
 

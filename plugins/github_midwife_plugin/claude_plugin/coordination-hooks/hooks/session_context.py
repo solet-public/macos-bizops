@@ -92,8 +92,10 @@ def _hydrate_instructions(pending: int, origin_tag: str, spool: str) -> str:
         "MEMORY PASSTHROUGH (this local memory dir is a disposable projection of the solet's "
         "memory_service; see workbench/2026-07-16_unified_memory_passthrough_design_v2.md).\n"
         "\n"
-        "HYDRATE (run once, early, before editing memory files) — regenerate the local "
-        "projection from the canonical store, in THIS order:\n"
+        + _drain_instructions(pending)
+        + "\n"
+        "HYDRATE (only AFTER DRAIN succeeds, and before making new local memory edits) — "
+        "regenerate the local projection from the canonical store, in THIS order:\n"
         f"  1. process_call service_interface::memory_service::export_memories with arguments "
         f'{{"tags": ["agent_memory", "{origin_tag}"], "file_path": "{spool}"}} '
         "(ALL-tag semantics keeps this to YOUR origin's records only).\n"
@@ -102,8 +104,6 @@ def _hydrate_instructions(pending: int, origin_tag: str, spool: str) -> str:
         "capture can fire so it does not echo back).\n"
         "  If the solet is DOWN (export fails): SKIP hydrate entirely — the last projection stays "
         "untouched; do not delete or half-write anything.\n"
-        "\n"
-        + _drain_instructions(pending)
     )
 
 

@@ -36,7 +36,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .constants import BUILD_BACKEND_PACKAGES, is_valid_solet_name
-from .credential_seed import _ISOLATION_FLAG, _SEED_FLAG
+from .credential_seed import _ISOLATION_FLAG, _SEED_FLAG, _resolve_psql_binary
 
 _INSTALL_TIMEOUT_S = 300
 _SEED_TIMEOUT_S = 30
@@ -141,6 +141,7 @@ def create_venv_and_install_seed(target: Path, *, run: Runner) -> Path:
     # deliberately absence-tolerant by a DIFFERENT, opposite contract; see
     # ananta/setup.py's own comment forbidding exactly this "harmonisation").
     for package_dir, extras in (
+        (target / "solet_setup_contracts", ""),
         (target / "ananta", "[gate]"),
         (target / "plugins" / "macos_vault_plugin", ""),
         (target / "plugins" / "github_midwife_plugin", ""),
@@ -183,7 +184,7 @@ def verify_newborn_db_scram_gated(newborn_name: str, *, run: Runner) -> None:
     # would subvert THIS scram-gate self-check. As separate argv tokens a space is
     # inert -- it can only ever be part of the dbname/role value.
     result = run(
-        ["psql", "-h", "127.0.0.1", "-d", newborn_name, "-U", newborn_name, "-tAc", "SELECT 1"],
+        [_resolve_psql_binary(), "-h", "127.0.0.1", "-d", newborn_name, "-U", newborn_name, "-tAc", "SELECT 1"],
         capture_output=True, text=True, timeout=_SEED_TIMEOUT_S, env=env,
     )
     if result.returncode == 0:

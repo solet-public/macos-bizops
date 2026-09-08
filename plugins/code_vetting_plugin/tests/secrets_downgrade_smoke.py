@@ -14,7 +14,15 @@ plugins/code_vetting_plugin/tests/secrets_downgrade_smoke.py`` (exit 0/1); the
 
 from __future__ import annotations
 
+import sys
+
+# ruff: noqa: E402
 from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from code_vetting_plugin.models import (
     ContextProfile,

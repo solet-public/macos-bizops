@@ -65,6 +65,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import jwt
+from ananta.services.store.errors import StoreError
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
@@ -141,6 +142,21 @@ class OAuthClientStore(Protocol):
         self, client_id: str, client_secret: str,
     ) -> dict[str, Any] | None:
         """Return client metadata on hit, None on bad credentials."""
+        ...
+
+    def record_oauth_client_token_use(
+        self,
+        client_id: str,
+        *,
+        client_ip: str = "",
+        user_agent: str = "",
+        transport: str = "",
+    ) -> bool:
+        """Persist evidence observed at a successful token issuance.
+
+        Returns True iff a client row matched. Never raises for an
+        unknown client: the token is already minted when this runs.
+        """
         ...
 
 
@@ -838,7 +854,7 @@ def _handle_client_credentials_grant(
     granted_scopes = _intersect_scopes(
         list(verification.get("scopes") or []), body.get("scope", ""),
     )
-    return _issue_access_token_response(
+    response = _issue_access_token_response(
         endpoints=endpoints,
         resource=effective_resource,
         hmac_key=hmac_key,
@@ -847,6 +863,12 @@ def _handle_client_credentials_grant(
         scopes=granted_scopes,
         token_ttl_seconds=token_ttl_seconds,
     )
+    _record_token_use(
+        request, client_store,
+        client_id=str(verification["client_id"]),
+        transport="client_credentials",
+    )
+    return response
 
 
 def _consume_auth_code(
@@ -982,7 +1004,7 @@ def _handle_authorization_code_grant(
             "resource parameter on /token must match the one supplied at /authorize",
             http_status=400,
         )
-    return _issue_access_token_response(
+    response = _issue_access_token_response(
         endpoints=endpoints,
         resource=entry.resource,
         hmac_key=hmac_key,
@@ -994,6 +1016,12 @@ def _handle_authorization_code_grant(
         refresh_token_ttl_seconds=refresh_token_ttl_seconds,
         client_metadata=verification,
     )
+    _record_token_use(
+        request, client_store,
+        client_id=entry.client_id,
+        transport="authorization_code",
+    )
+    return response
 
 
 def _handle_refresh_token_grant(
@@ -1028,7 +1056,7 @@ def _handle_refresh_token_grant(
     if (err := _validate_refresh_audience(claims, endpoints)) is not None:
         return err
     effective_resource = str(claims.get("audience") or endpoints.resource)
-    return _issue_access_token_response(
+    response = _issue_access_token_response(
         endpoints=endpoints,
         resource=effective_resource,
         hmac_key=hmac_key,
@@ -1040,6 +1068,12 @@ def _handle_refresh_token_grant(
         refresh_token_ttl_seconds=refresh_token_ttl_seconds,
         client_metadata=client_metadata,
     )
+    _record_token_use(
+        request, client_store,
+        client_id=stored_client_id,
+        transport="refresh_token",
+    )
+    return response
 
 
 def _consume_refresh_token(
@@ -1127,6 +1161,51 @@ async def _handle_register(
 # ---------------------------------------------------------------------
 # Token issuance — shared by both grant handlers.
 # ---------------------------------------------------------------------
+
+
+def _record_token_use(
+    request: Request,
+    client_store: OAuthClientStore,
+    *,
+    client_id: str,
+    transport: str,
+) -> None:
+    """Record who actually used the credential, best-effort.
+
+    Catches STORAGE and TRANSPORT failures only, by name:
+    :class:`StoreError` (the normalized base every ``Store`` backend
+    raises) and :class:`OSError` (socket/filesystem). This runs AFTER
+    the access token has been minted, so a storage outage must not
+    turn a successful, correctly-authenticated issuance into a 500
+    over bookkeeping.
+
+    It deliberately does NOT catch bare ``Exception``. A ``TypeError``
+    or ``AttributeError`` here is a programming error in this module,
+    not a storage outage, and swallowing it would hide a real bug
+    behind a log line -- the no-silent-fallback rule. Those propagate.
+
+    The evidence is observed, not self-declared: the peer IP comes
+    from the connection, the User-Agent from the request headers, and
+    the transport from which grant handler we are in. None of it is
+    proof of a product -- a User-Agent is client-controlled -- but it
+    is something an operator can compare against the operator-typed
+    client_name, which on its own corroborates nothing.
+    """
+    try:
+        client_ip = request.client.host if request.client is not None else ""
+        user_agent = request.headers.get("User-Agent", "")
+        client_store.record_oauth_client_token_use(
+            client_id,
+            client_ip=client_ip,
+            user_agent=user_agent,
+            transport=transport,
+        )
+    except (StoreError, OSError):
+        logger.exception(
+            "oauth_token: failed to record token use for client_id=%s "
+            "(token was still issued)",
+            client_id,
+        )
 
 
 def _issue_access_token_response(

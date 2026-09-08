@@ -163,7 +163,7 @@ class BridgeBinding:
     # at dispatch time.
     wake_capable: bool = True
     # MSG-04/identity-unification (2026-08-20): DECLARED, never probed, by
-    # `solet watch` on every peer/register call — the one caller that KNOWS
+    # `solet-bridge watch` on every peer/register call — the one caller that KNOWS
     # it is a watcher regardless of what `agent_instance_id` it registers
     # under. Needed because that fix stops deriving `agent_instance_id` from
     # `agent_session_id` (the `agi-watch-{digest}` scheme) in favor of the

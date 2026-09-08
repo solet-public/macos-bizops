@@ -14,6 +14,7 @@ Exercises the CLI and its `BridgeClient` end-to-end against an in-process
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import json
 import os
 import subprocess
@@ -26,6 +27,12 @@ from typing import Any
 from unittest.mock import patch
 
 import httpx
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 from ananta.constants import ExitCodes
 from click.testing import CliRunner, Result
 
@@ -422,10 +429,9 @@ def _paging_inbox(
 ) -> Callable[[dict[str, str]], dict[str, object]]:
     """Serve real multi-page sections, honouring the two cursors.
 
-    Instance pages are keyed by the FORWARD ``after`` mark (the last entry's
-    created_at); role pages by the BACKWARD ``role_after`` token. That
-    asymmetry is the point -- a fixture that treated them alike could not
-    distinguish the two algorithms.
+    Both sections are newest-first and walk backward: instance pages use the
+    last entry's timestamp as ``after``; role pages use an opaque
+    ``role_after`` token.
     """
     def render(params: dict[str, str]) -> dict[str, object]:
         after = params.get("after", "")
@@ -646,10 +652,10 @@ def test_drain_pages_both_sections_and_never_repeats_across_arms() -> None:
     the client; drop `role_after`; stop persisting the marks.
     """
     instance_pages = [
-        [_entry("i1", "2026-07-30T10:00:00"), _entry("i2", "2026-07-30T11:00:00")],
         [_entry("i3", "2026-07-30T12:00:00")],
+        [_entry("i2", "2026-07-30T11:00:00"), _entry("i1", "2026-07-30T10:00:00")],
     ]
-    # Role section is NEWEST-FIRST and pages BACKWARD -- descending timestamps.
+    # Both sections are NEWEST-FIRST and page BACKWARD.
     role_pages = [
         [_entry("r3", "2026-07-30T09:00:00"), _entry("r2", "2026-07-30T08:00:00")],
         [_entry("r1", "2026-07-30T07:00:00")],
@@ -662,7 +668,7 @@ def test_drain_pages_both_sections_and_never_repeats_across_arms() -> None:
     assert not any('"watch": "inbox"' in line for line in first), first
 
     # New mail lands after the seed, in BOTH sections.
-    instance_pages.append([_entry("i4", "2026-07-30T13:00:00")])
+    instance_pages.insert(0, [_entry("i4", "2026-07-30T13:00:00")])
     role_pages.insert(0, [_entry("r4", "2026-07-30T09:30:00")])
 
     # Arm 2: exactly the new entries, once each.
@@ -772,7 +778,7 @@ def test_instance_section_seeding_is_unchanged_by_the_per_section_split() -> Non
     change the instance call site to ``seeding=not instance_after``.
     """
     instance_pages = [
-        [_entry("i1", "2026-07-30T08:00:00"), _entry("i2", "2026-07-30T09:00:00")],
+        [_entry("i2", "2026-07-30T09:00:00"), _entry("i1", "2026-07-30T08:00:00")],
     ]
     marks = _tmp_marks()
     spool_mod.write_watch_marks(
@@ -855,7 +861,7 @@ def test_watch_identity_is_deterministic_per_session() -> None:
         first = cli_mod._resolve_watch_identity(None, "claude_code")
         second = cli_mod._resolve_watch_identity(None, "claude_code")
     assert first == second
-    assert first.agent_instance_id.startswith(cli_mod.WATCH_AGENT_INSTANCE_PREFIX)
+    assert first.agent_instance_id.startswith(spool_mod.WATCH_AGENT_INSTANCE_PREFIX)
     other_env = dict(_WATCH_ENV)
     other_env["AGENT_SESSION_ID"] = "ases-1753000001-778-54321"
     with patch.dict(os.environ, _no_ledger_id_env(other_env), clear=True):
@@ -881,7 +887,7 @@ def test_watch_prefers_ledger_instance_id_when_present() -> None:
         f"the derived digest (got {identity.agent_instance_id!r})"
     )
     assert not identity.agent_instance_id.startswith(
-        cli_mod.WATCH_AGENT_INSTANCE_PREFIX,
+        spool_mod.WATCH_AGENT_INSTANCE_PREFIX,
     )
 
 
@@ -892,7 +898,7 @@ def test_watch_falls_back_to_derived_id_with_no_ledger_row() -> None:
     """
     with patch.dict(os.environ, _no_ledger_id_env(_WATCH_ENV), clear=True):
         identity = cli_mod._resolve_watch_identity(None, "claude_code")
-    assert identity.agent_instance_id.startswith(cli_mod.WATCH_AGENT_INSTANCE_PREFIX)
+    assert identity.agent_instance_id.startswith(spool_mod.WATCH_AGENT_INSTANCE_PREFIX)
 
 
 def _claim_refusal_client(

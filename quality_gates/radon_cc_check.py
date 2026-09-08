@@ -88,7 +88,7 @@ def _load_allowlist(path: Path) -> frozenset[tuple[str, str]]:
         raise FileNotFoundError(f"allowlist file not found: {path}")
     entries: set[tuple[str, str]] = set()
     for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
+        line = raw_line.split("#", 1)[0].strip()
         if not line or line.startswith("#"):
             continue
         if "::" not in line:

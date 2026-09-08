@@ -26,6 +26,10 @@ class FakeKeychain:
     def _key(self, plugin_name: str, credential: str) -> tuple[str, str]:
         return (plugin_name, credential)
 
+    def is_available(self) -> bool:
+        """Mirror the production backend availability probe for hermetic tests."""
+        return True
+
     def store_credential(
         self, plugin_name: str, credential: str, value: bytes,
     ) -> None:

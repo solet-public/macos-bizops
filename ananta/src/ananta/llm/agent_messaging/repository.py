@@ -199,7 +199,7 @@ class AgentMessagingRepository:
         after_created_at: datetime | None,
         limit: int,
         silent_only: bool = True,
-    ) -> list[AgentMessageRow]:
+    ) -> tuple[list[AgentMessageRow], bool]:
         """Return originator peer messages addressed to a specific caller.
 
         Two-phase implementation (resolve peer thread ids, then fetch
@@ -225,6 +225,7 @@ class AgentMessagingRepository:
         want intentional silent-only status checks opt into this filter.
         """
         capped = max(1, min(limit, _MAX_LIST_LIMIT))
+        lookahead_limit = capped + 1
         # R3a (SQL-lockdown) + REL-08 UNION: two single-namespace 2-eq reads (no
         # OR in query_state), merged + deduped on thread id. Disjunct (i) = the
         # caller's current instance (legacy NULL-session rows + own); (ii) = the
@@ -264,7 +265,7 @@ class AgentMessagingRepository:
             )
         thread_ids = list(dict.fromkeys(thread_ids))  # dedup, order-preserving
         if not thread_ids:
-            return []
+            return [], True
 
         # R3b (SQL-lockdown): per-thread query_ordered + Python k-way merge.
         # SCALAR filters per thread, NOT a `thread_id = ANY(...)` list filter:
@@ -273,9 +274,12 @@ class AgentMessagingRepository:
         # playbook §9). Peer-thread count per instance is ~1. limit=capped
         # (<=100) per thread is k-way-merge-sufficient (any global top-capped
         # row is in its own thread's top-capped). The `important` column (GAP-2)
-        # replaces the raw metadata->>'important' predicate; the `after`
-        # sentinel `{prefix}_g` reproduces strict `created_at > after`
-        # (collation-robust), preserving the existing dup-created_at skip.
+        # replaces the raw metadata->>'important' predicate. Both inbox
+        # sections are newest-first: a cursor-less read must surface pending
+        # work rather than strand it behind a historical prefix. The
+        # timestamp-only direct cursor deliberately retains its existing
+        # duplicate-``created_at`` limitation; the empty-id sentinel skips the
+        # equal-timestamp group while walking backward.
         # query_ordered implicitly excludes is_deleted=1 (the raw SQL did not) —
         # a no-op today (core__agent_message has no soft-delete write path,
         # grep-confirmed), matching the R2 thread-read reconciliation. STILL a
@@ -290,7 +294,7 @@ class AgentMessagingRepository:
         if silent_only:
             filters["important"] = False
         after: list[object] | None = (
-            [after_created_at, f"{ID_PREFIX_MESSAGE}_g"]
+            [after_created_at, ""]
             if after_created_at is not None
             else None
         )
@@ -299,8 +303,14 @@ class AgentMessagingRepository:
             query: dict[str, object] = {
                 "table": TABLE_AGENT_MESSAGE,
                 "filters": {"thread_id": thread_id, **filters},
-                "order_by": [["created_at", "asc"], ["id", "asc"]],
-                "limit": capped,
+                "order_by": [["created_at", "desc"], ["id", "desc"]],
+                # Fetch one extra row so the service can expose honest
+                # exhaustion while preserving its newest-first, backward
+                # timestamp cursor. ``query_ordered`` caps ordinary pages at
+                # 100, so the 101-row seam requires this explicit consent;
+                # the public result remains capped below.
+                "limit": lookahead_limit,
+                "unbounded": True,
             }
             if after is not None:
                 query["after"] = after
@@ -308,8 +318,8 @@ class AgentMessagingRepository:
                 _row_to_message(r)
                 for r in _records(self._state.query_ordered(_NAMESPACE, query))
             )
-        merged.sort(key=lambda m: (m.created_at, m.id))
-        return merged[:capped]
+        merged.sort(key=lambda m: (m.created_at, m.id), reverse=True)
+        return merged[:capped], len(merged) <= capped
 
     # ------------------------------------------------------------------
     # Thread writes

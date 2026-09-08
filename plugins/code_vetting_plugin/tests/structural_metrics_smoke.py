@@ -22,11 +22,18 @@ Run directly or via run_smokes.py.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
 import tempfile
 from pathlib import Path
 
 import lizard
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 from code_vetting_plugin.live_state import get_vetting_runs_schema
 from code_vetting_plugin.models import Dimension, Finding, Severity
 from code_vetting_plugin.report import DEFAULT_ZERO_FP_DIMENSIONS

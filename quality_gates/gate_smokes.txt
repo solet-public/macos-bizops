@@ -20,7 +20,46 @@
 # confirmed with any of these red). Grow as new gate-relevant smokes land
 # (e.g. the proposed S1 post-transition-invariant + S2 readiness-truth smokes).
 
+# Canonical macOS business-operations product identity: validates the exact
+# repository/bundle/profile/runtime carrier and line-classifies every retained
+# former token; unmatched or stale live identities fail closed. Offline.
+
+# D-3.6: validates tagged tracked-debt registers. Offline temporary-file fixture.
+quality_gates/tests/allowlist_tagging_smoke.py
+
+# Exact future-tree construction: committed base plus explicit scoped overlay,
+# addition/deletion/rename semantics, shared-worktree isolation, and complete
+# manifest fail-closure. Uses ordinary temporary files and read-only base data.
+quality_gates/tests/candidate_tree_smoke.py
+
+# Private candidate repository (CTF-01, 2026-08-23): a Git directory seeded from
+# a shared one inherits the shared INDEX, so another lane's staged paths arrive
+# in a worktree that correctly excludes them and every index-based gate then
+# censuses a tree that is not there. Pins delete-AND-rebuild — a bare deletion
+# reports every tracked file as deleted, which is its own fidelity change — plus
+# exec-bit/symlink survival, the physical-path requirement, and fatal drift in
+# the shared-repository proof. Fixture repositories under temporary directories
+# only; the shared checkout is never read for mutation or written at all.
+quality_gates/tests/candidate_repo_smoke.py
+
+# Git-Controller foreign-edit guard (iss_81005d59, 2026-09-04): a confirmed
+# destructive `git checkout -- .` really discards an unprotected dirty tracked
+# file; the helper must snapshot only out-of-scope tracked paths outside the
+# repository, explicitly restore changed bytes afterward, leave declared scope
+# untouched, and report a clean tree as a truthful no-op. Killing mutation:
+# remove snapshot/verify and the red-first checkout-loss assertion fails.
+
+# Credential seeding must create cleartext OAuth/HMAC material with 0600 mode
+# and refuse a file that appears between the existence probe and creation.
+
+# The runner must strip inherited GIT_* variables before it spawns each smoke;
+# otherwise a smoke's own nested git commands can target the caller's repository.
+quality_gates/tests/run_smokes_git_environment_smoke.py
+quality_gates/tests/run_smokes_host_lock_smoke.py
+quality_gates/tests/run_smokes_battery_containment_smoke.py
+
 plugins/macos_self_deployment_plugin/tests/swap_round_trip_smoke.py
+plugins/macos_self_deployment_plugin/tests/swap_round_trip_scratch_cleanup_smoke.py
 plugins/macos_self_deployment_plugin/tests/cutover_failure_smoke.py
 plugins/macos_self_deployment_plugin/tests/complete_swap_crash_consistency_smoke.py
 plugins/macos_self_deployment_plugin/tests/rollback_release_smoke.py
@@ -34,6 +73,14 @@ plugins/macos_self_deployment_plugin/tests/backstop_loop_integration_smoke.py
 plugins/macos_self_deployment_plugin/tests/drain_sigterm_exit_smoke.py
 plugins/macos_self_deployment_plugin/tests/router_socket_wait_smoke.py
 plugins/macos_self_deployment_plugin/tests/router_socket_ownership_smoke.py
+plugins/macos_self_deployment_plugin/tests/readiness_arming_smoke.py
+plugins/macos_self_deployment_plugin/tests/runtime_attestation_smoke.py
+plugins/macos_self_deployment_plugin/tests/surface_digest_smoke.py
+plugins/macos_self_deployment_plugin/tests/reconciliation_cutover_smoke.py
+plugins/macos_self_deployment_plugin/tests/reconciliation_provenance_smoke.py
+plugins/default_scheduling_plugin/tests/scheduler_context_not_arguments_smoke.py
+plugins/github_midwife_plugin/tests/target_reconciliation_smoke.py
+solet_cli/tests/cutover_overlay_smoke.py
 # LaunchAgent plist render contract (Option-B supervisor KeepAlive, out-of-tree
 # CWD, and the §39.2 Homebrew-inclusive PATH the daemon needs to see tmux at
 # all). Pure render assertions -- no launchctl, no filesystem mutation outside
@@ -41,6 +88,9 @@ plugins/macos_self_deployment_plugin/tests/router_socket_ownership_smoke.py
 # but was never on this allowlist, so the gate had been blind to a silent
 # regression of the boot-path plist.
 plugins/macos_self_deployment_plugin/tests/autostart_plist_render_smoke.py
+
+# Shared fail-safe public-process dry_run matrix for iss_8918fbc4. Offline.
+ananta/tests/utils/dry_run_coercion_smoke.py
 
 # Phase 0 "freeze current contracts" — substrate-contract guards that must stay
 # green through the coding-agent substrate transition
@@ -51,6 +101,15 @@ ananta/tests/core/substrate_contracts/deterministic_continuation_single_step_smo
 ananta/tests/core/substrate_contracts/wbs_result_processor_kind_required_smoke.py
 ananta/tests/core/substrate_contracts/pre_dispatch_validation_smoke.py
 ananta/tests/core/actions/action_factory_edge_sink_skip_smoke.py
+# Bridge-delivery result/error envelopes are opaque structured payloads: template
+# and placeholder resolution must not inspect literal <<...>> relay content.
+ananta/tests/core/actions/action_processor_opaque_relay_bypass_smoke.py
+
+# Regs 237-241: a PluginManager roster becomes serving only after action
+# dispatch starts; post-serving clear-and-rebuild refuses, boot replacements
+# tear down in stop-deregister-delete order, and manifest incompleteness is
+# loud-but-continuing. Offline fakes only.
+ananta/tests/core/plugins/discovery_regime_enforcement_smoke.py
 
 # D0.3/Option-A (sync-verb Phase 0 remediation, workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md):
 # AsyncJobManager's completion-handler firing is a production mechanism (real
@@ -581,6 +640,13 @@ plugins/agent_messaging_plugin/tests/tmux_driver_channel_smoke.py
 # mutation-proven: send removed / un-park removed / re-arm removed red
 # exactly their own assertions, 2026-08-04).
 plugins/agent_messaging_plugin/tests/session_lifecycle_verbs_smoke.py
+plugins/agent_messaging_plugin/tests/managed_dispatch_smoke.py
+plugins/agent_messaging_plugin/tests/role_provisioning_smoke.py
+
+# Declarative model-dispatch policy — fail-closed loading and profile
+# validation. The smoke first proves missing/malformed policy refusal, then
+# deletes the required fix row as a red mutation and proves dispatch refusal.
+plugins/agent_messaging_plugin/tests/model_dispatch_policy_smoke.py
 
 # Drive-on-delivery lane (2026-08-04), slice 1 — session_lifecycle_verbs.
 # drive_on_delivery as exercised through the real dispatch_peer_send seam:
@@ -667,6 +733,11 @@ plugins/agent_messaging_plugin/tests/session_lifecycle_transport_smoke.py
 # steps) is driven all the way to 'retired' by a single re-invocation.
 plugins/agent_messaging_plugin/tests/session_sweep_smoke.py
 
+# R3-U1 operator presence reconciliation: a live binding survives even after
+# three idle days; a closed binding is dry-run proposed then terminated; a
+# malformed binding timestamp is held rather than treated as death.
+plugins/agent_messaging_plugin/tests/operator_session_liveness_reconciliation_smoke.py
+
 # Role-model v4 slice-C — system slots §6/§6.1/§D.2/§D.6. The reserved 'sys:'
 # keyspace + the slot-declaration registry (slot_name, owner_plugin, holder_kind)
 # + the sys:autonomic constant (session-filled; INF-01 §D.9 consumes it). The
@@ -702,6 +773,10 @@ plugins/agent_messaging_plugin/tests/role_migration_smoke.py
 plugins/agent_messaging_plugin/tests/rel06_relabel_smoke.py
 plugins/agent_messaging_plugin/tests/role_dispatch_smoke.py
 plugins/agent_messaging_plugin/tests/role_delivery_smoke.py
+# OAuth versus stdio durable sender provenance.  Both transport seams persist
+# their immutable kind; role-inbox projection exposes it, and later OAuth
+# activity cannot relabel an earlier stdio envelope.  Offline.
+plugins/agent_messaging_plugin/tests/transport_provenance_role_envelope_smoke.py
 #
 # REL-05 S4 — model-activity route total-classification: iterate the ACTUAL
 # FastAPI route table + assert every bridge route is in EXACTLY one of
@@ -931,6 +1006,13 @@ ananta/tests/core/plans/projection_continuation_smoke.py
 # agent_messaging pair needs SOLET_NAME set (vault-scoped constants).
 plugins/agent_messaging_plugin/tests/oauth_security_smoke.py
 plugins/agent_messaging_plugin/tests/streamable_no_auth_mount_smoke.py
+# OAuth token-use recording (unt_d81cbb20): last_used_at plus the observed
+# corroboration fields (client IP, User-Agent, grant transport) are written
+# on every successful issuance and refresh. Before this, last_used_at was
+# documented on OauthClientRecord and projected by list_clients but never
+# written, and the local Postgres table had no column for it -- so no
+# operator could date a client's last token. Offline; no DB, no network.
+plugins/agent_messaging_plugin/tests/oauth_token_use_recording_smoke.py
 # Task #53 HMAC bearer-token verification (BearerVerifier + _issue_access_token):
 # roundtrip, tampered/wrong-key/alg-confusion/expired rejections, constant-time
 # compare, forged-sealed-claim rejection, PLUS B1 Q2 (exp scopes the issued_at
@@ -952,6 +1034,10 @@ plugins/macos_self_deployment_plugin/tests/blue_green_router/tunnel_supervisor_s
 # durably, structural fault edge goes loud-typed (never silent), bound-name
 # and env-override behavior unchanged. Offline fakes.
 ananta/src/ananta/services/inference_service/tests/provider_vacancy_smoke.py
+
+# Bounded live-provider qualifier contract: one recorded structured request,
+# private provider payload containment, and invalid-schema visibility. Offline fakes.
+ananta/src/ananta/services/inference_service/tests/qualify_smoke.py
 
 # INF-03 fix round (Reviewer-A B1, 2026-07-05): boot-INTEGRATION coverage the
 # isolation smoke structurally misses — runs the real _create_service_wrappers
@@ -1045,6 +1131,7 @@ plugins/platform_dev_surface_plugin/tests/repo_bounded_output_smoke.py
 plugins/platform_dev_surface_plugin/tests/repo_search_fallback_smoke.py
 plugins/platform_dev_surface_plugin/tests/repo_readonly_git_smoke.py
 plugins/platform_dev_surface_plugin/tests/propose_patch_artifact_smoke.py
+plugins/platform_dev_surface_plugin/tests/gc_landing_verify_smoke.py
 
 # REL-11 get_focused dict-envelope dispatch contract (2026-07-06): the
 # service_interface::memory_service::get_focused verb was dead over process_call
@@ -1205,6 +1292,7 @@ plugins/github_midwife_plugin/tests/macos_free_profile_smoke.py
 # (incl. loading the real Slice A profile template). Offline
 # (subprocess.run mocked throughout; no real pip/network).
 plugins/github_midwife_plugin/tests/profile_install_faildloud_smoke.py
+plugins/github_midwife_plugin/tests/dependency_provisioning_noop_gate.py
 
 # github_midwife_plugin genesis Slice C (2026-07-09, RISKY — flagged for a
 # Codex/Rev pass before commit) — first-run scram db_password seed.
@@ -1447,8 +1535,8 @@ plugins/github_midwife_plugin/tests/router_install_smoke.py
 # script (agent_messaging_plugin local_cli); identity resolves by install
 # location, so the command pins its own solet and reaches no sibling.
 # command_launcher_smoke pins the helper contract in isolation (install /
-# idempotent re-run / stale-symlink repoint / non-symlink fail-loud refusal /
-# missing-console-script refusal / invalid-name refusal); the end-to-end wiring
+# same-name MCP table refusal / stale-symlink repoint / non-symlink fail-loud
+# refusal / missing-console-script refusal / invalid-name refusal); the end-to-end wiring
 # (phase record + marker + sandboxed bin_dir symlink) is pinned by
 # genesis_integration_smoke. Offline (tmpfs dirs only).
 plugins/github_midwife_plugin/tests/command_launcher_smoke.py
@@ -1531,6 +1619,16 @@ plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/memory_pass
 # SECURITY.md's Verification table and in tests/README.md. Offline (tmpfs
 # dirs only, no repository, no network).
 plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/git_controller_gate_smoke.py
+# Shipped-policy regression for iss_c6d517fe / iss_76cac9b4 (2026-09-06):
+# imports the Claude plugin's own coordination-hooks policy. Pins plain,
+# assignment-prefixed, and heredoc-in-substitution git refusal; malformed-shell
+# fail-closed behavior; and the controller-None gate-off allow. Offline, no
+# origin `.claude/` path.
+plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/shipped_git_policy_substitution_bypass_smoke.py
+
+# iss_e53f7b08 — Git-Controller authorization intake and pre-merge frontier
+# reconfirmation. The standalone smoke proves first-party acceptance, refusal,
+# stale-role refusal, exact path equality, and STOP timing.
 
 # Fleet session-management Phase B, §6 permission-mode design (2026-08-03) —
 # .claude/hooks/headless_tool_allowlist_gate.py, a PreToolUse mechanism for a
@@ -1613,7 +1711,6 @@ plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/git_controll
 # alone, clause defined but not concatenated, a forbidden "the gate detects"
 # claim, and env-var divergence unified by deletion each red; restore green.
 # Offline (no repository, no network, no subprocess).
-plugins/github_midwife_plugin/tests/git_policy_clause_consistency_smoke.py
 
 # WS-4b.2 — stock-Codex fixed coordination reminders and repo marketplace.
 # Hermetic checks pin the conservative 0.141 manifest inventory, fixed generic
@@ -1624,6 +1721,18 @@ plugins/github_midwife_plugin/tests/git_policy_clause_consistency_smoke.py
 plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/reminder_hooks_smoke.py
 plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/manifest_consistency_smoke.py
 plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/marketplace_consistency_smoke.py
+
+# CDX-06 (2026-08-24) — the synchronous peer-inbox consumer Stop hook.
+# Offline, controlled-subprocess behavioral smoke against the real hook file
+# (same harness as the reminder/manifest smokes above): unarmed/partially-armed
+# no-ops, wrong-hook-event no-op, nothing-pending vs pending-found decision
+# shapes, the report_inbox_consumption call fires on EVERY invocation
+# regardless of outcome (the honesty field), a pending wake drains the CLI's
+# complete dual-section inbox frontier (and surfaces a partial drain), a
+# wake-subprocess failure degrades to no-decision without a nonzero exit, and
+# a report-call failure never overrides the hook's own decision. No live Codex
+# process, no network.
+plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/inbox_consumer_smoke.py
 # codex coordination-hooks PREFLIGHT SKIP CONTRACT (2026-08-08, seed-adoption) —
 # the Codex hooks are an opt-in capability whose Node runtime nothing in the
 # adopter install path provides, so preflight now reports a DISCLOSED SKIP (77)
@@ -2071,6 +2180,9 @@ ananta/tests/llm/core_slice4/core_slice4_schema_manager_unit_smoke.py
 # ='session' (not the legacy agent_role_binding) + REL-05 owed-delivery columns
 # (consumed / escalated / emit_count / last_emitted_at).
 ananta/tests/llm/agent_messaging/role_inbox_smoke.py
+# Control #5: keyset scan must advance past a capped raw prefix before applying
+# the Python-only cap/window filter, so a newer eligible role message is reachable.
+ananta/tests/llm/agent_messaging/role_drain_cap_starvation_smoke.py
 # smoke_auth (schwab): W-PLUGIN-LAUNCH-KEYS scoped vault key — assert the store key ==
 # VAULT_KEY_REFRESH_TOKEN (was the flat pre-migration "schwab_refresh_token" literal).
 
@@ -2207,6 +2319,22 @@ plugins/agent_messaging_plugin/tests/role_binding_store_smoke.py
 # VERBATIM shipped refusal so a regex tidy-up that stops matching what actually
 # shipped reddens here, and on the pull-request-refusal false-positive
 # direction, which is correct policy and must never be flagged.
+# seed_factory_plugin KNOWLEDGE-BASE DISCOVERY ANCHOR (Unit K, 2026-09-05): the
+# root manifest declares knowledge_bases/ universal, but it held only symlinks
+# (banned from a seed) and never-shipped content, so a published bundle carried
+# it EMPTY -- and an empty directory is not a git object, so it was absent and
+# the root-strictness classifier reported the universal entry missing on every
+# born clone, pre-genesis (the whole-tree gate's C6.2). One enumerated copy line
+# ships a tracked README as the anchor. Both directions are measured in-run:
+# assembled twice from fixture manifests differing ONLY in that line, with the
+# classifier run over both bundles, so the negative control reproduces C6.2. Set
+# EQUALITY on the bundle's discovery directory catches a widened copy line that
+# dragged in .archive/ or compositions/. Genesis's symlink materialization is
+# run over the anchor twice for byte-identity and idempotence.
+#
+# PURE UNIT, offline: hermetic `git init` fixture repos in tempdirs plus one
+# deliberate read of the REAL production manifest. No live platform, database,
+# network, or seal.
 # seed_factory_plugin PRE-BIRTH agent instructions (2026-08-15): the generated
 # root CLAUDE.md / AGENTS.md a downloaded-but-uninstalled seed now ships. Pins
 # the pre-birth contract (installed-or-not probe, no hydration marker, Step Zero
@@ -2259,6 +2387,9 @@ plugins/agent_messaging_plugin/tests/role_binding_store_smoke.py
 # remote verifies), publish lineage_mismatch (red-first) + the pre-provenance
 # compat rung, the content-validator passing a real stamp, and the origin_id
 # singleton (§8.7: generate-once, read-same, fail-loud on a non-persisting write).
+# Step 7.5 source-tree instrument: measures every named shipped profile without
+# assembling a seed or writing a bundle. Rows are compared with the parent by
+# Git-Controller; this smoke proves the registered measurement surface itself.
 # hydration_templates: every *.template file (incl. the new Step 4a
 # fleet_functions.zsh.template) renders with no undocumented {{TOKEN}}
 # surviving, zsh-shaped templates parse under `zsh -n`, the settings.json
@@ -2367,6 +2498,7 @@ plugins/actr_memory_plugin/tests/actr_memory_read_discipline_smoke.py
 # end-to-end run is the SEPARATE (non-gate-registered) acceptance evidence.
 # Plan: workbench/2026-07-15_connector_and_frontier_first_execution_plan.md B5.
 ananta/tests/core/actions/action_factory_result_processor_merge_smoke.py
+plugins/agent_messaging_plugin/tests/process_call_unknown_arguments_smoke.py
 
 # Postgres unique-flip DDL capability (2026-07-18) — toggling a column's UNIQUE
 # constraint (True<->False) is a supported active-update migration: the
@@ -2815,6 +2947,20 @@ plugins/agent_messaging_plugin/tests/watcher_liveness_gate_smoke.py
 # succession — worse than the theft it prevents, and R7a alone cannot see it.
 plugins/agent_messaging_plugin/tests/register_session_conflict_smoke.py
 
+# iss_0cc6f884 (measured 2026-09-05) — the sibling defect R7 could not see. R7
+# guards the LIVE-incumbent case; this guards the DEAD-incumbent case R7
+# deliberately waves through as subprocess succession. A Claude Code pre-warmed
+# spare inherited a week-dead session's AGENT_SESSION_ID from the daemon's
+# environment and was handed that session's durable coordination role by
+# refresh_role_binding_cas — which re-points every binding filtered on
+# agent_session_id ALONE — without ever calling peer_claim_role. The
+# discriminator is parent_pid: a bridge resuming its own session keeps its host
+# process, an inheritor brings its own. The safety cases matter as much as the
+# killing one: an over-broad rule here would silently strip roles from every
+# bridge reconnect (verified by mutation — the two directions fail disjoint
+# cases).
+plugins/agent_messaging_plugin/tests/register_orphan_session_id_smoke.py
+
 # F-AISLOP timestamp-fragility unification (2026-07-20) — the AI code-vetting
 # suite's ai_slop lens found ONE lexical ISO-8601 timestamp idiom copy-pasted
 # across 3 durable-queue serve-timeout/GC sites (false-mirror docstrings + a
@@ -2832,6 +2978,7 @@ plugins/agent_messaging_plugin/tests/register_session_conflict_smoke.py
 plugins/agent_messaging_plugin/tests/timestamp_value_compare_smoke.py
 plugins/agent_messaging_plugin/tests/wake_hook_smoke.py
 plugins/macos_self_deployment_plugin/tests/steady_state_reassert_activation_smoke.py
+plugins/macos_self_deployment_plugin/tests/cold_start_auto_activate_smoke.py
 
 # Bridge peer-identity registration retry (2026-07-25). `_open_with_retry` loops
 # unbounded but `_register_identity` had ONE attempt and swallowed failures into a
@@ -2902,6 +3049,11 @@ plugins/default_scheduling_plugin/tests/action_executor_deferred_fire_smoke.py
 # process -- a shipped instruction that cannot execute is the defect this lane
 # closed. Hermetic: in-memory stores, no bridge, no DB.
 plugins/agent_messaging_plugin/tests/peer_inbox_process_smoke.py
+
+# Instance-section exhaustion is an additive signal over the legacy oldest-first
+# timestamp cursor. Pins default and forward paging, empty, and exact 100/101
+# lookahead behavior with the real bounded ordered-query fake. Hermetic.
+plugins/agent_messaging_plugin/tests/peer_inbox_instance_exhaustion_smoke.py
 
 # Peer-enumeration asymmetry close (WS-1a follow-on, operator-prompted
 # 2026-08-02): peer_inbox let a no-MCP session read its OWN mail; peer_list
@@ -3121,6 +3273,12 @@ plugins/agent_messaging_plugin/tests/seat_idle_watcher_smoke.py
 # Mutation-proved: breaking the placeholder-skip guard on either side reds
 # exactly that scenario's two targeted assertions, nothing else.
 
+# D-3.2 (2026-09-03) -- orchestrator_model_gate_smoke.py existed, passing,
+# but was the lone unregistered file among the .claude/hooks/tests/ siblings,
+# so it never ran as part of the battery: the control it exercises (refusing
+# a wrong-model orchestrator spawn_session call) was dead in the gate while
+# looking covered by its own presence on disk.
+
 # fleet-wake-integrity Task 1 (2026-08-08) -- proves the codex wake_capable
 # flag-loss root cause: get_peer_binding_schema()'s persisted columns never
 # included wake_capable, PeerRegistry.register()'s insert() dict never wrote
@@ -3149,12 +3307,25 @@ plugins/agent_messaging_plugin/tests/codex_managed_session_smoke.py
 # spawned CLAUDE-worker peer registration (2026-08-14, registration-loss RCA
 # lane R) -- the tmux/headless adapters' absolute solet resolution and PATH
 # export, the presence sidecar that actually puts a spawned worker in
-# peer_list (--no-claim, spool KEPT unlike Codex, none on the mcp transport),
-# and the /rename skill + seed-template lockstep that claims against the
-# derived agi-watch id rather than the launcher's AGENT_INSTANCE_ID. Offline:
-# argv/env shape assertions and file-text reads only; no tmux server, bridge,
-# database, or model turn. Every leg verified to RED under a named mutation.
+# peer_list (--no-claim, spool KEPT -- both runtimes as of CDX-06, 2026-08-24;
+# Codex's own spool policy is no longer this smoke's concern, see
+# codex_managed_session_smoke.py's spool-parity legs -- none on the mcp
+# transport), and the /rename skill + seed-template lockstep that claims
+# against the derived agi-watch id rather than the launcher's AGENT_INSTANCE_ID.
+# Offline: argv/env shape assertions and file-text reads only; no tmux server,
+# bridge, database, or model turn. Every leg verified to RED under a named
+# mutation.
 plugins/agent_messaging_plugin/tests/spawned_worker_registration_smoke.py
+
+# CDX-06 part C (2026-08-24) -- the inbox-consumption honesty field's
+# store/verb layer (inbox_consumption_store.py, inbox_consumption_verbs.py).
+# Report round-trips, resolved=False (never a raised error, never a defaulted
+# True) for a session that has never reported, the unresolved shape carries
+# the same keys as the resolved one, pending_reason without pending_found_at
+# is refused, an unknown reporter_surface is refused, and a later report
+# OVERWRITES the row (latest-state, not a history table). Offline: a
+# recording state double, no live database.
+plugins/agent_messaging_plugin/tests/inbox_consumption_smoke.py
 
 # retrieval-companion runner (2026-08-14, yaml-runner canonicalization lane Y) --
 # the pure logic of plugins/default_knowledge_plugin/tools/run_retrieval_companions.py:
@@ -3697,6 +3868,13 @@ plugins/agent_messaging_plugin/tests/gauge_series_smoke.py
 # database, network, or model turn.
 plugins/agent_messaging_plugin/tests/gauge_notice_record_smoke.py
 
+# GAU-21 real-interface companion.  The unit smoke above owns sweep wiring;
+# this opt-in smoke directly calls both store entrypoints through the running
+# solet's StateManagementInterface, with stale/coverage and appended/unbound
+# outcomes, then hard-deletes its sentinel probe rows.  It is a no-op unless
+# the bridge-bearing runner explicitly sets GAUGE_NOTICE_RECORD_LIVE_SMOKE=1.
+plugins/agent_messaging_plugin/tests/gauge_notice_record_live_smoke.py
+
 # GAU-15 item 4 (2026-08-19) GAUGE TAMPER CANARY — proof the staleness detector
 # CAN catch, by arresting a synthetic gauge on the real write path. Pinned
 # against all six binding constraints: the arrest withholds ONLY the gauge
@@ -3852,3 +4030,651 @@ quality_gates/tests/materialized_battery_artifact_check_smoke.py
 # and streamable_public_port=None (default) starts no second listener at all.
 # Offline: fake TCP listeners standing in for colors, no live solet.
 plugins/macos_self_deployment_plugin/tests/blue_green_router/blg04_streamable_proxy_smoke.py
+
+# setup_flow_schema_smoke (2026-08-20): validates the repository-delivered
+# setup wizard contract and its macOS reference.  Draft-07 validation is only
+# the first leg: the smoke also resolves every typed cross-reference, proves
+# secret inputs cannot carry defaults and remain agent-blind, pins the reviewed
+# connector auth modes, requires dynamic discovery + qualification for model
+# choices, permits alternatives to activate different plugins, and refuses
+# health-only completion.  Offline: checked-in JSON plus jsonschema only.
+plugins/github_midwife_plugin/tests/setup_flow_schema_smoke.py
+
+# permission-surface contract drift gate (2026-09-02): verifies that Genesis's
+# unconditional Codex MCP config append stays declared and previewed, every
+# coding-agent plugin installer carries consent and permission metadata, and
+# main/router LaunchAgent plist identities remain separately declared.
+# Offline: checked-in contract and source only.
+plugins/github_midwife_plugin/tests/permission_surface_contract_smoke.py
+plugins/claude_code_filesystem_session_source_plugin/tests/claude_code_usage_normalize_smoke.py
+
+# M-2 permission-manifest drift gate (2026-09-02): regenerates the machine
+# JSON and reviewer-facing Markdown artifacts from the sole setup-flow contract
+# and fails on any byte drift.  Also carries deterministic, red-mutation, and
+# six-field human-review completeness controls. Offline: checked-in JSON only.
+plugins/github_midwife_plugin/tests/permissions_manifest_smoke.py
+
+# Reconciliation manifest schema is rendered from the closed parser and must
+# remain byte-identical to the checked-in reviewer artifact.  The smoke also
+# drives digest, closed-key, const, citation, and hard-pinned resolution
+# mutations without a live target.
+# Reconciliation receipt transitions (1.55 / iss_b7e3aafe): composes the
+# historical R15 identity from two pinned Git objects, then proves the closed
+# reader's released and legacy receipt outcomes remain reconstructible.
+# Offline except for the checkout's own repository history.
+# Reconciliation re-grounding fixtures (1.55 / iss_79283a66): prove the
+# snapshot-derived b15 fixture corpus stays provenance-complete and pin R-A's
+# digest-only destination identity, including the legacy resume refusal.
+# Offline fixtures only; neither smoke contacts a live target.
+solet_cli/tests/reconciliation_identity_fixture_smoke.py
+solet_cli/tests/reconciliation_identity_i1_smoke.py
+
+# Captured persisted fresh-shell Python probe contract: compatibility is exact
+# digest plus full legacy shape, leaves captured bytes untouched, and must not
+# expand beyond the recorded ab2 target. Offline fixtures only.
+solet_cli/tests/legacy_resume_fresh_shell_probe_smoke.py
+
+solet_cli/tests/permission_preflight_smoke.py
+
+# setup_adapter_runtime HTTP-body bound regression (2026-08-25): a real
+# loopback embedding endpoint returns a realistic 49,194-byte response with
+# two finite identical 768-dimensional vectors. Before the fix,
+# SystemRuntime.http_json reused that evidence limit as an input-body cap and
+# raised ValueError before any embedding model could qualify. Boundary controls
+# cover declared and absent Content-Length, multibyte byte counting, truncated
+# bodies, and the unchanged 4 KiB command-evidence cap. Red-first corpus attempt:
+# 20260825T054355Z-lane-cdx-harness-setup-adapter-http-cap-red.
+# Offline: stdlib loopback HTTP server only, no live model or solet.
+plugins/github_midwife_plugin/tests/setup_adapter_runtime_http_json_smoke.py
+plugins/github_midwife_plugin/tests/served_model_identity_smoke.py
+
+# Homebrew release payload closure (2026-08-21): parses and cross-binds the
+# GitHub release asset, seed repository and immutable tag; rejects moving,
+# mismatched and ambiguous identities; proves the Formula uses the closed
+# python@3.13 no-index build shape and executes the installed manager
+# entrypoint. Offline from the package-index perspective; uses the declared
+# local Homebrew python@3.13 dependency and temporary directories only.
+# Read-only inspection of an externally built Solet (2026-08-23): proves the
+# target command derives artifact paths without a registry, resolves absent
+# artifacts to NOT_APPLICABLE rather than crashing or falsely passing, and
+# classifies a declared-versus-actual Python dependency only when the import is
+# provably unguarded -- a guarded import resolves to UNKNOWN rather than a false
+# MISSING. Temporary directories only; never mutates its target.
+solet_cli/tests/inspect_command_smoke.py
+
+# The manager's own suite (registered 2026-08-24). Every file below was tracked
+# in master and absent from this allowlist, so none of them had ever executed in
+# a gate battery -- 523 checks covering the CLI the product ships. They are
+# registered together because they share one cause, not because they share a
+# subject. All temporary directories and fixture state; none touches a live
+# Solet, a registry, or the network.
+solet_cli/tests/adapter_protocol_smoke.py
+solet_cli/tests/cli_approval_smoke.py
+solet_cli/tests/discovered_decision_lifecycle_smoke.py
+solet_cli/tests/journal_resume_round_trip_smoke.py
+solet_cli/tests/journal_migration_smoke.py
+solet_cli/tests/preview_resume_activation_smoke.py
+solet_cli/tests/existing_solet_diagnostic_smoke.py
+solet_cli/tests/git_mutation_control_plan_smoke.py
+solet_cli/tests/manager_foundation_smoke.py
+# PostgreSQL installer pre-probe (iss_754a42bc / iss_6bdb8358, 2026-09-06):
+# a present binary must not skip the service-start and pgvector installer actions.
+# Offline synthetic probe results plus a digest-pinned legacy contract fixture only.
+solet_cli/tests/install_postgresql_preprobe_smoke.py
+# Precondition-subset siblings (iss_dd90d655 / iss_08c5e379 / iss_79077638, 2026-09-08):
+# each operation must pre-probe every postcondition so a partial healthy state remediates.
+solet_cli/tests/precondition_subset_siblings_smoke.py
+solet_cli/tests/source_acquisition_smoke.py
+solet_cli/tests/stage_frontier_smoke.py
+
+# iss_7d9c5f5a (2026-09-06): an empty operation plan is approval-ready only
+# when the frontier is empty and every stage is verified/not_applicable. The
+# smoke proves normal completion then promotes the transaction, while pending
+# consent and a nonfinal stage retain exit 3 setup_preview_unresolved. Offline.
+solet_cli/tests/finalization_empty_frontier_smoke.py
+solet_cli/tests/optional_accounts_boundary_smoke.py
+solet_cli/tests/session_sources_boundary_smoke.py
+solet_cli/tests/state_transaction_smoke.py
+
+# Snapshot-only reconcile-adapter refresh (2026-09-02): proves locked-seed
+# code replacement across adapter/plugin/setup-contract strata, receipt hashes,
+# preview/apply drift refusal, at-vintage no-op, no live invocation, and a
+# fail-closed target-venv import check. Temporary fixtures only.
+solet_cli/tests/adapter_reconciliation_smoke.py
+
+# Receipt-bound in-field identity migration (I4, 2026-09-04): fixture-only
+# b15 control proves the three persisted revision carriers converge to the
+# seed only when the terminal receipt and target HEAD/main agree.
+solet_cli/tests/identity_reconciliation_smoke.py
+
+# Cutover-channel manager M1 (iss_dd6c87e6): offline target-local v2 receipt
+# and forward-only stage-machine controls.
+solet_cli/tests/cutover_receipts_smoke.py
+
+# Cutover-channel manager M2 (iss_dd6c87e6): offline byte-exact approval
+# fingerprint controls that bind the runtime state from M1.
+solet_cli/tests/cutover_fingerprint_smoke.py
+
+# Closed rollback executor (2026-08-25): a disposable paired fixture proves one
+# authenticated generated-artifact inverse, durable journal-before-mutation,
+# independent postconditions and collateral census, protected/evidence
+# refusals, and independently reverified second-run no-op behavior. It never
+# uses a live or preserved subject.
+solet_cli/tests/rollback_repair_smoke.py
+
+solet_cli/homebrew/tests/release_payload_smoke.py
+
+# Release staging closure (2026-08-23): proves the staging script builds a
+# byte-reproducible payload archive from a committed tree -- deterministic
+# ordering and zeroed mtimes -- and that its rendered metadata cross-binds the
+# archive checksum it actually produced. The network half is deliberately NOT
+# here: gate smokes must run offline, so asset upload and remote verification
+# live in the separate acceptance script instead. Temporary directories only.
+solet_cli/homebrew/tests/stage_release_smoke.py
+quality_gates/tests/release_workflow_parity_smoke.py
+
+# Homebrew lifecycle acceptance harness (2026-08-21): offline control-flow
+# proof for the deferred fresh-runner source/bottle, upgrade, Python repair,
+# uninstall/reinstall, unmanaged-discovery, no-keg-path, Brewfile and
+# BrewTestBot matrix. Exercises byte/symlink preservation in a temporary
+# fixture and never invokes brew or mutates the operator's HOME/prefix.
+solet_cli/homebrew/tests/lifecycle_acceptance_smoke.py
+plugins/default_scheduling_plugin/tests/scheduler_action_definition_configuration_smoke.py
+quality_gates/tests/dependency_declaration_gate_smoke.py
+# Birth-6 C boundary discriminator: core must remain independently importable.
+# Red mutation: restore selected_sources.py:9 `from solet_manager...`, including
+# a function-local form; this registered AST smoke must fail both.
+quality_gates/tests/ananta_no_solet_manager_import_smoke.py
+plugins/github_midwife_plugin/tests/bootstrap_adapter_contract_smoke.py
+plugins/github_midwife_plugin/tests/bootstrap_adapter_homebrew_guard_contract_smoke.py
+plugins/github_midwife_plugin/tests/bootstrap_adapter_homebrew_plan_smoke.py
+plugins/github_midwife_plugin/tests/setup_executor_contract_smoke.py
+quality_gates/tests/flow_probe_registry_gate_smoke.py
+
+# D-6.1 unit 2 (2026-09-03): the aggregate quality gate now invokes the
+# bundle-license gate in blocking mode. Red mutation: remove the fixture
+# plugin's Apache-2.0 declaration; this smoke requires B0 to exit non-zero.
+quality_gates/tests/bundle_license_gate_smoke.py
+
+# soundcloud_artist_studio_plugin + zuora_plugin D0.3 deferred-completion
+# migration (sync-verb Phase 2, lane-syncverb-phase2, 2026-08-24 — mirrors
+# salesforce_plugin's landed D0.3 shape above, the closest exemplar). All
+# real-I/O verbs in both plugins (16 of 17 soundcloud verbs — list_artists
+# excluded, it never touches http_client; all 9 zuora verbs) now dispatch
+# ms-scale (job_id + status: queued, no SoundCloudHTTPClient/ZuoraClient call
+# on the dispatch path) and complete on each plugin's ONE lazily-started
+# background worker thread. Each smoke proves: dispatch containment for
+# every migrated verb, dispatch-time session_id/flow_id validation failing
+# loud before any job is created, the worker running the real action
+# function (including soundcloud's upload pipeline and zuora's
+# export-path-gated TSV writer) against a fake HTTP client / Zuora client,
+# a non-2xx response classifying topology-safe from the worker, ACTION_HANDLERS
+# covering exactly the migrated verb names, and worker-thread idempotency.
+plugins/zuora_plugin/tests/smoke_async_jobs.py
+
+# readiness startup-race deadline scenarios (2026-08-26, lane-cdx-readiness):
+# the manager probed a newborn target about 21 seconds before it could answer
+# and treated the failure as terminal, after genesis had already started a
+# persistent LaunchAgent — producing a preserved orphan. This smoke is the only
+# gate-reachable path to the readiness deadline scenarios: it calls
+# run_scenarios(emit=False) from readiness_deadline_scenarios, which drives ten
+# deterministic stage-exit and completion runs, ten foreign-first isolation runs,
+# and the recorded deadline/boundary controls against a virtual clock and a
+# closed virtual runtime. The graded red/green pair differs only in
+# installation_doctor.py: the red redirects readiness to foreign-primary and
+# exits 1 at the foreign-first assertion. Offline: virtual clock and in-process
+# fakes only, no live solet, no network. Measured cost 5.5s, 72/72 checks.
+plugins/github_midwife_plugin/tests/executable_hydration_smoke.py
+# Flow precondition disposition (2026-09-01): verifies entry-boundary wiring,
+# conditional session roots, the Salesforce envelope predicate, Keychain
+# diagnostic demotion, auth-flow cleanup, and R4 tracked-debt closure.
+plugins/github_midwife_plugin/tests/flow_precondition_wiring_smoke.py
+plugins/github_midwife_plugin/tests/model_discovery_adapter_loopback_smoke.py
+
+# Per-lane worktree isolation (2026-08-27): hermetic scratch repositories only.
+# Proves the mandatory shared-dirt red/green pair, exact-path teardown that preserves
+# lane branches, orphan sweep bounds, shared-venv symlinking, and root-anchored imports.
+plugins/agent_messaging_plugin/tests/lane_worktrees_smoke.py
+
+# D3 lane retirement (2026-08-29): disposability is adjudicated before host
+# termination, and a post-termination teardown error records retained_error
+# while the ledger still reaches retired. Hermetic StateManagementInterface and
+# worktree/host seams only.
+plugins/agent_messaging_plugin/tests/retire_worktree_disposition_smoke.py
+
+# Fleet identity qualification (2026-08-27): hermetic bridge/lifecycle doubles
+# require real ordered success facts and fail closed on non-watcher delivery;
+# both paths prove role release and exact-worker retirement.
+plugins/agent_messaging_plugin/tests/fleet_identity_qualification_smoke.py
+ananta/tests/llm/session_ledger/selected_sources_qualification_smoke.py
+
+# Connector qualification wave (2026-08-27): both checks are hermetic. Google
+# uses a fake Gmail profile service, and Salesforce patches CLI discovery and
+# subprocess execution; neither touches a third-party account or network.
+plugins/g_suite_plugin/tests/smoke_test_connection.py
+plugins/salesforce_plugin/tests/smoke_probe_cli.py
+plugins/github_midwife_plugin/tests/stage_boundary_probe_inputs_smoke.py
+
+# caller provenance (2026-08-28; client-plugin pairing retired 2026-09-02):
+# originally landed alongside the project_solet_client_plugin smoke, whose
+# plugin was retired by operator ruling (per-project plugins are the wrong
+# shape — workbench/2026-09-01_architect_plugin_gap_resume_verb_record.md);
+# the provenance smoke tests agent_messaging_plugin itself and stays.
+plugins/agent_messaging_plugin/tests/caller_provenance_smoke.py
+
+# U-2c external application client: fixed argv, keychain child environment,
+# typed pre-argv refusals, stderr redaction, and cross-instance isolation.
+
+# keychain_user_interaction_gate_smoke (5 SC-* subsmokes, 2026-09-01): credential
+# READS run with macOS Keychain prompts forbidden, so an ACL-refused read fails
+# loud with errSecAuthFailed instead of blocking forever on a SecurityAgent dialog
+# no background solet can answer (the 2026-08-31 blue-green spawn hang: two
+# cutovers each burned the swap's full 600s register_timeout inside one read and
+# stalled the action queue). Asserts all four read seams independently so a
+# partial application cannot pass, and asserts the two exemptions that keep the
+# operator repair path usable -- writes are ungated, and allow_user_interaction=True
+# still prompts. Hermetic: keyring is replaced with a recorder, so no real
+# Keychain item is read or written.
+plugins/macos_vault_plugin/tests/keychain_user_interaction_gate_smoke.py
+
+# candidate_liveness_smoke (4 SC-* subsmokes, 2026-09-01): a swap candidate that
+# EXITS is detected within a poll interval and fails the swap as spawn_died,
+# instead of being indistinguishable from a slow one and costing the full
+# ready_timeout (600s in production) with the action queue stalled behind it.
+# SC-1 stages a real unreaped ZOMBIE, the state a bare os.kill(pid, 0) probe
+# cannot see and the state the 2026-08-31 hang actually left behind. SC-3 is the
+# discriminator: a LIVE candidate that never registers must still TIME OUT, so a
+# liveness check that calls everything dead cannot pass. Hermetic: stub router,
+# child processes are this interpreter exiting or sleeping.
+plugins/macos_self_deployment_plugin/tests/candidate_liveness_smoke.py
+
+# venv_interpreter_pin_smoke (6 SC-* subsmokes, 2026-09-01): a built release's
+# base interpreter is frozen to a concrete Cellar path at build time, so a later
+# `brew upgrade python@3.13` cannot change what an already-built, already-probed
+# release executes. SC-2 is the load-bearing case (it repoints the floating alias
+# after pinning and asserts the release does not move); SC-3 proves the intra-bin
+# hop is preserved so pyvenv.cfg adjacency and venv activation still hold; SC-5
+# keeps a copied-in launcher from being treated as a build failure. Hermetic:
+# fake venv trees in a temp dir, no release and no brew.
+plugins/macos_self_deployment_plugin/tests/venv_interpreter_pin_smoke.py
+
+# Consented tool provisioning (2026-09-01): static mutation-proof contract for
+# post-venv sequence-20 coding-agent installs, exact Homebrew acquisitions,
+# Node gating, Salesforce self-remediation, and the evaluator-inert fact_ref
+# condition trap. Offline: checked-in flow JSON only.
+plugins/github_midwife_plugin/tests/provisioning_pair_gate.py
+plugins/agent_messaging_session_source_plugin/tests/session_ledger_read_sources_smoke.py
+
+# Completion-set freeze and unknown-reads-as-false (rollup-cluster 1.41,
+# 2026-09-02): a completion probe gated on a reachable-but-unanswered decision
+# must stay required rather than read as not-required, a genuinely unreachable
+# gate must not block convergence, and the set must RE-SCOPE on answer revision
+# instead of freezing at create. Both defects fail GREEN (an omitted completion
+# probe lets the roll-up report VERIFIED), so the load-bearing assertion is that
+# the re-admitted probe actually RUNS and records an attempt -- membership alone
+# is not a discriminator. A probe that already ran is retained through a prune:
+# _expected_attempt_stage resolves completion attempts through that map, so
+# dropping one would fail journal validation. Offline: shipped flow JSON, temp
+# dirs, stubbed adapter.
+solet_cli/tests/completion_set_rebind_smoke.py
+
+# Retained attempts of unbound operations are history, not corruption
+# (rollup-cluster 1.56, iss_f103ec49, 2026-09-02): journal validation resolved an
+# attempt's expected stage through the CURRENT bindings, so a legitimately
+# re-scoped plan orphaned its own history and the journal failed to load. Pins
+# BOTH branches -- an absent operation is tolerated, a still-bound operation
+# whose stage disagrees still fails -- and asserts on the specific error, since
+# other validators reject the same document for their own reasons. Also pins the
+# leak direction: a pruned operation's retained attempt must not feed
+# stage-status derivation. Offline: shipped flow JSON only.
+solet_cli/tests/retained_attempt_validation_smoke.py
+
+# Reconciliation must not carry retired operations forward (rollup-cluster 1.42,
+# 2026-09-02): an operation the SOURCE revision declared but the DESTINATION does
+# not kept feeding the destination stage roll-up, pinning a stage that nothing
+# could clear. Driven through the real reconcile_contract_stage_probe_state path.
+# Depends on 1.56 by construction -- the retained attempt of the dropped
+# operation only survives validation with that fix in place, so a revert of 1.56
+# fails here loudly. Offline: shipped flow JSON only.
+solet_cli/tests/reconciliation_operation_scope_smoke.py
+
+# Doctor's verdict is over the checks it RAN (rollup-cluster 1.43, 2026-09-02):
+# the acceptance verdict was derived from transaction.status, which folds the
+# whole retained setup-stage map together with the completion set, so doctor
+# printed "repair the listed required checks" while every listed check was
+# verified and the real blocker was an unnamed setup stage. The completion
+# verdict is now scoped to the completion probes; setup-stage blockers are
+# reported separately and BY NAME. Offline: constructed transactions only.
+solet_cli/tests/doctor_verdict_scope_smoke.py
+
+# Doctor manager-versus-target vintage census (1.36, 2026-09-04): seed and
+# persisted-contract skew, declared background-item cardinality, and
+# LaunchAgent boot retries are named as report-only advisories. Offline:
+# constructed manager state and fake launchctl output only.
+solet_cli/tests/doctor_vintage_census_smoke.py
+
+# Doctor host-residue census (iss_e12ef805, iss_89275d5c, iss_bf9aaea8,
+# 2026-09-05): names leftovers that no writer corrects -- a stale MCP ingress
+# port file advertising a released loopback port, release staging directories
+# no garbage-collection pass walks, and router-owned port files outliving the
+# router. Each residue fixture must be named by its own reason code and each
+# clean fixture must stay green; an unreadable probe is unknown, never absent.
+# Offline: temporary directories and injected probes only.
+solet_cli/tests/doctor_residue_census_smoke.py
+
+# Blue-green ledger/symlink comparator (D-1.4 iss_68f363ae, D-1.Q6 iss_9789ed45,
+# 2026-09-05): _compensate_failed_swap clears the in_progress marker even when
+# the symlink restore raised OSError, and reconcile keys ONLY on that marker
+# (in_progress is None -> RECONCILE_NOOP), so a ledger that disagrees with the
+# current/previous symlinks was repaired by nothing and compared by nothing.
+# This registers the missing comparator, which names the stranded case
+# separately from a repairable in-flight swap. Covers two of D-1.Q6's four
+# invariants (ledger-agrees-with-symlinks, rollback-restores-the-manifest); the
+# other two need a live router observation and are NOT claimed. Offline:
+# constructed release roots under a temporary directory only.
+solet_cli/tests/doctor_blue_green_census_smoke.py
+
+# Recorded seed archive digest is compared (D-9.4 iss_8b1860e0, 2026-09-05):
+# archive_sha256 is parsed, carried, journaled and migrated, and NO consumer in
+# solet_cli/src ever compares it -- the field-nobody-reads-will-eventually-lie
+# shape. This registers the missing comparison across the two durable places it
+# is written (manager seed lock, target journal). It deliberately does NOT
+# claim to verify an archive: seed acquisition is git-fetch based and proves
+# identity by commit + tree hash, so no archive is ever materialized on the
+# target to hash, and every emitted summary says so. Offline: constructed seed
+# locks and transactions only.
+solet_cli/tests/doctor_seed_integrity_census_smoke.py
+
+# Control-plane credential on a live command line (D-7-residuals iss_7020ef5b,
+# 2026-09-05): tunnel_supervisor._child_argv passes --control-plane.api-key as a
+# LITERAL argv element, and the supervisor itself accepts the dashed spelling on
+# its own argv, so any local process can read the credential with ps. Two
+# exposure sites, one cause; both spellings are matched. The advisory reports
+# the exposure and NEVER the secret -- a result document that quoted the
+# credential would leak it further than the defect it reports, and the smoke
+# fails on any such regression. Offline: constructed ps output only.
+solet_cli/tests/doctor_secret_exposure_census_smoke.py
+
+# Genesis marker pair comparator (D-8.F2 iss_3de66b3c, D-8-LATENT iss_c010206a,
+# 2026-09-05): a genesis run writes its history twice -- _finalize_marker writes
+# the RICHER profile/data/github_midwife/attempt.json from steps+phases, and
+# _write_genesis_marker writes the POORER .solet/genesis.json from the spine
+# alone. The probe and the installation doctor both key on the poorer record and
+# nothing compared the two. The divergence has teeth because post-spine phase
+# failures are caught and appended rather than raised, and _finalize_marker
+# ("success") then runs unconditionally: a target whose install_router failed
+# carries an attempt record saying success WITH a failed phase, and a completion
+# marker that never mentions it. This registers the missing comparator. It does
+# NOT claim to compare a target marker against the manager's CURRENT genesis step
+# list -- that list lives in the midwife plugin, which the manager never imports
+# (it reaches it only by path into the target's own checkout), so iss_c010206a is
+# covered as the recorded-spine baseline the artifact itself lacks, not as a
+# fired manager-vs-target skew. Offline: constructed marker files under a
+# temporary directory only.
+solet_cli/tests/doctor_genesis_marker_census_smoke.py
+
+# Postgres major pin comparator (D-E1 iss_9d6b61ba, 2026-09-05): layer-0 repair
+# is UNPINNED while its acceptance is PINNED -- bootstrap.ensure_postgres reaches
+# its ABSENT branch and runs `brew install postgresql` unversioned, then returns
+# installed_and_started WITHOUT re-probing the major it installed, while both
+# layers require _SUPPORTED_POSTGRES_MAJOR. The sibling ensure_pgvector does
+# re-probe and raises on disagreement, and probe_postgres already owns a
+# RUNNING_WRONG_VERSION state it only ever applies to a PRE-EXISTING install.
+# This registers the comparison at doctor time. It does NOT claim to detect the
+# missing re-probe itself -- that is installer control flow, and source scanning
+# is the wrong instrument for a behavioural property; what is measured is the
+# consequence, the running major versus the pinned major. Note for the shipped
+# smoke filter: besides its own module this smoke reads the repo-root
+# bootstrap.py, to pin one integer literal against the census's copy so the two
+# cannot drift silently. Offline: constructed `psql --version` output only.
+solet_cli/tests/doctor_postgres_pin_census_smoke.py
+
+# Router identity read-back (D-7.4 iss_c30be917, 2026-09-05): _verify_router_up
+# returns on ANY status reply containing router_started_at -- no pid, port or
+# identity comparison -- so an INCUMBENT router already listening at the socket is
+# accepted as the install's own: install reports success over a foreign router,
+# publishes an unused port, and the new launchd job crash-loops under KeepAlive.
+# router_mgmt._reclaim_socket_path refuses correctly inside the incoming router,
+# but the installer never consumes that verdict. The comparison was always
+# available and never made: InstanceRecord has carried expected_router_socket and
+# expected_router_port_range since create time, and a whole-tree read finds them
+# written, serialised and listed -- compared against a live router NOWHERE. This
+# registers the read-back, discriminating on the published colour port, which is
+# the same predicate the row's own fix names. It does NOT compare pid or the
+# router's bound management port: the status payload carries neither today, and
+# adding them is the install-time fix, not this check. Offline: constructed status
+# payloads only; no socket is opened.
+solet_cli/tests/doctor_router_identity_census_smoke.py
+
+# Offline credential copy currency (D-2.F2 iss_dd451098, 2026-09-05):
+# credential_seed.seed_db_password rotates the live role and exactly TWO Keychain
+# copies (state db_password, pgvector password) and never the THIRD -- the legacy
+# raw `password` account that default_knowledge_plugin/tools/_pg_credentials.py
+# reads, which CLAUDE.md prescribes as the degraded fallback when live retrieval
+# is down. That file's docstring states the contract rotation breaks: "Both
+# accounts hold the same password", so the break surfaces only when the fallback
+# is already being reached for. The predicate is deliberately NOT "the live copy
+# is newer": db_password was introduced additively by G3 AFTER the raw account, so
+# newer is the normal healthy state (measured: live 20260628, offline 20260623,
+# both unmodified since creation) and a naive check warns on every solet. The warn
+# requires a ROTATION (mdat > cdat) postdating the offline write. No secret VALUE
+# is ever read, compared or emitted -- attribute reads omit -w, which also avoids
+# the SecurityAgent ACL prompt that would hang a headless run; the stated cost is
+# that equal timestamps do not PROVE equal values. Offline: constructed attribute
+# mappings only; `security` is never executed.
+solet_cli/tests/doctor_credential_copy_census_smoke.py
+
+# Plugin version source agreement, FORK-NEUTRAL (D-8-u4 iss_1e3a1558,
+# 2026-09-05): plugin_install converges to the wrong fixed point -- probe success
+# is visible AND interpreter_ok, visibility checks only id/installed/enabled, and
+# the module contains ZERO version reads, so a stale-but-enabled plugin is a
+# STABLE verified state and the correctly-wired remediation hangs off a sensor
+# that cannot sense the condition. The row records that no version-aware probe
+# exists anywhere, measured. This is that probe, and it is deliberately neutral on
+# the row's OPEN fix fork (authoritative source = packaged plugin.json vs
+# marketplace manifest, which may disagree): it compares three version-bearing
+# sources -- the registry, the installed cache copy that actually executes, and
+# the packaged manifest located via the marketplace source pointer -- warns ONLY
+# on disagreement, declares none authoritative, and prescribes NO repair. The
+# smoke asserts that neutrality directly, not just the detection. Verified against
+# live machine state while written: registry 0.6.0 / cache 0.6.0 / packaged 0.8.1,
+# the reg-58 incident, undetected until now. Offline: constructed manifest trees
+# under a temporary directory only.
+solet_cli/tests/doctor_plugin_version_skew_census_smoke.py
+
+# Seed-tree baseline verifier (1.55 G0-C, 2026-09-03): compares the sealed
+# seed tree object with the target checkout and names tracked index/worktree
+# deviations. Its doctor result remains WARN-only until managed-tree-v1 can
+# authenticate receipt-authorized overlays. Offline: fake read-only Git queries.
+solet_cli/tests/seed_tree_verifier_smoke.py
+
+# Managed-tree overlay verifier (1.55 I2, 2026-09-04): proves the sealed
+# seed-tree baseline plus ordered, receipt-authorized file overlays, including
+# target-local receipt authority and exact final-byte verification. Offline:
+# temporary targets and fake read-only Git queries only.
+solet_cli/tests/managed_tree_smoke.py
+
+# Codex coordination-hooks safe reinstall (iss_9959c013 / iss_eb36b76d,
+# 2026-09-04): stock `codex plugin add` prunes versioned cache directories
+# under live lanes. This hermetic smoke makes the stock-install stand-in delete
+# the parent, then proves the wrapper restores the live version as a real
+# directory (not a compat symlink) and leaves the fresh hook current.
+
+# Wave 2/F: offline blue-green and schema-snapshot coverage measured green.
+plugins/macos_self_deployment_plugin/tests/blue_green_router/router_smoke.py
+plugins/macos_self_deployment_plugin/tests/blue_green_router/bridge_port_watchdog_smoke.py
+plugins/macos_self_deployment_plugin/tests/blue_green_router/slice3_no_hardcoded_bands_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_schema_snapshot_smoke.py
+# not registered: install_smoke invokes launchctl bootout (iss_a5524d6f)
+# not registered: bridge_port_lifecycle_smoke invokes launchctl bootout (iss_a5524d6f)
+# not registered: schema_preflight_realsnapshot_smoke red in both lane and shared interpreters; cause unconfirmed (iss_a5524d6f environment premise did not reproduce: pth scan clean); discrepancy recorded (iss_a5524d6f)
+
+# not registered: ananta/tests/llm/session_ledger/cross_host_kara_ledger_live_smoke.py makes an unconditional live HTTP call at 52 (iss_a5524d6f)
+# not registered: ananta/tests/platform/install_plugin_from_path_smoke.py performs a real pip install/uninstall (iss_a5524d6f)
+# not registered: ananta/tests/platform/install_with_pip_dep_smoke.py performs a real pip install/uninstall (iss_a5524d6f)
+ananta/tests/llm/agent_messaging/list_threads_live_smoke.py
+ananta/tests/llm/agent_messaging/repository_write_migration_live_smoke.py
+ananta/tests/llm/context_management/context_management_migration_live_smoke.py
+ananta/tests/llm/core_slice2/core_slice2_migration_live_smoke.py
+ananta/tests/llm/core_slice3/core_slice3_migration_live_smoke.py
+ananta/tests/llm/core_slice4/core_slice4_migration_live_smoke.py
+ananta/tests/llm/core_slice5/core_slice5_migration_live_smoke.py
+ananta/tests/llm/session_ledger/canonical_pointer_repair_live_smoke.py
+ananta/tests/llm/session_ledger/census_migration_live_smoke.py
+ananta/tests/llm/session_ledger/deployment_migration_live_smoke.py
+ananta/tests/llm/session_ledger/event_external_id_backfill_live_smoke.py
+ananta/tests/llm/session_ledger/events_window_migration_live_smoke.py
+ananta/tests/llm/session_ledger/ingest_canonical_dispatch_migration_live_smoke.py
+ananta/tests/llm/session_ledger/ingest_idempotent_dedup_live_smoke.py
+ananta/tests/llm/session_ledger/ingest_migration_live_smoke.py
+ananta/tests/llm/session_ledger/inverted_bounds_repair_live_smoke.py
+ananta/tests/llm/session_ledger/list_sessions_migration_live_smoke.py
+ananta/tests/llm/session_ledger/polling_driver_migration_live_smoke.py
+ananta/tests/llm/session_ledger/quiescent_migration_live_smoke.py
+ananta/tests/llm/session_ledger/read_migration_active_sessions_live_smoke.py
+ananta/tests/llm/session_ledger/read_migration_live_smoke.py
+ananta/tests/llm/session_ledger/read_migration_slice6_live_smoke.py
+ananta/tests/llm/session_ledger/read_migration_slice6b_live_smoke.py
+ananta/tests/llm/session_ledger/reset_ingest_state_live_db_smoke.py
+ananta/tests/llm/session_ledger/summarize_migration_live_smoke.py
+ananta/src/ananta/services/inference_service/tests/source_namespace_canonical_get_smoke.py
+ananta/src/ananta/services/vault_service/tests/w_vault_caller_enforce_smoke.py
+ananta/tests/cli/fatal_path_logging_smoke.py
+ananta/tests/llm/session_ledger/blob_adapter_fetch_smoke.py
+ananta/tests/llm/session_ledger/chatgpt_export_shards_smoke.py
+ananta/tests/llm/session_ledger/claude_code_first_last_event_at_smoke.py
+ananta/tests/llm/session_ledger/claude_code_server_tool_use_smoke.py
+ananta/tests/llm/session_ledger/claude_code_usage_capture_smoke.py
+ananta/tests/llm/session_ledger/claude_code_vendor_drift_tolerance_smoke.py
+ananta/tests/llm/session_ledger/content_text_blob_offload_smoke.py
+ananta/tests/llm/session_ledger/duplicate_external_id_resilience_smoke.py
+ananta/tests/llm/session_ledger/enforcement_authz_smoke.py
+ananta/tests/llm/session_ledger/ensure_periodic_poll_smoke.py
+ananta/tests/llm/session_ledger/events_window_fold_smoke.py
+ananta/tests/llm/session_ledger/export_blob_identity_backfill_smoke.py
+ananta/tests/llm/session_ledger/importer_smoke.py
+ananta/tests/llm/session_ledger/ingest_external_id_derivation_smoke.py
+ananta/tests/llm/session_ledger/ingest_raw_chunk_sync_dispatch_tripwire_smoke.py
+ananta/tests/llm/session_ledger/integration_smoke.py
+ananta/tests/llm/session_ledger/least_greatest_upsert_concurrent_smoke.py
+ananta/tests/llm/session_ledger/lift_canonical_pointer_smoke.py
+ananta/tests/llm/session_ledger/list_canonical_contributors_migration_smoke.py
+ananta/tests/llm/session_ledger/list_events_by_source_window_smoke.py
+ananta/tests/llm/session_ledger/m6_wiring_smoke.py
+ananta/tests/llm/session_ledger/nul_byte_sanitization_smoke.py
+ananta/tests/llm/session_ledger/per_session_resilience_smoke.py
+ananta/tests/llm/session_ledger/polling_lease_smoke.py
+ananta/tests/llm/session_ledger/quiescent_fold_smoke.py
+ananta/tests/llm/session_ledger/read_verbs_smoke.py
+ananta/tests/llm/session_ledger/repository_smoke.py
+ananta/tests/llm/session_ledger/reset_ingest_state_smoke.py
+ananta/tests/llm/session_ledger/reset_source_cursor_smoke.py
+ananta/tests/llm/session_ledger/root_uri_convergence_smoke.py
+ananta/tests/llm/session_ledger/staged_text_attachment_smoke.py
+ananta/tests/llm/session_ledger/strip_nuls_in_json_smoke.py
+ananta/tests/llm/session_ledger/summary_search_smoke.py
+ananta/tests/llm/session_ledger/vendor/codex_cloud_parse_smoke.py
+ananta/tests/platform/metadata_registry_truthfulness_smoke.py
+ananta/tests/platform/whole_tree_integration_gate_smoke.py
+ananta/tests/session_ledger_service/backfill_first_last_event_at_repair_smoke.py
+
+# platform_health registry sweep: dry-run default and explicit external scope
+# confirmation are exercised only with recording fakes; no live sweep call.
+plugins/platform_health_plugin/tests/sweep_smoke.py
+
+# io-interface shadow-doc retirement (2026-09-04): disabled service-interface
+# process JSONs must remain absent; teaching surfaces must resolve the active IO
+# namespace before invoking plugin::<namespace>::post_message. Offline static smoke.
+ananta/tests/platform/io_interface_shadow_docs_smoke.py
+
+# Create approval must reconstruct bindings from the whole selected operation
+# plan (1.40, 2026-09-04): fixture-3's retained out-of-plan awaiting_user
+# operation must not pin the stage, but in-plan verified state and retained
+# history must survive. Offline: captured b15 fixture and patched boundaries.
+solet_cli/tests/create_execution_operation_scope_smoke.py
+
+# Wave 2/B: offline macOS self-deployment coverage measured green.
+plugins/macos_self_deployment_plugin/tests/autostart_seed_smoke.py
+plugins/macos_self_deployment_plugin/tests/cwd_out_of_tree_smoke.py
+plugins/macos_self_deployment_plugin/tests/durable_rollback_proxy_smoke.py
+plugins/macos_self_deployment_plugin/tests/instance_authority_smoke.py
+plugins/macos_self_deployment_plugin/tests/poller_gate_smoke.py
+plugins/macos_self_deployment_plugin/tests/post_local_restart_plugin_delete_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_call_sequence_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_cow_dedup_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_cutover_contract_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_first_boot_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_pth_validation_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_rehydrate_smoke.py
+plugins/macos_self_deployment_plugin/tests/slice2_register_within_budget_smoke.py
+plugins/macos_self_deployment_plugin/tests/slice4_5_stop_self_dry_run_smoke.py
+plugins/macos_self_deployment_plugin/tests/slice4_5_stop_self_smoke.py
+plugins/macos_self_deployment_plugin/tests/slice4_drain_sentinel_smoke.py
+
+# Wave 2/B3: agent-messaging offline smokes measured standalone-green. The
+# three live-surface files carry local non-registration markers; the four
+# red/unset-guard findings are intentionally absent. Offline coverage only.
+plugins/agent_messaging_plugin/tests/headless_permission_mode_default_live_smoke.py
+plugins/agent_messaging_plugin/tests/claude_queue_transcript_smoke.py
+plugins/agent_messaging_plugin/tests/context_rotation_calculation_smoke.py
+plugins/agent_messaging_plugin/tests/drive_on_delivery_detail_smoke.py
+plugins/agent_messaging_plugin/tests/driver_texts_smoke.py
+plugins/agent_messaging_plugin/tests/fleet_status_smoke.py
+plugins/agent_messaging_plugin/tests/forwarder_native_notification_smoke.py
+# Tier 1 reconnect cursor repair: 404 recipient/caller discrimination,
+# stale-generation cursor fencing, forwarder-lifetime Claude wire cursors, and
+# replay flow-id parity. Offline Forwarder with mocked boundaries.
+plugins/agent_messaging_plugin/tests/forwarder_reconnect_cursor_smoke.py
+plugins/agent_messaging_plugin/tests/minted_spawn_smoke.py
+plugins/agent_messaging_plugin/tests/model_profile_smoke.py
+plugins/agent_messaging_plugin/tests/oauth_machine_grant_smoke.py
+plugins/agent_messaging_plugin/tests/peer_registry_migration_live_smoke.py
+plugins/agent_messaging_plugin/tests/peer_registry_preserve_label_smoke.py
+plugins/agent_messaging_plugin/tests/plugin_config_defaults_smoke.py
+plugins/agent_messaging_plugin/tests/usage_economics_smoke.py
+plugins/agent_messaging_plugin/tests/watcher_ack_consumption_smoke.py
+plugins/agent_messaging_plugin/tests/role_drain_serialization_smoke.py
+
+# Destructive macOS self-deployment actions fail safe: omission/None report only;
+# malformed empty-string/zero values fail before the engine; explicit false may act.
+# Offline recording fakes never invoke launchctl or process control.
+plugins/macos_self_deployment_plugin/tests/dry_run_default_safety_smoke.py
+
+# Batch 4a dark-smoke accounting: excluded paths have one canonical marker here.
+# not registered: plugins/agent_messaging_plugin/tests/v10_live_smoke_driver.py Class C live-agent choreography driver (iss_a5524d6f)
+# not registered: plugins/aws_midwife_plugin/tests/_task17_18_container_smoke.py Class C underscore helper module (iss_a5524d6f)
+# not registered: plugins/aws_midwife_plugin/tests/_task20_execution_role_policy_smoke.py Class C underscore helper module (iss_a5524d6f)
+# not registered: plugins/macos_self_deployment_plugin/tests/_release_manager_smoke_support.py Class C shared smoke support module (iss_a5524d6f)
+# not registered: plugins/seed_factory_plugin/src/seed_factory_plugin/smoke_register.py Class C production source module (iss_a5524d6f)
+# not registered: plugins/sound_effects_plugin/research/generate_smoke_fixtures.py Class C research fixture generator (iss_a5524d6f)
+# not registered: quality_gates/run_smokes.py Class C smoke runner (iss_a5524d6f)
+# not registered: workbench/2026-06-09_phase4_keychain_vault_health_smoke.py Class A operator health check reads real production Keychain and runtime (iss_a5524d6f)
+# not registered: workbench/2026-07-31_ws3b_step0_probe/plugin_stripped/tests/git_controller_gate_smoke.py Class C frozen plugin_stripped fixture copy (iss_a5524d6f)
+# not registered: workbench/2026-07-31_ws3b_step0_probe/plugin_stripped/tests/manifest_consistency_smoke.py Class C frozen plugin_stripped fixture copy (iss_a5524d6f)
+# not registered: workbench/2026-07-31_ws3b_step0_probe/plugin_stripped/tests/reminder_hooks_smoke.py Class C frozen plugin_stripped fixture copy (iss_a5524d6f)
+# not registered: workbench/2026-07-31_ws3b_step0_probe/plugin_stripped/tests/wake_waiter_smoke.py Class C frozen plugin_stripped fixture copy (iss_a5524d6f)
+# not registered: workbench/2026-08-02_ws1_7_flagship_fixture/out/plugin_snapshot/tests/git_controller_gate_smoke.py Class C frozen plugin_snapshot fixture copy (iss_a5524d6f)
+# not registered: workbench/2026-08-02_ws1_7_flagship_fixture/out/plugin_snapshot/tests/manifest_consistency_smoke.py Class C frozen plugin_snapshot fixture copy (iss_a5524d6f)
+# not registered: workbench/2026-08-02_ws1_7_flagship_fixture/out/plugin_snapshot/tests/reminder_hooks_smoke.py Class C frozen plugin_snapshot fixture copy (iss_a5524d6f)
+# not registered: workbench/2026-08-02_ws1_7_flagship_fixture/out/plugin_snapshot/tests/wake_waiter_smoke.py Class C frozen plugin_snapshot fixture copy (iss_a5524d6f)
+# not registered: workbench/2026-09-02_archive_fleet_plan_blocks_smoke.py Class C workbench archival-tool regression (iss_a5524d6f)
+# not registered: workbench/2026-09-03_emit_rulings_cutover_smoke.py Class C workbench offline emitter regression (iss_a5524d6f)
+# not registered: workbench/2026-11-16_audio_workstation/2026-05-15_verify_composition_audio_p0_smoke.py Class C workbench verifier writes a report artifact (iss_a5524d6f)
+# not registered: workbench/archive/2026-05-03_verify_deterministic_result_smoke.py Class C archived workbench verification script (iss_a5524d6f)
+# not registered: plugins/agent_messaging_plugin/tests/forwarder_reconnect_announcement_smoke.py B3 Class A disposition; prior marker never landed (iss_a5524d6f)
+# not registered: plugins/agent_messaging_plugin/tests/mcp_descriptor_parity_smoke.py B3 red finding; descriptor parity failure (iss_a5524d6f)
+# not registered: plugins/agent_messaging_plugin/tests/action_cost_profile_smoke.py B3 red finding; action-cost profile failure (iss_a5524d6f)
+# not registered: plugins/agent_messaging_plugin/tests/read_thread_messages_live_smoke.py B3 unset-guard finding; live DB flag-unset path (iss_a5524d6f)
+# NOT SHIPPED (checkout-only) -- registered here and RUN in this checkout, but excluded from the
+# seed's shipped register by seed_manifest.yaml exclude_paths, and classified in
+# plugins/seed_factory_plugin/knowledge_base/shipped_smoke_contract.yaml. Assembly fails closed if one
+# of these is still in a shipped register. From the r21 born-clone verdict (sealed 254700866ab0), 6 of
+# its 14 BLOCKING rows; the other 8 were repaired or split instead (arm-5b37e64a, arm-149e5889).
+# not shipped: plugins/macos_self_deployment_plugin/tests/no_repo_pollution_smoke.py requires a git worktree; a born clone is a git-archive extract with no .git (repository_hygiene)
+# not shipped: quality_gates/tests/generate_solet_credentials_smoke.py requires deployment/scripts/generate_solet_credentials.py; operator credential tooling, not invoked by any shipped runtime code (fleet_tooling)
+# not shipped: quality_gates/tests/git_controller_foreign_edit_guard_smoke.py requires .claude/skills/git-controller-commit/foreign_edit_guard.py; .claude/ is absent from the manifest copy: allowlist (fleet_tooling)
+# not shipped: plugins/github_midwife_plugin/tests/git_policy_clause_consistency_smoke.py requires .claude/hooks/git_controller_gate.py; .claude/ is absent from the manifest copy: allowlist (fleet_tooling)
+# not shipped: quality_gates/tests/macos_bizops_identity_gate_smoke.py requires workbench/2026-07-09_seed_factory_design.md; workbench/ is never_copy (origin_census)
+# not shipped: solet_cli/tests/contract_reconciliation_schema_smoke.py requires solet_cli/tools/generate_contract_reconciliation_manifest_schema.py; **/tools/ is a pruned operator-tooling class (generator_tooling)
+# not shipped: solet_cli/tests/contract_reconciliation_smoke.py requires repository history for its pinned fixture Git objects; a born clone is a git-archive extract with no .git (repository_hygiene)
+# not shipped: ananta/tests/llm/session_ledger/codex_cloud_backfill_smoke.py requires plugins/codex_cloud_session_source_plugin/src/codex_cloud_session_source_plugin; that plugin is in no capability bundle (unshipped_plugin_subject)

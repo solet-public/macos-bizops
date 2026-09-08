@@ -8,15 +8,15 @@ import shlex
 import shutil
 import subprocess
 import time
-from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .codex_app_server import CodexAppServerHostDriver
+from .codex_app_server import _CODE_MODE_HOST_PROBE_SECONDS, CodexAppServerHostDriver
 from .codex_common import (
     _ANSI_ESCAPE_RE,
     _CODEX_AGENT_ID,
+    _CODEX_IDLE_COMPOSER_PLACEHOLDER,
     _DEFAULT_TMUX_POLL_INTERVAL_SECONDS,
     _DEFAULT_TMUX_STABLE_SAMPLES,
     _DEFAULT_TMUX_VERIFY_TIMEOUT_SECONDS,
@@ -37,7 +37,9 @@ from .headless_adapter import (
     _resolve_default_cwd,
     _sigterm_then_kill,
 )
+from .lane_worktrees import LaneWorktreeError, spawn_worktree_cwd, worktree_pythonpath
 from .solet_cli import WakeCliResolver
+from .submit_conventions import TMUX_CODEX_SUBMIT_CONVENTION
 from .tmux_adapter import (
     DEFAULT_PANE_HEIGHT,
     DEFAULT_PANE_WIDTH,
@@ -46,6 +48,24 @@ from .tmux_adapter import (
     _sanitize_session_name,
     _sigterm_then_kill_process_group,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+
+def _resolve_host_binary(explicit: str | None, name: str) -> str:
+    """Resolve a host binary without assuming launchd inherited a login PATH.
+
+    The LaunchAgent's deterministic PATH includes both Homebrew prefixes but
+    intentionally does not inherit the operator's shell configuration. Codex
+    itself commonly lives in ``~/.local/bin``; retain an explicit injection as
+    authoritative, then prefer PATH and finally that standard per-user location.
+    ``verify_config`` remains the executable-presence authority for a missing
+    fallback path.
+    """
+    if explicit is not None:
+        return explicit
+    return shutil.which(name) or str(Path.home() / ".local" / "bin" / name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,8 +95,11 @@ class _CodexTmuxDriverChannel:
         self._poll_interval_seconds = poll_interval_seconds
         self._stable_samples = stable_samples
         self._verify_timeout_seconds = verify_timeout_seconds
+        self._composed: str | None = None
 
-    def send(self, text: str) -> None:
+    convention = TMUX_CODEX_SUBMIT_CONVENTION
+
+    def insert(self, text: str) -> None:
         from .session_hosts import DriverChannelSendError  # noqa: PLC0415
 
         # _wait_until_ready's return value is the idle prompt it observed
@@ -94,18 +117,50 @@ class _CodexTmuxDriverChannel:
             raise DriverChannelSendError(
                 f"tmux literal send failed for Codex session {self._session!r}",
             )
-        composed = self._wait_until_stable(baseline)
-        if self._submit_and_observe_change(composed):
+        try:
+            self._composed = self._wait_until_stable(baseline)
+        except DriverChannelSendError as exc:
+            self._composed = None
+            rollback_detail = self._rollback_failed_insert(text)
+            if rollback_detail is None:
+                raise
+            raise DriverChannelSendError(f"{exc} {rollback_detail}") from exc
+
+    def submit(self) -> None:
+        from .session_hosts import DriverChannelSendError  # noqa: PLC0415
+
+        if self._composed is None:
+            raise DriverChannelSendError("Codex tmux submit called before a successful insert")
+        if self._submit_and_observe_change(self._composed):
             return
         # A same-burst Enter can be absorbed by the TUI.  One separately
         # timed retry is allowed; two no-op Enters are evidence of no pickup.
-        if self._submit_and_observe_change(composed):
+        if self._submit_and_observe_change(self._composed):
             return
         raise DriverChannelSendError(
             f"Codex tmux session {self._session!r} showed no styled pane-state "
             "change after two separate Enter submissions; refusing to call "
             "ghost/composed text a delivered turn.",
         )
+
+    def send(self, text: str) -> None:
+        self.insert(text)
+        self.submit()
+
+    def interrupt_park(self) -> str:
+        """Interrupt a Stop-hook park and prove the pane became idle again."""
+        from .session_hosts import DriverChannelSendError  # noqa: PLC0415
+
+        escaped = self._run(
+            [self._tmux_bin, "send-keys", "-t", self._session, "Escape"],
+        )
+        if not _command_succeeded(escaped):
+            raise DriverChannelSendError(
+                f"Codex tmux pane {self._session!r} rejected the parked-pane Escape interrupt.",
+            )
+        self._composed = None
+        self._wait_until_ready()
+        return "interrupted_park"
 
     def _run(self, argv: list[str]) -> Any:
         try:
@@ -130,15 +185,26 @@ class _CodexTmuxDriverChannel:
         return _ANSI_ESCAPE_RE.sub("", styled)
 
     def _wait_until_ready(self) -> str:
-        """Wait for an idle Codex prompt before putting text in its composer."""
+        """Wait for an idle Codex prompt before putting text in its composer.
+
+        Keys on ``_CODEX_IDLE_COMPOSER_PLACEHOLDER``, the empty-composer
+        placeholder line, not the ``OpenAI Codex`` startup banner the
+        previous check required: that banner is a one-time box printed at
+        session start which scrolls out of the visible pane as soon as a
+        turn or two of output has pushed it off-screen, after which the old
+        condition could never be satisfied again -- driver_delivery_failed
+        against a pane sitting right at its idle prompt (measured live,
+        2026-08-23, workbench/2026-08-23_dispatch_lane_m_codex_drive_idle_
+        detector.md). The placeholder reappears every time the composer goes
+        idle, independent of scroll position.
+        """
         deadline = self._now_fn() + self._verify_timeout_seconds
         while self._now_fn() <= deadline:
             current = self._capture_styled()
             if current is not None:
                 visible = self._visible_text(current)
                 if (
-                    "OpenAI Codex" in visible
-                    and "›" in visible
+                    _CODEX_IDLE_COMPOSER_PLACEHOLDER in visible
                     and not any(marker in visible for marker in _TMUX_BUSY_MARKERS)
                 ):
                     return current
@@ -189,9 +255,57 @@ class _CodexTmuxDriverChannel:
             "submission was not attempted.",
         )
 
+    def _rollback_failed_insert(self, text: str) -> str | None:
+        """Clear a failed literal send only after proving this call owns it.
+
+        A stable-gate miss happens after ``send-keys -l`` has already put text
+        in the composer but before any Enter.  Clearing blindly would be worse
+        than leaving the failure visible: another writer may have taken the
+        composer in that interval.  Require an exact active-composer match to
+        this call's text, use ``C-u`` (never Enter), then positively re-read
+        the idle placeholder.  Any uncertainty leaves the pane untouched and
+        is carried beside the original failure for a steward to diagnose.
+        """
+        from .session_hosts import DriverChannelSendError  # noqa: PLC0415
+
+        try:
+            captured = self._capture_styled()
+        except DriverChannelSendError as exc:
+            return f"Rollback could not inspect pane {self._session!r}: {exc}"
+        if captured is None:
+            return f"Rollback could not inspect pane {self._session!r}; text may be stranded."
+        if not self._composer_is_exactly(captured, text):
+            return (
+                f"Rollback refused for pane {self._session!r}: it did not positively show "
+                "only this call's inserted text; text may be stranded."
+            )
+        try:
+            cleared = self._run(
+                [self._tmux_bin, "send-keys", "-t", self._session, "C-u"],
+            )
+        except DriverChannelSendError as exc:
+            return f"Rollback clear failed for pane {self._session!r}: {exc}"
+        if not _command_succeeded(cleared):
+            return f"Rollback clear failed for pane {self._session!r}; text may be stranded."
+        try:
+            self._wait_until_ready()
+        except DriverChannelSendError as exc:
+            return f"Rollback could not verify idle composer for pane {self._session!r}: {exc}"
+        return None
+
+    def _composer_is_exactly(self, styled: str, text: str) -> bool:
+        """Whether the visible active-composer row contains only ``text``."""
+        if not text or "\n" in text:
+            return False
+        expected = f"› {text}"
+        return any(line.strip() == expected for line in self._visible_text(styled).splitlines())
+
     def _submit_and_observe_change(self, composed: str) -> bool:
+        submit_value = self.convention.submit_value
+        if submit_value is None:
+            raise RuntimeError("Codex tmux convention has no terminal submit value")
         enter = self._run(
-            [self._tmux_bin, "send-keys", "-t", self._session, "Enter"],
+            [self._tmux_bin, "send-keys", "-t", self._session, submit_value],
         )
         if not _command_succeeded(enter):
             return False
@@ -219,17 +333,22 @@ class CodexTmuxHostDriver:
         solet_name: str | None = None,
         codex_home: Path | None = None,
         cwd: Path | None = None,
+        python_executable: str | None = None,
         transport: str | None = None,
         run_fn: Callable[..., Any] = subprocess.run,
         pane_width: int = DEFAULT_PANE_WIDTH,
         pane_height: int = DEFAULT_PANE_HEIGHT,
         grace_seconds: float = 10.0,
+        code_mode_probe_seconds: float = _CODE_MODE_HOST_PROBE_SECONDS,
     ) -> None:
-        self._codex_bin = codex_bin if codex_bin is not None else shutil.which("codex") or ""
-        self._tmux_bin = tmux_bin if tmux_bin is not None else shutil.which("tmux") or ""
+        self._codex_bin = _resolve_host_binary(codex_bin, "codex")
+        self._tmux_bin = _resolve_host_binary(tmux_bin, "tmux")
         # R11 (2026-08-17): UNRESOLVED override; resolved per read by the
         # `_solet_bin` property. See resolve_solet_bin's own note.
-        self._cli_resolver = WakeCliResolver(solet_bin)
+        self._python_executable = python_executable
+        self._cli_resolver = WakeCliResolver(
+            solet_bin, python_executable=self._python_executable,
+        )
         self._solet_name = (
             solet_name if solet_name is not None
             else os.environ.get("SOLET_NAME", "")
@@ -241,6 +360,7 @@ class CodexTmuxHostDriver:
         self._pane_width = pane_width
         self._pane_height = pane_height
         self._grace_seconds = grace_seconds
+        self._code_mode_probe_seconds = code_mode_probe_seconds
 
     @property
     def _solet_bin(self) -> str:
@@ -270,7 +390,9 @@ class CodexTmuxHostDriver:
             solet_name=self._solet_name,
             codex_home=self._codex_home,
             cwd=self._cwd,
+            python_executable=self._python_executable,
             transport=self._transport,
+            code_mode_probe_seconds=self._code_mode_probe_seconds,
         ).verify_config(transport=transport)
         if not (self._tmux_bin and os.access(self._tmux_bin, os.X_OK)):
             base.append("no executable tmux binary found — install tmux>=3.3.")
@@ -303,8 +425,14 @@ class CodexTmuxHostDriver:
         transport = self._resolve_transport(spec)
         self._require_ready(transport)
         identity = self._spawn_identity(spec)
-        env = self._spawn_env(identity, transport)
-        codex_cmd = self._codex_command(spec, identity, transport)
+        try:
+            cwd = spawn_worktree_cwd(spec.get("worktree_path"), self._cwd)
+        except LaneWorktreeError as exc:
+            from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
+
+            raise HostCannotSpawnError(str(exc)) from exc
+        env = self._spawn_env(identity, transport, cwd)
+        codex_cmd = self._codex_command(spec, identity, transport, cwd)
         session_name = _sanitize_session_name(
             f"fleet-{identity.label}-{identity.agent_instance_id[-8:]}",
         )
@@ -313,7 +441,7 @@ class CodexTmuxHostDriver:
             pane_command=self._pane_command(
                 codex_cmd, label=identity.label, transport=transport,
             ),
-            env=env,
+            env=env, cwd=cwd,
         )
         self._launch_tmux(command)
         self._run_fn(
@@ -339,13 +467,17 @@ class CodexTmuxHostDriver:
         return _TmuxSpawnIdentity(
             agent_instance_id=agent_instance_id,
             agent_session_id=f"ases-{agent_instance_id}",
-            label=str(spec.get("lane_id") or "") or agent_instance_id,
+            label=(
+                str(spec.get("local_name") or "")
+                or str(spec.get("lane_id") or "")
+                or agent_instance_id
+            ),
         )
 
     def _spawn_env(
-        self, identity: _TmuxSpawnIdentity, transport: str,
+        self, identity: _TmuxSpawnIdentity, transport: str, cwd: Path | None = None,
     ) -> dict[str, str]:
-        return _identity_env(
+        env = _identity_env(
             agent_instance_id=identity.agent_instance_id,
             agent_session_id=identity.agent_session_id,
             label=identity.label,
@@ -353,10 +485,12 @@ class CodexTmuxHostDriver:
             solet_bin=self._solet_bin,
             transport=transport,
         )
+        env["PYTHONPATH"] = worktree_pythonpath(cwd or self._cwd, env.get("PYTHONPATH", ""))
+        return env
 
     def _codex_command(
         self, spec: Mapping[str, object], identity: _TmuxSpawnIdentity,
-        transport: str,
+        transport: str, cwd: Path | None = None,
     ) -> list[str]:
         config = _read_codex_config(self._config_path)
         overrides = _codex_config_overrides(
@@ -378,7 +512,7 @@ class CodexTmuxHostDriver:
             self._codex_bin,
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
-            "-C", str(self._cwd),
+            "-C", str(cwd or self._cwd),
         ]
         model = str(spec.get("model") or "")
         if model:
@@ -388,7 +522,7 @@ class CodexTmuxHostDriver:
         return codex_cmd
 
     def _new_session_command(
-        self, *, session_name: str, pane_command: str, env: Mapping[str, str],
+        self, *, session_name: str, pane_command: str, env: Mapping[str, str], cwd: Path | None = None,
     ) -> list[str]:
         new_session_cmd = [
             self._tmux_bin, "new-session", "-d", "-s", session_name,
@@ -398,10 +532,10 @@ class CodexTmuxHostDriver:
             if key in {
                 "SOLET_NAME", "AGENT_IDENTITY", "AGENT_INSTANCE_ID",
                 "AGENT_SESSION_ID", "AGENT_SESSION_LABEL", "AGENT_WAKE_CLI",
-                "FLEET_TRANSPORT", "PATH",
+                "FLEET_TRANSPORT", "PATH", "PYTHONPATH",
             }:
                 new_session_cmd += ["-e", f"{key}={value}"]
-        new_session_cmd += ["-c", str(self._cwd), "sh", "-c", pane_command]
+        new_session_cmd += ["-c", str(cwd or self._cwd), "sh", "-c", pane_command]
         return new_session_cmd
 
     def _launch_tmux(self, new_session_cmd: list[str]) -> None:
@@ -424,11 +558,17 @@ class CodexTmuxHostDriver:
             f"sh {shlex.quote(str(emit))} {shlex.quote(label)}; " if emit.exists() else "",
         ]
         if transport == "watch":
-            # codex-0147-dead-spool-retirement (2026-08-13): --no-spool disables
-            # this watcher's own wake-hook spool tee. Stock Codex's Stop hook
-            # cannot consume it (async command hooks do not execute on stock
-            # Codex), so an armed spool here would just accumulate an unread
-            # file for the pane's lifetime.
+            # CDX-06 (2026-08-24): the spool is RE-ARMED. It was disabled by
+            # codex-0147-dead-spool-retirement (2026-08-13) because stock
+            # Codex had no consumer for it at all -- an armed spool would
+            # just accumulate an unread file for the pane's lifetime. That
+            # premise no longer holds: `inbox_consumer.py`
+            # (plugins/github_midwife_plugin/codex_plugin/coordination-hooks/
+            # hooks/inbox_consumer.py), a SYNCHRONOUS Stop hook, now calls
+            # `solet-bridge wake --max-wait <a few seconds>` on every turn boundary
+            # specifically to read this spool -- an armed-but-unread spool is
+            # exactly the CDX-06 defect this consumer exists to fix, not a
+            # reason to leave the spool disabled.
             watch_cmd = shlex.join(
                 _without_parent_runtime_env(
                     [
@@ -436,7 +576,6 @@ class CodexTmuxHostDriver:
                         "watch",
                         "--agent-id", _CODEX_AGENT_ID,
                         "--no-claim",
-                        "--no-spool",
                     ],
                 ),
             )

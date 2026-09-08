@@ -43,7 +43,7 @@ _COL_ID = "id"
 # wide entries (the measured 108,741-char single-page specimen) still trips
 # it well under a context-blowing page. Page-level only (R4): bounds a whole
 # page's serialized size, never an individual entry.
-_ROLE_SECTION_BYTE_CEILING = 200_000
+ROLE_SECTION_BYTE_CEILING = 200_000
 
 
 def build_role_section(
@@ -57,7 +57,8 @@ def build_role_section(
     """Merge per-role pages into the global top-``limit`` + the next cursor.
 
     ``per_role_records`` is one ``query_ordered`` result list per held role
-    (each already ``(created_at, id)``-descending, capped at ``limit``, and —
+    (each already ``(created_at, id)``-descending, capped at ``limit + 1`` for
+    truthful global exhaustion, and —
     per the caller's own floor step — already excludes any row at/below that
     role's ``role_covered_mark`` unless the caller echoed back a history
     cursor). Returns ``(entries, next_role_cursor, role_floor_applied,
@@ -69,9 +70,10 @@ def build_role_section(
     1. **Byte-stop** — the byte-aware merge truncated the page short of
        ``limit`` rows. Mints a REAL continuation cursor from the last emitted
        row (there is unambiguously more to fetch).
-    2. **Row-limit-hit** — ``len(merged) == limit`` with no byte truncation —
-       today's existing signal, unchanged. Also mints a REAL continuation
-       cursor (more rows may follow; the floor has no bearing on this case).
+    2. **Lookahead-proven row limit** — one or more rows remain after the
+       emitted ``limit`` rows, with no byte truncation. Mints a REAL
+       continuation cursor. An exact-limit page with no lookahead is exhausted
+       and therefore returns ``None``.
     3. **Floor-stop** — no byte or row truncation, but the floor removed at
        least one already-covered row from some role's fetch this call. Mints
        ``next_role_cursor=None`` (the default drain genuinely IS complete)
@@ -94,8 +96,8 @@ def build_role_section(
     merged, byte_truncated = _take_within_byte_ceiling(flat, limit)
     entries = tuple(project_role_entry(record) for record in merged)
 
-    row_limit_hit = bool(merged) and len(merged) == limit and not byte_truncated
-    if byte_truncated or row_limit_hit:
+    has_more = len(flat) > len(merged)
+    if byte_truncated or has_more:
         last = merged[-1]
         next_cursor = encode_role_cursor(
             scope,
@@ -130,7 +132,7 @@ def _take_within_byte_ceiling(
     running_bytes = 0
     for record in row_capped:
         size = len(json.dumps(record, default=str))
-        if kept and running_bytes + size > _ROLE_SECTION_BYTE_CEILING:
+        if kept and running_bytes + size > ROLE_SECTION_BYTE_CEILING:
             return kept, True
         kept.append(record)
         running_bytes += size
@@ -166,6 +168,11 @@ def project_role_entry(record: dict[str, object]) -> PeerInboxEntry:
     sender_agent_id = str(record.get("sender_agent_id", ""))
     sender_agent_instance_id = str(record.get("sender_agent_instance_id", ""))
     sender_session_label = str(record.get("sender_session_label") or "")
+    sender_principal_kind = str(record.get("sender_principal_kind") or "unknown")
+    sender_transport_principal = str(
+        record.get("sender_transport_principal") or "unknown",
+    )
+    sender_identity_trust = str(record.get("sender_identity_trust") or "unknown")
     thread_id = str(record.get("thread_id", ""))
     message = AgentMessageRow(
         id=str(record.get("message_id", "")),
@@ -180,6 +187,9 @@ def project_role_entry(record: dict[str, object]) -> PeerInboxEntry:
             "sender_agent_id": sender_agent_id,
             "sender_agent_instance_id": sender_agent_instance_id,
             "sender_session_label": sender_session_label,
+            "sender_principal_kind": sender_principal_kind,
+            "sender_transport_principal": sender_transport_principal,
+            "sender_identity_trust": sender_identity_trust,
             "important": bool(record.get("important", False)),
         },
     )

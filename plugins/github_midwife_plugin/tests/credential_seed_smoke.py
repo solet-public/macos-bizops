@@ -27,6 +27,7 @@ plugins/github_midwife_plugin/tests/credential_seed_smoke.py``.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import getpass
 import io
 import os
@@ -35,6 +36,11 @@ import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 import github_midwife_plugin.credential_seed as _cs_module  # noqa: E402
 from fake_keychain import FakeKeychain  # noqa: E402
@@ -48,6 +54,7 @@ from github_midwife_plugin.credential_seed import (  # noqa: E402
     _default_role_exists,
     _default_sibling_connect_probe,
     _parse_seed_argv,
+    _resolve_psql_binary,
     seed_db_password,
 )
 
@@ -61,6 +68,7 @@ _CREDENTIAL = "db_password"
 _PGVECTOR_PLUGIN = "pgvector_service_plugin"
 _PGVECTOR_CREDENTIAL = "password"
 _SENTINEL_PW = "SENTINEL_PW_VALUE_do_not_leak_98765"
+_RESOLVED_PSQL = "/opt/homebrew/opt/postgresql@17/bin/psql"
 
 _CHECKS_RUN: list[str] = []
 
@@ -323,8 +331,82 @@ def _check_nothing_printed() -> None:
 # ── psql helpers: ALTER ROLE, role-authenticates, role-exists ───────────
 
 
+def _check_postgresql17_resolver_is_strict_and_keg_aware() -> None:
+    """Red mutations: missing brew fallback, unusable prefix, and non-executable keg.
+
+    The fixture deliberately models the genesis launch PATH where neither
+    Homebrew nor keg-only psql is visible. The resolver must find a validated
+    standard Homebrew executable before accepting only the approved formula
+    prefix; it must reject malformed/missing binaries rather than guessing a
+    prefix or falling back to PATH.
+    """
+    def _keg_only_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command == ["/opt/homebrew/bin/brew", "--version"]:
+            return _fake_completed(0, stdout="Homebrew 4.4.0\n")
+        if command == ["/opt/homebrew/bin/brew", "--prefix", "postgresql@17"]:
+            return _fake_completed(0, stdout="/opt/homebrew/opt/postgresql@17\n")
+        raise SmokeFailureError(f"unexpected command: {command!r}")
+
+    with patch("github_midwife_plugin.credential_seed.os.access", return_value=True), patch(
+        "github_midwife_plugin.credential_seed.Path.is_file", return_value=True,
+    ), patch(
+        "github_midwife_plugin.credential_seed.shutil.which", return_value=None,
+    ), patch(
+        "subprocess.run", side_effect=_keg_only_run,
+    ) as mock_run:
+        resolved = _resolve_psql_binary()
+    _check(
+        "bare-brew-and-psql-keg-only resolver reaches the PostgreSQL 17 Homebrew prefix",
+        resolved == _RESOLVED_PSQL,
+        resolved,
+    )
+    _check(
+        "resolver validates the standard Homebrew fallback before querying its PostgreSQL 17 prefix",
+        [call.args[0] for call in mock_run.call_args_list]
+        == [
+            ["/opt/homebrew/bin/brew", "--version"],
+            ["/opt/homebrew/bin/brew", "--prefix", "postgresql@17"],
+        ],
+        repr([call.args[0] for call in mock_run.call_args_list]),
+    )
+
+    with patch("github_midwife_plugin.credential_seed._resolve_brew_executable", return_value="brew"), patch(
+        "subprocess.run", return_value=_fake_completed(0, stdout="relative-prefix\n"),
+    ):
+        try:
+            _resolve_psql_binary()
+        except CredentialSeedError as exc:
+            _check(
+                "unresolvable-homebrew-prefix-refusal is named and actionable",
+                "PostgreSQL 17 psql" in str(exc) and "Repair" in str(exc),
+                str(exc),
+            )
+        else:
+            raise SmokeFailureError("unresolvable-homebrew-prefix-refusal: did not raise")
+
+    with patch("github_midwife_plugin.credential_seed._resolve_brew_executable", return_value="brew"), patch(
+        "github_midwife_plugin.credential_seed.Path.is_file", return_value=True,
+    ), patch(
+        "github_midwife_plugin.credential_seed.os.access", return_value=False,
+    ), patch(
+        "subprocess.run", return_value=_fake_completed(0, stdout="/opt/homebrew/opt/postgresql@17\n"),
+    ):
+        try:
+            _resolve_psql_binary()
+        except CredentialSeedError as exc:
+            _check(
+                "non-executable-keg-psql-refusal is named and actionable",
+                "executable `bin/psql`" in str(exc) and "Repair" in str(exc),
+                str(exc),
+            )
+        else:
+            raise SmokeFailureError("non-executable-keg-psql-refusal: did not raise")
+
+
 def _check_default_alter_role_password_passes_pw_via_stdin_not_argv() -> None:
-    with patch("subprocess.run", return_value=_fake_completed(0)) as mock_run:
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
+        "subprocess.run", return_value=_fake_completed(0),
+    ) as mock_run:
         _default_alter_role_password(_SENTINEL_PW)
     _, kwargs = mock_run.call_args
     cmd = mock_run.call_args.args[0]
@@ -343,10 +425,13 @@ def _check_default_alter_role_password_passes_pw_via_stdin_not_argv() -> None:
         "-U" in cmd and getpass.getuser() in cmd,
         f"cmd={cmd!r} getuser={getpass.getuser()!r}",
     )
+    _check("ALTER ROLE uses the resolved keg psql argv0", cmd[0] == _RESOLVED_PSQL, repr(cmd))
 
 
 def _check_default_alter_role_password_raises_on_failure() -> None:
-    with patch("subprocess.run", return_value=_fake_completed(1, stderr="permission denied")):
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
+        "subprocess.run", return_value=_fake_completed(1, stderr="permission denied"),
+    ):
         try:
             _default_alter_role_password(_SENTINEL_PW)
         except CredentialSeedError as exc:
@@ -363,7 +448,9 @@ def _check_default_alter_role_password_raises_on_failure() -> None:
 
 
 def _check_default_role_authenticates_passes_pw_via_env_not_argv() -> None:
-    with patch("subprocess.run", return_value=_fake_completed(0)) as mock_run:
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
+        "subprocess.run", return_value=_fake_completed(0),
+    ) as mock_run:
         result = _default_role_authenticates(_SENTINEL_PW)
     cmd = mock_run.call_args.args[0]
     _, kwargs = mock_run.call_args
@@ -378,8 +465,11 @@ def _check_default_role_authenticates_passes_pw_via_env_not_argv() -> None:
         kwargs.get("env", {}).get("PGPASSWORD") == _SENTINEL_PW,
         "PGPASSWORD not set correctly",
     )
+    _check("role-authenticates uses the resolved keg psql argv0", cmd[0] == _RESOLVED_PSQL, repr(cmd))
 
-    with patch("subprocess.run", return_value=_fake_completed(2)):
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
+        "subprocess.run", return_value=_fake_completed(2),
+    ):
         result_fail = _default_role_authenticates(_SENTINEL_PW)
     _check("role-authenticates returns False on non-zero exit", result_fail is False)
 
@@ -388,11 +478,17 @@ def _check_default_role_exists_parses_psql_output() -> None:
     """The role-existence probe replaces the retired pg_authid ownership probe:
     it queries `pg_roles` for this solet's own role and returns a plain
     bool (row present -> True, absent -> False)."""
-    with patch("subprocess.run", return_value=_fake_completed(0, stdout="1\n")):
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
+        "subprocess.run", return_value=_fake_completed(0, stdout="1\n"),
+    ):
         _check("pg_roles row '1' -> role exists True", _default_role_exists() is True)
-    with patch("subprocess.run", return_value=_fake_completed(0, stdout="\n")):
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
+        "subprocess.run", return_value=_fake_completed(0, stdout="\n"),
+    ):
         _check("pg_roles empty output -> role exists False", _default_role_exists() is False)
-    with patch("subprocess.run", return_value=_fake_completed(0, stdout="1\n")) as mock_run:
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
+        "subprocess.run", return_value=_fake_completed(0, stdout="1\n"),
+    ) as mock_run:
         _default_role_exists()
     cmd = mock_run.call_args.args[0]
     _check(
@@ -401,6 +497,7 @@ def _check_default_role_exists_parses_psql_output() -> None:
         f"cmd={cmd!r} getuser={getpass.getuser()!r}",
     )
     _check("the probe queries pg_roles", "pg_roles" in " ".join(cmd), f"cmd={cmd!r}")
+    _check("role-existence uses the resolved keg psql argv0", cmd[0] == _RESOLVED_PSQL, repr(cmd))
 
 
 def _check_default_role_exists_execution_failure_raises() -> None:
@@ -408,7 +505,9 @@ def _check_default_role_exists_execution_failure_raises() -> None:
     never be read as "role absent" -- that would route into a fresh seed whose
     ALTER then hits the same raw error the probe front-runs.
     """
-    with patch("subprocess.run", return_value=_fake_completed(2, stderr="psql: connection failed")):
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
+        "subprocess.run", return_value=_fake_completed(2, stderr="psql: connection failed"),
+    ):
         try:
             _default_role_exists()
         except CredentialSeedError as exc:
@@ -416,7 +515,9 @@ def _check_default_role_exists_execution_failure_raises() -> None:
         else:
             raise SmokeFailureError("role-exists-nonzero: did not raise")
 
-    with patch("subprocess.run", side_effect=OSError("psql binary missing")):
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
+        "subprocess.run", side_effect=OSError("psql binary missing"),
+    ):
         try:
             _default_role_exists()
         except CredentialSeedError as exc:
@@ -424,7 +525,9 @@ def _check_default_role_exists_execution_failure_raises() -> None:
         else:
             raise SmokeFailureError("role-exists-oserror: did not raise")
 
-    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["psql"], timeout=15)):
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
+        "subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=[_RESOLVED_PSQL], timeout=15),
+    ):
         try:
             _default_role_exists()
         except CredentialSeedError as exc:
@@ -433,13 +536,43 @@ def _check_default_role_exists_execution_failure_raises() -> None:
             raise SmokeFailureError("role-exists-timeout: did not raise")
 
 
+def _check_resolved_role_absent_preserves_wizard_step_1_refusal() -> None:
+    """A resolved client with no catalog row is role-absent, not resolution-failed.
+
+    This is the third red mutation: after the keg-only resolution succeeds, an
+    empty ``pg_roles`` response must retain the existing named wizard-step-1
+    repair and must not write either credential or ALTER the role.
+    """
+    kc = FakeKeychain()
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
+        "subprocess.run", return_value=_fake_completed(0, stdout="\n"),
+    ):
+        try:
+            seed_db_password(keychain=kc, role_authenticates=lambda _pw: False)
+        except CredentialSeedError as exc:
+            _check(
+                "resolved-role-absent-wizard-step-1 keeps the named repair",
+                "does not exist" in str(exc) and "wizard step 1" in str(exc),
+                str(exc),
+            )
+        else:
+            raise SmokeFailureError("resolved-role-absent-wizard-step-1: did not raise")
+    _check(
+        "resolved-role-absent-wizard-step-1 writes no credentials",
+        kc.snapshot() == {},
+        repr(kc.snapshot()),
+    )
+
+
 def _check_alter_role_stderr_never_leaks_password() -> None:
     """Codex must-fix 1 (2026-07-09): psql failure stderr can echo the SQL text
     (which embeds the password literal) back verbatim -- the fixed code must
     never do that.
     """
     poisoned_stderr = f"ERROR: syntax error at or near \"{_SENTINEL_PW}\""
-    with patch("subprocess.run", return_value=_fake_completed(1, stderr=poisoned_stderr)):
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
+        "subprocess.run", return_value=_fake_completed(1, stderr=poisoned_stderr),
+    ):
         try:
             _default_alter_role_password(_SENTINEL_PW)
         except CredentialSeedError as exc:
@@ -595,7 +728,7 @@ def _check_isolation_breach_when_connect_succeeds() -> None:
 
 
 def _check_default_sibling_connect_probe_passes_pw_via_env_not_argv() -> None:
-    with patch(
+    with patch("github_midwife_plugin.credential_seed._resolve_psql_binary", return_value=_RESOLVED_PSQL), patch(
         "subprocess.run", return_value=_fake_completed(2, stderr="permission denied for database"),
     ) as mock_run:
         _default_sibling_connect_probe("parent_db_xyz", _SENTINEL_PW)
@@ -612,6 +745,7 @@ def _check_default_sibling_connect_probe_passes_pw_via_env_not_argv() -> None:
         "PGPASSWORD not set correctly",
     )
     _check("sibling-connect targets the sibling database", "parent_db_xyz" in cmd, f"cmd={cmd!r}")
+    _check("sibling-connect uses the resolved keg psql argv0", cmd[0] == _RESOLVED_PSQL, repr(cmd))
 
 
 # ── CLI argv parsing ────────────────────────────────────────────────────
@@ -736,11 +870,13 @@ def main() -> int:
         _check_roundtrip_mismatch_raises()
         _check_solet_name_required()
         _check_nothing_printed()
+        _check_postgresql17_resolver_is_strict_and_keg_aware()
         _check_default_alter_role_password_passes_pw_via_stdin_not_argv()
         _check_default_alter_role_password_raises_on_failure()
         _check_default_role_authenticates_passes_pw_via_env_not_argv()
         _check_default_role_exists_parses_psql_output()
         _check_default_role_exists_execution_failure_raises()
+        _check_resolved_role_absent_preserves_wizard_step_1_refusal()
         _check_alter_role_stderr_never_leaks_password()
         _check_store_failure_leaves_role_untouched()
         _check_alter_failure_after_store_then_rerun_repairs()

@@ -18,11 +18,13 @@ Run:
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -47,19 +49,23 @@ from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
 )
 from ananta.llm.agent_messaging.state_results import require_records  # noqa: E402
 
+import agent_messaging_plugin.lane_worktrees as lane_worktrees  # noqa: E402
 import agent_messaging_plugin.session_hosts as session_hosts  # noqa: E402
+import agent_messaging_plugin.session_lifecycle_verbs as lifecycle_verbs  # noqa: E402
 from agent_messaging_plugin.headless_adapter import (  # noqa: E402
     _WORKER_INJECTED_HOOK_FILENAMES,
     HeadlessHostDriver,
 )
 from agent_messaging_plugin.schema import (  # noqa: E402
     CONDITION_SESSION_TERMINAL,
+    LIFECYCLE_IDLE,
     LIFECYCLE_LIVE,
     LIFECYCLE_OVERDUE,
     LIFECYCLE_PARKED,
     LIFECYCLE_RETIRED,
     LIFECYCLE_SPAWNING,
     LIFECYCLE_TERMINATED,
+    TABLE_MANAGED_DISPATCH,
     WORK_CLASS_ANALYSIS_DELIVERABLE,
 )
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
@@ -72,7 +78,6 @@ from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
 )
 from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
     DEFAULT_REPORT_BY_SECONDS,
-    FALLBACK_FIRST_TURN_TEMPLATE,
     FIRST_TURN_SOURCE_CHARTER,
     FIRST_TURN_SOURCE_FALLBACK,
     ArmSessionDependencyRequest,
@@ -117,6 +122,32 @@ def _state() -> StateManagementInterface:
     return cast("StateManagementInterface", RealShapeState())
 
 
+def test_lane_worktree_root_requires_app_home() -> None:
+    """A scratch checkout must never become a provisioning root by cwd inference."""
+    with tempfile.TemporaryDirectory() as raw:
+        scratch = Path(raw) / "scratch-checkout"
+        (scratch / ".git").mkdir(parents=True)
+        previous_app_home = os.environ.pop("APP_HOME", None)
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(scratch)
+            try:
+                lifecycle_verbs._resolve_lane_repo_root()  # noqa: SLF001
+            except VerbError as exc:
+                _check(
+                    exc.code == "lane_worktree_app_home_required",
+                    "APP_HOME-unset scratch checkout fails closed instead of inheriting cwd",
+                )
+            else:
+                _check(False, "APP_HOME-unset scratch checkout must fail closed")
+        finally:
+            os.chdir(previous_cwd)
+            if previous_app_home is None:
+                os.environ.pop("APP_HOME", None)
+            else:
+                os.environ["APP_HOME"] = previous_app_home
+
+
 def _spawn_req(**overrides: object) -> SpawnSessionRequest:
     base: dict[str, object] = {
         "role_class": "ephemeral",
@@ -126,9 +157,70 @@ def _spawn_req(**overrides: object) -> SpawnSessionRequest:
         "budget_line": "budget-1",
         "host": "operator",
         "directed_by": "operator:none",
+        "dispatch_kind": "infrastructure",
     }
     base.update(overrides)
     return SpawnSessionRequest(**base)  # type: ignore[arg-type]
+
+
+def _prepared_project_req(
+    state: StateManagementInterface,
+    **overrides: object,
+) -> SpawnSessionRequest:
+    """Mint the server-side preparing row required by project spawn tests."""
+    req = _spawn_req(role_class=ROLE_CLASS_PROJECT, **overrides)
+    dispatch_id = f"mdp-test-{time.time_ns()}"
+    state.write_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {
+            "table": TABLE_MANAGED_DISPATCH,
+            "record": {
+                "dispatch_id": dispatch_id,
+                "state": "preparing",
+                "current_agent_instance_id": "",
+                "lane_id": req.lane_id,
+                "role_name": req.role_name,
+                "role_class": req.role_class,
+                "work_class": req.work_class,
+                "budget_line": req.budget_line,
+                "brief_ref": req.brief_ref,
+                "agent_runtime": req.agent_runtime,
+                "host": str(req.host or ""),
+                "visibility": req.visibility,
+                "model": req.model,
+                "effort": req.effort,
+                "report_by_seconds": req.report_by_seconds,
+                "ttl_seconds": req.ttl_seconds,
+                "allowed_hosts": [str(req.host or "headless")],
+                "allowed_tools": list(req.allowed_tools),
+                "permission_mode": req.permission_mode,
+                "transport": req.transport,
+                "allow_askuserquestion": req.allow_askuserquestion,
+                "local_name": req.local_name,
+                "degraded_hooks_acknowledged": req.degraded_hooks_acknowledged,
+                "version": 0,
+                "attempt_number": 1,
+                "spawned_by_role": req.spawned_by_role,
+                "spawned_by_instance_id": req.spawned_by_instance_id,
+                "directed_by": req.directed_by,
+            },
+        },
+    )
+    return replace(req, dispatch_id=dispatch_id)
+
+
+def test_raw_project_spawn_requires_prepared_dispatch() -> None:
+    """Fixture 16: raw managed-work creation has no compatibility fallback."""
+    state = _state()
+    code = ""
+    try:
+        spawn_session(
+            state,
+            _spawn_req(role_class=ROLE_CLASS_PROJECT, role_name="Project-Builder"),
+        )
+    except VerbError as exc:
+        code = exc.code
+    _check(code == "managed_dispatch_required", "16 raw project spawn is hard-refused")
 
 
 def test_spawn_errors() -> None:
@@ -208,6 +300,87 @@ def test_spawn_errors() -> None:
     )
 
 
+def test_model_dispatch_policy_refusals_and_allowances() -> None:
+    """The policy is enforced before a host dispatch or ledger write."""
+    state = _state()
+    missing = None
+    try:
+        spawn_session(state, _spawn_req(dispatch_kind=""))
+    except VerbError as exc:
+        missing = exc.code
+    _check(missing == "dispatch_kind_required", "omitted dispatch_kind refuses")
+
+    # claude-opus-5 and claude-fable-5-1 became allowed `fix` pairs under
+    # rul_14c0cefb; claude-sonnet-5 keeps this negative control pointed at a
+    # claude model the policy still refuses, so the refusal path stays covered.
+    refused = None
+    try:
+        spawn_session(
+            state,
+            _spawn_req(dispatch_kind="fix", agent_runtime="claude_code", model="claude-sonnet-5"),
+        )
+    except VerbError as exc:
+        refused = exc.code
+    _check(refused == "dispatch_policy_violation", "fix with claude-sonnet-5 refuses")
+
+    allowed = None
+    try:
+        allowed = spawn_session(
+            state,
+            _spawn_req(dispatch_kind="fix", agent_runtime="claude_code", model="claude-opus-5"),
+        )
+    except VerbError as exc:
+        allowed = exc.code
+    _check(allowed != "dispatch_policy_violation", "fix with claude-opus-5 is not refused by policy")
+
+    _install_fake_hosts()
+    codex_host_key = (session_hosts.AGENT_RUNTIME_CODEX, _TEST_HOST)
+    session_hosts._REGISTRY[codex_host_key] = _FakeDriverWithChannel()  # noqa: SLF001
+    try:
+        fixed = spawn_session(
+            state,
+            _spawn_req(
+                host=_TEST_HOST, lane_id="policy-fix", dispatch_kind="fix",
+                agent_runtime="codex", model="gpt-5.6-terra",
+            ),
+        )
+        _check(bool(fixed.get("agent_instance_id")), "fix with gpt-5.6-terra passes")
+
+        same_vendor = None
+        try:
+            spawn_session(
+                state,
+                _spawn_req(
+                    host=_TEST_HOST, lane_id="policy-review-same", dispatch_kind="review",
+                    agent_runtime="codex", model="gpt-5.6-terra", reviewed_report_vendor="codex",
+                ),
+            )
+        except VerbError as exc:
+            same_vendor = exc.code
+        _check(same_vendor == "dispatch_policy_violation", "review by report author vendor refuses")
+
+        review = spawn_session(
+            state,
+            _spawn_req(
+                host=_TEST_HOST, lane_id="policy-review-cross", dispatch_kind="review",
+                agent_runtime="codex", model="gpt-5.6-terra", reviewed_report_vendor="claude_code",
+            ),
+        )
+        _check(bool(review.get("agent_instance_id")), "cross-vendor review passes")
+
+        infrastructure = spawn_session(
+            state,
+            _spawn_req(
+                host=_TEST_HOST, lane_id="policy-infrastructure", dispatch_kind="infrastructure",
+                agent_runtime="claude_code", model="unprofiled-fixture-model",
+            ),
+        )
+        _check(bool(infrastructure.get("agent_instance_id")), "infrastructure accepts any model")
+    finally:
+        session_hosts._REGISTRY.pop(codex_host_key, None)  # noqa: SLF001
+        _remove_fake_hosts()
+
+
 def test_spawn_role_class_conflict() -> None:
     state = _state()
     # Legislate 'Some-Office' as principal directly (simulating the D4
@@ -265,16 +438,16 @@ def test_spawn_refuses_second_session_under_a_live_local_name() -> None:
     try:
         spawn_session(
             state,
-            _spawn_req(
-                host=_TEST_HOST, role_class=ROLE_CLASS_PROJECT, role_name="Git-Controller",
+            _prepared_project_req(
+                state, host=_TEST_HOST, role_name="Git-Controller",
             ),
         )
         code, message = None, ""
         try:
             spawn_session(
                 state,
-                _spawn_req(
-                    host=_TEST_HOST, role_class=ROLE_CLASS_PROJECT, role_name="Git-Controller",
+                _prepared_project_req(
+                    state, host=_TEST_HOST, role_name="Git-Controller",
                 ),
             )
         except VerbError as exc:
@@ -299,8 +472,8 @@ def test_spawn_allows_replacement_after_incumbent_terminated() -> None:
     try:
         first = spawn_session(
             state,
-            _spawn_req(
-                host=_TEST_HOST, role_class=ROLE_CLASS_PROJECT, role_name="Git-Controller",
+            _prepared_project_req(
+                state, host=_TEST_HOST, role_name="Git-Controller",
             ),
         )
         terminate_session(
@@ -308,8 +481,8 @@ def test_spawn_allows_replacement_after_incumbent_terminated() -> None:
         )
         replaced = spawn_session(
             state,
-            _spawn_req(
-                host=_TEST_HOST, role_class=ROLE_CLASS_PROJECT, role_name="Git-Controller",
+            _prepared_project_req(
+                state, host=_TEST_HOST, role_name="Git-Controller",
             ),
         )
         _check(
@@ -329,8 +502,8 @@ def test_spawn_does_not_claim_the_role_binding() -> None:
     try:
         result = spawn_session(
             state,
-            _spawn_req(
-                host=_TEST_HOST, role_class=ROLE_CLASS_PROJECT, role_name="Git-Controller",
+            _prepared_project_req(
+                state, host=_TEST_HOST, role_name="Git-Controller",
             ),
         )
         rows = require_records(
@@ -384,6 +557,10 @@ def test_list_and_status() -> None:
     )
     row = session_status(state, "agi-x")
     _check(row["lifecycle_state"] == LIFECYCLE_SPAWNING, "session_status returns the ledger row")
+    _check(
+        row["coordination_state"] == "legacy_unsupervised",
+        "nonterminal historical row projects as legacy_unsupervised",
+    )
 
     not_found = None
     try:
@@ -392,14 +569,28 @@ def test_list_and_status() -> None:
         not_found = exc.code
     _check(not_found == "session_not_found", "session_status(unknown) -> session_not_found")
 
+    listed = list_sessions(state, {"lane_id": "lane-x"})["sessions"]
+    _check(len(listed) == 1, "list_sessions filters by lane_id")
     _check(
-        len(list_sessions(state, {"lane_id": "lane-x"})["sessions"]) == 1,
-        "list_sessions filters by lane_id",
+        listed[0]["coordination_state"] == "legacy_unsupervised",
+        "list_sessions exposes the same legacy projection",
+    )
+    transition_lifecycle_state(
+        state,
+        agent_instance_id="agi-x",
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_TERMINATED,
+        directed_by="test",
+    )
+    _check(
+        session_status(state, "agi-x")["coordination_state"] == "legacy_unmanaged",
+        "terminal historical row projects as legacy_unmanaged",
     )
 
 
 _TEST_HOST = "test-driver-host"
 _TEST_HOST_NO_CHANNEL = "test-driver-host-no-channel"
+_TEST_HOST_RUNTIME_ROUTING = "test-driver-runtime-routing"
 
 
 class _FakeChannel:
@@ -408,6 +599,21 @@ class _FakeChannel:
 
     def send(self, text: str) -> None:
         self.sent.append(text)
+
+
+class _FakeVerifyingChannel(_FakeChannel):
+    def verify_driven(self, text: str) -> bool:
+        return text in self.sent
+
+
+class _FakeParkInterruptingVerifyingChannel(_FakeVerifyingChannel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupts = 0
+
+    def interrupt_park(self) -> str:
+        self.interrupts += 1
+        return "interrupted_park"
 
 
 class _FakeDriverWithChannel:
@@ -914,7 +1120,8 @@ def test_charter_frame_ships_instruments_and_the_claim_first_instruction() -> No
         )
         spawn_session(
             state,
-            _spawn_req(
+            _prepared_project_req(
+                state,
                 host=_TEST_HOST, lane_id="lane-lif05", role_name="lane-lif05",
                 spawned_by_role="coordinator-seat",
             ),
@@ -958,11 +1165,8 @@ def test_charter_frame_ships_instruments_and_the_claim_first_instruction() -> No
         _remove_fake_hosts()
 
 
-def test_charter_frame_asks_rather_than_guessing_when_no_role_name_is_recorded() -> None:
-    """LIF-05, the other half: a spawn with no ``role_name`` on the row must
-    not hand the lane a name to invent. A guessed role name is worse than no
-    name — it claims a binding nobody routes to, so the lane reads as
-    addressable while still being unreachable."""
+def test_ephemeral_charter_frame_never_requests_a_role() -> None:
+    """An ephemeral charter is not a nameless project-role spawn."""
     state = _state()
     _install_fake_hosts()
     try:
@@ -980,13 +1184,17 @@ def test_charter_frame_asks_rather_than_guessing_when_no_role_name_is_recorded()
         driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
         driven = driver.channel.sent[0] if driver.channel.sent else ""
         _check(
-            "ask rather than inventing one" in driven,
-            "with no role_name recorded, the frame tells the lane to ASK for its name",
+            "no role exists or will be assigned" in driven,
+            "an ephemeral charter states that no durable role will be assigned",
         )
         _check(
-            "your row's role_name is" not in driven,
-            "...and never presents a name as if the row had recorded one (a derived "
-            "lane_id offered as the role_name is the guess this branch exists to avoid)",
+            "CLAIM YOUR ROLE BINDING FIRST" not in driven
+            and "ask rather than inventing one" not in driven,
+            "an ephemeral charter neither claims nor asks for a role name",
+        )
+        _check(
+            "`solet-bridge inbox`" in driven and "`solet inbox`" not in driven,
+            "the charter frame names the bridge inbox command, never the manager command",
         )
     finally:
         _remove_fake_hosts()
@@ -1009,7 +1217,10 @@ def test_spawn_session_drives_fallback_when_no_charter_on_file() -> None:
         _check(result["first_turn_delivered"] is True, "the fallback turn was delivered")
         driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
         expected = build_fallback_first_turn(
-            spawned_by_role="", role_name="", brief_ref="workbench/brief.md",
+            spawned_by_role="",
+            role_class="ephemeral",
+            role_name="",
+            brief_ref="workbench/brief.md",
         )
         _check(
             driver.channel.sent == [expected],
@@ -1017,12 +1228,60 @@ def test_spawn_session_drives_fallback_when_no_charter_on_file() -> None:
             f"{driver.channel.sent!r})",
         )
         _check(
-            expected != FALLBACK_FIRST_TURN_TEMPLATE,
-            "the template is RENDERED, not driven raw — an unsubstituted {field} reaching "
-            "a live pane would be the defect this check exists to catch",
+            "{" not in expected and "}" not in expected,
+            "the JSON template is rendered with no unsubstituted placeholder reaching a pane",
         )
     finally:
         _remove_fake_hosts()
+
+
+def test_spawn_session_first_turn_preserves_agent_runtime() -> None:
+    """Regression for the live 2026-08-22 Codex spawn failure.
+
+    The spawn half resolved ``(agent_runtime='codex', host='headless')`` and
+    created a real Codex app-server, but the immediate first-turn half rebuilt
+    the driver lookup without ``agent_runtime``.  That silently selected the
+    default Claude driver, which could not recognize the Codex host reference,
+    and returned ``first_turn_delivered=False`` over a live stranded worker.
+
+    The two runtime drivers deliberately disagree here: only the Codex driver
+    has a channel.  Dropping runtime propagation therefore makes this fixture
+    red without any real process or model turn.
+    """
+    state = _state()
+    codex_key = (session_hosts.AGENT_RUNTIME_CODEX, _TEST_HOST_RUNTIME_ROUTING)
+    claude_key = (session_hosts.AGENT_RUNTIME_CLAUDE_CODE, _TEST_HOST_RUNTIME_ROUTING)
+    prior_codex = session_hosts._REGISTRY.get(codex_key)  # noqa: SLF001
+    prior_claude = session_hosts._REGISTRY.get(claude_key)  # noqa: SLF001
+    codex_driver = _FakeDriverWithChannel()
+    session_hosts._REGISTRY[codex_key] = codex_driver  # noqa: SLF001
+    session_hosts._REGISTRY[claude_key] = _FakeDriverNoChannel()  # noqa: SLF001
+    try:
+        result = spawn_session(
+            state,
+            _spawn_req(
+                host=_TEST_HOST_RUNTIME_ROUTING,
+                agent_runtime=session_hosts.AGENT_RUNTIME_CODEX,
+                lane_id="lane-codex-runtime-first-turn",
+            ),
+        )
+        _check(
+            result["first_turn_delivered"] is True,
+            "Codex spawn resolves the first-turn channel through the Codex runtime driver",
+        )
+        _check(
+            len(codex_driver.channel.sent) == 1,
+            "the first turn reaches the same runtime-specific driver that performed spawn",
+        )
+    finally:
+        if prior_codex is None:
+            session_hosts._REGISTRY.pop(codex_key, None)  # noqa: SLF001
+        else:
+            session_hosts._REGISTRY[codex_key] = prior_codex  # noqa: SLF001
+        if prior_claude is None:
+            session_hosts._REGISTRY.pop(claude_key, None)  # noqa: SLF001
+        else:
+            session_hosts._REGISTRY[claude_key] = prior_claude  # noqa: SLF001
 
 
 def test_fallback_first_turn_hands_off_to_the_spawner() -> None:
@@ -1047,7 +1306,8 @@ def test_fallback_first_turn_hands_off_to_the_spawner() -> None:
     try:
         spawn_session(
             state,
-            _spawn_req(
+            _prepared_project_req(
+                state,
                 host=_TEST_HOST, lane_id="lane-spn01", role_name="lane-spn01",
                 brief_ref="workbench/spn01-brief.md", spawned_by_role="coordinator-seat",
             ),
@@ -1087,30 +1347,34 @@ def test_fallback_first_turn_hands_off_to_the_spawner() -> None:
         _remove_fake_hosts()
 
 
-def test_fallback_first_turn_asks_rather_than_guessing_what_the_row_lacks() -> None:
-    """SPN-01, the degradation half: a spawn with no role_name, no brief_ref
-    and no spawning role recorded must still produce a turn that is honest
-    about each gap rather than inventing a name, a brief or a recipient. A
-    lane that claims a made-up binding reads as addressable while routing
-    nowhere — strictly worse than one that says it has no name."""
+def test_ephemeral_fallback_preserves_the_brief_and_never_requests_a_role() -> None:
+    """DEFECT 1: no role request for an ephemeral fallback; brief_ref is literal."""
     state = _state()
     _install_fake_hosts()
     try:
-        spawn_session(state, _spawn_req(host=_TEST_HOST, lane_id="lane-spn01-bare", brief_ref=""))
+        brief_ref = "/tmp/briefs/codex-bootstrap.md sha256 deadbeef"
+        spawn_session(
+            state,
+            _spawn_req(host=_TEST_HOST, lane_id="lane-spn01-bare", brief_ref=brief_ref),
+        )
         driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
         driven = driver.channel.sent[0] if driver.channel.sent else ""
         _check(
-            "ask rather than inventing one" in driven,
-            "no role_name recorded -> the turn tells the lane to ASK for its name",
+            "no role exists or will be assigned" in driven,
+            "ephemeral fallback states the no-role contract",
         )
         _check(
-            "no brief_ref" in driven and "rather than guessing at the work" in driven,
-            "no brief_ref recorded -> the turn says so instead of pointing at nothing",
+            brief_ref in driven,
+            "the supplied absolute brief_ref is carried verbatim into the fallback",
         )
         _check(
-            "whoever spawned you" in driven,
-            "no spawning role recorded -> the handoff still has a stated recipient, "
-            "described honestly rather than fabricated",
+            "CLAIM YOUR ROLE BINDING FIRST" not in driven
+            and "ask rather than inventing one" not in driven,
+            "ephemeral fallback neither claims nor asks for a role",
+        )
+        _check(
+            "`solet-bridge inbox`" in driven and "`solet inbox`" not in driven,
+            "the fallback names the bridge inbox command, never the manager command",
         )
     finally:
         _remove_fake_hosts()
@@ -1265,7 +1529,8 @@ def test_drive_session_dispatches_and_unparks() -> None:
     """Green legs + their named failing mutations: removing the
     ``channel.send(text)`` call reds "sends the text"; removing the
     parked->live transition reds "drives parked -> live"; removing the
-    ``_rearm_report_by`` call reds "re-arms report_by"."""
+    confirmed-drive guard from ``_rearm_report_by`` reds "unverified drive
+    preserves the reporting deadline"."""
     _install_fake_hosts()
     try:
         state = _state()
@@ -1281,6 +1546,7 @@ def test_drive_session_dispatches_and_unparks() -> None:
         # Dispatch-at-spawn: a 'spawning' row is drivable (the brief can be
         # sent the moment spawn_session returns); the registration hook
         # still owns the spawning->live edge, so no transition here.
+        report_by_before_first = read_managed_session(state, "agi-drive-1").get("report_by")
         spawning_result = drive_session(
             state, agent_instance_id="agi-drive-1", text="Brief: build the tmux driver.",
             directed_by="steward:none",
@@ -1294,11 +1560,15 @@ def test_drive_session_dispatches_and_unparks() -> None:
                 "lifecycle_state": LIFECYCLE_SPAWNING, "unparked": False,
                 "dispatched": True, "submitted": None,
                 "drive_verification": "unsupported_on_driver",
+                "drive_on_delivery_detail": None,
             },
             "drive_session on a 'spawning' row dispatches without a transition",
         )
         report_by_after_first = read_managed_session(state, "agi-drive-1").get("report_by")
-        _check(bool(report_by_after_first), "drive_session re-arms report_by on dispatch")
+        _check(
+            report_by_after_first == report_by_before_first,
+            "an unsupported-on-driver dispatch preserves the reporting deadline",
+        )
 
         # parked -> live: the §3.2 "new dispatch through the driver channel"
         # edge, owned by this verb alone.
@@ -1310,26 +1580,42 @@ def test_drive_session_dispatches_and_unparks() -> None:
             state, agent_instance_id="agi-drive-1", from_state=LIFECYCLE_LIVE,
             to_state=LIFECYCLE_PARKED, directed_by="steward:none",
         )
+        driver.channel = _FakeParkInterruptingVerifyingChannel()
+        report_by_before_confirmed = read_managed_session(state, "agi-drive-1").get("report_by")
         unpark_result = drive_session(
             state, agent_instance_id="agi-drive-1", text="Follow-up: land it.",
             directed_by="steward:none",
         )
         _check(
-            driver.channel.sent
-            == ["Brief: build the tmux driver.", "Follow-up: land it."],
+            driver.channel.sent == ["Follow-up: land it."],
             "a second drive_session sends the follow-up text",
+        )
+        _check(
+            driver.channel.interrupts == 1,
+            "a parked drive interrupts its declared parked-pane channel before sending text",
+        )
+        _check(
+            unpark_result.get("drive_on_delivery_detail") == "interrupted_park",
+            "a parked drive reports the measured interrupt recovery detail",
         )
         _check(
             unpark_result == {
                 "lifecycle_state": LIFECYCLE_LIVE, "unparked": True,
-                "dispatched": True, "submitted": None,
-                "drive_verification": "unsupported_on_driver",
+                "dispatched": True, "submitted": True,
+                "drive_verification": "confirmed",
+                "drive_on_delivery_detail": "interrupted_park",
             },
             "drive_session drives parked -> live (unparked=True)",
         )
         _check(
             read_managed_session(state, "agi-drive-1")["lifecycle_state"] == LIFECYCLE_LIVE,
             "the ledger row is 'live' after driving a parked session",
+        )
+        confirmed_row = read_managed_session(state, "agi-drive-1")
+        _check(
+            confirmed_row.get("report_by") != report_by_before_confirmed
+            and confirmed_row.get("report_by_source") == "confirmed_drive",
+            "only a confirmed drive re-arms report_by with confirmed-drive provenance",
         )
     finally:
         _remove_fake_hosts()
@@ -1720,10 +2006,28 @@ def test_report_alive() -> None:
         "report_alive re-arms report_by even when NO transition occurs "
         "(the same-status branch)",
     )
+    heartbeat = _report("heartbeat")
+    after_heartbeat = read_managed_session(state, "agi-a")
+    _check(
+        heartbeat["lifecycle_state"] == LIFECYCLE_IDLE
+        and after_heartbeat["lifecycle_state"] == LIFECYCLE_IDLE,
+        "a passive heartbeat preserves an explicit idle status",
+    )
+    _check(
+        after_heartbeat.get("last_heartbeat_at") is not None
+        and after_heartbeat.get("report_by") == after2.get("report_by"),
+        "a passive heartbeat records liveness without rearming report_by",
+    )
+    later = _report("working")
+    _check(
+        later["lifecycle_state"] == LIFECYCLE_LIVE
+        and read_managed_session(state, "agi-a").get("status_source") == "explicit_self_report",
+        "a later explicit working report supersedes idle with explicit provenance",
+    )
 
     # overdue recovery
     transition_lifecycle_state(
-        state, agent_instance_id="agi-a", from_state="idle",
+        state, agent_instance_id="agi-a", from_state=LIFECYCLE_LIVE,
         to_state=LIFECYCLE_OVERDUE, directed_by="sweep:none",
     )
     recovered = _report("working")
@@ -2025,43 +2329,175 @@ def test_drive_session_rearm_honors_spawn_window() -> None:
         session_hosts._REGISTRY.pop(_TEST_HOST, None)  # noqa: SLF001
 
 
+def test_provision_surfaces_typed_dirty_stale_worktree_warning() -> None:
+    """SPN-04: one retained dirty tree cannot hide or block another lane spawn."""
+    repo_root = Path("/fixture-repo")
+    stale_path = Path("/fixture-lanes/stale--agi-stale")
+    requested = lifecycle_verbs.LaneWorktree(
+        repo_root=repo_root,
+        root=Path("/fixture-lanes"),
+        path=Path("/fixture-lanes/fresh--agi-fresh"),
+        branch="lane/fresh/agi-fresh",
+    )
+    warning = lane_worktrees.DirtyStaleWorktreeSkippedWarning(
+        path=stale_path,
+        git_diagnostic="git worktree remove refused dirty tracked.txt",
+    )
+    original_root = lifecycle_verbs._resolve_lane_repo_root  # noqa: SLF001
+    original_active = lifecycle_verbs._active_lane_worktree_paths  # noqa: SLF001
+    original_sweep = lifecycle_verbs.sweep_orphaned_lane_worktrees  # noqa: SLF001
+    original_worktree_for = lifecycle_verbs.lane_worktree_for  # noqa: SLF001
+    original_provision = lifecycle_verbs.provision_lane_worktree  # noqa: SLF001
+    emitted: list[str] = []
+
+    class _WarningCapture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            emitted.append(record.getMessage())
+
+    handler = _WarningCapture(level=logging.WARNING)
+    lifecycle_verbs.logger.addHandler(handler)  # noqa: SLF001
+    try:
+        lifecycle_verbs._resolve_lane_repo_root = lambda: repo_root  # type: ignore[assignment]  # noqa: SLF001
+        lifecycle_verbs._active_lane_worktree_paths = (  # type: ignore[assignment]  # noqa: SLF001
+            lambda _state, _repo: ()
+        )
+        lifecycle_verbs.sweep_orphaned_lane_worktrees = (  # type: ignore[assignment]  # noqa: SLF001
+            lambda *_args, **_kwargs: lane_worktrees.LaneWorktreeSweep(
+                removed=(), skipped=(warning,),
+            )
+        )
+        lifecycle_verbs.lane_worktree_for = (  # type: ignore[assignment]  # noqa: SLF001
+            lambda *_args, **_kwargs: requested
+        )
+        lifecycle_verbs.provision_lane_worktree = (  # type: ignore[assignment]  # noqa: SLF001
+            lambda worktree: _check(
+                worktree == requested,
+                "a dirty stale tree does not block the requested lane provision",
+            )
+        )
+        result = lifecycle_verbs._provision_spawn_worktree(  # noqa: SLF001
+            _state(), role_name="fresh", agent_instance_id="agi-fresh",
+        )
+    finally:
+        lifecycle_verbs.logger.removeHandler(handler)  # noqa: SLF001
+        lifecycle_verbs._resolve_lane_repo_root = original_root  # type: ignore[assignment]  # noqa: SLF001
+        lifecycle_verbs._active_lane_worktree_paths = original_active  # type: ignore[assignment]  # noqa: SLF001
+        lifecycle_verbs.sweep_orphaned_lane_worktrees = original_sweep  # type: ignore[assignment]  # noqa: SLF001
+        lifecycle_verbs.lane_worktree_for = original_worktree_for  # type: ignore[assignment]  # noqa: SLF001
+        lifecycle_verbs.provision_lane_worktree = original_provision  # type: ignore[assignment]  # noqa: SLF001
+    _check(result == requested, "the requested lane is returned after the stale-tree warning")
+    _check(
+        emitted == [
+            "dirty_stale_worktree_skipped: path=/fixture-lanes/stale--agi-stale "
+            "git_diagnostic=git worktree remove refused dirty tracked.txt"
+        ],
+        "typed warning carries the exact stale path and Git diagnostic",
+    )
+
+
 def main() -> int:
-    test_spawn_errors()
-    test_spawn_role_class_conflict()
-    test_local_name_defaults_by_role_class()
-    test_spawn_refuses_second_session_under_a_live_local_name()
-    test_spawn_allows_replacement_after_incumbent_terminated()
-    test_spawn_does_not_claim_the_role_binding()
-    test_spawn_lane_named_workers_do_not_collide_on_role()
-    test_list_and_status()
-    test_clear_session_sends_and_can_park()
-    test_compact_session_sends_no_park()
-    test_drive_session_dispatches_and_unparks()
-    test_drive_session_errors()
-    test_clear_and_compact_errors()
-    test_terminate_idempotent()
-    test_terminate_session_kills_the_real_headless_process()
-    test_retire_idempotent_and_redrivable()
-    test_report_alive()
-    test_report_alive_parked_refusal_is_distinct_from_the_terminal_one()
-    test_rearm_report_by_honors_spawn_window()
-    test_insert_managed_session_arms_report_by_for_non_operator_hosts()
-    test_drive_session_rearm_honors_spawn_window()
-    test_terminate_fires_and_delivers_session_terminal_edge()
-    test_retire_composes_terminate_no_double_delivery()
-    test_terminate_delivery_fault_is_contained()
-    test_already_terminal_catches_orphaned_edge()
-    test_capture_lane_charter_validation_errors()
-    test_capture_lane_charter_is_insert_only_and_supersedes_by_recency()
-    test_resolve_lane_charter_empty_for_unknown_lane()
-    test_spawn_session_drives_charter_as_first_turn_byte_exact()
-    test_charter_frame_ships_instruments_and_the_claim_first_instruction()
-    test_charter_frame_asks_rather_than_guessing_when_no_role_name_is_recorded()
-    test_spawn_session_drives_fallback_when_no_charter_on_file()
-    test_fallback_first_turn_hands_off_to_the_spawner()
-    test_fallback_first_turn_asks_rather_than_guessing_what_the_row_lacks()
-    test_spawn_session_first_turn_failure_is_visible_not_blocking()
-    test_spawn_session_first_turn_send_raising_is_contained()
+    test_provision_surfaces_typed_dirty_stale_worktree_warning()
+    fixture_temp = tempfile.TemporaryDirectory()
+    fixture_root = Path(fixture_temp.name)
+    original_provision = lifecycle_verbs._provision_spawn_worktree  # noqa: SLF001
+    original_adjudicate = lifecycle_verbs._adjudicate_retire_lane_worktree  # noqa: SLF001
+    original_retire = lifecycle_verbs._retire_lane_worktree  # noqa: SLF001
+    original_remove = lifecycle_verbs.remove_lane_worktree  # noqa: SLF001
+    provisioning_calls: list[tuple[str, str, lifecycle_verbs.LaneWorktree]] = []
+    retirement_calls: list[dict[str, object]] = []
+    cleanup_calls: list[lifecycle_verbs.LaneWorktree] = []
+
+    def fixture_provision(
+        state: StateManagementInterface, *, role_name: str, agent_instance_id: str,
+    ) -> lifecycle_verbs.LaneWorktree:
+        del state
+        worktree = lifecycle_verbs.LaneWorktree(
+            repo_root=fixture_root, root=fixture_root, path=fixture_root,
+            branch=f"fixture/{role_name}/{agent_instance_id}",
+        )
+        provisioning_calls.append((role_name, agent_instance_id, worktree))
+        return worktree
+
+    def fixture_retire(row: dict[str, object]) -> str:
+        retirement_calls.append(row)
+        return "removed"
+
+    def fixture_adjudicate(row: dict[str, object]) -> None:
+        del row
+
+    def fixture_cleanup(worktree: lifecycle_verbs.LaneWorktree) -> None:
+        cleanup_calls.append(worktree)
+
+    lifecycle_verbs._provision_spawn_worktree = fixture_provision  # type: ignore[assignment]  # noqa: SLF001
+    lifecycle_verbs._adjudicate_retire_lane_worktree = fixture_adjudicate  # type: ignore[assignment]  # noqa: SLF001
+    lifecycle_verbs._retire_lane_worktree = fixture_retire  # type: ignore[assignment]  # noqa: SLF001
+    lifecycle_verbs.remove_lane_worktree = fixture_cleanup  # type: ignore[assignment]  # noqa: SLF001
+    try:
+        test_lane_worktree_root_requires_app_home()
+        test_spawn_errors()
+        test_model_dispatch_policy_refusals_and_allowances()
+        test_spawn_role_class_conflict()
+        test_raw_project_spawn_requires_prepared_dispatch()
+        test_local_name_defaults_by_role_class()
+        test_spawn_refuses_second_session_under_a_live_local_name()
+        test_spawn_allows_replacement_after_incumbent_terminated()
+        test_spawn_does_not_claim_the_role_binding()
+        test_spawn_lane_named_workers_do_not_collide_on_role()
+        test_list_and_status()
+        test_clear_session_sends_and_can_park()
+        test_compact_session_sends_no_park()
+        test_drive_session_dispatches_and_unparks()
+        test_drive_session_errors()
+        test_clear_and_compact_errors()
+        test_terminate_idempotent()
+        test_terminate_session_kills_the_real_headless_process()
+        test_retire_idempotent_and_redrivable()
+        test_report_alive()
+        test_report_alive_parked_refusal_is_distinct_from_the_terminal_one()
+        test_rearm_report_by_honors_spawn_window()
+        test_insert_managed_session_arms_report_by_for_non_operator_hosts()
+        test_drive_session_rearm_honors_spawn_window()
+        test_terminate_fires_and_delivers_session_terminal_edge()
+        test_retire_composes_terminate_no_double_delivery()
+        test_terminate_delivery_fault_is_contained()
+        test_already_terminal_catches_orphaned_edge()
+        test_capture_lane_charter_validation_errors()
+        test_capture_lane_charter_is_insert_only_and_supersedes_by_recency()
+        test_resolve_lane_charter_empty_for_unknown_lane()
+        test_spawn_session_drives_charter_as_first_turn_byte_exact()
+        test_charter_frame_ships_instruments_and_the_claim_first_instruction()
+        test_ephemeral_charter_frame_never_requests_a_role()
+        test_spawn_session_drives_fallback_when_no_charter_on_file()
+        test_spawn_session_first_turn_preserves_agent_runtime()
+        test_fallback_first_turn_hands_off_to_the_spawner()
+        test_ephemeral_fallback_preserves_the_brief_and_never_requests_a_role()
+        test_spawn_session_first_turn_failure_is_visible_not_blocking()
+        test_spawn_session_first_turn_send_raising_is_contained()
+        _check(
+            bool(provisioning_calls)
+            and all(
+                worktree.root == fixture_root
+                and worktree.repo_root == fixture_root
+                and worktree.path == fixture_root
+                and worktree.branch == f"fixture/{role_name}/{agent_instance_id}"
+                for role_name, agent_instance_id, worktree in provisioning_calls
+            ),
+            "fixture provisioning records every spawn's expected lane branch and root",
+        )
+        _check(
+            any(str(row.get("lifecycle_state") or "") == LIFECYCLE_TERMINATED for row in retirement_calls),
+            "fixture teardown records retirement after the terminal transition",
+        )
+        _check(
+            bool(cleanup_calls),
+            "fixture cleanup records host-failed spawn teardown rather than silently swallowing it",
+        )
+    finally:
+        lifecycle_verbs._provision_spawn_worktree = original_provision  # type: ignore[assignment]  # noqa: SLF001
+        lifecycle_verbs._adjudicate_retire_lane_worktree = original_adjudicate  # type: ignore[assignment]  # noqa: SLF001
+        lifecycle_verbs._retire_lane_worktree = original_retire  # type: ignore[assignment]  # noqa: SLF001
+        lifecycle_verbs.remove_lane_worktree = original_remove  # type: ignore[assignment]  # noqa: SLF001
+        fixture_temp.cleanup()
 
     print()
     print(f"PASSED: {_passed}")

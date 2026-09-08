@@ -13,8 +13,11 @@ reports "rotation due" EARLIER than it would with its real, larger ceiling
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+
 
 # Model identifier -> total context-window token ceiling. Populated 2026-08-07
 # (seat-supplied, ruling 3 review). Citable sources:
@@ -32,12 +35,46 @@ from datetime import datetime
 # catch is arithmetically consistent with a 1,000,000-token window -- the live
 # fleet was already operating against these exact ceilings before this table
 # existed to name them.
+@dataclass(frozen=True)
+class NoticeModelWindow:
+    """One static fallback window, with its source kept beside the value."""
+
+    window_tokens: int
+    provenance: str
+
+
+# ONE DECLARATIVE NOTICE POLICY BLOCK (operator ruling 2026-08-29).
+# Runtime-reported windows win whenever the reporter supplies one. These rows
+# are static fallbacks only; they deliberately contain no Codex entry because
+# its catalog maximum and effective runtime window are different quantities.
+# The key reserves the second slot for a future effort-specific override.
+ROTATION_NOTICE_FRACTION: float = 0.80
+COMPACTION_RESERVE_FRACTION: float = 0.10
+DEFAULT_HARD_CLEAR_TOKENS: int = 400_000
+NOTICE_MODEL_WINDOWS: dict[tuple[str, str | None], NoticeModelWindow] = {
+    ("claude-fable-5", None): NoticeModelWindow(
+        1_000_000, "Anthropic model catalog; tracked 2026-08-07",
+    ),
+    ("claude-sonnet-5", None): NoticeModelWindow(
+        1_000_000, "Anthropic model catalog; tracked 2026-08-07",
+    ),
+    ("claude-opus-5", None): NoticeModelWindow(
+        1_000_000, "Anthropic model catalog; tracked 2026-08-07",
+    ),
+    ("claude-haiku-4-5", None): NoticeModelWindow(
+        200_000, "Anthropic model catalog; tracked 2026-08-07",
+    ),
+    ("claude-haiku-4-5-20251001", None): NoticeModelWindow(
+        200_000, "Anthropic model catalog; tracked 2026-08-07",
+    ),
+}
+
+# Legacy capacity callers retain this public map, derived from the declarative
+# notice table so a static window is never defined twice.
 MODEL_CONTEXT_CEILINGS: dict[str, int] = {
-    "claude-fable-5": 1_000_000,
-    "claude-sonnet-5": 1_000_000,
-    "claude-opus-5": 1_000_000,
-    "claude-haiku-4-5": 200_000,
-    "claude-haiku-4-5-20251001": 200_000,
+    model: entry.window_tokens
+    for (model, effort), entry in NOTICE_MODEL_WINDOWS.items()
+    if effort is None
 }
 
 # Conservative fallback for any model NOT present in MODEL_CONTEXT_CEILINGS
@@ -420,6 +457,133 @@ def resolve_ceiling(model: str) -> int:
     return MODEL_CONTEXT_CEILINGS.get(model, DEFAULT_CONSERVATIVE_CEILING)
 
 
+@dataclass(frozen=True)
+class RotationNoticeInput:
+    """All evidence used by the pure, swappable notice decision."""
+
+    model: str
+    effort: str
+    window_tokens: int | None
+    current_tokens: int
+    configured_hard_clear_tokens: int | None
+    window_source: str
+
+
+@dataclass(frozen=True)
+class RotationNoticeDecision:
+    """The one notice point and the provenance needed to explain it later."""
+
+    due: bool
+    notice_at_tokens: int
+    limiting_tokens: int
+    hard_clear_tokens: int
+    window_tokens: int | None
+    window_source: str
+    unrecognized_model: bool
+
+
+def configured_hard_clear_tokens() -> int:
+    """Read the operator-owned hard-clear knob, or its declared fallback.
+
+    This is deliberately outside :func:`rotation_notice_decision`: config I/O
+    is an adapter concern, while the decision itself receives explicit facts.
+    """
+    policy_path = Path.home() / ".claude" / "seat_hooks" / "rotation_policy.json"
+    try:
+        raw = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return DEFAULT_HARD_CLEAR_TOKENS
+    value = raw.get("hard_threshold_tokens") if isinstance(raw, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return DEFAULT_HARD_CLEAR_TOKENS
+
+
+def resolve_notice_window(
+    *, model: str, effort: str, runtime_window_tokens: int | None,
+) -> tuple[int | None, str, bool]:
+    """Prefer a runtime window; otherwise return a sourced static fallback.
+
+    An absent static row remains absent rather than becoming a guessed window.
+    The decision can still use the hard-clear bound and reports that fact.
+    """
+    if runtime_window_tokens is not None:
+        if runtime_window_tokens <= 0:
+            raise ValueError(
+                f"runtime_window_tokens must be positive, got {runtime_window_tokens}",
+            )
+        return runtime_window_tokens, "runtime-reported", False
+    entry = NOTICE_MODEL_WINDOWS.get((model, effort)) or NOTICE_MODEL_WINDOWS.get(
+        (model, None),
+    )
+    if entry is None:
+        return None, "unrecognized-model", True
+    return entry.window_tokens, entry.provenance, False
+
+
+def rotation_notice_decision(input: RotationNoticeInput) -> RotationNoticeDecision:
+    """Return the single 80%-of-first-ending-bound notice decision.
+
+    This strategy entry point performs no environment, file, or module-global
+    read. Runtime/window lookup and hard-clear loading happen at the adapters;
+    a later strategy registry can therefore replace this calculation without
+    changing its inputs or callers.
+    """
+    if input.current_tokens < 0:
+        raise ValueError(f"current_tokens must be non-negative, got {input.current_tokens}")
+    hard_clear = input.configured_hard_clear_tokens
+    if hard_clear is None:
+        raise ValueError("configured_hard_clear_tokens must be supplied explicitly")
+    if hard_clear <= 0:
+        raise ValueError(f"hard clear must be positive, got {hard_clear}")
+    limiting_tokens = hard_clear
+    if input.window_tokens is not None:
+        if input.window_tokens <= 0:
+            raise ValueError(f"window_tokens must be positive, got {input.window_tokens}")
+        compaction_point = int(input.window_tokens * (1 - COMPACTION_RESERVE_FRACTION))
+        limiting_tokens = min(hard_clear, compaction_point)
+    notice_at = int(limiting_tokens * ROTATION_NOTICE_FRACTION)
+    return RotationNoticeDecision(
+        due=input.current_tokens >= notice_at,
+        notice_at_tokens=notice_at,
+        limiting_tokens=limiting_tokens,
+        hard_clear_tokens=hard_clear,
+        window_tokens=input.window_tokens,
+        window_source=input.window_source,
+        unrecognized_model=input.window_source == "unrecognized-model",
+    )
+
+
+def rotation_notice_verdict(
+    *, model: str, effort: str, current_tokens: int,
+    runtime_window_tokens: int | None, configured_hard_clear_tokens: int | None = None,
+) -> RotationNoticeDecision:
+    """Resolve notice evidence then call the pure strategy entry point."""
+    window, source, unrecognized = resolve_notice_window(
+        model=model, effort=effort, runtime_window_tokens=runtime_window_tokens,
+    )
+    decision = rotation_notice_decision(RotationNoticeInput(
+        model=model,
+        effort=effort,
+        window_tokens=window,
+        current_tokens=current_tokens,
+        configured_hard_clear_tokens=(
+            configured_hard_clear_tokens
+            if configured_hard_clear_tokens is not None
+            else configured_hard_clear_tokens_from_runtime()
+        ),
+        window_source=source,
+    ))
+    if decision.unrecognized_model != unrecognized:
+        raise ValueError("notice window recognition changed during decision")
+    return decision
+
+
+def configured_hard_clear_tokens_from_runtime() -> int:
+    """Named adapter seam for callers that need the live configured knob."""
+    return configured_hard_clear_tokens()
+
+
 def is_rotation_due(
     *, model: str, current_tokens: int, cache_cold: bool | None = None,
 ) -> bool:
@@ -474,10 +638,14 @@ __all__ = [
     "CAPACITY_BAND_CRITICAL_FRACTION",
     "DEFAULT_CONSERVATIVE_CEILING",
     "RotationDueVerdict",
+    "CalculatedActionEvaluation",
+    "CalculatedContextVerdict",
+    "RotationActionCalibration",
     "RotationVerdict",
     "band_is_actionable",
     "break_even_horizon",
     "capacity_band",
+    "calculated_context_verdict",
     "rotation_due_verdict",
     "rotation_surface_verdict",
     "write_premium_multiplier",
@@ -491,6 +659,304 @@ __all__ = [
     "is_rotation_due_for_ceiling",
     "resolve_ceiling",
 ]
+
+
+@dataclass(frozen=True)
+class RotationActionCalibration:
+    """Measured action inputs in base-input-token-equivalent cost units.
+
+    ``post_action_prefix_tokens`` is H. ``one_time_cost_units`` is the measured
+    action cost after provider-specific output/cache-write prices have been
+    normalized by the selected economics profile. Keeping that normalization
+    outside this module prevents a model-price branch from leaking into the
+    core keep/compact/clear comparison.
+    """
+
+    action: str
+    post_action_prefix_tokens: int
+    one_time_cost_units: float
+    calibration_profile_id: str
+    calibration_profile_version: str
+
+
+@dataclass(frozen=True)
+class CalculatedActionEvaluation:
+    action: str
+    post_action_prefix_tokens: int
+    one_time_cost_units: float
+    projected_total_cost_units: float
+    break_even_horizon_calls: float | None
+    calibration_profile_id: str
+    calibration_profile_version: str
+
+
+@dataclass(frozen=True)
+class CalculatedContextVerdict:
+    """Truthful N-aware keep/compact/clear answer with its evidence boundary."""
+
+    resolved: bool
+    chosen_action: str | None
+    economic_choice: str | None
+    economic_cause: str
+    capacity_band: str
+    capacity_cause: str
+    current_tokens: int
+    ceiling: int
+    expected_calls_after: int
+    cache_state: str
+    cache_read_multiplier: float | None
+    keep_projected_cost_units: float | None
+    action_evaluations: tuple[CalculatedActionEvaluation, ...]
+    capability_profile_id: str
+    capability_profile_version: str
+    usage_economics_profile_id: str
+    usage_economics_profile_version: str
+    objective: str
+
+
+def _validate_calculation_inputs(
+    *,
+    current_tokens: int,
+    ceiling: int,
+    expected_calls_after: int,
+    required_actions: tuple[str, ...],
+    identity_fields: dict[str, str],
+) -> None:
+    if current_tokens < 0:
+        raise ValueError(f"current_tokens must be non-negative, got {current_tokens}")
+    if ceiling <= 0:
+        raise ValueError(f"ceiling must be positive, got {ceiling}")
+    if expected_calls_after < 0:
+        raise ValueError(
+            f"expected_calls_after must be non-negative, got {expected_calls_after}",
+        )
+    blank = sorted(name for name, value in identity_fields.items() if not value.strip())
+    if blank:
+        raise ValueError(f"calculated verdict requires profile identity: {', '.join(blank)}")
+    if not required_actions or len(required_actions) != len(set(required_actions)):
+        raise ValueError("required_actions must be a non-empty unique tuple")
+
+
+def _action_evaluation(
+    calibration: RotationActionCalibration,
+    *,
+    current_tokens: int,
+    ceiling: int,
+    expected_calls_after: int,
+    cache_read_multiplier: float,
+) -> CalculatedActionEvaluation:
+    action = calibration.action
+    if calibration.post_action_prefix_tokens <= 0:
+        raise ValueError(
+            f"{action}.post_action_prefix_tokens must be positive, got "
+            f"{calibration.post_action_prefix_tokens}",
+        )
+    if calibration.one_time_cost_units < 0:
+        raise ValueError(
+            f"{action}.one_time_cost_units must be non-negative, got "
+            f"{calibration.one_time_cost_units}",
+        )
+    if calibration.post_action_prefix_tokens >= ceiling:
+        raise ValueError(
+            f"{action}.post_action_prefix_tokens must be below ceiling {ceiling}",
+        )
+    if (
+        not calibration.calibration_profile_id.strip()
+        or not calibration.calibration_profile_version.strip()
+    ):
+        raise ValueError(f"{action} calibration needs profile id and version")
+    recurring = (
+        expected_calls_after
+        * calibration.post_action_prefix_tokens
+        * cache_read_multiplier
+    )
+    denominator = (
+        (current_tokens - calibration.post_action_prefix_tokens)
+        * cache_read_multiplier
+    )
+    horizon = (
+        calibration.one_time_cost_units / denominator
+        if denominator > 0
+        else None
+    )
+    return CalculatedActionEvaluation(
+        action=action,
+        post_action_prefix_tokens=calibration.post_action_prefix_tokens,
+        one_time_cost_units=calibration.one_time_cost_units,
+        projected_total_cost_units=calibration.one_time_cost_units + recurring,
+        break_even_horizon_calls=horizon,
+        calibration_profile_id=calibration.calibration_profile_id,
+        calibration_profile_version=calibration.calibration_profile_version,
+    )
+
+
+def _calibrations_by_action(
+    calibrations: tuple[RotationActionCalibration, ...],
+) -> dict[str, RotationActionCalibration]:
+    by_action = {calibration.action: calibration for calibration in calibrations}
+    if len(by_action) != len(calibrations):
+        raise ValueError("calibration actions must be unique")
+    return by_action
+
+
+def _choose_calculated_action(
+    evaluations: list[CalculatedActionEvaluation],
+    *,
+    keep_cost: float,
+    capacity_band_name: str,
+) -> tuple[str, str]:
+    economic_action = min(
+        evaluations,
+        key=lambda evaluation: (evaluation.projected_total_cost_units, evaluation.action),
+    )
+    economic_choice = (
+        economic_action.action
+        if economic_action.projected_total_cost_units < keep_cost
+        else "keep"
+    )
+    chosen = (
+        economic_choice
+        if capacity_band_name != "capacity_critical"
+        else economic_action.action
+    )
+    return economic_choice, chosen
+
+
+def calculated_context_verdict(
+    *,
+    current_tokens: int,
+    ceiling: int,
+    expected_calls_after: int,
+    cache_state: str,
+    cache_read_multiplier: float | None,
+    calibrations: tuple[RotationActionCalibration, ...],
+    required_actions: tuple[str, ...],
+    capability_profile_id: str,
+    capability_profile_version: str,
+    usage_economics_profile_id: str,
+    usage_economics_profile_version: str,
+    objective: str,
+    evidence_error: str | None = None,
+) -> CalculatedContextVerdict:
+    """Calculate keep versus measured actions without runtime/model branches.
+
+    For action ``a``, ``cost(a) = one_time(a) + N * H(a) * r`` and
+    ``cost(keep) = N * C * r``.  The caller supplies provider-price-normalized
+    one-time costs, so metered and quota strategies can project actions using
+    their own objective before reaching this pure boundary.
+
+    Missing cache evidence or any required action calibration is unresolved,
+    never a warm-cache or zero-cost assumption. Capacity is evaluated
+    independently: a critical/full window removes ``keep`` from the eligible
+    set even when it is economically cheapest.
+    """
+    identity_fields = {
+        "capability_profile_id": capability_profile_id,
+        "capability_profile_version": capability_profile_version,
+        "usage_economics_profile_id": usage_economics_profile_id,
+        "usage_economics_profile_version": usage_economics_profile_version,
+        "objective": objective,
+    }
+    _validate_calculation_inputs(
+        current_tokens=current_tokens,
+        ceiling=ceiling,
+        expected_calls_after=expected_calls_after,
+        required_actions=required_actions,
+        identity_fields=identity_fields,
+    )
+    cap_band, cap_guidance = capacity_band(current_tokens, ceiling)
+
+    def unresolved(cause: str, keep_cost: float | None) -> CalculatedContextVerdict:
+        return CalculatedContextVerdict(
+            resolved=False,
+            chosen_action=None,
+            economic_choice=None,
+            economic_cause=cause,
+            capacity_band=cap_band,
+            capacity_cause=cap_guidance,
+            current_tokens=current_tokens,
+            ceiling=ceiling,
+            expected_calls_after=expected_calls_after,
+            cache_state=cache_state,
+            cache_read_multiplier=cache_read_multiplier,
+            keep_projected_cost_units=keep_cost,
+            action_evaluations=(),
+            capability_profile_id=capability_profile_id,
+            capability_profile_version=capability_profile_version,
+            usage_economics_profile_id=usage_economics_profile_id,
+            usage_economics_profile_version=usage_economics_profile_version,
+            objective=objective,
+        )
+
+    if evidence_error is not None:
+        return unresolved(evidence_error, None)
+    if cache_state not in {"observed_warm", "observed_cold"}:
+        return unresolved(
+            (
+                f"cache state is {cache_state!r}; keep/action carriage cannot be "
+                "priced without observed_warm or observed_cold evidence"
+            ),
+            None,
+        )
+    if cache_read_multiplier is None or cache_read_multiplier <= 0:
+        return unresolved(
+            "cache_read_multiplier is unknown or non-positive",
+            None,
+        )
+    by_action = _calibrations_by_action(calibrations)
+    missing = [action for action in required_actions if action not in by_action]
+    if missing:
+        return unresolved(
+            (
+                "missing measured action calibration for " + ", ".join(missing)
+            ),
+            expected_calls_after * current_tokens * cache_read_multiplier,
+        )
+    evaluations = [
+        _action_evaluation(
+            by_action[action],
+            current_tokens=current_tokens,
+            ceiling=ceiling,
+            expected_calls_after=expected_calls_after,
+            cache_read_multiplier=cache_read_multiplier,
+        )
+        for action in required_actions
+    ]
+    keep_cost = expected_calls_after * current_tokens * cache_read_multiplier
+    economic_choice, chosen = _choose_calculated_action(
+        evaluations,
+        keep_cost=keep_cost,
+        capacity_band_name=cap_band,
+    )
+    return CalculatedContextVerdict(
+        resolved=True,
+        chosen_action=chosen,
+        economic_choice=economic_choice,
+        economic_cause=(
+            f"keep={keep_cost:.3f}; "
+            + "; ".join(
+                f"{evaluation.action}={evaluation.projected_total_cost_units:.3f} "
+                f"with H={evaluation.post_action_prefix_tokens} and "
+                f"break_even_N={evaluation.break_even_horizon_calls}"
+                for evaluation in evaluations
+            )
+            + "; actions must be strictly cheaper than keep"
+        ),
+        keep_projected_cost_units=keep_cost,
+        action_evaluations=tuple(evaluations),
+        capacity_band=cap_band,
+        capacity_cause=cap_guidance,
+        current_tokens=current_tokens,
+        ceiling=ceiling,
+        expected_calls_after=expected_calls_after,
+        cache_state=cache_state,
+        cache_read_multiplier=cache_read_multiplier,
+        capability_profile_id=capability_profile_id,
+        capability_profile_version=capability_profile_version,
+        usage_economics_profile_id=usage_economics_profile_id,
+        usage_economics_profile_version=usage_economics_profile_version,
+        objective=objective,
+    )
 
 
 def rotation_band(
@@ -924,25 +1390,27 @@ class RotationDueVerdict:
 def rotation_due_verdict(
     *, ceiling: int, current_tokens: int, cache_cold: bool | None,
 ) -> RotationDueVerdict:
-    """Both terms of the union, evaluated once each, plus their disjunction.
+    """Compatibility view of the single rotation-notice decision.
 
-    :func:`is_rotation_due_for_ceiling` is this function's ``due`` field and
-    carries the reasoning for the definition; this is the form to call when
-    the caller must also SAY which axis fired.
+    ``cache_cold`` remains accepted for installed callers, but it no longer
+    triggers a notice. The supplied ceiling is a runtime-reported window for
+    this legacy entry point; modern callers use :func:`rotation_notice_verdict`
+    to retain model, effort, and source provenance.
     """
     if ceiling <= 0:
         raise ValueError(
             f"rotation_due_verdict needs a positive ceiling, got {ceiling}",
         )
-    band, _ = rotation_band(current_tokens, cache_cold=bool(cache_cold))
-    actionable = band_is_actionable(band)
-    crossed = current_tokens >= ceiling * ROTATION_THRESHOLD_FRACTION
+    decision = rotation_notice_verdict(
+        model="", effort="", current_tokens=current_tokens,
+        runtime_window_tokens=ceiling,
+    )
     return RotationDueVerdict(
-        due=actionable or crossed,
-        band=band,
-        band_actionable=actionable,
+        due=decision.due,
+        band="notice_due" if decision.due else "notice_below_threshold",
+        band_actionable=decision.due,
         fraction=current_tokens / ceiling,
-        fraction_crossed=crossed,
+        fraction_crossed=decision.due,
     )
 
 

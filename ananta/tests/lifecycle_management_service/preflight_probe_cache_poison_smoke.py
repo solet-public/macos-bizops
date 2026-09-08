@@ -40,6 +40,7 @@ from _probe_fixture_support import (  # noqa: E402
     write_fixture,
 )
 from ananta.services.lifecycle_management_service.manifest_preflight import (  # noqa: E402
+    _build_partial_registry,
     run_manifest_preflight,
 )
 
@@ -105,6 +106,28 @@ def _poisoned_discriminator(fixture_dir: Path) -> None:
     )
 
 
+def _disabled_service_interfaces_are_not_registered() -> None:
+    """Disabled service interfaces need no KB JSON overlay."""
+    registry = _build_partial_registry({})
+    processes = registry["processes"]
+    shadow_docs = (
+        REPO_ROOT / "ananta" / "knowledge_base" / "processes"
+        / "io_interface_service" / "post_message.json",
+        REPO_ROOT / "ananta" / "knowledge_base" / "processes"
+        / "io_interface_service" / "deliver_artifact.json",
+    )
+    _check(
+        isinstance(processes, dict)
+        and "service_interface::io_interface_service::post_message" not in processes  # wint:negative-fixture
+        and "service_interface::io_interface_service::deliver_artifact" not in processes,  # wint:negative-fixture
+        "[5] disabled IO service-interface processes are absent from the KB overlay registry",
+    )
+    _check(
+        not any(path.exists() for path in shadow_docs),
+        "[6] disabled IO service-interface processes have no KB shadow documents",
+    )
+
+
 def run_smoke() -> int:
     print("=== preflight_probe_cache_poison_smoke (S2: in-process blind / probe sees) ===")
     with tempfile.TemporaryDirectory() as tmp:
@@ -114,6 +137,7 @@ def run_smoke() -> int:
         try:
             _healthy_baseline(fixture_dir)
             _poisoned_discriminator(fixture_dir)
+            _disabled_service_interfaces_are_not_registered()
         finally:
             sys.path.remove(str(fixture_dir))
 

@@ -148,6 +148,17 @@ def _probe_failed_result() -> RestartResult:
     )
 
 
+def _failed_result() -> RestartResult:
+    return RestartResult(
+        status=RestartStatus.FAILED,
+        restart_action_id="",
+        message="restart scheduling failed (smoke)",
+        reason="smoke",
+        expected_etag="",
+        dry_run=False,
+    )
+
+
 def _apply(service: LifecycleManagementService) -> dict[str, Any]:
     return service.apply_manifest(
         new_manifest={"plugins": [FIXTURE_PLUGIN_NAME], "service_bindings": {}},
@@ -226,6 +237,27 @@ def _case_restore_oserror(app_home: Path) -> None:
         os.chmod(config_dir, stat.S_IRWXU)
 
 
+def _case_restart_failed_rolled_back(app_home: Path) -> None:
+    manifest_bytes, bindings_bytes = _seed_app_home(app_home)
+    plugin = _FakeDeploymentPlugin(_failed_result())
+    service = LifecycleManagementService(_FakeOrchestratorRef(app_home, plugin))
+    envelope = _apply(service)
+    data = envelope["data"]
+    _check(
+        data.get("status") == "restart_failed_after_manifest_commit",
+        f"[7] FAILED restart stays an honest failure envelope (got {data.get('status')!r})",
+    )
+    _check(
+        (app_home / "config" / "manifest.yaml").read_bytes() == manifest_bytes
+        and (app_home / "config" / "service_bindings.json").read_bytes() == bindings_bytes,
+        "[8] FAILED restart restores manifest + bindings BYTE-IDENTICAL to pre-write state",
+    )
+    _check(
+        data.get("manifest_restored_to") and data.get("service_bindings_restored_to"),
+        "[9] FAILED restart envelope exposes the restoration paths",
+    )
+
+
 def _case_q5_success_evidence(app_home: Path) -> None:
     _seed_app_home(app_home)
     evidence: dict[str, object] = {
@@ -265,6 +297,7 @@ def run_smoke() -> int:
                 _case_rolled_back,
                 _case_concurrent_commit,
                 _case_restore_oserror,
+                _case_restart_failed_rolled_back,
                 _case_q5_success_evidence,
             ):
                 app_home = Path(tempfile.mkdtemp(dir=tmp, prefix="app_home_"))

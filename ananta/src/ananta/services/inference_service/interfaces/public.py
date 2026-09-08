@@ -18,6 +18,36 @@ class InferenceServiceAPI(ABC):
     """Public inference operations - AI-discoverable via vector search."""
 
     @service_interface_process(
+        name="qualify",
+        provider="inference_service",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Bounded live-provider qualification result",
+            properties={
+                "provider": ParameterMetadata(type=ParameterType.STRING),
+                "model": ParameterMetadata(type=ParameterType.STRING),
+                "completed": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "structured_result_valid": ParameterMetadata(type=ParameterType.BOOLEAN),
+            },
+        ),
+    )
+    def qualify(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> ActionResult:
+        """Issue one bounded structured request against the bound provider.
+
+        SessionInferenceProvider inherits this decorated registration surface
+        but cannot perform a local provider probe; the concrete service wrapper
+        owns the bound-provider implementation.
+        """
+        del params, state
+        raise NotImplementedError("qualify is implemented by InferenceService")
+
+    @service_interface_process(
         name="process_error",
         provider="inference_service",
         processor_policy_category=ProcessorPolicyCategory.VERTEX,

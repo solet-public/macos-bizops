@@ -24,6 +24,7 @@ Run:
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -40,11 +41,13 @@ from ananta.core.services.call_context import CallContext  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from ananta.llm.agent_messaging.state_results import require_records  # noqa: E402
 
+import agent_messaging_plugin.session_lifecycle_verbs as lifecycle_verbs  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.schema import TABLE_SESSION_TRANSITION  # noqa: E402
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     ManagedSessionSpec,
     insert_managed_session,
+    read_managed_session,
 )
 
 _passed = 0
@@ -86,7 +89,7 @@ def test_spawn_session_transport() -> None:
     result = plugin.spawn_session(
         _params(
             role_class="bogus", lane_id="lane-1", brief_ref="b", work_class="read_only",
-            budget_line="b1",
+            budget_line="b1", dispatch_kind="infrastructure",
         ),
         _state_with_context(),
     )
@@ -99,7 +102,7 @@ def test_spawn_session_transport() -> None:
     ok = plugin.spawn_session(
         _params(
             role_class="ephemeral", lane_id="lane-1", brief_ref="b", work_class="read_only",
-            budget_line="b1", host="operator",
+            budget_line="b1", host="operator", dispatch_kind="infrastructure",
         ),
         _state_with_context(),
     )
@@ -125,6 +128,13 @@ def test_list_and_status_transport() -> None:
         listed.get("action_status") == "completed"
         and len(listed["data"]["sessions"]) == 1,
         f"list_sessions transport returns the envelope-wrapped sessions list (got {listed!r})",
+    )
+
+    unfiltered = plugin.list_sessions(_params(), {})
+    _check(
+        unfiltered.get("action_status") == "failed"
+        and _error_code(unfiltered) == "filter_required",
+        "list_sessions transport maps an omitted filter to filter_required",
     )
 
     status = plugin.session_status(_params(agent_instance_id="agi-z"), {})
@@ -195,13 +205,144 @@ def test_report_alive_transport() -> None:
         bad_status.get("action_status") == "failed" and _error_code(bad_status) == "unknown_status",
         "report_alive transport surfaces unknown_status through the failure envelope",
     )
+    before = read_managed_session(state, "agi-w").get("report_by")
+    working = plugin.report_alive(
+        _params(agent_instance_id="agi-w", status="working"), _state_with_context(),
+    )
+    after = read_managed_session(state, "agi-w")
+    _check(
+        working.get("action_status") == "completed"
+        and working["data"]["lifecycle_state"] == "live",
+        "the plugin report_alive process path promotes a spawned row to live",
+    )
+    _check(
+        after["report_by"] != before,
+        "the plugin report_alive process path re-arms report_by",
+    )
+    first_heartbeat = plugin.report_alive(
+        _params(agent_instance_id="agi-w", status="heartbeat"), _state_with_context(),
+    )
+    after_first_heartbeat = read_managed_session(state, "agi-w")
+    _check(
+        first_heartbeat.get("action_status") == "completed"
+        and after_first_heartbeat["last_heartbeat_at"] is not None,
+        "a healthy heartbeat writes a distinct liveness reading through the transport path",
+    )
+    _check(
+        after_first_heartbeat["heartbeat_failure_first_at"] is None,
+        "a healthy heartbeat writes typed NULL for its absent failure timestamp",
+    )
+    failing_heartbeat = plugin.report_alive(
+        _params(
+            agent_instance_id="agi-w",
+            status="heartbeat",
+            heartbeat_failures_since_last=1,
+            heartbeat_failure_first_at="2026-09-04T00:00:00+00:00",
+            heartbeat_failure_last_reason="bridge timeout",
+        ),
+        _state_with_context(),
+    )
+    after_failing_heartbeat = read_managed_session(state, "agi-w")
+    _check(
+        failing_heartbeat.get("action_status") == "completed"
+        and after_failing_heartbeat["heartbeat_failure_first_at"] == "2026-09-04T00:00:00+00:00",
+        "a failing heartbeat records its failure episode before the healthy recovery",
+    )
+    recovered_heartbeat = plugin.report_alive(
+        _params(agent_instance_id="agi-w", status="heartbeat"), _state_with_context(),
+    )
+    after_recovery = read_managed_session(state, "agi-w")
+    _check(
+        recovered_heartbeat.get("action_status") == "completed"
+        and after_recovery["last_heartbeat_at"] != after_failing_heartbeat["last_heartbeat_at"],
+        "a healthy recovery advances the heartbeat row rather than reusing the failing value",
+    )
+    _check(
+        after_recovery["heartbeat_failure_first_at"] is None
+        and after_recovery["heartbeat_failure_last_reason"] == "",
+        "a healthy recovery clears the frozen failure episode with typed NULL",
+    )
+    before_empty_attempt = dict(after_recovery)
+    empty_timestamp = plugin.report_alive(
+        _params(
+            agent_instance_id="agi-w",
+            status="heartbeat",
+            heartbeat_failure_first_at="",
+        ),
+        _state_with_context(),
+    )
+    _check(
+        empty_timestamp.get("action_status") == "failed"
+        and _error_code(empty_timestamp) == "invalid_heartbeat_failure_first_at",
+        "an explicit empty timestamp fails loud instead of returning a false success",
+    )
+    _check(
+        read_managed_session(state, "agi-w")["last_heartbeat_at"]
+        == before_empty_attempt["last_heartbeat_at"],
+        "the rejected empty timestamp does not advance the heartbeat row",
+    )
+    state.fail_next("update")
+    rejected_write = plugin.report_alive(
+        _params(agent_instance_id="agi-w", status="heartbeat"), _state_with_context(),
+    )
+    _check(
+        rejected_write.get("action_status") == "failed"
+        and _error_code(rejected_write) == "heartbeat_write_failed"
+        and "injected update failure" in str(rejected_write.get("error")),
+        "a state-layer write rejection reaches the caller as a failed report_alive result",
+    )
 
 
 def main() -> int:
-    test_spawn_session_transport()
-    test_list_and_status_transport()
-    test_terminate_retire_directed_by_transport()
-    test_report_alive_transport()
+    fixture_temp = tempfile.TemporaryDirectory()
+    fixture_root = Path(fixture_temp.name)
+    original_provision = lifecycle_verbs._provision_spawn_worktree  # noqa: SLF001
+    original_retire = lifecycle_verbs._retire_lane_worktree  # noqa: SLF001
+    original_remove = lifecycle_verbs.remove_lane_worktree  # noqa: SLF001
+    provisioning_calls: list[tuple[str, str, lifecycle_verbs.LaneWorktree]] = []
+    retirement_calls: list[dict[str, object]] = []
+
+    def fixture_provision(
+        state: StateManagementInterface, *, role_name: str, agent_instance_id: str,
+    ) -> lifecycle_verbs.LaneWorktree:
+        del state
+        worktree = lifecycle_verbs.LaneWorktree(
+            repo_root=fixture_root, root=fixture_root, path=fixture_root,
+            branch=f"fixture/{role_name}/{agent_instance_id}",
+        )
+        provisioning_calls.append((role_name, agent_instance_id, worktree))
+        return worktree
+
+    def fixture_retire(row: dict[str, object]) -> None:
+        retirement_calls.append(row)
+
+    lifecycle_verbs._provision_spawn_worktree = fixture_provision  # type: ignore[assignment]  # noqa: SLF001
+    lifecycle_verbs._retire_lane_worktree = fixture_retire  # type: ignore[assignment]  # noqa: SLF001
+    lifecycle_verbs.remove_lane_worktree = lambda worktree: None  # type: ignore[assignment]  # noqa: SLF001
+    try:
+        test_spawn_session_transport()
+        test_list_and_status_transport()
+        test_terminate_retire_directed_by_transport()
+        test_report_alive_transport()
+        _check(
+            len(provisioning_calls) == 1
+            and provisioning_calls[0][0] == "lane-1"
+            and provisioning_calls[0][2].repo_root == fixture_root
+            and provisioning_calls[0][2].path == fixture_root
+            and provisioning_calls[0][2].branch
+            == f"fixture/lane-1/{provisioning_calls[0][1]}",
+            "transport spawn invokes provisioning with the lane-derived branch",
+        )
+        _check(
+            len(retirement_calls) == 1
+            and retirement_calls[0].get("agent_instance_id") == "agi-y",
+            "transport retirement invokes teardown for the retiring session",
+        )
+    finally:
+        lifecycle_verbs._provision_spawn_worktree = original_provision  # type: ignore[assignment]  # noqa: SLF001
+        lifecycle_verbs._retire_lane_worktree = original_retire  # type: ignore[assignment]  # noqa: SLF001
+        lifecycle_verbs.remove_lane_worktree = original_remove  # type: ignore[assignment]  # noqa: SLF001
+        fixture_temp.cleanup()
 
     print()
     print(f"PASSED: {_passed}")

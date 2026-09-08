@@ -24,11 +24,11 @@ baseline and then overrides only the fields that vary per newborn.
 | `pgvector_service_plugin.json` | `db_schema`, `host`, `port` | mirrors `write_pgvector_config`, which adds these keys even when the baseline doesn't have them |
 | `default_knowledge_plugin.json` | `knowledge_base_root` | `<clone_root>/knowledge_bases` — absolute, depends on where the user cloned the repo; the plugin has no built-in default and raises `knowledge_base_root not configured` if the key is absent, so Slice D MUST set it (fail-loud otherwise, by design) |
 
-## `default_inference_plugin.json` — bizops-profile-only, all-static
+## `default_inference_plugin.json` — `macos-bizops`-profile-only, all-static
 
 Baseline selection is plugin-membership-derived (`seed_resolver`), so this
 file materializes ONLY into profiles whose allowlist includes
-`default_inference_plugin` (the bizops profile; the free profile stays
+`default_inference_plugin` (the `macos-bizops` profile; the free profile stays
 declared-VACANT per INF-03 and never resolves it). Every field is static
 and universal: the LM Studio OpenAI-compatible localhost endpoint, the
 platform's chosen local inference model, and tuning values mirroring the

@@ -100,26 +100,16 @@ def _log(msg: str) -> None:
 _BRIDGE_ID_ROUTE_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^/api/v1/bridge/agc-[^/]+(?:/|$)",
 )
+_BRIDGE_NOT_FOUND_CODE: Final[str] = "bridge_not_found"
 
 
 def _is_bridge_gone(exc: BaseException) -> bool:
     """True if an HTTP error indicates the bridge session no longer exists.
 
-    Two paths to True:
-
-    * String-based fallback against the exception message — catches the
-      legacy ``BridgeHTTPError`` shapes ("Bridge not found or closed",
-      ``bridge_not_found`` body code, etc.). Kept for compatibility with
-      any exception source that doesn't attach structured attributes.
-    * Structured: ``BridgeHTTPError`` carries ``status_code`` + ``path``
-      attributes (set by :meth:`Forwarder._unwrap`); a 404 against a path
-      matching ``/api/v1/bridge/agc-<bridge_id>/...`` is treated as
-      stale-bridge. Path-matched defensively against the ``agc-`` prefix
-      so 404s on routes that don't address a bridge_id (e.g. a future
-      ``/api/v1/bridge/open`` 404) don't false-positive (2026-06-02
-      Architect's debug session: post-restart MCP was unreachable until
-      a manual ``/mcp`` because the existing string-based check missed
-      the structured 404 path).
+    This deliberately fails closed.  A route under the caller's ``agc-``
+    prefix can return ``peer_unreachable`` when its *recipient* disappeared;
+    that must not reconnect the healthy caller bridge.  Only the server's
+    affirmative own-bridge shape (404 + ``bridge_not_found``) is actionable.
     """
     status_code = getattr(exc, "status_code", None)
     path = getattr(exc, "path", None)
@@ -127,14 +117,10 @@ def _is_bridge_gone(exc: BaseException) -> bool:
         status_code == 404
         and isinstance(path, str)
         and _BRIDGE_ID_ROUTE_PATTERN.match(path)
+        and getattr(exc, "response_code", None) == _BRIDGE_NOT_FOUND_CODE
     ):
         return True
-    text = str(exc)
-    return (
-        "Bridge not found or closed" in text
-        or "bridge_not_found" in text
-        or "not found" in text
-    )
+    return False
 
 
 _ROLE_CLAIM_ACTIONS: Final[frozenset[str]] = frozenset(
@@ -159,9 +145,9 @@ def _role_claim_succeeded(payload: dict[str, Any]) -> bool:
 class BridgeHTTPError(RuntimeError):
     """HTTP call to the solet bridge surface failed.
 
-    Carries optional ``status_code`` and ``path`` so :func:`_is_bridge_gone`
-    can discriminate stale-bridge 404s (a 404 on a route addressed to a
-    specific ``agc-`` bridge_id) from legitimate 404s elsewhere.
+    Carries the parsed response code with ``status_code`` and ``path`` so
+    :func:`_is_bridge_gone` can distinguish the caller's missing bridge from
+    a recipient-scoped 404 on the same caller-addressed route.
     """
 
     def __init__(
@@ -170,10 +156,12 @@ class BridgeHTTPError(RuntimeError):
         *,
         status_code: int | None = None,
         path: str | None = None,
+        response_code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.path = path
+        self.response_code = response_code
 
 
 class Forwarder:
@@ -230,6 +218,12 @@ class Forwarder:
         )
         self._bridge_id: str | None = None
         self._cursor: int = -1
+        # ``_cursor`` belongs to one BridgeSessionState and is intentionally
+        # reset on each open.  ``_generation`` fences late work from an old
+        # BridgeSessionState; ``_claude_wire_cursor`` instead belongs to this
+        # forwarder/Claude-MCP lifetime and therefore never resets on open.
+        self._generation: int = 0
+        self._claude_wire_cursor: int = 0
         self._poll_task: asyncio.Task[None] | None = None
         self._poll_active: bool = False
         self._reconnect_lock = asyncio.Lock()
@@ -304,6 +298,7 @@ class Forwarder:
                     raise BridgeHTTPError(msg)
                 self._bridge_id = bridge_id
                 self._cursor = -1
+                self._generation += 1
                 _log(f"bridge opened (parent_pid={self._parent_pid}): {bridge_id}")
                 return
             except Exception as exc:  # noqa: BLE001
@@ -565,7 +560,9 @@ class Forwarder:
                 await asyncio.sleep(0.5)
                 continue
             try:
-                await self._drain_once(self._bridge_id)
+                bridge_id = self._bridge_id
+                generation = self._generation
+                await self._drain_once(bridge_id, generation)
                 consecutive_failures = 0
                 if self._monotonic_clock() >= next_reassert_at:
                     await self._reassert_identity()
@@ -580,7 +577,7 @@ class Forwarder:
                     consecutive_failures,
                 )
 
-    async def _drain_once(self, bridge_id: str) -> None:
+    async def _drain_once(self, bridge_id: str, generation: int | None = None) -> None:
         """Fetch one events page, dispatch each event, advance the cursor.
 
         The page-level ``next_cursor`` advance is the cursor authority here:
@@ -588,7 +585,15 @@ class Forwarder:
         per-event cursor bump), so this page-level advance is what prevents the
         suppressed event from being re-fetched on the next poll.
         """
+        poll_generation = self._generation if generation is None else generation
         events_payload = await self._fetch_events(bridge_id, self._cursor)
+        if self._generation != poll_generation:
+            _log(
+                "discarding stale events page "
+                f"(bridge={bridge_id}, generation={poll_generation}, "
+                f"current_generation={self._generation})",
+            )
+            return
         events = events_payload.get("events") or []
         if isinstance(events, list):
             for event in events:
@@ -596,6 +601,13 @@ class Forwarder:
                     await self._dispatch_incoming_event(event)
         next_cursor = events_payload.get("next_cursor")
         if isinstance(next_cursor, int):
+            if self._generation != poll_generation:
+                _log(
+                    "skipping stale page cursor update "
+                    f"(bridge={bridge_id}, generation={poll_generation}, "
+                    f"current_generation={self._generation})",
+                )
+                return
             self._cursor = max(self._cursor, next_cursor - 1)
 
     async def _dispatch_incoming_event(self, event: dict[str, Any]) -> None:
@@ -649,10 +661,15 @@ class Forwarder:
         )
         return self._unwrap(response, path)
 
-    async def _emit_event(self, event: dict[str, Any]) -> None:
+    async def _emit_event(
+        self,
+        event: dict[str, Any],
+        generation: int | None = None,
+    ) -> None:
         """Push one bridge event as a transport-specific MCP notification."""
         if self._write_stream is None:
             return
+        emit_generation = self._generation if generation is None else generation
         source_event_type = str(event.get("event_type") or "post_message")
         content_raw = event.get("content")
         content = "" if content_raw is None else str(content_raw)
@@ -679,6 +696,13 @@ class Forwarder:
         await self._write_stream.send(message)
         cursor = event.get("cursor")
         if isinstance(cursor, int):
+            if self._generation != emit_generation:
+                _log(
+                    "skipping stale event cursor update "
+                    f"(generation={emit_generation}, "
+                    f"current_generation={self._generation})",
+                )
+                return
             self._cursor = max(self._cursor, cursor)
 
     def _notification_method_for(self, source_event_type: str) -> str:
@@ -724,12 +748,14 @@ class Forwarder:
         # empty string.  Without the meta fallback every wake-adapter
         # event ships flow_id="" which Claude Code silently rejects.
         flow_id = self._flow_id_for(event, event_meta)
+        wire_cursor = self._claude_wire_cursor
+        self._claude_wire_cursor += 1
         return {
             "source": "homunculus",
             "event_type": "post_message",
             "source_event_type": source_event_type,
             "flow_id": flow_id,
-            "cursor": str(event.get("cursor", "")),
+            "cursor": str(wire_cursor),
         }
 
     def _solet_peer_message_meta(
@@ -798,10 +824,9 @@ class Forwarder:
     def _unwrap(response: httpx.Response, path: str) -> dict[str, Any]:
         """Parse JSON body; raise BridgeHTTPError on non-2xx.
 
-        On the error path, attaches ``status_code`` and ``path`` to the
-        raised exception so :func:`_is_bridge_gone` can do structured
-        discrimination (404 on an ``agc-``-prefixed bridge route ⇒
-        stale-bridge ⇒ reconnect).
+        On the error path, attaches ``status_code``, ``path``, and parsed
+        response ``code`` so :func:`_is_bridge_gone` can require the
+        affirmative caller-bridge-missing shape.
         """
         try:
             parsed = response.json() if response.content else {}
@@ -809,13 +834,20 @@ class Forwarder:
             parsed = {"raw": response.text}
         if not response.is_success:
             message = ""
+            response_code: str | None = None
             if isinstance(parsed, dict):
                 message = str(parsed.get("message") or "")
+                code = parsed.get("code")
+                if isinstance(code, str):
+                    response_code = code
             if not message:
                 message = response.text or response.reason_phrase
             msg = f"Solet {path} failed ({response.status_code}): {message}"
             raise BridgeHTTPError(
-                msg, status_code=response.status_code, path=path,
+                msg,
+                status_code=response.status_code,
+                path=path,
+                response_code=response_code,
             )
         if not isinstance(parsed, dict):
             return {"result": parsed}
@@ -1083,4 +1115,3 @@ class Forwarder:
             return await self._get(self._bridge_path(f"/peer/inbox{query}"))
 
         return await self._call_with_reconnect("peer_inbox", call)
-

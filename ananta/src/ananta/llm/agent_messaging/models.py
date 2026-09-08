@@ -66,6 +66,13 @@ class RoleSectionStatus(StrEnum):
     ERROR = "error"
 
 
+class RoleTruncationReason(StrEnum):
+    """Why a successful role-inbox page has a continuation cursor."""
+
+    ROW_LIMIT = "row_limit"
+    BYTE_CEILING = "byte_ceiling"
+
+
 @dataclass(frozen=True, slots=True)
 class TextPart:
     """A single text fragment of message content.
@@ -274,7 +281,7 @@ class PeerInboxRequest:
     # v10 Control #1a: the opaque, scope-bound cursor for the role-inbox
     # section (a global (created_at, id) k-way merge across held roles).
     # Independent of ``after_created_at`` (the instance section's raw
-    # timestamp cursor) — the two are never mixed. Default None = first
+    # newest-first timestamp cursor) — the two are never mixed. Default None = first
     # role page; existing instance-only callers are unaffected.
     role_after: str | None = None
 
@@ -343,8 +350,14 @@ class PeerInboxEntry:
 class PeerInbox:
     """Response from ``AgentMessagingService.peer_inbox``.
 
-    The instance section (``entries`` + ``next_after_created_at``) is the
-    pre-v10 contract, unchanged. v10 adds the role section ADDITIVELY:
+    Both sections are newest-first. The instance section keeps its
+    timestamp-only backward cursor contract. ``instance_exhausted`` says
+    whether that cursor has reached the end of the currently readable instance
+    section. It does **not** prove every durable row was observed: the legacy
+    timestamp-only cursor deliberately retains its pre-existing
+    duplicate-``created_at`` skip at a page boundary.
+
+    v10 adds the role section ADDITIVELY:
     ``role_entries`` is the global ``(created_at, id)`` k-way merge across
     the holder's roles, paged by the opaque ``next_role_cursor`` (fed back
     as ``PeerInboxRequest.role_after``). Both new fields default empty, so
@@ -366,17 +379,27 @@ class PeerInbox:
     from this page; ``role_history_cursor`` is populated ONLY on a genuine
     floor-stop (``next_role_cursor is None and role_floor_applied``) — echo it
     back as ``role_after`` for a deliberate pre-mark read.
+
+    ``role_limit`` records the effective page limit. A successful role page
+    with a continuation cursor is explicitly bounded: ``role_page_truncated``
+    is true and ``role_truncation_reason`` identifies either the row limit or
+    page byte ceiling. ``role_byte_ceiling`` is populated only for the latter.
     """
 
     recipient_agent_id: str
     entries: tuple[PeerInboxEntry, ...]
     next_after_created_at: datetime | None
+    instance_exhausted: bool
     role_entries: tuple[PeerInboxEntry, ...] = ()
     next_role_cursor: str | None = None
     role_section_status: RoleSectionStatus = RoleSectionStatus.OK
     role_section_error: str | None = None
     role_floor_applied: bool = False
     role_history_cursor: str | None = None
+    role_limit: int | None = None
+    role_page_truncated: bool = False
+    role_truncation_reason: RoleTruncationReason | None = None
+    role_byte_ceiling: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

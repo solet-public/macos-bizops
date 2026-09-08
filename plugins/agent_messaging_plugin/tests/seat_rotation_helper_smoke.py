@@ -430,8 +430,12 @@ def test_run_rotation_ambiguous_matches_never_sends_anything() -> None:
 def test_run_rotation_happy_path_sends_exact_two_call_shape_twice() -> None:
     """The direct regression test for the brief's core defect: `/clear` and
     the pickup prompt must EACH be one send_text call with no trailing
-    newline, immediately followed by a SEPARATE send_text("\\r") call --
-    never combined into one `...text\\n` call."""
+    newline, followed by SEPARATE send_text("\\r") call(s) -- never combined
+    into one `...text\\n` call. The clear leg is the five-send shape: the
+    space + kill-line preamble (2026-08-28 ghost-text matrix -- a leading
+    flush-Enter SUBMITS a stranded remote-control draft, so it is banned),
+    then /clear, CR, menu-confirm CR (2026-08-27 joseki: a single CR after
+    a slash command was measured leaving it accepted-but-unsubmitted)."""
     session = _StubSession(role="Coordinator-Main", session_id="s1", screen_lines=["ready>"])
     app = _one_pane_app(session)
 
@@ -439,18 +443,100 @@ def test_run_rotation_happy_path_sends_exact_two_call_shape_twice() -> None:
         return await helper.run_rotation(
             "Coordinator-Main", "resume the work", cleared_signature="ready>",
             poll_interval_seconds=0.0, stable_samples_required=1, settle_timeout_seconds=2.0,
+            send_gap_seconds=0.0,
         )
 
     result = asyncio.run(_run_with_stub(app, _go))
     _check(result["status"] == "completed", "happy path completes")
     _check(
-        session.sent == ["/clear", "\r", "resume the work", "\r"],
-        f"exact 4-call ordered send sequence, no embedded newlines (got {session.sent!r})",
+        session.sent == [" ", "\x15", "/clear", "\r", "\r", "resume the work", "\r"],
+        f"exact 7-call ordered send sequence, no embedded newlines (got {session.sent!r})",
     )
     _check(
         "settle_diagnostics" in result and result["settle_diagnostics"]["samples_taken"] == 1,
         "the COMPLETED envelope carries settle_diagnostics (live leg #1's own named gap: "
         "a green result with no settle-timing detail can't localize how long settle took)",
+    )
+
+
+def test_run_rotation_model_none_is_byte_identical_to_the_existing_sequence() -> None:
+    """The additive model parameter must not alter the established default.
+
+    This is deliberately separate from the general happy-path assertion: it
+    makes ``model=None`` itself a permanent byte-for-byte contract rather
+    than merely an implicit default of a test written before model support.
+    """
+    session = _StubSession(role="Coordinator-Main", session_id="s1", screen_lines=["ready>"])
+    app = _one_pane_app(session)
+
+    async def _go() -> dict[str, Any]:
+        return await helper.run_rotation(
+            "Coordinator-Main", "resume the work", cleared_signature="ready>",
+            poll_interval_seconds=0.0, stable_samples_required=1, settle_timeout_seconds=2.0,
+            send_gap_seconds=0.0, model=None,
+        )
+
+    result = asyncio.run(_run_with_stub(app, _go))
+    _check(result["status"] == "completed", "model=None happy path completes")
+    _check(
+        session.sent == [" ", "\x15", "/clear", "\r", "\r", "resume the work", "\r"],
+        f"model=None preserves the exact pre-model send sequence (got {session.sent!r})",
+    )
+
+
+def test_run_rotation_model_leg_follows_clear_settle_before_pickup() -> None:
+    """A requested model uses the proven five-send slash-command shape only
+    after the clear settle check, then itself settles before pickup injection."""
+    session = _StubSession(role="Coordinator-Main", session_id="s1", screen_lines=["ready>"])
+    app = _one_pane_app(session)
+
+    async def _go() -> dict[str, Any]:
+        return await helper.run_rotation(
+            "Coordinator-Main", "resume the work", cleared_signature="ready>",
+            poll_interval_seconds=0.0, stable_samples_required=1, settle_timeout_seconds=2.0,
+            send_gap_seconds=0.0, model="claude-sonnet-5",
+        )
+
+    result = asyncio.run(_run_with_stub(app, _go))
+    _check(result["status"] == "completed", "model-leg happy path completes")
+    _check(
+        session.sent == [
+            " ", "\x15", "/clear", "\r", "\r",
+            " ", "\x15", "/model claude-sonnet-5", "\r", "\r",
+            "resume the work", "\r",
+        ],
+        f"model leg is clear-settle then five sends then model-settle then pickup (got {session.sent!r})",
+    )
+    _check("model_settle_diagnostics" in result, "completed model rotation reports its second settle")
+
+
+def test_run_rotation_model_send_failure_aborts_before_model_cr_or_pickup() -> None:
+    """The model leg uses the same fail-closed primitive-failure contract as
+    clear: a failed command text never reaches either CR or the pickup."""
+    session = _StubSession(
+        role="Coordinator-Main", session_id="s1", screen_lines=["ready>"],
+        fail_on={"/model claude-sonnet-5"},
+    )
+    app = _one_pane_app(session)
+
+    async def _go() -> dict[str, Any]:
+        return await helper.run_rotation(
+            "Coordinator-Main", "pickup text", cleared_signature="ready>",
+            poll_interval_seconds=0.0, stable_samples_required=1, settle_timeout_seconds=2.0,
+            send_gap_seconds=0.0, model="claude-sonnet-5",
+        )
+
+    try:
+        asyncio.run(_run_with_stub(app, _go))
+        _check(False, "a failing /model send raises HelperStepError")
+    except helper.HelperStepError as exc:
+        _check(
+            exc.step == helper.STEP_SEND_MODEL_TEXT,
+            f"failing /model send names the model-text step (got {exc.step!r})",
+        )
+    _check(
+        session.sent == [" ", "\x15", "/clear", "\r", "\r", " ", "\x15"],
+        f"model send failure reaches neither model CR nor pickup (got {session.sent!r})",
     )
 
 
@@ -465,6 +551,7 @@ def test_run_rotation_settle_timeout_never_sends_pickup() -> None:
         return await helper.run_rotation(
             "Coordinator-Main", "pickup text", cleared_signature="ready>",
             poll_interval_seconds=0.0, stable_samples_required=1, settle_timeout_seconds=0.05,
+            send_gap_seconds=0.0,
         )
 
     result = asyncio.run(_run_with_stub(app, _go))
@@ -473,8 +560,8 @@ def test_run_rotation_settle_timeout_never_sends_pickup() -> None:
         "settle timeout -> refused/settle_timeout envelope",
     )
     _check(
-        session.sent == ["/clear", "\r"],
-        f"settle timeout sent only the clear pair, never the pickup (got {session.sent!r})",
+        session.sent == [" ", "\x15", "/clear", "\r", "\r"],
+        f"settle timeout sent only the clear leg, never the pickup (got {session.sent!r})",
     )
     _check(
         "settle_diagnostics" in result and result["settle_diagnostics"]["samples_taken"] > 0,
@@ -492,6 +579,7 @@ def test_run_rotation_send_failure_on_clear_text_aborts_before_cr() -> None:
         return await helper.run_rotation(
             "Coordinator-Main", "pickup text", cleared_signature="ready>",
             poll_interval_seconds=0.0, settle_timeout_seconds=1.0,
+            send_gap_seconds=0.0,
         )
 
     try:
@@ -502,7 +590,11 @@ def test_run_rotation_send_failure_on_clear_text_aborts_before_cr() -> None:
             exc.step == helper.STEP_SEND_CLEAR_TEXT,
             f"failing /clear send names step=send_clear_text (got {exc.step!r})",
         )
-    _check(session.sent == [], "a failing clear-text send never reaches the CR call")
+    _check(
+        session.sent == [" ", "\x15"],
+        f"a failing clear-text send happens after only the space+kill-line preamble and "
+        f"never reaches the submitting CRs (got {session.sent!r})",
+    )
 
 
 def test_run_rotation_send_failure_on_pickup_text_names_that_step() -> None:
@@ -513,6 +605,7 @@ def test_run_rotation_send_failure_on_pickup_text_names_that_step() -> None:
         return await helper.run_rotation(
             "Coordinator-Main", "pickup text", cleared_signature="ready>",
             poll_interval_seconds=0.0, stable_samples_required=1, settle_timeout_seconds=2.0,
+            send_gap_seconds=0.0,
         )
 
     try:
@@ -524,17 +617,18 @@ def test_run_rotation_send_failure_on_pickup_text_names_that_step() -> None:
             f"failing pickup-text send names step=send_pickup_text (got {exc.step!r})",
         )
     _check(
-        session.sent == ["/clear", "\r"],
-        f"failing pickup-text send happens only after the clear pair, never a trailing CR (got {session.sent!r})",
+        session.sent == [" ", "\x15", "/clear", "\r", "\r"],
+        f"failing pickup-text send happens only after the clear leg, never a trailing CR (got {session.sent!r})",
     )
 
 
 def test_run_rotation_send_failure_on_final_cr_names_pickup_cr_step() -> None:
-    """The final "\\r" call (pickup CR) is byte-identical to the clear CR --
-    fail only on the SECOND occurrence of "\\r" (an occurrence-counting
-    stub) so the failure lands specifically on step 4, not step 2."""
+    """The final "\\r" call (pickup CR) is byte-identical to the clear leg's
+    two CRs (submit, menu-confirm) -- fail only on the THIRD occurrence of
+    "\\r" (an occurrence-counting stub) so the failure lands specifically on
+    the pickup CR step, not any clear-leg CR."""
 
-    class _SecondCrFailsSession(_StubSession):
+    class _ThirdCrFailsSession(_StubSession):
         def __init__(self) -> None:
             super().__init__(role="Coordinator-Main", session_id="s1", screen_lines=["ready>"])
             self._cr_calls = 0
@@ -542,17 +636,18 @@ def test_run_rotation_send_failure_on_final_cr_names_pickup_cr_step() -> None:
         async def async_send_text(self, text: str) -> None:
             if text == "\r":
                 self._cr_calls += 1
-                if self._cr_calls == 2:
-                    raise RuntimeError("send failed for second \\r")
+                if self._cr_calls == 3:
+                    raise RuntimeError("send failed for third \\r")
             self.sent.append(text)
 
-    session = _SecondCrFailsSession()
+    session = _ThirdCrFailsSession()
     app = _one_pane_app(session)
 
     async def _go() -> dict[str, Any]:
         return await helper.run_rotation(
             "Coordinator-Main", "pickup text", cleared_signature="ready>",
             poll_interval_seconds=0.0, stable_samples_required=1, settle_timeout_seconds=2.0,
+            send_gap_seconds=0.0,
         )
 
     try:
@@ -564,8 +659,8 @@ def test_run_rotation_send_failure_on_final_cr_names_pickup_cr_step() -> None:
             f"failing final CR send names step=send_pickup_cr (got {exc.step!r})",
         )
     _check(
-        session.sent == ["/clear", "\r", "pickup text"],
-        f"failing final CR send happens only after clear+CR+pickup-text (got {session.sent!r})",
+        session.sent == [" ", "\x15", "/clear", "\r", "\r", "pickup text"],
+        f"failing final CR send happens only after the clear leg + pickup text (got {session.sent!r})",
     )
 
 
@@ -719,6 +814,7 @@ def test_run_rotation_paste_unstable_refuses_before_sending_final_cr() -> None:
         return await helper.run_rotation(
             "Coordinator-Main", "pickup text", cleared_signature="ready>",
             poll_interval_seconds=0.0, stable_samples_required=3, settle_timeout_seconds=0.05,
+            send_gap_seconds=0.0,
         )
 
     result = asyncio.run(_run_with_stub(app, _go))
@@ -727,7 +823,7 @@ def test_run_rotation_paste_unstable_refuses_before_sending_final_cr() -> None:
         f"an unstabilizing screen -> refused/paste_stable_timeout (got {result!r})",
     )
     _check(
-        session.sent == ["/clear", "\r", "pickup text"],
+        session.sent == [" ", "\x15", "/clear", "\r", "\r", "pickup text"],
         f"the pickup TEXT was sent (needed to trigger the paste) but the submitting CR "
         f"was NEVER sent (got {session.sent!r})",
     )
@@ -753,6 +849,7 @@ def test_run_rotation_submit_never_confirmed_refuses_and_never_reports_completed
         return await helper.run_rotation(
             "Coordinator-Main", "pickup text", cleared_signature="ready>",
             poll_interval_seconds=0.0, stable_samples_required=1, settle_timeout_seconds=0.05,
+            send_gap_seconds=0.0,
         )
 
     result = asyncio.run(_run_with_stub(app, _go))
@@ -761,8 +858,8 @@ def test_run_rotation_submit_never_confirmed_refuses_and_never_reports_completed
         f"an unconfirmed submission -> refused/submit_timeout, NEVER completed (got {result!r})",
     )
     _check(
-        session.sent == ["/clear", "\r", "pickup text", "\r"],
-        f"BOTH send calls succeeded -- this IS the false-green trap: send success != submit "
+        session.sent == [" ", "\x15", "/clear", "\r", "\r", "pickup text", "\r"],
+        f"EVERY send call succeeded -- this IS the false-green trap: send success != submit "
         f"truth (got {session.sent!r})",
     )
     _check("submit_diagnostics" in result, "the refused envelope carries submit_diagnostics")
@@ -780,6 +877,7 @@ def test_run_rotation_happy_path_carries_both_settle_and_submit_diagnostics() ->
         return await helper.run_rotation(
             "Coordinator-Main", "pickup text", cleared_signature="ready>",
             poll_interval_seconds=0.0, stable_samples_required=1, settle_timeout_seconds=2.0,
+            send_gap_seconds=0.0,
         )
 
     result = asyncio.run(_run_with_stub(app, _go))
@@ -787,8 +885,68 @@ def test_run_rotation_happy_path_carries_both_settle_and_submit_diagnostics() ->
     _check("settle_diagnostics" in result, "carries the pre-pickup settle_diagnostics")
     _check("submit_diagnostics" in result, "carries the NEW post-CR submit_diagnostics")
     _check(
-        session.sent == ["/clear", "\r", "pickup text", "\r"],
-        f"exact send sequence unchanged by the new confirmation steps (got {session.sent!r})",
+        session.sent == [" ", "\x15", "/clear", "\r", "\r", "pickup text", "\r"],
+        f"exact send sequence unchanged by the confirmation steps (got {session.sent!r})",
+    )
+
+
+# ─── run_rotation — capture-then-clear (relay-not-disregard, 2026-08-28) ──
+
+
+def test_run_rotation_captures_stranded_composer_content_before_killing_it() -> None:
+    """RED-FIRST for the relay-not-disregard policy: content sitting in the
+    composer when the clear leg starts (a stranded remote-control draft, or
+    a genuine unsent operator draft) is about to be destroyed by the
+    kill-line -- the helper must CAPTURE it off the screen first and carry
+    it in the envelope, never silently discard it. Kills a mutation that
+    sends the preamble without reading the screen."""
+    def _screen_fn(s: Any) -> list[str]:
+        if "/clear" not in s.sent:
+            return ["old turn text", "ready> stranded RC draft"]
+        return ["ready>"]
+
+    session = _StubSession(role="Coordinator-Main", session_id="s1", screen_lines_fn=_screen_fn)
+    app = _one_pane_app(session)
+
+    async def _go() -> dict[str, Any]:
+        return await helper.run_rotation(
+            "Coordinator-Main", "pickup text", cleared_signature="ready>",
+            poll_interval_seconds=0.0, stable_samples_required=1, settle_timeout_seconds=2.0,
+            send_gap_seconds=0.0,
+        )
+
+    result = asyncio.run(_run_with_stub(app, _go))
+    _check(result["status"] == "completed", "capture never blocks the rotation itself")
+    _check(
+        result.get("composer_capture") == ["ready> stranded RC draft"],
+        f"the stranded composer row is captured verbatim in the envelope "
+        f"(got {result.get('composer_capture')!r})",
+    )
+    _check(
+        session.sent[:2] == [" ", "\x15"],
+        f"the kill happens only AFTER the capture-bearing screen read (got {session.sent!r})",
+    )
+
+
+def test_run_rotation_empty_composer_captures_nothing() -> None:
+    """GREEN companion: an empty composer (the bare cleared-signature row)
+    yields an empty capture -- the signature row itself must never be
+    mistaken for stranded content."""
+    session = _StubSession(role="Coordinator-Main", session_id="s1", screen_lines=["ready>"])
+    app = _one_pane_app(session)
+
+    async def _go() -> dict[str, Any]:
+        return await helper.run_rotation(
+            "Coordinator-Main", "pickup text", cleared_signature="ready>",
+            poll_interval_seconds=0.0, stable_samples_required=1, settle_timeout_seconds=2.0,
+            send_gap_seconds=0.0,
+        )
+
+    result = asyncio.run(_run_with_stub(app, _go))
+    _check(result["status"] == "completed", "empty-composer happy path completes")
+    _check(
+        result.get("composer_capture") == [],
+        f"bare signature row captures nothing (got {result.get('composer_capture')!r})",
     )
 
 
@@ -892,7 +1050,7 @@ def test_module_imports_and_discloses_when_iterm2_bindings_are_absent() -> None:
     """The module must IMPORT with no ``iterm2`` present, and disclose at use.
 
     ``iterm2`` is not declared by this plugin; it arrives only with
-    ``iterm2_coding_agent_management_plugin``, which the shipped bizops profile
+    ``iterm2_coding_agent_management_plugin``, which the shipped macos-bizops profile
     deliberately excludes. A module-scope hard import therefore made this entire
     module -- pure rotation logic included -- unimportable on an adopter box.
     Absence must be a DISCLOSED condition at the one place that drives iTerm2,
@@ -945,6 +1103,9 @@ def main() -> int:
     test_run_rotation_zero_matches_never_sends_anything()
     test_run_rotation_ambiguous_matches_never_sends_anything()
     test_run_rotation_happy_path_sends_exact_two_call_shape_twice()
+    test_run_rotation_model_none_is_byte_identical_to_the_existing_sequence()
+    test_run_rotation_model_leg_follows_clear_settle_before_pickup()
+    test_run_rotation_model_send_failure_aborts_before_model_cr_or_pickup()
     test_run_rotation_settle_timeout_never_sends_pickup()
     test_run_rotation_send_failure_on_clear_text_aborts_before_cr()
     test_run_rotation_send_failure_on_pickup_text_names_that_step()
@@ -959,6 +1120,8 @@ def main() -> int:
     test_run_rotation_paste_unstable_refuses_before_sending_final_cr()
     test_run_rotation_submit_never_confirmed_refuses_and_never_reports_completed()
     test_run_rotation_happy_path_carries_both_settle_and_submit_diagnostics()
+    test_run_rotation_captures_stranded_composer_content_before_killing_it()
+    test_run_rotation_empty_composer_captures_nothing()
     test_run_rotation_submit_only_confirms_content_then_sends_cr_and_confirms_submit()
     test_run_rotation_submit_only_refuses_and_sends_nothing_on_content_mismatch()
     test_module_imports_and_discloses_when_iterm2_bindings_are_absent()

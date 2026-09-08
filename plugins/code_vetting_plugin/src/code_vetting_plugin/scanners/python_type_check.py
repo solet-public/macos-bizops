@@ -34,7 +34,7 @@ from typing import Any
 from ..coverage import CoverageRecord, ScannerResult
 from ..models import ContextProfile, Dimension, Finding, Layer, Provenance, Severity
 from ..targets import TargetTree
-from ..toolrun import ToolOutcome, run, tool_available
+from ..toolrun import ToolOutcome, run, tool_available, tool_unavailable_reason
 
 _SCANNER = "python_type_check"
 _PYRIGHT = "pyright"
@@ -320,7 +320,10 @@ def _run_checker(tree: TargetTree, venv_name: str, checker: str, run_id: str) ->
     if binary is None:
         return _CheckerRun(
             findings=[],
-            disclosure=f"{checker}: not available (target env + scan host)",
+            disclosure=(
+                f"{checker}: not available (target env + scan host): "
+                f"{tool_unavailable_reason(checker)}"
+            ),
             completed=False,
         )
     version, version_failure = _binary_version(binary, tree.root)

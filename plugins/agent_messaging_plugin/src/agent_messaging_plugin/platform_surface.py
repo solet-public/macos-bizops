@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
+from ananta.core.actions.action_factory import UNKNOWN_ARGUMENTS_ERROR_CODE
 from ananta.core.domain.enums import ActionStatus
 from ananta.core.result_processing import ErrorProcessorKind, ResultProcessorKind
 
@@ -652,6 +653,9 @@ class PlatformSurface:
         except Exception as exc:
             self._flow_manager.update_flow_status(flow_id, "failed")
             logger.error("process_call dispatch failed: %s", exc, exc_info=True)
+            error_code = getattr(exc, "error_code", None)
+            if error_code == UNKNOWN_ARGUMENTS_ERROR_CODE:
+                raise BridgeError(error_code, str(exc)) from exc
             raise BridgeError(ERR_PROCESS_CALL_FAILED, str(exc)) from exc
         return {
             "status": "queued",

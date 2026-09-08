@@ -26,6 +26,7 @@ fake that records the call but doesn't actually launch another the solet.
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from collections.abc import Callable, Iterable
@@ -37,6 +38,7 @@ from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
 from ananta.core.runtime import get_runtime_dir
 from ananta.interfaces.lifecycle_result_types import RestartResult, RestartStatus
 
+from macos_self_deployment_plugin import process_identity
 from macos_self_deployment_plugin.child_spawn import spawn_solet_child
 from macos_self_deployment_plugin.constants import (
     AUDIT_TOKEN_PREFIX,
@@ -154,6 +156,7 @@ class ReleaseManagerProtocol(Protocol):
         manifest_etag: str = ...,
         manifest_plugins: tuple[str, ...] | None = ...,
         schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = ...,
+        reconciliation_provenance: dict[str, str] | None = ...,
     ) -> CandidatePaths: ...
 
     def candidate_for(self, release_id: str) -> CandidatePaths: ...
@@ -509,6 +512,52 @@ def _derive_next_color(
     return opposite_color(self_color)
 
 
+def _provenance_kwargs(
+    reconciliation_provenance: dict[str, str] | None,
+) -> dict[str, dict[str, str]]:
+    """Pass the provenance kwarg ONLY on the reconciliation path.
+
+    An ordinary deploy must call ``build_candidate`` with exactly the argument
+    list it always did, so widening that seam cannot silently change deploy
+    behaviour — and a release-manager stand-in that does not understand
+    provenance then fails loudly the moment a reconciliation actually uses it,
+    instead of quietly dropping the one field that records which approved act
+    produced these bytes.
+
+    Provenance reaches the build and nothing else: it never influences colour
+    selection, preflight, or any refusal, so a reconciliation swap and a deploy
+    swap remain the same operation with the same safety properties.
+    """
+    if reconciliation_provenance is None:
+        return {}
+    return {"reconciliation_provenance": reconciliation_provenance}
+
+
+def _prior_identity(
+    prior_pid: int | None,
+    prior_start_token: str | None,
+) -> tuple[int, str | None]:
+    """Supply service-local identity only for direct compatibility callers."""
+    resolved_pid = os.getpid() if prior_pid is None else prior_pid
+    return (
+        resolved_pid,
+        process_identity.start_token(resolved_pid)
+        if prior_start_token is None
+        else prior_start_token,
+    )
+
+
+def _gc_releases(manager: ReleaseManagerProtocol, logger: logging.Logger) -> None:
+    """Best-effort release cleanup that never aborts a healthy swap."""
+    try:
+        result = manager.gc()
+    except (ReleaseManagerError, OSError) as exc:
+        logger.warning("release gc failed (non-fatal): %s", exc)
+        return
+    if result.deleted:
+        logger.info("release gc reaped %d: %s", len(result.deleted), result.deleted)
+
+
 class SwapOrchestrator:
     """Stateless coordinator for one ``restart_with_manifest`` turn.
 
@@ -521,7 +570,6 @@ class SwapOrchestrator:
     holds the platform's manifest CAS lock — concurrent firings are
     blocked at the apply-manifest layer.
     """
-
     def __init__(
         self,
         *,
@@ -584,6 +632,10 @@ class SwapOrchestrator:
         self_instance_id: str,
         self_color: str,
         set_active_targets: Iterable[SetActiveTarget],
+        reconciliation_provenance: dict[str, str] | None = None,
+        prior_pid: int | None = None,
+        prior_start_token: str | None = None,
+        poller_gate: str = "local_service_quiesced",
     ) -> RestartResult:
         """Drive one swap end-to-end and return the typed RestartResult.
 
@@ -642,6 +694,7 @@ class SwapOrchestrator:
         plan = self._prepare_swap(
             reason=reason, expected_etag=expected_etag, app_home=app_home,
             self_color=self_color, self_instance_id=self_instance_id,
+            reconciliation_provenance=reconciliation_provenance,
         )
         if isinstance(plan, RestartResult):
             return plan
@@ -654,6 +707,9 @@ class SwapOrchestrator:
         # symlink op is ``cutover`` (the durable rollback verb passes
         # ``rollback`` instead); a register-timeout here is a plain FAILED
         # (system unchanged, retryable).
+        resolved_prior_pid, resolved_prior_start_token = _prior_identity(
+            prior_pid, prior_start_token,
+        )
         result = self._executor.execute(
             app_home=app_home,
             candidate=candidate,
@@ -662,6 +718,9 @@ class SwapOrchestrator:
             expected_etag=expected_etag,
             self_instance_id=self_instance_id,
             self_color=self_color,
+            prior_pid=resolved_prior_pid,
+            prior_start_token=resolved_prior_start_token,
+            poller_gate=poller_gate,
             set_active_targets=set_active_targets,
             symlink_swap=self._release_manager.cutover,
             spawn_failure=(RestartStatus.FAILED, RestartReasonCode.SPAWN_FAILED),
@@ -674,7 +733,10 @@ class SwapOrchestrator:
         if result.status is RestartStatus.QUEUED and plan.probe_evidence is not None:
             # Q5: the GREEN probe's evidence rides the QUEUED result so the
             # applied envelope carries positive proof the L2 probe executed.
-            return replace(result, probe=plan.probe_evidence)
+            merged_probe = dict(plan.probe_evidence)
+            if result.probe is not None:
+                merged_probe.update(result.probe)
+            return replace(result, probe=merged_probe)
         return result
 
     # ------------------------------------------------------------------
@@ -691,6 +753,8 @@ class SwapOrchestrator:
         self_instance_id: str,
         self_color: str,
         set_active_targets: Iterable[SetActiveTarget],
+        prior_pid: int | None = None,
+        prior_start_token: str | None = None,
     ) -> RestartResult:
         """Durably roll back to the prior release (design §4.5, PATH A).
 
@@ -798,6 +862,9 @@ class SwapOrchestrator:
             "rolling back: bringing up previous release=%s as color=%s",
             previous, next_color,
         )
+        resolved_prior_pid, resolved_prior_start_token = _prior_identity(
+            prior_pid, prior_start_token,
+        )
         return self._executor.execute(
             app_home=app_home,
             candidate=candidate,
@@ -806,6 +873,9 @@ class SwapOrchestrator:
             expected_etag=expected_etag,
             self_instance_id=self_instance_id,
             self_color=self_color,
+            prior_pid=resolved_prior_pid,
+            prior_start_token=resolved_prior_start_token,
+            poller_gate="local_service_quiesced",
             set_active_targets=set_active_targets,
             # rollback ignores the candidate (its target is the ledger's
             # previous); the executor still spawns FROM candidate's venv/code.
@@ -835,6 +905,7 @@ class SwapOrchestrator:
     def _prepare_swap(
         self, *, reason: str, expected_etag: str, app_home: Path,
         self_color: str, self_instance_id: str,
+        reconciliation_provenance: dict[str, str] | None = None,
     ) -> _SwapPlan | RestartResult:
         """Pre-spawn phase: confirm self active + materialize + preflight candidate.
 
@@ -845,6 +916,9 @@ class SwapOrchestrator:
         failure, or a non-additive schema diff (§3). On every failure path
         nothing is spawned and the live router + ``current``/``previous``
         stay untouched.
+
+        ``reconciliation_provenance`` reaches the candidate build and nothing
+        else — see :func:`_provenance_kwargs`.
         """
         try:
             status_snap = self._router.status()
@@ -881,6 +955,7 @@ class SwapOrchestrator:
                 manifest_etag=expected_etag,
                 manifest_plugins=_capture_manifest_plugins(app_home),
                 schema_snapshot_fn=snapshot_fn,
+                **_provenance_kwargs(reconciliation_provenance),
             )
         except ReleaseManagerError as exc:
             return self._failure(
@@ -899,7 +974,7 @@ class SwapOrchestrator:
         # superseded releases AND rejected candidates from a run of
         # build-then-refuse / post-build failures (the just-built candidate is
         # newest, so it survives; the next build reaps it if it never landed).
-        self._gc_releases()
+        _gc_releases(self._release_manager, self._logger)
         # §3 preflight DDL-free gate: durable code rollback only holds over an
         # unchanged/additive schema. A non-additive diff is refused HERE, before
         # any spawn. The rejected candidate dir is left for the NEXT build's GC.
@@ -943,24 +1018,6 @@ class SwapOrchestrator:
             next_color=next_color, candidate=candidate,
             probe_evidence=probe_outcome.payload,
         )
-
-    def _gc_releases(self) -> None:
-        """Reap stale releases (keep last K); best-effort — never fails a deploy.
-
-        §4.6 GC-safety in the release manager guarantees ``current``/
-        ``previous`` and any in-progress release are never reaped. A cleanup
-        failure (disk full, an ``rmtree`` race) is logged and swallowed:
-        bounded disk hygiene must not abort a swap that is otherwise healthy.
-        """
-        try:
-            result = self._release_manager.gc()
-        except (ReleaseManagerError, OSError) as exc:
-            self._logger.warning("release gc failed (non-fatal): %s", exc)
-            return
-        if result.deleted:
-            self._logger.info(
-                "release gc reaped %d: %s", len(result.deleted), result.deleted,
-            )
 
     def _dry_run_envelope(
         self, reason: str, expected_etag: str, self_color: str

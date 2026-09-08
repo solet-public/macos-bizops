@@ -1,8 +1,8 @@
 {
   "process_key": "plugin::default_scheduling_plugin::execute_in_seconds",
   "display_name": "Execute in Seconds",
-  "description": "[NON-TERMINAL] Schedule a one-time wake-up after a delay. Two modes: (1) action_definitions — provide a list of {process_key, arguments} objects to execute at fire time; (2) memory_tag — the platform retrieves memories with that tag and the model decides what to do next. For scheduled peer notifications use action_definitions with plugin::agent_messaging_plugin::send_peer_message and important=true so the wake fires via the native IMPORTANT path.",
-  "embedding_description": "Schedule a one-time delayed wake-up after N seconds. Use action_definitions (list of {process_key, arguments}) for direct action dispatch at fire time, or memory_tag for the recall-and-decide pattern. Returns schedule_id and run_at. Use for check-ins, retries, peer wake-ups, and watchdog timeouts.",
+  "description": "[NON-TERMINAL REGISTRATION] Schedule one-time execution after a delay. Provide exactly one mode: a non-empty action_definitions list of syntactically valid {process_key, arguments} objects, or memory_tag for a terminal get_memories_by_tag read whose result is written only to the action row and does not start a model turn. Registration validates entry shape and scheduled-action policy; execution resolves process_key against processes registered at fire time. Content is valid only with memory_tag. For scheduled peer notifications, use action_definitions with plugin::agent_messaging_plugin::peer_send_by_name.",
+  "embedding_description": "Schedule one-time delayed work using exactly one mode: non-empty, syntactically valid action_definitions whose process keys resolve against registered processes at fire time, or memory_tag for a terminal get_memories_by_tag read that records its result and starts no model turn. Content is valid only with memory_tag. Returns schedule_id and run_at.",
   "result_processor_customizations": {
     "action_label": "Delayed execution scheduled",
     "result_type": "schedule_created",
@@ -11,8 +11,8 @@
     "output_action_guidance": "A delayed execution schedule has been created. Consider whether you should inform the requester when the check-in will occur, and retain the schedule_id or tags so it can be cancelled once work completes."
   },
   "error_processor_customizations": {
-    "action_context": "Scheduling a one-time delayed wake-up keyed by memory_tag",
-    "error_interpretation": "ParameterError with 'seconds': value must be a positive integer greater than 0. ParameterError with 'memory_tag': missing or empty. ScheduleCreateError: scheduler not initialized or failed to save schedule.",
-    "recovery_guidance": "For seconds errors: ensure value is a positive integer. For memory_tag errors: provide a non-empty memory_tag. For scheduler errors: verify scheduler service is running and state service is accessible for persistence."
+    "action_context": "Scheduling one-time delayed execution with exactly one execution mode",
+    "error_interpretation": "default_scheduling_plugin.parameter_error: non-positive seconds, malformed or inference-bearing action definition, empty action list, invalid memory_tag, content outside memory_tag mode, or an execution-mode conflict. default_scheduling_plugin.schedule_create_error: persistence or scheduler registration failed after valid parameters.",
+    "recovery_guidance": "Use a positive seconds value and choose exactly one mode. For deterministic work, provide non-empty action_definitions using {process_key, arguments}. Use memory_tag only for a terminal memory read. For scheduler errors, verify the scheduling and state services."
   }
 }

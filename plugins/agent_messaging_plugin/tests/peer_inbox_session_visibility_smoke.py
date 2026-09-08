@@ -126,15 +126,16 @@ def _seed_msg(
 def _inbox_cursors(
     repo: AgentMessagingRepository, *, instance: str, session: str,
 ) -> list[int]:
+    rows, _ = repo.list_peer_messages_for(
+        recipient_agent_id="claude_code",
+        recipient_agent_instance_id=instance,
+        recipient_agent_session_id=session,
+        after_created_at=None,
+        limit=50,
+    )
     return [
         m.cursor
-        for m in repo.list_peer_messages_for(
-            recipient_agent_id="claude_code",
-            recipient_agent_instance_id=instance,
-            recipient_agent_session_id=session,
-            after_created_at=None,
-            limit=50,
-        )
+        for m in rows
     ]
 
 

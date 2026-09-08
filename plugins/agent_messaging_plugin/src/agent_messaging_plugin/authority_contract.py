@@ -53,8 +53,9 @@ _TEMPLATE_PATH = (
 _PLACEHOLDER_RE = re.compile(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}")
 
 _PLACEHOLDER_NAMES = (
-    "agent_instance_id", "role_class", "lane_id", "brief_ref", "spawned_by_role",
+    "agent_instance_id", "role_class", "lane_id", "brief_ref", "unit_id", "spawned_by_role",
 )
+_OPTIONAL_UNIT_ID_LINE = "UNIT ID: {unit_id}\n"
 
 
 class UnresolvedPlaceholderError(ValueError):
@@ -70,6 +71,7 @@ def render_authority_delegation_contract(
     lane_id: str,
     brief_ref: str,
     spawned_by_role: str,
+    unit_id: str = "",
 ) -> str:
     """Renders the delegation contract for one spawn. Raises
     :class:`UnresolvedPlaceholderError` if any named placeholder in the
@@ -77,11 +79,14 @@ def render_authority_delegation_contract(
     template) -- never silently ships a raw ``{placeholder}`` token into a
     worker's live system prompt."""
     template = _TEMPLATE_PATH.read_text()
+    if not unit_id:
+        template = template.replace(_OPTIONAL_UNIT_ID_LINE, "")
     values = {
         "agent_instance_id": agent_instance_id,
         "role_class": role_class,
         "lane_id": lane_id,
         "brief_ref": brief_ref,
+        "unit_id": unit_id,
         "spawned_by_role": spawned_by_role,
     }
     rendered = template

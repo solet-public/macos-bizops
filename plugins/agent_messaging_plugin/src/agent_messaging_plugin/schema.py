@@ -72,6 +72,14 @@ SESSION_ROLE_CLAIM_ID_PREFIX = "src"
 TABLE_MANAGED_SESSION = "managed_session"
 MANAGED_SESSION_ID_PREFIX = "mgs"
 
+# Codex/Solet coordination-efficiency repair (2026-08-22): one durable work
+# contract may own sequential managed_session attempts.  The event table is
+# append-only; managed_dispatch is the current decision projection.
+TABLE_MANAGED_DISPATCH = "managed_dispatch"
+MANAGED_DISPATCH_ID_PREFIX = "mdp"
+TABLE_MANAGED_DISPATCH_EVENT = "managed_dispatch_event"
+MANAGED_DISPATCH_EVENT_ID_PREFIX = "mde"
+
 TABLE_SESSION_TRANSITION = "session_transition"
 SESSION_TRANSITION_ID_PREFIX = "sxn"
 
@@ -105,6 +113,25 @@ TABLE_SESSION_CONTEXT_STATUS = "session_context_status"
 SESSION_CONTEXT_STATUS_ID_PREFIX = "scx"
 TABLE_SESSION_CONTEXT_STATUS_HISTORY = "session_context_status_history"
 SESSION_CONTEXT_STATUS_HISTORY_ID_PREFIX = "scxh"
+
+# CDX-06 part C (2026-08-24) — the HONESTY FIELD. ONE row per
+# agent_instance_id (latest state, always overwritten — same single-row
+# posture as session_context_status, deliberately NOT a history table: the
+# question this table answers is "has this session's inbox-consumer hook
+# ever run, and when", not a time series). Sibling of session_context_status
+# by REPORTER (same Stop-hook family, same identity, same cadence) but
+# deliberately a SEPARATE table rather than new columns bolted onto it: this
+# table carries zero token/context/model fields, and report_context_status's
+# six identity/measurement parameters are all `required=True` on a verb
+# already relied upon by every existing reporter -- loosening that contract
+# to make an unrelated field optional would be a breaking change to a proven
+# surface for a caller (the new consumer hook) that has no reason to have
+# computed a token measurement at all. `report_inbox_consumption` is a plain
+# upsert on this table, same shape as report_context_status. Its read surface
+# resolves watcher-held identities through the GAU-07 ledger/watch-id join,
+# using the stable agent_session_id already captured by the writer.
+TABLE_INBOX_CONSUMPTION_STATUS = "inbox_consumption_status"
+INBOX_CONSUMPTION_STATUS_ID_PREFIX = "ics"
 
 # GAU-21 (2026-08-19) — the DURABLE record that a gauge notice fired. The
 # sweep's notices are appended as in-memory bridge events only: nothing
@@ -375,7 +402,7 @@ def get_peer_binding_schema() -> TableSchema:
                 default=0,
                 description=(
                     "MSG-04/identity-unification (2026-08-20): declared by "
-                    "`solet watch` on every peer/register call (never "
+                    "`solet-bridge watch` on every peer/register call (never "
                     "probed), matching BridgeBinding.watcher_declared's own "
                     "default. True when this binding is a no-MCP `watch` "
                     "subprocess registering under its ledger AGENT_INSTANCE_ID "
@@ -793,8 +820,24 @@ def get_managed_session_schema() -> TableSchema:
                 type=ColumnType.TEXT,
                 description="Workbench path or dispatch id backing the spawn (provenance).",
             ),
+            "unit_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Optional project-solet work-unit identity resolvable by the spawned lane.",
+            ),
             "model": ColumnDefinition(
                 type=ColumnType.TEXT, description="Dispatch model override.",
+            ),
+            "dispatch_kind": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Required model-dispatch policy kind: diagnose | design | review | fix | infrastructure.",
+            ),
+            "reviewed_report_vendor": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="For review only: vendor that authored the reviewed report (codex | claude_code).",
+            ),
+            "pair_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="For diagnose/design only: cross-vendor producer pair identity.",
             ),
             "effort": ColumnDefinition(
                 type=ColumnType.TEXT, description="Dispatch effort override.",
@@ -828,9 +871,62 @@ def get_managed_session_schema() -> TableSchema:
                     "claude_code."
                 ),
             ),
+            "hook_absence_checked_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description=(
+                    "When the hook-absence sweep consumed this row. A NULL value is an "
+                    "unchecked candidate; the atomic first write is the bounded sweep cursor."
+                ),
+            ),
+            "hook_absence_warned_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description=(
+                    "When the absence sweep emitted this session's one actionable "
+                    "HOOK ABSENCE warning; NULL means it was checked without warning."
+                ),
+            ),
             "host_ref": ColumnDefinition(
                 type=ColumnType.TEXT,
                 description="tmux session name / driver pid / null (§5).",
+            ),
+            "dispatch_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "The durable managed_dispatch work contract this host attempt "
+                    "belongs to. NULL/empty on historical and explicit host-only rows."
+                ),
+            ),
+            "first_turn_source": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="charter | fallback submission source, persisted after spawn.",
+            ),
+            "first_turn_delivered": ColumnDefinition(
+                type=ColumnType.BOOLEAN,
+                description="Host submission receipt only; never worker uptake.",
+            ),
+            "first_turn_error": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Exact first-turn submission error; empty on success.",
+            ),
+            "first_turn_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description="When first-turn submission was attempted.",
+            ),
+            "host_liveness": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="alive | dead | unknown; probe faults remain unknown.",
+            ),
+            "host_liveness_observed_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description="When native host liveness was last observed.",
+            ),
+            "host_liveness_detail": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Exact probe outcome or fault detail.",
+            ),
+            "last_reconciled_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description="Last supervisor reconciliation time for this attempt.",
             ),
             "capability_report": ColumnDefinition(
                 type=ColumnType.JSON,
@@ -839,7 +935,32 @@ def get_managed_session_schema() -> TableSchema:
             ),
             "report_by": ColumnDefinition(
                 type=ColumnType.DATETIME,
-                description="report-or-die deadline; re-armed on each report_alive call.",
+                description="report-or-die deadline; re-armed only by explicit reports or confirmed drives.",
+            ),
+            "report_by_source": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="explicit_self_report | confirmed_drive | observed_spawning provenance for report_by.",
+            ),
+            "status_source": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="explicit_self_report | heartbeat_inferred provenance for status.",
+            ),
+            "last_heartbeat_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description="Successful passive heartbeat liveness timestamp, never a deadline rearm.",
+            ),
+            "heartbeat_failures_since_last": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                default=0,
+                description="Failures carried forward by the next successful heartbeat.",
+            ),
+            "heartbeat_failure_first_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                description="First failure timestamp in the carried-forward heartbeat episode.",
+            ),
+            "heartbeat_failure_last_reason": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Most recent carried-forward heartbeat failure reason.",
             ),
             "report_by_seconds": ColumnDefinition(
                 type=ColumnType.INTEGER,
@@ -870,6 +991,16 @@ def get_managed_session_schema() -> TableSchema:
             "last_transition_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
                 description="Timestamp of the most recent lifecycle_state write.",
+            ),
+            "worktree_disposition": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "Retirement teardown outcome: removed | retained_not_disposable | "
+                    "retained_error | not_provisioned. Empty until retirement. Recorded "
+                    "with the terminal ledger transition so session_status/list_sessions "
+                    "expose a retained worktree or an absent provisioning target instead "
+                    "of implying cleanup succeeded."
+                ),
             ),
             "registration_overdue_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
@@ -909,6 +1040,19 @@ def get_managed_session_schema() -> TableSchema:
                     "trail is session_transition, this is the fast-read mirror."
                 ),
             ),
+            "provisioning_mode": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                default="worktree",
+                description=(
+                    "How this session's working environment is provisioned: "
+                    "'worktree' (default) or 'synthetic_no_worktree' (the "
+                    "qualification-only lifecycle — no lane worktree exists, so "
+                    "teardown must skip worktree removal). Written at spawn by "
+                    "session_lifecycle_store.insert_managed_session; read by the "
+                    "teardown fork in session_lifecycle_verbs."
+                ),
+            ),
         },
         indexes=[
             IndexDefinition(name="idx_managed_session_lane", columns=["lane_id"]),
@@ -918,6 +1062,284 @@ def get_managed_session_schema() -> TableSchema:
             # before dispatch — indexed so the guard costs one index probe
             # rather than a fleet scan on every spawn.
             IndexDefinition(name="idx_managed_session_local_name", columns=["local_name"]),
+        ],
+    )
+
+
+def get_managed_dispatch_schema() -> TableSchema:
+    """One durable work contract spanning sequential host attempts."""
+    text_columns = {
+        "dispatch_id": "Stable server-issued work-contract identity.",
+        "lane_id": "Human-facing lane identity.",
+        "role_name": "Durable worker role required by the dispatch.",
+        "role_class": "Role class required by the dispatch.",
+        "work_class": "Work authority classification.",
+        "budget_line": "Budget attribution key.",
+        "brief_ref": "Exact immutable brief path.",
+        "unit_id": "Optional project-solet work-unit identity resolvable by the spawned lane.",
+        "brief_sha256": "SHA-256 of the exact brief bytes.",
+        "expected_path": "Exact expected completion artifact.",
+        "completion_contract_sha256": "Digest of the structured completion contract.",
+        "model": "Explicit worker model.",
+        "dispatch_kind": "Required model-dispatch policy kind.",
+        "reviewed_report_vendor": "For review: vendor that authored the reviewed report.",
+        "pair_id": "For diagnose/design: cross-vendor producer pair identity.",
+        "effort": "Explicit worker effort tier.",
+        "agent_runtime": "Worker runtime, independent of host topology.",
+        "host": "Exact spawn host selected by the immutable contract.",
+        "visibility": "Exact worker visibility policy.",
+        "local_name": "Exact local worker name and registration label.",
+        "permission_mode": "Exact host permission policy.",
+        "transport": "Exact managed worker transport policy.",
+        "spawned_by_instance_id": "Coordinator instance lineage.",
+        "spawned_by_role": "Coordinator role lineage.",
+        "directed_by": "Server-built authorization principal.",
+        "state": "Current managed-dispatch state-machine projection.",
+        "current_agent_instance_id": "Current attempt identity; at most one.",
+        "blocker_class": "internal | operator when blocked.",
+        "blocker_owner": "Role responsible for the blocker decision.",
+        "blocker_question": "Exact outstanding ruling question.",
+        "next_required_action": "Decision-oriented next action.",
+        "responsible_role": "Role responsible for the next action.",
+        "terminal_reason": "Explicit terminal classification.",
+        "first_turn_source": "charter | fallback transport source.",
+        "first_turn_error": "Exact first-turn submission error.",
+        "current_host": "Current attempt host topology.",
+        "current_host_ref": "Current attempt native host reference.",
+        "current_agent_runtime": "Current attempt runtime.",
+        "host_liveness": "alive | dead | unknown.",
+        "host_liveness_detail": "Exact native liveness probe detail.",
+        "reported_artifact_sha256": "Worker-reported artifact digest.",
+        "reported_completion_verdict": "Worker completion verdict under the contract.",
+    }
+    columns = {
+        name: ColumnDefinition(
+            type=ColumnType.TEXT,
+            not_null=name
+            in {
+                "dispatch_id",
+                "lane_id",
+                "role_name",
+                "role_class",
+                "work_class",
+                "budget_line",
+                "brief_ref",
+                "brief_sha256",
+                "expected_path",
+                "completion_contract_sha256",
+                "model",
+                "effort",
+                "agent_runtime",
+                "host",
+                "visibility",
+                "local_name",
+                "permission_mode",
+                "transport",
+                "spawned_by_instance_id",
+                "spawned_by_role",
+                "directed_by",
+                "state",
+                "next_required_action",
+                "responsible_role",
+            },
+            unique=name == "dispatch_id",
+            description=description,
+        )
+        for name, description in text_columns.items()
+    }
+    columns.update(
+        {
+            "completion_contract": ColumnDefinition(
+                type=ColumnType.JSON,
+                not_null=True,
+                description="Structured gate/evidence contract; path existence is insufficient.",
+            ),
+            "allowed_hosts": ColumnDefinition(
+                type=ColumnType.JSON,
+                not_null=True,
+                description="Explicit allowed host policy.",
+            ),
+            "allowed_tools": ColumnDefinition(
+                type=ColumnType.JSON,
+                not_null=True,
+                description="Exact host tool allowlist bound before spawn.",
+            ),
+            "allow_askuserquestion": ColumnDefinition(
+                type=ColumnType.BOOLEAN,
+                not_null=True,
+                description="Exact unattended AskUserQuestion policy.",
+            ),
+            "degraded_hooks_acknowledged": ColumnDefinition(
+                type=ColumnType.BOOLEAN,
+                not_null=True,
+                description="Exact degraded-hook acknowledgement policy.",
+            ),
+            "report_by_seconds": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=True,
+                description="Attempt-level report window passed to the host lifecycle.",
+            ),
+            "ttl_seconds": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=True,
+                description="Attempt-level TTL window passed to the host lifecycle.",
+            ),
+            "attempt_number": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=True,
+                description="Monotonic sequential-attempt number.",
+            ),
+            "version": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=True,
+                description="Monotonic causal version for all authoritative transitions.",
+            ),
+            "liveness_unknown_count": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                default=0,
+                description="Consecutive unknown native-host probes for the current attempt.",
+            ),
+            "first_turn_delivered": ColumnDefinition(
+                type=ColumnType.BOOLEAN,
+                description="Submission receipt only; never ACK or uptake.",
+            ),
+            "blocker_evidence": ColumnDefinition(
+                type=ColumnType.JSON,
+                description="Structured blocker evidence and safe options.",
+            ),
+            "reported_completion_evidence": ColumnDefinition(
+                type=ColumnType.JSON,
+                description="Worker completion evidence awaiting independent acceptance.",
+            ),
+            "acceptance_evidence": ColumnDefinition(
+                type=ColumnType.JSON,
+                description="Coordinator independent acceptance evidence.",
+            ),
+        },
+    )
+    for name in (
+        "uptake_due_at",
+        "report_by",
+        "watchdog_due_at",
+        "expires_at",
+        "last_ack_at",
+        "last_milestone_at",
+        "blocked_at",
+        "decision_due_at",
+        "completion_reported_at",
+        "completion_accepted_at",
+        "first_turn_at",
+        "host_liveness_observed_at",
+        "last_reconciled_at",
+        "watchdog_fired_at",
+        "next_liveness_probe_at",
+        "liveness_escalation_due_at",
+    ):
+        columns[name] = ColumnDefinition(
+            type=ColumnType.DATETIME,
+            not_null=name in {"uptake_due_at", "report_by", "watchdog_due_at", "expires_at"},
+            description=f"Managed-dispatch timestamp: {name}.",
+        )
+    for name in (
+        "uptake_due_at_window_seconds",
+        "report_by_window_seconds",
+        "watchdog_due_at_window_seconds",
+        "expires_at_window_seconds",
+    ):
+        columns[name] = ColumnDefinition(
+            type=ColumnType.INTEGER,
+            not_null=True,
+            description=f"Immutable retry window derived at prepare: {name}.",
+        )
+    return TableSchema(
+        table_name=TABLE_MANAGED_DISPATCH,
+        description=(
+            "Durable managed work contract with explicit uptake, blocker, liveness, "
+            "completion, and coordinator-acceptance truth."
+        ),
+        id_prefix=MANAGED_DISPATCH_ID_PREFIX,
+        columns=columns,
+        indexes=[
+            IndexDefinition(name="idx_managed_dispatch_state", columns=["state"]),
+            IndexDefinition(name="idx_managed_dispatch_lane", columns=["lane_id"]),
+            IndexDefinition(
+                name="idx_managed_dispatch_current",
+                columns=["current_agent_instance_id"],
+            ),
+        ],
+    )
+
+
+def get_managed_dispatch_event_schema() -> TableSchema:
+    """Append-only accepted and rejected dispatch-event audit trail."""
+    return TableSchema(
+        table_name=TABLE_MANAGED_DISPATCH_EVENT,
+        description=(
+            "Append-only causal event trail for worker reports, coordinator decisions, "
+            "transport evidence, and deduplicated supervision notices."
+        ),
+        id_prefix=MANAGED_DISPATCH_EVENT_ID_PREFIX,
+        columns={
+            "event_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="Caller idempotency key scoped to dispatch_id.",
+            ),
+            "dispatch_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="Owning work contract.",
+            ),
+            "attempt_agent_instance_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Attempt associated with this event, if any.",
+            ),
+            "event_kind": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="ACK, milestone, blocker, completion, decision, or supervision kind.",
+            ),
+            "actor_role": ColumnDefinition(type=ColumnType.TEXT, description="Actor role."),
+            "actor_instance_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Actor instance identity.",
+            ),
+            "event_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                not_null=True,
+                description="Event observation time.",
+            ),
+            "prior_version": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=True,
+                description="Causal dispatch version supplied by the actor.",
+            ),
+            "payload": ColumnDefinition(
+                type=ColumnType.JSON,
+                not_null=True,
+                description="Structured event evidence.",
+            ),
+            "payload_sha256": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="Canonical payload digest.",
+            ),
+            "accepted": ColumnDefinition(
+                type=ColumnType.BOOLEAN,
+                not_null=True,
+                description="Whether this event won validation and causal ordering.",
+            ),
+            "rejection_code": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Stable rejection token for an audit-preserved loser.",
+            ),
+        },
+        indexes=[
+            IndexDefinition(name="idx_managed_dispatch_event_dispatch", columns=["dispatch_id"]),
+            IndexDefinition(
+                name="idx_managed_dispatch_event_attempt",
+                columns=["attempt_agent_instance_id"],
+            ),
         ],
     )
 
@@ -1057,6 +1479,94 @@ def get_session_claude_mapping_schema() -> TableSchema:
     )
 
 
+def get_inbox_consumption_status_schema() -> TableSchema:
+    """CDX-06 part C — the honesty field. See the ``TABLE_INBOX_CONSUMPTION_STATUS``
+    module comment for why this is a separate table from
+    ``session_context_status`` rather than new columns on it."""
+    return TableSchema(
+        table_name=TABLE_INBOX_CONSUMPTION_STATUS,
+        description=(
+            "Latest known inbox-consumption-check state per agent_instance_id "
+            "-- the cache session_inbox_consumption_status reads, fed by "
+            "report_inbox_consumption. Absence of a row is the honest, "
+            "expected shape for a session whose runtime has no consumer hook "
+            "(or has not ticked yet), never a synonym for 'consumed'."
+        ),
+        id_prefix=INBOX_CONSUMPTION_STATUS_ID_PREFIX,
+        columns={
+            COL_AGENT_INSTANCE_ID: ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="The reporting session — worker ledger id or the seat's own id.",
+            ),
+            "runtime": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                description="The reporting agent runtime (for example codex).",
+            ),
+            "checked_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                not_null=True,
+                description=(
+                    "When the consumer hook last actually performed its "
+                    "existence check, REGARDLESS of what it found. This is "
+                    "the honesty signal itself: a recent checked_at proves "
+                    "the mechanism executed; row absence (never a stale or "
+                    "defaulted timestamp) proves it never has."
+                ),
+            ),
+            "pending_found_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                not_null=False,
+                description=(
+                    "The last time a check found a pending delivery and "
+                    "forced a Stop-hook block/continue. NULL means either "
+                    "'never found one' or 'no check has run yet' -- "
+                    "disambiguate using checked_at, not this column alone."
+                ),
+            ),
+            "pending_reason": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "The fixed nudge text last delivered via decision:block, "
+                    "for diagnostics. NULL when pending_found_at is NULL."
+                ),
+            ),
+            "reporter_surface": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "checkout | plugin_cache | vendored | release | unknown "
+                    "-- which copy of the hook wrote this row, same closed "
+                    "vocabulary as session_context_status.reporter_surface. "
+                    "NULL means the reporter predates this column."
+                ),
+            ),
+            "agent_session_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description=(
+                    "The reporting session's STABLE agent_session_id, same "
+                    "routing-join semantics as "
+                    "session_context_status.agent_session_id. NULL means the "
+                    "reporter predates this column, NOT that the session has "
+                    "no bridge. session_inbox_consumption_status uses this "
+                    "stored value for its GAU-07-style read-side resolution, "
+                    "so no backfill is needed."
+                ),
+            ),
+        },
+        indexes=[
+            IndexDefinition(
+                name="idx_inbox_consumption_status_instance",
+                columns=[COL_AGENT_INSTANCE_ID],
+                unique=True,
+            ),
+        ],
+    )
+
+
 def get_session_context_status_schema() -> TableSchema:
     """The `session_context_status` cache table (maintenance-verbs M1, shape
     (a)). One row per `agent_instance_id`, always overwritten by the latest
@@ -1080,7 +1590,26 @@ def get_session_context_status_schema() -> TableSchema:
             "claude_session_id": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description="The Claude Code session_id this snapshot was measured against.",
+                description=(
+                    "The runtime's native session identity this snapshot was measured "
+                    "against. The physical column predates Codex coverage; the external "
+                    "contract names this runtime_session_id."
+                ),
+            ),
+            "provider": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description="Reported model provider; NULL means a pre-parity reporter.",
+            ),
+            "runtime": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description="Reported agent runtime; NULL means a pre-parity reporter.",
+            ),
+            "effort": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description="Reported reasoning effort; NULL means a pre-parity reporter.",
             ),
             "model": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -1091,14 +1620,18 @@ def get_session_context_status_schema() -> TableSchema:
                 type=ColumnType.INTEGER,
                 not_null=True,
                 description=(
-                    "input_tokens + cache_creation_input_tokens + "
-                    "cache_read_input_tokens from the most recent assistant turn."
+                    "Model-visible input tokens for the most recent assistant call, "
+                    "using the runtime's native counter. Cache counters are stored "
+                    "separately and must not be added twice."
                 ),
             ),
             "ceiling": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=True,
-                description="rotation_thresholds.resolve_ceiling(model) at measurement time.",
+                description=(
+                    "The active runtime's positive effective context capacity at "
+                    "measurement time, distinct from a provider API maximum."
+                ),
             ),
             "measured_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
@@ -1158,6 +1691,14 @@ def get_session_context_status_schema() -> TableSchema:
                     "cache_read_input_tokens on the most recent assistant call. "
                     "0 means that call read NOTHING from cache and paid full "
                     "price; NULL means the reporting hook did not report it."
+                ),
+            ),
+            "cache_write_tokens": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description=(
+                    "Cache-write tokens on the same measured call. NULL means the "
+                    "runtime did not report the counter; it is never inferred from input."
                 ),
             ),
             "cache_cold": ColumnDefinition(
@@ -1358,11 +1899,26 @@ def get_session_context_status_history_schema() -> TableSchema:
                 type=ColumnType.TEXT,
                 not_null=True,
                 description=(
-                    "The Claude Code session_id this reading was measured "
-                    "against. THE ROTATION MARKER: a change here under a "
-                    "constant agent_instance_id is a /clear boundary, which is "
-                    "exactly what made the original freeze unanalysable."
+                    "The runtime-native session identity this reading was measured "
+                    "against. The physical column predates Codex coverage; the "
+                    "external contract names it runtime_session_id. A change here "
+                    "under one agent_instance_id is a rotation boundary."
                 ),
+            ),
+            "provider": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description="Reported model provider; NULL means a pre-parity reporter.",
+            ),
+            "runtime": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description="Reported agent runtime; NULL means a pre-parity reporter.",
+            ),
+            "effort": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=False,
+                description="Reported reasoning effort; NULL means a pre-parity reporter.",
             ),
             "agent_session_id": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -1381,12 +1937,18 @@ def get_session_context_status_history_schema() -> TableSchema:
             "current_tokens": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=True,
-                description="The reading itself — the occupancy this tick saw.",
+                description=(
+                    "The model-visible input-token reading this tick saw, from the "
+                    "reporting runtime's native counter."
+                ),
             ),
             "ceiling": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=True,
-                description="resolve_ceiling(model) at measurement time.",
+                description=(
+                    "The active runtime's positive effective context capacity, "
+                    "distinct from a provider API maximum."
+                ),
             ),
             "measured_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
@@ -1429,6 +1991,11 @@ def get_session_context_status_history_schema() -> TableSchema:
                 type=ColumnType.INTEGER,
                 not_null=False,
                 description="As reported; NULL = not reported by this reporter.",
+            ),
+            "cache_write_tokens": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description="As reported; NULL means the runtime did not expose it.",
             ),
             "cache_cold": ColumnDefinition(
                 type=ColumnType.INTEGER,
@@ -1927,7 +2494,7 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
     D1 is land-able alone)."""
     return SchemaDefinition(
         namespace=AGENT_ROLE_BINDING_NAMESPACE,
-        version="1.5.0",
+        version="1.7.0",
         description=(
             "Fleet session-management Phase B, D1 — L0 schema deltas. "
             "+1.1.0: session_context_status (maintenance-verbs M1). "
@@ -1935,11 +2502,16 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             "+1.3.0: session_context_status_history (GAU-15 gauge series). "
             "+1.4.0: gauge_notice_record (GAU-21 durable notice record). "
             "+1.5.0: gauge_canary_registry + gauge_canary_tamper (GAU-15 "
-            "item 4 tamper canary)."
+            "item 4 tamper canary). +1.6.0: managed_dispatch + append-only "
+            "managed_dispatch_event, with additive managed_session dispatch/first-turn/"
+            "liveness evidence. +1.7.0: inbox_consumption_status (CDX-06 part "
+            "C, the honesty field)."
         ),
         tables={
             TABLE_SESSION_ROLE_CLAIM: get_session_role_claim_schema(),
             TABLE_MANAGED_SESSION: get_managed_session_schema(),
+            TABLE_MANAGED_DISPATCH: get_managed_dispatch_schema(),
+            TABLE_MANAGED_DISPATCH_EVENT: get_managed_dispatch_event_schema(),
             TABLE_SESSION_TRANSITION: get_session_transition_schema(),
             TABLE_SESSION_DEPENDENCY: get_session_dependency_schema(),
             TABLE_SESSION_CLAUDE_MAPPING: get_session_claude_mapping_schema(),
@@ -1951,6 +2523,7 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             TABLE_HELD_AUTHORIZATION: get_held_authorization_schema(),
             TABLE_GAUGE_NOTICE_RECORD: get_gauge_notice_record_schema(),
             TABLE_GAUGE_CANARY_REGISTRY: get_gauge_canary_registry_schema(),
+            TABLE_INBOX_CONSUMPTION_STATUS: get_inbox_consumption_status_schema(),
             TABLE_GAUGE_CANARY_TAMPER: get_gauge_canary_tamper_schema(),
         },
     )
@@ -1969,6 +2542,7 @@ __all__ = [
     "GAUGE_CANARY_TAMPER_ID_PREFIX",
     "GAUGE_NOTICE_RECORD_ID_PREFIX",
     "HELD_AUTHORIZATION_ID_PREFIX",
+    "INBOX_CONSUMPTION_STATUS_ID_PREFIX",
     "LANE_CHARTER_ID_PREFIX",
     "LIFECYCLE_IDLE",
     "LIFECYCLE_LIVE",
@@ -1979,6 +2553,8 @@ __all__ = [
     "LIFECYCLE_TERMINATED",
     "LIFECYCLE_TRANSITIONS",
     "MANAGED_SESSION_ID_PREFIX",
+    "MANAGED_DISPATCH_EVENT_ID_PREFIX",
+    "MANAGED_DISPATCH_ID_PREFIX",
     "NOTICE_DELIVERY_APPENDED",
     "NOTICE_DELIVERY_APPEND_FAILED",
     "NOTICE_DELIVERY_NO_STEWARD_BINDING",
@@ -2003,8 +2579,11 @@ __all__ = [
     "TABLE_GAUGE_CANARY_TAMPER",
     "TABLE_GAUGE_NOTICE_RECORD",
     "TABLE_HELD_AUTHORIZATION",
+    "TABLE_INBOX_CONSUMPTION_STATUS",
     "TABLE_LANE_CHARTER",
     "TABLE_MANAGED_SESSION",
+    "TABLE_MANAGED_DISPATCH",
+    "TABLE_MANAGED_DISPATCH_EVENT",
     "TABLE_SESSION_CLAUDE_MAPPING",
     "TABLE_SESSION_CONTEXT_STATUS",
     "TABLE_SESSION_CONTEXT_STATUS_HISTORY",
@@ -2022,6 +2601,8 @@ __all__ = [
     "get_held_authorization_schema",
     "get_lane_charter_schema",
     "get_managed_session_schema",
+    "get_managed_dispatch_event_schema",
+    "get_managed_dispatch_schema",
     "get_peer_binding_schema",
     "get_peer_binding_schema_definition",
     "get_role_binding_schema",

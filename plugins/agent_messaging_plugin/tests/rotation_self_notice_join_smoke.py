@@ -171,7 +171,7 @@ def _write_gauge_row(
     *,
     agent_instance_id: str,
     agent_session_id: str | None,
-    current_tokens: int = 281_507,
+    current_tokens: int = 336_000,
 ) -> None:
     """Write the row through the REAL store function, not a hand-built dict.
 
@@ -288,9 +288,8 @@ def test_a_watcher_held_worker_is_reached_through_the_join() -> None:
         "and it is a rotation_self_notice, not some other event",
     )
     _check(
-        bool(events) and "warm_safe_checkpoint" in events[0].content,
-        "and its prose carries the band -- a delivery with no band is a "
-        "notification the reader cannot act on",
+        bool(events) and events[0].content == "context is 336,000 — make sure everything is durable.",
+        "and its prose is the one-line durability notice",
     )
 
 
@@ -515,8 +514,11 @@ def test_the_verb_round_trips_the_join_and_preserves_null() -> None:
     report_context_status(
         state,
         agent_instance_id=LEDGER_ID,
-        claude_session_id="c-session",
+        runtime_session_id="c-session",
+        provider="anthropic",
+        runtime="claude_code",
         model="claude-opus-5",
+        effort="high",
         current_tokens=281_507,
         ceiling=1_000_000,
         measured_at=_fresh_stamp(),
@@ -529,8 +531,11 @@ def test_the_verb_round_trips_the_join_and_preserves_null() -> None:
     report_context_status(
         other,
         agent_instance_id=SEAT_ID,
-        claude_session_id="c-session",
+        runtime_session_id="c-session",
+        provider="anthropic",
+        runtime="claude_code",
         model="claude-opus-5",
+        effort="high",
         current_tokens=281_507,
         ceiling=1_000_000,
         measured_at=_fresh_stamp(),
@@ -827,8 +832,11 @@ def test_the_process_verb_mapping_does_not_drop_the_field() -> None:
         {
             "parameters": {
                 "agent_instance_id": LEDGER_ID,
-                "claude_session_id": "c-session",
+                "runtime_session_id": "c-session",
+                "provider": "anthropic",
+                "runtime": "claude_code",
                 "model": "claude-opus-5",
+                "effort": "high",
                 "current_tokens": 281_507,
                 "ceiling": 1_000_000,
                 "measured_at": _fresh_stamp(),

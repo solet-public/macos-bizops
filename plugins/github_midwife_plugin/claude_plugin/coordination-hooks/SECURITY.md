@@ -223,7 +223,7 @@ hooks have no credential access at all. **Exactly four** subprocess
 executions exist in the plugin, each with its own fixed-shape contract
 detailed below: the wake waiter's fixed-argv invocation of the
 operator-configured CLI; the heartbeat's and rotation-due watch's
-fixed-argv `solet call <fixed process_key> <JSON payload>` invocations
+fixed-argv `solet-bridge call <fixed process_key> <JSON payload>` invocations
 (no shell, `subprocess.run` only, built entirely from this session's own
 environment and its own transcript — never from tool-call content); and
 `sync.py`'s (agent-invoked, never auto-fired) same-shape invocations, one
@@ -302,7 +302,7 @@ CLI/network round trip on a throttled tick.
 
 `heartbeat_report_alive.py`: when un-throttled (at most once per ~180s per
 `agent_instance_id`), runs exactly
-`["solet", "call", "plugin::agent_messaging_plugin::report_alive", <payload>]`
+`["solet-bridge", "call", "plugin::agent_messaging_plugin::report_alive", <payload>]`
 — the fixed process key `report_alive`, and a JSON payload built entirely
 from this session's own `AGENT_INSTANCE_ID` plus two fixed literals
 (`status: "working"`, a fixed `status_note`). It has no persistent process
@@ -367,7 +367,7 @@ calling session's own context.
 **Failure posture.** Both are non-fatal by design, the same contract as
 every other hook in this plugin: a missing env var, an unreadable
 transcript, a malformed stdin payload, an unresolvable `solet`
-binary, or a failed `solet call` all warn to stderr and exit `0` —
+binary, or a failed `solet-bridge call` all warn to stderr and exit `0` —
 neither hook can ever cost a tool call, and neither uses exit code `2`.
 One accepted gap, stated in the heartbeat's own docstring rather than
 engineered around: a single tool call longer than a session's report-by
@@ -477,7 +477,7 @@ Configuration surface section.)
   heartbeat/rotation-due-watch hooks: one `export_memories` call on
   hydrate, and — on drain — one `upsert_memory_by_tag` call PER pending
   journal entry (unbounded per invocation, bounded only by how many local
-  edits are actually pending). Every argv is `["solet", "call",
+  edits are actually pending). Every argv is `["solet-bridge", "call",
   <fixed process_key>, <JSON payload>]`, no shell, `subprocess.run` only —
   same shape-fixity property as every other solet-calling hook in
   this plugin, just not a Claude-Code-fired one. A failed drain upsert
@@ -687,7 +687,7 @@ is made — only what was measured.
 **Peer enumeration — confirmed.** Discovering which peer sessions are
 currently registered is a capability of the MCP transport only. A session on
 a non-MCP transport reaches the platform solely through
-`solet call <process_key>`, and no registered process returns the peer
+`solet-bridge call <process_key>`, and no registered process returns the peer
 registry: the CLI exposes no `peers` subcommand, semantic discovery over the
 knowledge base surfaces no peer-registry verb, and `peer_list` exists only as
 an MCP tool. Sending is unaffected — `peer_send_by_name` resolves and
@@ -699,7 +699,7 @@ returns a well-formed, successful, and incorrect result (`0 bridge(s)
 tracked` against a live multi-session fleet) rather than an error; treat it
 as unreliable for this purpose, not as a substitute for peer enumeration. A
 fix is scoped but not built: three thin CLI subcommands
-(`solet inbox`, `solet peers`, `solet whoami`) over routes
+(`solet-bridge inbox`, `solet-bridge peers`, `solet-bridge whoami`) over routes
 that already exist would close this gap; none of the three exist today.
 
 **Idle-session wake — confirmed.** A session on the MCP transport that goes
@@ -808,7 +808,7 @@ input, never another session's.
 - **Heartbeat / rotation-due watch**: disarmed (no `AGENT_INSTANCE_ID`) →
   immediate exit `0`, silent. Every other failure mode (missing marker
   dir, unreadable transcript, malformed stdin, unresolvable `solet`
-  binary, a non-zero or unparseable `solet call` result) warns to
+binary, a non-zero or unparseable `solet-bridge call` result) warns to
   stderr and exits `0` — never `2`, never blocking a tool call. A broken
   heartbeat degrades to "liveness reporting stops" (the fleet's own
   overdue-session detection is the backstop, not this hook); a broken
@@ -892,7 +892,8 @@ way Claude Code invokes them.
 | A broken wake path never traps the session | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py` |
 | Fifteen of sixteen hooks are default-off behind an environment or filesystem-presence guard; `step_zero_reminder.py` is unconditionally armed by design | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py` and `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py` |
 | The git-mutation guard blocks every mutating git invocation (direct, shell-wrapped, chained, path-qualified) for a non-controller session, allows it for the controller, and is fail-open when its env var is unset | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/git_controller_gate_smoke.py` |
-| The heartbeat and rotation-due watch hooks' `solet call` argv carries their fixed process key, never a shell, never `subprocess.call`/`Popen` | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| The shipped policy refuses assignment-prefixed or malformed-shell git mutations without treating heredoc prose as executable source | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/shipped_git_policy_substitution_bypass_smoke.py` |
+| The heartbeat and rotation-due watch hooks' `solet-bridge call` argv carries their fixed process key, never a shell, never `subprocess.call`/`Popen` | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
 | The heartbeat and rotation-due watch hooks never print a `hookSpecificOutput` block | disclosed here (source-read); no dedicated behavioral smoke ships in this plugin's own `tests/` yet — see the Known gaps note below |
 | The rotation-due notice hook refuses to inject a marker owned by another uid or one that is group/world-writable, and skips the ownership half rather than faking it where no uid exists | the checkout's .claude/hooks/tests/rotation_due_notice_smoke.py — checkout-external, see the Known gaps note below |
 | The rotation-due notice hook surfaces a marker at most once (the stamp is written into the marker itself), emits exactly ONE `hookSpecificOutput` object however many markers match, and still delivers when the stamp cannot be written | the checkout's .claude/hooks/tests/rotation_due_notice_smoke.py — same external caveat |

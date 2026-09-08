@@ -88,6 +88,7 @@ _EXPECTED_AUTHORITY_NOUN = os.environ.get("GATE_SMOKE_AUTHORITY_NOUN") or "contr
 _ROUTING_CONFIG = Path(
     os.environ.get("GATE_SMOKE_ROUTING_CONFIG") or (_HOOK_DIR / "hooks.json"),
 ).resolve()
+_EXPECTED_COMMON_HOOK_DIR = os.environ.get("GATE_SMOKE_EXPECT_COMMON_HOOK_DIR")
 
 # Tool names that must NOT be routed to the gate. `Task` is a prefix of three
 # unrelated task-TRACKING tools, and `Bash` of `BashOutput`; an unanchored
@@ -96,13 +97,23 @@ _MUST_NOT_ROUTE = ("TaskCreate", "TaskUpdate", "TaskList", "BashOutput")
 
 # ruff: noqa: I001, E402
 # pyright: reportMissingImports=false
+import git_controller_gate as gate
 import _git_controller_lex as lex
 import _git_controller_walker as walker
-import git_controller_gate as gate
 from _git_controller_walker import walk_git_invocations
 
 GC = "Git-Controller"  # the git-controller role name the fleet uses
 SOME = "Architect"  # any non-Git-Controller name
+_CONTROLLER_CONFIRMATION = (
+    "GIT_CONTROLLER_OPERATOR_CONFIRMATION=rul_19919464"
+)
+# iss_ceebab20: the pre-fix fixture cited "turn_2026-09-04_rul_19919464", which
+# the substring rule accepted (it contains both "turn" and "rul"). The id-shape
+# rule refuses it, so it is kept here as a NEGATIVE CONTROL rather than deleted —
+# it is the only in-repo evidence of the informal turn_<date>_rul_<hex> habit the
+# ruling retires, and a fix must not quietly erase the case that motivated it.
+_RETIRED_PROSE_CITATION = "turn_2026-09-04_rul_19919464"
+_CONFIRM_ENV = _CONTROLLER_CONFIRMATION.split("=", 1)[0]
 # The gate is opt-in + nameable: it enforces ONLY when the neutral controller
 # env var names the controller role. Set it for the enforcing Layer-A/B cases
 # below; the gate-off + nameable cases save-and-restore it.
@@ -115,6 +126,21 @@ _failed: list[str] = []
 # passes — a skip that reads as a pass is the vacuity this suite exists to
 # avoid.
 _skipped: list[str] = []
+
+
+def _link_origin_common_source(repo_root: str) -> None:
+    """Expose the origin adapter's common source inside a temporary test repo."""
+    source = os.environ.get("GATE_SMOKE_COMMON_SOURCE")
+    if source is None:
+        return
+    destination = (
+        Path(repo_root)
+        / "plugins"
+        / "github_midwife_plugin"
+        / "coordination_hooks_common"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(source, destination, target_is_directory=True)
 
 
 def _check(condition: object, label: str) -> None:
@@ -229,12 +255,160 @@ def case_universal_banned_flags() -> None:
 
 def case_identity_routing() -> None:
     """Identity routing: GC allowed, others blocked, on the same command."""
-    _expect_allow(gate.check_bash, ({"command": "git stash"}, GC), "GC can stash")
+    _expect_allow(gate.check_bash, ({"command": "git stash apply"}, GC), "GC can apply a stash")
     _expect_allow(gate.check_bash, ({"command": "git commit -m foo"}, GC), "GC can commit")
     _expect_allow(gate.check_bash, ({"command": "git push origin master"}, GC), "GC can push")
     _expect_block(gate.check_bash, ({"command": "git stash"}, SOME), "Architect cannot stash")
     _expect_allow(gate.check_bash, ({"command": "ls -la"}, SOME), "non-git command allowed")
     _expect_allow(gate.check_bash, ({"command": "echo hello"}, SOME), "echo allowed")
+
+
+def case_controller_destructive_scope_requires_confirmation() -> None:
+    """The controller gets a narrow, command-local confirmation path.
+
+    The exact five-command incident block is intentionally one Bash payload:
+    the fourth command, ``git checkout -- .``, must make the whole payload
+    refuse under the controller identity.  The controls name the scoped and
+    dry-run forms that must remain available for ordinary landings.
+    """
+    incident = "\n".join((
+        "git checkout master",
+        "git status --porcelain | wc -l",
+        "git checkout -- .",
+        "git clean -n -- quality_gates/tests/allowlist_tagging_smoke.py",
+        "git status --porcelain | wc -l",
+    ))
+    _expect_block(
+        gate.check_bash,
+        ({"command": incident}, GC),
+        "01:34:35Z five-command block refuses at git checkout -- .",
+        contains="checkout",
+    )
+
+    destructive = (
+        "git checkout",
+        "git checkout -- .",
+        "git checkout master -- :/",
+        "git checkout master -- *",
+        "git restore",
+        "git restore --staged",
+        "git restore --worktree",
+        "git restore --source master",
+        "git reset --hard path.txt",
+        "git reset --merge",
+        "git reset --keep",
+        "git clean -fd",
+        "git clean -df",
+        "git clean --force -x",
+        "git stash",
+        "git stash push",
+        "git stash drop",
+        "git stash clear",
+        "git branch -d obsolete",
+        "git branch -D obsolete",
+        "git branch --delete obsolete",
+        "git push --force origin HEAD",
+        "git push --force-with-lease origin HEAD",
+        "git push origin +HEAD:main",
+        "git rebase main",
+        "git status --no-verify",
+        "git worktree remove --force ../obsolete",
+        "git worktree prune",
+    )
+    for command in destructive:
+        _expect_block(
+            gate.check_bash,
+            ({"command": command}, GC),
+            f"controller confirmation required: {command}",
+        )
+
+    allowed = (
+        "git checkout -- CLAUDE.md AGENTS.md",
+        "git checkout master -- CLAUDE.md",
+        "git restore CLAUDE.md",
+        "git restore --staged CLAUDE.md",
+        "git restore --worktree CLAUDE.md",
+        "git restore --source master -- CLAUDE.md",
+        "git clean -n -- quality_gates/tests/allowlist_tagging_smoke.py",
+        "git stash push -- CLAUDE.md AGENTS.md",
+        "git stash pop",
+        "git stash apply",
+        "git branch --show-current",
+        "git push origin HEAD",
+        "git worktree list",
+    )
+    for command in allowed:
+        _expect_allow(
+            gate.check_bash,
+            ({"command": command}, GC),
+            f"controller scoped/dry-run form allowed: {command}",
+        )
+
+    _expect_allow(
+        gate.check_bash,
+        ({"command": f"{_CONTROLLER_CONFIRMATION} git checkout -- ."}, GC),
+        "one in-band operator citation confirms one controller invocation",
+    )
+    _expect_block(
+        gate.check_bash,
+        ({"command": f"{_CONTROLLER_CONFIRMATION} git checkout -- . && git checkout -- ."}, GC),
+        "one confirmation cannot cover a second controller invocation",
+    )
+
+
+def case_confirmation_citation_must_be_an_id_shape() -> None:
+    """iss_ceebab20: the citation is matched as a WHOLE TOKEN against an id
+    grammar, never as a substring anywhere in the value.
+
+    Measured before the fix: "rules", "turnip" and "msgs" were each ACCEPTED and
+    each authorized one destructive invocation, because the old rule asked only
+    whether the value CONTAINED "turn"/"message"/"msg"/"rul". A control keyed on
+    co-occurrence in a blob cannot tell mention from meaning.
+    """
+    refused = (
+        "rules",                 # contains "rul"
+        "turnip",                # contains "turn"
+        "msgs",                  # contains "msg"
+        "messages",              # contains "message"
+        _RETIRED_PROSE_CITATION,  # the informal turn_<date>_rul_<hex> habit
+        "see-rul_19919464",      # a real id embedded in prose is still prose
+        "rul_19919464x",         # trailing junk breaks the whole-token match
+        "rul_zzzzzzzz",          # right prefix, not hex
+        "unstructured-garbage",
+    )
+    for citation in refused:
+        _expect_block(
+            gate.check_bash,
+            ({"command": f"{_CONFIRM_ENV}={citation} git clean -fd"}, GC),
+            f"prose citation is refused, not accepted as an id: {citation!r}",
+        )
+
+    accepted = (
+        "rul_19919464",                                   # register ruling, short
+        "rul_14c0cefb-dc8d-42f7-b95f-27efc993e60a",       # register ruling, full uuid
+        "arm-c8a91c5e183b359a2058eb9b36d4fb7b",           # peer message id
+        "agm-_e9176a86b9664b118312c4a48bc05a8c",          # peer message id, agm form
+    )
+    for citation in accepted:
+        _expect_allow(
+            gate.check_bash,
+            ({"command": f"{_CONFIRM_ENV}={citation} git clean -fd"}, GC),
+            f"a real register/message id still confirms: {citation!r}",
+        )
+
+    # The tightening must not cost the mechanism its OTHER controls. Both of
+    # these must still block for their own reason, with a VALID citation, so a
+    # pass here cannot be an artefact of the citation being rejected.
+    _expect_block(
+        gate.check_bash,
+        ({"command": f"{_CONTROLLER_CONFIRMATION} git clean -fd && git clean -fd"}, GC),
+        "a valid citation still cannot cover a second invocation",
+    )
+    _expect_block(
+        gate.check_bash,
+        ({"command": f"{_CONTROLLER_CONFIRMATION} echo hi && git clean -fd"}, GC),
+        "a valid citation not adjacent to git does not confirm",
+    )
 
 
 def case_gate_disabled_allows_everything() -> None:
@@ -257,7 +431,7 @@ def case_gate_nameable() -> None:
     saved = os.environ.get(gate.GIT_CONTROLLER_ENV)
     os.environ[gate.GIT_CONTROLLER_ENV] = "Boss"
     try:
-        _expect_allow(gate.check_bash, ({"command": "git stash"}, "Boss"), "nameable: named controller can stash")
+        _expect_allow(gate.check_bash, ({"command": "git stash apply"}, "Boss"), "nameable: named controller can apply a stash")
         _expect_block(gate.check_bash, ({"command": "git stash"}, SOME), "nameable: non-controller blocked")
         _expect_allow(gate.check_task, ({"subagent_type": "general-purpose"}, "Boss"), "nameable: controller can spawn")
     finally:
@@ -430,6 +604,20 @@ def case_env_contract_literal() -> None:
     )
 
 
+def case_origin_adapter_imports_common_modules() -> None:
+    """The origin driver proves its adapter imports resolve to the common source."""
+    if _EXPECTED_COMMON_HOOK_DIR is None:
+        return
+    expected = Path(_EXPECTED_COMMON_HOOK_DIR).resolve()
+    for name in ("_git_policy", "_git_controller_walker", "_git_controller_lex"):
+        module = getattr(gate, name, None)
+        module_file = getattr(module, "__file__", None)
+        _check(
+            isinstance(module_file, str) and Path(module_file).resolve().parent == expected,
+            f"origin adapter imports {name} from coordination_hooks_common",
+        )
+
+
 def case_subagent_tool_names_literal() -> None:
     """Pin the sub-agent tool-name set the gate dispatches on.
 
@@ -555,6 +743,50 @@ def case_walker_basics() -> None:
     _check(ok and ["git", "commit"] in invs, f"walk $(...): {invs}")
 
 
+def case_printf_arguments_are_not_invocations() -> None:
+    """iss_23d12798: only explicit data consumers suppress git-shaped args.
+
+    Killing mutation: reintroduce command-position-only detection. The wrapper
+    forms below then all become allowed, while ``printf`` still hides data.
+    """
+    for payload in (
+        "printf '%s\\n' git reset --hard",
+        "echo git reset --hard",
+    ):
+        invocations, ok = walk_git_invocations(payload)
+        _check(ok and not invocations, f"walker ignores data-consumer args: {payload!r}")
+        _expect_allow(
+            gate.check_bash,
+            ({"command": payload}, SOME),
+            f"data consumer mentioning git reset --hard is allowed: {payload}",
+        )
+    for command in (
+        "echo x | xargs git commit -m y",
+        "nohup git push",
+        "time git push",
+        "timeout 5 git push",
+        "sudo git push",
+        "nice -n 5 git push",
+        "caffeinate -i git push",
+        "setsid git push",
+        "stdbuf -oL git push",
+        "flock /tmp/l git push",
+        "script -q /dev/null git push",
+        "find . -exec git commit -m y",
+    ):
+        _expect_block(
+            gate.check_bash,
+            ({"command": command}, SOME),
+            f"unknown wrapper keeps git visible: {command}",
+        )
+    _expect_block(
+        gate.check_bash,
+        ({"command": "git reset --hard"}, SOME),
+        "genuine git reset --hard remains refused",
+        contains="reset",
+    )
+
+
 def case_is_invocation_allowed_basics() -> None:
     """is_invocation_allowed reads the allowlist correctly."""
     allowed, _ = gate.is_invocation_allowed(["git", "status"])
@@ -611,6 +843,73 @@ def case_global_flags_before_subcommand() -> None:
         )
     finally:
         policy_module.ALLOWED_NO_FLAG_CHECK = original_allowlist
+
+
+def case_new_read_only_git_forms() -> None:
+    """iss_bc412994/iss_e0e93ff5: permit only the newly measured read forms."""
+    _expect_allow(
+        gate.check_bash,
+        ({"command": "git grep needle"}, SOME),
+        "git grep is read-only",
+    )
+    _expect_allow(
+        gate.check_bash,
+        ({"command": "git -C /tmp rev-parse HEAD"}, SOME),
+        "git -C path rev-parse is read-only",
+    )
+    _expect_block(
+        gate.check_bash,
+        ({"command": "git -C /tmp reset --hard"}, SOME),
+        "git -C does not allow a destructive subcommand",
+        contains="reset",
+    )
+
+    policy_module = getattr(gate, "policy", gate)
+    original_allowlist = policy_module.ALLOWED_NO_FLAG_CHECK
+    try:
+        policy_module.ALLOWED_NO_FLAG_CHECK = original_allowlist - frozenset({"grep"})
+        _expect_block(
+            gate.check_bash,
+            ({"command": "git grep needle"}, SOME),
+            "MUTATION CHECK: removing grep from the allowlist refuses git grep",
+            contains="grep",
+        )
+    finally:
+        policy_module.ALLOWED_NO_FLAG_CHECK = original_allowlist
+
+    original_globals = policy_module._VALUE_GIT_GLOBALS
+    try:
+        policy_module._VALUE_GIT_GLOBALS = original_globals - frozenset({"-C"})
+        _expect_block(
+            gate.check_bash,
+            ({"command": "git -C /tmp rev-parse HEAD"}, SOME),
+            "MUTATION CHECK: removing -C recognition refuses the read-only form",
+            contains="-C",
+        )
+    finally:
+        policy_module._VALUE_GIT_GLOBALS = original_globals
+
+
+def case_refusal_guidance_matches_enforced_contract() -> None:
+    """iss_e15c53b3/iss_b6a4b283: every refusal gives usable, safe guidance."""
+    message = gate.POLICY_MESSAGE
+    _check(
+        "coordinator" in message.lower() and "authorized handoff" in message,
+        "policy message directs a coordinator-arranged authorized handoff",
+    )
+    _check(
+        "provision_role_session" not in message and "Automatically call" not in message,
+        "policy message does not instruct session auto-provisioning",
+    )
+    blocked, reason = gate.check_bash({"command": "git clean -fd"}, GC)
+    _check(blocked, "controller destructive form still reaches the confirmation refusal")
+    _check(
+        "operator-turn-or-message-id" not in reason
+        and "rul_<8 hex>" in reason
+        and "arm-<32 hex>" in reason
+        and "agm-_<8-32 hex>" in reason,
+        "confirmation refusal names only citation shapes the validator accepts",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -786,6 +1085,7 @@ def _run_hook_subprocess(
     so the hook runs in its opt-in default-OFF state.
     """
     with tempfile.TemporaryDirectory() as tmp_home, tempfile.TemporaryDirectory() as tmp_repo:
+        _link_origin_common_source(tmp_repo)
         if name is not None:
             sessions_dir = Path(tmp_home) / ".claude" / "sessions"
             sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -874,12 +1174,164 @@ def case_subprocess_heredoc_prose_allowed() -> None:
     _check("push" in stderr, f"block names the invocation inside the body (got {stderr[:200]!r})")
 
 
+def case_subprocess_heredoc_substitution_git_commit_blocked() -> None:
+    """A heredoc inside ``$(...)`` cannot crash the origin cwd scanner open.
+
+    The origin adapter additionally scans mutations for the externally-owned
+    project-solet boundary.  Its pre-fix per-line tokenization ran before the
+    common walker's substitution extraction, so this otherwise ordinary
+    non-controller commit raised ``ValueError`` and ``main`` allowed it under
+    its broad hook exception.  The shipped adapters have no origin scanner,
+    but run the same case as a control for the common policy path.
+    """
+    command = """git commit -m "$(cat <<'EOF'
+totally ordinary commit message
+EOF
+)\""""
+    previous = os.environ.get("SOLET_PROJECT_SOLET_GIT_EXTERNAL")
+    os.environ["SOLET_PROJECT_SOLET_GIT_EXTERNAL"] = "1"
+    try:
+        code, stderr = _run_hook_subprocess(
+            name=SOME,
+            payload={"tool_name": "Bash", "tool_input": {"command": command}},
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("SOLET_PROJECT_SOLET_GIT_EXTERNAL", None)
+        else:
+            os.environ["SOLET_PROJECT_SOLET_GIT_EXTERNAL"] = previous
+    _check(
+        code == 2,
+        f"subprocess heredoc substitution git commit: exit=2 (got {code})",
+    )
+    _check(
+        "commit" in stderr,
+        f"block names the invocation inside the substitution (got {stderr[:200]!r})",
+    )
+    for assignment, label in (
+        ("x=1", "one assignment"),
+        ("x=1 y=2", "two assignments"),
+        ("a=$(true)", "substitution assignment"),
+    ):
+        code, stderr = _run_hook_subprocess(
+            name=SOME,
+            payload={
+                "tool_name": "Bash",
+                "tool_input": {"command": f"{assignment}; git commit -m x"},
+            },
+        )
+        _check(code == 2, f"subprocess {label} before git commit: exit=2 (got {code})")
+        _check(
+            "commit" in stderr,
+            f"subprocess {label} refusal names commit (got {stderr[:200]!r})",
+        )
+
+
+def case_subprocess_unparseable_git_fail_closed_for_non_controller() -> None:
+    """Lexer exceptions block a non-controller but never lock out the GC.
+
+    Killing mutation: restore ``except _BashCheckError: return 0`` in the
+    origin adapter's ``main``. Every non-controller leg below becomes allowed;
+    the Git-Controller controls remain allowed before and after that mutation.
+
+    This is origin-only: the shipped adapters retain their separately reviewed
+    broad hook exception policy, so the common suite drives these legs only
+    when the origin driver's distinct controller environment is selected.
+    """
+    if _EXPECTED_ENV != "SOLET_GIT_CONTROLLER_NAME":
+        return
+    commands = (
+        ('git commit -m "unterminated', "unterminated double quote"),
+        ("git commit -m 'unterminated", "unterminated single quote"),
+        ('echo "oops && git push', "unterminated echo before git push"),
+    )
+    previous = os.environ.get("SOLET_PROJECT_SOLET_GIT_EXTERNAL")
+    os.environ["SOLET_PROJECT_SOLET_GIT_EXTERNAL"] = "1"
+    try:
+        for command, label in commands:
+            payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+            code, stderr = _run_hook_subprocess(SOME, payload)
+            _check(code == 2, f"subprocess {label}: Architect exit=2 (got {code})")
+            _check("could not be safely inspected" in stderr, f"subprocess {label}: fail-closed reason")
+            code, _ = _run_hook_subprocess(GC, payload)
+            _check(code == 0, f"subprocess {label}: Git-Controller exit=0 (got {code})")
+    finally:
+        if previous is None:
+            os.environ.pop("SOLET_PROJECT_SOLET_GIT_EXTERNAL", None)
+        else:
+            os.environ["SOLET_PROJECT_SOLET_GIT_EXTERNAL"] = previous
+
+
+def case_unparseable_heredoc_prose_stays_data() -> None:
+    """Fail-closed inspection searches retained source, not heredoc data."""
+    prose = "cat > note.md <<'EOF'\ngit commit -m prose\nEOF"
+    for command, label in (
+        (prose, "parseable heredoc prose"),
+        (prose + '\necho "unterminated', "unparseable heredoc prose"),
+        ('echo "unterminated', "unparseable source without git"),
+    ):
+        _expect_allow(gate.check_bash, ({"command": command}, SOME), label)
+    _expect_block(
+        gate.check_bash,
+        ({"command": 'git commit -m "unterminated'}, SOME),
+        "unparseable real git",
+        contains="could not be safely inspected",
+    )
+
+
+def case_unparseable_nested_source_fails_closed() -> None:
+    """Substitution and evaluator-fed heredoc parse failures stay visible."""
+    for command, label in (
+        ('echo "$(git push -m \'unterminated)"', "unparseable substitution"),
+        ("bash <<'EOF'\ngit push -m 'unterminated\nEOF", "unparseable script-source heredoc"),
+    ):
+        _expect_block(
+            gate.check_bash,
+            ({"command": command}, SOME),
+            label,
+            contains="could not be safely inspected",
+        )
+        _expect_allow(gate.check_bash, ({"command": command}, GC), f"GC {label}")
+
+
+def case_subprocess_gate_disabled_allows_unparseable_git() -> None:
+    """The disabled gate must allow even git-bearing source a lexer cannot parse.
+
+    Killing mutation: remove the ``controller is None`` guard from
+    ``_unexpected_bash_error_blocks``.  This case then blocks (exit 2), while
+    the gate-enabled non-controller cases remain blocked, proving the guard —
+    rather than this assertion — is the discriminator.
+
+    This is origin-only because its fail-closed shell-error branch belongs to
+    the origin adapter, not the shipped common-policy adapters.
+    """
+    if _EXPECTED_ENV != "SOLET_GIT_CONTROLLER_NAME":
+        return
+    previous = os.environ.get("SOLET_PROJECT_SOLET_GIT_EXTERNAL")
+    os.environ["SOLET_PROJECT_SOLET_GIT_EXTERNAL"] = "1"
+    try:
+        code, _ = _run_hook_subprocess(
+            SOME,
+            payload={
+                "tool_name": "Bash",
+                "tool_input": {"command": 'git commit -m "unterminated'},
+            },
+            gate_disabled=True,
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("SOLET_PROJECT_SOLET_GIT_EXTERNAL", None)
+        else:
+            os.environ["SOLET_PROJECT_SOLET_GIT_EXTERNAL"] = previous
+    _check(code == 0, f"subprocess gate-off unparseable git: exit=0 (got {code})")
+
+
 def case_subprocess_gc_git_stash_allowed() -> None:
     code, _ = _run_hook_subprocess(
         name=GC,
-        payload={"tool_name": "Bash", "tool_input": {"command": "git stash"}},
+        payload={"tool_name": "Bash", "tool_input": {"command": "git stash apply"}},
     )
-    _check(code == 0, f"subprocess GC git stash: exit=0 (got {code})")
+    _check(code == 0, f"subprocess GC git stash apply: exit=0 (got {code})")
 
 
 def case_subprocess_architect_git_status_allowed() -> None:
@@ -892,6 +1344,7 @@ def case_subprocess_architect_git_status_allowed() -> None:
 
 def case_subprocess_architect_edit_into_git_blocked() -> None:
     with tempfile.TemporaryDirectory() as tmp_home, tempfile.TemporaryDirectory() as tmp_repo:
+        _link_origin_common_source(tmp_repo)
         sessions_dir = Path(tmp_home) / ".claude" / "sessions"
         sessions_dir.mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / ".git").mkdir()
@@ -1050,6 +1503,8 @@ LAYER_A_CASES = (
     case_dual_mode_banned_flags,
     case_universal_banned_flags,
     case_identity_routing,
+    case_controller_destructive_scope_requires_confirmation,
+    case_confirmation_citation_must_be_an_id_shape,
     case_gate_disabled_allows_everything,
     case_gate_nameable,
     case_shell_eval_recursion,
@@ -1061,11 +1516,15 @@ LAYER_A_CASES = (
     case_dot_git_edit_file_path,
     case_task_tool_blocked,
     case_env_contract_literal,
+    case_origin_adapter_imports_common_modules,
     case_subagent_tool_names_literal,
     case_routing_config_matches_dispatch,
     case_walker_basics,
+    case_printf_arguments_are_not_invocations,
     case_is_invocation_allowed_basics,
     case_global_flags_before_subcommand,
+    case_new_read_only_git_forms,
+    case_refusal_guidance_matches_enforced_contract,
     case_heredoc_body_is_data,
     case_heredoc_body_to_shell_evaluator_still_visible,
     case_heredoc_boundaries_do_not_hide_surrounding_commands,
@@ -1074,6 +1533,11 @@ LAYER_A_CASES = (
 LAYER_B_CASES = (
     case_subprocess_architect_git_stash_blocked,
     case_subprocess_heredoc_prose_allowed,
+    case_subprocess_heredoc_substitution_git_commit_blocked,
+    case_subprocess_unparseable_git_fail_closed_for_non_controller,
+    case_unparseable_heredoc_prose_stays_data,
+    case_unparseable_nested_source_fails_closed,
+    case_subprocess_gate_disabled_allows_unparseable_git,
     case_subprocess_gc_git_stash_allowed,
     case_subprocess_architect_git_status_allowed,
     case_subprocess_architect_edit_into_git_blocked,

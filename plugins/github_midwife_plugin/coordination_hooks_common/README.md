@@ -13,3 +13,9 @@ Run `python3 materialize.py --check` to verify both plugin copies or
 identity, hook payload parsing, dispatch, and block presentation remain in the
 runner-specific `git_controller_gate.py` adapters and are never materialized
 from here.
+
+The origin checkout's unshipped gate is a third adapter. It imports these
+modules through the project directory's common-policy directory; it must not
+carry local `_git_policy.py`, `_git_controller_walker.py`, or
+`_git_controller_lex.py` copies. Fleet-local configuration remains there, not
+in materialized adopter artifacts.

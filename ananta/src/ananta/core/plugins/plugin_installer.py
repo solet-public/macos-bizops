@@ -11,10 +11,9 @@ with ONE atomic dict insert; and the symmetric atomic remove. Any failure
 before the commit leaves the live roster, the allowlist, and every
 pre-existing plugin instance byte-identical (the design's §1 contract, by
 construction rather than by compensation logic). This is the ONLY code path
-that mutates `plugin_manager.plugins` at runtime; the boot-time
-clear-and-rebuild (`PluginManager.discover_plugins`) is a different regime
-(fresh process, no concurrent readers) and must never run against a
-live-serving roster.
+that mutates plugin_manager.plugins at runtime. Boot-time
+PluginManager.discover_plugins is permitted only before action dispatch starts;
+its serving-state guard refuses a live-serving roster.
 
 The installer owns roster + allowlist mutation, atomic ordering, and process
 key-collection. It never touches pip (the artifact lifecycle belongs to the

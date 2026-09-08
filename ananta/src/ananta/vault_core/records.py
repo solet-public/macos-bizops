@@ -44,6 +44,11 @@ OAUTH_ALLOWED_GRANT_TYPES = frozenset(
     {"authorization_code", "client_credentials", "refresh_token"},
 )
 
+# Upper bound on the stored User-Agent. The header is client-controlled
+# and unbounded on the wire; a registry row is operator-facing evidence,
+# not a log sink, so it is truncated rather than stored whole.
+MAX_LAST_USE_USER_AGENT_LEN: int = 256
+
 
 class OauthClientRecord(TypedDict, total=False):
     """One OAuth 2.1 client registration record.
@@ -55,8 +60,14 @@ class OauthClientRecord(TypedDict, total=False):
     Optional fields (defaulted during migration; see Task #26 §4.4.7):
         grant_types — list of allowed grants; defaults to
           ``["authorization_code", "refresh_token"]``
-        last_used_at — ISO timestamp of most recent token issuance;
-          defaults to ``created_at`` at migration time
+        last_used_at — ISO timestamp of most recent token issuance,
+          written by ``VaultOAuthRegistry.record_token_use``
+        last_use_ip / last_use_user_agent / last_use_transport —
+          evidence observed at the most recent successful token
+          issuance. These corroborate (or contradict) the
+          self-descriptive ``client_name``, which is operator-typed
+          at registration and is not evidence of the product behind
+          the credential.
 
     ``operator_approved`` (Task #31) is ``True`` exactly when the row
     was minted via the operator-only platform process
@@ -74,6 +85,9 @@ class OauthClientRecord(TypedDict, total=False):
     created_at: str  # ISO 8601 UTC
     grant_types: list[str]
     last_used_at: str  # ISO 8601 UTC
+    last_use_ip: str
+    last_use_user_agent: str
+    last_use_transport: str
     operator_approved: bool
 
 

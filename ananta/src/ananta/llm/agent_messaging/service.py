@@ -43,6 +43,7 @@ from .models import (
     RoleCoveredMark,
     RoleMessagePersisted,
     RoleSectionStatus,
+    RoleTruncationReason,
     ThreadStatus,
 )
 from .repository import (
@@ -62,7 +63,11 @@ from .role_cursor import (
     RoleCursorScope,
     decode_role_cursor,
 )
-from .role_inbox import build_role_section, merge_undelivered_oldest_first
+from .role_inbox import (
+    ROLE_SECTION_BYTE_CEILING,
+    build_role_section,
+    merge_undelivered_oldest_first,
+)
 from .schema import (
     COL_ACTIVITY_AT_EMISSION,
     COL_CONSUMED,
@@ -486,10 +491,11 @@ class AgentMessagingService:
         from strict bridge-bound ownership because the recipient is,
         by definition, not the originator.
 
-        Pagination uses ``after_created_at`` as the high-water mark
+        Pagination uses ``after_created_at`` as the backward cursor
         (per-thread cursor wouldn't span multiple threads cleanly).
         Caller passes the previous page's ``next_after_created_at``
-        back on the next call.
+        back on the next call. Both direct and role sections return
+        newest-first pages and walk toward older rows.
         """
         self._require_enabled()
         if not request.recipient_agent_id:
@@ -498,7 +504,7 @@ class AgentMessagingService:
             raise AgentRequestInvalidError(
                 "recipient_agent_instance_id is required",
             )
-        rows = self._repo.list_peer_messages_for(
+        rows, instance_exhausted = self._repo.list_peer_messages_for(
             recipient_agent_id=request.recipient_agent_id,
             recipient_agent_instance_id=(
                 request.recipient_agent_instance_id
@@ -544,16 +550,32 @@ class AgentMessagingService:
             role_entries, next_role_cursor, role_floor_applied,
             role_history_cursor, role_status, role_error,
         ) = self._collect_role_section(request)
+        role_page_truncated = (
+            role_status is RoleSectionStatus.OK and next_role_cursor is not None
+        )
+        role_truncation_reason: RoleTruncationReason | None = None
+        role_byte_ceiling: int | None = None
+        if role_page_truncated:
+            if len(role_entries) < request.limit:
+                role_truncation_reason = RoleTruncationReason.BYTE_CEILING
+                role_byte_ceiling = ROLE_SECTION_BYTE_CEILING
+            else:
+                role_truncation_reason = RoleTruncationReason.ROW_LIMIT
         return PeerInbox(
             recipient_agent_id=request.recipient_agent_id,
             entries=entries,
             next_after_created_at=next_at,
+            instance_exhausted=instance_exhausted,
             role_entries=role_entries,
             next_role_cursor=next_role_cursor,
             role_section_status=role_status,
             role_section_error=role_error,
             role_floor_applied=role_floor_applied,
             role_history_cursor=role_history_cursor,
+            role_limit=request.limit,
+            role_page_truncated=role_page_truncated,
+            role_truncation_reason=role_truncation_reason,
+            role_byte_ceiling=role_byte_ceiling,
         )
 
     def _collect_role_section(
@@ -614,6 +636,9 @@ class AgentMessagingService:
         sender_session_label: str | None,
         important: bool,
         content: MessageContent,
+        sender_principal_kind: str = "unknown",
+        sender_transport_principal: str = "unknown",
+        sender_identity_trust: str = "unknown",
     ) -> RoleMessagePersisted:
         """Single authoritative write for a role-addressed message (B2 keystone).
 
@@ -645,6 +670,9 @@ class AgentMessagingService:
             "sender_agent_id": sender_agent_id,
             "sender_agent_instance_id": sender_agent_instance_id,
             "sender_session_label": sender_session_label,
+            "sender_principal_kind": sender_principal_kind,
+            "sender_transport_principal": sender_transport_principal,
+            "sender_identity_trust": sender_identity_trust,
             # Synthetic, deterministic role-channel handle — display only,
             # never dereferenced as a live thread.
             "thread_id": f"{ROLE_THREAD_PREFIX}{recipient_key}",
@@ -686,7 +714,12 @@ class AgentMessagingService:
         return RoleMessagePersisted(message_id=message_id, created_at=created_at)
 
     def list_undelivered_for(
-        self, *, recipient_kind: str, recipient_key: str, limit: int,
+        self,
+        *,
+        recipient_kind: str,
+        recipient_key: str,
+        limit: int,
+        after: tuple[object, object] | None = None,
     ) -> list[dict[str, object]]:
         """Oldest-first page of un-CONSUMED IMPORTANT messages for a recipient.
 
@@ -704,24 +737,24 @@ class AgentMessagingService:
         newer arrivals. A role recipient keys on ``recipient_key`` only →
         cross-kind takeover.
         """
-        result = self._state.query_ordered(
-            _ROLE_NAMESPACE,
-            {
-                "table": TABLE_AGENT_ROLE_MESSAGE,
-                "filters": {
-                    "recipient_kind": recipient_kind,
-                    "recipient_key": recipient_key,
-                    "important": True,
-                    COL_CONSUMED: False,
-                    # RIDER-1 (starvation fix): terminal-escalated rows drop from
-                    # the owed query, so a capped-dormant row can no longer fill
-                    # the oldest limit-page and starve a genuinely-owed newer row.
-                    COL_ESCALATED: False,
-                },
-                "order_by": [("created_at", "asc"), ("id", "asc")],
-                "limit": limit,
+        query: dict[str, object] = {
+            "table": TABLE_AGENT_ROLE_MESSAGE,
+            "filters": {
+                "recipient_kind": recipient_kind,
+                "recipient_key": recipient_key,
+                "important": True,
+                COL_CONSUMED: False,
+                # RIDER-1 (starvation fix): terminal-escalated rows drop from
+                # the owed query, so a capped-dormant row can no longer fill
+                # the oldest limit-page and starve a genuinely-owed newer row.
+                COL_ESCALATED: False,
             },
-        )
+            "order_by": [("created_at", "asc"), ("id", "asc")],
+            "limit": limit,
+        }
+        if after is not None:
+            query["after"] = after
+        result = self._state.query_ordered(_ROLE_NAMESPACE, query)
         return _result_records(result)
 
     def mark_delivered(self, *, external_id: str) -> None:
@@ -829,12 +862,9 @@ class AgentMessagingService:
             return []
         cutoff = now or self._clock()
         per_role = [
-            _owed_after_window_and_cap(
-                self.list_undelivered_for(
-                    recipient_kind=RECIPIENT_KIND_ROLE,
-                    recipient_key=role,
-                    limit=limit,
-                ),
+            self._eligible_undelivered_for_role(
+                role=role,
+                limit=limit,
                 now=cutoff,
                 re_emit_window_s=re_emit_window_s,
                 cap=cap,
@@ -842,6 +872,49 @@ class AgentMessagingService:
             for role in held_roles
         ]
         return merge_undelivered_oldest_first(per_role, limit)
+
+    def _eligible_undelivered_for_role(
+        self,
+        *,
+        role: str,
+        limit: int,
+        now: datetime,
+        re_emit_window_s: float,
+        cap: int,
+    ) -> list[dict[str, object]]:
+        """Collect one role's first ``limit`` eligible owed rows by keyset scan.
+
+        The cap/window predicate cannot be expressed by the equality-only
+        state interface. Applying a raw ``limit`` before that Python filter
+        would therefore re-read the same capped prefix forever and hide a
+        newer eligible row. Advance on the raw oldest-first ``(created_at,
+        id)`` key until enough eligible rows are found or the role is
+        exhausted; only then does the existing global merge apply its limit.
+        """
+        eligible: list[dict[str, object]] = []
+        after: tuple[object, object] | None = None
+        while len(eligible) < limit:
+            raw_page = self.list_undelivered_for(
+                recipient_kind=RECIPIENT_KIND_ROLE,
+                recipient_key=role,
+                limit=limit,
+                after=after,
+            )
+            if not raw_page:
+                break
+            eligible.extend(
+                _owed_after_window_and_cap(
+                    raw_page,
+                    now=now,
+                    re_emit_window_s=re_emit_window_s,
+                    cap=cap,
+                )
+            )
+            if len(raw_page) < limit:
+                break
+            last = raw_page[-1]
+            after = (last.get("created_at"), last.get("id"))
+        return eligible[:limit]
 
     def mark_role_consumed_on_ack(self, *, external_id: str) -> bool:
         """Watcher events-ack consumption for ONE role row.
@@ -1017,7 +1090,7 @@ class AgentMessagingService:
         limit: int,
         after: tuple[object, ...] | None,
     ) -> list[dict[str, object]]:
-        """One per-role recent-first ``query_ordered`` page over the envelope."""
+        """One per-role newest-first page plus a truthful-exhaustion lookahead."""
         filters: dict[str, object] = {
             "recipient_kind": RECIPIENT_KIND_ROLE,
             "recipient_key": recipient_key,
@@ -1031,7 +1104,12 @@ class AgentMessagingService:
             "table": TABLE_AGENT_ROLE_MESSAGE,
             "filters": filters,
             "order_by": [("created_at", "desc"), ("id", "desc")],
-            "limit": limit,
+            # Each role supplies one extra row.  The global merge needs only
+            # the top ``limit`` rows plus one lookahead to know whether a
+            # continuation actually exists; limit+1 per role is sufficient
+            # for that global top-(limit+1) result.
+            "limit": limit + 1,
+            "unbounded": True,
         }
         if after is not None:
             query["after"] = after

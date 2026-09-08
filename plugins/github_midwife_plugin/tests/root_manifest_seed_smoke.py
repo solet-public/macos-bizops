@@ -16,9 +16,15 @@ plugins/github_midwife_plugin/tests/root_manifest_seed_smoke.py``.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
 import tempfile
 from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from github_midwife_plugin.root_manifest_seed import (
     ROOT_MANIFEST_FILENAME,

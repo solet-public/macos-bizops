@@ -81,11 +81,11 @@ Read the name as a tombstone.
 [ ] 6. The script resolves the target surface under a 0/1/N gate
     a) Match the target by its role variable via the terminal's scripting API; refuse loudly on zero or multiple matches [agent-executed: refusal BY CONSTRUCTION, the only kind that is deterministic — an ambiguous match must never be guessed, the wrong pane gets cleared]
 
-[ ] 7. The script injects the clear, submitting as a separate send
-    a) Inject the literal clear command, then send the carriage return as its own distinct send [agent-executed: a newline inside the text does not submit]
+[ ] 7. The script injects the clear, submitting as separate sends
+    a) Capture any non-empty composer content from the screen first (relay it, never silently discard it), then send a space, then a kill-line control (C-u), then the literal clear command, then its carriage return, then a SECOND carriage return, with gaps between sends [agent-executed: a leading bare return is BANNED — measured 2026-08-28 SUBMITTING a stranded remote-control draft as a prompt; the space suppresses ghost-suggestion text and realizes composer state, and the kill-line empties all real content, which is why the capture precedes it; a newline inside the text does not submit; and a slash command's first return can be consumed by its autocomplete menu as "accept selection" — a single return after the command was measured (2026-08-27) leaving it accepted but unsubmitted in the composer]
 
 [ ] 8. The script settles, then injects the pickup prompt
-    a) Wait for the turn to end and the clear to execute before sending the pickup, then send its carriage return separately [agent-executed: sending both together lets the clear swallow the queued pickup]
+    a) Wait for the turn to end and the clear to execute before sending the pickup, then send its carriage return separately [agent-executed: sending both together lets the clear swallow the queued pickup — and the wait must OBSERVE the executed clear, never trust a timer: a blind settle sleep was measured twice (2026-08-27/28) typing the pickup while the clear was still pending, so the pane committed the pickup first and the clear then wiped it]
 
 [ ] 9. Verify the fresh session is PROCESSING, and record the rotation
     a) Confirm the fresh context is actively working the pickup prompt, not merely cleared; if deaf, the operator retypes it [agent-executed: cleared-and-idle is a failure, not a success — and with no helper there is no transcript to capture, so the fresh session records the rotation itself]
@@ -108,16 +108,21 @@ Read the name as a tombstone.
   and put nothing in it that identifies a person, an employer, or a credential.
 - The two-injection mechanics SHIP: `agent_messaging_plugin`'s
   `seat_rotation_helper.py` is the deterministic console one-shot — live
-  `user.role` pane resolution under a 0/1/N gate, `/clear` and its carriage
-  return as separate sends, a poll-settle on a POSITIVE cleared-state
-  signature, then the pickup and its own return. Prefer it. Deliberately not a
-  `@platform_process` verb: it must outlive the seat's own turn, which a
-  synchronous verb call cannot.
+  `user.role` pane resolution under a 0/1/N gate, the capture-then-clear leg
+  of step 7 (composer capture into the envelope, then space, kill-line, the
+  clear command, return, return), a poll-settle on a POSITIVE cleared-state
+  signature, then the pickup and its own return.
+  Prefer it. Deliberately not a `@platform_process` verb: it must outlive the
+  seat's own turn, which a synchronous verb call cannot. One measured limit
+  of the positive signature (2026-08-28): the bare empty-composer prompt
+  glyph also renders on a MID-TURN screen, so the signature only proves the
+  clear on a pane that was IDLE when the clear was sent — fire rotation at a
+  turn boundary, never from inside a running turn.
 - **What ships is the CONTRACT, not the host driver.** That module holds the
   `iterm2` bindings as optional — absent bindings are recorded at import and
   re-raised only at the one step that actually drives a pane — because the
   distribution arrives with `iterm2_coding_agent_management_plugin`, which the
-  bizops profile excludes. So an adopter on a headless box inherits the
+  `macos-bizops` profile excludes. So an adopter on a headless box inherits the
   ordering contract and the gates, and must supply a host driver for their own
   surface, or use the operator-present path. Cite the shipping module by its
   process surface; a checkout-local script is never the thing to hand an

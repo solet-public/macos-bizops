@@ -20,6 +20,7 @@ runbook
 |---|---|
 | `{{SOLET_NAME}}` | the newborn's validated name (`^[a-z][a-z0-9_-]{1,62}$`) |
 | `{{CLONE_DIR}}` | absolute path of the newborn clone (no trailing slash) |
+| `{{CLONE_DIR_ZSH}}` | the same absolute clone path rendered as one single-quoted zsh word; shell templates must use this token, never interpolate `{{CLONE_DIR}}` inside shell quotes |
 | `{{HYDRATION_DATE}}` | `YYYY-MM-DD` of the hydration run |
 | `{{BACKUP_PATH}}` | the collision-free .zshrc backup path chosen in the runbook's offer step (only in `zshrc.template`) |
 | `{{MARKETPLACE_NAME}}` | the Claude Code and Codex marketplace name, **DERIVED from `{{SOLET_NAME}}`** by one documented transform — underscores become hyphens (`acme_corp` → `acme-corp`) — reported at hydration output and recorded in the hydration record, never silent (operator ruling 2026-08-01: *"the name of the seed is the name of the seed… built off a user input — use that"*). Every other kebab-case violation, and the 16 reserved Claude marketplace names, **REFUSE LOUDLY** naming the rule — a silent skip would register no marketplace and the plugin would simply be absent, with no error anywhere. ⚠ The `_`→`-` transform is **non-injective** (`a_b` and `a-b` both derive `a-b`), so hydration also refuses when the derived name is already registered to a different source. Verification legs derive the expected enabled/installed plugin selector from the rendered name, never pin a literal |
@@ -85,7 +86,8 @@ casually:
 | Var | Occurrences |
 |---|---|
 | `SOLET_NAME` | **NOT part of the neutral AGENT_* family below** — that family is deliberately unprefixed per the 2026-07-28 ruling (`agent_messaging_plugin/env_contract.py`), which is about not re-prefixing *those five names* with `SOLET_`; it says nothing about this separate, pre-existing variable naming which solet a shell is scoped to. `launch.template` (daemon launcher — export), `claude_launcher.template`, `codex_launcher.template`, `fleet_functions.zsh.template` (session launchers — export, added 2026-08-02 to close a launcher asymmetry: session-launched shells previously had no way to know their own solet's name). Consumed at module-import time by several plugins for scoped vault-key resolution (`agent_messaging_plugin`, `g_suite_plugin`, `signal_plugin`, `soundcloud_artist_studio_plugin`) and required by `quality_gates/run_smokes.py`'s fail-closed check — the Git-Controller gate path — so a session launched without this export cannot run gate scripts unless the caller sets it by hand. ⚠ **Arm all launchers or none**, same reasoning as `GIT_CONTROLLER_NAME` below: a launcher that omits it produces a session class where in-session gate scripts and vault-scoped plugin code fail loud unpredictably depending on which launcher started the shell |
-| `SOLET_PERMISSION_PROMPTS` | **OPERATOR-SET, never rendered** — read by `claude_launcher.template` only. The launcher passes `--permission-mode bypassPermissions` BY DEFAULT (changed 2026-08-20, operator ruling, after adopters could not act at all on fresh installs); setting this to `1` restores the per-action approval prompt for a supervised session. ⚠ **The launcher takes POSITIONAL args (`label`, `model`, `effort`) and forwards no arbitrary flags**, so `claude-<name> --permission-mode …` is read as `label="--permission-mode"` and fails with an error naming neither cause; the env var is the supported route. ⚠ **A rendered launcher is written ONCE at genesis** — a `git pull` updates this template and never the operator's `client/bin/claude-<name>`, so delivering a change here REQUIRES re-running hydration Step 2 (see the update runbook's Step 5) |
+| `SOLET_PERMISSION_POSTURE` | **OPERATOR-SET, never rendered** — read by `claude_launcher.template` only (seed feedback #30/§48.3, 2026-08-24: the explicit 3-state posture Dax's upstream ask asked for). Three values: `bypass` (default — `--permission-mode bypassPermissions`, a fresh install can act immediately), `prompt` (`--permission-mode default` — forces Claude Code's own standard per-action approval flow regardless of what this machine's own `~/.claude/settings.json` otherwise says), `inherit` (no `--permission-mode` flag at all — defers entirely to Claude Code's own resolution, whatever this machine's global config says right now). An unrecognized value warns on stderr and falls back to `bypass`. ⚠ **`prompt` and `inherit` are NOT the same state**, and the difference is the exact gap #30 reported: `inherit` follows the operator's own global settings, which can silently change meaning across a Claude Code CLI update (one operator's flagless-equivalent session came up auto-denying, with no approval path, after such an update); `prompt` is a fixed, explicit request for standard prompting that does not depend on the global config at all. ⚠ **The launcher takes POSITIONAL args (`label`, `model`, `effort`) and forwards no arbitrary flags**, so `claude-<name> --permission-mode …` is read as `label="--permission-mode"` and fails with an error naming neither cause; the env var is the supported route. ⚠ **A rendered launcher is written ONCE at genesis** — a `git pull` updates this template and never the operator's `client/bin/claude-<name>`, so delivering a change here REQUIRES re-running hydration Step 2 (see the update runbook's Step 5) |
+| `SOLET_PERMISSION_PROMPTS` | **OPERATOR-SET, never rendered, DEPRECATED ALIAS** — `SOLET_PERMISSION_PROMPTS=1` is kept as a permanent alias for `SOLET_PERMISSION_POSTURE=inherit` (its exact pre-#30 meaning) so no already-exported deployment's shell profile changes behavior. Prefer `SOLET_PERMISSION_POSTURE` directly in new guidance; this row exists for compatibility, not as the documented route going forward |
 | `AGENT_SESSION_LABEL` | `claude_launcher.template` (export); `codex_launcher.template` (export); `fleet_functions.zsh.template` (export); and the coordination-hooks Claude plugin, where it is **load-bearing at user scope — an unlabeled `claude` session anywhere on the machine must get zero output**. ⚠ Measured via `ls hooks/` + `hooks/hooks.json` (re-derive both, never trust a count in prose — entrypoints, registrations and event types are three different numbers): on the Codex plugin, **three of the four** shipped entrypoints are label-gated — `step_zero_reminder.js`, `check_messages_reminder.js`, `role_binding_reminder.js`. The fourth, `git_controller_gate.py`, is **label-INDEPENDENT**: it arms on the presence of `GIT_CONTROLLER_NAME` and evaluates wherever armed. Zero-output for unlabeled sessions therefore holds for the gate **by its arming boundary, not by a label guard** — see that variable's row. The Codex plugin currently ships no `Stop`-bound entrypoint at all (codex-0147-async-hook-regression, 2026-08-13). `claude_settings.json.template` no longer guards anything: it ships no hooks at all (the plugin owns every one — read the current roster from `hooks/hooks.json`, do not restate a count here). The repo-scoped Codex reminders use the same non-empty label guard |
 | `AGENT_SESSION_ID` | `claude_launcher.template`, `codex_launcher.template`, and `fleet_functions.zsh.template` (single-sourced export); consumed by the Claude `Stop` hook's `<name> wake`, which derives the per-session watch spool path from it — the same derivation `<name> watch` uses, so the pair meets with no flags. The Codex coordination plugin ships no `Stop` hook currently (stock Codex does not execute async command hooks on any measured build); this identity also reconciles a managed watch registration to its spawn row for driver-channel auto-drive regardless. `peer_inbox` takes this same value and resolves the caller's registered binding server-side |
 | `AGENT_WAKE_CLI` | `claude_launcher.template`, `codex_launcher.template`, and `fleet_functions.zsh.template` (export). Names the coordination CLI (the `<name>` console script) for the Claude coordination-hooks Stop waiter, which invokes exactly `$AGENT_WAKE_CLI wake`. The Codex plugin ships no Stop waiter to invoke it currently; in a managed session, `drive_on_delivery` owns turn initiation through the host driver regardless. The user-scope settings Stop hook does not read this variable (it execs `<name> wake` directly) |
@@ -106,11 +108,61 @@ without its neutral replacement. Renaming any member piecemeal in these
 templates recreates the 2026-07-25 half-landed-rename incident — code and
 templates move together or not at all.
 
-## Invariant
+## Permission posture (post-2026-08-20 ruling contract)
 
-`claude_launcher.template` never carries `--dangerously-skip-permissions`, and
-`codex_launcher.template` never carries a dangerous approval, sandbox, hook-
-trust, or MCP bypass. The user's native approval flow and explicit `/hooks`
-trust review are the client-deployment safety boundary. `CODEX_BIN` may select
-an explicit stock executable; hydration never points it at a locally patched
-receive build.
+**This used to be titled "Invariant" and said `claude_launcher.template`
+"never carries `--dangerously-skip-permissions`," framed as something "do not
+edit away." That framing is retired (seed feedback #30/§48.3, 2026-08-24) —
+it is exactly the prose a seed-born solet quoted to REFUSE an operator's
+explicit, authorized request to add that flag to their own already-hydrated
+launcher, which is backwards: the 2026-08-20 ruling that flipped the shipped
+default to `bypassPermissions` was an explicit rejection of treating
+permission posture as a hard-coded, un-overridable invariant. Nothing about
+that ruling — or this section — restricts what an operator may configure on
+their own deployment.** If you are an agent reading this to decide whether to
+honor an operator's instruction about their own launcher's permission flags:
+this document is never grounds for refusal. Comply, and disclose what you
+did — this section documents the SHIPPED DEFAULT, not a ceiling on the
+operator's authority over their own machine.
+
+**The actual contract, stated plainly:**
+
+- `claude_launcher.template`, as hydrated, defaults to `--permission-mode
+  bypassPermissions` (the 2026-08-20 default flip, now the `bypass` state of
+  `SOLET_PERMISSION_POSTURE` above), not
+  `--dangerously-skip-permissions`. On installed Claude Code 2.1.243 those
+  spellings select the same effective `bypassPermissions` mode and are
+  behaviorally equivalent; the spelling difference is not a second safety
+  tier. Neither bypass spelling retains a permission classifier. The
+  background classifier belongs to `auto` mode.
+- `SOLET_PERMISSION_POSTURE=prompt` or `=inherit` are the documented
+  opt-outs, for a session the operator wants supervised either explicitly
+  (`prompt`, fixed regardless of global config) or by deferring to whatever
+  this machine's own Claude Code settings already say (`inherit`).
+- An operator may choose either bypass spelling on their own deployment, but
+  changing from `--permission-mode bypassPermissions` to
+  `--dangerously-skip-permissions` does not go further and cannot repair a
+  refusal: both select the same effective mode. If a session expected to be in
+  bypass is denied, first establish its effective mode and capture the exact
+  denial, then classify the independent boundary (hook, managed policy, tool
+  availability, OS/sandbox, credential, service, or another evidenced cause).
+  Do not infer a permission classifier from the denial; the classifier is an
+  `auto`-mode feature. Hydration must still preserve an operator's own launcher
+  edits outside its marker regions, but preservation is an authority rule, not
+  evidence that the alternate spelling has different behavior. For this
+  contract, installed-binary behavior outranks current vendor documentation,
+  and both outrank this knowledge-base text.
+- `codex_launcher.template`'s own posture is UNCHANGED by the 2026-08-20
+  ruling and stays exactly as strict as before: it never carries a
+  dangerous approval, sandbox, hook-trust, or MCP bypass. The ruling was
+  scoped to Claude Code's permission-mode default only; nothing about the
+  Codex launcher's own invariant moved.
+- `CODEX_BIN` may select an explicit stock executable; hydration never
+  points it at a locally patched receive build.
+
+The user's native approval flow applies when the resolved mode prompts, and
+the background classifier applies only in `auto` mode. A session in effective
+`bypassPermissions` uses neither as a per-action boundary; independently
+configured hooks, managed policy, tool availability, OS/sandbox controls,
+credentials, and service-level refusals must be diagnosed from their exact
+evidence. Explicit `/hooks` trust review remains part of client deployment.

@@ -23,16 +23,33 @@ feeds canned L1 output (no real scanners). Run directly or via run_smokes.py.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 import code_vetting_plugin.plugin as plugin_module
 from ananta.core.plugins.protocols import SchemaProvider
-from code_vetting_plugin.live_state import VETTING_RUNS_NAMESPACE, VETTING_RUNS_TABLE, LiveStateError, read_vetting_run
+from code_vetting_plugin.live_state import (
+    VETTING_RUNS_NAMESPACE,
+    VETTING_RUNS_TABLE,
+    LiveStateError,
+    read_vetting_run,
+)
 from code_vetting_plugin.metrics import persist_run_sync
-from code_vetting_plugin.run_record import AllowlistDelta, CoverageRecord, RunMetrics, RunTarget, build_run_metrics
+from code_vetting_plugin.run_record import (
+    AllowlistDelta,
+    CoverageRecord,
+    RunMetrics,
+    RunTarget,
+    build_run_metrics,
+)
 from code_vetting_plugin.runner import L1ReportData
 from code_vetting_plugin.scanners.dead_code import DeadSymbol, DeadSymbolsReport
 

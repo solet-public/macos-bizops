@@ -542,6 +542,20 @@ def test_ladder_registered_caller_and_sentinel_unchanged() -> None:
     )
 
 
+def test_peer_identity_reports_one_shot_attribution() -> None:
+    """The process reads the instance attribution field lifted into state."""
+    plugin = object.__new__(AgentMessagingPlugin)
+    result = plugin.peer_identity({}, {"caller_attribution_instance_id": _LIVE_INSTANCE})
+    data = result.get("data")
+    _check(
+        isinstance(data, dict)
+        and data.get("caller_identity_available") is True
+        and data.get("registered_bridge") is False
+        and data.get("bridge_identity") == "one_shot_attributed",
+        "peer_identity: one-shot caller attribution reports its available identity",
+    )
+
+
 class _CapturingService:
     """Captures the PeerSendRequest ``send_peer_message`` hands the service."""
 
@@ -562,7 +576,16 @@ class _CapturingService:
 _UNSET = object()
 
 
-def _send_peer_message(state: dict[str, Any], state_service: object = _UNSET) -> Any:
+def _send_peer_message(
+    state: dict[str, Any],
+    state_service: object = _UNSET,
+    *,
+    recipient_instance_id: str = "agi-recipient",
+    recipient_session_id: str = "ases-recipient",
+    recipient_is_watcher: bool = False,
+    requested_instance_id: str = "agi-recipient",
+    requested_session_id: str | None = None,
+) -> Any:
     """Drive the REAL ``send_peer_message`` body against a captured service."""
     registry = _registry_with_live_session()
     bridge_manager = BridgeSessionManager(
@@ -581,10 +604,11 @@ def _send_peer_message(state: dict[str, Any], state_service: object = _UNSET) ->
         BridgeBinding(
             bridge_id=recipient_bridge_id,
             agent_id="codex",
-            agent_instance_id="agi-recipient",
+            agent_instance_id=recipient_instance_id,
             session_label="Recipient",
             parent_pid=None,
-            agent_session_id="ases-recipient",
+            agent_session_id=recipient_session_id,
+            watcher_declared=recipient_is_watcher,
         ),
     )
     service = _CapturingService()
@@ -594,9 +618,14 @@ def _send_peer_message(state: dict[str, Any], state_service: object = _UNSET) ->
     plugin._require_service = lambda: service
     resolved = _NoRoleStateService() if state_service is _UNSET else state_service
     plugin._get_state_service = lambda: resolved
-    result = plugin.send_peer_message(
-        {"peer_id": "codex", "content": "hello"}, state,
-    )
+    params: dict[str, Any] = {
+        "peer_id": "codex",
+        "peer_agent_instance_id": requested_instance_id,
+        "content": "hello",
+    }
+    if requested_session_id is not None:
+        params["peer_agent_session_id"] = requested_session_id
+    result = plugin.send_peer_message(params, state)
     _check(
         result.get("action_status") == "completed",
         "send_peer_message: the send still succeeds",
@@ -659,6 +688,33 @@ def test_send_peer_message_sentinel_when_unattributed() -> None:
         and request.sender_agent_instance_id == "system:scheduler",
         "send_peer_message: a genuinely scheduler-originated send is still "
         "honestly the sentinel (no regression)",
+    )
+
+
+def test_send_peer_message_reaches_no_claim_watcher_by_stable_session() -> None:
+    request = _send_peer_message(
+        dict(_ATTRIBUTED_STATE),
+        recipient_instance_id="agi-watch-codex-lane",
+        recipient_session_id="ases-codex-lane",
+        recipient_is_watcher=True,
+        requested_instance_id="agi-ledger-codex-lane",
+        requested_session_id="ases-codex-lane",
+    )
+    _check(
+        request is not None
+        and request.peer_agent_instance_id == "agi-watch-codex-lane"
+        and request.peer_agent_session_id == "ases-codex-lane",
+        "send_peer_message: stable-session fallback reaches a no-claim watcher binding",
+    )
+    metadata = getattr(
+        AgentMessagingPlugin.send_peer_message,
+        "_platform_process_metadata",
+        None,
+    )
+    parameters = getattr(metadata, "parameters", {})
+    _check(
+        "peer_agent_session_id" in parameters,
+        "send_peer_message: process schema exposes the watcher-safe session fallback",
     )
 
 

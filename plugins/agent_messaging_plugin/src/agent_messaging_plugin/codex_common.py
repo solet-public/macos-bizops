@@ -57,6 +57,16 @@ _TMUX_BUSY_MARKERS = (
     "Working",
     "esc to interrupt",
 )
+_CODEX_IDLE_COMPOSER_PLACEHOLDER = "› Ask Codex to do anything"
+"""The empty-composer placeholder line the Codex TUI renders only while idle
+and waiting for input -- live-measured 2026-08-23 against a running
+``fleet-lane-c-inspect-target-3ab14add`` pane (Codex v0.149.0), captured both
+at its first idle turn (banner still visible) and after several turns once
+the ``OpenAI Codex (v...)`` startup-banner box had scrolled out of the
+visible pane. That banner was the PREVIOUS readiness marker; unlike it, this
+placeholder reappears every time the composer goes idle regardless of scroll
+position, and was not observed anywhere else in over 900 lines of that pane's
+scrollback (no false-positive risk from quoted/transcript text)."""
 
 
 def _toml_string(value: str) -> str:
@@ -175,7 +185,7 @@ def _codex_config_overrides(
         "AGENT_INSTANCE_ID": agent_instance_id,
         "AGENT_SESSION_ID": agent_session_id,
         "AGENT_SESSION_LABEL": label,
-        "AGENT_WAKE_CLI": solet_bin or "solet",
+        "AGENT_WAKE_CLI": solet_bin or "solet-bridge",
         "FLEET_TRANSPORT": transport,
         # A managed-session lane label is cosmetic.  Role ownership remains a
         # model-initiated peer_claim_role action after the bootstrap turn.

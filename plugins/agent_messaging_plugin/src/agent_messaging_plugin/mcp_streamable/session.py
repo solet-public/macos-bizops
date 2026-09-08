@@ -39,9 +39,14 @@ import secrets
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import TYPE_CHECKING, Final
 
 from ..models import BridgeBinding
+from ..sender_provenance import (
+    SENDER_PRINCIPAL_KIND_OAUTH_CLIENT,
+    SENDER_PRINCIPAL_KIND_UNKNOWN,
+)
 
 if TYPE_CHECKING:
     from ..bridge_sessions import BridgeSessionManager
@@ -64,6 +69,7 @@ _SESSION_ID_PREFIX: Final[str] = "mcp-"
 # Default human session_label for phone bindings; the bearer claim can
 # override it.  Kept short so peer_list output stays readable.
 _DEFAULT_SESSION_LABEL: Final[str] = "phone via streamable HTTP"
+_SHARED_OAUTH_BEARER_TRUST: Final[str] = "shared_oauth_bearer_verified"
 
 
 @dataclass(slots=True)
@@ -91,6 +97,14 @@ class StreamableSession:
     agent_instance_id: str
     session_label: str
     binding: BridgeBinding
+    sender_principal_kind: Final[str] = SENDER_PRINCIPAL_KIND_UNKNOWN
+    # The bearer claim is the sole authenticated transport principal on this
+    # surface. Keep it separate from the sender fields: a shared bearer does
+    # not prove which human or coding-agent process presented it.
+    sender_transport_principal: str = ""
+    sender_identity_trust: str = _SHARED_OAUTH_BEARER_TRUST
+    authenticated_agent_id: str = ""
+    authenticated_session_label: str = ""
     agent_session_id: str = ""
     client_info: dict[str, object] = field(default_factory=dict)
     protocol_version: str = ""
@@ -169,6 +183,11 @@ class StreamableSessionManager:
             agent_instance_id=claim.agent_instance_id,
             session_label=session_label,
             binding=binding,
+            sender_principal_kind=SENDER_PRINCIPAL_KIND_OAUTH_CLIENT,
+            sender_transport_principal=_oauth_transport_principal(claim.client_id),
+            sender_identity_trust=_SHARED_OAUTH_BEARER_TRUST,
+            authenticated_agent_id=claim.agent_id,
+            authenticated_session_label=session_label,
             agent_session_id=claim.agent_session_id,
             client_info=dict(client_info or {}),
             protocol_version=protocol_version,
@@ -230,6 +249,18 @@ class StreamableSessionManager:
 def _mint_session_id() -> str:
     """Generate an ``mcp-<urlsafe-b64>`` id; ASCII-visible per MCP spec."""
     return _SESSION_ID_PREFIX + secrets.token_urlsafe(_SESSION_ID_BYTES)
+
+
+def _oauth_transport_principal(client_id: str) -> str:
+    """Return a stable, non-secret envelope identifier for an OAuth bearer.
+
+    The server retains the raw client id on the bridge for policy enforcement.
+    Durable peer envelopes instead carry this one-way identifier so recipients
+    can distinguish the transport principal without receiving credential
+    material.
+    """
+    digest = sha256(client_id.encode("utf-8")).hexdigest()[:32]
+    return f"oauth_bearer:{digest}"
 
 
 __all__ = ["StreamableSession", "StreamableSessionManager"]

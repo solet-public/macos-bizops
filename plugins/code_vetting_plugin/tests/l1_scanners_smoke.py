@@ -12,11 +12,22 @@ runner (``quality_gates/run_smokes.py``) or directly with
 
 from __future__ import annotations
 
+# ruff: noqa: E402
+import os
+import platform
 import re
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from code_vetting_plugin import toolrun
 from code_vetting_plugin.models import Dimension
 from code_vetting_plugin.scanners import deps, duplication, hidden_unicode, patterns, secrets
 from code_vetting_plugin.targets import TargetTree
@@ -118,6 +129,82 @@ def test_absent_tool_records_coverage_gap() -> None:
     assert not result.coverage.ran
     assert result.coverage.gap_reason is not None
     assert not result.findings
+
+
+def _write_hanging_tool(directory: Path, name: str) -> Path:
+    tool = directory / name
+    tool.write_text("#!/bin/sh\nsleep 1000\n", encoding="utf-8")
+    tool.chmod(0o755)
+    return tool
+
+
+def test_hung_scanner_tool_records_qualification_gap() -> None:
+    """Red mutation: presence-only detection waits for the scanner's full 900s bound."""
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        name = "smoke-hanging-scanner"
+        _write_hanging_tool(directory, name)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{directory}{os.pathsep}{old_path}"
+        toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
+        original = secrets._TRUFFLEHOG  # noqa: SLF001
+        secrets._TRUFFLEHOG = name  # noqa: SLF001
+        try:
+            result = secrets.scan_trufflehog(_make_tree(directory / "tree"), "rid")
+        finally:
+            secrets._TRUFFLEHOG = original  # noqa: SLF001
+            os.environ["PATH"] = old_path
+            toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
+    assert not result.coverage.ran
+    assert result.coverage.gap_reason is not None
+    assert "hung past 2s" in result.coverage.gap_reason
+    assert name in result.coverage.gap_reason
+
+
+def test_nonzero_version_probe_is_unusable() -> None:
+    """A PATH hit that exits nonzero is disclosed as unusable, not treated as installed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        name = "smoke-failing-version"
+        tool = directory / name
+        tool.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+        tool.chmod(0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{directory}{os.pathsep}{old_path}"
+        toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
+        try:
+            verdict = toolrun.qualify_tool(name)
+        finally:
+            os.environ["PATH"] = old_path
+            toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
+    assert not verdict.usable
+    assert "exit 42" in verdict.reason
+
+
+def test_quarantine_attribute_is_named_on_darwin() -> None:
+    """A quarantined temporary fixture is diagnosed, never altered by qualification."""
+    if platform.system() != "Darwin":
+        print("SKIP quarantine fixture: com.apple.quarantine is macOS-only")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        name = "smoke-quarantined-tool"
+        tool = _write_hanging_tool(directory, name)
+        subprocess.run(
+            ["xattr", "-w", "com.apple.quarantine", "0081;smoke", str(tool)], check=True, timeout=5
+        )
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{directory}{os.pathsep}{old_path}"
+        toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
+        try:
+            verdict = toolrun.qualify_tool(name)
+        finally:
+            os.environ["PATH"] = old_path
+            subprocess.run(["xattr", "-d", "com.apple.quarantine", str(tool)], check=False, timeout=5)
+            toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
+    assert not verdict.usable
+    assert "com.apple.quarantine is present" in verdict.reason
+    assert f"xattr -d com.apple.quarantine {tool}" in verdict.reason
 
 
 # --- operator-PII pattern is RUNTIME-DERIVED, never a hardcoded literal -------------
@@ -236,6 +323,9 @@ def main() -> int:
         test_license_flags_non_two_bucket_spdx,
         test_duplication_flags_exact_block,
         test_absent_tool_records_coverage_gap,
+        test_hung_scanner_tool_records_qualification_gap,
+        test_nonzero_version_probe_is_unusable,
+        test_quarantine_attribute_is_named_on_darwin,
         test_operator_pii_is_not_baked_into_the_static_pattern_tuple,
         test_operator_pii_pattern_follows_the_running_git_identity,
         test_operator_pii_atoms_are_regex_escaped,

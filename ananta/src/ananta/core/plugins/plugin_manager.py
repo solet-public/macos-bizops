@@ -26,6 +26,7 @@ import inspect
 import logging
 from typing import TYPE_CHECKING, Protocol
 
+from ananta.core.plugins.capabilities import is_lifecycle_managed
 from ananta.core.plugins.plugin_base import (
     EventBusProtocol,
     OrchestratorProtocol,
@@ -35,7 +36,7 @@ from ananta.core.plugins.plugin_base import (
 from ananta.core.plugins.plugin_discovery import PluginDiscovery
 from ananta.core.plugins.plugin_dispatcher import PluginDispatcher
 from ananta.core.plugins.plugin_initializer import PluginInitializer
-from ananta.core.plugins.plugin_installer import PluginInstaller
+from ananta.core.plugins.plugin_installer import PluginInstaller, PluginInstallError
 
 # Removed: from ananta.core.plugins.plugin_contracts import get_required_interface
 # Now using explicit isinstance() checks instead of magic string patterns
@@ -72,6 +73,7 @@ class PluginManager:
         self._event_bus_ref: EventBusProtocol | None = None
         self._config_manager: ConfigManagerProtocol | None = None
         self._allowed_plugins: set[str] | None = None
+        self._is_serving = False
         self.plugin_validation_registry = PluginValidationRegistry()
 
         # Collaborators (Step 9.C). Each receives the shared `plugins` dict
@@ -132,6 +134,10 @@ class PluginManager:
         """
         self._allowed_plugins = allowed
 
+    def _mark_serving(self) -> None:
+        """Seal this roster after the orchestrator starts action dispatch."""
+        self._is_serving = True
+
     # ------------------------------------------------------------------
     # Discovery — delegates to PluginDiscovery, with the coordinating
     # instantiation loop owned by the manager (per the §9.C design's
@@ -144,19 +150,27 @@ class PluginManager:
         *,
         allowed_plugins: set[str] | None = None,
     ) -> None:
-        """Bootstrap-compatible plugin discovery method.
+        """Pre-serving plugin discovery method.
 
         ``allowed_plugins`` (the solet's profile manifest) restricts
         loading to entry points whose name appears in the set. ``None``
         means "no gating" (legacy / dev-box behavior). The first call's
-        ``allowed_plugins`` is remembered for subsequent re-discoveries
-        (e.g. the service-transition path), so the manifest stays the
-        source of truth across re-loads.
+        ``allowed_plugins`` is remembered for subsequent boot-phase
+        re-discoveries, so the manifest stays the source of truth. Once action
+        dispatch starts, this method refuses rather than clearing a live roster.
         """
-        self.plugins.clear()
+        if self._is_serving:
+            raise RuntimeError(
+                "Plugin discovery refused: this PluginManager is serving actions; "
+                "use PluginInstaller for a runtime roster mutation"
+            )
+
+        remembered_allowed = (
+            allowed_plugins if allowed_plugins is not None else self._allowed_plugins
+        )
+        self._teardown_replaced_plugins()
         self._config_manager = config_manager
-        if allowed_plugins is not None:
-            self._allowed_plugins = allowed_plugins
+        self._allowed_plugins = remembered_allowed
 
         plugin_classes = self._discovery.discover(
             self._allowed_plugins, self._config_manager,
@@ -172,6 +186,57 @@ class PluginManager:
                 logger.error(
                     f"Exception loading plugin {plugin_name}: {e}", exc_info=True,
                 )
+
+    def _teardown_replaced_plugins(self) -> None:
+        """Remove pre-serving instances in the installer teardown order."""
+        for plugin_name in list(self.plugins):
+            try:
+                self.installer.remove(
+                    plugin_name,
+                    stop=self._stop_replaced_plugin,
+                    deregister=self._deregister_replaced_plugin_processes,
+                )
+            except PluginInstallError as exc:
+                logger.error(
+                    "Pre-serving replacement teardown was partial for plugin %r: %s",
+                    plugin_name,
+                    exc,
+                )
+
+    @staticmethod
+    def _stop_replaced_plugin(plugin: PluginBase) -> None:
+        """Stop a replaced plugin before its process keys leave the registry."""
+        if not is_lifecycle_managed(plugin):
+            return
+        result = plugin.stop_services()
+        if not inspect.isawaitable(result):
+            return
+
+        import asyncio
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(result)
+            return
+        raise RuntimeError(
+            "Cannot synchronously stop a replaced plugin while an event loop is running"
+        )
+
+    def _deregister_replaced_plugin_processes(self, process_keys: list[str]) -> None:
+        """Remove replaced process keys before deleting its roster entry."""
+        if self._orchestrator_ref is None:
+            return
+        registry_manager = getattr(self._orchestrator_ref, "_process_registry_manager", None)
+        if registry_manager is None:
+            return
+        deregister = getattr(registry_manager, "unregister_dynamic_processes", None)
+        if not callable(deregister):
+            raise RuntimeError(
+                "Plugin replacement requires a process registry manager with "
+                "unregister_dynamic_processes"
+            )
+        deregister(process_keys)
 
     # ------------------------------------------------------------------
     # Initialization + readiness — one-line delegates to PluginInitializer.

@@ -21,6 +21,7 @@ live solet. Run directly or via run_smokes.py.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
 import tempfile
 import threading
@@ -28,13 +29,31 @@ import time
 from pathlib import Path
 from typing import Any
 
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 import code_vetting_plugin.plugin as plugin_module
 from ananta.core.domain.enums import ProcessorPolicyCategory
 from code_vetting_plugin.live_state import VETTING_RUNS_NAMESPACE, VETTING_RUNS_TABLE
-from code_vetting_plugin.models import ContextProfile, Dimension, Finding, Layer, Provenance, Severity
-from code_vetting_plugin.run_context import _ALLOWLIST_GATES  # noqa: PLC2701 — the self-vet reads these allowlist files; the fixture must carry them
+from code_vetting_plugin.models import (
+    ContextProfile,
+    Dimension,
+    Finding,
+    Layer,
+    Provenance,
+    Severity,
+)
+from code_vetting_plugin.run_context import (
+    _ALLOWLIST_GATES,  # noqa: PLC2701 — the self-vet reads these allowlist files; the fixture must carry them
+)
 from code_vetting_plugin.runner import L1ReportData
-from code_vetting_plugin.scheduled_vet import REGRESSION_MEMORY_TAG, SingleSlotVetExecutor, is_regression
+from code_vetting_plugin.scheduled_vet import (
+    REGRESSION_MEMORY_TAG,
+    SingleSlotVetExecutor,
+    is_regression,
+)
 
 _CHECKS_RUN: list[str] = []
 

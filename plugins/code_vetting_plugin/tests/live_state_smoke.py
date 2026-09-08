@@ -17,9 +17,16 @@ Run directly: ``.venv/bin/python3 plugins/code_vetting_plugin/tests/live_state_s
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import asyncio
 import sys
+from pathlib import Path
 from typing import Any
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from ananta.core.domain.enums import ActionStatus
 from ananta.types.column_types import ColumnType

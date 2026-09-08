@@ -34,7 +34,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+from ananta.core.actions.action_metadata import (
+    ContextHandling,
+    MergeErrorProcessorCustomizations,
+    MergeResultProcessorCustomizations,
+    ParameterMetadata,
+    ParameterType,
+    ReturnValueSchema,
+    platform_process,
+)
+from ananta.core.domain.enums import ActionStatus, ProcessorPolicyCategory
 from ananta.core.plugins.plugin_base import PluginBase
+from ananta.interfaces.edge_process_provider import EdgeProcessDefinition, EdgeProcessProvider
 from ananta.interfaces.llm_session_source_interface import (
     LLMSessionSourceInterface,
     PullingSourceMixin,
@@ -71,6 +82,7 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
     PluginBase,
     LLMSessionSourceInterface,
     PullingSourceMixin,
+    EdgeProcessProvider,
 ):
     """Walks ``~/.claude/projects/`` and surfaces each ``.jsonl`` as a session."""
 
@@ -97,6 +109,72 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
         from ananta.core.config.config_provider import ConfigProvider  # noqa: PLC0415
 
         self.config_provider = ConfigProvider(self.name, config)
+
+    def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
+        """Declare the bounded source-local qualification result contract."""
+        return {
+            "qualify": EdgeProcessDefinition(
+                name="qualify",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                    result_type="claude_code_filesystem_session_source_qualification",
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+        }
+
+    @platform_process(
+        name="qualify",
+        is_discoverable=True,
+        context_handling=ContextHandling.NONE,
+        parameters={},
+        output_type="object",
+        output_description=(
+            "Bounded source-local Claude Code filesystem retrieval proof: "
+            "{source_registered, source_kind, backfill_count, sample_content_retrieved}."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Registration, one bounded backfill, and a non-payload retrieval proof.",
+            properties={
+                "source_registered": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "source_kind": ParameterMetadata(type=ParameterType.STRING),
+                "backfill_count": ParameterMetadata(type=ParameterType.INTEGER),
+                "sample_content_retrieved": ParameterMetadata(type=ParameterType.BOOLEAN),
+            },
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(
+            result_type="claude_code_filesystem_session_source_qualification",
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+    )
+    def qualify(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Prove this already-consented source can register, backfill, and retrieve."""
+        del params, state
+        try:
+            proof = _qualify_source(
+                ledger=self._require_ledger_service(),
+                source_kind=IngestSourceKind.CLAUDE_CODE_LOCAL.value,
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            return _qualification_failure(exc)
+        return {
+            "action_status": ActionStatus.COMPLETED.value,
+            "data": proof,
+            "actions": [],
+            "error": None,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+
+    def _require_ledger_service(self) -> Any:
+        if self.orchestrator_ref is None:
+            raise RuntimeError(f"{self.name}: orchestrator_ref unavailable")
+        ledger = self.orchestrator_ref.get_service("session_ledger_service")
+        if ledger is None:
+            raise RuntimeError(f"{self.name}: session_ledger_service unavailable")
+        return ledger
 
     # ------------------------------------------------------------------
     # LLMSessionSourceInterface
@@ -552,6 +630,87 @@ def _parse_cursor_int(
             f"claude_code filesystem: cursor field {key!r} must be int or null",
         )
     return value
+
+
+def _qualify_source(*, ledger: Any, source_kind: str) -> dict[str, object]:
+    """Run one source-local, bounded retrieval proof without exposing content."""
+    source_id = _require_registered_source_id(ledger, source_kind)
+    backfill_count = _run_nonempty_backfill(ledger, source_id, source_kind)
+    _require_retrievable_content(ledger, source_kind)
+    return {
+        "source_registered": True,
+        "source_kind": source_kind,
+        "backfill_count": backfill_count,
+        "sample_content_retrieved": True,
+    }
+
+
+def _require_registered_source_id(ledger: Any, source_kind: str) -> str:
+    listed = ledger.list_sources()
+    sources = listed.get("sources") if isinstance(listed, dict) else None
+    if not isinstance(sources, list):
+        raise RuntimeError("session_ledger_service.list_sources returned no sources list")
+    source_id = _registered_source_id(sources, source_kind)
+    if source_id is None:
+        raise RuntimeError(f"no enabled registered source for {source_kind!r}")
+    return source_id
+
+
+def _run_nonempty_backfill(ledger: Any, source_id: str, source_kind: str) -> int:
+    backfill = ledger.poll_source(source_id)
+    if not isinstance(backfill, dict):
+        raise RuntimeError("session_ledger_service.poll_source returned a malformed report")
+    backfill_count = backfill.get("events_persisted")
+    if not isinstance(backfill_count, int) or backfill_count <= 0:
+        raise RuntimeError(f"source {source_kind!r} backfill produced no persisted events")
+    return backfill_count
+
+
+def _require_retrievable_content(ledger: Any, source_kind: str) -> None:
+    sessions_result = ledger.list_sessions(source_kind=source_kind, limit=1)
+    sessions = sessions_result.get("sessions") if isinstance(sessions_result, dict) else None
+    if not isinstance(sessions, list) or not sessions:
+        raise RuntimeError(f"source {source_kind!r} yielded no retrievable sessions")
+    session_id = _session_id(sessions[0])
+    timeline = ledger.get_session_timeline(session_id=session_id, limit=1)
+    events = timeline.get("events") if isinstance(timeline, dict) else None
+    if not isinstance(events, list) or not any(_has_content(event) for event in events):
+        raise RuntimeError(f"source {source_kind!r} yielded no retrievable content")
+
+
+def _registered_source_id(sources: list[object], source_kind: str) -> str | None:
+    for source in sources:
+        if not isinstance(source, dict) or source.get("source_kind") != source_kind:
+            continue
+        source_id = source.get("source_id")
+        if isinstance(source_id, str) and source_id and source.get("enabled") is True:
+            return source_id
+    return None
+
+
+def _session_id(session: object) -> str:
+    if not isinstance(session, dict):
+        raise RuntimeError("session_ledger_service.list_sessions returned a malformed row")
+    session_id = session.get("session_id", session.get("id"))
+    if not isinstance(session_id, str) or not session_id:
+        raise RuntimeError("session_ledger_service.list_sessions row has no session id")
+    return session_id
+
+
+def _has_content(event: object) -> bool:
+    if not isinstance(event, dict):
+        return False
+    return bool(event.get("content_text")) or bool(event.get("content_json"))
+
+
+def _qualification_failure(exc: Exception) -> dict[str, object]:
+    return {
+        "action_status": ActionStatus.FAILED.value,
+        "data": {},
+        "actions": [],
+        "error": {"code": "source_qualification_failed", "message": str(exc)},
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
 
 
 __all__ = ["ClaudeCodeFilesystemSessionSourcePlugin"]

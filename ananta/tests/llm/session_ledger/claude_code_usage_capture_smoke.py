@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """T1 usage-capture lane (2026-08-05 ruling, S2b) — the claude_code vendor
 parser threads a message line's per-turn ``usage`` dict through to
-``RawSessionEvent.payload['usage']``, and
-``claude_code_filesystem_session_source_plugin``'s ``normalize()`` carries
-it into ``NormalizedSessionEvent.usage_json`` verbatim (no re-derivation).
+``RawSessionEvent.payload['usage']``. Plugin normalization coverage lives with
+the plugin that owns it, so capability bundles without that plugin still ship
+this vendor-parser smoke.
 
 Covers the tool-only-turn gap a naive "attach usage to the text event"
 design would silently drop: an assistant turn with ONLY tool_use blocks
@@ -24,15 +24,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
-sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "claude_code_filesystem_session_source_plugin" / "src"),
-)
 
-from ananta.llm.session_ledger.types import EventType  # noqa: E402
 from ananta.llm.session_ledger.vendor import claude_code as vendor  # noqa: E402
-from claude_code_filesystem_session_source_plugin.plugin import (  # noqa: E402
-    ClaudeCodeFilesystemSessionSourcePlugin,
-)
 
 _passed = 0
 _failed: list[str] = []
@@ -56,16 +49,21 @@ def _check(condition: object, label: str) -> None:
 
 
 def _line(*, msg_type: str, content: object, usage: dict[str, object] | None = None) -> str:
-    message: dict[str, object] = {"role": "assistant" if msg_type == "assistant" else "user", "content": content}
+    message: dict[str, object] = {
+        "role": "assistant" if msg_type == "assistant" else "user",
+        "content": content,
+    }
     if usage is not None:
         message["usage"] = usage
-    return json.dumps({
-        "type": msg_type,
-        "uuid": "u-usage-1",
-        "sessionId": "s-usage-1",
-        "timestamp": "2026-08-05T00:00:00.000Z",
-        "message": message,
-    })
+    return json.dumps(
+        {
+            "type": msg_type,
+            "uuid": "u-usage-1",
+            "sessionId": "s-usage-1",
+            "timestamp": "2026-08-05T00:00:00.000Z",
+            "message": message,
+        }
+    )
 
 
 def test_assistant_text_line_carries_usage_through_to_normalized() -> None:
@@ -74,19 +72,11 @@ def test_assistant_text_line_carries_usage_through_to_normalized() -> None:
     _check(len(raw_events) == 1, "one text block -> one raw event")
     _check(raw_events[0].payload.get("usage") == _USAGE, "raw payload carries usage verbatim")
 
-    plugin = ClaudeCodeFilesystemSessionSourcePlugin()
-    normalized = plugin.normalize(raw_events[0])
-    _check(normalized.event_type == EventType.MESSAGE, "normalizes to a MESSAGE event")
-    _check(normalized.usage_json == _USAGE, "NormalizedSessionEvent.usage_json carries usage verbatim")
-
 
 def test_user_line_has_no_usage_field() -> None:
     line = _line(msg_type="user", content=[{"type": "text", "text": "hello"}])
     raw_events = vendor.parse_line(line)
     _check(raw_events[0].payload.get("usage") is None, "a user line's payload carries no usage key")
-    plugin = ClaudeCodeFilesystemSessionSourcePlugin()
-    normalized = plugin.normalize(raw_events[0])
-    _check(normalized.usage_json is None, "a user message normalizes with usage_json=None")
 
 
 def test_tool_only_assistant_turn_still_carries_usage() -> None:
@@ -102,25 +92,19 @@ def test_tool_only_assistant_turn_still_carries_usage() -> None:
         len(raw_events) == 2,
         f"tool-only turn with usage yields 2 events (message carrier + tool_call), got {len(raw_events)}",
     )
-    plugin = ClaudeCodeFilesystemSessionSourcePlugin()
-    normalized = [plugin.normalize(e) for e in raw_events]
-    message_events = [n for n in normalized if n.event_type == EventType.MESSAGE]
-    tool_events = [n for n in normalized if n.event_type == EventType.TOOL_CALL]
-    _check(len(message_events) == 1, "exactly one MESSAGE carrier event is emitted for the tool-only turn")
+    message_events = [event for event in raw_events if event.payload.get("kind") == "message"]
+    tool_events = [event for event in raw_events if event.payload.get("kind") == "tool_call"]
     _check(
-        message_events and message_events[0].usage_json == _USAGE,
-        "the MESSAGE carrier event's usage_json matches the line's usage",
+        len(message_events) == 1,
+        "exactly one MESSAGE carrier event is emitted for the tool-only turn",
     )
     _check(
-        message_events and message_events[0].content_text == "",
-        "the carrier event's content_text is empty (no real text existed), not None "
-        "(_validate_message_event requires content_text OR content_json non-None; "
-        "empty string satisfies it)",
+        message_events and message_events[0].payload.get("usage") == _USAGE,
+        "MESSAGE carrier preserves line usage",
     )
     _check(
-        tool_events and tool_events[0].usage_json is None,
-        "the TOOL_CALL event itself carries no usage -- usage is per-LINE, attributed "
-        "once to the message carrier, never duplicated onto tool events",
+        tool_events and tool_events[0].payload.get("usage") is None,
+        "TOOL_CALL does not duplicate line usage",
     )
 
 
@@ -143,16 +127,21 @@ def test_tool_only_assistant_turn_without_usage_emits_no_carrier() -> None:
 def test_legacy_string_content_carries_usage() -> None:
     """Legacy single-string ``message.content`` (early Claude Code
     versions) -- usage still threads through the direct-string branch."""
-    line = json.dumps({
-        "type": "assistant",
-        "uuid": "u-legacy-1",
-        "sessionId": "s-usage-1",
-        "timestamp": "2026-08-05T00:00:00.000Z",
-        "message": {"role": "assistant", "content": "plain legacy text", "usage": _USAGE},
-    })
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "uuid": "u-legacy-1",
+            "sessionId": "s-usage-1",
+            "timestamp": "2026-08-05T00:00:00.000Z",
+            "message": {"role": "assistant", "content": "plain legacy text", "usage": _USAGE},
+        }
+    )
     raw_events = vendor.parse_line(line)
     _check(len(raw_events) == 1, "legacy string content -> one raw event")
-    _check(raw_events[0].payload.get("usage") == _USAGE, "legacy-string branch carries usage verbatim too")
+    _check(
+        raw_events[0].payload.get("usage") == _USAGE,
+        "legacy-string branch carries usage verbatim too",
+    )
 
 
 def test_multiple_text_blocks_usage_attached_once() -> None:

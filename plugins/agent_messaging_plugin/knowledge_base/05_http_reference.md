@@ -210,9 +210,10 @@ GET  /api/v1/bridge/{bridge_id}/peer/inbox?after=<recent-ISO-time>
           "role_entries": [ {sender_agent_id, sender_agent_instance_id,
                               sender_session_label, message, ...}, ... ],
           "next_after_created_at": "...",
+          "instance_exhausted": false,
           "next_role_cursor": "..." }
-  # Default is catch-up mode: silent + IMPORTANT. Pass
-  # include_important=false only for intentional silent-only status checks.
+  # Instance mail is exhausted only when instance_exhausted is true under its
+  # existing forward timestamp cursor; equal-timestamp tie safety is not implied.
 ```
 
 See `03_inter_agent_messaging.md` for the delivery

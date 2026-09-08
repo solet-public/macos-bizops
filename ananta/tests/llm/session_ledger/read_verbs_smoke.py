@@ -32,17 +32,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
-sys.path.insert(0, str(
-    REPO_ROOT / "plugins" / "agent_messaging_session_source_plugin" / "src"
-))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "tests" / "llm" / "session_ledger"))
 
 from _stub_state_service import (  # noqa: E402
     StubBlobStorageService,
     StubStateService,
-)
-from agent_messaging_session_source_plugin.plugin import (  # noqa: E402
-    AgentMessagingSessionSourcePlugin,
 )
 from ananta.llm.session_ledger.types import (  # noqa: E402
     IngestSourceKind,
@@ -64,75 +58,20 @@ def _check(condition: object, label: str) -> None:
         print(f"  FAIL  {label}")
 
 
-PLUGIN_NAME = "agent_messaging_session_source_plugin"
-
-
 class _StubPluginManager:
     def __init__(self, plugins: dict[str, object]) -> None:
         self.plugins = plugins
 
 
-def _make_service(state: StubStateService, *, with_plugin: bool = True) -> SessionLedgerService:
-    plugins: dict[str, object] = {}
-    if with_plugin:
-        plugins[PLUGIN_NAME] = AgentMessagingSessionSourcePlugin()
+def _make_service(state: StubStateService) -> SessionLedgerService:
     return SessionLedgerService(
         state_service=state,  # type: ignore[arg-type]
         blob_storage_service=StubBlobStorageService(),  # type: ignore[arg-type]
-        plugin_manager=_StubPluginManager(plugins),  # type: ignore[arg-type]
+        plugin_manager=_StubPluginManager({}),  # type: ignore[arg-type]
     )
 
 
 # ─── list_sources ──────────────────────────────────────────────────────────
-
-
-def test_list_sources_descriptor_only_when_no_db_row() -> None:
-    state = StubStateService()
-    service = _make_service(state)
-    result = service.list_sources()
-    sources = result["sources"]
-    _check(len(sources) == 1, "list_sources returns one entry for the lone agent_messaging plugin")
-    entry = sources[0]
-    _check(
-        entry["source_kind"] == IngestSourceKind.AGENT_MESSAGING.value,
-        "descriptor-only entry carries source_kind",
-    )
-    _check(entry["vendor"] == SourceVendor.AGENT_MESSAGING.value, "descriptor-only entry carries vendor")
-    _check(
-        entry["default_pulling_root_uri"] == "local:agent_messaging",
-        "descriptor-only entry carries default_pulling_root_uri",
-    )
-    _check(entry["source_id"] is None, "descriptor-only entry has source_id=None (no DB row)")
-    _check(entry["root_uri"] is None, "descriptor-only entry has root_uri=None (no DB row)")
-    _check(entry["enabled"] is None, "descriptor-only entry has enabled=None (no DB row)")
-
-
-def test_list_sources_joined_when_db_row_exists() -> None:
-    state = StubStateService()
-    state.add_select_response(
-        "FROM session_ledger__source WHERE is_deleted",
-        [
-            {
-                "id": "src_am",
-                "source_kind": IngestSourceKind.AGENT_MESSAGING.value,
-                "root_uri": "local:agent_messaging",
-                "account_label": None,
-                "enabled": True,
-                "config_json": {},
-            }
-        ],
-    )
-    service = _make_service(state)
-    sources = service.list_sources()["sources"]
-    _check(len(sources) == 1, "list_sources returns one joined entry for the registered source")
-    entry = sources[0]
-    _check(entry["source_id"] == "src_am", "joined entry carries DB source_id")
-    _check(entry["root_uri"] == "local:agent_messaging", "joined entry carries DB root_uri")
-    _check(entry["enabled"] is True, "joined entry carries DB enabled")
-    _check(
-        entry["vendor"] == SourceVendor.AGENT_MESSAGING.value,
-        "joined entry still carries descriptor vendor",
-    )
 
 
 def test_list_sources_row_only_when_plugin_not_loaded() -> None:
@@ -150,7 +89,7 @@ def test_list_sources_row_only_when_plugin_not_loaded() -> None:
             }
         ],
     )
-    service = _make_service(state, with_plugin=False)
+    service = _make_service(state)
     sources = service.list_sources()["sources"]
     _check(len(sources) == 1, "list_sources surfaces orphan row when plugin unloaded")
     entry = sources[0]
@@ -205,7 +144,8 @@ def test_list_sessions_applies_filters_and_clamps_limit() -> None:
     )
     row = result["sessions"][0]
     _check(
-        row.get("id") == "les_a" and row.get("event_count") == 3
+        row.get("id") == "les_a"
+        and row.get("event_count") == 3
         and row.get("project_path") == "/proj/x",
         "row projected to the list_sessions 10-col envelope",
     )
@@ -237,12 +177,18 @@ def test_list_active_sessions_merges_lease_and_session_reads() -> None:
         "active_lease",
         [
             {
-                "id": "lse_2", "session_id": "les_b", "source_id": "src_b",
-                "last_seen_at": "2026-05-31T00:55:00", "expires_at": "2026-05-31T01:00:00",
+                "id": "lse_2",
+                "session_id": "les_b",
+                "source_id": "src_b",
+                "last_seen_at": "2026-05-31T00:55:00",
+                "expires_at": "2026-05-31T01:00:00",
             },
             {
-                "id": "lse_1", "session_id": "les_a", "source_id": "src_a",
-                "last_seen_at": "2026-05-31T01:55:00", "expires_at": "2026-05-31T02:00:00",
+                "id": "lse_1",
+                "session_id": "les_a",
+                "source_id": "src_a",
+                "last_seen_at": "2026-05-31T01:55:00",
+                "expires_at": "2026-05-31T02:00:00",
             },
         ],
         when=lambda f: (
@@ -257,14 +203,22 @@ def test_list_active_sessions_merges_lease_and_session_reads() -> None:
         "session",
         [
             {
-                "id": "les_a", "source_id": "src_a", "external_session_id": "ext_a",
-                "vendor": SourceVendor.CODEX.value, "vendor_session_label": "Demo-A",
-                "project_path": "/proj/a", "last_event_at": "2026-05-31T00:00:00",
+                "id": "les_a",
+                "source_id": "src_a",
+                "external_session_id": "ext_a",
+                "vendor": SourceVendor.CODEX.value,
+                "vendor_session_label": "Demo-A",
+                "project_path": "/proj/a",
+                "last_event_at": "2026-05-31T00:00:00",
             },
             {
-                "id": "les_b", "source_id": "src_b", "external_session_id": "ext_b",
-                "vendor": SourceVendor.CLAUDE_CODE.value, "vendor_session_label": "Demo-B",
-                "project_path": "/proj/b", "last_event_at": "2026-05-30T00:00:00",
+                "id": "les_b",
+                "source_id": "src_b",
+                "external_session_id": "ext_b",
+                "vendor": SourceVendor.CLAUDE_CODE.value,
+                "vendor_session_label": "Demo-B",
+                "project_path": "/proj/b",
+                "last_event_at": "2026-05-30T00:00:00",
             },
         ],
         when=lambda f: isinstance(f.get("id"), list) and f.get("is_deleted") == 0,
@@ -278,11 +232,17 @@ def test_list_active_sessions_merges_lease_and_session_reads() -> None:
         "lease+session reads merged and ordered expires_at DESC (les_a@02:00 before les_b@01:00)",
     )
     _check(
-        sessions[0] == {
-            "id": "les_a", "source_id": "src_a", "external_session_id": "ext_a",
-            "vendor": SourceVendor.CODEX.value, "vendor_session_label": "Demo-A",
-            "project_path": "/proj/a", "last_event_at": "2026-05-31T00:00:00",
-            "last_seen_at": "2026-05-31T01:55:00", "expires_at": "2026-05-31T02:00:00",
+        sessions[0]
+        == {
+            "id": "les_a",
+            "source_id": "src_a",
+            "external_session_id": "ext_a",
+            "vendor": SourceVendor.CODEX.value,
+            "vendor_session_label": "Demo-A",
+            "project_path": "/proj/a",
+            "last_event_at": "2026-05-31T00:00:00",
+            "last_seen_at": "2026-05-31T01:55:00",
+            "expires_at": "2026-05-31T02:00:00",
         },
         "session fields + lease last_seen_at/expires_at merge into one 9-key row",
     )
@@ -297,11 +257,18 @@ def test_get_session_timeline_applies_cursor_and_limit() -> None:
         "session_ledger__event",
         [
             {
-                "id": "evt_1", "sequence": 1, "event_type": "MESSAGE", "role": "user",
-                "content_text": "hi", "content_json": None, "content_blob_id": None,
-                "vendor_event_id": None, "vendor_parent_event_id": None,
+                "id": "evt_1",
+                "sequence": 1,
+                "event_type": "MESSAGE",
+                "role": "user",
+                "content_text": "hi",
+                "content_json": None,
+                "content_blob_id": None,
+                "vendor_event_id": None,
+                "vendor_parent_event_id": None,
                 "event_at": "2026-05-31T00:00:00+00:00",
-                "batch_id": "imb_x", "imported_at": "2026-05-31T00:00:01+00:00",
+                "batch_id": "imb_x",
+                "imported_at": "2026-05-31T00:00:01+00:00",
             }
         ],
     )
@@ -336,16 +303,24 @@ def test_list_tool_calls_filter_composition() -> None:
         "FROM session_ledger__tool_call",
         [
             {
-                "id": "tcl_1", "session_id": "les_a", "call_event_id": "evt_call",
-                "result_event_id": None, "tool_name": "Bash", "status": "pending",
-                "called_at": "2026-05-31T00:00:00+00:00", "resolved_at": None,
+                "id": "tcl_1",
+                "session_id": "les_a",
+                "call_event_id": "evt_call",
+                "result_event_id": None,
+                "tool_name": "Bash",
+                "status": "pending",
+                "called_at": "2026-05-31T00:00:00+00:00",
+                "resolved_at": None,
             }
         ],
     )
     service = _make_service(state)
     result = service.list_tool_calls(
-        session_id="les_a", tool_name="Bash", status="pending",
-        since_iso="2026-05-01T00:00:00+00:00", limit=10,
+        session_id="les_a",
+        tool_name="Bash",
+        status="pending",
+        since_iso="2026-05-01T00:00:00+00:00",
+        limit=10,
     )
     _check("tool_calls" in result, "envelope has 'tool_calls' key")
     _check(len(result["tool_calls"]) == 1, "tool_calls surfaces stubbed row")
@@ -381,8 +356,6 @@ def test_list_tool_calls_filter_composition() -> None:
 
 def main() -> int:
     print("=== session_ledger read_verbs_smoke (7 verbs) ===")
-    test_list_sources_descriptor_only_when_no_db_row()
-    test_list_sources_joined_when_db_row_exists()
     test_list_sources_row_only_when_plugin_not_loaded()
     test_list_sessions_applies_filters_and_clamps_limit()
     test_list_sessions_empty_when_no_rows_stubbed()

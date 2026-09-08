@@ -92,8 +92,8 @@ class RouterClient:
             "activate", {"color": color, "instance_id": instance_id}
         )
 
-    def rollback(self, color: str) -> dict[str, Any]:
-        return self._call("rollback", {"color": color})
+    def rollback(self, color: str, instance_id: str) -> dict[str, Any]:
+        return self._call("rollback", {"color": color, "instance_id": instance_id})
 
     def _call(self, verb: str, args: dict[str, Any]) -> dict[str, Any]:
         """Open one short-lived connection; send one line; read one line."""

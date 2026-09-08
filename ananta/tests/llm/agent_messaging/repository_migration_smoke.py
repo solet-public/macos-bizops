@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
 from ananta.core.domain.types import ActionResult  # noqa: E402
@@ -393,7 +393,7 @@ def main() -> int:
     p_spy = _SpyState(peer_rows)
     p_repo = AgentMessagingRepository(cast("StateManagementInterface", p_spy))
 
-    silent = p_repo.list_peer_messages_for(
+    silent, _ = p_repo.list_peer_messages_for(
         recipient_agent_id="claude_code",
         recipient_agent_instance_id="agi-r",
         after_created_at=None,
@@ -438,10 +438,11 @@ def main() -> int:
         == {"thread_id": "agt-1", "role": "originator", "important": False}
         and sample["order_by"] == [["created_at", "asc"], ["id", "asc"]]
         and "after" not in sample
-        and sample["limit"] == 50,
+        and sample["limit"] == 51
+        and sample["unbounded"] is True,
         f"R3b: per-thread query_ordered uses SCALAR filters "
         f"{{thread_id, role:'originator', important:False}} (NOT =ANY), composite "
-        f"order, limit=capped (sample={sample!r})",
+        f"order, explicit capped+1 lookahead (sample={sample!r})",
     )
     _check(
         [m.cursor for m in silent] == [0, 1, 2, 4, 5],
@@ -450,7 +451,7 @@ def main() -> int:
         f"(cursors={[m.cursor for m in silent]!r})",
     )
 
-    full = p_repo.list_peer_messages_for(
+    full, _ = p_repo.list_peer_messages_for(
         recipient_agent_id="claude_code",
         recipient_agent_instance_id="agi-r",
         after_created_at=None,
@@ -471,7 +472,7 @@ def main() -> int:
         f"(silent={[m.cursor for m in silent]!r}, audit={[m.cursor for m in full]!r})",
     )
 
-    after_page = p_repo.list_peer_messages_for(
+    after_page, _ = p_repo.list_peer_messages_for(
         recipient_agent_id="claude_code",
         recipient_agent_instance_id="agi-r",
         after_created_at=datetime.fromisoformat("2026-06-20T12:00:02"),
@@ -484,7 +485,7 @@ def main() -> int:
         f"(cursors={[m.cursor for m in after_page]!r})",
     )
 
-    capped_page = p_repo.list_peer_messages_for(
+    capped_page, _ = p_repo.list_peer_messages_for(
         recipient_agent_id="claude_code",
         recipient_agent_instance_id="agi-r",
         after_created_at=None,
@@ -497,14 +498,14 @@ def main() -> int:
         f"WRONGLY drop cursor 1) (cursors={[m.cursor for m in capped_page]!r})",
     )
 
-    empty = p_repo.list_peer_messages_for(
+    empty, empty_exhausted = p_repo.list_peer_messages_for(
         recipient_agent_id="claude_code",
         recipient_agent_instance_id="agi-nobody",
         after_created_at=None,
         limit=50,
     )
     _check(
-        empty == [],
+        empty == [] and empty_exhausted is True,
         "R3b no matching peer threads -> [] (R3a empty -> short-circuit, no "
         "message query)",
     )

@@ -26,14 +26,31 @@ Standalone — not pytest.  Run with::
 from __future__ import annotations
 
 import os
+import stat
 import sys
 import traceback
 from collections.abc import Callable
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 if "SOLET_NAME" not in os.environ:
     os.environ["SOLET_NAME"] = "smoke"
 
+# The gate runner invokes this script with the repository root as cwd, but
+# imports otherwise resolve through the venv's ambient editable installation.
+# Anchor both source roots to this smoke's own checkout so a lane-worktree
+# verdict measures its edited plugin and interface contracts.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_SOURCE_ROOTS = (_REPO_ROOT / "ananta" / "src", _REPO_ROOT / "plugins" / "macos_vault_plugin" / "src")
+for _source_root in reversed(_SOURCE_ROOTS):
+    _source_root_text = str(_source_root)
+    if _source_root_text not in sys.path:
+        sys.path.insert(0, _source_root_text)
+
+from ananta.core.services.call_context import CallContext  # noqa: E402
+from macos_vault_plugin.constants import passphrase_env_var  # noqa: E402
+from macos_vault_plugin.key_manager import VaultKeyManager  # noqa: E402
 from macos_vault_plugin.plugin import MacosVaultPlugin  # noqa: E402
 
 if TYPE_CHECKING:
@@ -122,6 +139,24 @@ class IdentityCrypto:
         auth_tag: str,  # noqa: ARG002
     ) -> str:
         return ciphertext
+
+
+class WrappedMasterKeyKeychain:
+    """In-memory KeychainBackend double for passphrase-wrap lifecycle tests."""
+
+    direct_master_key = False
+
+    def __init__(self) -> None:
+        self._entries: dict[str, bytes] = {}
+
+    def exists(self, account: str) -> bool:
+        return account in self._entries
+
+    def retrieve(self, account: str) -> bytes | None:
+        return self._entries.get(account)
+
+    def store(self, account: str, data: bytes) -> None:
+        self._entries[account] = data
 
 
 def make_vault() -> MacosVaultPlugin:
@@ -219,6 +254,80 @@ def test_rotate_keychain_only() -> None:
     assert result.get("action_status") == "completed", result
     assert fake(vault).retrieve_credential(PLUGIN, "rotating") == b"v2"
     assert all(r["secret_key"] != key for r in state(vault).rows)
+
+
+def test_rotate_passphrase_keeps_file_unlock_coherent() -> None:
+    """A file-backed rotation must unlock after the manager is locked again.
+
+    Killing mutation: omit the ``os.replace`` publication in
+    ``vault_rotate_passphrase``. The next-boot file stays on the old value and
+    lacks the replacement's private-at-birth mode, so this round-trip fails.
+    """
+    import macos_vault_plugin.key_manager as key_manager_module
+
+    keychain = WrappedMasterKeyKeychain()
+    original_get_keychain = key_manager_module.get_keychain
+    original_get_backend_name = key_manager_module.get_backend_name
+    original_key_manager = key_manager_module._key_manager
+    env_var = passphrase_env_var()
+    original_app_home = os.environ.get("APP_HOME")
+    original_env_passphrase = os.environ.get(env_var)
+    try:
+        key_manager_module.get_keychain = lambda: keychain  # type: ignore[assignment]
+        key_manager_module.get_backend_name = lambda: "smoke keychain"  # type: ignore[assignment]
+        with TemporaryDirectory() as app_home:
+            os.environ["APP_HOME"] = app_home
+            os.environ.pop(env_var, None)
+            passphrase_file = (
+                Path(app_home) / "config" / "plugins" / PLUGIN / "passphrase"
+            )
+            passphrase_file.parent.mkdir(parents=True)
+            passphrase_file.write_text("before")
+            manager = VaultKeyManager()
+            manager.initialize("before")
+            key_manager_module._key_manager = manager
+            vault = MacosVaultPlugin()
+
+            result = vault.vault_rotate_passphrase(
+                "before", "after", call_context=CallContext.for_operator(),
+            )
+
+            assert result.get("action_status") == "completed", result
+            assert stat.S_IMODE(passphrase_file.stat().st_mode) == 0o600
+            manager.lock()
+            assert vault._get_passphrase() == "after"
+            manager.unlock(vault._get_passphrase())
+            assert manager.is_unlocked()
+    finally:
+        key_manager_module.get_keychain = original_get_keychain  # type: ignore[assignment]
+        key_manager_module.get_backend_name = original_get_backend_name  # type: ignore[assignment]
+        key_manager_module._key_manager = original_key_manager
+        if original_app_home is None:
+            os.environ.pop("APP_HOME", None)
+        else:
+            os.environ["APP_HOME"] = original_app_home
+        if original_env_passphrase is None:
+            os.environ.pop(env_var, None)
+        else:
+            os.environ[env_var] = original_env_passphrase
+
+
+def test_rotate_passphrase_refuses_nonpersistent_env() -> None:
+    """An environment-backed unlock cannot be persistently updated by this verb."""
+    env_var = passphrase_env_var()
+    original_env_passphrase = os.environ.get(env_var)
+    try:
+        os.environ[env_var] = "before"
+        result = MacosVaultPlugin().vault_rotate_passphrase(
+            "before", "after", call_context=CallContext.for_operator(),
+        )
+        assert result.get("action_status") == "error", result
+        assert result.get("error", {}).get("code") == "vault.passphrase_mismatch", result
+    finally:
+        if original_env_passphrase is None:
+            os.environ.pop(env_var, None)
+        else:
+            os.environ[env_var] = original_env_passphrase
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -532,6 +641,31 @@ def test_sc16_surviving_default_vault_plugin_refs_are_intentional() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# SC-17: vault qualification probes are bounded and leave no canary behind.
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_sc17_vault_qualification_probes_are_bounded() -> None:
+    vault = make_vault()
+
+    keychain = vault.qualify_keychain()
+    assert keychain.get("action_status") == "completed", keychain
+    assert set(keychain.get("data", {})) == {
+        "backend", "available", "current_user_accessible",
+    }, keychain
+
+    round_trip = vault.qualify_round_trip()
+    assert round_trip.get("action_status") == "completed", round_trip
+    assert round_trip.get("data") == {
+        "stored": True,
+        "retrieved": True,
+        "matched": True,
+        "deleted": True,
+    }, round_trip
+    assert fake(vault).snapshot() == {}, fake(vault).snapshot()
+    assert "canary" not in repr(round_trip), round_trip
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Standalone runner
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -540,6 +674,8 @@ _SMOKES: list[tuple[str, Callable[[], None]]] = [
     ("Retrieve Keychain-only", test_retrieve_keychain_only),
     ("Store Keychain-only", test_store_keychain_only),
     ("Rotate Keychain-only", test_rotate_keychain_only),
+    ("Passphrase rotation keeps next-boot file unlock coherent", test_rotate_passphrase_keeps_file_unlock_coherent),
+    ("Passphrase rotation refuses nonpersistent environment config", test_rotate_passphrase_refuses_nonpersistent_env),
     ("SC-5  Dual-write delete", test_sc5_dual_write_delete),
     ("SC-6  Stale-fallback prevention", test_sc6_stale_fallback_prevention),
     ("Keychain store failure propagates", test_keychain_store_failure_propagates),
@@ -549,6 +685,7 @@ _SMOKES: list[tuple[str, Callable[[], None]]] = [
     ("SC-14 Cross-plugin denial pre-substrate", test_sc14_cross_plugin_denial_fires_before_substrate_lookup),
     ("SC-15 Operator-ingest namespace disjoint", test_sc15_operator_keychain_namespace_disjoint),
     ("SC-16 Surviving refs are intentional", test_sc16_surviving_default_vault_plugin_refs_are_intentional),
+    ("SC-17 Vault qualification probes are bounded", test_sc17_vault_qualification_probes_are_bounded),
 ]
 
 

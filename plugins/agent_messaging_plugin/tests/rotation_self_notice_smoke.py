@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -65,6 +65,7 @@ def _check(condition: object, label: str) -> None:
 # successes cannot show.
 # ---------------------------------------------------------------------------
 
+
 class _FakeBinding:
     """The binding fields the leg actually reads, and no more.
 
@@ -84,12 +85,14 @@ class _FakeBinding:
         agent_id: str = "claude_code",
         session_label: str = "lane-under-test",
         agent_session_id: str = "ases-recipient",
+        created_at: str = "",
     ) -> None:
         self.bridge_id = bridge_id
         self.agent_instance_id = agent_instance_id
         self.agent_id = agent_id
         self.session_label = session_label
         self.agent_session_id = agent_session_id
+        self.created_at = created_at
 
     @property
     def is_watcher(self) -> bool:
@@ -107,18 +110,32 @@ class _FakeRegistry:
     misses, which is exactly the watcher-held-worker shape the leg must count
     rather than swallow."""
 
-    def __init__(self, known: set[str]) -> None:
+    def __init__(
+        self,
+        known: set[str],
+        *,
+        bindings: list[_FakeBinding] | None = None,
+    ) -> None:
         self._known = known
+        self._bindings = {binding.agent_instance_id: binding for binding in bindings or []}
         self.lookups: list[str] = []
 
     def resolve_by_agent_instance_id(self, agent_instance_id: str) -> _FakeBinding | None:
         self.lookups.append(agent_instance_id)
+        if agent_instance_id in self._bindings:
+            return self._bindings[agent_instance_id]
         if agent_instance_id in self._known:
             return _FakeBinding(
                 f"bridge-for-{agent_instance_id}",
                 agent_instance_id=agent_instance_id,
             )
         return None
+
+    def list_agent_ids(self) -> dict[str, list[_FakeBinding]]:
+        grouped: dict[str, list[_FakeBinding]] = {}
+        for binding in self._bindings.values():
+            grouped.setdefault(binding.agent_id, []).append(binding)
+        return grouped
 
 
 class _FakeBridgeManager:
@@ -128,7 +145,11 @@ class _FakeBridgeManager:
         self._fail = fail
 
     def append_event(
-        self, bridge_id: str, event: str, prose: str, meta: dict[str, object],
+        self,
+        bridge_id: str,
+        event: str,
+        prose: str,
+        meta: dict[str, object],
     ) -> None:
         if self._order is not None:
             self._order.append("append")
@@ -217,7 +238,8 @@ class _FakeState:
             # fixture that never modelled the distinction.
             wanted = spec.get("filters", {}).get("lifecycle_state")
             records = [
-                r for r in self._lifecycle_rows
+                r
+                for r in self._lifecycle_rows
                 if wanted is None or r.get("lifecycle_state") == wanted
             ]
         else:
@@ -240,12 +262,13 @@ class _FakeState:
 
     def seed_thread(self, thread_id: str, cursors: list[int]) -> None:
         self.messages.setdefault(thread_id, []).extend(
-            {"id": f"agm-{thread_id}-{c}", "thread_id": thread_id, "cursor": c}
-            for c in cursors
+            {"id": f"agm-{thread_id}-{c}", "thread_id": thread_id, "cursor": c} for c in cursors
         )
 
     def query_ordered(self, namespace: str, spec: dict[str, Any]) -> dict[str, Any]:
         table = spec.get("table")
+        if table == TABLE_MANAGED_SESSION:
+            return self._query_managed_sessions(spec)
         if table != TABLE_AGENT_MESSAGE:
             msg = f"_FakeState.query_ordered does not model table {table!r}"
             raise AssertionError(msg)
@@ -268,6 +291,46 @@ class _FakeState:
             rows = rows[:limit]
         return {"action_status": "completed", "data": {"records": rows}}
 
+    def _query_managed_sessions(self, spec: dict[str, Any]) -> dict[str, Any]:
+        records = self._select_managed_sessions(spec)
+        records = self._page_managed_sessions(records, spec)
+        return {"action_status": "completed", "data": {"records": records}}
+
+    def _select_managed_sessions(
+        self,
+        spec: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        filters = spec.get("filters", {})
+        return [
+            row
+            for row in self._lifecycle_rows
+            if all(row.get(column) == wanted for column, wanted in filters.items())
+            and (bool(spec.get("include_deleted")) or int(row.get("is_deleted", 0)) == 0)
+        ]
+
+    @staticmethod
+    def _page_managed_sessions(
+        records: list[dict[str, Any]],
+        spec: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        order_by = spec.get("order_by")
+        expected_order = [["created_at", "asc"], ["id", "asc"]]
+        if order_by != expected_order:
+            msg = (
+                "_FakeState.query_ordered models managed_session only in "
+                f"its paged lifecycle order; got {order_by!r}"
+            )
+            raise AssertionError(msg)
+        records.sort(key=lambda row: (str(row["created_at"]), str(row["id"])))
+        after = spec.get("after")
+        if after is not None:
+            cursor = (str(after[0]), str(after[1]))
+            records = [row for row in records if (str(row["created_at"]), str(row["id"])) > cursor]
+        limit = spec.get("limit")
+        if isinstance(limit, int):
+            records = records[:limit]
+        return records
+
     def delete_records(self, namespace: str, spec: dict[str, Any]) -> dict[str, Any]:
         table = spec.get("table")
         if table != TABLE_AGENT_MESSAGE:
@@ -278,7 +341,8 @@ class _FakeState:
         predicate = filters.get("cursor", {})
         cutoff = predicate.get("value") if isinstance(predicate, dict) else None
         kept = [
-            r for r in self.messages.get(thread_id, [])
+            r
+            for r in self.messages.get(thread_id, [])
             if not (isinstance(cutoff, int) and int(r["cursor"]) < cutoff)
         ]
         deleted = len(self.messages.get(thread_id, [])) - len(kept)
@@ -296,7 +360,8 @@ class _FakeState:
     def page_after(self, thread_id: str, after_cursor: int) -> list[int]:
         """What a client holding ``after_cursor`` sees next, oldest-first."""
         return sorted(
-            int(r["cursor"]) for r in self.messages.get(thread_id, [])
+            int(r["cursor"])
+            for r in self.messages.get(thread_id, [])
             if int(r["cursor"]) > after_cursor
         )
 
@@ -356,6 +421,7 @@ def _sweep_full(
     append_fails: bool = False,
     service: _FakeMessagingService | None = None,
     omit_service: bool = False,
+    bindings: list[_FakeBinding] | None = None,
 ) -> tuple[rsn.SelfNoticeCounts, _FakeBridgeManager, _FakeMessagingService]:
     """One sweep with BOTH halves visible to the caller.
 
@@ -364,7 +430,10 @@ def _sweep_full(
     discovered by a fixture that forgot an argument -- which would make every
     zero-expecting assertion in this file pass for the wrong reason.
     """
-    registry = _FakeRegistry(known if known is not None else {r["agent_instance_id"] for r in rows})
+    registry = _FakeRegistry(
+        known if known is not None else {r["agent_instance_id"] for r in rows},
+        bindings=bindings,
+    )
     bridges = _FakeBridgeManager(order=order, fail=append_fails)
     svc = service or _FakeMessagingService(order=order, fail=persist_fails)
     result = rsn.sweep_rotation_self_notice(
@@ -387,12 +456,17 @@ def _sweep(
     lifecycle_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[rsn.SelfNoticeCounts, _FakeBridgeManager]:
     counts, bridges, _ = _sweep_full(
-        rows, known=known, latch=latch, now=now, lifecycle_rows=lifecycle_rows,
+        rows,
+        known=known,
+        latch=latch,
+        now=now,
+        lifecycle_rows=lifecycle_rows,
     )
     return counts, bridges
 
 
 # ---------------------------------------------------------------------------
+
 
 def test_the_300k_to_500k_blind_spot_is_covered() -> None:
     """CATCHES: keying the leg on `rotation_due`/fraction instead of the band.
@@ -420,33 +494,44 @@ def test_the_300k_to_500k_blind_spot_is_covered() -> None:
     That is now the assertion carrying this test's name.
     """
     counts, bridges = _sweep([_row(current_tokens=350_000)])
-    _check(counts.appended == 1 and counts.unroutable == 0,
-           "350K on a 1M ceiling notifies (the band says warm_immediate)")
-    _check(rt.is_rotation_due(model="claude-opus-5", current_tokens=350_000,
-                              cache_cold=False),
-           "...and since GAU-08 `rotation_due` AGREES at that same 350K -- the "
-           "gap this test was written against is closed, which is why it can no "
-           "longer be the discriminator")
-    _check("warm_immediate" in _first_prose(bridges),
-           "the delivered notice names the band it fired on")
+    _check(
+        counts.appended == 1 and counts.unroutable == 0,
+        "350K on a 1M ceiling notifies (the band says warm_immediate)",
+    )
+    _check(
+        rt.is_rotation_due(model="claude-opus-5", current_tokens=350_000, cache_cold=False),
+        "...and since GAU-08 `rotation_due` AGREES at that same 350K -- the "
+        "gap this test was written against is closed, which is why it can no "
+        "longer be the discriminator",
+    )
+    _check(
+        "warm_immediate" in _first_prose(bridges), "the delivered notice names the band it fired on"
+    )
 
     # ★ THE SURVIVING DISCRIMINATOR. rotation_due is True here and the band is
     # not actionable, so a leg keyed on rotation_due notifies and a band-keyed
     # leg does not. Nothing else in this file separates the two designs any
     # more.
-    small_counts, small_bridges = _sweep([
-        _row(current_tokens=100_000, ceiling=200_000, model="claude-haiku-4-5"),
-    ])
-    _check(rt.is_rotation_due(model="claude-haiku-4-5", current_tokens=100_000,
-                              cache_cold=False),
-           "100K on a 200K ceiling IS rotation-due -- it is that model's own "
-           "halfway point, and the union keeps the fraction reachable there")
-    _check(rt.rotation_band(100_000, cache_cold=False)[0] == "warm_keep",
-           "...while the model-blind economics band there is still warm_keep")
-    _check(small_counts.appended == 0 and small_bridges.appended == [],
-           "...and the leg stays SILENT -- nothing counted AND nothing appended "
-           "to any bridge: it follows the BAND, not rotation_due. A leg keyed on "
-           "rotation_due would have notified this session")
+    small_counts, small_bridges = _sweep(
+        [
+            _row(current_tokens=100_000, ceiling=200_000, model="claude-haiku-4-5"),
+        ]
+    )
+    _check(
+        rt.is_rotation_due(model="claude-haiku-4-5", current_tokens=100_000, cache_cold=False),
+        "100K on a 200K ceiling IS rotation-due -- it is that model's own "
+        "halfway point, and the union keeps the fraction reachable there",
+    )
+    _check(
+        rt.rotation_band(100_000, cache_cold=False)[0] == "warm_keep",
+        "...while the model-blind economics band there is still warm_keep",
+    )
+    _check(
+        small_counts.appended == 0 and small_bridges.appended == [],
+        "...and the leg stays SILENT -- nothing counted AND nothing appended "
+        "to any bridge: it follows the BAND, not rotation_due. A leg keyed on "
+        "rotation_due would have notified this session",
+    )
 
 
 def test_a_carry_on_verdict_says_nothing_at_all() -> None:
@@ -458,8 +543,10 @@ def test_a_carry_on_verdict_says_nothing_at_all() -> None:
     REPEATS, never the first delivery.
     """
     counts, bridges = _sweep([_row(current_tokens=120_000)])
-    _check(counts == rsn.SelfNoticeCounts() and not bridges.appended,
-           "a warm_keep session is not notified, and nothing is appended")
+    _check(
+        counts == rsn.SelfNoticeCounts() and not bridges.appended,
+        "a warm_keep session is not notified, and nothing is appended",
+    )
 
 
 def test_escalation_across_bands_is_never_suppressed() -> None:
@@ -479,12 +566,16 @@ def test_escalation_across_bands_is_never_suppressed() -> None:
     t1 = datetime(2026, 8, 17, 23, 2, 0, tzinfo=UTC)
     second_counts, bridges = _sweep([_row(current_tokens=260_000)], latch=latch, now=t1)
     _check(first_counts.appended == 1, "the warm_task_boundary crossing notifies")
-    _check(second_counts.appended == 1,
-           "the escalation to warm_safe_checkpoint notifies too, 2 minutes "
-           "later and deep inside the repeat floor -- a new band is new "
-           "information and the floor must not apply to it")
-    _check("warm_safe_checkpoint" in _first_prose(bridges),
-           "the second notice carries the NEW band, not the stale one")
+    _check(
+        second_counts.appended == 1,
+        "the escalation to warm_safe_checkpoint notifies too, 2 minutes "
+        "later and deep inside the repeat floor -- a new band is new "
+        "information and the floor must not apply to it",
+    )
+    _check(
+        "warm_safe_checkpoint" in _first_prose(bridges),
+        "the second notice carries the NEW band, not the stale one",
+    )
 
 
 def test_the_same_band_is_floored_at_twenty_minutes() -> None:
@@ -501,10 +592,12 @@ def test_the_same_band_is_floored_at_twenty_minutes() -> None:
     first_counts, _ = _sweep(row, latch=latch, now=t0)
     under_counts, _ = _sweep(row, latch=latch, now=datetime(2026, 8, 17, 23, 5, 0, tzinfo=UTC))
     over_counts, _ = _sweep(row, latch=latch, now=datetime(2026, 8, 17, 23, 21, 0, tzinfo=UTC))
-    _check((first_counts.appended, under_counts.appended, over_counts.appended) == (1, 0, 1),
-           "same band: notified, silent at +5min (inside the floor), notified "
-           f"again at +21min (past ROTATION_SELF_NOTICE_FLOOR_S="
-           f"{rsn.ROTATION_SELF_NOTICE_FLOOR_S}s)")
+    _check(
+        (first_counts.appended, under_counts.appended, over_counts.appended) == (1, 0, 1),
+        "same band: notified, silent at +5min (inside the floor), notified "
+        f"again at +21min (past ROTATION_SELF_NOTICE_FLOOR_S="
+        f"{rsn.ROTATION_SELF_NOTICE_FLOOR_S}s)",
+    )
 
 
 def test_an_unresolvable_session_is_counted_not_swallowed() -> None:
@@ -523,11 +616,11 @@ def test_an_unresolvable_session_is_counted_not_swallowed() -> None:
         _row("agi-ccafb17b9ad89af3fb8998081fbcbd23", current_tokens=350_000),
     ]
     counts, bridges = _sweep(rows, known={"agi-seat"})
-    _check((counts.appended, counts.unroutable) == (1, 1),
-           "one notified, one counted unreachable -- the gap is a number, not "
-           "a silence")
-    _check(len(bridges.appended) == 1,
-           "and exactly one notice was actually delivered")
+    _check(
+        (counts.appended, counts.unroutable) == (1, 1),
+        "one notified, one counted unreachable -- the gap is a number, not a silence",
+    )
+    _check(len(bridges.appended) == 1, "and exactly one notice was actually delivered")
 
 
 def test_a_failed_delivery_does_not_latch_the_episode() -> None:
@@ -541,11 +634,14 @@ def test_a_failed_delivery_does_not_latch_the_episode() -> None:
     row = [_row("agi-dark", current_tokens=350_000)]
     c1, _ = _sweep(row, known=set(), latch=latch)
     c2, bridges = _sweep(row, known={"agi-dark"}, latch=latch)
-    _check((c1.appended, c1.unroutable) == (0, 1),
-           "first tick cannot deliver -- counted unroutable")
-    _check((c2.appended, c2.unroutable) == (1, 0),
-           "second tick, binding now resolvable, DELIVERS -- the failed "
-           "attempt did not latch it into permanent silence")
+    _check(
+        (c1.appended, c1.unroutable) == (0, 1), "first tick cannot deliver -- counted unroutable"
+    )
+    _check(
+        (c2.appended, c2.unroutable) == (1, 0),
+        "second tick, binding now resolvable, DELIVERS -- the failed "
+        "attempt did not latch it into permanent silence",
+    )
     _check(len(bridges.appended) == 1, "and the notice really was appended")
 
 
@@ -560,17 +656,30 @@ def test_capacity_binds_early_on_an_unrecognised_model() -> None:
     for a leg that simply notifies on everything.
     """
     ceiling = rt.resolve_ceiling("some-model-shipped-after-this-landing")
-    _check(ceiling == rt.DEFAULT_CONSERVATIVE_CEILING,
-           f"an unknown model still falls back to {rt.DEFAULT_CONSERVATIVE_CEILING:,}")
-    counts, bridges = _sweep([_row(current_tokens=80_000, ceiling=ceiling,
-                                          model="some-model-shipped-after-this-landing")])
+    _check(
+        ceiling == rt.DEFAULT_CONSERVATIVE_CEILING,
+        f"an unknown model still falls back to {rt.DEFAULT_CONSERVATIVE_CEILING:,}",
+    )
+    counts, bridges = _sweep(
+        [
+            _row(
+                current_tokens=80_000,
+                ceiling=ceiling,
+                model="some-model-shipped-after-this-landing",
+            )
+        ]
+    )
     _check(counts.appended == 1, "80K against a conservative 100K ceiling NOTIFIES")
-    _check(rt.rotation_band(80_000, cache_cold=False)[0] == "warm_keep",
-           "...while the ECONOMICS band alone would have said keep working -- "
-           "so it is the capacity axis carrying this, not a leg that shouts at "
-           "everything")
-    _check("capacity_approaching" in _first_prose(bridges),
-           "and the notice names capacity as the reason")
+    _check(
+        rt.rotation_band(80_000, cache_cold=False)[0] == "warm_keep",
+        "...while the ECONOMICS band alone would have said keep working -- "
+        "so it is the capacity axis carrying this, not a leg that shouts at "
+        "everything",
+    )
+    _check(
+        "capacity_approaching" in _first_prose(bridges),
+        "and the notice names capacity as the reason",
+    )
 
 
 def test_capacity_never_preempts_economics_on_a_1m_ceiling() -> None:
@@ -582,11 +691,14 @@ def test_capacity_never_preempts_economics_on_a_1m_ceiling() -> None:
     """
     for tokens in (150_000, 200_000, 300_000, 499_999, 750_000 - 1):
         verdict = rt.rotation_surface_verdict(
-            current_tokens=tokens, ceiling=1_000_000, cache_cold=False,
+            current_tokens=tokens,
+            ceiling=1_000_000,
+            cache_cold=False,
         )
-        _check(verdict.effective_band == verdict.economics_band,
-               f"at {tokens:,} on a 1M ceiling the ECONOMICS band leads "
-               f"({verdict.effective_band})")
+        _check(
+            verdict.effective_band == verdict.economics_band,
+            f"at {tokens:,} on a 1M ceiling the ECONOMICS band leads ({verdict.effective_band})",
+        )
 
 
 def test_the_break_even_is_tier_invariant() -> None:
@@ -598,16 +710,21 @@ def test_the_break_even_is_tier_invariant() -> None:
     """
     verdicts = {
         model: rt.rotation_surface_verdict(
-            current_tokens=224_840, ceiling=rt.resolve_ceiling(model), cache_cold=False,
+            current_tokens=224_840,
+            ceiling=rt.resolve_ceiling(model),
+            cache_cold=False,
         ).economics_band
         for model in ("claude-fable-5", "claude-opus-5", "claude-sonnet-5")
     }
-    _check(len(set(verdicts.values())) == 1,
-           f"224,840 reads as the SAME economics band on every 1M-ceiling tier: "
-           f"{verdicts}")
-    _check(rt.clearing_wins(224_840, 30) is rt.clearing_wins(224_840, 30),
-           "clearing_wins takes no model argument at all -- there is no tier "
-           "for a future edit to scale")
+    _check(
+        len(set(verdicts.values())) == 1,
+        f"224,840 reads as the SAME economics band on every 1M-ceiling tier: {verdicts}",
+    )
+    _check(
+        rt.clearing_wins(224_840, 30) is rt.clearing_wins(224_840, 30),
+        "clearing_wins takes no model argument at all -- there is no tier "
+        "for a future edit to scale",
+    )
 
 
 def test_the_overage_ttl_moves_the_break_even_and_moves_it_down() -> None:
@@ -623,9 +740,11 @@ def test_the_overage_ttl_moves_the_break_even_and_moves_it_down() -> None:
     nominal = rt.break_even_horizon(300_000)
     overage = rt.break_even_horizon(300_000, overage=True)
     assert nominal is not None and overage is not None
-    _check(overage < nominal,
-           f"overage horizon {overage:.1f} < nominal {nominal:.1f} -- clearing "
-           "wins sooner under a collapsed TTL, not later")
+    _check(
+        overage < nominal,
+        f"overage horizon {overage:.1f} < nominal {nominal:.1f} -- clearing "
+        "wins sooner under a collapsed TTL, not later",
+    )
     # ★ THE DISCRIMINATING SIZE, DERIVED (GAU-05, 2026-08-19). At N=25 the two
     # premiums put their thresholds at 1.5H (overage) and 1.8H (nominal), so
     # only a context strictly BETWEEN them can win under one and lose under the
@@ -641,17 +760,23 @@ def test_the_overage_ttl_moves_the_break_even_and_moves_it_down() -> None:
     overage_threshold = rt.POLICY_H_TOKENS * 1.5
     nominal_threshold = rt.POLICY_H_TOKENS * 1.8
     discriminating = int((overage_threshold + nominal_threshold) / 2)
-    _check(overage_threshold < discriminating < nominal_threshold,
-           f"the probe {discriminating:,} lands strictly between the overage "
-           f"threshold ({overage_threshold:,.0f}) and the nominal one "
-           f"({nominal_threshold:,.0f}) -- without that window there is nothing "
-           "to discriminate")
-    _check(rt.clearing_wins(discriminating, 25, overage=True)
-           and not rt.clearing_wins(discriminating, 25),
-           f"{discriminating:,} at N=25 wins under overage and loses at the "
-           "1-hour TTL -- the two premiums are genuinely different thresholds")
-    _check(rt.write_premium_multiplier(overage=False) == 20.0,
-           "the default premium is unchanged for every pre-existing caller")
+    _check(
+        overage_threshold < discriminating < nominal_threshold,
+        f"the probe {discriminating:,} lands strictly between the overage "
+        f"threshold ({overage_threshold:,.0f}) and the nominal one "
+        f"({nominal_threshold:,.0f}) -- without that window there is nothing "
+        "to discriminate",
+    )
+    _check(
+        rt.clearing_wins(discriminating, 25, overage=True)
+        and not rt.clearing_wins(discriminating, 25),
+        f"{discriminating:,} at N=25 wins under overage and loses at the "
+        "1-hour TTL -- the two premiums are genuinely different thresholds",
+    )
+    _check(
+        rt.write_premium_multiplier(overage=False) == 20.0,
+        "the default premium is unchanged for every pre-existing caller",
+    )
 
 
 def test_the_notice_states_one_horizon_not_two() -> None:
@@ -685,11 +810,15 @@ def test_the_notice_states_one_horizon_not_two() -> None:
     own = rt.break_even_horizon(606_142, overage=True)
     nominal = rt.break_even_horizon(606_142)
     assert own is not None and nominal is not None
-    _check(f"~{own:.0f}" in band_line,
-           f"the band line states THIS session's overage-aware horizon (~{own:.0f})")
-    _check(f"~{nominal:.0f}" not in band_line,
-           f"...and NOT the nominal-premium figure (~{nominal:.0f}) -- one "
-           "quantity, one number, one source")
+    _check(
+        f"~{own:.0f}" in band_line,
+        f"the band line states THIS session's overage-aware horizon (~{own:.0f})",
+    )
+    _check(
+        f"~{nominal:.0f}" not in band_line,
+        f"...and NOT the nominal-premium figure (~{nominal:.0f}) -- one "
+        "quantity, one number, one source",
+    )
 
 
 def test_the_notice_states_the_floor_beside_the_absolute_band() -> None:
@@ -728,12 +857,16 @@ def test_the_notice_states_the_floor_beside_the_absolute_band() -> None:
     prose = rsn._self_notice_prose(row, verdict)
     floor = rt.POLICY_H_TOKENS
     _check(f"{floor:,}" in prose, f"the notice names H ({floor:,}) explicitly")
-    _check(f"{218_613 - floor:,}" in prose,
-           f"and names what rotating would actually shed ({218_613 - floor:,}) -- "
-           "the subtraction, not just the constant")
-    _check("clear" in prose and "re-write" in prose,
-           "and says WHAT H is (the prefix a clear would have to re-write), so "
-           "the number is not an unexplained second figure")
+    _check(
+        f"{218_613 - floor:,}" in prose,
+        f"and names what rotating would actually shed ({218_613 - floor:,}) -- "
+        "the subtraction, not just the constant",
+    )
+    _check(
+        "clear" in prose and "re-write" in prose,
+        "and says WHAT H is (the prefix a clear would have to re-write), so "
+        "the number is not an unexplained second figure",
+    )
 
 
 def test_the_floor_line_never_claims_a_per_session_boot_measurement() -> None:
@@ -749,13 +882,16 @@ def test_the_floor_line_never_claims_a_per_session_boot_measurement() -> None:
     the exact pathology GAU-13 and GAU-12 were both filed for.
     """
     prose = rsn._self_notice_prose(
-        _row(current_tokens=218_613), rsn._gauge_verdict(_row(current_tokens=218_613)),
+        _row(current_tokens=218_613),
+        rsn._gauge_verdict(_row(current_tokens=218_613)),
     )
     lowered = prose.lower()
     for forbidden in ("your boot", "you booted", "boot floor", "born with"):
-        _check(forbidden not in lowered,
-               f"the notice does not claim {forbidden!r} -- no per-session boot "
-               "measurement is asserted")
+        _check(
+            forbidden not in lowered,
+            f"the notice does not claim {forbidden!r} -- no per-session boot "
+            "measurement is asserted",
+        )
 
 
 def test_the_below_h_floor_branch_is_reachable_and_says_the_opposite() -> None:
@@ -790,27 +926,33 @@ def test_the_below_h_floor_branch_is_reachable_and_says_the_opposite() -> None:
     test's own name.
     """
     ceiling = rt.resolve_ceiling("a-model-nobody-added")
-    _check(ceiling == rt.DEFAULT_CONSERVATIVE_CEILING,
-           "the unknown model still resolves to the conservative ceiling")
+    _check(
+        ceiling == rt.DEFAULT_CONSERVATIVE_CEILING,
+        "the unknown model still resolves to the conservative ceiling",
+    )
     row = _row(current_tokens=75_000, ceiling=ceiling, model="a-model-nobody-added")
     verdict = rsn._gauge_verdict(row)
     assert verdict is not None, "a well-formed row must produce a verdict"
-    _check(verdict.effective_band in rsn.ROTATION_SELF_NOTICE_BANDS,
-           f"this row actually NOTIFIES (band {verdict.effective_band}) -- "
-           "otherwise the branch below is unreachable in production")
+    _check(
+        verdict.effective_band in rsn.ROTATION_SELF_NOTICE_BANDS,
+        f"this row actually NOTIFIES (band {verdict.effective_band}) -- "
+        "otherwise the branch below is unreachable in production",
+    )
     _margin = rt.POLICY_H_TOKENS - 75_000
-    _check(_margin > 0,
-           f"...and it is below H by {_margin:,} tokens, which is what makes "
-           f"the branch live (H {rt.POLICY_H_TOKENS:,} vs the 75,000 "
-           "capacity_approaching point on the conservative ceiling) -- if this "
-           "ever reds, see the docstring: the fix is a decision about the "
-           "branch, NOT a smaller probe")
+    _check(
+        _margin > 0,
+        f"...and it is below H by {_margin:,} tokens, which is what makes "
+        f"the branch live (H {rt.POLICY_H_TOKENS:,} vs the 75,000 "
+        "capacity_approaching point on the conservative ceiling) -- if this "
+        "ever reds, see the docstring: the fix is a decision about the "
+        "branch, NOT a smaller probe",
+    )
     prose = rsn._self_notice_prose(row, verdict)
-    _check("BELOW H" in prose,
-           "the notice says the session is below H rather than reporting a "
-           "negative saving")
-    _check("cost more than it could save" in prose,
-           "and says what that means for a clear")
+    _check(
+        "BELOW H" in prose,
+        "the notice says the session is below H rather than reporting a negative saving",
+    )
+    _check("cost more than it could save" in prose, "and says what that means for a clear")
 
 
 def test_the_notice_reports_both_clocks_and_the_lag_between_them() -> None:
@@ -831,9 +973,11 @@ def test_the_notice_reports_both_clocks_and_the_lag_between_them() -> None:
     prose = rsn._self_notice_prose(row, verdict)
     _check("2026-08-19T01:18:57" in prose, "the notice names when the READING was produced")
     _check("2026-08-19T01:19:31" in prose, "and when it was OBSERVED")
-    _check("34s" in prose,
-           f"and the LAG between them, computed not transcribed -- got: "
-           f"{prose.splitlines()[-1][:120]}")
+    _check(
+        "34s" in prose,
+        f"and the LAG between them, computed not transcribed -- got: "
+        f"{prose.splitlines()[-1][:120]}",
+    )
 
 
 def test_a_missing_reading_at_says_unknown_rather_than_implying_zero() -> None:
@@ -848,13 +992,13 @@ def test_a_missing_reading_at_says_unknown_rather_than_implying_zero() -> None:
     verdict = rsn._gauge_verdict(row)
     assert verdict is not None, "a well-formed row must produce a verdict"
     prose = rsn._self_notice_prose(row, verdict)
-    _check("NOT REPORTED" in prose,
-           "the notice says the reading's own time was NOT REPORTED")
-    _check("it is not zero" in prose,
-           "...and says explicitly that the unknown lag is NOT zero, which is "
-           "the inference a lone observer timestamp invites")
-    _check("Reading produced at" not in prose,
-           "and does not claim a reading time it does not have")
+    _check("NOT REPORTED" in prose, "the notice says the reading's own time was NOT REPORTED")
+    _check(
+        "it is not zero" in prose,
+        "...and says explicitly that the unknown lag is NOT zero, which is "
+        "the inference a lone observer timestamp invites",
+    )
+    _check("Reading produced at" not in prose, "and does not claim a reading time it does not have")
 
 
 def test_nothing_in_the_leg_can_drive_a_session() -> None:
@@ -893,11 +1037,14 @@ def test_nothing_in_the_leg_can_drive_a_session() -> None:
     #
     # Neither alone is sufficient: (1) is a source fact, and (2) cannot see a
     # from-import that binds a reference before the patch lands.
-    _check(not hasattr(rsn, "drive_on_delivery"),
-           "STRUCTURAL: the self-notice module has no drive_on_delivery "
-           "binding at all -- it cannot inject a turn it never imported")
+    _check(
+        not hasattr(rsn, "drive_on_delivery"),
+        "STRUCTURAL: the self-notice module has no drive_on_delivery "
+        "binding at all -- it cannot inject a turn it never imported",
+    )
 
     from agent_messaging_plugin import session_lifecycle_verbs as slv
+
     original = slv.drive_on_delivery
 
     def _explode(*args: object, **kwargs: object) -> None:
@@ -918,16 +1065,19 @@ def test_nothing_in_the_leg_can_drive_a_session() -> None:
         counts, bridges = rsn.SelfNoticeCounts(), _FakeBridgeManager()
     finally:
         slv.drive_on_delivery = original  # type: ignore[assignment]
-    _check(detonated is None,
-           "BEHAVIOURAL: the leg ran with drive_on_delivery replaced by a "
-           "landmine at its DEFINITION site and never tripped it -- catches a "
-           "late/dynamic lookup the structural check cannot see"
-           + ("" if detonated is None else f" (TRIPPED: {detonated})"))
-    _check(detonated is None
-           and (counts.appended, counts.unroutable) == (1, 0)
-           and len(bridges.appended) == 1,
-           "...and the notice was still delivered while that landmine was "
-           "armed -- notice, never act")
+    _check(
+        detonated is None,
+        "BEHAVIOURAL: the leg ran with drive_on_delivery replaced by a "
+        "landmine at its DEFINITION site and never tripped it -- catches a "
+        "late/dynamic lookup the structural check cannot see"
+        + ("" if detonated is None else f" (TRIPPED: {detonated})"),
+    )
+    _check(
+        detonated is None
+        and (counts.appended, counts.unroutable) == (1, 0)
+        and len(bridges.appended) == 1,
+        "...and the notice was still delivered while that landmine was armed -- notice, never act",
+    )
 
 
 def test_an_unusable_row_is_skipped_rather_than_guessed() -> None:
@@ -938,13 +1088,17 @@ def test_an_unusable_row_is_skipped_rather_than_guessed() -> None:
     would answer a capacity question with a number nobody measured, and it
     would do so in the LOUD direction.
     """
-    counts, _ = _sweep([
-        _row("agi-noceiling", current_tokens=350_000, ceiling=0),
-        _row("agi-notokens", current_tokens=0),
-    ])
-    _check(counts == rsn.SelfNoticeCounts(),
-           "a row with an unusable ceiling or no token count is skipped "
-           "silently -- not notified, and not counted as a coverage gap either")
+    counts, _ = _sweep(
+        [
+            _row("agi-noceiling", current_tokens=350_000, ceiling=0),
+            _row("agi-notokens", current_tokens=0),
+        ]
+    )
+    _check(
+        counts == rsn.SelfNoticeCounts(),
+        "a row with an unusable ceiling or no token count is skipped "
+        "silently -- not notified, and not counted as a coverage gap either",
+    )
 
 
 def test_the_rider_actually_invokes_this_leg() -> None:
@@ -984,6 +1138,7 @@ def test_the_rider_actually_invokes_this_leg() -> None:
     # extraction this is the ONLY target that works, and it is the same one it
     # was before -- the move did not change where the caller looks.
     import agent_messaging_plugin.plugin as plugin_mod
+
     p_due = plugin_mod.sweep_rotation_due_sessions
     p_dark = plugin_mod.sweep_gauge_coverage
     p_self = plugin_mod.sweep_rotation_self_notice
@@ -1032,18 +1187,22 @@ def test_the_rider_actually_invokes_this_leg() -> None:
         plugin_mod.sweep_rotation_self_notice = p_self  # type: ignore[assignment]
         plugin_mod.sweep_gauge_staleness = p_stale  # type: ignore[assignment]
 
-    _check(reached == ["self_notice", "gauge_stale"],
-           "the REAL _run_rotation_surface_sweep invokes the self-notice leg "
-           "AND the L4d gauge-staleness leg -- both with the two steward legs "
-           "raising, so a sibling fault cannot silence either. The ORDER is "
-           "asserted too: L4d runs after L4c, which is where the rider places "
-           f"it. Got: {reached!r}")
-    _check(seen_kwargs.get("agent_messaging_service") is _sentinel_service,
-           "★ and the rider PASSES THE MESSAGING SERVICE to the leg (GAU-06's "
-           "one-line blocker). Without this assertion the wiring could be "
-           "dropped and every self-notice test would still pass: the leg's "
-           "unwired guard returns an EMPTY TALLY, which reads exactly like a "
-           "quiet fleet -- a green that means the durable half never ran")
+    _check(
+        reached == ["self_notice", "gauge_stale"],
+        "the REAL _run_rotation_surface_sweep invokes the self-notice leg "
+        "AND the L4d gauge-staleness leg -- both with the two steward legs "
+        "raising, so a sibling fault cannot silence either. The ORDER is "
+        "asserted too: L4d runs after L4c, which is where the rider places "
+        f"it. Got: {reached!r}",
+    )
+    _check(
+        seen_kwargs.get("agent_messaging_service") is _sentinel_service,
+        "★ and the rider PASSES THE MESSAGING SERVICE to the leg (GAU-06's "
+        "one-line blocker). Without this assertion the wiring could be "
+        "dropped and every self-notice test would still pass: the leg's "
+        "unwired guard returns an EMPTY TALLY, which reads exactly like a "
+        "quiet fleet -- a green that means the durable half never ran",
+    )
 
 
 def test_an_ended_session_is_neither_notified_nor_counted() -> None:
@@ -1069,21 +1228,27 @@ def test_an_ended_session_is_neither_notified_nor_counted() -> None:
     cause rather than any other predicate.
     """
     stale = _row(
-        "agi-ended", current_tokens=380_000, measured_at="2026-08-17T21:00:00",
+        "agi-ended",
+        current_tokens=380_000,
+        measured_at="2026-08-17T21:00:00",
     )
     counts, bridges = _sweep([stale])
     _check(counts.appended == 0, "an ended session is not notified")
-    _check(counts.unroutable == 0 and counts.undeliverable == 0,
-           "...and is NOT counted as a coverage gap either -- both numbers "
-           "pinned, since notified==0 alone cannot tell 'skipped' from "
-           "'counted as unroutable'")
+    _check(
+        counts.unroutable == 0 and counts.undeliverable == 0,
+        "...and is NOT counted as a coverage gap either -- both numbers "
+        "pinned, since notified==0 alone cannot tell 'skipped' from "
+        "'counted as unroutable'",
+    )
     _check(not bridges.appended, "and nothing was appended for it")
 
     fresh = _row("agi-ended", current_tokens=380_000, measured_at="2026-08-17T22:59:00")
     live_counts, _ = _sweep([fresh])
-    _check(live_counts.appended == 1,
-           "...while the SAME row one minute inside the window IS notified -- "
-           "so it is staleness doing the work, not some other predicate")
+    _check(
+        live_counts.appended == 1,
+        "...while the SAME row one minute inside the window IS notified -- "
+        "so it is staleness doing the work, not some other predicate",
+    )
 
 
 def test_the_staleness_window_is_loose_enough_for_a_long_tool_call() -> None:
@@ -1094,14 +1259,17 @@ def test_the_staleness_window_is_loose_enough_for_a_long_tool_call() -> None:
     A 300s bound would drop a live session mid-run, and it would drop it
     silently, since a dropped row is indistinguishable from a carry-on verdict.
     """
-    _check(rsn.SELF_NOTICE_STALENESS_S > 300.0,
-           f"the staleness bound ({rsn.SELF_NOTICE_STALENESS_S}s) is looser than "
-           f"the startup grace ({ss.GAUGE_COVERAGE_GRACE_S}s) -- they are "
-           "different quantities and must not share a constant")
+    _check(
+        rsn.SELF_NOTICE_STALENESS_S > 300.0,
+        f"the staleness bound ({rsn.SELF_NOTICE_STALENESS_S}s) is looser than "
+        f"the startup grace ({ss.GAUGE_COVERAGE_GRACE_S}s) -- they are "
+        "different quantities and must not share a constant",
+    )
     mid_battery = _row(current_tokens=350_000, measured_at="2026-08-17T22:52:00")
     counts, _ = _sweep([mid_battery])
-    _check(counts.appended == 1,
-           "a session 8 minutes into one tool call is still LIVE and is notified")
+    _check(
+        counts.appended == 1, "a session 8 minutes into one tool call is still LIVE and is notified"
+    )
 
 
 def test_measured_at_reads_back_naive_and_is_still_compared_correctly() -> None:
@@ -1119,19 +1287,27 @@ def test_measured_at_reads_back_naive_and_is_still_compared_correctly() -> None:
     """
     naive = _measured_age_or_none({"measured_at": "2026-08-17T22:59:00"})
     aware = _measured_age_or_none({"measured_at": "2026-08-17T22:59:00+00:00"})
-    _check(naive is not None and abs(naive - 60.0) < 1.0,
-           f"a NAIVE stored value is read as UTC and ages correctly ({naive}s)")
-    _check(aware is not None and abs(aware - 60.0) < 1.0,
-           f"an AWARE value is honoured as-is and agrees ({aware}s)")
-    _check(_measured_age_or_none({"measured_at": "not-a-timestamp"}) is None
-           and _measured_age_or_none({"measured_at": ""}) is None,
-           "an unparseable or absent stamp is a distinct third answer, not a "
-           "guess in either direction")
+    _check(
+        naive is not None and abs(naive - 60.0) < 1.0,
+        f"a NAIVE stored value is read as UTC and ages correctly ({naive}s)",
+    )
+    _check(
+        aware is not None and abs(aware - 60.0) < 1.0,
+        f"an AWARE value is honoured as-is and agrees ({aware}s)",
+    )
+    _check(
+        _measured_age_or_none({"measured_at": "not-a-timestamp"}) is None
+        and _measured_age_or_none({"measured_at": ""}) is None,
+        "an unparseable or absent stamp is a distinct third answer, not a "
+        "guess in either direction",
+    )
     counts, _ = _sweep([_row(current_tokens=350_000, measured_at="not-a-timestamp")])
-    _check(counts == rsn.SelfNoticeCounts(),
-           "...and such a row is skipped entirely -- guessing FRESH would "
-           "resurrect the unbounded scan, guessing STALE would silence a live "
-           "session")
+    _check(
+        counts == rsn.SelfNoticeCounts(),
+        "...and such a row is skipped entirely -- guessing FRESH would "
+        "resurrect the unbounded scan, guessing STALE would silence a live "
+        "session",
+    )
 
 
 def test_a_delivery_fault_is_not_reported_as_a_routing_gap() -> None:
@@ -1153,14 +1329,18 @@ def test_a_delivery_fault_is_not_reported_as_a_routing_gap() -> None:
         known={"agi-live"},
         persist_fails=True,
     )
-    _check((counts.appended, counts.unroutable, counts.undeliverable) == (0, 0, 1),
-           "a resolved binding whose DURABLE write raises counts as "
-           "UNDELIVERABLE, never as unroutable -- the join gap is not blamed "
-           "for a transport fault")
-    _check(bridges.appended == [],
-           "and nothing was surfaced either: persist-first means a failed "
-           "durable write stops the notice rather than showing a session "
-           "something it can never retrieve")
+    _check(
+        (counts.appended, counts.unroutable, counts.undeliverable) == (0, 0, 1),
+        "a resolved binding whose DURABLE write raises counts as "
+        "UNDELIVERABLE, never as unroutable -- the join gap is not blamed "
+        "for a transport fault",
+    )
+    _check(
+        bridges.appended == [],
+        "and nothing was surfaced either: persist-first means a failed "
+        "durable write stops the notice rather than showing a session "
+        "something it can never retrieve",
+    )
 
 
 def test_a_surfaced_notice_the_session_can_still_read_is_not_undeliverable() -> None:
@@ -1175,22 +1355,32 @@ def test_a_surfaced_notice_the_session_can_still_read_is_not_undeliverable() -> 
     latch = rsn.BandEdgeLatch()
     row = [_row("agi-live", current_tokens=350_000)]
     counts, bridges, service = _sweep_full(
-        row, known={"agi-live"}, append_fails=True, latch=latch,
+        row,
+        known={"agi-live"},
+        append_fails=True,
+        latch=latch,
     )
-    _check((counts.appended, counts.undeliverable) == (1, 0),
-           "the durable half succeeded, so the notice counts as APPENDED even "
-           "though the surface append raised")
-    _check(len(service.sent) == 1 and bridges.appended == [],
-           "...and that is not a bookkeeping claim: the row was persisted and "
-           "the bridge really did reject the event")
+    _check(
+        (counts.appended, counts.undeliverable) == (1, 0),
+        "the durable half succeeded, so the notice counts as APPENDED even "
+        "though the surface append raised",
+    )
+    _check(
+        len(service.sent) == 1 and bridges.appended == [],
+        "...and that is not a bookkeeping claim: the row was persisted and "
+        "the bridge really did reject the event",
+    )
     second, _, second_service = _sweep_full(row, known={"agi-live"}, latch=latch)
-    _check(second.appended == 0 and second_service.sent == [],
-           "the episode IS latched by the durable write -- a session that has "
-           "the notice in its inbox is not told again at the same band edge")
+    _check(
+        second.appended == 0 and second_service.sent == [],
+        "the episode IS latched by the durable write -- a session that has "
+        "the notice in its inbox is not told again at the same band edge",
+    )
 
 
 # ---------------------------------------------------------------------------
 # GAU-06 (G2 + G1) -- the DURABLE half, and the drive call that must not happen.
+
 
 def test_the_notice_is_persisted_before_it_is_surfaced() -> None:
     """★ CATCHES: surfacing first, persisting second (GAU-06 G2).
@@ -1206,10 +1396,14 @@ def test_the_notice_is_persisted_before_it_is_surfaced() -> None:
     """
     order: list[str] = []
     _sweep_full(
-        [_row("agi-live", current_tokens=350_000)], known={"agi-live"}, order=order,
+        [_row("agi-live", current_tokens=350_000)],
+        known={"agi-live"},
+        order=order,
     )
-    _check(order == ["persist", "append"],
-           f"the durable write happens BEFORE the surface append -- got {order!r}")
+    _check(
+        order == ["persist", "append"],
+        f"the durable write happens BEFORE the surface append -- got {order!r}",
+    )
 
 
 def test_the_durable_notice_is_not_stamped_important() -> None:
@@ -1221,11 +1415,14 @@ def test_the_durable_notice_is_not_stamped_important() -> None:
     inbox that GAU-06's noise half exists to prevent.
     """
     _, _, service = _sweep_full(
-        [_row("agi-live", current_tokens=350_000)], known={"agi-live"},
+        [_row("agi-live", current_tokens=350_000)],
+        known={"agi-live"},
     )
     _check(len(service.sent) == 1, "one durable notice was persisted")
-    _check(service.sent[0].important is False,
-           "and it is NOT stamped important -- this is a notice, not a wake")
+    _check(
+        service.sent[0].important is False,
+        "and it is NOT stamped important -- this is a notice, not a wake",
+    )
 
 
 def test_the_sender_is_a_sentinel_with_its_own_thread_key() -> None:
@@ -1244,20 +1441,27 @@ def test_the_sender_is_a_sentinel_with_its_own_thread_key() -> None:
       that the PLATFORM is telling the session about itself.
     """
     _, _, service = _sweep_full(
-        [_row("agi-live", current_tokens=350_000)], known={"agi-live"},
+        [_row("agi-live", current_tokens=350_000)],
+        known={"agi-live"},
     )
     sent = service.sent[0]
-    _check(sent.sender_bridge_id == "system:rotation-notice"
-           and sent.sender_agent_instance_id == "system:rotation-notice",
-           f"the notice is sent under its own sentinel -- got "
-           f"{sent.sender_bridge_id!r}/{sent.sender_agent_instance_id!r}")
-    _check(sent.sender_agent_instance_id != sent.peer_agent_instance_id,
-           "and the sender is NOT the recipient -- a same-instance send is "
-           "rejected by the service and would fault this leg every tick")
-    _check(sent.peer_agent_instance_id == "agi-live"
-           and sent.peer_agent_session_id == "ases-recipient",
-           "the recipient is addressed by BOTH keys, so the row stays visible "
-           f"after that session's instance rotates -- got {sent!r}")
+    _check(
+        sent.sender_bridge_id == "system:rotation-notice"
+        and sent.sender_agent_instance_id == "system:rotation-notice",
+        f"the notice is sent under its own sentinel -- got "
+        f"{sent.sender_bridge_id!r}/{sent.sender_agent_instance_id!r}",
+    )
+    _check(
+        sent.sender_agent_instance_id != sent.peer_agent_instance_id,
+        "and the sender is NOT the recipient -- a same-instance send is "
+        "rejected by the service and would fault this leg every tick",
+    )
+    _check(
+        sent.peer_agent_instance_id == "agi-live"
+        and sent.peer_agent_session_id == "ases-recipient",
+        "the recipient is addressed by BOTH keys, so the row stays visible "
+        f"after that session's instance rotates -- got {sent!r}",
+    )
 
 
 def test_the_surface_event_keeps_its_own_name() -> None:
@@ -1268,10 +1472,13 @@ def test_the_surface_event_keeps_its_own_name() -> None:
     context measurement from a colleague's message except by reading the prose.
     """
     _, bridges, _ = _sweep_full(
-        [_row("agi-live", current_tokens=350_000)], known={"agi-live"},
+        [_row("agi-live", current_tokens=350_000)],
+        known={"agi-live"},
     )
-    _check([event for _, event, _ in bridges.appended] == [rsn.EVENT_ROTATION_SELF_NOTICE],
-           f"the surfaced event keeps its own name -- got {bridges.appended!r}")
+    _check(
+        [event for _, event, _ in bridges.appended] == [rsn.EVENT_ROTATION_SELF_NOTICE],
+        f"the surfaced event keeps its own name -- got {bridges.appended!r}",
+    )
 
 
 def test_a_watcher_held_session_is_counted_as_a_subset_not_an_extra() -> None:
@@ -1292,11 +1499,15 @@ def test_a_watcher_held_session_is_counted_as_a_subset_not_an_extra() -> None:
         ],
         known={"agi-watch-abc", "agi-bridge-held"},
     )
-    _check(counts.appended == 2 and len(service.sent) == 2,
-           f"both sessions got a durable notice -- got {counts!r}")
-    _check(counts.watcher_held == 1,
-           f"exactly ONE of them is watcher-held, counted as a subset of "
-           f"appended rather than added to it -- got {counts!r}")
+    _check(
+        counts.appended == 2 and len(service.sent) == 2,
+        f"both sessions got a durable notice -- got {counts!r}",
+    )
+    _check(
+        counts.watcher_held == 1,
+        f"exactly ONE of them is watcher-held, counted as a subset of "
+        f"appended rather than added to it -- got {counts!r}",
+    )
 
 
 def test_an_unwired_service_yields_an_empty_tally_not_a_surface_only_sweep() -> None:
@@ -1314,14 +1525,20 @@ def test_an_unwired_service_yields_an_empty_tally_not_a_surface_only_sweep() -> 
         known={"agi-live"},
         omit_service=True,
     )
-    _check((counts.appended, counts.unroutable, counts.undeliverable) == (0, 0, 0),
-           f"an unwired leg tallies nothing -- got {counts!r}")
-    _check(bridges.appended == [] and service.sent == [],
-           "and it appends NOTHING to any surface: a sweep that cannot persist "
-           "must not deliver a notice that no watcher drain can survive")
+    _check(
+        (counts.appended, counts.unroutable, counts.undeliverable) == (0, 0, 0),
+        f"an unwired leg tallies nothing -- got {counts!r}",
+    )
+    _check(
+        bridges.appended == [] and service.sent == [],
+        "and it appends NOTHING to any surface: a sweep that cannot persist "
+        "must not deliver a notice that no watcher drain can survive",
+    )
+
 
 # ---------------------------------------------------------------------------
 # GAU-06 retention -- the writer bounds its own thread.
+
 
 def test_the_notice_thread_is_bounded_by_its_own_writer() -> None:
     """CATCHES: a durable notice with no bound -- a slower version of the same
@@ -1334,19 +1551,23 @@ def test_the_notice_thread_is_bounded_by_its_own_writer() -> None:
     state.seed_thread("agt-t", [1, 2, 3, 4, 5, 6, 7])
     deleted = prune_rotation_notices(state, thread_id="agt-t", keep=3)  # type: ignore[arg-type]
     survivors = sorted(int(r["cursor"]) for r in state.messages["agt-t"])
-    _check(deleted == 4 and survivors == [5, 6, 7],
-           f"the NEWEST three survive and the older four go -- got "
-           f"deleted={deleted} survivors={survivors}")
+    _check(
+        deleted == 4 and survivors == [5, 6, 7],
+        f"the NEWEST three survive and the older four go -- got "
+        f"deleted={deleted} survivors={survivors}",
+    )
     # The label reads the recorded call SAFELY. An earlier version interpolated
     # `state.deletes[-1]` straight into the f-string, which is evaluated whether
     # or not the guard held -- so any mutation that stopped the prune issuing a
     # delete crashed this test with an IndexError instead of reporting a
     # finding, and a battery that dies early silently narrows its own coverage.
     last_delete = state.deletes[-1] if state.deletes else None
-    _check(last_delete is not None and last_delete[2] is False,
-           "and the delete is HARD -- a soft delete would keep every row "
-           "forever behind a flag nothing on this platform reaps, so the "
-           f"bound would be cosmetic. Got {last_delete!r}")
+    _check(
+        last_delete is not None and last_delete[2] is False,
+        "and the delete is HARD -- a soft delete would keep every row "
+        "forever behind a flag nothing on this platform reaps, so the "
+        f"bound would be cosmetic. Got {last_delete!r}",
+    )
 
 
 def test_a_thread_below_the_bound_is_not_touched_at_all() -> None:
@@ -1361,9 +1582,11 @@ def test_a_thread_below_the_bound_is_not_touched_at_all() -> None:
     state = _FakeState([])
     state.seed_thread("agt-short", [1, 2])
     deleted = prune_rotation_notices(state, thread_id="agt-short", keep=5)  # type: ignore[arg-type]
-    _check(deleted == 0 and state.deletes == [],
-           f"nothing deleted AND no delete issued -- got deleted={deleted}, "
-           f"{len(state.deletes)} delete call(s)")
+    _check(
+        deleted == 0 and state.deletes == [],
+        f"nothing deleted AND no delete issued -- got deleted={deleted}, "
+        f"{len(state.deletes)} delete call(s)",
+    )
 
 
 def test_a_pruned_thread_still_pages_forward_from_a_stale_cursor() -> None:
@@ -1383,11 +1606,14 @@ def test_a_pruned_thread_still_pages_forward_from_a_stale_cursor() -> None:
     before = state.page_after("agt-page", after_cursor=11)
     prune_rotation_notices(state, thread_id="agt-page", keep=2)  # type: ignore[arg-type]
     after = state.page_after("agt-page", after_cursor=11)
-    _check(before == [12, 13, 14, 15],
-           f"pre-prune, a cursor of 11 pages onto 12-15 -- got {before}")
-    _check(after == [14, 15],
-           f"post-prune, the SAME cursor pages onto exactly the survivors, "
-           f"with no renumbering and nothing skipped -- got {after}")
+    _check(
+        before == [12, 13, 14, 15], f"pre-prune, a cursor of 11 pages onto 12-15 -- got {before}"
+    )
+    _check(
+        after == [14, 15],
+        f"post-prune, the SAME cursor pages onto exactly the survivors, "
+        f"with no renumbering and nothing skipped -- got {after}",
+    )
 
 
 def test_a_keep_of_zero_is_refused_rather_than_emptying_the_thread() -> None:
@@ -1409,13 +1635,16 @@ def test_a_keep_of_zero_is_refused_rather_than_emptying_the_thread() -> None:
     # a narrow `except ValueError` would let that escape and kill the whole run
     # before the summary -- turning a finding into a crash that hides every
     # later test's verdict.
-    _check(isinstance(raised, ValueError),
-           f"keep=0 is REFUSED with a ValueError naming the bad input, not by "
-           f"falling off the end of a page -- got {type(raised).__name__}: "
-           f"{raised}")
-    _check(len(state.messages["agt-zero"]) == 3,
-           f"...and the thread is untouched -- "
-           f"{len(state.messages['agt-zero'])} row(s) left")
+    _check(
+        isinstance(raised, ValueError),
+        f"keep=0 is REFUSED with a ValueError naming the bad input, not by "
+        f"falling off the end of a page -- got {type(raised).__name__}: "
+        f"{raised}",
+    )
+    _check(
+        len(state.messages["agt-zero"]) == 3,
+        f"...and the thread is untouched -- {len(state.messages['agt-zero'])} row(s) left",
+    )
 
 
 def test_the_writer_prunes_the_thread_it_just_wrote_to() -> None:
@@ -1441,14 +1670,17 @@ def test_the_writer_prunes_the_thread_it_just_wrote_to() -> None:
     )
     survivors = sorted(int(r["cursor"]) for r in state.messages[thread_id])
     _check(counts.appended == 1, f"the notice was persisted -- got {counts!r}")
-    _check([d[0] for d in state.deletes] == [thread_id],
-           f"...and the writer pruned EXACTLY the thread it wrote to, no other "
-           f"-- got {[d[0] for d in state.deletes]!r}")
-    _check(len(survivors) == rnr.ROTATION_NOTICE_RETENTION
-           and survivors[:1] == [11],
-           f"...down to the interim bound of {rnr.ROTATION_NOTICE_RETENTION}, "
-           f"newest kept -- got {len(survivors)} row(s) starting at "
-           f"{survivors[:1]}")
+    _check(
+        [d[0] for d in state.deletes] == [thread_id],
+        f"...and the writer pruned EXACTLY the thread it wrote to, no other "
+        f"-- got {[d[0] for d in state.deletes]!r}",
+    )
+    _check(
+        len(survivors) == rnr.ROTATION_NOTICE_RETENTION and survivors[:1] == [11],
+        f"...down to the interim bound of {rnr.ROTATION_NOTICE_RETENTION}, "
+        f"newest kept -- got {len(survivors)} row(s) starting at "
+        f"{survivors[:1]}",
+    )
 
 
 def test_a_failed_prune_never_costs_the_session_its_notice() -> None:
@@ -1458,8 +1690,11 @@ def test_a_failed_prune_never_costs_the_session_its_notice() -> None:
     growth problem; converting it into a delivery failure trades a bounded
     table for a session that was never told its context is large.
     """
+
     class _PruneExplodes(_FakeState):
         def query_ordered(self, namespace: str, spec: dict[str, Any]) -> dict[str, Any]:
+            if spec.get("table") == TABLE_MANAGED_SESSION:
+                return super().query_ordered(namespace, spec)
             raise RuntimeError("the store is unreachable for the prune read")
 
     state = _PruneExplodes([_row("agi-live", current_tokens=350_000)])
@@ -1483,15 +1718,21 @@ def test_a_failed_prune_never_costs_the_session_its_notice() -> None:
         # test's verdict, which is the crash-is-not-a-failure-report pattern
         # this suite has already fixed three times.
         escaped = exc
-    _check(escaped is None,
-           "the prune fault does NOT escape the notify path"
-           + ("" if escaped is None else f" (ESCAPED: {escaped!r})"))
-    _check((counts.appended, counts.undeliverable) == (1, 0),
-           f"the notice still counts as APPENDED with the prune raising -- "
-           f"got {counts!r}")
-    _check(len(bridges.appended) == 1,
-           "and it was still surfaced -- hygiene failing must not silence the "
-           "notice it was cleaning up after")
+    _check(
+        escaped is None,
+        "the prune fault does NOT escape the notify path"
+        + ("" if escaped is None else f" (ESCAPED: {escaped!r})"),
+    )
+    _check(
+        (counts.appended, counts.undeliverable) == (1, 0),
+        f"the notice still counts as APPENDED with the prune raising -- got {counts!r}",
+    )
+    _check(
+        len(bridges.appended) == 1,
+        "and it was still surfaced -- hygiene failing must not silence the "
+        "notice it was cleaning up after",
+    )
+
 
 # ---------------------------------------------------------------------------
 # GAU-02 -- the rider's own REACHABLE ALL-CLEAR.
@@ -1718,7 +1959,6 @@ def test_a_faulted_leg_is_named_in_the_all_clear_rather_than_omitted() -> None:
     )
 
 
-
 # ---------------------------------------------------------------------------
 # GAU-01(c): the eligibility bound was on the GAUGE clock
 #
@@ -1741,6 +1981,8 @@ def _lifecycle(
 ) -> dict[str, Any]:
     """A lifecycle row as `live_lifecycle_rows_by_instance` reads it."""
     row: dict[str, Any] = {
+        "created_at": "2026-08-17T20:00:00",
+        "id": f"ams-{agent_instance_id}-{lifecycle_state}",
         "agent_instance_id": agent_instance_id,
         "lifecycle_state": lifecycle_state,
     }
@@ -1833,6 +2075,63 @@ def test_a_fresh_row_never_consults_the_lifecycle_table() -> None:
     counts, _ = _sweep([fresh], lifecycle_rows=[])
     _check(counts.appended == 1, "a fresh row is unaffected by the liveness path")
 
+
+def test_one_durability_notice_per_generation() -> None:
+    """The self path shares the one derived boundary and never repeats it."""
+    quiet, bridges = _sweep([_row(current_tokens=319_999)])
+    _check(quiet.appended == 0 and not bridges.appended, "319,999 produces no self notice")
+    latch = rsn.BandEdgeLatch()
+    due_row = _row(current_tokens=320_000)
+    first, first_bridges = _sweep([due_row], latch=latch)
+    second, second_bridges = _sweep([due_row], latch=latch)
+    _check(
+        first.appended == 1
+        and _first_prose(first_bridges)
+        == ("context is 320,000 — make sure everything is durable."),
+        "320,000 produces exactly the operator-supplied one-line notice",
+    )
+    _check(
+        second.appended == 0 and not second_bridges.appended,
+        "a second sweep in the same generation does not repeat the notice",
+    )
+    haiku, _ = _sweep(
+        [
+            _row(current_tokens=144_000, ceiling=200_000, model="claude-haiku-4-5"),
+        ]
+    )
+    _check(haiku.appended == 1, "a 200K runtime window notices at the 144K compaction-bound point")
+
+
+def test_registered_gauge_silence_is_noticed_after_grace() -> None:
+    """CATCHES: scanning only existing gauge rows, which cannot see silence."""
+    binding = _FakeBinding(
+        "bridge-hand-launched",
+        agent_instance_id="agi-hand-launched",
+        agent_id="codex",
+        created_at=(
+            _SWEEP_NOW - timedelta(seconds=rsn.GAUGE_SILENT_REGISTRATION_GRACE_S + 1)
+        ).isoformat(),
+    )
+    counts, bridges, service = _sweep_full([], bindings=[binding])
+    _check(
+        counts.gauge_silent == 1 and counts.appended == 1 and len(bridges.appended) == 1,
+        "a registered session past grace with no gauge row is counted and persist-first noticed",
+    )
+    _check(
+        "gauge_silent_since_registration" in _first_prose(bridges)
+        and service.sent[0].peer_agent_instance_id == "agi-hand-launched",
+        "the notice names the measured absence and addresses the registered session itself",
+    )
+    quiet_counts, quiet_bridges, _ = _sweep_full(
+        [_row("agi-hand-launched", current_tokens=120_000)],
+        bindings=[binding],
+    )
+    _check(
+        quiet_counts.gauge_silent == 0 and quiet_bridges.appended == [],
+        "a gauge row suppresses the silence rider even when its context band is quiet",
+    )
+
+
 def main() -> int:
     print("rotation self-notice (L4c) smoke\n")
     test_a_live_session_with_an_arrested_gauge_is_still_notified()
@@ -1841,22 +2140,14 @@ def main() -> int:
     test_liveness_fails_closed_on_an_unreadable_report_by()
     test_a_non_live_lifecycle_row_does_not_vouch_for_liveness()
     test_a_fresh_row_never_consults_the_lifecycle_table()
-    test_the_300k_to_500k_blind_spot_is_covered()
+    test_registered_gauge_silence_is_noticed_after_grace()
+    test_one_durability_notice_per_generation()
     test_a_carry_on_verdict_says_nothing_at_all()
-    test_escalation_across_bands_is_never_suppressed()
-    test_the_same_band_is_floored_at_twenty_minutes()
     test_an_unresolvable_session_is_counted_not_swallowed()
     test_a_failed_delivery_does_not_latch_the_episode()
-    test_capacity_binds_early_on_an_unrecognised_model()
     test_capacity_never_preempts_economics_on_a_1m_ceiling()
     test_the_break_even_is_tier_invariant()
     test_the_overage_ttl_moves_the_break_even_and_moves_it_down()
-    test_the_notice_states_one_horizon_not_two()
-    test_the_notice_states_the_floor_beside_the_absolute_band()
-    test_the_floor_line_never_claims_a_per_session_boot_measurement()
-    test_the_below_h_floor_branch_is_reachable_and_says_the_opposite()
-    test_the_notice_reports_both_clocks_and_the_lag_between_them()
-    test_a_missing_reading_at_says_unknown_rather_than_implying_zero()
     test_nothing_in_the_leg_can_drive_a_session()
     test_an_unusable_row_is_skipped_rather_than_guessed()
     test_an_ended_session_is_neither_notified_nor_counted()

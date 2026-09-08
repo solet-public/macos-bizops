@@ -160,8 +160,11 @@ class _TwoTableState:
 def _report(state: _TwoTableState, **overrides: Any) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "agent_instance_id": LEDGER_ID,
-        "claude_session_id": "616f70d9",
+        "runtime_session_id": "616f70d9",
+        "provider": "anthropic",
+        "runtime": "claude_code",
         "model": "claude-opus-5",
+        "effort": "high",
         "current_tokens": 99_266,
         "ceiling": 1_000_000,
         "measured_at": "2026-08-18T22:21:55+00:00",

@@ -120,8 +120,17 @@ class IPluginLifecycleManager(ABC):
 
     @abstractmethod
     def discover_and_initialize_plugins(
-        self, plugin_manager: object, orchestrator_ref: object
+        self,
+        plugin_manager: object,
+        orchestrator_ref: object,
+        config_manager: object | None = None,
     ) -> None:
+        """Discover with the orchestrator profile manifest as the allowlist.
+
+        Implementations must derive the allowed plugin set from APP_HOME and
+        pass it to PluginManager discovery. Omitting the allowlist loads every
+        installed entry point and repeats the 2026-05-31 boot incident.
+        """
         pass
 
     @abstractmethod

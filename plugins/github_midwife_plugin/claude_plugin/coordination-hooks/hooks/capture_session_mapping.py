@@ -26,14 +26,27 @@ Stdlib-only -- fires outside the venv, mirrors this repo's other hooks
 (.claude/hooks/headless_tool_allowlist_gate.py,
 .claude/hooks/memory_passthrough/*.py).
 
-This is a spawn-injected worker hook: unlike this plugin's ordinary
-hooks.json-registered hooks, a spawned headless/tmux worker's own host
-adapter (`agent_messaging_plugin`) references this file by path in a
-generated Claude Code `--settings` blob at spawn time — it is never wired
-into this plugin's own `hooks/hooks.json`. It ships here as the fallback
-copy a born clone (no `.claude/hooks/` at all) still carries; the origin
-checkout's own `.claude/hooks/capture_session_mapping.py` is the primary
-copy and this file must stay behaviorally byte-identical to it.
+This is a spawn-injected worker hook: a spawned headless/tmux worker's own
+host adapter (`agent_messaging_plugin`) ALSO references this file by path in
+a generated Claude Code `--settings` blob at spawn time, independent of the
+`hooks.json` registration below. Both routes are deliberate, not redundant
+by accident (seed feedback #40/S51.1, 2026-08-24): the adapter's own
+`--settings` injection is what a managed policy's
+`strictPluginOnlyCustomization: ["hooks"]` strips, silently, on every host
+that carries that policy; the `hooks.json` registration is what survives it,
+because a plugin already listed in the operator's `strictKnownMarketplaces`
+keeps firing its own manifest-registered hooks under that exact policy
+(proven empirically for this plugin's other hooks — see §43.1/#8's Case C).
+A session under a policy that does NOT strip `--settings` gets this hook
+fired from both routes for one SessionStart event — harmless by design: the
+handler is a pure function of its two env vars and stdin payload, so a
+second firing with the same inputs re-derives the same spool record (a
+`captured_at` a few milliseconds apart is the only difference), and the
+platform side already upserts per file rather than assuming one-write.
+It ships here as the fallback copy a born clone (no `.claude/hooks/` at all)
+still carries; the origin checkout's own
+`.claude/hooks/capture_session_mapping.py` is the primary copy and this file
+must stay behaviorally byte-identical to it.
 """
 
 

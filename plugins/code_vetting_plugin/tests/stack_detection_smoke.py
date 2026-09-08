@@ -20,9 +20,15 @@ Hermetic (tmp walk-trees; a no-op probe scanner; no tools). Run directly or via 
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
 import tempfile
 from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 import code_vetting_plugin.runner as runner_mod
 from code_vetting_plugin.coverage import CoverageRecord, ScannerResult

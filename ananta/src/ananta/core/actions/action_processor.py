@@ -12,6 +12,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
+from ananta.core.actions.action_factory import validate_process_arguments
 from ananta.core.domain.enums import ActionStatus
 from ananta.core.domain.status import is_status_match
 from ananta.core.orchestration import placeholder_utils
@@ -51,6 +52,18 @@ _CALLER_IDENTITY_KEYS: Final[tuple[str, ...]] = (
     "caller_attribution_instance_id",
     "caller_attribution_label",
     "caller_attribution_role",
+)
+
+# Raw bridge-delivery envelopes must stay byte-identical to their producer's
+# result. Keep these literals byte-identical to
+# agent_messaging_plugin.platform_surface._DELIVER_RESULT_PROCESS_KEY and
+# _DELIVER_ERROR_PROCESS_KEY. The opaque-relay smoke detects drift; core must
+# not import a plugin merely to perform a runtime cross-check.
+_OPAQUE_RELAY_PROCESS_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "plugin::agent_messaging_plugin::deliver_result",
+        "plugin::agent_messaging_plugin::deliver_error",
+    }
 )
 
 
@@ -261,6 +274,9 @@ class ActionProcessor:
 
         FAIL-FAST: Raises on missing context or resolution failure.
         """
+        if action.process_key in _OPAQUE_RELAY_PROCESS_KEYS:
+            return arguments
+
         # FAIL-FAST: Require execution context manager
         if not self.execution_context_manager:
             raise FrameworkError(
@@ -410,6 +426,9 @@ class ActionProcessor:
 
         FAIL-FAST: Raises on template resolution failure (no silent fallback).
         """
+        if action.process_key in _OPAQUE_RELAY_PROCESS_KEYS:
+            return arguments
+
         if not self._has_template_patterns(arguments):
             return arguments
 
@@ -583,7 +602,7 @@ class ActionProcessor:
         action: QueuedActionProtocol,
         process_def: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        """Filter arguments to registered parameters and inject session/flow context.
+        """Validate registered arguments and inject session/flow context.
 
         W-VAULT-INTERFACE-EXTEND: when ``process_def`` declares
         ``requires_call_context: True`` (set via
@@ -595,7 +614,8 @@ class ActionProcessor:
         for per-method admin/operator gating + per-key namespace
         ownership checks downstream.
         """
-        filtered: dict[str, object] = {k: v for k, v in arguments.items() if k in parameters_schema}
+        validate_process_arguments(action.process_key, parameters_schema, arguments)
+        filtered: dict[str, object] = dict(arguments)
 
         # Inject standard context fields
         self._inject_session_context(filtered, parameters_schema, action)

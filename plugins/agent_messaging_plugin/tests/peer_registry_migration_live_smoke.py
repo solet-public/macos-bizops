@@ -26,8 +26,10 @@ Standalone — not pytest.  Run with::
     .venv/bin/python3 plugins/agent_messaging_plugin/tests/peer_registry_migration_live_smoke.py
 """
 
+
 from __future__ import annotations
 
+# ruff: noqa: E402
 import contextlib
 import os
 import socket
@@ -36,8 +38,14 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from ananta.core.runtime.port_manager import read_port_file
 

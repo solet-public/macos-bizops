@@ -14,7 +14,7 @@ label="${1:-Operator}"
 model="$2"
 effort="$3"
 
-cd "{{CLONE_DIR}}" || exit 1
+cd {{CLONE_DIR_ZSH}} || exit 1
 
 typeset -a extra_flags
 [[ -n "$model" ]]  && extra_flags+=(--model "$model")
@@ -29,18 +29,40 @@ typeset -a extra_flags
 # picker: launch with SOLET_ALLOW_ASKUSERQUESTION=1. Rationale and doctrine:
 # search the knowledge base for "structured-choice prompt default deny".
 [[ "$SOLET_ALLOW_ASKUSERQUESTION" != "1" ]] && \
-  extra_flags+=(--settings "{{CLONE_DIR}}/client/claude-session-overlay.json")
+  extra_flags+=(--settings {{CLONE_DIR_ZSH}}/client/claude-session-overlay.json)
 
-# Permission mode. Defaults to bypassPermissions so a fresh install can
-# actually do work; set SOLET_PERMISSION_PROMPTS=1 to get the per-action
-# approval prompt back for a session you want to supervise.
+# Permission posture. Three explicit states via SOLET_PERMISSION_POSTURE
+# (seed feedback #30/§48.3, 2026-08-24): "bypass" (default) passes
+# --permission-mode bypassPermissions so a fresh install can actually do
+# work; "prompt" passes --permission-mode default, which forces Claude
+# Code's own standard per-action approval flow regardless of what this
+# machine's own ~/.claude/settings.json otherwise says; "inherit" passes no
+# permission-mode flag at all, deferring entirely to Claude Code's own
+# resolution (this machine's global settings, whatever they are — the state
+# an unset posture used to reach only via SOLET_PERMISSION_PROMPTS=1, kept
+# below as a permanent alias so no existing deployment's exported env
+# changes behavior). "prompt" is the new state "inherit" cannot promise:
+# inherit follows the operator's own global config, which can itself change
+# across a Claude Code update (the exact gap #30 reported — a flagless
+# session came up auto-denying with no approval path because the global
+# config's own meaning shifted under a CLI update); prompt is a fixed,
+# explicit request for standard prompting that does not depend on it.
 #
 # Note this launcher takes POSITIONAL arguments (label, model, effort) and
 # forwards no arbitrary flags, so `claude-{{SOLET_NAME}} --permission-mode ...`
 # is read as label="--permission-mode" and fails with an error naming neither
 # cause. Use the environment variable.
-[[ "$SOLET_PERMISSION_PROMPTS" != "1" ]] && \
-  extra_flags+=(--permission-mode bypassPermissions)
+_permission_posture="${SOLET_PERMISSION_POSTURE:-bypass}"
+[[ "$SOLET_PERMISSION_PROMPTS" == "1" ]] && _permission_posture="inherit"
+case "$_permission_posture" in
+  bypass)  extra_flags+=(--permission-mode bypassPermissions) ;;
+  prompt)  extra_flags+=(--permission-mode default) ;;
+  inherit) ;;
+  *)
+    print -u2 "claude-{{SOLET_NAME}}: unknown SOLET_PERMISSION_POSTURE=$_permission_posture (want bypass|prompt|inherit); using bypass"
+    extra_flags+=(--permission-mode bypassPermissions)
+    ;;
+esac
 
 # Session label: read by the optional peer bridge for role identity and by the
 # coordination-hooks plugin's role-binding reminder for the role re-claim.

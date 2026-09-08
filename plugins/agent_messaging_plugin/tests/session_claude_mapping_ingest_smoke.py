@@ -19,8 +19,8 @@ Also covers ``detect_hook_absent_sessions`` (S2c, named T1 follow-up): a
 ``managed_session`` row past the grace window with NO ``hook:startup``
 mapping row fires a WARNING (the genuinely-broken-hook case the cross-check
 alone cannot see); a row still inside the grace window, one that already
-has its hook:startup row, an ``operator``-host row, and rows in terminal/
-too-early lifecycle states are all NOT flagged; and the same wired-consumer
+has its hook:startup row, and rows in terminal/too-early lifecycle states
+are all NOT flagged; an old operator row is included; and the same wired-consumer
 proof for the sweep tick.
 
 Run:
@@ -71,6 +71,7 @@ from agent_messaging_plugin.session_claude_mapping_store import (  # noqa: E402
 )
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     ManagedSessionSpec,
+    backfill_registration,
     insert_managed_session,
     transition_lifecycle_state,
 )
@@ -93,8 +94,12 @@ def _check(condition: object, label: str) -> None:
 
 
 def _write_spool_file(
-    spool_dir: Path, *, agent_instance_id: str, claude_session_id: str,
-    captured_at: str = "2026-08-05T16:00:00+00:00", capture_source: str = "hook:startup",
+    spool_dir: Path,
+    *,
+    agent_instance_id: str,
+    claude_session_id: str,
+    captured_at: str = "2026-08-05T16:00:00+00:00",
+    capture_source: str = "hook:startup",
     content: str | None = None,
 ) -> Path:
     spool_dir.mkdir(parents=True, exist_ok=True)
@@ -102,12 +107,16 @@ def _write_spool_file(
     if content is not None:
         path.write_text(content)
         return path
-    path.write_text(json.dumps({
-        "agent_instance_id": agent_instance_id,
-        "claude_session_id": claude_session_id,
-        "captured_at": captured_at,
-        "capture_source": capture_source,
-    }))
+    path.write_text(
+        json.dumps(
+            {
+                "agent_instance_id": agent_instance_id,
+                "claude_session_id": claude_session_id,
+                "captured_at": captured_at,
+                "capture_source": capture_source,
+            }
+        )
+    )
     return path
 
 
@@ -141,7 +150,9 @@ def test_app_home_fallback_drains_platform_side() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         spool_dir = Path(tmp) / "data" / "session_claude_mapping_spool"
         path = _write_spool_file(
-            spool_dir, agent_instance_id="agi-apphome-1", claude_session_id="cs-apphome",
+            spool_dir,
+            agent_instance_id="agi-apphome-1",
+            claude_session_id="cs-apphome",
         )
         orig = os.environ.pop(_SPOOL_ENV, None)
         orig_app_home = os.environ.get("APP_HOME")
@@ -160,7 +171,9 @@ def test_app_home_fallback_drains_platform_side() -> None:
             result == {"files_seen": 1, "upserted": 1, "skipped_malformed": 0},
             "env var unset + APP_HOME set -> drain resolves APP_HOME/data/session_claude_mapping_spool and ingests",
         )
-        _check(not path.exists(), "APP_HOME-fallback ingest deletes the spool file after durable write")
+        _check(
+            not path.exists(), "APP_HOME-fallback ingest deletes the spool file after durable write"
+        )
 
 
 def test_explicit_spool_env_wins_over_app_home() -> None:
@@ -171,10 +184,14 @@ def test_explicit_spool_env_wins_over_app_home() -> None:
         env_spool = Path(tmp) / "declared"
         app_home_spool = Path(tmp) / "home" / "data" / "session_claude_mapping_spool"
         env_path = _write_spool_file(
-            env_spool, agent_instance_id="agi-declared-1", claude_session_id="cs-declared",
+            env_spool,
+            agent_instance_id="agi-declared-1",
+            claude_session_id="cs-declared",
         )
         home_path = _write_spool_file(
-            app_home_spool, agent_instance_id="agi-derived-1", claude_session_id="cs-derived",
+            app_home_spool,
+            agent_instance_id="agi-derived-1",
+            claude_session_id="cs-derived",
         )
         orig = os.environ.get(_SPOOL_ENV)
         orig_app_home = os.environ.get("APP_HOME")
@@ -222,7 +239,9 @@ def test_fresh_file_ingested_and_deleted() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         spool_dir = Path(tmp) / "spool"
         path = _write_spool_file(
-            spool_dir, agent_instance_id="agi-ingest-1", claude_session_id="cs-fresh",
+            spool_dir,
+            agent_instance_id="agi-ingest-1",
+            claude_session_id="cs-fresh",
         )
         os.environ[_SPOOL_ENV] = str(spool_dir)
         try:
@@ -237,7 +256,10 @@ def test_fresh_file_ingested_and_deleted() -> None:
         _check(not path.exists(), "the spool file is deleted after a successful ingest")
         rows = list_session_claude_mappings(state, "agi-ingest-1")
         _check(len(rows) == 1, "exactly one row appears in session_claude_mapping")
-        _check(rows[0]["claude_session_id"] == "cs-fresh", "the row carries the right claude_session_id")
+        _check(
+            rows[0]["claude_session_id"] == "cs-fresh",
+            "the row carries the right claude_session_id",
+        )
 
 
 def test_rerun_after_deletion_is_clean_noop() -> None:
@@ -262,7 +284,9 @@ def test_malformed_file_skipped_not_deleted() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         spool_dir = Path(tmp) / "spool"
         bad_json_path = _write_spool_file(
-            spool_dir, agent_instance_id="agi-bad-1", claude_session_id="cs-bad-1",
+            spool_dir,
+            agent_instance_id="agi-bad-1",
+            claude_session_id="cs-bad-1",
             content="not valid json{{{",
         )
         missing_field_path = spool_dir / "2026-08-05T16:00:01+00:00__agi-bad-2__cs-bad-2.json"
@@ -277,7 +301,10 @@ def test_malformed_file_skipped_not_deleted() -> None:
             result == {"files_seen": 2, "upserted": 0, "skipped_malformed": 2},
             f"both malformed files are skipped, neither upserted (got {result!r})",
         )
-        _check(bad_json_path.exists(), "invalid-JSON spool file is LEFT IN PLACE, never silently deleted")
+        _check(
+            bad_json_path.exists(),
+            "invalid-JSON spool file is LEFT IN PLACE, never silently deleted",
+        )
         _check(missing_field_path.exists(), "missing-required-field spool file is LEFT IN PLACE")
         rows = list_session_claude_mappings(state, "agi-bad-1")
         _check(rows == [], "no row is created for a malformed file")
@@ -291,7 +318,9 @@ def test_crash_before_delete_reingests_idempotently() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         spool_dir = Path(tmp) / "spool"
         path = _write_spool_file(
-            spool_dir, agent_instance_id="agi-crash-1", claude_session_id="cs-crash",
+            spool_dir,
+            agent_instance_id="agi-crash-1",
+            claude_session_id="cs-crash",
         )
         os.environ[_SPOOL_ENV] = str(spool_dir)
         try:
@@ -311,7 +340,10 @@ def test_crash_before_delete_reingests_idempotently() -> None:
             finally:
                 Path.unlink = original_unlink  # type: ignore[method-assign]
             _check(first["upserted"] == 1, "first drain upserts despite the delete failing")
-            _check(path.exists(), "the file survives when delete fails, even though the upsert succeeded")
+            _check(
+                path.exists(),
+                "the file survives when delete fails, even though the upsert succeeded",
+            )
 
             second = drain_session_claude_mapping_spool(state)
             _check(second["upserted"] == 1, "the surviving file is re-ingested on the next drain")
@@ -348,6 +380,7 @@ def _spawn_managed_session(
     host: str = SESSION_HOST_HEADLESS,
     lifecycle_state: str = LIFECYCLE_LIVE,
     created_at: datetime = _T0,
+    agent_runtime: str = "claude_code",
 ) -> None:
     """Inserts a ``managed_session`` row with a CONTROLLED ``created_at``
     (via ``state.now_iso`` override -- the fake's own stamping hook) and
@@ -359,20 +392,31 @@ def _spawn_managed_session(
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id=agent_instance_id, lane_id="lane-hook-absence", brief_ref="",
-            work_class=WORK_CLASS_READ_ONLY, budget_line="b1", host=host,
+            agent_instance_id=agent_instance_id,
+            lane_id="lane-hook-absence",
+            brief_ref="",
+            work_class=WORK_CLASS_READ_ONLY,
+            budget_line="b1",
+            host=host,
+            agent_runtime=agent_runtime,
         ),
     )
     if lifecycle_state == LIFECYCLE_SPAWNING:
         return
     transition_lifecycle_state(
-        state, agent_instance_id=agent_instance_id, from_state=LIFECYCLE_SPAWNING,
-        to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+        state,
+        agent_instance_id=agent_instance_id,
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE,
+        directed_by="operator:none",
     )
     if lifecycle_state != LIFECYCLE_LIVE:
         transition_lifecycle_state(
-            state, agent_instance_id=agent_instance_id, from_state=LIFECYCLE_LIVE,
-            to_state=lifecycle_state, directed_by="operator:none",
+            state,
+            agent_instance_id=agent_instance_id,
+            from_state=LIFECYCLE_LIVE,
+            to_state=lifecycle_state,
+            directed_by="operator:none",
         )
 
 
@@ -414,23 +458,24 @@ def test_hook_absence_no_warning_when_hook_present() -> None:
     state = cast("StateManagementInterface", RealShapeState())
     _spawn_managed_session(state, agent_instance_id="agi-hookful-1", host=SESSION_HOST_TMUX)
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-hookful-1", claude_session_id="cs-present",
-        captured_at=_T0.isoformat(), capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-hookful-1",
+        claude_session_id="cs-present",
+        captured_at=_T0.isoformat(),
+        capture_source="hook:startup",
     )
     past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
     warned = detect_hook_absent_sessions(state, now=past_grace)
     _check(warned == 0, "a row whose hook already fired is never flagged")
 
 
-def test_hook_absence_excludes_operator_host() -> None:
-    """``host='operator'`` rows are never spawned through either adapter, so
-    the hook contract does not apply to them -- never eligible, regardless
-    of elapsed time."""
+def test_hook_absence_includes_operator_host() -> None:
+    """CATCHES: retaining the false operator-host exclusion after C1."""
     state = cast("StateManagementInterface", RealShapeState())
     _spawn_managed_session(state, agent_instance_id="agi-operator-1", host=SESSION_HOST_OPERATOR)
     past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
     warned = detect_hook_absent_sessions(state, now=past_grace)
-    _check(warned == 0, "an operator-host row is never flagged, no matter how old")
+    _check(warned == 1, "an old hookless operator-host row is flagged")
 
 
 def test_hook_absence_excludes_terminal_and_spawning_states() -> None:
@@ -440,11 +485,15 @@ def test_hook_absence_excludes_terminal_and_spawning_states() -> None:
     itself is out of scope)."""
     state = cast("StateManagementInterface", RealShapeState())
     _spawn_managed_session(
-        state, agent_instance_id="agi-terminated-1", host=SESSION_HOST_HEADLESS,
+        state,
+        agent_instance_id="agi-terminated-1",
+        host=SESSION_HOST_HEADLESS,
         lifecycle_state=LIFECYCLE_TERMINATED,
     )
     _spawn_managed_session(
-        state, agent_instance_id="agi-spawning-1", host=SESSION_HOST_HEADLESS,
+        state,
+        agent_instance_id="agi-spawning-1",
+        host=SESSION_HOST_HEADLESS,
         lifecycle_state=LIFECYCLE_SPAWNING,
     )
     far_future = _T0 + timedelta(days=365)
@@ -459,13 +508,66 @@ def test_hook_absence_counts_multiple_absent_rows() -> None:
     _spawn_managed_session(state, agent_instance_id="agi-multi-1", host=SESSION_HOST_HEADLESS)
     _spawn_managed_session(state, agent_instance_id="agi-multi-2", host=SESSION_HOST_TMUX)
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-multi-2", claude_session_id="cs-multi-2",
-        captured_at=_T0.isoformat(), capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-multi-2",
+        claude_session_id="cs-multi-2",
+        captured_at=_T0.isoformat(),
+        capture_source="hook:startup",
     )
     _spawn_managed_session(state, agent_instance_id="agi-multi-3", host=SESSION_HOST_HEADLESS)
     past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
     warned = detect_hook_absent_sessions(state, now=past_grace)
     _check(warned == 2, f"exactly the two genuinely hook-absent rows are counted (got {warned})")
+
+
+def test_hook_absence_is_once_latched_per_session() -> None:
+    """Regression: an unresolved hook absence is logged once, never once per tick."""
+    state = cast("StateManagementInterface", RealShapeState())
+    _spawn_managed_session(state, agent_instance_id="agi-latched-1")
+    past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
+    records, original = _capture_warnings()
+    try:
+        first = detect_hook_absent_sessions(state, now=past_grace)
+        second = detect_hook_absent_sessions(state, now=past_grace + timedelta(minutes=5))
+    finally:
+        session_claude_mapping_ingest.logger.warning = original
+    _check(first == 1, "the first eligible sweep emits the actionable warning")
+    _check(second == 0, "the next sweep does not re-warn the same absent session")
+    _check(len(records) == 1, "one absent session produces exactly one WARNING across two ticks")
+
+
+def test_hook_absence_excludes_codex_sessions_that_cannot_fire_claude_hooks() -> None:
+    """Codex has no Claude SessionStart hook, so its absence must not be alarmed."""
+    state = cast("StateManagementInterface", RealShapeState())
+    _spawn_managed_session(
+        state,
+        agent_instance_id="agi-codex-hookless-1",
+        agent_runtime="codex",
+    )
+    backfill_registration(
+        state,
+        agent_instance_id="agi-codex-hookless-1",
+        agent_id="codex",
+        agent_session_id="ases-agi-codex-hookless-1",
+    )
+    past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
+    records, original = _capture_warnings()
+    try:
+        warned = detect_hook_absent_sessions(state, now=past_grace)
+    finally:
+        session_claude_mapping_ingest.logger.warning = original
+    _check(warned == 0, "a structurally hookless Codex session is excluded")
+    _check(records == [], "Codex produces no unactionable HOOK ABSENCE warning")
+
+
+def test_hook_absence_tick_is_bounded_to_one_page() -> None:
+    """A large unresolved population is handled incrementally, never in one sweep."""
+    state = cast("StateManagementInterface", RealShapeState())
+    for number in range(30):
+        _spawn_managed_session(state, agent_instance_id=f"agi-bounded-{number:02d}")
+    past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
+    warned = detect_hook_absent_sessions(state, now=past_grace)
+    _check(warned == 25, "one sweep handles at most the fixed 25-session page")
 
 
 def test_sweep_tick_wiring_reaches_hook_absence_detection() -> None:
@@ -479,7 +581,9 @@ def test_sweep_tick_wiring_reaches_hook_absence_detection() -> None:
     state = cast("StateManagementInterface", RealShapeState())
     long_ago = datetime.now(UTC) - timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 300)
     _spawn_managed_session(
-        state, agent_instance_id="agi-wired-hookless-1", host=SESSION_HOST_HEADLESS,
+        state,
+        agent_instance_id="agi-wired-hookless-1",
+        host=SESSION_HOST_HEADLESS,
         created_at=long_ago,
     )
     records, original = _capture_warnings()
@@ -506,19 +610,28 @@ def test_cross_check_mismatched_startup_pair_warns() -> None:
     fires, naming both session ids."""
     state = RealShapeState()
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-xcheck-1", claude_session_id="cs-from-hook",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-xcheck-1",
+        claude_session_id="cs-from-hook",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-xcheck-1", claude_session_id="cs-from-init-event",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="init_event",
+        state,
+        agent_instance_id="agi-xcheck-1",
+        claude_session_id="cs-from-init-event",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="init_event",
     )
     records, original = _capture_warnings()
     try:
         session_claude_mapping_ingest._cross_check_init_event(state, "agi-xcheck-1")  # noqa: SLF001
     finally:
         session_claude_mapping_ingest.logger.warning = original
-    _check(len(records) == 1, "a genuinely mismatched startup/init_event pair fires exactly one WARNING")
+    _check(
+        len(records) == 1,
+        "a genuinely mismatched startup/init_event pair fires exactly one WARNING",
+    )
     _check(
         records and "cs-from-hook" in records[0] and "cs-from-init-event" in records[0],
         "the WARNING names both claude_session_id values",
@@ -530,12 +643,18 @@ def test_cross_check_matching_pair_no_warning() -> None:
     no warning -- the pairing only fires on a genuine disagreement."""
     state = RealShapeState()
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-xcheck-2", claude_session_id="cs-agree",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-xcheck-2",
+        claude_session_id="cs-agree",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-xcheck-2", claude_session_id="cs-agree",
-        captured_at="2026-08-05T18:00:01+00:00", capture_source="init_event",
+        state,
+        agent_instance_id="agi-xcheck-2",
+        claude_session_id="cs-agree",
+        captured_at="2026-08-05T18:00:01+00:00",
+        capture_source="init_event",
     )
     records, original = _capture_warnings()
     try:
@@ -554,16 +673,25 @@ def test_cross_check_clear_row_never_contaminates_the_pairing() -> None:
     would get ignored, un-guarding the real mismatch class."""
     state = RealShapeState()
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-xcheck-3", claude_session_id="cs-startup-clean",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-xcheck-3",
+        claude_session_id="cs-startup-clean",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-xcheck-3", claude_session_id="cs-startup-clean",
-        captured_at="2026-08-05T18:00:01+00:00", capture_source="init_event",
+        state,
+        agent_instance_id="agi-xcheck-3",
+        claude_session_id="cs-startup-clean",
+        captured_at="2026-08-05T18:00:01+00:00",
+        capture_source="init_event",
     )
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-xcheck-3", claude_session_id="cs-after-a-real-clear",
-        captured_at="2026-08-05T18:05:00+00:00", capture_source="hook:clear",
+        state,
+        agent_instance_id="agi-xcheck-3",
+        claude_session_id="cs-after-a-real-clear",
+        captured_at="2026-08-05T18:05:00+00:00",
+        capture_source="hook:clear",
     )
     records, original = _capture_warnings()
     try:
@@ -583,8 +711,11 @@ def test_cross_check_missing_either_side_no_warning() -> None:
     both fall out silently, never flagged as a mismatch."""
     state = RealShapeState()
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-xcheck-4", claude_session_id="cs-tmux-only",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-xcheck-4",
+        claude_session_id="cs-tmux-only",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     records, original = _capture_warnings()
     try:
@@ -595,8 +726,11 @@ def test_cross_check_missing_either_side_no_warning() -> None:
 
     state2 = RealShapeState()
     upsert_session_claude_mapping(
-        state2, agent_instance_id="agi-xcheck-5", claude_session_id="cs-init-only",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="init_event",
+        state2,
+        agent_instance_id="agi-xcheck-5",
+        claude_session_id="cs-init-only",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="init_event",
     )
     records2, original2 = _capture_warnings()
     try:
@@ -614,15 +748,21 @@ def test_full_drain_pipeline_fires_the_cross_check() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         spool_dir = Path(tmp) / "spool"
         _write_spool_file(
-            spool_dir, agent_instance_id="agi-xcheck-e2e", claude_session_id="cs-e2e-hook",
+            spool_dir,
+            agent_instance_id="agi-xcheck-e2e",
+            claude_session_id="cs-e2e-hook",
             capture_source="hook:startup",
         )
         spool_dir.mkdir(parents=True, exist_ok=True)
         (spool_dir / "2026-08-05T18:00:01+00:00__agi-xcheck-e2e__cs-e2e-init.json").write_text(
-            json.dumps({
-                "agent_instance_id": "agi-xcheck-e2e", "claude_session_id": "cs-e2e-init",
-                "captured_at": "2026-08-05T18:00:01+00:00", "capture_source": "init_event",
-            }),
+            json.dumps(
+                {
+                    "agent_instance_id": "agi-xcheck-e2e",
+                    "claude_session_id": "cs-e2e-init",
+                    "captured_at": "2026-08-05T18:00:01+00:00",
+                    "capture_source": "init_event",
+                }
+            ),
         )
         os.environ[_SPOOL_ENV] = str(spool_dir)
         records, original = _capture_warnings()
@@ -651,7 +791,9 @@ def test_sweep_tick_wiring_reaches_the_real_drain() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         spool_dir = Path(tmp) / "spool"
         path = _write_spool_file(
-            spool_dir, agent_instance_id="agi-wired-1", claude_session_id="cs-wired",
+            spool_dir,
+            agent_instance_id="agi-wired-1",
+            claude_session_id="cs-wired",
         )
         os.environ[_SPOOL_ENV] = str(spool_dir)
         state = RealShapeState()
@@ -695,9 +837,12 @@ def main() -> int:
     test_hook_absence_fires_past_grace_window()
     test_hook_absence_no_warning_within_grace_window()
     test_hook_absence_no_warning_when_hook_present()
-    test_hook_absence_excludes_operator_host()
+    test_hook_absence_includes_operator_host()
     test_hook_absence_excludes_terminal_and_spawning_states()
     test_hook_absence_counts_multiple_absent_rows()
+    test_hook_absence_is_once_latched_per_session()
+    test_hook_absence_excludes_codex_sessions_that_cannot_fire_claude_hooks()
+    test_hook_absence_tick_is_bounded_to_one_page()
     test_sweep_tick_wiring_reaches_hook_absence_detection()
 
     print()

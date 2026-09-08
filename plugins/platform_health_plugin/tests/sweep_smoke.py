@@ -34,8 +34,10 @@ sys.path.insert(0, str(
 
 from platform_health_plugin.constants import (  # noqa: E402
     SELF_PROCESS_KEY,
+    STATUS_DRY_RUN,
     STATUS_FAILED,
     STATUS_OK,
+    STATUS_SKIPPED_SCOPE,
     STATUS_SKIPPED_SELF,
     STATUS_SKIPPED_WRITE,
 )
@@ -122,11 +124,31 @@ class _FixturePluginManager:
         return self._plugins.get(plugin_name)
 
 
+class _FixtureExternalPlugin:
+    """Outward-facing plugin double; every call is recorded, never real I/O."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[dict[str, object], dict[str, object]]] = []
+
+    def get_account_status(
+        self, params: dict[str, object], state: dict[str, object],
+    ) -> dict[str, object]:
+        self.calls.append((params, state))
+        return {"connected": False}
+
+
 class _FixtureOrchestrator:
-    def __init__(self, service: _FixtureService, registry: dict[str, object]) -> None:
+    def __init__(
+        self,
+        service: _FixtureService,
+        registry: dict[str, object],
+        external_plugin: _FixtureExternalPlugin,
+    ) -> None:
         self._service = service
         self._registry = registry
-        self.plugin_manager = _FixturePluginManager({})
+        self.plugin_manager = _FixturePluginManager({
+            "soundcloud_artist_studio_plugin": external_plugin,
+        })
 
     def get_service(self, name: str) -> object | None:
         if name in {
@@ -161,7 +183,7 @@ def _build_registry() -> dict[str, object]:
                     "limit": {"type": "integer", "required": False},
                 },
             },
-            "service_interface::soundcloud_artist_studio_service::get_account_status": {
+            "plugin::soundcloud_artist_studio_plugin::get_account_status": {
                 "name": "get_account_status", "parameters": {},
             },
             "service_interface::scheduling_service::execute_in_seconds": {
@@ -240,9 +262,10 @@ def test_build_sentinel_args() -> None:
 
 def test_sweep_read_only_default() -> None:
     service = _FixtureService()
+    external_plugin = _FixtureExternalPlugin()
     registry = _build_registry()
-    orch = _FixtureOrchestrator(service, registry)
-    report = run_sweep(orch, write_enabled=False)
+    orch = _FixtureOrchestrator(service, registry, external_plugin)
+    report = run_sweep(orch, write_enabled=False, dry_run=False)
     by_key = {row["process_key"]: row for row in report["results"]}
 
     # Read-shape verbs all fired (some ok, some failed).
@@ -257,14 +280,9 @@ def test_sweep_read_only_default() -> None:
         "ledger integer=boolean error text preserved verbatim",
     )
 
-    get_status = by_key[
-        "service_interface::soundcloud_artist_studio_service::get_account_status"
-    ]
-    _check(get_status["status"] == STATUS_FAILED, "ARRAY-vs-LIST captured as failed")
-    _check(
-        "ParameterType.ARRAY" in str(get_status["error_message"]),
-        "D5 EDGE-wake ParameterType drift surfaced verbatim",
-    )
+    get_status = by_key["plugin::soundcloud_artist_studio_plugin::get_account_status"]
+    _check(get_status["status"] == STATUS_SKIPPED_SCOPE, "external plugin excluded from live default scope")
+    _check(not external_plugin.calls, "old call shape dispatches no external plugin by default")
 
     # Write-shape verbs skipped by default.
     register = by_key["service_interface::fixture_service::register_thing"]
@@ -295,9 +313,10 @@ def test_sweep_write_enabled_fires_scheduling_failure() -> None:
     its 'Process not found or malformed' error surfaces verbatim.
     """
     service = _FixtureService()
+    external_plugin = _FixtureExternalPlugin()
     registry = _build_registry()
-    orch = _FixtureOrchestrator(service, registry)
-    report = run_sweep(orch, write_enabled=True)
+    orch = _FixtureOrchestrator(service, registry, external_plugin)
+    report = run_sweep(orch, write_enabled=True, dry_run=False)
     by_key = {row["process_key"]: row for row in report["results"]}
 
     execute_in_seconds = by_key[
@@ -321,8 +340,9 @@ def test_sweep_write_enabled_fires_scheduling_failure() -> None:
 
 def test_sweep_include_pattern_narrows() -> None:
     service = _FixtureService()
+    external_plugin = _FixtureExternalPlugin()
     registry = _build_registry()
-    orch = _FixtureOrchestrator(service, registry)
+    orch = _FixtureOrchestrator(service, registry, external_plugin)
     report = run_sweep(orch, include_pattern="session_ledger_service")
     _check(report["total"] == 1, "include_pattern narrowed to one process")
     _check(
@@ -330,6 +350,63 @@ def test_sweep_include_pattern_narrows() -> None:
         == "service_interface::session_ledger_service::list_sessions",
         "include_pattern selected the ledger row",
     )
+
+
+def test_dry_run_and_explicit_external_scope() -> None:
+    service = _FixtureService()
+    external_plugin = _FixtureExternalPlugin()
+    orch = _FixtureOrchestrator(service, _build_registry(), external_plugin)
+
+    report = run_sweep(orch, write_enabled=False)
+    _check(not service.calls and not external_plugin.calls, "dry_run default dispatches nothing")
+    _check(report["would_dispatch"] == 3, "dry_run reports service-interface read rows")
+    by_key = {row["process_key"]: row for row in report["results"]}
+    _check(
+        by_key["service_interface::fixture_service::list_clean"]["status"] == STATUS_DRY_RUN,
+        "dry_run returns a classification row for a would-dispatch process",
+    )
+
+    try:
+        run_sweep(
+            orch,
+            dry_run=False,
+            external_namespaces=("soundcloud_artist_studio_plugin",),
+        )
+    except ValueError as exc:
+        _check(
+            "operator_confirmation" in str(exc) and "soundcloud_artist_studio_plugin" in str(exc),
+            "external scope without confirmation refuses loudly",
+        )
+    else:
+        _check(False, "external scope without confirmation refuses loudly")
+
+    report = run_sweep(
+        orch,
+        dry_run=False,
+        external_namespaces=("soundcloud_artist_studio_plugin",),
+        operator_confirmation="operator-turn-123",
+    )
+    external_row = next(
+        row for row in report["results"]
+        if row["process_key"] == "plugin::soundcloud_artist_studio_plugin::get_account_status"
+    )
+    _check(len(external_plugin.calls) == 1, "enumerated external plugin dispatches exactly once")
+    _check(
+        external_row["operator_confirmation"] == "operator-turn-123",
+        "external result row echoes operator confirmation",
+    )
+
+    try:
+        run_sweep(
+            orch,
+            dry_run=False,
+            external_namespaces=("unknown_plugin",),
+            operator_confirmation="operator-turn-123",
+        )
+    except ValueError as exc:
+        _check("declared outward-facing" in str(exc), "unknown plugin namespace fails closed")
+    else:
+        _check(False, "unknown plugin namespace fails closed")
 
 
 def main() -> int:
@@ -340,6 +417,7 @@ def main() -> int:
     test_sweep_read_only_default()
     test_sweep_write_enabled_fires_scheduling_failure()
     test_sweep_include_pattern_narrows()
+    test_dry_run_and_explicit_external_scope()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

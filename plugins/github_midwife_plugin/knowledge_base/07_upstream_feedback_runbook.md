@@ -42,7 +42,7 @@ It also does not constrain you. This code is Apache-2.0: you already have the ri
 
 ### Filing an item as an issue
 
-1. **Open the repository's issue chooser** and pick the form matching the item class. The forms exist so you cannot forget the evidence — they ask for the command, the observed output, the expected behavior, and the release you measured against, and they will not submit without them.
+1. **File non-interactively with `gh issue create --body-file`.** The issue forms are a browser UI; mirror the matching form's required visible field labels in the draft, add the checked content-gate acknowledgement, and apply that form's label. The API does not enforce the fields, so verify the structured draft before sending rather than relying on a chooser.
 2. **One issue per item.** Resist the urge to fold three defects into one issue; each needs its own disposition, and a merged issue can only be closed once.
 3. **A multi-item round gets a parent issue.** File a parent issue for the round, then attach each item's issue to it as a sub-issue. The parent carries the round's context and gives both sides one place to see what is still open; the children carry the individually answerable items.
 4. **A single-item round needs no parent.** File the one issue.
@@ -81,7 +81,10 @@ The feedback surface is outside your deployment. An issue on a repository is pub
 - **No credentials or secret-looking values** — nothing from Keychain, config, or environment. If evidence output contains one, redact it and say so.
 - **No transcript excerpts containing any of the above.** Re-read pasted command output specifically — that is where identifiers hide.
 
-The issue forms carry this gate as a required checkbox. The checkbox is a reminder, not the check: tick it because you re-read the body, never to get past the form.
+The issue forms carry this gate as a required checkbox. In the non-interactive
+filing path, include its checked Markdown acknowledgement in the structured
+body. It is a reminder, not the check: check it because you re-read the body,
+never to get past a form or API request.
 
 If an item cannot be reported without violating this gate, report the generic shape of it and offer detail through whatever private channel the operator and the maintainers separately share, if any.
 

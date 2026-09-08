@@ -167,6 +167,33 @@ def _file_mode(path: Path) -> int:
     return path.stat().st_mode & 0o777
 
 
+def _uninstall_removes_port_files(
+    *,
+    home_dir: Path,
+    plist_path: Path,
+    unit_path: Path,
+    socket_path: Path,
+    router_port_file: Path,
+    bridge_port_file: Path,
+) -> bool:
+    """Uninstall the fixture router and prove both router-owned files are gone."""
+
+    uninstall_proc = _run_uninstall(
+        home_dir=home_dir,
+        plist_path=plist_path,
+        unit_path=unit_path,
+        socket_path=socket_path,
+    )
+    uninstall_ok = uninstall_proc.returncode == 0
+    router_removed = not router_port_file.exists()
+    bridge_removed = not bridge_port_file.exists()
+    uninstall_detail = "" if uninstall_ok else f"stderr={uninstall_proc.stderr!r}"
+    _stamp("uninstall exit 0", uninstall_ok, uninstall_detail)
+    _stamp("uninstall removes router.port", router_removed, str(router_port_file))
+    _stamp("uninstall removes bridge.port", bridge_removed, str(bridge_port_file))
+    return all((uninstall_ok, router_removed, bridge_removed))
+
+
 def _serve_one_router_status(socket_path: Path) -> threading.Thread:
     """Serve one router status reply on a sandboxed Unix socket.
 
@@ -284,19 +311,26 @@ def _case_slice1_router_writes_both_files(
     _stamp("router.port mode 0o600", router_mode == 0o600, f"mode={router_mode:#o}")
     _stamp("bridge.port mode 0o600", bridge_mode == 0o600, f"mode={bridge_mode:#o}")
 
-    # Uninstall + clean up our port files (the operator's real home is
-    # untouched but we still leave the sandbox clean).
-    _run_uninstall(
-        home_dir=home_dir, plist_path=plist_path,
-        unit_path=unit_path, socket_path=socket_path,
+    # Uninstall must remove both router-owned discovery files. The operator's
+    # real home is untouched; this only inspects the smoke sandbox.
+    uninstall_removes_files = _uninstall_removes_port_files(
+        home_dir=home_dir,
+        plist_path=plist_path,
+        unit_path=unit_path,
+        socket_path=socket_path,
+        router_port_file=router_port_file,
+        bridge_port_file=bridge_port_file,
     )
 
-    return (
-        matches_router
-        and matches_bridge
-        and router_port == bridge_port
-        and router_mode == 0o600
-        and bridge_mode == 0o600
+    return all(
+        (
+            matches_router,
+            matches_bridge,
+            router_port == bridge_port,
+            router_mode == 0o600,
+            bridge_mode == 0o600,
+            uninstall_removes_files,
+        )
     )
 
 

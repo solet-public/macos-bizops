@@ -36,10 +36,18 @@ scripted fake and the retry backoff is patched to a no-op.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import asyncio
 import os
+import sys
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 import agent_messaging_plugin.mcp_bridge.forwarder as fwd_mod
 from agent_messaging_plugin.mcp_bridge.__main__ import (
@@ -202,7 +210,7 @@ def test_dense_event_burst_does_not_accelerate_reassert() -> None:
     drains = 0
     reasserts = 0
 
-    async def _drain(_bridge_id: str) -> None:
+    async def _drain(_bridge_id: str, _generation: int | None = None) -> None:
         nonlocal drains
         drains += 1
         if drains == 100:
@@ -233,7 +241,7 @@ def test_elapsed_deadline_reasserts_once() -> None:
     drains = 0
     reasserts = 0
 
-    async def _drain(_bridge_id: str) -> None:
+    async def _drain(_bridge_id: str, _generation: int | None = None) -> None:
         nonlocal drains, now
         drains += 1
         now += REGISTER_REASSERT_INTERVAL_S

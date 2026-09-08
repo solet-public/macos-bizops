@@ -47,6 +47,9 @@ from _real_state_fake import RealShapeState  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from ananta.llm.agent_messaging.state_results import require_records  # noqa: E402
 
+from agent_messaging_plugin.http_routes import (  # noqa: E402
+    _managed_session_registration_backfill,
+)
 from agent_messaging_plugin.schema import (  # noqa: E402
     LIFECYCLE_IDLE,
     LIFECYCLE_LIVE,
@@ -62,6 +65,7 @@ from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     StaleLifecycleStateError,
     backfill_registration,
     insert_managed_session,
+    iter_managed_sessions_unbounded,
     list_managed_sessions,
     read_managed_session,
     set_host_ref,
@@ -125,15 +129,23 @@ def test_list_filters() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-spawn-1", lane_id="lane-x", brief_ref="",
-            work_class="analysis_deliverable", budget_line="budget-1", host="headless",
+            agent_instance_id="agi-spawn-1",
+            lane_id="lane-x",
+            brief_ref="",
+            work_class="analysis_deliverable",
+            budget_line="budget-1",
+            host="headless",
         ),
     )
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-spawn-2", lane_id="lane-y", brief_ref="", work_class="read_only",
-            budget_line="budget-2", host="operator",
+            agent_instance_id="agi-spawn-2",
+            lane_id="lane-y",
+            brief_ref="",
+            work_class="read_only",
+            budget_line="budget-2",
+            host="operator",
         ),
     )
     lane_x_rows = list_managed_sessions(state, {"lane_id": "lane-x"})
@@ -141,10 +153,13 @@ def test_list_filters() -> None:
         len(lane_x_rows) == 1 and lane_x_rows[0]["agent_instance_id"] == "agi-spawn-1",
         "list_managed_sessions filters by lane_id",
     )
-    _check(
-        len(list_managed_sessions(state)) == 2,
-        "list_managed_sessions with no filter returns all",
+    all_rows = list(
+        iter_managed_sessions_unbounded(
+            state,
+            reason="store smoke intentionally verifies all inserted fixture rows",
+        )
     )
+    _check(len(all_rows) == 2, "the named full-ledger helper returns all fixture rows")
 
 
 def test_transition_guards() -> None:
@@ -157,15 +172,23 @@ def test_transition_guards() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-spawn-1", lane_id="lane-x", brief_ref="",
-            work_class="analysis_deliverable", budget_line="budget-1", host="headless",
+            agent_instance_id="agi-spawn-1",
+            lane_id="lane-x",
+            brief_ref="",
+            work_class="analysis_deliverable",
+            budget_line="budget-1",
+            host="headless",
         ),
     )
 
     # --- legal transition succeeds: ledger + audit both land ---
     transition_lifecycle_state(
-        state, agent_instance_id="agi-spawn-1", from_state=LIFECYCLE_SPAWNING,
-        to_state=LIFECYCLE_LIVE, directed_by="operator:none", reason="registration hook",
+        state,
+        agent_instance_id="agi-spawn-1",
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE,
+        directed_by="operator:none",
+        reason="registration hook",
     )
     _check(
         read_managed_session(state, "agi-spawn-1")["lifecycle_state"] == LIFECYCLE_LIVE,
@@ -180,8 +203,11 @@ def test_transition_guards() -> None:
     illegal_raised = False
     try:
         transition_lifecycle_state(
-            state, agent_instance_id="agi-spawn-1", from_state=LIFECYCLE_LIVE,
-            to_state=LIFECYCLE_RETIRED, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-spawn-1",
+            from_state=LIFECYCLE_LIVE,
+            to_state=LIFECYCLE_RETIRED,
+            directed_by="operator:none",
         )
     except IllegalLifecycleTransitionError:
         illegal_raised = True
@@ -213,8 +239,11 @@ def test_transition_guards() -> None:
     stale_raised = False
     try:
         transition_lifecycle_state(
-            state, agent_instance_id="agi-spawn-1", from_state=LIFECYCLE_LIVE,
-            to_state=LIFECYCLE_IDLE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-spawn-1",
+            from_state=LIFECYCLE_LIVE,
+            to_state=LIFECYCLE_IDLE,
+            directed_by="operator:none",
         )
     except StaleLifecycleStateError:
         stale_raised = True
@@ -242,12 +271,19 @@ def test_backfill_registration_fires_once() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-spawn-3", lane_id="lane-z", brief_ref="",
-            work_class="read_only", budget_line="budget-3", host="headless",
+            agent_instance_id="agi-spawn-3",
+            lane_id="lane-z",
+            brief_ref="",
+            work_class="read_only",
+            budget_line="budget-3",
+            host="headless",
         ),
     )
     backfill_registration(
-        state, agent_instance_id="agi-spawn-3", agent_id="claude_code", agent_session_id="sess-3",
+        state,
+        agent_instance_id="agi-spawn-3",
+        agent_id="claude_code",
+        agent_session_id="sess-3",
     )
     row = read_managed_session(state, "agi-spawn-3")
     _check(
@@ -272,15 +308,25 @@ def test_backfill_reconnect_does_not_refire() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-spawn-3", lane_id="lane-z", brief_ref="",
-            work_class="read_only", budget_line="budget-3", host="headless",
+            agent_instance_id="agi-spawn-3",
+            lane_id="lane-z",
+            brief_ref="",
+            work_class="read_only",
+            budget_line="budget-3",
+            host="headless",
         ),
     )
     backfill_registration(
-        state, agent_instance_id="agi-spawn-3", agent_id="claude_code", agent_session_id="sess-3",
+        state,
+        agent_instance_id="agi-spawn-3",
+        agent_id="claude_code",
+        agent_session_id="sess-3",
     )
     backfill_registration(
-        state, agent_instance_id="agi-spawn-3", agent_id="claude_code", agent_session_id="sess-3-b",
+        state,
+        agent_instance_id="agi-spawn-3",
+        agent_id="claude_code",
+        agent_session_id="sess-3-b",
     )
     row = read_managed_session(state, "agi-spawn-3")
     _check(
@@ -303,7 +349,9 @@ def test_backfill_with_no_managed_session_row_is_noop() -> None:
     no_row_raised = False
     try:
         backfill_registration(
-            state, agent_instance_id="agi-no-such-session", agent_id="claude_code",
+            state,
+            agent_instance_id="agi-no-such-session",
+            agent_id="claude_code",
             agent_session_id="sess-none",
         )
     except Exception:  # noqa: BLE001 — this smoke asserts NO exception of any kind
@@ -311,7 +359,50 @@ def test_backfill_with_no_managed_session_row_is_noop() -> None:
     _check(
         not no_row_raised,
         "backfill_registration on an agent_instance_id with no managed_session "
-        "row is a silent no-op (operator-launched sessions have no row)",
+        "row returns cleanly so the registration route can decide whether to birth inventory",
+    )
+
+
+def test_hand_launched_registration_creates_honest_operator_row() -> None:
+    """CATCHES: preserving the old no-row no-op in the actual registration seam.
+
+    This faithfully simulates a hand-launched bridge registering without any
+    prior spawn lineage, then reads the row back through the store API. A
+    fixture row inserted before the assertion would not exercise C1.
+    """
+    state = _state()
+    _managed_session_registration_backfill(
+        state,
+        agent_instance_id="agi-hand-launched",
+        agent_id="codex",
+        agent_session_id="ases-hand-launched",
+    )
+    row = read_managed_session(state, "agi-hand-launched")
+    _check(
+        row["host"] == "operator" and row["lifecycle_state"] == LIFECYCLE_LIVE,
+        "a hand-launched registration creates and activates a real operator row",
+    )
+    _check(
+        row["agent_id"] == "codex" and row["agent_session_id"] == "ases-hand-launched",
+        "the registration-created row reads back the registering identity",
+    )
+    _check(
+        row.get("report_by") is None
+        and row.get("expires_at") is None
+        and row["report_by_seconds"] == 0,
+        "the inventory row carries no fabricated deadline or TTL contract",
+    )
+    _managed_session_registration_backfill(
+        state,
+        agent_instance_id="agi-hand-launched",
+        agent_id="codex-reconnected",
+        agent_session_id="ases-hand-launched",
+    )
+    reconnected = read_managed_session(state, "agi-hand-launched")
+    _check(
+        reconnected["agent_id"] == "codex-reconnected"
+        and _transition_count(state, "agi-hand-launched") == 1,
+        "a reconnect updates identity without creating a second row or transition",
     )
 
 
@@ -329,8 +420,12 @@ def test_backfill_registration_recovers_spawn_id_from_agent_session_id() -> None
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-spawn-recover", lane_id="lane-z", brief_ref="",
-            work_class="read_only", budget_line="budget-3", host="tmux",
+            agent_instance_id="agi-spawn-recover",
+            lane_id="lane-z",
+            brief_ref="",
+            work_class="read_only",
+            budget_line="budget-3",
+            host="tmux",
         ),
     )
     backfill_registration(
@@ -367,16 +462,25 @@ def test_backfill_registration_fallback_refuses_when_recovered_row_not_spawning(
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-spawn-completed", lane_id="lane-z", brief_ref="",
-            work_class="read_only", budget_line="budget-3", host="tmux",
+            agent_instance_id="agi-spawn-completed",
+            lane_id="lane-z",
+            brief_ref="",
+            work_class="read_only",
+            budget_line="budget-3",
+            host="tmux",
         ),
     )
     backfill_registration(
-        state, agent_instance_id="agi-spawn-completed", agent_id="claude_code",
+        state,
+        agent_instance_id="agi-spawn-completed",
+        agent_id="claude_code",
         agent_session_id="ases-agi-spawn-completed",
     )
     row_before = read_managed_session(state, "agi-spawn-completed")
-    _check(row_before["lifecycle_state"] == LIFECYCLE_LIVE, "setup: the row is live before the refusal case")
+    _check(
+        row_before["lifecycle_state"] == LIFECYCLE_LIVE,
+        "setup: the row is live before the refusal case",
+    )
 
     backfill_registration(
         state,
@@ -455,8 +559,12 @@ def test_set_host_ref() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-spawn-3", lane_id="lane-z", brief_ref="",
-            work_class="read_only", budget_line="budget-3", host="headless",
+            agent_instance_id="agi-spawn-3",
+            lane_id="lane-z",
+            brief_ref="",
+            work_class="read_only",
+            budget_line="budget-3",
+            host="headless",
         ),
     )
     set_host_ref(state, agent_instance_id="agi-spawn-3", host_ref="driver-pid-4242")
@@ -466,13 +574,53 @@ def test_set_host_ref() -> None:
     )
 
 
+def test_written_columns_are_declared() -> None:
+    """Every column the store writes must exist in the declared TableSchema.
+
+    The battery's fakes accept any record shape, so a write-path column that
+    was never declared passes every lifecycle smoke and then fails at the
+    real provider with Postgres's undefined-column error (measured live
+    2026-08-28: ``provisioning_mode``). This check closes that seam: the
+    insert payload — including the conditional report_by/expires_at keys —
+    is compared against the schema declaration itself.
+    """
+    from agent_messaging_plugin.schema import get_managed_session_schema
+
+    state = _state()
+    record = insert_managed_session(
+        state,
+        ManagedSessionSpec(
+            agent_instance_id="agi-schema-parity",
+            lane_id="lane-schema-parity",
+            brief_ref="workbench/brief.md",
+            work_class="analysis_deliverable",
+            budget_line="budget-parity",
+            host="tmux",
+            spawned_by_instance_id="agi-spawner",
+            spawned_by_role="Claude-C",
+            directed_by="operator:none",
+            report_by_seconds=900,
+            ttl_seconds=3600,
+        ),
+    )
+    declared = set(get_managed_session_schema().columns)
+    undeclared = sorted(set(record) - declared)
+    _check(
+        not undeclared,
+        f"every written managed_session column is declared in the schema "
+        f"(undeclared: {undeclared})",
+    )
+
+
 def main() -> int:
     test_insert_and_read()
+    test_written_columns_are_declared()
     test_list_filters()
     test_transition_guards()
     test_backfill_registration_fires_once()
     test_backfill_reconnect_does_not_refire()
     test_backfill_with_no_managed_session_row_is_noop()
+    test_hand_launched_registration_creates_honest_operator_row()
     test_backfill_registration_recovers_spawn_id_from_agent_session_id()
     test_backfill_registration_fallback_refuses_when_recovered_row_not_spawning()
     test_backfill_registration_fallback_noop_when_recovered_id_also_has_no_row()

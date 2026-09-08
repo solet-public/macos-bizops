@@ -23,6 +23,8 @@ Checks:
   4. A hard failure (a mocked install command exits non-zero) is caught
      as a "failed" step record, not an uncaught exception, and the
      sequence stops there too.
+  5. Every formerly escaping standalone-bootstrap failure is converted to a
+     typed failed step record, and a real re-run resumes at that step.
 
 Run directly: ``.venv/bin/python3
 plugins/github_midwife_plugin/tests/bootstrap_stdlib_only_smoke.py``.
@@ -34,11 +36,13 @@ import contextlib
 import getpass
 import importlib.util
 import io
+import json
 import os
 import subprocess
 import sys
 import tempfile
 from collections.abc import Generator
+from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -46,6 +50,7 @@ from unittest.mock import patch
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _BOOTSTRAP_PATH = _REPO_ROOT / "bootstrap.py"
+_BOOTSTRAP_ADAPTER_PATHS = tuple(sorted((_REPO_ROOT / "bootstrap_adapter").glob("*.py")))
 
 _CHECKS_RUN: list[str] = []
 
@@ -76,6 +81,8 @@ def _load_bootstrap_module() -> ModuleType:
     # exec_module runs, or @dataclass crashes with an AttributeError on
     # a None module lookup.
     sys.modules[module_name] = module
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
     spec.loader.exec_module(module)
     return module
 
@@ -95,6 +102,8 @@ def _load_bootstrap_module_fresh() -> ModuleType:
         raise SmokeFailureError(f"could not build an import spec for {_BOOTSTRAP_PATH}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module  # dataclasses needs it registered before exec
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
     spec.loader.exec_module(module)
     return module
 
@@ -176,17 +185,18 @@ def _check_missing_solet_name_fails_loud() -> None:
 
 _AST_SCAN_SCRIPT = """
 import ast, sys
-source = open(sys.argv[1]).read()
-tree = ast.parse(source)
 mods = set()
-for node in ast.walk(tree):
-    if isinstance(node, ast.Import):
-        for alias in node.names:
-            mods.add(alias.name.split(".")[0])
-    elif isinstance(node, ast.ImportFrom):
-        if node.module:
-            mods.add(node.module.split(".")[0])
-non_stdlib = sorted(m for m in mods if m not in sys.stdlib_module_names)
+for path in sys.argv[1:]:
+    tree = ast.parse(open(path).read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mods.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and node.level == 0:
+                mods.add(node.module.split(".")[0])
+allowed_local = {"bootstrap_adapter"}
+non_stdlib = sorted(m for m in mods if m not in sys.stdlib_module_names | allowed_local)
 if non_stdlib:
     print("NON_STDLIB:" + ",".join(non_stdlib))
     sys.exit(1)
@@ -196,9 +206,31 @@ sys.exit(0)
 
 
 def _check_bootstrap_is_stdlib_only() -> None:
+    expected = {
+        "__init__.py",
+        "models.py",
+        "protocol.py",
+        "dependency.py",
+        "homebrew.py",
+        "postgres.py",
+        "routes.py",
+    }
+    _check(
+        "stdlib scan covers the complete authorized bootstrap_adapter package",
+        {path.name for path in _BOOTSTRAP_ADAPTER_PATHS} == expected,
+        f"scanned={[path.name for path in _BOOTSTRAP_ADAPTER_PATHS]!r}",
+    )
     result = subprocess.run(
-        [sys.executable, "-c", _AST_SCAN_SCRIPT, str(_BOOTSTRAP_PATH)],
-        capture_output=True, text=True, timeout=15,
+        [
+            sys.executable,
+            "-c",
+            _AST_SCAN_SCRIPT,
+            str(_BOOTSTRAP_PATH),
+            *(str(path) for path in _BOOTSTRAP_ADAPTER_PATHS),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     _check(
         "bootstrap.py imports only stdlib modules",
@@ -214,8 +246,16 @@ def _check_ast_scan_catches_a_real_third_party_import(root: Path) -> None:
     poisoned = root / "poisoned_bootstrap.py"
     poisoned.write_text(_BOOTSTRAP_PATH.read_text() + "\nimport requests\n")
     result = subprocess.run(
-        [sys.executable, "-c", _AST_SCAN_SCRIPT, str(poisoned)],
-        capture_output=True, text=True, timeout=15,
+        [
+            sys.executable,
+            "-c",
+            _AST_SCAN_SCRIPT,
+            str(poisoned),
+            *(str(path) for path in _BOOTSTRAP_ADAPTER_PATHS),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     _check(
         "the AST scan flags a fabricated third-party import (negative control)",
@@ -224,12 +264,16 @@ def _check_ast_scan_catches_a_real_third_party_import(root: Path) -> None:
     )
 
 
-def _fake_completed(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
+def _fake_completed(
+    returncode: int, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 def _make_all_healthy_fake_run(
-    fake_prefix: Path, datacl_text: str = "{owner=CTc/owner}", vector_installed: bool = True,
+    fake_prefix: Path,
+    datacl_text: str = "{owner=CTc/owner}",
+    vector_installed: bool = True,
 ) -> Any:
     """`datacl_text` is what the R4 datacl probe sees: the default is a
     revoked-style ACL (owner-only, no PUBLIC aclitem) so the all-healthy
@@ -239,14 +283,49 @@ def _make_all_healthy_fake_run(
     `pg_extension` probe sees (per-database activation, distinct from the
     machine-wide `pg_available_extensions` brew-install probe below); pass
     False to drive the reconciled-db-missing-vector-extension path."""
+
     def _fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        if cmd[:2] == ["brew", "--prefix"]:
+        if cmd[-1:] == ["--version"] and Path(cmd[0]).name.startswith("python"):
+            return _fake_completed(0, stdout="Python 3.13.7\n")
+        if cmd[-1:] == ["--version"] and Path(cmd[0]).name == "solet-bridge":
+            return _fake_completed(0, stdout="solet-bridge 0.1.0\n")
+        if "-I" in cmd and "-c" in cmd and ".venv/bin/python3" in cmd[0]:
+            if "packages =" not in cmd[-1]:
+                return _fake_completed(0, stdout="3.13.7\n")
+            target = Path(cmd[0]).parents[2]
+            packages: dict[str, dict[str, str]] = {}
+            for distribution, relative in _load_bootstrap_module()._REQUIRED_DISTRIBUTIONS:  # noqa: SLF001
+                packages[distribution] = {
+                    "version": "1.0.0",
+                    "direct_url": json.dumps(
+                        {
+                            "url": (target / relative).resolve().as_uri(),
+                            "dir_info": {"editable": True},
+                        },
+                    ),
+                }
+            return _fake_completed(
+                0,
+                stdout=json.dumps(
+                    {
+                        "pip": True,
+                        "build_backend": True,
+                        "wheel": True,
+                        "packages": packages,
+                    },
+                ),
+            )
+        if cmd[-1:] == ["--version"] and Path(cmd[0]).name == "brew":
+            return _fake_completed(0, stdout="Homebrew 4.4.0\n")
+        if cmd[1:] == ["--prefix"]:
             return _fake_completed(0, stdout=f"{fake_prefix}\n")
-        if cmd[:2] == ["brew", "list"]:
+        if cmd[1:] == ["--prefix", "postgresql@17"]:
+            return _fake_completed(0, stdout=f"{fake_prefix}\n")
+        if cmd[1:] == ["list", "--formula"]:
             return _fake_completed(0, stdout="postgresql@17\npgvector\n")
-        if cmd == ["psql", "--version"]:
+        if cmd[1:] == ["--version"] and Path(cmd[0]).name == "psql":
             return _fake_completed(0, stdout="psql (PostgreSQL) 17.2\n")
-        if cmd[0] == "pg_isready":
+        if Path(cmd[0]).name == "pg_isready":
             return _fake_completed(0)
         if "pg_available_extensions" in " ".join(cmd):
             return _fake_completed(0, stdout="1\n")
@@ -268,7 +347,7 @@ def _make_all_healthy_fake_run(
 
 
 def _fake_http_get_correct_model(_url: str, _timeout: int) -> bytes:
-    return b'{"data": [{"id": "text-embedding-nomic-embed-text-v1.5"}]}'
+    return b'{"data": [{"id": "text-embedding-nomic-embed-text-v1.5-embedding"}]}'
 
 
 def _make_fixture_tree(root: Path) -> tuple[Path, Path]:
@@ -278,22 +357,30 @@ def _make_fixture_tree(root: Path) -> tuple[Path, Path]:
     scram lines so role_and_db also reports skipped.
     """
     target = root / "clone"
+    for _distribution, relative in _load_bootstrap_module()._REQUIRED_DISTRIBUTIONS:  # noqa: SLF001
+        (target / relative).mkdir(parents=True, exist_ok=True)
     (target / ".venv" / "bin").mkdir(parents=True)
     (target / ".venv" / "bin" / "python3").write_text("#!/bin/sh\n")
+    (target / ".venv" / "bin" / "solet-bridge").write_text("#!/bin/sh\n")
+    (target / ".venv" / "pyvenv.cfg").write_text("home = /opt/homebrew/bin\n")
 
     fake_prefix = root / "homebrew"
     pg_hba = fake_prefix / "var" / "postgresql@17" / "pg_hba.conf"
     pg_hba.parent.mkdir(parents=True)
+    fake_bin = fake_prefix / "bin"
+    fake_bin.mkdir()
+    for executable in ("psql", "pg_isready", "createuser", "createdb"):
+        path = fake_bin / executable
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
     module = _load_bootstrap_module()
     pg_hba.write_text("\n".join(module._DEFAULT_SCRAM_LINES) + "\n# trust block below\n")  # noqa: SLF001
     return target, fake_prefix
 
 
-
-# bootstrap reaches the host through exactly three probes, all `shutil.which` and
-# none of them routed through `ctx.run`: brew, psql, pg_isready. Enumerated from
-# the source rather than discovered one failure at a time — patching only the one
-# that happened to fail first is how this leaked twice.
+# The shared resolver reaches `shutil.which` for PATH candidates and for its
+# keg paths. Its runner validates Homebrew with `--version`; the fixture must
+# make both seams hermetic rather than relying on the minting host.
 _HOST_PROBES = ("brew", "psql", "pg_isready")
 
 
@@ -307,6 +394,8 @@ def _isolated_host(module: ModuleType, *, brew_present: bool = True) -> Generato
             return f"/opt/fake/bin/{name}" if brew_present else None
         if name in _HOST_PROBES:
             return f"/opt/fake/bin/{name}"
+        if Path(name).is_absolute():
+            return name
         return real_which(name)
 
     module.shutil.which = fake
@@ -314,7 +403,6 @@ def _isolated_host(module: ModuleType, *, brew_present: bool = True) -> Generato
         yield
     finally:
         module.shutil.which = real_which
-
 
 
 def _quietly(fn: Any, *args: Any, **kwargs: Any) -> Any:
@@ -332,8 +420,9 @@ def _quietly(fn: Any, *args: Any, **kwargs: Any) -> Any:
         return fn(*args, **kwargs)
 
 
-
-def _run_steps_isolated(module: ModuleType, ctx: Any, *, brew_present: bool = True) -> list[dict[str, Any]]:
+def _run_steps_isolated(
+    module: ModuleType, ctx: Any, *, brew_present: bool = True
+) -> list[dict[str, Any]]:
     """Drive the step sequence with the HOST fully isolated, and its echo contained.
 
     Two things this closes, both of which leaked the ambient machine into a smoke
@@ -353,7 +442,10 @@ def _run_steps_isolated(module: ModuleType, ctx: Any, *, brew_present: bool = Tr
        into gate logs. Captured here rather than masked in `bootstrap.py`, which
        would degrade the adopter-facing transparency that echo exists for.
     """
-    with _isolated_host(module, brew_present=brew_present), contextlib.redirect_stdout(io.StringIO()):
+    with (
+        _isolated_host(module, brew_present=brew_present),
+        contextlib.redirect_stdout(io.StringIO()),
+    ):
         return module.run_steps(ctx)
 
 
@@ -371,8 +463,15 @@ def _check_happy_path_dry_run(root: Path) -> None:
 
     _check(
         "happy-path dry run executes all 7 steps in order",
-        [s["step_name"] for s in steps] == [
-            "homebrew", "postgres", "pgvector", "role_and_db", "lm_server", "venv_and_seed", "handoff",
+        [s["step_name"] for s in steps]
+        == [
+            "homebrew",
+            "postgres",
+            "pgvector",
+            "role_and_db",
+            "lm_server",
+            "venv_and_seed",
+            "handoff",
         ],
         f"got {[s['step_name'] for s in steps]!r}",
     )
@@ -393,12 +492,14 @@ def _check_homebrew_absent_stops_immediately(root: Path) -> None:
     target, fake_prefix = _make_fixture_tree(root)
 
     def _fake_run_no_brew(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        if cmd[0] == "brew":
+        if Path(cmd[0]).name == "brew":
             raise FileNotFoundError("brew not found")
         return _make_all_healthy_fake_run(fake_prefix)(cmd)
 
     ctx = module.BootstrapContext(
-        target=target, run=_fake_run_no_brew, confirm=lambda _msg: True,
+        target=target,
+        run=_fake_run_no_brew,
+        confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
     # Same isolation as the happy path, brew forced ABSENT. Previously this leg
@@ -408,8 +509,119 @@ def _check_homebrew_absent_stops_immediately(root: Path) -> None:
 
     _check(
         "Homebrew absence stops the sequence at step 1 -- no later step attempted",
-        [s["step_name"] for s in steps] == ["homebrew"] and steps[0]["status"] == "needs_user_action",
+        [s["step_name"] for s in steps] == ["homebrew"]
+        and steps[0]["status"] == "needs_user_action",
         f"got {steps!r}",
+    )
+
+
+def _check_keg_only_postgres_matches_adapter(root: Path) -> None:
+    """Layer 0 and the adapter must agree when Postgres is keg-only.
+
+    RED before this repair: Layer 0's bare ``shutil.which('psql')`` returned
+    None here while the adapter's keg resolver reported ready PostgreSQL 17.
+    """
+
+    module = _load_bootstrap_module()
+    from bootstrap_adapter.models import AdapterRuntime
+    from bootstrap_adapter.postgres import postgres_observation
+
+    target, fake_prefix = _make_fixture_tree(root)
+    recorded: list[list[str]] = []
+
+    def fake_which(name: str) -> str | None:
+        if name == "brew":
+            return "/opt/fake/bin/brew"
+        return name if Path(name).is_absolute() else None
+
+    def recording_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        recorded.append(cmd)
+        return _make_all_healthy_fake_run(fake_prefix)(cmd)
+
+    previous_which = module.shutil.which
+    module.shutil.which = fake_which
+    try:
+        context = module.BootstrapContext(
+            target=target,
+            run=recording_run,
+            confirm=lambda _message: True,
+            http_get=_fake_http_get_correct_model,
+        )
+        layer_zero_state, layer_zero_detail = module.probe_postgres(context)
+    finally:
+        module.shutil.which = previous_which
+
+    adapter = postgres_observation(
+        AdapterRuntime(recording_run, fake_which, datetime.now, "keg_only_smoke", target),
+    )
+    _check(
+        "keg-only PostgreSQL 17 is healthy in both Layer 0 and the adapter",
+        layer_zero_state is module.PostgresState.RUNNING_HEALTHY_COMPATIBLE
+        and adapter.psql_present
+        and adapter.major == 17
+        and adapter.ready,
+        f"layer_zero=({layer_zero_state.value!r}, {layer_zero_detail!r}) adapter={adapter!r}",
+    )
+    expected_bin = str(fake_prefix / "bin")
+    postgres_commands = [command for command in recorded if Path(command[0]).name in {"psql", "pg_isready"}]
+    _check(
+        "keg-only Layer 0 and adapter commands use the resolved absolute PostgreSQL bin directory",
+        bool(postgres_commands) and all(command[0].startswith(expected_bin + "/") for command in postgres_commands),
+        f"commands={postgres_commands!r}",
+    )
+
+
+def _check_homebrew_standard_prefix_when_path_missing(root: Path) -> None:
+    """Validated standard Homebrew paths work without a launch-shell PATH entry."""
+
+    module = _load_bootstrap_module()
+    target, _fake_prefix = _make_fixture_tree(root)
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if cmd == ["/opt/homebrew/bin/brew", "--version"]:
+            return _fake_completed(0, stdout="Homebrew 4.4.0\n")
+        raise FileNotFoundError(cmd[0])
+
+    context = module.BootstrapContext(target, fake_run, lambda _message: True)
+    previous_which = module.shutil.which
+    module.shutil.which = lambda _name: None
+    try:
+        state = module.probe_homebrew(context)
+    finally:
+        module.shutil.which = previous_which
+    _check(
+        "Homebrew at its standard absolute prefix is present when launch PATH omits it",
+        state is module.HomebrewState.PRESENT,
+        state.value,
+    )
+
+
+def _check_missing_homebrew_is_named_not_file_not_found(root: Path) -> None:
+    """Formerly bare brew calls surface a normal state when Homebrew is absent."""
+
+    module = _load_bootstrap_module()
+    target, _fake_prefix = _make_fixture_tree(root)
+
+    def missing_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(cmd[0])
+
+    context = module.BootstrapContext(target, missing_run, lambda _message: True)
+    previous_which = module.shutil.which
+    module.shutil.which = lambda _name: None
+    try:
+        postgres_step = module.ensure_postgres(context)
+        hba_path = module._pg_hba_path(context)  # noqa: SLF001
+    finally:
+        module.shutil.which = previous_which
+    _check(
+        "missing Homebrew produces a named postgres needs-user-action state",
+        postgres_step["status"] == "needs_user_action" and "Homebrew executable" in str(postgres_step.get("detail")),
+        f"step={postgres_step!r}",
+    )
+    _check(
+        "the formerly unguarded Homebrew pg_hba probe returns no path instead of FileNotFoundError",
+        hba_path is None,
+        f"hba_path={hba_path!r}",
     )
 
 
@@ -418,24 +630,36 @@ def _check_hard_failure_is_caught_not_raised(root: Path) -> None:
     target, fake_prefix = _make_fixture_tree(root)
     # Force venv_and_seed to attempt real work (no pre-existing venv).
     (target / ".venv" / "bin" / "python3").unlink()
+    (target / ".venv" / "bin" / "solet-bridge").unlink()
     (target / ".venv" / "bin").rmdir()
+    (target / ".venv" / "pyvenv.cfg").unlink()
     (target / ".venv").rmdir()
 
-    def _fake_run_venv_creation_fails(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def _fake_run_venv_creation_fails(
+        cmd: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         if "venv" in cmd:
             return _fake_completed(1, stdout="simulated venv creation failure")
         return _make_all_healthy_fake_run(fake_prefix)(cmd)
 
     ctx = module.BootstrapContext(
-        target=target, run=_fake_run_venv_creation_fails, confirm=lambda _msg: True,
+        target=target,
+        run=_fake_run_venv_creation_fails,
+        confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
     steps = _run_steps_isolated(module, ctx)
 
     _check(
         "a hard subprocess failure is caught as a 'failed' step record, not an uncaught exception",
-        [s["step_name"] for s in steps] == [
-            "homebrew", "postgres", "pgvector", "role_and_db", "lm_server", "venv_and_seed",
+        [s["step_name"] for s in steps]
+        == [
+            "homebrew",
+            "postgres",
+            "pgvector",
+            "role_and_db",
+            "lm_server",
+            "venv_and_seed",
         ]
         and steps[-1]["status"] == "failed",
         f"got {steps!r}",
@@ -459,16 +683,20 @@ def _check_role_creation_failure_names_homebrew_convention(root: Path) -> None:
     module = _load_bootstrap_module()
     target, fake_prefix = _make_fixture_tree(root)
 
-    def _fake_run_role_absent_createuser_fails(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def _fake_run_role_absent_createuser_fails(
+        cmd: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         joined = " ".join(cmd)
         if "pg_roles" in joined or "pg_database" in joined:
             return _fake_completed(0, stdout="")  # role/db ABSENT -> createuser is attempted
-        if cmd[:1] == ["createuser"]:
+        if Path(cmd[0]).name == "createuser":
             return _fake_completed(1, stderr="simulated createuser failure")
         return _make_all_healthy_fake_run(fake_prefix)(cmd)
 
     ctx = module.BootstrapContext(
-        target=target, run=_fake_run_role_absent_createuser_fails, confirm=lambda _msg: True,
+        target=target,
+        run=_fake_run_role_absent_createuser_fails,
+        confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
     try:
@@ -485,7 +713,9 @@ def _check_role_creation_failure_names_homebrew_convention(root: Path) -> None:
             f"{str(exc)!r} did not name resolved admin role {getpass.getuser()!r}",
         )
     else:
-        raise SmokeFailureError("role-creation-failure-diagnostic: ensure_role_and_db did not raise")
+        raise SmokeFailureError(
+            "role-creation-failure-diagnostic: ensure_role_and_db did not raise"
+        )
 
 
 def _check_handoff_failure_surfaces_stderr_fatal_text(root: Path) -> None:
@@ -501,13 +731,17 @@ def _check_handoff_failure_surfaces_stderr_fatal_text(root: Path) -> None:
     target, fake_prefix = _make_fixture_tree(root)
     sentinel = "FATAL: genesis failed: sentinel failure"
 
-    def _fake_run_handoff_fails(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def _fake_run_handoff_fails(
+        cmd: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         if "github_midwife_plugin.genesis" in cmd:
             return _fake_completed(1, stdout="", stderr=sentinel)
         return _make_all_healthy_fake_run(fake_prefix)(cmd)
 
     ctx = module.BootstrapContext(
-        target=target, run=_fake_run_handoff_fails, confirm=lambda _msg: True,
+        target=target,
+        run=_fake_run_handoff_fails,
+        confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
     try:
@@ -519,7 +753,208 @@ def _check_handoff_failure_surfaces_stderr_fatal_text(root: Path) -> None:
             str(exc),
         )
     else:
-        raise SmokeFailureError("handoff-failure-surfaces-stderr-fatal-text: handoff() did not raise")
+        raise SmokeFailureError(
+            "handoff-failure-surfaces-stderr-fatal-text: handoff() did not raise"
+        )
+
+
+def _completed_bootstrap_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    return _fake_completed(0)
+
+
+def _check_pre_fix_scram_escape(safe_hba: Path) -> None:
+    """Prove the old unguarded read/write shape escaped its OSError boundary."""
+
+    with patch.object(Path, "read_text", side_effect=PermissionError("scram read sentinel")):
+        try:
+            original = safe_hba.read_text() if safe_hba.is_file() else ""
+            safe_hba.write_text(original)
+        except PermissionError as exc:
+            pre_fix_scram_escape = exc
+        else:
+            raise SmokeFailureError("pre-fix scram writer did not reach the injected OSError boundary")
+    _check(
+        "pre-fix scram read OSError escaped the standalone writer",
+        isinstance(pre_fix_scram_escape, PermissionError) and "scram read sentinel" in str(pre_fix_scram_escape),
+        repr(pre_fix_scram_escape),
+    )
+
+
+def _escape_cases(module: ModuleType, safe_hba: Path, unrecognized_hba: Path) -> list[tuple[str, str, Any, Any]]:
+    """Return the four real failure/retry pairs for the resume contract."""
+
+    def scram_failure(context: Any) -> dict[str, Any]:
+        with patch.object(Path, "read_text", side_effect=PermissionError("scram read sentinel")):
+            module._write_default_scram_block(context, safe_hba)  # noqa: SLF001
+        return {"step_name": "role_and_db", "status": "completed"}
+
+    def scram_retry(context: Any) -> dict[str, Any]:
+        with patch.object(module, "_postgres_command", return_value=["psql"]):
+            module._write_default_scram_block(context, safe_hba)  # noqa: SLF001
+        return {"step_name": "role_and_db", "status": "completed"}
+
+    def handoff_failure(context: Any) -> dict[str, Any]:
+        original_run = context.run
+        context.run = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("handoff sentinel"))
+        try:
+            return module.handoff(context)
+        finally:
+            context.run = original_run
+
+    def handoff_retry(context: Any) -> dict[str, Any]:
+        return module.handoff(context)
+
+    def closure_failure(context: Any) -> dict[str, Any]:
+        import bootstrap_adapter
+
+        with patch.object(bootstrap_adapter, "probe_dependency_closure", return_value=(object(), {})):
+            module._probe_dependency_closure(context)  # noqa: SLF001
+        return {"step_name": "venv_and_seed", "status": "completed"}
+
+    def closure_retry(context: Any) -> dict[str, Any]:
+        import bootstrap_adapter
+
+        with patch.object(
+            bootstrap_adapter,
+            "probe_dependency_closure",
+            return_value=(bootstrap_adapter.ClosureState.PRESENT_CLOSED, {}),
+        ):
+            module._probe_dependency_closure(context)  # noqa: SLF001
+        return {"step_name": "venv_and_seed", "status": "completed"}
+
+    def layout_failure(context: Any) -> dict[str, Any]:
+        module._write_default_scram_block(context, unrecognized_hba)  # noqa: SLF001
+        return {"step_name": "role_and_db", "status": "completed"}
+
+    def layout_retry(context: Any) -> dict[str, Any]:
+        safe_hba.write_text(
+            "local all all trust\n"
+            "host all all 127.0.0.1/32 trust\n"
+            "host all all ::1/128 trust\n",
+            encoding="utf-8",
+        )
+        with patch.object(module, "_postgres_command", return_value=["psql"]):
+            module._write_default_scram_block(context, safe_hba)  # noqa: SLF001
+        return {"step_name": "role_and_db", "status": "completed"}
+
+    return [
+        ("role_and_db", "unrecognized or unsafe", scram_failure, scram_retry),
+        ("handoff", "handoff", handoff_failure, handoff_retry),
+        ("venv_and_seed", "unrecognized dependency-closure state", closure_failure, closure_retry),
+        ("role_and_db", "unrecognized or unsafe", layout_failure, layout_retry),
+    ]
+
+
+def _check_escape_case(
+    module: ModuleType,
+    target: Path,
+    completed_hba: Path,
+    step_name: str,
+    expected_error: str,
+    failing_runner: Any,
+    retry_runner: Any,
+) -> None:
+    """Assert a typed record, then a fresh-context probe-and-rerun."""
+
+    events: list[str] = []
+    observed: list[BaseException] = []
+
+    def prior_runner(_context: Any) -> dict[str, Any]:
+        events.append("prior")
+        return {
+            "step_name": "prior",
+            "status": "skipped" if module._scram_lines_present(completed_hba) else "completed",  # noqa: SLF001
+        }
+
+    def wrapped_failure(context: Any) -> dict[str, Any]:
+        events.append("failure")
+        try:
+            return failing_runner(context)
+        except module.BootstrapError as exc:
+            observed.append(exc)
+            raise
+
+    def wrapped_retry(context: Any) -> dict[str, Any]:
+        events.append("retry")
+        return retry_runner(context)
+
+    def later_runner(_context: Any) -> dict[str, Any]:
+        events.append("later")
+        return {"step_name": "later", "status": "completed"}
+
+    failed_steps = module.run_steps(
+        module.BootstrapContext(target, _completed_bootstrap_run, lambda _message: True),
+        (("prior", prior_runner), (step_name, wrapped_failure), ("later", later_runner)),
+    )
+    _check(
+        f"{step_name} injected failure reaches run_steps as BootstrapError",
+        len(observed) == 1 and isinstance(observed[0], module.BootstrapError),
+        f"observed={observed!r}",
+    )
+    _check(
+        f"{step_name} writes the typed failure record and its cause",
+        len(failed_steps) == 2
+        and failed_steps[-1].get("step_name") == step_name
+        and failed_steps[-1].get("status") == "failed"
+        and expected_error in str(failed_steps[-1].get("error")),
+        f"got {failed_steps!r}",
+    )
+    _check_layout_remediation(expected_error, failed_steps[-1])
+    rerun_steps = module.run_steps(
+        module.BootstrapContext(target, _completed_bootstrap_run, lambda _message: True),
+        (("prior", prior_runner), (step_name, wrapped_retry), ("later", later_runner)),
+    )
+    _check(
+        f"{step_name} rerun probes completed work, skips it, and reattempts the failed step",
+        events == ["prior", "failure", "prior", "retry", "later"]
+        and rerun_steps[0].get("status") == "skipped"
+        and [step["step_name"] for step in rerun_steps] == ["prior", step_name, "later"],
+        f"events={events!r} steps={rerun_steps!r}",
+    )
+
+
+def _check_layout_remediation(expected_error: str, failed_step: dict[str, Any]) -> None:
+    if expected_error != "unrecognized or unsafe":
+        return
+    error = str(failed_step.get("error"))
+    _check(
+        "unrecognized pg_hba.conf refusal names its remediation and preserves fail-closed behavior",
+        "inspect the file" in error
+        and "extend the recognizer or edit it manually" in error
+        and "will not auto-write" in error,
+        f"got {failed_step!r}",
+    )
+
+
+def _check_role_db_rerun_probe(module: ModuleType, target: Path, fake_prefix: Path) -> None:
+    role_context = module.BootstrapContext(
+        target,
+        _make_all_healthy_fake_run(fake_prefix),
+        lambda _message: True,
+        _fake_http_get_correct_model,
+    )
+    _check(
+        "rerun RoleDbState probe recognizes completed role and database work",
+        module.probe_role_and_db(role_context) is module.RoleDbState.PRESENT_HEALTHY,
+        "role/db probe did not report PRESENT_HEALTHY",
+    )
+
+
+def _check_resume_records_for_previously_escaping_failures(root: Path) -> None:
+    """Each converted exception must write a typed record and permit rerun."""
+
+    module = _load_bootstrap_module()
+    target, fake_prefix = _make_fixture_tree(root)
+    safe_hba = target / "safe_pg_hba.conf"
+    safe_hba.write_text("local all all trust\nhost all all 127.0.0.1/32 trust\nhost all all ::1/128 trust\n", encoding="utf-8")
+    unrecognized_hba = target / "unrecognized_pg_hba.conf"
+    unrecognized_hba.write_text("local all all md5\n", encoding="utf-8")
+    completed_hba = target / "completed_pg_hba.conf"
+    completed_hba.write_text("\n".join(module._DEFAULT_SCRAM_LINES) + "\n", encoding="utf-8")  # noqa: SLF001
+    _check_pre_fix_scram_escape(safe_hba)
+    for case in _escape_cases(module, safe_hba, unrecognized_hba):
+        _check_escape_case(module, target, completed_hba, *case)
+    _check_role_db_rerun_probe(module, target, fake_prefix)
 
 
 def _record_venv_seed_commands(root: Path) -> list[list[str]]:
@@ -528,7 +963,9 @@ def _record_venv_seed_commands(root: Path) -> list[list[str]]:
     module = _load_bootstrap_module()
     target, fake_prefix = _make_fixture_tree(root)
     (target / ".venv" / "bin" / "python3").unlink()
+    (target / ".venv" / "bin" / "solet-bridge").unlink()
     (target / ".venv" / "bin").rmdir()
+    (target / ".venv" / "pyvenv.cfg").unlink()
     (target / ".venv").rmdir()
 
     recorded: list[list[str]] = []
@@ -538,11 +975,17 @@ def _record_venv_seed_commands(root: Path) -> list[list[str]]:
         return _make_all_healthy_fake_run(fake_prefix)(cmd)
 
     ctx = module.BootstrapContext(
-        target=target, run=_recording_run, confirm=lambda _msg: True,
+        target=target,
+        run=_recording_run,
+        confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
     step = _quietly(module.ensure_venv_and_seed, ctx)
-    _check("venv_and_seed completes under the recording fake", step["status"] == "completed", f"{step!r}")
+    _check(
+        "venv_and_seed completes under the recording fake",
+        step["status"] == "completed",
+        f"{step!r}",
+    )
     return recorded
 
 
@@ -552,16 +995,21 @@ def _check_venv_seed_preinstalls_build_backend(root: Path) -> None:
     seed plugin's pyproject pins macos_vault_plugin (pip resolved it against
     PyPI and died). ensure_venv_and_seed must run: venv creation → the
     pip/setuptools/wheel pre-install → editable installs of exactly
-    ananta → macos_vault_plugin → github_midwife_plugin, in that order.
+    solet_setup_contracts → ananta → macos_vault_plugin → github_midwife_plugin,
+    in that order.
     """
     recorded = _record_venv_seed_commands(root)
-    backend_idx = [i for i, c in enumerate(recorded) if "install" in c and c[-3:] == ["pip", "setuptools", "wheel"]]
+    backend_idx = [
+        i
+        for i, c in enumerate(recorded)
+        if "install" in c and c[-3:] == ["pip", "setuptools", "wheel"]
+    ]
     editable_idx = [i for i, c in enumerate(recorded) if "--no-build-isolation" in c]
     venv_idx = [i for i, c in enumerate(recorded) if c[1:3] == ["-m", "venv"]]
 
-    counts_ok = (len(venv_idx), len(backend_idx), len(editable_idx)) == (1, 1, 3)
+    counts_ok = (len(venv_idx), len(backend_idx), len(editable_idx)) == (1, 1, 5)
     _check(
-        "exactly one venv creation, one build-backend pre-install, three editable installs",
+        "exactly one venv creation, one build-backend pre-install, five editable installs",
         counts_ok,
         f"venv={venv_idx} backend={backend_idx} editable={editable_idx} recorded={recorded!r}",
     )
@@ -571,10 +1019,16 @@ def _check_venv_seed_preinstalls_build_backend(root: Path) -> None:
         f"venv={venv_idx} backend={backend_idx} editable={editable_idx}",
     )
     editable_targets = [recorded[i][-1] for i in editable_idx]
-    expected_suffixes = ("/ananta", "/plugins/macos_vault_plugin", "/plugins/github_midwife_plugin")
+    expected_suffixes = (
+        "/solet_setup_contracts",
+        "/ananta",
+        "/plugins/macos_vault_plugin",
+        "/plugins/github_midwife_plugin",
+        "/plugins/agent_messaging_plugin",
+    )
     order_ok = all(t.endswith(s) for t, s in zip(editable_targets, expected_suffixes, strict=True))
     _check(
-        "editable install order: ananta → macos_vault_plugin → github_midwife_plugin",
+        "editable install order: ananta → macos_vault_plugin → github_midwife_plugin → agent_messaging_plugin",
         order_ok,
         f"targets={editable_targets!r}",
     )
@@ -602,8 +1056,10 @@ def _check_confirm_interactive_assume_yes_env() -> None:
     `yes |` piping which does not leave intent in the environment.
     """
     module = _load_bootstrap_module()
-    with patch.dict(os.environ, {"SOLET_ASSUME_YES": "1"}), \
-         patch("builtins.input", side_effect=SmokeFailureError("input should not be read")):
+    with (
+        patch.dict(os.environ, {"SOLET_ASSUME_YES": "1"}),
+        patch("builtins.input", side_effect=SmokeFailureError("input should not be read")),
+    ):
         accepted = module.confirm_interactive("fixture message")
     _check(
         "SOLET_ASSUME_YES=1 approves without reading stdin",
@@ -621,7 +1077,11 @@ def _check_failed_step_summary_surfaces_error() -> None:
     """
     module = _load_bootstrap_module()
     line = module._step_summary_line(  # noqa: SLF001
-        {"step_name": "venv_and_seed", "status": "failed", "error": "sentinel pip resolution failure"}
+        {
+            "step_name": "venv_and_seed",
+            "status": "failed",
+            "error": "sentinel pip resolution failure",
+        }
     )
     _check(
         "a failed step's summary line carries its 'error' text",
@@ -642,7 +1102,9 @@ def _check_role_db_inconsistent_state_needs_user_action(root: Path) -> None:
     module = _load_bootstrap_module()
     target, fake_prefix = _make_fixture_tree(root)
 
-    def _fake_run_role_present_db_absent(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def _fake_run_role_present_db_absent(
+        cmd: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         joined = " ".join(cmd)
         if "pg_roles" in joined:
             return _fake_completed(0, stdout="1")
@@ -651,7 +1113,9 @@ def _check_role_db_inconsistent_state_needs_user_action(root: Path) -> None:
         return _make_all_healthy_fake_run(fake_prefix)(cmd)
 
     ctx = module.BootstrapContext(
-        target=target, run=_fake_run_role_present_db_absent, confirm=lambda _msg: True,
+        target=target,
+        run=_fake_run_role_present_db_absent,
+        confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
     step = _quietly(module.ensure_role_and_db, ctx)
@@ -696,7 +1160,9 @@ def _check_reconciled_db_missing_revoke_applies_r4(root: Path) -> None:
             return _make_all_healthy_fake_run(fake_prefix, datacl_text=_datacl)(cmd)
 
         ctx = module.BootstrapContext(
-            target=_target, run=_recording_run, confirm=lambda _msg: True,
+            target=_target,
+            run=_recording_run,
+            confirm=lambda _msg: True,
             http_get=_fake_http_get_correct_model,
         )
         step = _quietly(module.ensure_role_and_db, ctx)
@@ -711,7 +1177,7 @@ def _check_reconciled_db_missing_revoke_applies_r4(root: Path) -> None:
             len(revokes) == 1 and any(module._DATABASE in part for part in revokes[0]),  # noqa: SLF001
             f"recorded psql/create commands: {recorded!r}",
         )
-        createuser_calls = [c for c in recorded if c[:1] == ["createuser"]]
+        createuser_calls = [c for c in recorded if Path(c[0]).name == "createuser"]
         _check(
             f"no createuser/createdb re-run on the already-healthy pair (datacl {datacl_text!r})",
             not createuser_calls,
@@ -733,12 +1199,16 @@ def _check_reconciled_db_missing_vector_extension_applies_d12(root: Path) -> Non
     target, fake_prefix = _make_fixture_tree(root)
     recorded: list[list[str]] = []
 
-    def _recording_run(cmd: list[str], _sink: list[list[str]] = recorded, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def _recording_run(
+        cmd: list[str], _sink: list[list[str]] = recorded, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         _sink.append(cmd)
         return _make_all_healthy_fake_run(fake_prefix, vector_installed=False)(cmd)
 
     ctx = module.BootstrapContext(
-        target=target, run=_recording_run, confirm=lambda _msg: True,
+        target=target,
+        run=_recording_run,
+        confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
     step = _quietly(module.ensure_role_and_db, ctx)
@@ -747,13 +1217,15 @@ def _check_reconciled_db_missing_vector_extension_applies_d12(root: Path) -> Non
         step.get("status") == "completed",
         f"got {step!r}",
     )
-    creates = [c for c in recorded if any("CREATE EXTENSION IF NOT EXISTS vector" in part for part in c)]
+    creates = [
+        c for c in recorded if any("CREATE EXTENSION IF NOT EXISTS vector" in part for part in c)
+    ]
     _check(
         "the D12 CREATE EXTENSION is executed against this solet's own database",
         len(creates) == 1 and any(module._DATABASE in part for part in creates[0]),  # noqa: SLF001
         f"recorded psql/create commands: {recorded!r}",
     )
-    createuser_calls = [c for c in recorded if c[:1] == ["createuser"]]
+    createuser_calls = [c for c in recorded if Path(c[0]).name == "createuser"]
     _check(
         "no createuser/createdb re-run on the already-healthy pair",
         not createuser_calls,
@@ -771,7 +1243,9 @@ def _check_absent_role_db_create_path_activates_vector_extension(root: Path) -> 
     target, fake_prefix = _make_fixture_tree(root)
     recorded: list[list[str]] = []
 
-    def _recording_run(cmd: list[str], _sink: list[list[str]] = recorded, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def _recording_run(
+        cmd: list[str], _sink: list[list[str]] = recorded, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         _sink.append(cmd)
         joined = " ".join(cmd)
         if "pg_roles" in joined or "pg_database" in joined:
@@ -779,7 +1253,9 @@ def _check_absent_role_db_create_path_activates_vector_extension(root: Path) -> 
         return _make_all_healthy_fake_run(fake_prefix)(cmd)
 
     ctx = module.BootstrapContext(
-        target=target, run=_recording_run, confirm=lambda _msg: True,
+        target=target,
+        run=_recording_run,
+        confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
     step = _quietly(module.ensure_role_and_db, ctx)
@@ -788,14 +1264,18 @@ def _check_absent_role_db_create_path_activates_vector_extension(root: Path) -> 
         step.get("status") == "completed",
         f"got {step!r}",
     )
-    creates = [c for c in recorded if any("CREATE EXTENSION IF NOT EXISTS vector" in part for part in c)]
+    creates = [
+        c for c in recorded if any("CREATE EXTENSION IF NOT EXISTS vector" in part for part in c)
+    ]
     _check(
         "the D12 CREATE EXTENSION is part of the fresh-create sequence",
         len(creates) == 1 and any(module._DATABASE in part for part in creates[0]),  # noqa: SLF001
         f"recorded psql/create commands: {recorded!r}",
     )
-    create_idx = next(i for i, c in enumerate(recorded) if c[:1] == ["createdb"])
-    extension_idx = next(i for i, c in enumerate(recorded) if "CREATE EXTENSION IF NOT EXISTS vector" in " ".join(c))
+    create_idx = next(i for i, c in enumerate(recorded) if Path(c[0]).name == "createdb")
+    extension_idx = next(
+        i for i, c in enumerate(recorded) if "CREATE EXTENSION IF NOT EXISTS vector" in " ".join(c)
+    )
     _check(
         "CREATE EXTENSION runs AFTER createdb (the database must exist first)",
         extension_idx > create_idx,
@@ -811,7 +1291,9 @@ def _check_fully_healthy_role_db_skips_with_revoke_verified(root: Path) -> None:
     module = _load_bootstrap_module()
     target, fake_prefix = _make_fixture_tree(root)
     ctx = module.BootstrapContext(
-        target=target, run=_make_all_healthy_fake_run(fake_prefix), confirm=lambda _msg: True,
+        target=target,
+        run=_make_all_healthy_fake_run(fake_prefix),
+        confirm=lambda _msg: True,
         http_get=_fake_http_get_correct_model,
     )
     step = _quietly(module.ensure_role_and_db, ctx)
@@ -837,11 +1319,19 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as tmp:
             _check_homebrew_absent_stops_immediately(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
+            _check_keg_only_postgres_matches_adapter(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_homebrew_standard_prefix_when_path_missing(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_missing_homebrew_is_named_not_file_not_found(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
             _check_hard_failure_is_caught_not_raised(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_role_creation_failure_names_homebrew_convention(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_handoff_failure_surfaces_stderr_fatal_text(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_resume_records_for_previously_escaping_failures(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_venv_seed_preinstalls_build_backend(Path(tmp))
         _check_confirm_interactive_eof_is_decline()

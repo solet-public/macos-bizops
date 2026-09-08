@@ -53,7 +53,7 @@ identity (names route, content binds).
 
 Non-fatal by design, same contract as this checkout's other hooks: any
 failure (missing env var, unreadable transcript, unparseable JSON,
-``solet`` subprocess failure) warns on stderr and exits 0 -- this
+``solet-bridge`` subprocess failure) warns on stderr and exits 0 -- this
 hook must never cost a session its tool call.
 
 Stdlib-only for I/O and subprocess dispatch, EXCEPT the one direct import
@@ -113,16 +113,14 @@ just edited.
 
 Copies 1 and 3 both bind PostToolUse with no matcher, and settings sources
 MERGE rather than override, so in a project that wires copy 1 while the
-plugin is enabled BOTH are registered and both run. They also share their
-throttle and latch marker paths (see ``_throttle_marker_path`` and
-``_latch_marker_path``), which carry no discriminator for WHICH copy wrote
-them, and ``main`` claims the throttle BEFORE performing any work. So
-within one ``_THROTTLE_SECONDS`` window exactly one copy serves the tick,
-chosen by hook execution order rather than by which copy is current -- a
-stale copy 3 can quietly serve the tick and emit a report missing whatever
-a newer copy would have sent, while a marker file and a report still appear
-exactly as they would on success. If you are debugging a field that "should
-be there and isn't", rule this out before suspecting the reporting verb.
+plugin is enabled BOTH still receive the event. A spawned worker's host
+adapter now exports ``AGENT_CONTEXT_GAUGE_REPORTER_PATH`` as copy 1's
+absolute, spawn-time-resolved path. Every copy compares that designation to
+its own ``__file__`` before it claims the shared throttle or latch: only the
+designated copy reports, and every other registration exits 0 without a
+marker write. The setting is absent for sessions without generated worker
+settings, preserving the plugin-cache reporter there. This is an election of
+ONE writer, not a renamed pair of independent writers.
 """
 
 
@@ -159,6 +157,7 @@ from typing import Any
 
 _MARKER_DIR_ENV = "AGENT_HEARTBEAT_MARKER_DIR"
 _INSTANCE_ID_ENV = "AGENT_INSTANCE_ID"
+_GAUGE_REPORTER_PATH_ENV = "AGENT_CONTEXT_GAUGE_REPORTER_PATH"
 # The session's STABLE id, distinct from the instance id above and NOT
 # derivable from it. It is what makes a gauge row routable: the row keys on
 # the LEDGER instance id while a watcher-held session's live bridge binding
@@ -212,7 +211,11 @@ _PEER_LIST_PROCESS_KEY = "plugin::agent_messaging_plugin::peer_list"
 #     dead session. That distinction only exists because this constant was
 #     bumped; without it, a NULL join could not be told apart from a session
 #     that genuinely failed to route.
-_REPORTER_GENERATION = 3
+# 4 = the runtime-neutral identity fields (2026-08-29): the reporting verb
+#     requires the runtime session id, provider, runtime, and selected effort.
+# 5 = spawned-session reporter election (2026-08-30): the designated absolute
+#     hook path is the only copy allowed to claim the shared throttle/write.
+_REPORTER_GENERATION = 5
 # Staleness bound for the seat's registry row. Basis (measured 2026-08-16 over
 # 6 live rows): heartbeat ages were 3s / 11s median / 163s stalest, so this is
 # ~1.8x the stalest observed and comfortably above this hook's own 60s poll.
@@ -222,6 +225,7 @@ _REPORTER_GENERATION = 3
 _SEAT_REGISTRY_MAX_AGE_SECONDS = 300
 _ANCESTOR_WALK_MAX_DEPTH = 12
 _CLAUDE_PROCESS_NAME = "claude"
+_missing_effort_warned = False
 
 
 def _warn(message: str) -> None:
@@ -229,6 +233,22 @@ def _warn(message: str) -> None:
         print(f"[rotation-due-watch] {message}", file=sys.stderr)
     except Exception:  # noqa: BLE001 -- telemetry strictly best-effort
         pass
+
+
+def _is_designated_gauge_reporter() -> bool:
+    """Whether this hook copy owns gauge writes for this process.
+
+    A spawned worker has an absolute hook path selected by its host adapter.
+    Both that injected hook and a user-scope plugin-cache registration can
+    receive the same PostToolUse event, but only the selected path may claim
+    this session's throttle or write its gauge row. The cache registration is
+    deliberately still useful for sessions without this spawn-only setting,
+    so an absent designation preserves that standalone path.
+    """
+    designated = os.environ.get(_GAUGE_REPORTER_PATH_ENV, "").strip()
+    if not designated:
+        return True
+    return Path(__file__).resolve() == Path(designated).expanduser().resolve()
 
 
 def _throttle_marker_path(marker_dir: str, agent_instance_id: str) -> Path:
@@ -434,68 +454,8 @@ def build_notification_content(
     current_tokens: int, ceiling: int, band: str, band_actionable: bool,
     threshold_fraction: float, fraction_crossed: bool,
 ) -> str:
-    """Identity-in-content, per this fleet's own measured trap (names
-    route, content binds) -- the subject session's identity is embedded as
-    text, never left to the transport's sender-identity field alone.
-
-    NAMES THE AXIS IT FIRED ON (GAU-08, 2026-08-18). This notice used to read
-    ``threshold_fraction=0.5 (crossed at 30.0% of ceiling)`` -- a sentence
-    that refutes itself, claiming a 0.5 threshold was crossed at 0.30. That
-    was unreachable while ``rotation_due`` was the fraction alone, because the
-    fraction was the only thing that could fire it. The union makes it the
-    COMMON case: on a 1M ceiling the whole actionable 300,000-500,000 range
-    fires on the BAND with the fraction hint uncrossed, so every notice in the
-    range this landing exists to serve would have contradicted itself in its
-    own headline.
-
-    ``band_actionable`` and ``fraction_crossed`` are PASSED IN, never
-    recomputed here. Rebuilding ``current_tokens >= ceiling * threshold`` in
-    this function would put a second copy of the rotation-due rule in a second
-    file, and the two would drift the first time either was edited -- with the
-    notice, not the decision, being the one that lied. They come from
-    ``rotation_thresholds.rotation_due_verdict``, which evaluates each term
-    exactly once.
-    """
-    if band_actionable and fraction_crossed:
-        because = (
-            f"BOTH axes agree -- the economics band is {band!r}, and "
-            f"{current_tokens:,} is at or past {threshold_fraction:.0%} of the "
-            f"{ceiling:,}-token ceiling"
-        )
-    elif band_actionable:
-        because = (
-            f"the ECONOMICS BAND is {band!r}. That band is an ABSOLUTE token "
-            f"count, not a share of the window, which is why it fires at "
-            f"{current_tokens / ceiling:.1%} of the ceiling -- the "
-            f"{threshold_fraction:.0%} fraction hint is NOT crossed here and is "
-            f"not what triggered this"
-        )
-    elif fraction_crossed:
-        because = (
-            f"{current_tokens:,} is at or past {threshold_fraction:.0%} of this "
-            f"model's {ceiling:,}-token ceiling, while the model-blind economics "
-            f"band is still {band!r} -- on a ceiling this small the bands do not "
-            f"fit the window and the fraction is what fires first"
-        )
-    else:
-        # UNREACHABLE from `_check_and_notify`, which returns before building a
-        # notice when neither axis fired. Raised rather than papered over with
-        # a vague "rotation is due": a notice that cannot say why it exists is
-        # a notice whose reader has to guess, and this whole change is about
-        # not making them.
-        raise ValueError(
-            f"build_notification_content called with NEITHER axis firing "
-            f"(band={band!r}, current_tokens={current_tokens}, ceiling={ceiling}) "
-            f"-- there is no rotation-due reason to state",
-        )
-    return (
-        f"IMPORTANT: rotation due for agent_instance_id="
-        f"{agent_instance_id!r} session_label={session_label!r}. "
-        f"model={model!r} current_tokens={current_tokens} ceiling={ceiling}. "
-        f"DUE BECAUSE {because}. "
-        "This is a MEASURED SIGNAL, not an action -- rotation timing stays "
-        "a steward/seat decision; nothing was cleared or rotated."
-    )
+    """Return the sole durability notice text for a due session."""
+    return f"context is {current_tokens:,} — make sure everything is durable."
 
 
 def _resolve_plugin_src_path() -> Path | None:
@@ -530,24 +490,24 @@ def _import_rotation_thresholds() -> Any | None:
 
 def _solet_call_env() -> dict[str, str]:
     """``os.environ``, with PATH APPENDED by ``AGENT_WAKE_CLI``'s directory
-    when that directory actually contains a file named ``solet`` --
+    when that directory actually contains a file named ``solet-bridge`` --
     SECURITY.md's disclosed contract for this hook keeps argv literally
-    ``["solet", "call", ...]`` (PATH-resolved, from the session's own
+    ``["solet-bridge", "call", ...]`` (PATH-resolved, from the session's own
     environment, same category as before); this widens WHICH directories
     PATH searches, not what gets exec'd by name.
 
     APPEND, not prepend (2026-08-16, cross-session review): a prepend would
     make the release venv's bin dir win PATH resolution for EVERY lookup in
-    this subprocess and anything it spawns, not just ``solet`` -- that
+    this subprocess and anything it spawns, not just ``solet-bridge`` -- that
     directory also carries ``python3``/``pip``, so a prepend would silently
     change which of those a child process resolves too, a behavior change
-    beyond "find the right solet" with no signal in the diff's intent.
-    Append fixes the identical missing-solet case (a PATH that lacks solet
+    beyond "find the right solet-bridge" with no signal in the diff's intent.
+    Append fixes the identical missing-solet-bridge case (a PATH that lacks solet-bridge
     entirely resolves it either way, first match or last) while never
     shadowing an existing resolution -- it only ever adds a location PATH
     lookup falls through to, never reorders one already there.
 
-    2026-08-16 dark-gauge root cause: a bare ``"solet"`` lookup against the
+    2026-08-16 dark-gauge root cause: a bare ``"solet-bridge"`` lookup against the
     UNMODIFIED PATH silently ``FileNotFoundError``s on a worker whose PATH
     excludes the venv bin dir -- caught below, warned to stderr (nothing
     reads it), exit 0. The throttle marker gets touched upstream of this
@@ -564,13 +524,13 @@ def _solet_call_env() -> dict[str, str]:
     ``is_file()`` guard -- a stat for the FILE, not merely the directory's
     existence -- means a dangling export contributes NOTHING to PATH -- no
     bogus directory gets appended at all -- so a session whose PATH already
-    resolves solet fine is completely unaffected either way; only a session
+    resolves solet-bridge fine is completely unaffected either way; only a session
     that would otherwise fail gains a chance to resolve."""
     cli = os.environ.get("AGENT_WAKE_CLI", "").strip()
     if not cli:
         return dict(os.environ)
     solet_dir = str(Path(cli).parent)
-    if not (Path(solet_dir) / "solet").is_file():
+    if not (Path(solet_dir) / "solet-bridge").is_file():
         return dict(os.environ)
     env = dict(os.environ)
     env["PATH"] = f"{env.get('PATH', '')}:{solet_dir}"
@@ -580,20 +540,20 @@ def _solet_call_env() -> dict[str, str]:
 def _solet_call(process_key: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
     try:
         result = subprocess.run(
-            ["solet", "call", process_key, json.dumps(arguments)],
+            ["solet-bridge", "call", process_key, json.dumps(arguments)],
             capture_output=True, text=True, timeout=20, check=False,
             env=_solet_call_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        _warn(f"solet call {process_key} failed to run: {exc}")
+        _warn(f"solet-bridge call {process_key} failed to run: {exc}")
         return None
     if result.returncode != 0:
-        _warn(f"solet call {process_key} exited {result.returncode}: {result.stderr.strip()[:200]}")
+        _warn(f"solet-bridge call {process_key} exited {result.returncode}: {result.stderr.strip()[:200]}")
         return None
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        _warn(f"solet call {process_key} returned unparseable output: {exc}")
+        _warn(f"solet-bridge call {process_key} returned unparseable output: {exc}")
         return None
 
 
@@ -980,6 +940,33 @@ def _reporter_arguments() -> dict[str, Any]:
     }
 
 
+def _runtime_identity_arguments(claude_session_id: str) -> dict[str, str]:
+    """The runtime-neutral identity this Claude Code hook can state truthfully.
+
+    ``claude_session_id`` is the native runtime-session id from this hook's
+    stdin payload. Provider and runtime are fixed by this Claude Code-only
+    hook. A missing ``CLAUDE_EFFORT`` is represented explicitly as ``unknown``:
+    the hook must not darken its gauge merely because this optional launcher
+    input was absent.
+    """
+    effort = os.environ.get("CLAUDE_EFFORT", "").strip()
+    if not effort:
+        global _missing_effort_warned
+        if not _missing_effort_warned:
+            _warn(
+                "CLAUDE_EFFORT is unset; reporting effort='unknown' as a "
+                "degraded identity rather than withholding the gauge",
+            )
+            _missing_effort_warned = True
+        effort = "unknown"
+    return {
+        "runtime_session_id": claude_session_id,
+        "provider": "anthropic",
+        "runtime": "claude_code",
+        "effort": effort,
+    }
+
+
 def _has_consecutive(parts: tuple[str, ...], *names: str) -> bool:
     """True when ``names`` appear as CONSECUTIVE path components."""
     width = len(names)
@@ -1040,11 +1027,12 @@ def _report_context_status(
     False means "the solet did not complete this call", which is exactly the
     condition under which the solet-side legs cannot be covering anything.
     """
+    identity = _runtime_identity_arguments(claude_session_id)
     envelope = _solet_call(
         _REPORT_CONTEXT_STATUS_PROCESS_KEY,
         {
             "agent_instance_id": agent_instance_id,
-            "claude_session_id": claude_session_id,
+            **identity,
             "model": model,
             "current_tokens": current_tokens,
             "ceiling": ceiling,
@@ -1222,6 +1210,8 @@ def _check_and_notify(
 
 
 def main() -> int:
+    if not _is_designated_gauge_reporter():
+        return 0
     context = _resolve_firing_context()
     if context is None:
         return 0

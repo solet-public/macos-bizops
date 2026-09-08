@@ -30,7 +30,7 @@ from ..models import (
     Severity,
 )
 from ..targets import TargetTree
-from ..toolrun import run, tool_available
+from ..toolrun import run, tool_available, tool_unavailable_reason
 
 _RG = "rg"
 _GIT = "git"
@@ -303,7 +303,9 @@ def scan(tree: TargetTree, run_id: str) -> ScannerResult:
     if not tool_available(_RG):
         return ScannerResult(
             findings=[],
-            coverage=CoverageRecord(scanner=_SCANNER, ran=False, files_examined=0, gap_reason="rg not installed"),
+            coverage=CoverageRecord(
+                scanner=_SCANNER, ran=False, files_examined=0, gap_reason=tool_unavailable_reason(_RG)
+            ),
         )
     # The operator-PII pattern is runtime-composed, so its absence is a real reduction in
     # what this scan covered and is disclosed rather than silently passing (F1 §3).

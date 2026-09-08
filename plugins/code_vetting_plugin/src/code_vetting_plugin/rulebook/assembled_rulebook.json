@@ -208,7 +208,7 @@
     "artifact_hash": "fbdaa91da29fb64f17edaa79a2b8e9afc14a768935c0e70ea0627472329adc99",
     "sources": [
       {
-        "anchor": "verify/lenses.py::_REFUTE_CLAUSES",
+        "anchor": "verify/lenses.py::REFUTE_CLAUSES",
         "hash": "5d38bd43c87b0021afb3ac9b165f8c35302fda96450c18203e031f36ce52fa0a"
       },
       {

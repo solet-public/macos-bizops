@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
 from ananta.interfaces.state_management_interface import (  # noqa: E402
@@ -46,6 +46,7 @@ from ananta.interfaces.state_management_interface import (  # noqa: E402
 from ananta.llm.agent_messaging.models import (  # noqa: E402
     PeerInboxRequest,
     RoleSectionStatus,
+    RoleTruncationReason,
 )
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     AGENT_ROLE_BINDING_NAMESPACE,
@@ -153,10 +154,21 @@ class _FakeState:
         return {"action_status": "completed", "data": {"result": {"updated": updated}}}
 
 
-def _make_service(state: _FakeState) -> AgentMessagingService:
-    """Construct the service with stubs — only ``_state`` is exercised here."""
+class _NoDirectInboxRepository:
+    """The role-page metadata tests do not need direct peer-thread rows."""
+
+    def list_peer_messages_for(self, **_: object) -> tuple[list[object], bool]:
+        return [], True
+
+
+def _make_service(
+    state: _FakeState, *, include_direct_inbox: bool = False,
+) -> AgentMessagingService:
+    """Construct the service with a faithful state fake and optional empty inbox."""
     return AgentMessagingService(
-        repository=cast(Any, None),
+        repository=(
+            _NoDirectInboxRepository() if include_direct_inbox else cast(Any, None)
+        ),
         state_service=cast(StateManagementInterface, state),
         config=AgentMessagingConfig(),
     )
@@ -367,6 +379,65 @@ def test_multirole_kway_merge_pagination() -> None:
         "multi-role k-way merge: every row exactly once across pages",
     )
     _check(pages >= 3, "multi-role k-way merge: role_after page-2+ reachable (>=3 pages)")
+
+
+def test_backlog_depths_repeat_and_cursor_completion() -> None:
+    """0/5/6/12 role rows: newest page, replay, then complete backward walk."""
+    for count in (0, 5, 6, 12):
+        state = _FakeState()
+        _seed_binding(state, "R1")
+        for index in range(count):
+            _seed_role_msg(
+                state,
+                row_id=f"depth-{index:02d}",
+                role="R1",
+                created_at=f"2026-06-19T08:00:{index:02d}",
+            )
+        service = _make_service(state)
+        first, cursor, _, _ = service.list_silent_for_roles(
+            agent_instance_id=_INSTANCE,
+            include_important=False,
+            limit=5,
+            role_after=None,
+        )
+        repeated, _, _, _ = service.list_silent_for_roles(
+            agent_instance_id=_INSTANCE,
+            include_important=False,
+            limit=5,
+            role_after=None,
+        )
+        expected_first = [
+            f"msg-depth-{index:02d}"
+            for index in range(count - 1, max(-1, count - 6), -1)
+        ]
+        _check(
+            _page_ids(first) == expected_first,
+            f"role depth {count}: cursorless page starts at newest row",
+        )
+        _check(
+            _page_ids(repeated) == expected_first,
+            f"role depth {count}: cursorless repeat replays page one",
+        )
+        _check(
+            (cursor is None) is (count <= 5),
+            f"role depth {count}: null cursor means no older row remains",
+        )
+        collected = _page_ids(first)
+        while cursor is not None:
+            page, cursor, _, _ = service.list_silent_for_roles(
+                agent_instance_id=_INSTANCE,
+                include_important=False,
+                limit=5,
+                role_after=cursor,
+            )
+            collected.extend(_page_ids(page))
+        _check(
+            collected == [
+                f"msg-depth-{index:02d}"
+                for index in range(count - 1, -1, -1)
+            ],
+            f"role depth {count}: echoed cursor reaches every row exactly once",
+        )
 
 
 def test_held_role_set_change_resets() -> None:
@@ -688,6 +759,97 @@ def test_byte_ceiling_admits_at_least_one_oversized_entry() -> None:
     _check(cursor is not None, "byte ceiling: an over-ceiling single-entry page still mints a cursor")
 
 
+def _row_limit_metadata_matches(first: Any, ten: Any) -> bool:
+    return all((
+        first.role_limit == 6,
+        ten.role_limit == 10,
+        first.role_page_truncated is True,
+        ten.role_page_truncated is True,
+        first.role_truncation_reason is RoleTruncationReason.ROW_LIMIT,
+        ten.role_truncation_reason is RoleTruncationReason.ROW_LIMIT,
+        first.role_byte_ceiling is None,
+        ten.role_byte_ceiling is None,
+    ))
+
+
+def _drain_role_page_ids(
+    service: AgentMessagingService, cursor: str | None,
+) -> list[str]:
+    collected: list[str] = []
+    while cursor is not None:
+        page = service.peer_inbox(_inbox_request(limit=6, role_after=cursor))
+        collected.extend(_page_ids(page.role_entries))
+        if page.next_role_cursor is None:
+            _check(
+                page.role_page_truncated is False
+                and page.role_truncation_reason is None
+                and page.role_byte_ceiling is None,
+                "an exhausted role page discloses completeness, not truncation",
+            )
+        cursor = page.next_role_cursor
+    return collected
+
+
+def test_role_page_metadata_discloses_limits_and_full_drain() -> None:
+    """The U2 killing fixture: limits 6 and 10, then exact-once drain."""
+    state = _FakeState()
+    _seed_binding(state, "R1")
+    for index in range(12):
+        _seed_role_msg(
+            state,
+            row_id=f"metadata-{index:02d}",
+            role="R1",
+            created_at=f"2026-06-19T08:00:{index:02d}",
+        )
+    service = _make_service(state, include_direct_inbox=True)
+
+    first = service.peer_inbox(_inbox_request(limit=6))
+    ten = service.peer_inbox(_inbox_request(limit=10))
+    _check(
+        len(first.role_entries) == 6
+        and len(ten.role_entries) == 10
+        and _page_ids(first.role_entries) == _page_ids(ten.role_entries)[:6],
+        "limits 6 then 10 return matching newest-first prefixes",
+    )
+    _check(
+        _row_limit_metadata_matches(first, ten),
+        "row-limited pages disclose the effective limit and reason",
+    )
+
+    collected = _page_ids(first.role_entries) + _drain_role_page_ids(
+        service, first.next_role_cursor,
+    )
+    _check(
+        collected == [f"msg-metadata-{index:02d}" for index in range(11, -1, -1)]
+        and len(collected) == len(set(collected)),
+        "continuing to a null cursor covers the role stream exactly once",
+    )
+
+
+def test_role_page_metadata_discloses_byte_ceiling() -> None:
+    state = _FakeState()
+    _seed_binding(state, "R1")
+    for index in range(6):
+        _seed_role_msg(
+            state,
+            row_id=f"metadata-byte-{index:02d}",
+            role="R1",
+            created_at=f"2026-06-19T08:00:{index:02d}",
+            text="x" * 60_000,
+        )
+    page = _make_service(state, include_direct_inbox=True).peer_inbox(
+        _inbox_request(limit=10),
+    )
+    _check(
+        0 < len(page.role_entries) < page.role_limit
+        and page.next_role_cursor is not None
+        and page.role_page_truncated is True
+        and page.role_truncation_reason is RoleTruncationReason.BYTE_CEILING
+        and page.role_byte_ceiling == 200_000,
+        "a byte-limited short role page discloses its ceiling and cursor",
+    )
+
+
 # ---------------------------------------------------------------------------
 # 9. Q1 role-section fault-domain boundary (peer_inbox._collect_role_section)
 # ---------------------------------------------------------------------------
@@ -702,10 +864,13 @@ class _RaisingState(_FakeState):
         raise RuntimeError(msg)
 
 
-def _inbox_request(role_after: str | None = None) -> PeerInboxRequest:
+def _inbox_request(
+    role_after: str | None = None, *, limit: int = 50,
+) -> PeerInboxRequest:
     return PeerInboxRequest(
         recipient_agent_id="claude_code",
         recipient_agent_instance_id=_INSTANCE,
+        limit=limit,
         role_after=role_after,
     )
 
@@ -760,6 +925,7 @@ def main() -> int:
     test_cursor_roundtrip_and_scope()
     test_cursor_fail_closed()
     test_multirole_kway_merge_pagination()
+    test_backlog_depths_repeat_and_cursor_completion()
     test_held_role_set_change_resets()
     test_malformed_role_after_rejected()
     test_delivered_important_catchup()
@@ -772,6 +938,8 @@ def main() -> int:
     test_floor_is_noop_without_a_mark()
     test_byte_ceiling_truncates_short_of_the_row_limit()
     test_byte_ceiling_admits_at_least_one_oversized_entry()
+    test_role_page_metadata_discloses_limits_and_full_drain()
+    test_role_page_metadata_discloses_byte_ceiling()
     test_q1_boundary_isolates_query_failure()
     test_q1_boundary_malformed_cursor_isolated()
     test_q1_boundary_ok_passthrough()

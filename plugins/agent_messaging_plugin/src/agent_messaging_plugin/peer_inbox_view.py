@@ -3,7 +3,7 @@
 Three surfaces render the SAME ``PeerInbox`` dataclass for a caller:
 
 - the localhost bridge route ``GET .../peer/inbox`` (``http_routes``) — what
-  the no-MCP ``solet watch`` drain reads;
+  the no-MCP ``solet-bridge watch`` drain reads;
 - the Streamable-HTTP MCP tool dispatch (``mcp_streamable.dispatch``);
 - the ``plugin::agent_messaging_plugin::peer_inbox`` platform process
   (``plugin.peer_inbox_process``) — the pull path for sessions with no MCP
@@ -63,13 +63,21 @@ def serialize_peer_inbox_page(
 ) -> dict[str, Any]:
     """Render a ``PeerInbox`` page, both sections, with their two cursors.
 
-    The role section (``role_entries`` + ``next_role_cursor``) is emitted
+    ``instance_exhausted`` is the instance section's progress signal. It means
+    exhausted under the existing newest-first timestamp cursor only; that legacy
+    cursor can skip equal-``created_at`` rows at a page boundary, so it is not
+    a claim of globally lossless observation. The role section (``role_entries`` + ``next_role_cursor``) is emitted
     ADDITIVELY; the instance section keys are byte-for-byte unchanged.
     ``role_section_status`` / ``role_section_error`` carry the v10 Q1
     fault-domain outcome so a caller can tell an empty role section (no role
     messages) from a failed one — status ``"ok"`` means the section was
     COMPUTED without error, never that it is drained. Drained is
     ``next_role_cursor is None``.
+
+    A successful role page is not a drain; continue until
+    ``next_role_cursor`` is null. ``role_limit`` is the effective limit and
+    the additive truncation fields disclose whether a continuation was caused
+    by that row limit or the role-page byte ceiling.
     """
     return {
         "recipient_agent_id": page.recipient_agent_id,
@@ -80,6 +88,7 @@ def serialize_peer_inbox_page(
             if page.next_after_created_at is not None
             else None
         ),
+        "instance_exhausted": page.instance_exhausted,
         "role_entries": [
             serialize_peer_inbox_entry(entry) for entry in page.role_entries
         ],
@@ -96,4 +105,12 @@ def serialize_peer_inbox_page(
         # deliberate pre-mark read.
         "role_floor_applied": page.role_floor_applied,
         "role_history_cursor": page.role_history_cursor,
+        "role_limit": page.role_limit,
+        "role_page_truncated": page.role_page_truncated,
+        "role_truncation_reason": (
+            page.role_truncation_reason.value
+            if page.role_truncation_reason is not None
+            else None
+        ),
+        "role_byte_ceiling": page.role_byte_ceiling,
     }

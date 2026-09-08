@@ -464,10 +464,13 @@ def test_executor_writes_record_before_swap(tmp: Path) -> None:
     executor = _make_executor(tmp, "b2exec")
     path = pending_finisher_path(tmp, "b2exec")
     clear_pending_finisher(path)
+    prior_pid = os.getpid()
+    prior_start_token = process_identity.start_token(prior_pid)
     swap = executor._swap_or_compensate(  # noqa: SLF001
         candidate=_fake_candidate(),
         symlink_swap=lambda _c: SwapResult(current=_CANDIDATE_REL, previous="rel-old"),
         prior_color="blue", self_instance_id="example-blue-1", instance_id="example-green-2",
+        prior_pid=prior_pid, prior_start_token=prior_start_token,
         pid=999, reason="b2-smoke", expected_etag="etag",
         compensation_codes=("confirmed", "unconfirmed"),
     )
@@ -475,11 +478,11 @@ def test_executor_writes_record_before_swap(tmp: Path) -> None:
     record = read_pending_finisher(path)
     _check(record is not None, "record written before the swap")
     assert record is not None
-    _check(record.prior_pid == os.getpid(), "record names THIS process pid")
+    _check(record.prior_pid == prior_pid, "record names the supplied prior pid")
     _check(record.candidate_release_id == _CANDIDATE_REL, "record carries candidate_release_id (B2·1)")
     _check(
-        record.prior_start_token == process_identity.start_token(os.getpid()),
-        "record carries our real start-time token (B2·3)",
+        record.prior_start_token == prior_start_token,
+        "record carries the supplied start-time token (B2·3)",
     )
 
 
@@ -490,8 +493,12 @@ def test_executor_enqueue_failure_is_non_fatal(tmp: Path) -> None:
     record = _rec(pid=os.getpid())
     write_pending_finisher(path, record)
     result = executor._finish_queued(  # noqa: SLF001
-        next_color="green", next_instance_id="example-green-2", pid=999,
-        self_instance_id="example-blue-1", self_color="blue", set_active_targets=[],
+        next_color="green", next_instance_id="example-green-2",
+        candidate_release_id=record.candidate_release_id,
+        pid=999, prior_pid=record.prior_pid,
+        prior_instance_id=record.prior_instance_id, prior_color=record.prior_color,
+        prior_start_token=record.prior_start_token, poller_gate="local_service_quiesced",
+        set_active_targets=[],
         activate_result={}, reason="b2-smoke", expected_etag="etag",
     )
     _check(result.status is RestartStatus.QUEUED, "enqueue raised, cutover still QUEUED (not failed)")

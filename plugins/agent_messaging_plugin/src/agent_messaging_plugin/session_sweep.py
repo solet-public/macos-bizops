@@ -83,7 +83,12 @@ from ananta.llm.agent_messaging.state_results import (
 )
 
 from . import rotation_thresholds
+from .dispatch_policy_pair_sweep import sweep_unpaired_dispatch_policy
 from .gauge_notice_emit import deliver_and_record_gauge_notice
+from .managed_dispatch import (
+    EVENT_MANAGED_DISPATCH_NOTICE,
+    sweep_managed_dispatches,
+)
 from .overdue_notice import EVENT_SESSION_OVERDUE_NOTICE, _notify_steward_of_overdue
 from .peer_registry import PeerAmbiguousError, PeerSessionAmbiguousError, PeerUnreachableError
 from .schema import (
@@ -95,7 +100,6 @@ from .schema import (
     LIFECYCLE_RETIRED,
     LIFECYCLE_SPAWNING,
     LIFECYCLE_TERMINATED,
-    TABLE_MANAGED_SESSION,
     TABLE_SESSION_DEPENDENCY,
     TABLE_SESSION_ROLE_CLAIM,
 )
@@ -109,6 +113,8 @@ from .session_lifecycle_store import (
     transition_lifecycle_state,
 )
 from .session_lifecycle_verbs import (
+    REPORT_BY_SOURCE_EXPLICIT_SELF_REPORT,
+    REPORT_BY_SOURCE_OBSERVED_SPAWNING,
     VerbError,
     _rearm_report_by,
     _resolve_termination_driver,
@@ -140,7 +146,6 @@ DEFAULT_PRUNE_GRACE_WINDOW_S: float = 300.0
 # ``ESCALATION_EVENT_TYPE`` naming convention (a distinct type per concern,
 # never the generic peer_message type, so a receiver can tell wake classes apart).
 EVENT_SESSION_DEPENDENCY_WAKE = "session_dependency_wake"
-
 # Same convention, the D2-lane-tail overdue-steward-notice fix (follow-up
 # #3): the report-or-die contract's own steward notification, distinct from
 # the session_dependency wake above even though both ride append_event.
@@ -156,6 +161,10 @@ EVENT_SESSION_DEPENDENCY_WAKE = "session_dependency_wake"
 # surface that can observe "this session has been idle a while, its context is
 # large, its cache is about to lapse" BEFORE the next call pays for it.
 EVENT_ROTATION_DUE_NOTICE = "rotation_due_notice"
+EVENT_DISPATCH_POLICY_UNPAIRED = "dispatch_policy_unpaired"
+"""A diagnose/design producer remained without its required other-vendor peer."""
+
+DISPATCH_POLICY_PAIR_WINDOW_S: float = 600.0
 
 # The gauge-coverage leg. Signature it detects: the platform believes a session
 # is LIVE (its lifecycle row says so, i.e. report_alive is landing) while NO
@@ -398,11 +407,7 @@ def _parse_iso(value: object) -> datetime | None:
 def _managed_sessions_in_state(
     state: StateManagementInterface, lifecycle_state: str,
 ) -> list[dict[str, Any]]:
-    result = state.query_state(
-        AGENT_ROLE_BINDING_NAMESPACE,
-        {"table": TABLE_MANAGED_SESSION, "filters": {"lifecycle_state": lifecycle_state}},
-    )
-    return require_records(result)
+    return list_managed_sessions(state, {"lifecycle_state": lifecycle_state})
 
 
 def live_lifecycle_rows_by_instance(
@@ -601,6 +606,7 @@ def _extend_observed_alive_spawning_row(
     _rearm_report_by(
         state, agent_instance_id,
         report_by_seconds=int(row.get("report_by_seconds") or 0),
+        source=REPORT_BY_SOURCE_OBSERVED_SPAWNING,
     )
     if peer_registry is not None and bridge_manager is not None:
         _notify_steward_of_spawn_unregistered(
@@ -1378,6 +1384,8 @@ def last_report_alive(row: dict[str, Any]) -> datetime | None:
     the failure mode this whole entry is about. Callers must keep the
     distinction; none of them may treat ``None`` as "did not tick".
     """
+    if row.get("report_by_source") != REPORT_BY_SOURCE_EXPLICIT_SELF_REPORT:
+        return None
     report_by = _parse_iso(row.get("report_by"))
     window_s = row.get("report_by_seconds")
     if report_by is None or not isinstance(window_s, (int, float)):
@@ -1418,92 +1426,10 @@ def _gauge_dark_session(
 
 
 def _rotation_prose(agent_instance_id: str, row: dict[str, Any]) -> str:
-    """The notice text: the MEASURED numbers, never a bare "you should rotate".
-
-    Two qualifications are carried IN THE TEXT rather than assumed away,
-    because both are live limitations of the data this reads:
-
-    * The bands are MODEL-BLIND. ``rotation_band`` takes no model argument and
-      its thresholds came from one tier's economics, so the model is named
-      beside the band and the reader discounts it themselves. A tier-specific
-      verdict presented as universal is how a hygiene-level number reads as an
-      emergency.
-    * A row whose reporter is unattributable cannot be trusted to the same
-      degree. A reporter predating attribution sends no cache state, so the
-      band it implies is the WARM default rather than a measurement -- and an
-      urgent-sounding notice derived from a default is false precision. Such a
-      row is reported AS unattributable instead of being silently upgraded.
-
-    NAMES THE AXIS IT FIRED ON (GAU-12, 2026-08-18). On a small ceiling the
-    fraction term can cross while the model-blind band is still ``warm_keep``
-    -- the leg's own decision (:func:`_rotation_due_row`) is the union, but
-    this function used to print only the band, so the steward received an
-    event TYPED ``rotation_due_notice`` whose body read "keep working". Same
-    remedy GAU-08 already applied to the hook's notice
-    (``rotation_due_watch.build_notification_content``): a "DUE BECAUSE"
-    clause built from ``rotation_band_actionable`` / ``rotation_fraction_
-    crossed``, PASSED IN on ``row`` from :func:`_rotation_due_row` and never
-    recomputed here -- recomputing ``current_tokens >= ceiling * threshold``
-    in this function would put a second copy of the rule in a second file,
-    with this prose as the half that could drift and lie.
-    """
-    band = row.get("rotation_band") or "unknown"
-    guidance = row.get("rotation_guidance") or "no guidance derived"
-    current_tokens = row.get("current_tokens")
-    ceiling = row.get("ceiling")
-    fraction = row.get("fraction")
-    band_actionable = bool(row.get("rotation_band_actionable"))
-    fraction_crossed = bool(row.get("rotation_fraction_crossed"))
-    if band_actionable and fraction_crossed:
-        because = (
-            f"BOTH axes agree -- the economics band is {band!r}, and "
-            f"{fraction:.3f} of the {ceiling} ceiling is at or past the "
-            "rotation fraction hint"
-        )
-    elif band_actionable:
-        because = (
-            f"the ECONOMICS BAND is {band!r}. That band is an ABSOLUTE token "
-            "count, not a share of the window, which is why it fires here -- "
-            "the rotation fraction hint is NOT crossed and is not what "
-            "triggered this"
-        )
-    elif fraction_crossed:
-        because = (
-            f"{current_tokens} tokens is at or past this model's rotation "
-            f"fraction hint of its {ceiling}-token ceiling, while the "
-            f"model-blind economics band is still {band!r} -- on a ceiling "
-            "this small the bands do not fit the window and the fraction is "
-            "what fires first"
-        )
-    else:
-        # UNREACHABLE from `_rotation_due_row`, which returns None before this
-        # is ever called when neither axis fired. Raised rather than printing
-        # a vague "rotation is due" -- a notice that cannot say why it exists
-        # is a notice whose reader has to guess, which is the exact defect
-        # this change removes.
-        raise ValueError(
-            f"_rotation_prose called for {agent_instance_id} with NEITHER "
-            f"axis firing (band={band!r}, current_tokens={current_tokens}, "
-            f"ceiling={ceiling}) -- there is no rotation-due reason to state",
-        )
-    surface = row.get("reporter_surface")
-    generation = row.get("reporter_generation")
-    attribution = (
-        f"reported by {surface}/gen{generation}"
-        if surface is not None and generation is not None
-        else "REPORTER UNATTRIBUTABLE (predates attribution) -- treat the band "
-        "as provisional: an un-upgraded reporter sends no cache state, so this "
-        "band is the warm default rather than a measurement"
-    )
-    return (
-        f"rotation_due_notice: {agent_instance_id} is at "
-        f"{current_tokens} tokens on {row.get('model')!r} "
-        f"({fraction:.3f} of a {ceiling} ceiling). DUE BECAUSE {because}. "
-        f"band={band} -- {guidance}. Measured at {row.get('measured_at')}. "
-        f"{attribution}. NOTE the bands are model-blind: the thresholds derive "
-        f"from one tier's economics, so weigh this against {row.get('model')!r}'s "
-        f"own costs rather than reading the band as universal."
-    )
+    """Return the sole durability notice text for a due session."""
+    del agent_instance_id
+    current_tokens = int(row["current_tokens"])
+    return f"context is {current_tokens:,} — make sure everything is durable."
 
 
 def _notify_rotation_due(
@@ -1576,28 +1502,19 @@ def _notify_rotation_due(
     return True
 
 
-def _rotation_due_row(
-    state: StateManagementInterface, row: dict[str, Any],
-) -> dict[str, Any] | None:
-    """The gauge row for ``row``'s session, enriched with the derived band —
-    or ``None`` when this session is not rotation-due.
-
-    Every ``None`` here is a distinct, deliberate skip rather than a failure:
-    no steward to notify, no gauge row yet, an unusable ceiling, or not
-    rotation-due on either axis. Split out of the sweep loop so the loop reads
-    as "for each session, notify if due" and the decision of what counts as DUE
-    lives in one place.
-
-    That decision is DELEGATED, never restated here. It was a local
-    ``fraction < ROTATION_THRESHOLD_FRACTION`` comparison until GAU-08, which
-    is how this leg came to hold its own private copy of a rule that had moved
-    -- the fix belonged in the predicate, and a second copy of it here would
-    have re-opened the same gap the moment either changed again.
-    """
+def _rotation_notice_subject(row: dict[str, Any]) -> tuple[str, str] | None:
+    """Return the session/steward pair only when both durable keys exist."""
     agent_instance_id = str(row.get("agent_instance_id") or "")
     spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
     if not agent_instance_id or not spawner_instance_id:
         return None
+    return agent_instance_id, spawner_instance_id
+
+
+def _rotation_notice_gauge(
+    state: StateManagementInterface, agent_instance_id: str,
+) -> tuple[dict[str, Any], int, int] | None:
+    """Read one usable gauge and its denominator, without guessing either."""
     gauge = read_session_context_status(state, agent_instance_id)
     if gauge is None:
         return None
@@ -1605,6 +1522,20 @@ def _rotation_due_row(
     ceiling = int(gauge.get("ceiling") or 0)
     if ceiling <= 0:
         return None
+    return gauge, current, ceiling
+
+
+def _rotation_due_row(
+    state: StateManagementInterface, row: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return one due gauge, enriched only with centralized notice evidence."""
+    subject = _rotation_notice_subject(row)
+    if subject is None:
+        return None
+    gauge_values = _rotation_notice_gauge(state, subject[0])
+    if gauge_values is None:
+        return None
+    gauge, current, ceiling = gauge_values
     # Derived ONCE, as the full decomposition, and used for the verdict, the
     # band, AND the two axis flags that ride into the notice (GAU-12), so
     # `_rotation_prose` cannot name a band the decision did not use, nor claim
@@ -1615,20 +1546,20 @@ def _rotation_due_row(
     # decision; GAU-12 carries the same decomposition into the prose so a
     # small-ceiling fraction-only firing no longer prints an unqualified
     # keep-working band under an event typed rotation_due_notice.
-    cache_cold = bool(gauge.get("cache_cold"))
-    verdict = rotation_thresholds.rotation_due_verdict(
-        ceiling=ceiling, current_tokens=current, cache_cold=cache_cold,
+    verdict = rotation_thresholds.rotation_notice_verdict(
+        model=str(gauge.get("model") or ""),
+        effort=str(gauge.get("effort") or ""),
+        current_tokens=current,
+        runtime_window_tokens=ceiling,
     )
     if not verdict.due:
         return None
-    _, guidance = rotation_thresholds.rotation_band(current, cache_cold=cache_cold)
     enriched = dict(gauge)
     enriched.update({
-        "fraction": verdict.fraction,
-        "rotation_band": verdict.band,
-        "rotation_guidance": guidance,
-        "rotation_band_actionable": verdict.band_actionable,
-        "rotation_fraction_crossed": verdict.fraction_crossed,
+        "fraction": current / ceiling,
+        "rotation_notice_at_tokens": verdict.notice_at_tokens,
+        "rotation_notice_window_source": verdict.window_source,
+        "rotation_notice_unrecognized_model": verdict.unrecognized_model,
     })
     return enriched
 
@@ -1949,17 +1880,11 @@ def _gauge_stale_session(
       grace window this check no longer applies and a genuinely stuck
       rotation is free to alarm through the ordinary lag check below.
     """
-    agent_instance_id = str(row.get("agent_instance_id") or "")
-    spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
-    if not agent_instance_id or not spawner_instance_id:
+    inputs = _gauge_stale_inputs(state, row)
+    if inputs is None:
         return None
-    gauge = read_session_context_status(state, agent_instance_id)
-    if gauge is None:
-        return None
-    measured_at = _parse_iso(gauge.get("measured_at"))
-    if measured_at is None:
-        return None
-    last_alive = last_report_alive(row)
+    agent_instance_id, spawner_instance_id, measured_at = inputs
+    last_alive = last_report_alive(row) or _heartbeat_liveness_after_gauge(row, measured_at)
     if last_alive is None:
         return None
     if _in_rotation_grace(row, measured_at=measured_at, clock=clock):
@@ -1968,6 +1893,40 @@ def _gauge_stale_session(
     if lag_s <= GAUGE_STALE_LAG_S:
         return None
     return agent_instance_id, spawner_instance_id, last_alive, measured_at
+
+
+def _gauge_stale_inputs(
+    state: StateManagementInterface,
+    row: dict[str, Any],
+) -> tuple[str, str, datetime] | None:
+    """Return the validated row identity and gauge clock, or no evidence."""
+    agent_instance_id = str(row.get("agent_instance_id") or "")
+    spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
+    if not agent_instance_id or not spawner_instance_id:
+        return None
+    gauge = read_session_context_status(state, agent_instance_id)
+    measured_at = _parse_iso(gauge.get("measured_at")) if gauge is not None else None
+    if measured_at is None:
+        return None
+    return agent_instance_id, spawner_instance_id, measured_at
+
+
+def _heartbeat_liveness_after_gauge(
+    row: dict[str, Any],
+    measured_at: datetime,
+) -> datetime | None:
+    """The D-5.3 exception to the explicit-report identity.
+
+    A successful passive heartbeat carrying one or more failed predecessor
+    attempts is liveness evidence with a different diagnosis.  It must be
+    newer than the frozen gauge row; otherwise it says nothing about whether
+    the gauge has since arrested.
+    """
+    heartbeat_at = _parse_iso(row.get("last_heartbeat_at"))
+    failures = int(row.get("heartbeat_failures_since_last") or 0)
+    if failures <= 0 or heartbeat_at is None or heartbeat_at <= measured_at:
+        return None
+    return heartbeat_at
 
 
 def _gauge_stale_prose(
@@ -2006,24 +1965,35 @@ def _gauge_stale_prose(
     """
     lag_s = (last_alive - measured_at).total_seconds()
     minutes = lag_s / 60.0
+    heartbeat_failures = int(row.get("heartbeat_failures_since_last") or 0)
+    if heartbeat_failures:
+        liveness_evidence = (
+            f"Its last successful passive heartbeat landed at {last_alive.isoformat()}, "
+            f"after carrying forward {heartbeat_failures} heartbeat failure(s) "
+            f"since {row.get('heartbeat_failure_first_at')!r}; this is a "
+            "heartbeat-FAILING diagnosis, not evidence that the gauge reporter alone froze."
+        )
+    else:
+        liveness_evidence = (
+            f"Its last report_alive derives to {last_alive.isoformat()}; the "
+            "independently-written liveness row advanced while the gauge did not, "
+            "narrowing this to that session's gauge reporter."
+        )
     return (
         f"gauge_stale_notice: {agent_instance_id} (lane_id={row.get('lane_id')!r}) "
         f"is LIVE and STILL REPORTING, but its context-gauge row has STOPPED "
-        f"ADVANCING. Its last report_alive derives to {last_alive.isoformat()}, "
+        f"ADVANCING. {liveness_evidence} "
         f"while its session_context_status row was last measured at "
         f"{measured_at.isoformat()} — a gap of {lag_s:,.0f}s ({minutes:,.1f} "
         f"minutes), against a tolerance of {GAUGE_STALE_LAG_S:,.0f}s. Now is "
-        f"{clock.isoformat()}. Both numbers are measured: the first is derived "
-        "from this row as report_by minus report_by_seconds, which the platform "
-        "re-arms on every report_alive; the second is the gauge row's own "
-        "measured_at. BOTH reporters are PostToolUse hooks firing on the same "
-        "completed tool call, so report_alive landing while the gauge did not "
-        "narrows this to the gauge reporter specifically — check that session's "
-        "rotation_due_watch hook. This notice does NOT identify why it stopped; "
+        f"{clock.isoformat()}. Both numbers are measured; the second is the gauge "
+        "row's own measured_at. "
+        "This notice does NOT identify why it stopped; "
         "the divergence is what was measured, and the cause is not visible from "
-        "here. NOTE the reader will want: the gauge row is upsert-only and keeps "
-        "no history, so the frozen value is the only evidence of the freeze that "
-        "survives — capture it before the session rotates."
+        "here. NOTE the reader will want: the latest gauge cache row is upsert-only, "
+        "but GAU-15 retains the accepted series (up to 64 rows): query "
+        "plugin::agent_messaging_plugin::session_context_status_history before "
+        "concluding when the gauge stopped."
     )
 
 
@@ -2322,6 +2292,8 @@ __all__ = [
     "DEFAULT_REGISTRATION_BOUND_S",
     "GAUGE_COVERAGE_GRACE_S",
     "EVENT_GAUGE_COVERAGE_NOTICE",
+    "EVENT_MANAGED_DISPATCH_NOTICE",
+    "EVENT_DISPATCH_POLICY_UNPAIRED",
     "EVENT_ROTATION_DUE_NOTICE",
     "EVENT_SESSION_DEPENDENCY_WAKE",
     "EVENT_SESSION_OVERDUE_NOTICE",
@@ -2333,7 +2305,9 @@ __all__ = [
     "sweep_deadline_dependencies",
     "sweep_gauge_coverage",
     "sweep_lane_closed_dependencies",
+    "sweep_managed_dispatches",
     "sweep_overdue_sessions",
+    "sweep_unpaired_dispatch_policy",
     "sweep_rotation_due_sessions",
     "sweep_ttl_overdue_sessions",
     "sweep_unregistered_spawning_sessions",

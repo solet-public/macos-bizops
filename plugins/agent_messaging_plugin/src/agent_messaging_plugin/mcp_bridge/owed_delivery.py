@@ -325,15 +325,19 @@ def _drain_row_to_event(
     ``cursor`` key — a drain row is not part of the ``/events`` stream, so it
     must not advance the long-poll cursor.
     """
+    message_id = str(row.get("message_id") or "")
     return {
         "event_type": EVENT_PEER_MESSAGE,
         "content": str(row.get("content") or ""),
+        # Match the native wake producer: Claude Code rejects an empty flow_id
+        # even though replay rows are not themselves part of /events.
+        "flow_id": f"peer-wake-{message_id}",
         "meta": {
             "from_agent_id": row.get("sender_agent_id") or "",
             "from_agent_instance_id": row.get("sender_agent_instance_id") or "",
             "from_session_label": row.get("sender_session_label") or "",
             "thread_id": row.get("thread_id") or "",
-            "message_id": row.get("message_id") or "",
+            "message_id": message_id,
             "important": bool(row.get("important", False)),
             META_KEY_RECIPIENT_KIND: RECIPIENT_KIND_ROLE,
             META_KEY_RECIPIENT_KEY: recipient_key,
@@ -369,7 +373,7 @@ def _apply_reemit_marker(
     not touch the server-side consumption guards, so the row stays owed and
     keeps re-emitting until the holder's forwarder confirms it. Nothing is
     dropped: the full text stays PERSISTED in the thread and retrievable via
-    the named ``peer_inbox`` call.
+    ``solet-bridge inbox``.
     """
     emit_count = row.get("emit_count")
     n = emit_count if isinstance(emit_count, int) else 0
@@ -381,7 +385,7 @@ def _apply_reemit_marker(
     whole = f"{prefix}]\n\n{body}"
     condensed = (
         f"{prefix} — body truncated here to save context; the FULL text is "
-        "persisted in the thread. Read it whole with peer_inbox (limit=10), "
+        "persisted in the thread. Read it whole with solet-bridge inbox, "
         f"matching message_id={message_id}.]"
         f"\n\n{body[:REEMIT_BODY_HEAD_CHARS]}…"
     )

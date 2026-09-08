@@ -5,6 +5,7 @@ This package provides shared utilities across all components:
 - naming: Name normalization, external_id generation, validation
 """
 
+from ananta.utils.dry_run import coerce_dry_run
 from ananta.utils.filesystem import (
     JSONData,
     JSONValue,
@@ -49,6 +50,7 @@ __all__ = [
     "load_json_file",
     "save_json_file",
     "truncate_message",
+    "coerce_dry_run",
     # Naming utilities
     "NamingError",
     "NamingErrorCode",

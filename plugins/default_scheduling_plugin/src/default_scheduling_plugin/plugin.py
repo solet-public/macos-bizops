@@ -83,6 +83,20 @@ class StateContext(TypedDict, total=False):
     flow_id: str
 
 
+def _build_plugin_error_response(error: PluginError) -> dict[str, Any]:
+    """Preserve a deliberate plugin error code at the process boundary."""
+    return build_response(
+        ActionStatus.ERROR.value,
+        {},
+        {
+            "type": error.error_type,
+            "code": error.error_code,
+            "message": error.message,
+            "plugin_name": PLUGIN_NAME,
+        },
+    )
+
+
 class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
     def __init__(self) -> None:
         super().__init__()
@@ -588,18 +602,21 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             ),
             "action_definitions": ParameterMetadata(
                 description=(
-                    "List of action definitions to execute on each run. "
-                    "Each entry is an object with 'process_key' and 'arguments'. "
-                    "Provide either action_definitions or memory_tag, not both."
+                    "Non-empty list of syntactically valid action objects in the "
+                    "canonical {process_key, arguments} shape. Registration validates "
+                    "the shape and scheduled-action policy; execution resolves "
+                    "process_key against processes registered at fire time. Provide "
+                    "exactly one of action_definitions or memory_tag."
                 ),
                 required=False,
                 type=ParameterType.LIST,
             ),
             "memory_tag": ParameterMetadata(
                 description=(
-                    "Memory tag to wake up on each run. The scheduler retrieves memories with this tag "
-                    "and the model decides what to do next. "
-                    "Provide either memory_tag or action_definitions."
+                    "Memory tag to read on each run. The scheduled get_memories_by_tag "
+                    "action is terminal: its result is written to the action row and "
+                    "does not start a model turn. Provide exactly one of memory_tag "
+                    "or action_definitions."
                 ),
                 required=False,
                 type=ParameterType.STRING,
@@ -612,7 +629,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             "tags": ParameterMetadata(
                 description="Tags for grouping schedules (used by clear_scheduled_actions_by_tag)",
                 required=False,
-                type=ParameterType.STRING,
+                type=ParameterType.LIST,
             ),
         },
         output_type="object",
@@ -662,7 +679,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             "Used for recurring tasks that run on fixed schedules (daily, hourly, weekly, etc.)",
             "Common use cases: daily reports, periodic cleanup, scheduled monitoring, automated backups",
             "Accepts standard cron expressions with format: minute hour day month weekday (e.g., '0 9 * * *' for daily at 9am)",
-            "Can schedule any action definition to run repeatedly at specified intervals",
+            "Can schedule validated action definitions to run repeatedly at specified intervals",
             "Unlike execute_in_seconds which runs once, cron schedules repeat indefinitely until cleared",
         ],
         summary="Create recurring scheduled jobs using cron expressions for automated periodic execution",
@@ -947,6 +964,9 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 },
             )
 
+        except PluginError as e:
+            self.logger.error(f"Failed to create cron schedule: {e}", exc_info=True)
+            return _build_plugin_error_response(e)
         except Exception as e:
             self.logger.error(f"Failed to create cron schedule: {e}", exc_info=True)
             return build_response(
@@ -977,26 +997,37 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             ),
             "action_definitions": ParameterMetadata(
                 description=(
-                    "List of action definitions to execute when the wake-up fires. "
-                    "Each entry is an object with 'process_key' and 'arguments'. "
-                    "Provide either action_definitions or memory_tag, not both."
+                    "Non-empty list of syntactically valid action objects in the "
+                    "canonical {process_key, arguments} shape. Registration validates "
+                    "the shape and scheduled-action policy; execution resolves "
+                    "process_key against processes registered at fire time. Provide "
+                    "exactly one of action_definitions or memory_tag."
                 ),
                 required=False,
                 type=ParameterType.LIST,
             ),
             "memory_tag": ParameterMetadata(
                 description=(
-                    "Memory tag to wake up after the delay. The scheduler retrieves memories "
-                    "with this tag and the model decides what to do next. "
-                    "Provide either memory_tag or action_definitions."
+                    "Memory tag to read after the delay. The scheduled "
+                    "get_memories_by_tag action is terminal: its result is written "
+                    "to the action row and does not start a model turn. Provide "
+                    "exactly one of memory_tag or action_definitions."
                 ),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "content": ParameterMetadata(
-                description="Follow-up instructions to stash as a tagged memory (one-step pattern). When both content and memory_tag are provided, the plugin stores the memory automatically.",
+                description=(
+                    "Follow-up instructions to stash as a tagged memory. Content is "
+                    "only valid with memory_tag; action-definition mode rejects it."
+                ),
                 required=False,
                 type=ParameterType.STRING,
+            ),
+            "tags": ParameterMetadata(
+                description="Tags for grouping delayed schedules",
+                required=False,
+                type=ParameterType.LIST,
             ),
         },
         output_type="object",
@@ -1302,16 +1333,30 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                     plugin_name=PLUGIN_NAME,
                 )
 
+            # Parse the full action/memory/content contract before any memory or
+            # schedule write, then apply the same scheduled-action validator used
+            # by recurring registration and both restoration paths.
+            try:
+                actions_list, legacy_action_name, legacy_action_params = (
+                    ScheduleFactory.parse_delayed_actions_from_params(p)
+                )
+                for action_def in actions_list:
+                    validate_cron_action_def(action_def)
+            except ValueError as e:
+                raise PluginError(
+                    str(e),
+                    SchedulerErrorCode.PARAMETER_ERROR,
+                    plugin_name=PLUGIN_NAME,
+                ) from e
+
             label = p.get("label", "Untitled Schedule")
             run_at = datetime.datetime.now(UTC) + datetime.timedelta(seconds=seconds)
             tags = normalize_tags(p.get("tags", []))
 
-            # Memory-driven scheduling: stash content as a tagged memory
-            # so the timer callback can recall it via get_memories_by_tag.
-            content = p.get("content", "")
-            memory_tag = p.get("memory_tag", "")
-            if content and memory_tag:
-                assert self._memory_service is not None  # guaranteed by prepare_for_readiness
+            content = p.get("content")
+            if content:
+                memory_tag = legacy_action_params["tag"]
+                assert self._memory_service is not None  # guaranteed by readiness
                 self._memory_service.remember(
                     content=content,
                     tags=[memory_tag],
@@ -1324,17 +1369,6 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             self.logger.debug(
                 f"Creating delayed execution: {label} in {seconds}s (at {run_at.isoformat()})"
             )
-            # Parse actions using factory (supports both legacy and new formats)
-            try:
-                actions_list, legacy_action_name, legacy_action_params = (
-                    ScheduleFactory.parse_actions_from_params(p)
-                )
-            except ValueError as e:
-                raise PluginError(
-                    str(e),
-                    SchedulerErrorCode.PARAMETER_ERROR,
-                    plugin_name=PLUGIN_NAME,
-                ) from e
 
             # Build ScheduleData using factory
             schedule_data = ScheduleFactory.create_one_time_schedule_data(
@@ -1382,6 +1416,9 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 },
             )
 
+        except PluginError as e:
+            self.logger.error(f"Failed to schedule delayed execution: {e}", exc_info=True)
+            return _build_plugin_error_response(e)
         except Exception as e:
             self.logger.error(f"Failed to schedule delayed execution: {e}", exc_info=True)
             return build_response(

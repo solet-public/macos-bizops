@@ -28,7 +28,7 @@ from ..models import (
     Severity,
 )
 from ..targets import TargetTree
-from ..toolrun import run, tool_available, tool_version
+from ..toolrun import run, tool_available, tool_unavailable_reason, tool_version
 
 _PIP_AUDIT = "pip-audit"
 _OSV = "osv-scanner"
@@ -153,7 +153,9 @@ def scan_pip_audit(tree: TargetTree, run_id: str) -> ScannerResult:
     if not tool_available(_PIP_AUDIT):
         return ScannerResult(
             findings=[],
-            coverage=CoverageRecord(scanner=_PIP_AUDIT, ran=False, files_examined=0, gap_reason="pip-audit not installed"),
+            coverage=CoverageRecord(
+                scanner=_PIP_AUDIT, ran=False, files_examined=0, gap_reason=tool_unavailable_reason(_PIP_AUDIT)
+            ),
         )
     if tree.foreign:
         # Self-vet audits our deployed environment (below); a foreign target must not —
@@ -228,7 +230,8 @@ def scan_osv(tree: TargetTree, run_id: str) -> ScannerResult:
         return ScannerResult(
             findings=[],
             coverage=CoverageRecord(
-                scanner=_OSV, ran=False, files_examined=0, gap_reason="osv-scanner not installed — lockfile SCA cross-check not run"
+                scanner=_OSV, ran=False, files_examined=0,
+                gap_reason=f"{tool_unavailable_reason(_OSV)} — lockfile SCA cross-check not run"
             ),
         )
     lockfiles = _osv_lockfiles(tree)

@@ -12,6 +12,7 @@ plugins/github_midwife_plugin/tests/vault_passphrase_seed_smoke.py``.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import io
 import stat
 import sys
@@ -19,6 +20,11 @@ import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from github_midwife_plugin.vault_passphrase_seed import (
     seed_vault_passphrase,

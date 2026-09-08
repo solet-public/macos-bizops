@@ -17,7 +17,14 @@ the verifier carries the field. Hermetic. Run directly or via run_smokes.py.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
+from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from code_vetting_plugin.models import (
     ContextProfile,
@@ -34,7 +41,10 @@ from code_vetting_plugin.verify.dispatch import (
 )
 from code_vetting_plugin.verify.lenses import SkepticLens, refute_directive
 from code_vetting_plugin.verify.prompts import build_skeptic_prompt
-from code_vetting_plugin.verify.rulebook import _KEYWORD_RULES, load_rulebook  # noqa: PLC2701 — pin the DNF tier tags
+from code_vetting_plugin.verify.rulebook import (
+    KEYWORD_RULES,
+    load_rulebook,
+)
 from code_vetting_plugin.verify.tiers import ALL_TIERS, UNIVERSAL_ONLY, PolicyTier, active_tiers
 from code_vetting_plugin.verify.verifier import AdversarialVerifier
 
@@ -145,8 +155,8 @@ def _multitenant_finding() -> Finding:
 def _check_dnf_screen() -> None:
     _check(
         "every keyword DNF rule is tagged project_local (FT-2)",
-        all(rule.tier is PolicyTier.PROJECT_LOCAL for rule in _KEYWORD_RULES),
-        str([rule.rule_id for rule in _KEYWORD_RULES if rule.tier is not PolicyTier.PROJECT_LOCAL]),
+        all(rule.tier is PolicyTier.PROJECT_LOCAL for rule in KEYWORD_RULES),
+        str([rule.rule_id for rule in KEYWORD_RULES if rule.tier is not PolicyTier.PROJECT_LOCAL]),
     )
     rulebook = load_rulebook()
     finding = _multitenant_finding()

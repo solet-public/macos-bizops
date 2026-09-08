@@ -26,6 +26,16 @@ import git_controller_gate as gate
 
 GC = "Git-Controller"
 PEER = "Architect"
+_CONTROLLER_CONFIRMATION = (
+    "GIT_CONTROLLER_OPERATOR_CONFIRMATION=rul_19919464"
+)
+# iss_ceebab20: the citation is matched as a WHOLE TOKEN against an id grammar.
+# The pre-fix fixture cited "turn_2026-09-04_rul_19919464", accepted only because
+# the old rule asked whether the value CONTAINED "turn"/"rul". Kept as a negative
+# control so the tightening is proven here too, not merely survived.
+_RETIRED_PROSE_CITATION = (
+    "GIT_CONTROLLER_OPERATOR_CONFIRMATION=turn_2026-09-04_rul_19919464"
+)
 _passed = 0
 _failed: list[str] = []
 
@@ -113,8 +123,78 @@ def case_opt_in_and_controller_role() -> None:
     mutation = {"tool_name": "Bash", "tool_input": {"command": "git stash"}}
     code, _ = _run_hook(mutation, controller=None)
     _check(code == 0, "controller env unset disables the gate")
-    code, _ = _run_hook(mutation, role=GC)
-    _check(code == 0, "configured controller role may mutate git")
+    code, _ = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "git stash apply"}},
+        role=GC,
+    )
+    _check(code == 0, "configured controller role may apply a stash")
+
+
+def case_controller_destructive_scope_requires_confirmation() -> None:
+    """The stock-Codex adapter applies the shared controller-only rule."""
+    incident = "\n".join((
+        "git checkout master",
+        "git status --porcelain | wc -l",
+        "git checkout -- .",
+        "git clean -n -- quality_gates/tests/allowlist_tagging_smoke.py",
+        "git status --porcelain | wc -l",
+    ))
+    code, _ = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": incident}}, role=GC,
+    )
+    _check(code == 2, "controller five-command incident block is refused at checkout -- .")
+
+    destructive = (
+        "git checkout -- .", "git restore --staged", "git reset --hard",
+        "git reset --merge", "git reset --keep", "git clean -fd", "git clean -df", "git stash",
+        "git stash push", "git stash drop", "git stash clear", "git branch -D old",
+        "git push --force origin HEAD", "git push origin +HEAD:main", "git rebase main",
+        "git status --no-verify", "git worktree remove --force ../old", "git worktree prune",
+    )
+    for command in destructive:
+        code, _ = _run_hook(
+            {"tool_name": "Bash", "tool_input": {"command": command}}, role=GC,
+        )
+        _check(code == 2, f"controller requires confirmation: {command}")
+
+    allowed = (
+        "git checkout -- CLAUDE.md AGENTS.md", "git restore CLAUDE.md",
+        "git clean -n", "git stash push -- CLAUDE.md", "git stash pop",
+        "git stash apply", "git branch --show-current", "git push origin HEAD",
+        "git worktree list",
+    )
+    for command in allowed:
+        code, _ = _run_hook(
+            {"tool_name": "Bash", "tool_input": {"command": command}}, role=GC,
+        )
+        _check(code == 0, f"controller scoped/dry-run form is allowed: {command}")
+
+    code, _ = _run_hook(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": f"{_CONTROLLER_CONFIRMATION} git checkout -- ."},
+        },
+        role=GC,
+    )
+    _check(code == 0, "one in-band operator citation confirms one controller invocation")
+    code, _ = _run_hook(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": f"{_RETIRED_PROSE_CITATION} git checkout -- ."},
+        },
+        role=GC,
+    )
+    _check(code != 0, "a prose citation is refused, not accepted as an id (iss_ceebab20)")
+    code, _ = _run_hook(
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": f"{_CONTROLLER_CONFIRMATION} git checkout -- . && git checkout -- .",
+            },
+        },
+        role=GC,
+    )
+    _check(code == 2, "one citation is not reusable for a second invocation")
 
 
 def case_peer_and_missing_role_block_mutation() -> None:
@@ -175,6 +255,64 @@ def case_read_only_and_wrapped_commands() -> None:
     _check(code == 2, "wrapped git mutation is blocked")
 
 
+def case_five_defect_regressions() -> None:
+    """The shared policy fixes hold on the actual Bash-only Codex adapter."""
+    for command, label in (
+        ("git grep needle", "git grep is allowed"),
+        ("git -C /tmp rev-parse HEAD", "read-only git -C is allowed"),
+        ("printf '%s\\n' git reset --hard", "git-shaped printf args are allowed"),
+        ("echo git reset --hard", "git-shaped echo args are allowed"),
+    ):
+        code, _ = _run_hook({"tool_name": "Bash", "tool_input": {"command": command}})
+        _check(code == 0, label)
+
+    code, _ = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "git -C /tmp reset --hard"}},
+    )
+    _check(code == 2, "git -C does not allow a destructive subcommand")
+    code, _ = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "git reset --hard"}},
+    )
+    _check(code == 2, "genuine git reset --hard remains refused")
+    for command in (
+        "echo x | xargs git commit -m y",
+        "nohup git push",
+        "time git push",
+        "timeout 5 git push",
+        "sudo git push",
+        "nice -n 5 git push",
+        "caffeinate -i git push",
+        "setsid git push",
+        "stdbuf -oL git push",
+        "flock /tmp/l git push",
+        "script -q /dev/null git push",
+        "find . -exec git commit -m y",
+    ):
+        code, _ = _run_hook({"tool_name": "Bash", "tool_input": {"command": command}})
+        _check(code == 2, f"unknown wrapper keeps git visible: {command}")
+
+    code, stderr = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "git stash"}},
+    )
+    _check(
+        "coordinator" in stderr.lower()
+        and "authorized handoff" in stderr
+        and "provision_role_session" not in stderr,
+        "mutation refusal directs a coordinator handoff without auto-provisioning",
+    )
+    code, stderr = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "git clean -fd"}}, role=GC,
+    )
+    _check(
+        code == 2
+        and "operator-turn-or-message-id" not in stderr
+        and "rul_<8 hex>" in stderr
+        and "arm-<32 hex>" in stderr
+        and "agm-_<8-32 hex>" in stderr,
+        "controller refusal advertises only accepted confirmation-id shapes",
+    )
+
+
 def case_unmeasured_tools_are_not_routed() -> None:
     """Do not claim edit/delegation protection before capturing live schemas."""
     for tool_name in ("apply_patch", "Agent", "Task"):
@@ -195,9 +333,11 @@ def main() -> int:
         case_common_policy_bytes_match,
         case_identity_contract_is_role_only,
         case_opt_in_and_controller_role,
+        case_controller_destructive_scope_requires_confirmation,
         case_peer_and_missing_role_block_mutation,
         case_label_and_uuid_cannot_grant_controller,
         case_read_only_and_wrapped_commands,
+        case_five_defect_regressions,
         case_unmeasured_tools_are_not_routed,
         case_malformed_payload_is_non_blocking,
     ]

@@ -1,13 +1,13 @@
 {
   "process_key": "plugin::zuora_plugin::get_invoice",
   "display_name": "Zuora: Get Invoice",
-  "description": "Fetch one invoice by id.",
-  "embedding_description": "Read one Zuora invoice in full by its id: the amount charged, the outstanding balance, the invoice status, and the line items making up the total. Answers what a specific invoice says, what the customer was billed for on it, and whether any of it is still owed. A billing-document lookup against a known invoice id.",
+  "description": "Fetch one invoice by id. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the job finishing; the invoice's fields are delivered when the job completes.",
+  "embedding_description": "Read one Zuora invoice in full by its id: the amount charged, the outstanding balance, the invoice status, and the line items making up the total. Dispatches asynchronously: a job_id comes back at once, the invoice's fields land moments later. A billing-document lookup against a known invoice id.",
   "result_processor_customizations": {
-    "action_label": "Zuora invoice fetched",
+    "action_label": "Zuora invoice fetch queued",
     "result_type": "zuora_get_invoice_result",
-    "result_description": "Dict with invoice: a mapping of field names to values.",
-    "presentation_guidance": "Show the invoice's key fields; reflects sensitive financial/billing content (data_sensitivity 0.5) — surface for downstream use but never treat as public."
+    "result_description": "Dispatch envelope: job_id (string) and status ('queued'). This is NOT the invoice -- its fields arrive separately, as their own message, when the job completes.",
+    "presentation_guidance": "This call only confirms the fetch was queued -- do not present job_id/status as the invoice itself. Acknowledge the lookup is in flight; the invoice's fields land in a follow-up message when the job completes. Once delivered, show the invoice's key fields; reflects sensitive financial/billing content (data_sensitivity 0.5) — surface for downstream use but never treat as public."
   },
   "error_processor_customizations": {
     "action_context": "Fetch one Zuora invoice by id.",

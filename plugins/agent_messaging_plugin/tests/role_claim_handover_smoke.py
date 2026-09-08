@@ -160,9 +160,16 @@ class _RecordingNotifier:
         peer_agent_instance_id: str,
         prose: str,
         kind: str,
+        peer_agent_session_id: str = "",
     ) -> bool:
         self.notices.append(
-            {"peer_id": peer_id, "agi": peer_agent_instance_id, "kind": kind, "prose": prose},
+            {
+                "peer_id": peer_id,
+                "agi": peer_agent_instance_id,
+                "session_id": peer_agent_session_id,
+                "kind": kind,
+                "prose": prose,
+            },
         )
         return True
 
@@ -222,6 +229,10 @@ def test_displacement_notifies_both() -> None:
         "displaced notice names the opaque role + the displacing instance",
     )
     _check(plugin.notices[1]["agi"] == "agi-new", "new-holder notice targets the claiming instance")
+    _check(
+        [notice["session_id"] for notice in plugin.notices] == ["sess-old", "sess-new"],
+        "handover notices carry the stable recipient session keys",
+    )
 
 
 def test_first_claim_only_new_holder() -> None:
@@ -355,16 +366,17 @@ class _DirectService:
         return _PeerResult()
 
 
-def _recip_binding() -> BridgeBinding:
+def _recip_binding(*, watcher: bool = False) -> BridgeBinding:
     # The REAL binding type, not a hand-rolled stub — dispatch reads binding
     # surface beyond raw fields (``is_watcher``), and a stub silently drifts.
     return BridgeBinding(
         bridge_id="agc-r",
         agent_id="claude_code",
-        agent_instance_id="agi-recipient",
-        session_label="lbl",
+        agent_instance_id="agi-watch-recipient" if watcher else "agi-recipient",
+        session_label="lbl watch" if watcher else "lbl",
         parent_pid=99,
         agent_session_id="ases-recipient",
+        watcher_declared=watcher,
     )
 
 
@@ -378,14 +390,26 @@ class _WakeAdapter:
 
 
 class _DirectRegistry:
-    def __init__(self, *, online: bool, adapter: _WakeAdapter | None) -> None:
+    def __init__(
+        self,
+        *,
+        online: bool,
+        adapter: _WakeAdapter | None,
+        session_fallback: bool = False,
+    ) -> None:
         self._online = online
         self._adapter = adapter
+        self._session_fallback = session_fallback
 
     def resolve(self, peer_id: str, peer_agent_instance_id: str | None) -> BridgeBinding:
-        if not self._online:
+        if not self._online or self._session_fallback:
             raise PeerUnreachableError(f"no binding for {peer_id}/{peer_agent_instance_id}")
         return _recip_binding()
+
+    def resolve_by_agent_session_id(self, agent_session_id: str) -> BridgeBinding | None:
+        if self._session_fallback and agent_session_id == "ases-recipient":
+            return _recip_binding(watcher=True)
+        return None
 
     def wake_adapter_for(self, agent_id: str) -> _WakeAdapter | None:
         return self._adapter
@@ -453,6 +477,31 @@ def test_notice_delivers_when_live() -> None:
     _check(delivered is True, "live recipient → notice delivered (True)")
     _check(len(adapter.calls) == 1, "live recipient → native wake fired once")
     _check(len(service.sent) == 1, "live recipient → message persisted durably (Layer A)")
+
+
+def test_notice_reaches_watcher_via_stable_session_fallback() -> None:
+    """A role-claim notice must reach a parked watcher without a stale-id retry."""
+    service = _DirectService()
+    delivered = role_claim_module.send_handover_notice(
+        bridge_manager=_DirectManager(),  # type: ignore[arg-type]
+        peer_registry=_DirectRegistry(  # type: ignore[arg-type]
+            online=True,
+            adapter=None,
+            session_fallback=True,
+        ),
+        agent_messaging_service=service,
+        state_service=RealShapeState(),  # type: ignore[arg-type]
+        peer_id="claude_code",
+        peer_agent_instance_id="agi-stale-managed",
+        peer_agent_session_id="ases-recipient",
+        prose="IMPORTANT: role handover",
+        kind="new-holder",
+    )
+    _check(delivered is True, "handover notice resolves a parked watcher by stable session key")
+    _check(
+        service.sent and service.sent[0].peer_agent_instance_id == "agi-watch-recipient",
+        "handover notice persists against the live watcher instance",
+    )
 
 
 def test_notice_unreachable_never_raises_claim_survives() -> None:
@@ -860,6 +909,7 @@ def main() -> int:
     test_provider_displacement_logs_loud_no_wake()
     test_displaced_peer_id_falls_back_to_new_agent()
     test_notice_delivers_when_live()
+    test_notice_reaches_watcher_via_stable_session_fallback()
     test_notice_unreachable_never_raises_claim_survives()
     test_notice_skipped_when_bridge_not_started()
     test_prose_is_role_agnostic()

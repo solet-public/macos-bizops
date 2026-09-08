@@ -130,6 +130,7 @@ def _lifecycle_row(state: Any, *, last_alive: datetime, window_s: int = 5400) ->
                 "lifecycle_state": "live",
                 "report_by_seconds": window_s,
                 "report_by": (last_alive + timedelta(seconds=window_s)).isoformat(),
+                "report_by_source": "explicit_self_report",
                 "is_deleted": 0,
             },
             "conflict_columns": ["agent_instance_id"],

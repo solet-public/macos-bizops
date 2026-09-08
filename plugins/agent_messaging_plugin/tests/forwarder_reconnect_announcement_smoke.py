@@ -145,7 +145,7 @@ async def test_announce_restored_label() -> None:
         f"flow_id must be non-empty (Claude Code drops empty-flow_id events); "
         f"got {meta['flow_id']!r}"
     )
-    assert meta["source"] == "solet"
+    assert meta["source"] == "homunculus"
     assert meta["event_type"] == "post_message"
     print("  restored-label announcement carries 'restored as Coordinator'")
     print("  wire meta matches the canonical 5-key shape with non-empty flow_id")
@@ -267,6 +267,7 @@ def test_404_on_bridge_path_classified_as_stale() -> None:
         "Solet /api/v1/bridge/agc-stale/peer/send failed (404): bridge_not_found",
         status_code=404,
         path="/api/v1/bridge/agc-stale/peer/send",
+        response_code="bridge_not_found",
     )
     assert _is_bridge_gone(exc), (
         "404 on an agc- bridge-prefixed path must classify as stale"
@@ -300,14 +301,14 @@ def test_500_on_bridge_path_does_not_classify_as_stale() -> None:
     print("  500 on bridge-prefixed path NOT classified as stale")
 
 
-def test_legacy_string_match_still_works() -> None:
-    """Backward compat: exceptions without status_code/path attributes still match by string."""
+def test_unstructured_404_fails_closed() -> None:
+    """Unstructured errors must not reconnect a bridge on ambiguous evidence."""
     exc = BridgeHTTPError("Bridge not found or closed")
-    assert _is_bridge_gone(exc), (
-        "legacy string-shape exception must still classify as stale via the "
-        "fallback string match"
+    assert not _is_bridge_gone(exc), (
+        "an error without the affirmative server response code must not "
+        "classify as a stale bridge"
     )
-    print("  legacy 'Bridge not found or closed' string still classifies as stale")
+    print("  unstructured 404 evidence fails closed")
 
 
 def test_async_call_with_reconnect_triggers_on_404_bridge_path() -> None:
@@ -330,6 +331,7 @@ def test_async_call_with_reconnect_triggers_on_404_bridge_path() -> None:
                     "bridge_not_found",
                     status_code=404,
                     path="/api/v1/bridge/agc-stale/peer/send",
+                    response_code="bridge_not_found",
                 )
             return {"ok": True, "attempt": call_count["n"]}
 
@@ -415,6 +417,7 @@ def test_peer_send_retries_with_fresh_bridge_id() -> None:
                         "bridge_not_found",
                         status_code=404,
                         path=path,
+                        response_code="bridge_not_found",
                     )
                 return {"ok": True, "path": path}
             return {}
@@ -458,7 +461,7 @@ def main() -> int:
         test_404_on_bridge_path_classified_as_stale()
         test_404_on_non_bridge_path_does_not_falsely_classify()
         test_500_on_bridge_path_does_not_classify_as_stale()
-        test_legacy_string_match_still_works()
+        test_unstructured_404_fails_closed()
         test_async_call_with_reconnect_triggers_on_404_bridge_path()
         test_register_payload_declares_inference_capability()
         test_peer_send_retries_with_fresh_bridge_id()

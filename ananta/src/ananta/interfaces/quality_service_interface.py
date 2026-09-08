@@ -35,9 +35,9 @@ if TYPE_CHECKING:
 
 
 class QualityServiceInterface(ABC):
-    """Enumerate + run the platform's quality gates and smoke suite."""
+    """Enumerate, run, and read-only verify platform quality/landing evidence."""
 
-    INTERFACE_VERSION: ClassVar[str] = "1.0.0"
+    INTERFACE_VERSION: ClassVar[str] = "1.1.0"
 
     @abstractmethod
     def list_gates(
@@ -75,4 +75,39 @@ class QualityServiceInterface(ABC):
         the register (allowlist boundary) or the verb raises a typed error;
         the single smoke is then run directly.
         """
+        ...
+
+    @abstractmethod
+    def verify_hash_manifest(
+        self,
+        unit_id: str,
+        root_path: str,
+        manifest: dict[str, str],
+        *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        """Rehash a declared manifest under one worktree/candidate-tree root."""
+        ...
+
+    @abstractmethod
+    def predict_gate_smokes_merge(
+        self,
+        base_ref: str,
+        lane_root_path: str,
+        current_master: str,
+        register_path: str = "quality_gates/gate_smokes.txt",
+        *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        """Predict a no-write three-way merge of an append-only debt register."""
+        ...
+
+    @abstractmethod
+    def detect_scope_regex_gaps(
+        self,
+        paths: list[str],
+        *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        """Classify paths that fall outside the per-file static-gate surface."""
         ...

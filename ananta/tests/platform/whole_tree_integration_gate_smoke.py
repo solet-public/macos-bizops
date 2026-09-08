@@ -22,6 +22,15 @@ Cases:
  11. Negative-fixture marker — `# wint:negative-fixture` is honored in a
      tests/ path (line-scoped suppression) but IGNORED in a src/ path
      (red-first: the convention must not weaken src detection).
+ 12. C3.* executable-context matching (iss_3dc2ecc3) — a process_key quoted
+     inside PROSE (a comment, a docstring, a `description=` format example)
+     is not a reference, while a whole-literal key still is. Also pins the
+     assembled-key boundary: f-strings and implicit adjacent-literal
+     concatenation are deliberately NOT reported.
+ 13. Bindings fail-loud (iss_06a5d953) — a tree with no materialized
+     `service_bindings.json` derives them from the shipped profile template
+     genesis uses; with no provenance to say which profile, the gate exits 2
+     (harness error) instead of silently scanning against an empty map.
 
 Project policy: no pytest. Exits 0 on success, 1 on first failure.
 """
@@ -38,18 +47,22 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "quality_gates"))
 
+import whole_tree_integration_gate as wint  # noqa: E402
 from whole_tree_integration_gate import (  # noqa: E402
     Allowlist,
     AllowlistEntry,
+    BindingsResolutionError,
     CallSiteRef,
     Finding,
     PluginSurface,
     ServiceSurface,
+    _bindings_from_profile_template,
     _check_plugin_decorator_vs_kb,
     _check_plugin_kb_process_keys,
     _check_service_decorator_vs_kb,
     _check_service_kb_process_keys,
     _classify_call_site_ref,
+    _collect_service_interface_decorated,
     _is_test_path,
     _scan_single_file_for_refs,
     check_scheduling_rpk_propagation,
@@ -97,6 +110,35 @@ def _case_c1_5_decorator_without_json() -> None:
            "emits C1.5 finding when decorator has no JSON (vault write_state precedent)")
     _check(any("write_state" in f.specifier for f in findings),
            "C1.5 specifier names the offending method")
+
+
+def _case_c1_5_disabled_decorator_without_json() -> None:
+    print("\nCase 1b: C1.5 — disabled decorator needs no KB JSON")
+    module = ast.parse('''
+class API:
+    @service_interface_process(name="disabled_verb", is_enabled=False)
+    def disabled_verb(self):
+        pass
+    @service_interface_process(name="enabled_verb", is_enabled=True)
+    def enabled_verb(self):
+        pass
+''')
+    decorated = _collect_service_interface_decorated(module)
+    surface = ServiceSurface(
+        name="example_service",
+        public_path=REPO_ROOT / "ananta/src/ananta/services/example_service/interfaces/public.py",
+        decorated=decorated,
+        kb_jsons={},
+    )
+    findings = _check_service_decorator_vs_kb(surface)
+    _check(
+        "disabled_verb" not in decorated and "enabled_verb" in decorated,
+        "shared enabled predicate omits disabled decorators from the C1.5 surface",
+    )
+    _check(
+        [finding.specifier for finding in findings] == ["enabled_verb"],
+        "disabled method without JSON passes C1.5; enabled method without JSON fails",
+    )
 
 
 def _case_c1_7_orphan_kb_json() -> None:
@@ -338,10 +380,130 @@ def _case_e2e_live_gate_clean() -> None:
            "live gate prints OK: summary line")
 
 
+def _case_c3_executable_context_only() -> None:
+    print("\nCase 15: C3.* — a key quoted in PROSE is not a reference")
+    # Every shape below carries a real, correctly-spelled process key. What
+    # separates them is CONTEXT, which is exactly what the pre-2026-09-05
+    # raw-line detector could not see (iss_3dc2ecc3).
+    source = (
+        '''"""Module docstring mentioning \'plugin::ghost_plugin::doc_verb\'."""
+'''
+        "\n"
+        "# A comment naming 'plugin::ghost_plugin::comment_verb' as an example.\n"
+        "\n"
+        "def f() -> None:\n"
+        '    """Returns: Process key string (e.g., \'plugin::ghost_plugin::inner_doc_verb\').\n'
+        '    """\n'
+        "\n"
+        "META = Param(\n"
+        '    description=(\n'
+        '        "The fully-qualified process identifier. "\n'
+        '        "Format: \'provider_type::provider::function_name\' "\n'
+        '        "(e.g., \'plugin::ghost_plugin::kwarg_verb\')"\n'
+        "    ),\n"
+        ")\n"
+        "\n"
+        "# Positive controls — whole-literal keys in executable position.\n"
+        'ROUTE = {"target": "plugin::ghost_plugin::dict_value_verb"}\n'
+        'call("plugin::ghost_plugin::call_arg_verb")\n'
+        "\n"
+        "# Assembled keys — deliberately OUT of scope.\n"
+        'FSTR = f"plugin::ghost_plugin::fstring_{suffix}"\n'
+        'IMPL = ("plugin::ghost_plugin::"\n'
+        '        "implicit_concat_verb")\n'
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mod = Path(tmpdir) / "plugins" / "x" / "src" / "prose.py"
+        mod.parent.mkdir(parents=True, exist_ok=True)
+        mod.write_text(source, encoding="utf-8")
+        verbs = {r.verb for r in _scan_single_file_for_refs(mod)}
+
+    # Prose — each of these was a Group A/C born-clone false positive.
+    _check("doc_verb" not in verbs, "module docstring key is NOT a reference")
+    _check("comment_verb" not in verbs, "comment key is NOT a reference")
+    _check("inner_doc_verb" not in verbs, "function docstring key is NOT a reference")
+    _check("kwarg_verb" not in verbs, "`description=` format example is NOT a reference")
+    # Positive controls — these MUST still fire, or the fix over-pruned and the
+    # gate has quietly stopped detecting the drift it exists to catch.
+    _check("dict_value_verb" in verbs, "POSITIVE CONTROL: whole-literal key as a dict value still detected")
+    _check("call_arg_verb" in verbs, "POSITIVE CONTROL: whole-literal key as a call argument still detected")
+    # Assembled — documented boundary.
+    _check("fstring_" not in verbs, "f-string prefix is NOT reported as a whole key")
+    _check("implicit_concat_verb" not in verbs, "implicit adjacent-literal concatenation is NOT reported")
+
+
+def _write_fixture_clone(root: Path, *, bundle: str | None, template: str | None) -> None:
+    """Materialize the minimum a born clone carries for bindings resolution."""
+    if bundle is not None:
+        (root / "PROVENANCE.json").write_text(
+            json.dumps({"bundle": {"name": bundle, "platform": "macos"}}), encoding="utf-8",
+        )
+    if template is not None:
+        tdir = root / "plugins" / "github_midwife_plugin" / "knowledge_base" / "profile_templates"
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / f"{template}.yaml").write_text(
+            "service_bindings:\n"
+            "  state_service: postgres_state_management_plugin\n"
+            "  vault_service: macos_vault_plugin\n",
+            encoding="utf-8",
+        )
+
+
+def _case_bindings_fail_loud() -> None:
+    print("\nCase 16: bindings — derived from the shipped template, never a silent {}")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # (a) No bindings file AND no provenance: the gate cannot know which
+        # profile to measure against. Before this fix it returned {} and every
+        # bound-plugin ref reclassified C3.2 -> C3.1 (iss_06a5d953).
+        bare = Path(tmpdir) / "bare"
+        bare.mkdir()
+        try:
+            _bindings_from_profile_template(bare)
+            _check(False, "no bindings + no provenance raises (got a value instead)")
+        except BindingsResolutionError:
+            _check(True, "no bindings + no provenance raises BindingsResolutionError")
+        _check(issubclass(BindingsResolutionError, RuntimeError),
+               "BindingsResolutionError is a RuntimeError, so `main` renders it as exit 2")
+
+        # (b) Provenance present: bindings equal the shipped template's mapping.
+        clone = Path(tmpdir) / "clone"
+        clone.mkdir()
+        _write_fixture_clone(clone, bundle="macos-bizops", template="macos-bizops")
+        derived = _bindings_from_profile_template(clone)
+        _check(derived == {"state_service": "postgres_state_management_plugin",
+                           "vault_service": "macos_vault_plugin"},
+               "bindings derived from the profile template genesis materializes from")
+
+        # (c) Provenance present but the template is missing: still loud.
+        headless = Path(tmpdir) / "headless"
+        headless.mkdir()
+        _write_fixture_clone(headless, bundle="macos-bizops", template=None)
+        try:
+            _bindings_from_profile_template(headless)
+            _check(False, "missing template raises (got a value instead)")
+        except RuntimeError:
+            _check(True, "missing profile template raises (harness error, not {})")
+
+        # (d) End-to-end: the gate process really exits 2, not just the helper.
+        # REPO_ROOT/_DEFAULT_BINDINGS are module constants, so point them at a
+        # tree with neither bindings nor provenance and drive `main` itself.
+        empty = Path(tmpdir) / "empty"
+        empty.mkdir()
+        saved_root, saved_bindings = wint.REPO_ROOT, wint._DEFAULT_BINDINGS
+        try:
+            wint.REPO_ROOT = empty
+            wint._DEFAULT_BINDINGS = empty / "profile" / "config" / "service_bindings.json"
+            rc = wint.main(["--skip-call-sites", "--skip-scheduling"])
+        finally:
+            wint.REPO_ROOT, wint._DEFAULT_BINDINGS = saved_root, saved_bindings
+        _check(rc == 2, f"live gate exits 2 when bindings are unresolvable (got {rc})")
+
+
 def main() -> int:
     print("Whole-tree integration gate meta-smoke (W-INT Cycle 1)")
     print("=" * 60)
     _case_c1_5_decorator_without_json()
+    _case_c1_5_disabled_decorator_without_json()
     _case_c1_7_orphan_kb_json()
     _case_c1_6_wrong_process_key_in_json()
     _case_c2_2_plugin_decorator_without_json()
@@ -354,6 +516,8 @@ def main() -> int:
     _case_allowlist_wildcard_and_exact()
     _case_allowlist_file_round_trip()
     _case_negative_fixture_marker()
+    _case_c3_executable_context_only()
+    _case_bindings_fail_loud()
     _case_e2e_live_gate_clean()
 
     print("\n" + "-" * 60)

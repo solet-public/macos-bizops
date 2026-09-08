@@ -8,7 +8,7 @@
     "result_type": "discovery_results",
     "result_description": "",
     "presentation_guidance": "",
-    "output_action_guidance": "Discovery completed. The results describe available plugin processes with their process keys and invocation schemas. If a matching process was found, you can invoke it directly with valid arguments from the schema. If no matching processes were found (match_type=no_matches, process_count=0), there is no registered tool for the requested capability. Do not retry with rephrased queries. The productive next step is user communication: propose realistic alternatives or ask a targeted clarification via post_message. For multi-step goals where at least some steps have known tools, consider creating a plan artifact."
+    "output_action_guidance": "Discovery completed. The results describe available plugin processes with their process keys and invocation schemas. If a matching process was found, you can invoke it directly with valid arguments from the schema. If no matching processes were found (match_type=no_matches, process_count=0), there is no registered tool for the requested capability. Do not retry with rephrased queries. The productive next step is user communication: resolve the active IO plugin namespace with query_process_registry, then invoke plugin::<namespace>::post_message with message and any namespace-specific arguments from its schema to propose realistic alternatives or ask a targeted clarification. For multi-step goals where at least some steps have known tools, consider creating a plan artifact."
   },
   "error_processor_customizations": {
     "action_context": "Searches the process registry for capabilities matching user intent using semantic vector search and tag filtering",

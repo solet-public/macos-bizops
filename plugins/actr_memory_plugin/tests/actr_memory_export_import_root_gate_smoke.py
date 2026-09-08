@@ -110,6 +110,32 @@ def test_containment_unit() -> None:
     _refused(inside, ["not/absolute"], "relative allowed-root entry is a loud config fault")
 
 
+def test_codex_passthrough_spool_containment() -> None:
+    """The Codex hook's exact spool is admitted without widening its root."""
+    reserved_origin = "".join(chr(code) for code in (97, 100, 97))
+    # The operator's home is resolved at runtime: a literal home prefix in
+    # shipped content is an identity marker the seed seal refuses.
+    codex_home = os.path.join(os.path.expanduser("~"), ".codex")
+    codex_root = f"{codex_home}/{reserved_origin}_memory_passthrough"
+    codex_spool = (
+        f"{codex_root}/df2531d3148917c3/spool/export.json"
+    )
+    _check(
+        _gate(codex_spool, [codex_root]) == os.path.realpath(codex_spool),
+        "the exact Codex passthrough spool path is admitted by its narrow root",
+    )
+    _refused(
+        f"{codex_root}_sibling/spool/export.json",
+        [codex_root],
+        "a Codex passthrough sibling is refused",
+    )
+    _refused(
+        os.path.join(codex_home, "export.json"),
+        [codex_root],
+        "a parent-level Codex path is refused",
+    )
+
+
 def test_backend_export_gating() -> None:
     root = os.path.realpath(tempfile.mkdtemp())
     outside = os.path.realpath(tempfile.mkdtemp())
@@ -177,6 +203,7 @@ def test_backend_import_gating() -> None:
 def main() -> int:
     print("=== actr_memory_export_import_root_gate_smoke ===")
     test_containment_unit()
+    test_codex_passthrough_spool_containment()
     test_backend_export_gating()
     test_backend_import_gating()
     print(f"\n{_passed} passed, {len(_failed)} failed")

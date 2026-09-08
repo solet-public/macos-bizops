@@ -23,7 +23,7 @@ from ..models import (
 )
 from ..stacks import Stack, detect_stacks
 from ..targets import WALK_EXCLUDE_DIRS, TargetTree
-from ..toolrun import run, tool_available, tool_version
+from ..toolrun import run, tool_available, tool_unavailable_reason, tool_version
 
 _BANDIT = "bandit"
 _SEMGREP = "semgrep"
@@ -114,7 +114,9 @@ def scan_bandit(tree: TargetTree, run_id: str) -> ScannerResult:
     if not tool_available(_BANDIT):
         return ScannerResult(
             findings=[],
-            coverage=CoverageRecord(scanner=_BANDIT, ran=False, files_examined=0, gap_reason="bandit not installed"),
+            coverage=CoverageRecord(
+                scanner=_BANDIT, ran=False, files_examined=0, gap_reason=tool_unavailable_reason(_BANDIT)
+            ),
         )
     if not targets:
         # FT-1.1 defect 2: no python source in the target quality-surface means bandit
@@ -214,7 +216,9 @@ def scan_semgrep(tree: TargetTree, run_id: str) -> ScannerResult:
     if not tool_available(_SEMGREP):
         return ScannerResult(
             findings=[],
-            coverage=CoverageRecord(scanner=_SEMGREP, ran=False, files_examined=0, gap_reason="semgrep not installed"),
+            coverage=CoverageRecord(
+                scanner=_SEMGREP, ran=False, files_examined=0, gap_reason=tool_unavailable_reason(_SEMGREP)
+            ),
         )
     stacks = detect_stacks(tree)
     packs = _semgrep_packs(stacks)

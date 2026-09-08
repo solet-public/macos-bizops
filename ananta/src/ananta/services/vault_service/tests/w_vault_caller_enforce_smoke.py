@@ -409,6 +409,20 @@ def _smoke_11_removed_plugin_process_surface() -> None:
         repo_root / "plugins" / "secrets_manager_vault_plugin" / "src"
         / "secrets_manager_vault_plugin" / "plugin.py",
     ]:
+        # ROSTER INTERSECTION. The plugin roster here is hardcoded, but which
+        # plugins ship is resolved PER CAPABILITY BUNDLE:
+        # secrets_manager_vault_plugin is in no bundle, so it is absent from every
+        # seed while macos_vault_plugin ships in all of them. This is the repair
+        # the seed manifest's ★ standard prescribes for a hardcoded roster, and
+        # the same one applied to hydration_guidance_convention_smoke. The
+        # assertion is a REMOVAL proof, so an absent plugin satisfies it
+        # vacuously — there is no surface left to carry a decorator. Measured on
+        # the r21 born-clone verdict (sealed 254700866ab0…): this smoke was 1 of
+        # 14 BLOCKING, raising FileNotFoundError on exactly this path after ten
+        # enforcement smokes had passed.
+        if not plugin_path.is_file():
+            print(f"  SKIP    {plugin_path.relative_to(repo_root)}: plugin not in this profile's set")
+            continue
         source = plugin_path.read_text(encoding="utf-8")
         count = sum(
             1 for line in source.splitlines()
@@ -452,6 +466,10 @@ def _smoke_13_lockstep_parity() -> None:
             "secrets_manager_vault_plugin",
         ),
     ]:
+        # Same roster intersection as smoke 11 above, same reason.
+        if not plugin_path.is_file():
+            print(f"  SKIP    {label}: plugin not in this profile's set")
+            continue
         source = plugin_path.read_text(encoding="utf-8")
         lines = source.splitlines()
         decorated: set[str] = set()

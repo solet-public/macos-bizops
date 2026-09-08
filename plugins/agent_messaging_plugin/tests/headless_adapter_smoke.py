@@ -115,9 +115,9 @@ def _configured_driver(
     _stub_worker_hook_files(tmp_dir)
     # Injected, never resolved from the ambient environment: the CLI/PATH and
     # presence-sidecar assertions would otherwise pass or fail depending on
-    # whether the machine running the gate happens to have a `solet` on PATH
+    # whether the machine running the gate happens to have a `solet-bridge` on PATH
     # or beside its interpreter.
-    solet_bin = tmp_dir / "stub-venv" / "bin" / "solet"
+    solet_bin = tmp_dir / "venv" / "bin" / "solet-bridge"
     solet_bin.parent.mkdir(parents=True, exist_ok=True)
     solet_bin.write_text("#!/bin/sh\nexit 0\n")
     solet_bin.chmod(0o755)
@@ -128,6 +128,7 @@ def _configured_driver(
         "permission_mode": "bypassPermissions",
         "mcp_config_path": mcp_config,
         "cwd": tmp_dir,
+        "python_executable": str(solet_bin.parent / "python3"),
     }
     if popen_fn is not None:
         kwargs["popen_fn"] = popen_fn
@@ -542,11 +543,16 @@ def test_spawn_watch_transport_succeeds_without_mcp_json_present() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         _stub_worker_hook_files(tmp_dir)
+        solet_bin = tmp_dir / "venv" / "bin" / "solet-bridge"
+        solet_bin.parent.mkdir(parents=True, exist_ok=True)
+        solet_bin.write_text("#!/bin/sh\nexit 0\n")
+        solet_bin.chmod(0o755)
         driver = HeadlessHostDriver(
             claude_bin=_executable_stub(tmp_dir), solet_name="testhom",
             permission_mode="bypassPermissions",
             mcp_config_path=tmp_dir / "missing.mcp.json",
-            cwd=tmp_dir,
+            cwd=tmp_dir, solet_bin=str(solet_bin),
+            python_executable=str(solet_bin.parent / "python3"),
             popen_fn=lambda *a, **k: _FakeProc(pid=4242),
         )
         host_ref = driver.spawn(
@@ -685,7 +691,7 @@ def test_spawn_env_and_command_wiring() -> None:
         _check(env["AGENT_SESSION_LABEL"] == "lane-x", "label prefers lane_id when given")
         _check(env["SOLET_NAME"] == "testhom", "SOLET_NAME flows from driver config")
         _check(
-            Path(env["AGENT_WAKE_CLI"]).name == "solet"
+            Path(env["AGENT_WAKE_CLI"]).name == "solet-bridge"
             and env["AGENT_WAKE_CLI"] != env["SOLET_NAME"],
             "AGENT_WAKE_CLI is the wake-CLI EXECUTABLE, never the solet "
             "instance name -- `which <instance-name>` cannot resolve, so a "
@@ -695,7 +701,7 @@ def test_spawn_env_and_command_wiring() -> None:
         )
         _check(
             Path(env["AGENT_WAKE_CLI"]).is_absolute(),
-            "AGENT_WAKE_CLI is ABSOLUTE, not the bare name -- a bare 'solet' "
+            "AGENT_WAKE_CLI is ABSOLUTE, not the bare name -- a bare 'solet-bridge' "
             "is unresolvable under the minimal PATH a tmux pane or a "
             "materialized release actually runs with, and both the Stop-hook "
             "waker and the PostToolUse heartbeat then died silently "
@@ -705,7 +711,7 @@ def test_spawn_env_and_command_wiring() -> None:
             env["PATH"].split(os.pathsep)[0]
             == str(Path(env["AGENT_WAKE_CLI"]).parent),
             "the CLI's directory leads PATH, so hooks and skills that invoke "
-            "a BARE `solet` resolve it too",
+            "a BARE `solet-bridge` resolve it too",
         )
         _check(
             env["FLEET_TRANSPORT"] == "watch",
@@ -931,6 +937,12 @@ def test_spawn_env_heartbeat_marker_dir() -> None:
         "AGENT_HEARTBEAT_MARKER_DIR is rooted under APP_HOME's data dir, "
         "in its OWN subdirectory distinct from the mapping spool",
     )
+    designated_reporter = env.get("AGENT_CONTEXT_GAUGE_REPORTER_PATH", "")
+    _check(
+        Path(designated_reporter).is_absolute()
+        and designated_reporter.endswith("rotation_due_watch.py"),
+        "the headless worker receives an absolute designated gauge-reporter path",
+    )
 
     calls.clear()
     prior = _pop_env_family()
@@ -1083,7 +1095,7 @@ def _real_echo_to_file_popen_fn(
     gate-register runs rather than on an idle box.
 
     Only the WORKER spawn gets the echo child; the watcher arm gets the real
-    argv it asked for (the stub ``solet`` exits 0). This is the
+    argv it asked for (the stub ``solet-bridge`` exits 0). This is the
     widening-degrades-fakes trap: the 08-13/14 registration fix widened spawn
     from one popen call to two, and this fake was never re-audited.
 
@@ -1098,11 +1110,11 @@ def _real_echo_to_file_popen_fn(
         WORKER's argv also contains "watch", because its ``--settings`` JSON
         wires the watch/wake hooks. A whole-argv match therefore classifies the
         worker as the watcher, routes the real echo argv to neither, and fails
-        every run. The sidecar is the one launched via the stub ``solet``
+        every run. The sidecar is the one launched via the stub ``solet-bridge``
         binary, so argv[0] is the only honest signal.
         """
         parts = [str(x) for x in argv] if isinstance(argv, (list, tuple)) else [str(argv)]
-        return bool(parts) and Path(parts[0]).name == "solet"
+        return bool(parts) and Path(parts[0]).name == "solet-bridge"
 
     def _fn(*a: Any, **_k: Any) -> subprocess.Popen[str]:
         argv = a[0] if a else []
@@ -1189,7 +1201,7 @@ def test_sidecar_popen_never_targets_the_worker_side_channel() -> None:
 
     The previous version of this check counted popen calls by the argv the
     DRIVER passed in — which cannot see the bug, because the fixture substitutes
-    the echo argv internally. An argv-blind fake still shows one solet argv and
+    the echo argv internally. An argv-blind fake still shows one solet-bridge argv and
     one claude argv, so the count looked right while both children wrote the
     same file. Measured: that assertion passed under the very mutation it was
     written to catch.
@@ -1202,7 +1214,7 @@ def test_sidecar_popen_never_targets_the_worker_side_channel() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         echo_file = Path(tmp) / "echo.txt"
         echo_file.write_text("SENTINEL")
-        solet_stub = Path(tmp) / "stub-venv" / "bin" / "solet"
+        solet_stub = Path(tmp) / "venv" / "bin" / "solet-bridge"
         solet_stub.parent.mkdir(parents=True, exist_ok=True)
         solet_stub.write_text("#!/bin/sh\nexit 0\n")
         solet_stub.chmod(0o755)

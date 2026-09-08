@@ -9,13 +9,24 @@ All scheduled wake-ups execute independently of the current inference chain. The
 
 ---
 
-## Memory-Driven Scheduling
+## Execution Modes
 
-Schedules are **timers + memory addresses** (`memory_tag`).
+Both scheduling operations require exactly one execution mode:
 
-When a schedule fires, the platform runs `service_interface::memory_service::get_memories_by_tag(tag=memory_tag)`. The recalled memory content arrives at a normal `process_results` vertex. The model reads the instructions and decides what to do next (post a status update, check a job, reschedule, or terminate).
+1. `action_definitions`: a non-empty list of syntactically valid canonical
+   `{process_key, arguments}` objects. Registration validates entry shape and
+   the scheduled-action result-processor policy; it does not promise that a
+   named process exists. Execution resolves each `process_key` against processes
+   registered at fire time. Use this mode for work that must happen, including
+   scheduled peer notifications.
+2. `memory_tag`: a terminal
+   `service_interface::memory_service::get_memories_by_tag` read. The fetched
+   content is written to the scheduled action's result row; no model turn or
+   downstream action starts. Use this only when that terminal read is the whole
+   intent.
 
-This keeps schemas small and preserves the ReAct loop: observe, decide, act.
+Supplying both modes or neither mode fails loudly. `actions` remains an internal
+legacy alias, while `action_definitions` is the discoverable public field.
 
 ---
 
@@ -28,7 +39,8 @@ Create a recurring schedule using a cron expression. The schedule fires repeated
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `cron_expression` | string | Yes | Standard 5-field cron expression (UTC) |
-| `memory_tag` | string | Yes | Memory tag to wake up on each run |
+| `action_definitions` | list | One mode required | Non-empty, syntactically valid `{process_key, arguments}` actions |
+| `memory_tag` | string | One mode required | Terminal memory read; does not start a model turn |
 | `label` | string | No | Human-readable label |
 | `tags` | list | No | Tags for grouping (used by `clear_scheduled_actions_by_tag`) |
 
@@ -54,21 +66,58 @@ day of week (0-6, 0=Sunday)
 | `0 0 * * 0` | Weekly on Sunday at midnight |
 | `0 */6 * * *` | Every 6 hours |
 
-### Example: Heartbeat Wake-Up Every 5 Minutes
+### Example: Scheduled Peer Notification Every 15 Minutes
 
 ```json
 {
   "process_key": "service_interface::scheduling_service::create_cron_schedule",
   "arguments": {
-    "cron_expression": "*/5 * * * *",
-    "label": "Global Heartbeat Tick",
-    "tags": ["heartbeat:global"],
-    "memory_tag": "heartbeat:global"
+    "cron_expression": "*/15 * * * *",
+    "label": "Coordinator status reminder",
+    "tags": ["coordination:status-reminder"],
+    "action_definitions": [
+      {
+        "process_key": "plugin::agent_messaging_plugin::peer_send_by_name",
+        "arguments": {
+          "name": "Coordinator",
+          "content": "Scheduled reminder: review active scheduler work."
+        }
+      }
+    ]
   }
 }
 ```
 
-At each tick, the platform recalls memories tagged `heartbeat:global` and the model decides what (if anything) to do.
+The scheduler invokes `peer_send_by_name` directly. No Claude or Codex
+inference is required when the schedule fires. The peer message is the action
+itself, not a prompt asking a seat to perform some other scheduled action.
+
+### Example: Scheduled Mechanizable Joseki
+
+```json
+{
+  "process_key": "service_interface::scheduling_service::create_cron_schedule",
+  "arguments": {
+    "cron_expression": "0 6 * * 1",
+    "label": "Weekly platform quality sweep",
+    "action_definitions": [
+      {
+        "process_key": "service_interface::thinking_service::run_joseki",
+        "arguments": {
+          "joseki_key": "run_platform_quality_gates",
+          "bindings": {},
+          "label": "Scheduled platform quality sweep"
+        }
+      }
+    ]
+  }
+}
+```
+
+Scheduler submission works for registered, mechanizable cards such as the
+closed-world deterministic `run_platform_quality_gates` card. `run_joseki`
+validates the card and bindings at execution time; this example does not imply
+that inference-bearing or otherwise non-mechanizable cards are admitted.
 
 ---
 
@@ -82,7 +131,9 @@ This is an idempotent helper for liveness and responsiveness:
 - If duplicates exist, it normalizes back to a single schedule.
 - If a heartbeat exists with the same cadence, it returns the existing schedule.
 
-The heartbeat itself should be low-noise: it only provides periodic wake-ups. What to do on each wake-up is model-driven (typically by recalling and processing queued follow-up memories).
+The helper currently uses the terminal `memory_tag` mode. It can maintain the
+scheduled read/touch, but it does not create a model turn or cause a model to
+act on the fetched content.
 
 ### Parameters
 
@@ -130,19 +181,32 @@ List schedules matching a tag. Use this for introspection (detecting missing hea
 
 ## execute_in_seconds
 
-Schedule a one-time wake-up after a delay, keyed by `memory_tag`.
-
-When the wake-up fires, the platform retrieves memories tagged with `memory_tag` via `service_interface::memory_service::get_memories_by_tag`, and the model decides what to do next at the normal `process_results` vertex.
+Schedule one-time direct action execution or a terminal memory read after a
+delay. Exactly one execution mode is required.
 
 ### Parameters
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `seconds` | integer | Yes | Delay in seconds (must be > 0) |
-| `memory_tag` | string | Yes | Memory tag identifying the follow-up memory to retrieve at wake-up time |
-| `content` | string | No | Follow-up instructions to stash as a tagged memory (one-step pattern) |
+| `action_definitions` | list | One mode required | Non-empty, syntactically valid `{process_key, arguments}` actions |
+| `memory_tag` | string | One mode required | Terminal memory read; does not start a model turn |
+| `content` | string | No | Content to store before a terminal memory-tag read; invalid in action-definition mode |
+| `label` | string | No | Human-readable label |
+| `tags` | list | No | Tags for grouping and cancellation |
 
-If `content` and `memory_tag` are both provided, the scheduling plugin stashes the instructions as a memory automatically (tagged with `memory_tag`) before creating the wake-up. If you omit `content`, the system assumes the memory was already stashed (two-step pattern).
+Content is valid only with `memory_tag`. The plugin validates the complete
+mode/content/action request and the scheduled-action policy before any memory or
+schedule write. If valid `content` and `memory_tag` are both provided, it then
+stashes the instructions as a memory automatically (tagged with `memory_tag`)
+before creating the wake-up. If you omit `content`, the system assumes the
+memory was already stashed (two-step pattern). Supplying `content` with
+`action_definitions` fails with
+`default_scheduling_plugin.parameter_error` rather than being ignored.
+
+`execute_in_seconds` rejects inference-bearing scheduled actions before
+persistence, using the same scheduled-action validator as recurring
+registration and both restoration paths.
 
 Note: the one-step stash uses only `tags=[memory_tag]`. If you need richer tags (for example `session:<id>` or `job:<id>`), use the two-step pattern.
 
@@ -154,44 +218,41 @@ Note: the one-step stash uses only `tags=[memory_tag]`. If you need richer tags 
 | `message` | string | Confirmation message |
 | `run_at` | string | ISO 8601 timestamp when the wake-up will run |
 
-### Example: One-Step Check-In
+### Example: One-Time Scheduled Peer Notification
 
 ```json
 {
   "process_key": "service_interface::scheduling_service::execute_in_seconds",
   "arguments": {
     "seconds": 60,
-    "memory_tag": "followup:sess-abc123:tts",
-    "content": "Follow-up: if the TTS job is still processing, post a brief status update; otherwise deliver the audio."
+    "label": "One-minute coordinator reminder",
+    "action_definitions": [
+      {
+        "process_key": "plugin::agent_messaging_plugin::peer_send_by_name",
+        "arguments": {
+          "name": "Coordinator",
+          "content": "Scheduled reminder: inspect the pending job."
+        }
+      }
+    ]
   }
 }
 ```
 
-### Example: Two-Step Check-In (More Control)
-
-Step 1 — stash the memory with richer tags:
-
-```json
-{
-  "process_key": "service_interface::memory_service::remember",
-  "arguments": {
-    "content": "Follow-up: if the TTS job is still processing, post a brief status update; otherwise deliver the audio.",
-    "tags": ["followup:sess-abc123:tts", "session:sess-abc123", "job:job_abc123"]
-  }
-}
-```
-
-Step 2 — schedule the wake-up:
+### Example: Terminal Memory Read
 
 ```json
 {
   "process_key": "service_interface::scheduling_service::execute_in_seconds",
   "arguments": {
     "seconds": 60,
-    "memory_tag": "followup:sess-abc123:tts"
+    "memory_tag": "memory:recency-touch"
   }
 }
 ```
+
+The lookup result stays on the completed action row. This example does not
+notify a peer, resume a seat, or start inference.
 
 ---
 
@@ -243,18 +304,20 @@ Cancel all scheduled jobs matching a tag. This is the preferred way to clean up 
 
 ## Common Patterns
 
-### Pattern: Progress Check-Ins During Long Tasks
+### Pattern: Deterministic Progress Check
 
-1. **Seed a wake-up** (or rely on an existing global heartbeat): create a cron schedule or one-time delay with `memory_tag`.
-2. **Store follow-up instructions** as memories (for example: queue items tagged `followup_queue:global`).
-3. **On each wake-up**, check job status / progress, decide whether to send a user-visible update, and reschedule with an appropriate cadence.
+Schedule the check verb itself in `action_definitions`. If the verb must notify
+a peer, either make that notification part of the deterministic verb or schedule
+`peer_send_by_name` directly. Do not use `memory_tag` as instructions for a
+model; no model receives that result at fire time.
 
 ### Pattern: Timeout with Fallback
 
-Schedule a fallback wake-up in case the primary task takes too long:
+Schedule the deterministic fallback action in case the primary task takes too
+long:
 
 ```
-Step 1: execute_in_seconds(seconds=300, memory_tag="followup:timeout:<id>", content="If still not complete, inform user and propose next steps.")
+Step 1: execute_in_seconds(seconds=300, action_definitions=[{"process_key": "<fallback EDGE/EDGE_SINK verb>", "arguments": {"job_id": "<id>"}}])
 Step 2: ... execute primary task ...
 Step 3: clear_scheduled_actions_by_tag(tag="followup:timeout:<id>")  // Cancel if task completed in time
 ```
@@ -279,6 +342,8 @@ Step 3: clear_scheduled_actions_by_tag(tag="followup:timeout:<id>")  // Cancel i
 - All cron expressions use **UTC** timezone
 - The `state` parameter is **auto-injected** -- do not set it manually. It carries `session_id` and `flow_id` for proper context routing
 - Scheduled wake-ups execute **asynchronously** and independently of the current inference chain
+- Provide exactly one of `action_definitions` or `memory_tag`
+- `action_definitions` execute directly; `memory_tag` is a terminal read and starts no model turn
 - One-time schedules (`execute_in_seconds`) auto-complete after execution
 - Recurring schedules (`create_cron_schedule`) continue until explicitly cancelled
 - **Always tag your schedules** so they can be bulk-cancelled with `clear_scheduled_actions_by_tag`

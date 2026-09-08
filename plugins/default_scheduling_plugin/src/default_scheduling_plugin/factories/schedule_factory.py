@@ -13,6 +13,17 @@ from ..models import ActionData, ScheduleData
 
 RELOAD_SAFE = True
 
+_ACTION_ENTRY_FIELDS: frozenset[str] = frozenset(
+    {
+        "name",
+        "parameters",
+        "process_key",
+        "arguments",
+        "result_processor",
+        "result_processor_kind",
+    }
+)
+
 
 class ScheduleFactory:
     """Factory for creating and validating ScheduleData objects.
@@ -134,21 +145,57 @@ class ScheduleFactory:
         )
 
     @staticmethod
+    def _reject_unknown_action_fields(action: dict[str, Any]) -> None:
+        unknown_fields = sorted(set(action) - _ACTION_ENTRY_FIELDS)
+        if unknown_fields:
+            raise ValueError(
+                f"Unsupported action entry fields: {', '.join(unknown_fields)}"
+            )
+
+    @staticmethod
+    def _normalized_process_key(action: dict[str, Any]) -> str:
+        has_name = "name" in action
+        has_process_key = "process_key" in action
+        if has_name and has_process_key and action["name"] != action["process_key"]:
+            raise ValueError("Action entry has conflicting 'name' and 'process_key'")
+
+        raw_name = action.get("name", action.get("process_key"))
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ValueError(
+                "Each action must include a non-empty string 'name' or 'process_key'"
+            )
+        return raw_name.strip()
+
+    @staticmethod
+    def _normalized_action_parameters(action: dict[str, Any]) -> dict[str, Any]:
+        has_parameters = "parameters" in action
+        has_arguments = "arguments" in action
+        if (
+            has_parameters
+            and has_arguments
+            and action["parameters"] != action["arguments"]
+        ):
+            raise ValueError(
+                "Action entry has conflicting 'parameters' and 'arguments'"
+            )
+
+        raw_parameters = action.get("parameters", action.get("arguments", {}))
+        if not isinstance(raw_parameters, dict):
+            raise ValueError("Action parameters/arguments must be an object")
+        return raw_parameters
+
+    @staticmethod
     def _normalize_action_entry(action: dict[str, Any]) -> dict[str, Any]:
-        """Normalize common action shapes (process_key/arguments) to ActionData schema."""
-        normalized: dict[str, Any] = {}
-        for key, value in action.items():
-            normalized[key] = value
-
-        if "name" not in normalized and "process_key" in normalized:
-            normalized["name"] = normalized.pop("process_key")
-
-        if "parameters" not in normalized:
-            if "arguments" in normalized:
-                normalized["parameters"] = normalized.pop("arguments")
-            else:
-                normalized["parameters"] = {}
-
+        """Validate and normalize canonical/legacy action-entry aliases."""
+        ScheduleFactory._reject_unknown_action_fields(action)
+        normalized: dict[str, Any] = {
+            "name": ScheduleFactory._normalized_process_key(action),
+            "parameters": ScheduleFactory._normalized_action_parameters(action),
+        }
+        if "result_processor" in action:
+            normalized["result_processor"] = action["result_processor"]
+        if "result_processor_kind" in action:
+            normalized["result_processor_kind"] = action["result_processor_kind"]
         return normalized
 
     @staticmethod
@@ -159,14 +206,16 @@ class ScheduleFactory:
             actions_data = []
         if not isinstance(actions_data, list):
             raise ValueError("actions must be provided as a list")
+        if not actions_data:
+            raise ValueError(
+                "Action definitions must include at least one executable action"
+            )
 
-        normalized_actions = []
+        normalized_actions: list[dict[str, Any]] = []
         for action in actions_data:
             if not isinstance(action, dict):
                 raise ValueError("Each action entry must be an object")
             normalized = ScheduleFactory._normalize_action_entry(action)
-            if "name" not in normalized:
-                raise ValueError("Each action must include a 'name' or 'process_key'")
             normalized_actions.append(normalized)
 
         actions_list = [ActionData(**action) for action in normalized_actions]
@@ -197,6 +246,28 @@ class ScheduleFactory:
         return actions_list, legacy_action_name, lookup_params
 
     @staticmethod
+    def _select_action_input(params: dict[str, Any]) -> str:
+        """Select one explicit action input or fail on ambiguous/absent modes."""
+        action_keys = [
+            key
+            for key in ("actions", "action_definitions", "action_name")
+            if key in params and params[key] is not None
+        ]
+        has_memory_tag = "memory_tag" in params and params["memory_tag"] is not None
+
+        if len(action_keys) > 1:
+            raise ValueError(
+                "Provide only one action input: 'action_definitions', 'actions', "
+                "or legacy 'action_name'"
+            )
+        if bool(action_keys) == has_memory_tag:
+            raise ValueError(
+                "Exactly one of action definitions ('action_definitions' or "
+                "'actions') or 'memory_tag' is required"
+            )
+        return action_keys[0] if action_keys else "memory_tag"
+
+    @staticmethod
     def parse_actions_from_params(
         params: dict[str, Any],
     ) -> tuple[list[ActionData], str, dict[str, Any]]:
@@ -215,13 +286,17 @@ class ScheduleFactory:
         Raises:
             ValueError: If neither format is provided
         """
-        if "actions" in params or "action_definitions" in params:
-            return ScheduleFactory._parse_new_format_actions(
-                params.get("actions") or params.get("action_definitions", [])
-            )
-        if "action_name" in params:
-            legacy_action_name = params.get("action_name", "")
+        action_input = ScheduleFactory._select_action_input(params)
+        if action_input in {"actions", "action_definitions"}:
+            return ScheduleFactory._parse_new_format_actions(params[action_input])
+        if action_input == "action_name":
+            raw_action_name = params.get("action_name")
+            if not isinstance(raw_action_name, str) or not raw_action_name.strip():
+                raise ValueError("action_name must be a non-empty string")
+            legacy_action_name = raw_action_name.strip()
             legacy_action_params = params.get("action_parameters", {})
+            if not isinstance(legacy_action_params, dict):
+                raise ValueError("action_parameters must be an object")
             actions_list = [
                 ActionData(
                     name=legacy_action_name,
@@ -231,8 +306,23 @@ class ScheduleFactory:
                 )
             ]
             return actions_list, legacy_action_name, legacy_action_params
-        if "memory_tag" in params:
-            return ScheduleFactory._parse_memory_tag_actions(params["memory_tag"])
-        raise ValueError(
-            "Must provide 'actions', 'action_name', or 'memory_tag' parameter"
-        )
+        memory_tag = params["memory_tag"]
+        if not isinstance(memory_tag, str):
+            raise ValueError("memory_tag must be a non-empty string")
+        return ScheduleFactory._parse_memory_tag_actions(memory_tag)
+
+    @staticmethod
+    def parse_delayed_actions_from_params(
+        params: dict[str, Any],
+    ) -> tuple[list[ActionData], str, dict[str, Any]]:
+        """Validate delayed execution mode and content before side effects."""
+        parsed = ScheduleFactory.parse_actions_from_params(params)
+        if "content" not in params or params["content"] is None:
+            return parsed
+
+        content = params["content"]
+        if not isinstance(content, str):
+            raise ValueError("content must be a string")
+        if ScheduleFactory._select_action_input(params) != "memory_tag":
+            raise ValueError("content is valid only with memory_tag mode")
+        return parsed

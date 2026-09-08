@@ -75,6 +75,7 @@ from threading import RLock
 from typing import TYPE_CHECKING, Any
 
 from .authority_contract import render_authority_delegation_contract
+from .lane_worktrees import LaneWorktreeError, spawn_worktree_cwd, worktree_pythonpath
 from .schema import CAPTURE_SOURCE_INIT_EVENT
 from .solet_cli import (
     WakeCliResolver,
@@ -113,6 +114,26 @@ def _resolve_default_cwd() -> Path:
         if (candidate / ".git").exists() and (candidate / "ananta").is_dir():
             return candidate
     return Path.cwd()
+
+
+def _resolve_spawn_cwd(spec: Mapping[str, object], fallback: Path) -> Path:
+    """Map an explicit lane tree into a host-spawn error at the adapter edge."""
+    from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
+
+    try:
+        return spawn_worktree_cwd(spec.get("worktree_path"), fallback)
+    except LaneWorktreeError as exc:
+        raise HostCannotSpawnError(str(exc)) from exc
+
+
+def _with_worktree_pythonpath(env: dict[str, str], cwd: Path) -> dict[str, str]:
+    env["PYTHONPATH"] = worktree_pythonpath(cwd, env.get("PYTHONPATH", ""))
+    return env
+
+
+def _resolve_spawn_transport(spec: Mapping[str, object], floor: str) -> str:
+    """Prefer the policy-resolved spawn value, then the driver floor."""
+    return str(spec.get("transport") or "") or floor or "watch"
 
 
 # R4 Package C (2026-08-10): a born clone ships NO ".claude/hooks/" at all
@@ -523,6 +544,16 @@ def _resolve_worker_hook_paths(repo_root: Path) -> dict[str, Path]:
     }
 
 
+def _resolve_worker_hook_paths_for_spawn(repo_root: Path) -> dict[str, Path]:
+    """Resolve the complete hook set or preserve spawn's public error type."""
+    from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
+
+    try:
+        return _resolve_worker_hook_paths(repo_root)
+    except WorkerHookResolutionError as exc:
+        raise HostCannotSpawnError(str(exc)) from exc
+
+
 def _resolve_session_mapping_spool_dir() -> Path | None:
     """The T1 usage-capture SessionStart hook's spool dir (ruling
     2026-08-05, Q1(a)) -- computed platform-side from ``APP_HOME`` directly
@@ -569,6 +600,7 @@ def _authority_system_prompt(spec: Mapping[str, object]) -> str:
         lane_id=str(spec.get("lane_id") or ""),
         brief_ref=str(spec.get("brief_ref") or ""),
         spawned_by_role=str(spec.get("spawned_by_role") or ""),
+        unit_id=str(spec.get("unit_id") or ""),
     )
 
 
@@ -661,7 +693,11 @@ def _maybe_capture_init_event(line: str, *, agent_instance_id: str) -> bool:
         event = json.loads(line)
     except (json.JSONDecodeError, ValueError):
         return False
-    if not (isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init"):
+    if not (
+        isinstance(event, dict)
+        and event.get("type") == "system"
+        and event.get("subtype") == "init"
+    ):
         return False
     claude_session_id = str(event.get("session_id") or "")
     if claude_session_id:
@@ -818,7 +854,7 @@ class _StreamJsonDriverChannel:
 
     proc: subprocess.Popen[str]
 
-    def send(self, text: str) -> None:
+    def insert(self, text: str) -> None:
         if self.proc.stdin is None:
             return
         message = {"role": "user", "content": [{"type": "text", "text": text}]}
@@ -836,6 +872,13 @@ class _StreamJsonDriverChannel:
                 "driver channel send() failed — pid=%d is no longer accepting stdin", self.proc.pid,
             )
 
+    def submit(self) -> None:
+        pass
+
+    def send(self, text: str) -> None:
+        self.insert(text)
+        self.submit()
+
 
 class HeadlessHostDriver:
     """The ``headless`` driver (§5): universal floor, no presentation
@@ -852,6 +895,7 @@ class HeadlessHostDriver:
         transport: str | None = None,
         mcp_config_path: Path | None = None,
         cwd: Path | None = None,
+        python_executable: str | None = None,
         popen_fn: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
         grace_seconds: float = DEFAULT_TERMINATE_GRACE_SECONDS,
     ) -> None:
@@ -872,7 +916,9 @@ class HeadlessHostDriver:
         # Wake CLI BINARY (never solet_name). Unresolvable is non-fatal here
         # -- see _arm_watcher / _spawn_env for why it degrades, not refuses.
         # R11 (2026-08-17): resolved per read, never once here — see below.
-        self._cli_resolver = WakeCliResolver(solet_bin)
+        self._cli_resolver = WakeCliResolver(
+            solet_bin, python_executable=python_executable,
+        )
         self._permission_mode = (
             permission_mode if permission_mode is not None
             else os.environ.get(_ENV_PERMISSION_MODE) or ""
@@ -957,6 +1003,7 @@ class HeadlessHostDriver:
     def _spawn_env(
         self, *, agent_instance_id: str, agent_session_id: str, label: str,
         allowed_tools: tuple[str, ...], transport: str,
+        context_gauge_reporter_path: Path, cwd: Path | None = None,
     ) -> dict[str, str]:
         env = dict(os.environ)
         env["SOLET_NAME"] = self._solet_name
@@ -964,15 +1011,16 @@ class HeadlessHostDriver:
         env["AGENT_INSTANCE_ID"] = agent_instance_id
         env["AGENT_SESSION_ID"] = agent_session_id
         env["AGENT_SESSION_LABEL"] = label
+        env["AGENT_CONTEXT_GAUGE_REPORTER_PATH"] = str(context_gauge_reporter_path.resolve())
         # Deaf-wake fix (2026-08-08): MUST be the wake CLI's own binary,
         # never self._solet_name (the solet INSTANCE name, e.g. "mysolet") --
-        # `which <instance-name>` fails, `which solet` resolves.
+        # `which <instance-name>` fails, `which solet-bridge` resolves.
         # Registration-loss fix (2026-08-14): the 2026-08-08 fix used the
         # bare command NAME, which only works when PATH can resolve it. A
         # materialized blue-green release runs with a minimal PATH excluding
         # its own venv/bin, so wake_waiter.py's
         # `subprocess.run([$AGENT_WAKE_CLI, "wake"])` and
-        # heartbeat_report_alive.py's bare `["solet", "call", ...]` both died
+        # heartbeat_report_alive.py's bare `["solet-bridge", "call", ...]` both died
         # with FileNotFoundError and, being non-fatal by design, died
         # SILENTLY. Absolute binary + PATH prepend closes both halves.
         expose_worker_cli(env, self._solet_bin)
@@ -1007,9 +1055,11 @@ class HeadlessHostDriver:
         heartbeat_dir = _resolve_heartbeat_marker_dir()
         if heartbeat_dir is not None:
             env["AGENT_HEARTBEAT_MARKER_DIR"] = str(heartbeat_dir)
-        return env
+        return _with_worktree_pythonpath(env, cwd or self._cwd)
 
-    def _hook_settings_json(self) -> str:
+    def _hook_settings_json(
+        self, resolved_hooks: Mapping[str, Path] | None = None,
+    ) -> str:
         """The ``--settings`` JSON injecting the PreToolUse allowlist gate
         (§6 permission-mode ruling, 2026-08-03), the SessionStart
         usage-capture hook (T1 lane, ruling 2026-08-05), the PostToolUse
@@ -1050,7 +1100,7 @@ class HeadlessHostDriver:
         # WorkerHookResolutionError, converted to HostCannotSpawnError by
         # the caller (spawn()), if any file resolves at neither rung --
         # never silently emits settings pointing at a missing path.
-        resolved_hooks = _resolve_worker_hook_paths(self._cwd)
+        resolved_hooks = resolved_hooks or _resolve_worker_hook_paths(self._cwd)
         allowlist_hook_path = resolved_hooks["headless_tool_allowlist_gate.py"]
         capture_hook_path = resolved_hooks["capture_session_mapping.py"]
         heartbeat_hook_path = resolved_hooks["heartbeat_report_alive.py"]
@@ -1094,7 +1144,7 @@ class HeadlessHostDriver:
                 ],
                 "UserPromptSubmit": [
                     {"hooks": [{"type": "command", "command": f"python3 {step_zero_hook_path}"}]},
-                    {"hooks": [{"type": "command", "command": f"python3 {check_messages_hook_path}"}]},
+                    {"hooks": [{"type": "command", "command": f"python3 {check_messages_hook_path}"}]},  # noqa: E501
                 ],
                 "PostToolUse": [
                     {"hooks": [
@@ -1125,6 +1175,7 @@ class HeadlessHostDriver:
 
     def _spawn_command(
         self, spec: Mapping[str, object], *, label: str, transport: str,
+        resolved_hooks: Mapping[str, Path] | None = None,
     ) -> list[str]:
         # spec-level permission_mode (§6 ruling, resolved from plugin.yaml's
         # headless_permission_mode at the platform_process shim) takes
@@ -1147,7 +1198,7 @@ class HeadlessHostDriver:
             # anything (additive only); only --setting-sources scoping +
             # the injected PreToolUse hook actually enforce.
             "--setting-sources", "project",
-            "--settings", self._hook_settings_json(),
+            "--settings", self._hook_settings_json(resolved_hooks),
             "--name", label,
         ]
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
@@ -1201,15 +1252,6 @@ class HeadlessHostDriver:
         cmd += ["--append-system-prompt", _authority_system_prompt(spec)]
         return cmd
 
-    def _resolve_transport(self, spec: Mapping[str, object]) -> str:
-        """fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
-        spec-level value (spawn_session's policy resolution) wins; this
-        driver's constructor/floor value is next; the operator charter's
-        own declared default ("watch") is the final floor, never silently
-        something else. Split out of :meth:`spawn` to keep it under the
-        radon cc threshold (mirrors :func:`_env_pairs`'s own precedent)."""
-        return str(spec.get("transport") or "") or self._transport or "watch"
-
     def spawn(self, spec: Mapping[str, object]) -> str:
         # Deferred: session_hosts imports THIS module to populate its
         # driver registry, so a module-level import here would be
@@ -1220,7 +1262,7 @@ class HeadlessHostDriver:
         # .mcp.json existence gate, transport-scoped since Dax Part 36
         # §36.3), _spawn_env (the FLEET_TRANSPORT env var), and
         # _spawn_command (the MCP-config argv posture).
-        transport = self._resolve_transport(spec)
+        transport = _resolve_spawn_transport(spec, self._transport)
         degraded_ok = bool(spec.get("degraded_hooks_acknowledged"))
         remedies = self.verify_config(
             permission_mode=str(spec.get("permission_mode") or ""),
@@ -1244,18 +1286,20 @@ class HeadlessHostDriver:
         # Minted exactly ONCE, here — never re-derived elsewhere (two
         # evaluations of an identity expression is two identities).
         agent_session_id = f"ases-{agent_instance_id}"
+        cwd = _resolve_spawn_cwd(spec, self._cwd)
+        resolved_hooks = _resolve_worker_hook_paths_for_spawn(cwd)
         env = self._spawn_env(
             agent_instance_id=agent_instance_id, agent_session_id=agent_session_id,
             label=label, allowed_tools=_coerce_allowed_tools(spec), transport=transport,
+            context_gauge_reporter_path=resolved_hooks["rotation_due_watch.py"], cwd=cwd,
         )
-        try:
-            cmd = self._spawn_command(spec, label=label, transport=transport)
-        except WorkerHookResolutionError as exc:
-            raise HostCannotSpawnError(str(exc)) from exc
+        cmd = self._spawn_command(
+            spec, label=label, transport=transport, resolved_hooks=resolved_hooks,
+        )
 
         try:
             proc = self._popen_fn(
-                cmd, cwd=str(self._cwd), env=env,
+                cmd, cwd=str(cwd), env=env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1, start_new_session=True,
             )
@@ -1264,7 +1308,7 @@ class HeadlessHostDriver:
 
         host_ref = str(proc.pid)
         watcher = _arm_watcher(
-            self._popen_fn, self._solet_bin, self._cwd, proc.pid, env, transport,
+            self._popen_fn, self._solet_bin, cwd, proc.pid, env, transport,
         )
         with self._lock:
             self._processes[host_ref] = _TrackedHeadlessProcess(

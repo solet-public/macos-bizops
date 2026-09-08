@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "repository": "{{SEED_REPOSITORY}}",
+  "release_tag": "{{SEED_RELEASE_TAG}}",
+  "commit": "{{SEED_COMMIT}}",
+  "tree_hash": "{{SEED_TREE_HASH}}",
+  "archive_sha256": "{{SEED_ARCHIVE_SHA256}}",
+  "profile": "{{SEED_PROFILE}}"
+}

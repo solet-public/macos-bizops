@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline smoke for ``list_managed_sessions`` — the ONE fleet list (no pytest).
+"""Offline smoke for the filter-required, hard-bounded fleet list (no pytest).
 
 Read-cap sweep, 2026-08-16 (lane-ak). ``plugin::agent_messaging_plugin::list_sessions``
 called with NO filters was **measured refusing on the serving release**:
@@ -10,16 +10,18 @@ called with NO filters was **measured refusing on the serving release**:
 
 106 live rows against a 100-row cap. The fleet ledger is append-mostly and
 nothing prunes it, so it crossed the bound by **accumulating history** rather
-than by anything going wrong — the same shape as the RUNNING import-batch set
-repaired earlier in this sweep, and a bound that fails as the fleet gets *more*
-use. ``list_managed_sessions`` pages now.
+than by anything going wrong. The repair now makes that dangerous default
+impossible: ``list_sessions`` requires a meaningful fleet filter, refuses when
+match ``limit + 1`` exists, and reserves the complete paged walk for a named,
+reason-bearing internal helper.
 
 WHAT THIS FILE PINS THAT A SMALLER FIXTURE CANNOT
 ==================================================
 Two properties, neither visible below the page boundary:
 
-1. **Completeness past page 1.** The fixture holds 250 rows at a page size of
-   100, so a walk that stopped after its first page returns 100 and is caught.
+1. **Bounded refusal past page 1.** The fixture holds 250 rows at a page size of
+   100, so both the explicit whole-ledger helper's completeness and the public
+   verb's over-limit refusal are observable.
 2. **The soft-delete override survives.** The old code seeded ``{is_deleted: 0}``
    and let a caller's ``filters`` OVERWRITE it, so ``is_deleted: 1`` returned
    soft-deleted rows. ``iter_table_rows`` expresses that as ``include_deleted``,
@@ -53,7 +55,13 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src")
 from ananta.services.state_service.read_bounds import MAX_READ_ROWS  # noqa: E402
 
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
+    ManagedSessionFilterRequiredError,
+    iter_managed_sessions_unbounded,
     list_managed_sessions,
+)
+from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
+    VerbError,
+    list_sessions,
 )
 
 _passed = 0
@@ -196,10 +204,15 @@ def test_fixture_crosses_the_page_boundary() -> None:
     )
 
 
-def test_unfiltered_list_returns_every_live_row() -> None:
-    """The exact call that refuses on the serving release."""
+def test_deliberate_unbounded_helper_returns_every_live_row() -> None:
+    """The named escape hatch remains complete past page one."""
     state = _state()
-    rows = list_managed_sessions(state)  # type: ignore[arg-type]
+    rows = list(
+        iter_managed_sessions_unbounded(
+            state,  # type: ignore[arg-type]
+            reason="smoke proves the explicit full-ledger helper stays complete",
+        )
+    )
     _check(
         len(rows) == _LIVE_ROWS,
         f"unfiltered fleet list returned all {_LIVE_ROWS} live rows (got "
@@ -215,6 +228,73 @@ def test_unfiltered_list_returns_every_live_row() -> None:
         f"include_deleted default, which replaced the explicit is_deleted filter",
     )
     _check(state.query_state_calls == 0, "no unbounded query_state read remains")
+
+
+def test_store_refuses_an_implicit_full_walk() -> None:
+    refused = False
+    try:
+        list_managed_sessions(_state())  # type: ignore[arg-type]
+    except ManagedSessionFilterRequiredError:
+        refused = True
+    _check(refused, "list_managed_sessions without filters refuses by default")
+
+
+def test_list_sessions_requires_a_filter() -> None:
+    """RED MUTATION: remove the verb filter guard and this test must fail."""
+    for filters in (None, {}, {"is_deleted": 0}):
+        code = None
+        message = ""
+        try:
+            list_sessions(_state(), filters)  # type: ignore[arg-type]
+        except VerbError as exc:
+            code = exc.code
+            message = exc.message
+        _check(
+            code == "filter_required"
+            and "live_only" in message
+            and "lane_id" in message
+            and "\n" not in message,
+            f"list_sessions({filters!r}) -> one-line filter_required with accepted keys",
+        )
+
+
+def test_list_sessions_refuses_over_limit_without_rows() -> None:
+    """RED MUTATION: restore the 1,000,000-row ceiling and this test must fail."""
+    code = None
+    returned_rows: list[dict[str, Any]] = []
+    try:
+        returned_rows = list_sessions(
+            _state(), {"lane_id": "lane-a"}, limit=50,  # type: ignore[arg-type]
+        )["sessions"]
+    except VerbError as exc:
+        code = exc.code
+    _check(
+        code == "result_over_limit" and returned_rows == [],
+        "a filtered match set above limit refuses with result_over_limit and returns no rows",
+    )
+
+
+def test_list_sessions_returns_exact_under_limit_rows() -> None:
+    state = _state()
+    expected_ids = [f"ms-{idx:04d}" for idx in range(_LIVE_ROWS) if idx % 3 == 0]
+    rows = list_sessions(
+        state, {"lifecycle_state": "retired"}, limit=100,  # type: ignore[arg-type]
+    )["sessions"]
+    _check(
+        [row["id"] for row in rows] == expected_ids,
+        "a filtered match set under limit returns the exact rows",
+    )
+
+
+def test_list_sessions_live_only_excludes_terminal_rows() -> None:
+    rows = list_sessions(
+        _state(), live_only=True, limit=250,  # type: ignore[arg-type]
+    )["sessions"]
+    _check(
+        len(rows) == sum(1 for idx in range(_LIVE_ROWS) if idx % 3 != 0)
+        and {str(row["lifecycle_state"]) for row in rows} == {"live"},
+        "live_only uses one IN filter and returns non-terminal rows only",
+    )
 
 
 def test_caller_filters_are_pushed_down() -> None:
@@ -253,7 +333,12 @@ def test_soft_delete_override_is_preserved() -> None:
 def test_explicit_is_deleted_zero_matches_the_default() -> None:
     state = _state()
     explicit = list_managed_sessions(state, {"is_deleted": 0})  # type: ignore[arg-type]
-    default = list_managed_sessions(state)  # type: ignore[arg-type]
+    default = list(
+        iter_managed_sessions_unbounded(
+            state,  # type: ignore[arg-type]
+            reason="compare the deliberate default soft-delete predicate",
+        )
+    )
     _check(
         {str(r["id"]) for r in explicit} == {str(r["id"]) for r in default},
         "an explicit is_deleted=0 is identical to the default — the two "

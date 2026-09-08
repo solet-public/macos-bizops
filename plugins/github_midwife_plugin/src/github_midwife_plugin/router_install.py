@@ -6,7 +6,7 @@ router_in_seed_design.md` §4 D1 (Q1 RULED — genesis auto-step, zero operator
 action) and §5.
 
 **Conditional (SEED-06 Q3).** Only a newborn whose profile allowlist includes
-`macos_self_deployment_plugin` ships the router code (`bizops_standard`, NOT
+`macos_self_deployment_plugin` ships the router code (`macos-bizops`, NOT
 `macos_free_minimal`). A free-tier newborn is single-color by design and this
 phase SKIPS cleanly. When the plugin IS in the allowlist the phase is
 FAIL-LOUD — a solet that boots believing it can blue-green but silently
@@ -36,7 +36,7 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 SELF_DEPLOYMENT_PLUGIN = "macos_self_deployment_plugin"
 
 # Path to the shipped installer, relative to the clone root. The router is a
-# subpackage of macos_self_deployment_plugin, so an assembled bizops seed that
+# subpackage of macos_self_deployment_plugin, so an assembled macos-bizops seed that
 # carries the plugin carries this file (assemble ships the plugin subtree
 # verbatim); a free seed omits the plugin dir entirely.
 _INSTALL_ROUTER_RELPATH = (

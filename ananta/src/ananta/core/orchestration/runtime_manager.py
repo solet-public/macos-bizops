@@ -90,9 +90,40 @@ class RuntimeManager:
             raise
 
     async def _start_action_queue_poller(self) -> None:
-        """Start ActionQueuePoller for continuous action processing."""
+        """Start action dispatch, then arm the target registration deadline.
+
+        The self-deployment heartbeat waits for the bridge created by a
+        starting action.  Startup preparation also contains synchronous
+        inference prewarm and knowledge-base hydration, neither of which is a
+        bridge-registration failure.  Arming after the poller starts preserves
+        the existing strict-I2 budget for its intended bridge-bind/register
+        interval.
+        """
         # Start polling-based action processing (replaces trigger system)
         await self.orchestrator.action_queue_poller.start()
+        plugin_manager = self.orchestrator.plugin_manager
+        mark_serving = getattr(plugin_manager, "_mark_serving", None)
+        if not callable(mark_serving):
+            raise RuntimeError(
+                "PluginManager must expose _mark_serving before action dispatch starts"
+            )
+        mark_serving()
+        self_deployment_plugin = plugin_manager.plugins.get(
+            "macos_self_deployment_plugin",
+        )
+        if self_deployment_plugin is None:
+            return
+        arm_registration_deadline = getattr(
+            self_deployment_plugin,
+            "arm_registration_deadline",
+            None,
+        )
+        if not callable(arm_registration_deadline):
+            raise RuntimeError(
+                "macos_self_deployment_plugin must expose "
+                "arm_registration_deadline after action dispatch starts",
+            )
+        arm_registration_deadline()
 
     async def _coordinate_main_event_loop(self) -> None:
         """Coordinate main event loop with ActionQueuePoller."""

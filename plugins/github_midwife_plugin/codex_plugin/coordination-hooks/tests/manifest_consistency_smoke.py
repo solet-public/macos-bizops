@@ -26,21 +26,26 @@ from _harness import HOOKS_DIR, PLUGIN_ROOT, Results, preflight  # noqa: E402
 # either reminder to any UserPromptSubmit entry, or dropping either from the
 # SessionStart(startup|resume|clear) group.
 #
-# codex-0147-async-hook-regression (2026-08-13): the Stop/wake_waiter.js entry
-# is deliberately ABSENT. Stock Codex 0.147.0 does not accept async command
-# hooks ("skipping async hook ... async hooks are not supported yet") — the
-# handler registered under 906753eb7 never fired. wake_waiter.js and its
-# dedicated smoke were deleted rather than kept dormant; the 0.141.0
-# acceptance evidence that motivated the async binding is preserved as
-# historical record in SECURITY.md and git history. RED MUTATION for this
-# Counter: re-adding a Stop entry without first proving async command-hook
-# support on the target stock Codex build.
+# The current official hook contract defines background command hooks. Live
+# stock-process execution remains a separate acceptance leg. The context
+# reporter is deliberately async so transcript parsing and the platform call
+# cannot hold the turn boundary; it reports context only and never requests
+# continuation or consumes peer messages. CDX-06 (2026-08-24) adds a SECOND
+# Stop hook, inbox_consumer.py, which is deliberately SYNCHRONOUS -- measured
+# live (workbench/2026-08-24_cdx06_isolated_stop_hook_proof.md) that an
+# async hook's decision output is discarded, so only a synchronous hook can
+# gate/continue a turn. R1 extends its bounded Stop park to 2400 seconds;
+# the paired 2430-second manifest timeout is a runtime contract, not a
+# decorative setting, and reports its execution on every run regardless of
+# outcome (the CDX-06 part C honesty field).
 EXPECTED = Counter(
     {
         ("SessionStart", "startup|resume|clear", "step_zero_reminder.js"): 1,
         ("SessionStart", "startup|resume|clear", "check_messages_reminder.js"): 1,
         ("SessionStart", "startup|resume|clear", "role_binding_reminder.js"): 1,
         ("PreToolUse", "^Bash$", "git_controller_gate.py"): 1,
+        ("Stop", "", "context_status_reporter.py"): 1,
+        ("Stop", "", "inbox_consumer.py"): 1,
     }
 )
 COMMAND_RE = re.compile(
@@ -51,6 +56,8 @@ HOOK_KEYWORDS = {
     "check_messages_reminder.js": ("coordination reminder", "unread-message"),
     "role_binding_reminder.js": ("role-binding", "role binding"),
     "git_controller_gate.py": ("git-controller", "git controller"),
+    "context_status_reporter.py": ("context-status", "context status"),
+    "inbox_consumer.py": ("inbox-consumer", "peer inbox"),
 }
 DOCUMENTS = (
     "hooks/hooks.json",
@@ -145,10 +152,19 @@ def _check_python_source(res: Results, path: Path, source: str) -> None:
         not imports.intersection(NETWORK_MODULES),
         f"{path.name} imports no network module",
     )
-    res.check(
-        not imports.intersection(PROCESS_MODULES),
-        f"{path.name} imports no process module",
-    )
+    process_imports = imports.intersection(PROCESS_MODULES)
+    if path.name in {"context_status_reporter.py", "inbox_consumer.py"}:
+        res.check(
+            process_imports == {"subprocess"},
+            f"{path.name} imports only its declared process module",
+            repr(sorted(process_imports)),
+        )
+    else:
+        res.check(
+            not process_imports,
+            f"{path.name} imports no process module",
+            repr(sorted(process_imports)),
+        )
     call_names = {
         node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
         for node in ast.walk(tree)
@@ -204,6 +220,16 @@ def _record_entry(
     if match is None:
         return
     script = match.group(2)
+    if script == "context_status_reporter.py":
+        res.check(entry.get("async") is True, "context reporter is explicitly async")
+    else:
+        res.check("async" not in entry, f"{script} has no undeclared async mode")
+    if script == "inbox_consumer.py":
+        res.check(
+            entry.get("timeout") == 2430,
+            "inbox consumer has the paired 2430-second Stop timeout",
+            repr(entry.get("timeout")),
+        )
     referenced.add(script)
     actual[(event, matcher, script)] += 1
 
@@ -297,12 +323,13 @@ def _check_security_claim(res: Results) -> None:
     )
 
 
-def _check_no_stop_binding(res: Results, hooks: dict[object, object]) -> None:
-    """codex-0147-async-hook-regression: no Stop entry may exist until a stock
-    Codex build with confirmed async command-hook support motivates re-adding
-    one. A bound-but-unsupported Stop entry is what produced the 0.147.0
-    startup warning this smoke exists to prevent regressing to."""
-    res.check("Stop" not in hooks, "manifest carries no Stop binding", repr(sorted(hooks)))
+def _check_stop_binding(res: Results, hooks: dict[object, object]) -> None:
+    """The reporter must remain a single background Stop definition."""
+    stop_groups = hooks.get("Stop")
+    res.check(isinstance(stop_groups, list), "manifest carries the Stop reporter binding")
+    if not isinstance(stop_groups, list):
+        return
+    res.check(len(stop_groups) == 1, "manifest carries one Stop group", repr(stop_groups))
 
 
 def main() -> int:
@@ -321,7 +348,7 @@ def main() -> int:
     actual, referenced = _collect_inventory(res, hooks)
 
     res.check(actual == EXPECTED, "registered event/matcher/script inventory is exact", repr(actual))
-    _check_no_stop_binding(res, hooks)
+    _check_stop_binding(res, hooks)
     _check_documentation(res, referenced)
     _check_gate_routing(res, actual)
     _check_source_contract(res)

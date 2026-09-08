@@ -29,6 +29,9 @@ next driver to land).
 from __future__ import annotations
 
 import os
+import shutil
+import signal
+import subprocess
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -39,6 +42,7 @@ DEFAULT_HOST = "headless"
 
 OPERATOR_HOST = "operator"
 SYNTHETIC_HOST = "synthetic"
+QUALIFICATION_HOST = "qualification"
 """GAU-15 item 4 / GAU-24 — the gauge tamper canary's declared host. A
 canary has no process, so this driver is registered but DEGENERATE exactly
 like :class:`OperatorHostDriver`: ``spawn``/``terminate`` both refuse with
@@ -69,7 +73,23 @@ class DriverChannel(Protocol):
     real one (the ``operator`` driver's ``driver_channel()`` still returns
     ``None`` — ``unsupported_on_host``, never a silent degradation)."""
 
+    def insert(self, text: str) -> None: ...
+
+    def submit(self) -> None: ...
+
     def send(self, text: str) -> None: ...
+
+
+@runtime_checkable
+class ParkInterruptingDriverChannel(Protocol):
+    """A channel that can interrupt a parked interactive pane safely.
+
+    This intentionally stays separate from :class:`DriverChannel`: only a
+    host with an interrupt key and a positive idle-prompt read-back may claim
+    it.  The durable lifecycle ``parked`` row, not pane prose, selects it.
+    """
+
+    def interrupt_park(self) -> str: ...
 
 
 @runtime_checkable
@@ -104,6 +124,13 @@ class ClearVerifyingDriverChannel(Protocol):
     """
 
     def verify_cleared(self) -> bool: ...
+
+
+@runtime_checkable
+class SubmitVerifyingDriverChannel(Protocol):
+    """A channel that can positively verify that submitted text became input."""
+
+    def verify_submitted(self, text: str) -> bool | None: ...
 
 
 @runtime_checkable
@@ -290,6 +317,65 @@ class SyntheticHostDriver:
         return []
 
 
+class QualificationHostDriver:
+    """A bounded non-LLM worker which exercises the ordinary watch bridge path."""
+
+    def __init__(self) -> None:
+        self._processes: dict[str, subprocess.Popen[str]] = {}
+
+    def spawn(self, spec: Mapping[str, object]) -> str:
+        instance_id = str(spec.get("agent_instance_id") or "")
+        role = str(spec.get("local_name") or "")
+        if not instance_id or not role or str(spec.get("worktree_path") or ""):
+            raise HostCannotSpawnError(
+                "qualification host requires an identity, role, and no worktree"
+            )
+        if shutil.which("solet-bridge") is None:
+            raise HostCannotSpawnError("solet-bridge is required for qualification host")
+        env = dict(os.environ)
+        env["AGENT_INSTANCE_ID"] = instance_id
+        env["AGENT_SESSION_ID"] = f"ases-{instance_id}"
+        process = subprocess.Popen(
+            ["solet-bridge", "watch", "--role", role, "--agent-id", "qualification", "--no-spool"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        self._processes[str(process.pid)] = process
+        return str(process.pid)
+
+    def alive(self, host_ref: str) -> bool:
+        process = self._processes.get(host_ref)
+        return process is not None and process.poll() is None
+
+    def terminate(self, host_ref: str, grace_seconds: int) -> None:
+        process = self._processes.get(host_ref)
+        if process is None or process.poll() is not None:
+            return
+        process.send_signal(signal.SIGTERM)
+        try:
+            process.wait(timeout=max(1, grace_seconds))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        finally:
+            self._processes.pop(host_ref, None)
+
+    def driver_channel(self, host_ref: str) -> DriverChannel | None:
+        del host_ref
+        return None
+
+    def capability_report(self) -> dict[str, object]:
+        return {"host": QUALIFICATION_HOST, "topology": "bounded-watch", "inspectable_via": ["pid"]}
+
+    def verify_config(self) -> list[str]:
+        return [] if shutil.which("solet-bridge") else [
+            "solet-bridge is required for qualification host"
+        ]
+
+
 RegistryKey = str | tuple[str, str]
 
 
@@ -305,10 +391,12 @@ def _build_registry() -> dict[RegistryKey, HostDriver]:
         (AGENT_RUNTIME_CLAUDE_CODE, "headless"): HeadlessHostDriver(),
         (AGENT_RUNTIME_CLAUDE_CODE, "tmux"): TmuxHostDriver(),
         (AGENT_RUNTIME_CLAUDE_CODE, SYNTHETIC_HOST): SyntheticHostDriver(),
+        (AGENT_RUNTIME_CLAUDE_CODE, QUALIFICATION_HOST): QualificationHostDriver(),
         (AGENT_RUNTIME_CODEX, OPERATOR_HOST): OperatorHostDriver(),
         (AGENT_RUNTIME_CODEX, "headless"): CodexAppServerHostDriver(),
         (AGENT_RUNTIME_CODEX, "tmux"): CodexTmuxHostDriver(),
         (AGENT_RUNTIME_CODEX, SYNTHETIC_HOST): SyntheticHostDriver(),
+        (AGENT_RUNTIME_CODEX, QUALIFICATION_HOST): QualificationHostDriver(),
     }
 
 
@@ -400,6 +488,7 @@ __all__ = [
     "SYNTHETIC_HOST",
     "AgentRuntimeNotSupportedError",
     "ClearVerifyingDriverChannel",
+    "SubmitVerifyingDriverChannel",
     "DriveVerifyingDriverChannel",
     "DriverChannel",
     "DriverChannelSendError",

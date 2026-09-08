@@ -138,6 +138,15 @@ def _case_a_double_prime_grep_clean() -> None:
     ``_DELETED_PLUGIN_CLASS`` as constants — exclude it so the
     assertion exercises the cascade-clean contract instead of
     catching its own self-reference.
+
+    ``shipped_smoke_contract.yaml`` is excluded for the same reason and no other:
+    it is a PATH-KEYED REGISTRATION surface, so it necessarily contains this
+    smoke's own filename as a key, and that filename contains the retired plugin
+    name as a substring. That is a registration, not a reference to the deleted
+    plugin — exactly the relationship ``quality_gates/gate_smokes.txt`` has, which
+    is why the register is not among ``_PRODUCTION_GREP_ROOTS`` either. The
+    exclusion is by FILENAME, so a real code reference to the retired plugin
+    anywhere else under the grep roots is still caught.
     """
     print("\nCase A'': production-tree grep returns zero name references")
     pattern = f"{_DELETED_PLUGIN_NAME}|{_DELETED_PLUGIN_CLASS}"
@@ -145,6 +154,7 @@ def _case_a_double_prime_grep_clean() -> None:
         ["grep", "-rnE",
          "--exclude-dir=__pycache__", "--exclude-dir=.ruff_cache",
          f"--exclude={Path(__file__).name}",
+         "--exclude=shipped_smoke_contract.yaml",
          pattern,
          *(str(p) for p in _PRODUCTION_GREP_ROOTS if p.exists())],
         capture_output=True, text=True, check=False,
@@ -190,8 +200,22 @@ def _assert_profile_yaml_clean(path: Path, label_prefix: str) -> None:
 def _case_a_triple_prime_profiles_parse_clean() -> None:
     """A''': both local.yaml artifacts parse + omit deleted + keep canonical binding."""
     print("\nCase A''': both local.yaml artifacts parse cleanly post-cleanup")
-    _assert_profile_yaml_clean(_MIDWIFE_TEMPLATE, "midwife KB template")
-    _assert_profile_yaml_clean(_OPERATOR_PROFILE, "operator profile")
+    # BOTH artifacts in this case are ORIGIN-ONLY, each for its own measured
+    # reason, so each is guarded separately rather than the case being dropped:
+    # macos_midwife_plugin is in NO capability bundle (github_midwife_plugin is
+    # the birth spine), and `initialization/` is absent from the seed manifest's
+    # `copy:` allowlist entirely. A born solet's profile comes from the midwife
+    # templates that DO ship, so neither artifact describes an adopter. Every
+    # other case here — the production-tree grep, the PluginManager rediscovery —
+    # is adopter-relevant and still runs. Measured on the r21 born-clone verdict
+    # (sealed 254700866ab0…): 1 of 14 BLOCKING, raising FileNotFoundError on the
+    # midwife template right after Case A'' had printed PASS.
+    for path, label in ((_MIDWIFE_TEMPLATE, "midwife KB template"),
+                        (_OPERATOR_PROFILE, "operator profile")):
+        if not path.is_file():
+            print(f"  SKIP    {label}: origin-only artifact, not shipped in a seed")
+            continue
+        _assert_profile_yaml_clean(path, label)
 
 
 def _case_a_quad_prime_plugin_manager_rediscover() -> None:

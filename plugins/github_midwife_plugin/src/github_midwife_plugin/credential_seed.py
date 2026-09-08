@@ -114,9 +114,11 @@ from __future__ import annotations
 import getpass
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 from macos_vault_plugin.keychain import PerCredentialKeychain, SystemKeychain
 
@@ -192,12 +194,79 @@ _ADMIN_DB = "postgres"
 _ADMIN_ROLE = getpass.getuser()
 _PW_TOKEN_BYTES = 32
 _PSQL_TIMEOUT_S = 15
+_POSTGRES_FORMULA = "postgresql@17"
+_HOMEBREW_CANDIDATES = (
+    "/opt/homebrew/bin/brew",
+    "/usr/local/bin/brew",
+)
 
 # CLI flags (verb-mode newborn self-seed subprocess). `--seed` runs the full
 # self-seed against this process's own SOLET_NAME role; the optional
 # `--isolation-sibling-db <db>` adds the post-seed isolation self-proof.
 _SEED_FLAG = "--seed"
 _ISOLATION_FLAG = "--isolation-sibling-db"
+
+
+def _resolve_brew_executable() -> str:
+    """Resolve a working Homebrew executable when the launch PATH is incomplete."""
+    candidates = (shutil.which("brew"), *_HOMEBREW_CANDIDATES)
+    for candidate in dict.fromkeys(item for item in candidates if item is not None):
+        try:
+            completed = subprocess.run(  # noqa: S603
+                [candidate, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=_PSQL_TIMEOUT_S,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if completed.returncode == 0:
+            return candidate
+    raise CredentialSeedError(
+        "PostgreSQL 17 psql could not be resolved: Homebrew executable could "
+        "not be found. Repair the approved PostgreSQL 17 setup, then re-run genesis."
+    )
+
+
+def _resolve_psql_binary() -> str:
+    """Resolve the declared PostgreSQL 17 client without a PATH fallback.
+
+    The setup adapter verifies the Homebrew-managed ``postgresql@17`` formula
+    by resolving its authoritative ``brew --prefix`` and invoking binaries
+    under that prefix.  Genesis runs after that verified prerequisite, but its
+    subprocess environment need not include the keg-only ``bin`` directory.
+    Resolve the same formula here rather than guessing a Homebrew prefix or
+    silently falling back to a possibly unrelated PATH binary.
+    """
+    brew = _resolve_brew_executable()
+    try:
+        prefix_result = subprocess.run(  # noqa: S603
+            [brew, "--prefix", _POSTGRES_FORMULA],
+            capture_output=True,
+            text=True,
+            timeout=_PSQL_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CredentialSeedError(
+            "PostgreSQL 17 psql could not be resolved: `brew --prefix "
+            "postgresql@17` could not run. Repair the approved PostgreSQL 17 "
+            "setup, then re-run genesis."
+        ) from exc
+    if prefix_result.returncode != 0:
+        raise CredentialSeedError(
+            "PostgreSQL 17 psql could not be resolved: `brew --prefix "
+            "postgresql@17` failed. Repair the approved PostgreSQL 17 setup, "
+            "then re-run genesis."
+        )
+    prefix = Path(prefix_result.stdout.strip())
+    psql = prefix / "bin" / "psql"
+    if not prefix.is_absolute() or not psql.is_file() or not os.access(psql, os.X_OK):
+        raise CredentialSeedError(
+            "PostgreSQL 17 psql could not be resolved: the configured "
+            "Homebrew prefix does not contain an executable `bin/psql`. Repair "
+            "the approved PostgreSQL 17 setup, then re-run genesis."
+        )
+    return str(psql)
 
 
 def _default_alter_role_password(pw: str) -> None:
@@ -215,7 +284,7 @@ def _default_alter_role_password(pw: str) -> None:
     escaped = pw.replace("'", "''")
     sql = f'ALTER ROLE "{_ROLE_NAME}" PASSWORD \'{escaped}\';\n'
     result = subprocess.run(  # noqa: S603
-        ["psql", "-U", _ADMIN_ROLE, "-d", _ADMIN_DB, "-v", "ON_ERROR_STOP=1", "-q"],
+        [_resolve_psql_binary(), "-U", _ADMIN_ROLE, "-d", _ADMIN_DB, "-v", "ON_ERROR_STOP=1", "-q"],
         input=sql, text=True, capture_output=True, timeout=_PSQL_TIMEOUT_S,
     )
     if result.returncode != 0:
@@ -252,7 +321,7 @@ def _default_role_authenticates(pw: str) -> bool:
     env = os.environ.copy()
     env["PGPASSWORD"] = pw
     result = subprocess.run(  # noqa: S603
-        ["psql", "-U", _ROLE_NAME, "-d", _require_solet_name(),
+        [_resolve_psql_binary(), "-U", _ROLE_NAME, "-d", _require_solet_name(),
          "-v", "ON_ERROR_STOP=1", "-q", "-c", "SELECT 1;"],
         capture_output=True, text=True, timeout=_PSQL_TIMEOUT_S, env=env,
     )
@@ -276,7 +345,7 @@ def _default_role_exists() -> bool:
     """
     try:
         result = subprocess.run(  # noqa: S603
-            ["psql", "-U", _ADMIN_ROLE, "-d", _ADMIN_DB, "-tAc",
+            [_resolve_psql_binary(), "-U", _ADMIN_ROLE, "-d", _ADMIN_DB, "-tAc",
              f"SELECT 1 FROM pg_roles WHERE rolname='{_ROLE_NAME}'"],
             capture_output=True, text=True, timeout=_PSQL_TIMEOUT_S,
         )
@@ -441,7 +510,7 @@ def _default_sibling_connect_probe(sibling_db: str, pw: str) -> subprocess.Compl
     env = os.environ.copy()
     env["PGPASSWORD"] = pw
     return subprocess.run(  # noqa: S603
-        ["psql", "-U", _ROLE_NAME, "-d", sibling_db, "-v", "ON_ERROR_STOP=1",
+        [_resolve_psql_binary(), "-U", _ROLE_NAME, "-d", sibling_db, "-v", "ON_ERROR_STOP=1",
          "-tAc", "SELECT 1"],
         capture_output=True, text=True, timeout=_PSQL_TIMEOUT_S, env=env,
     )

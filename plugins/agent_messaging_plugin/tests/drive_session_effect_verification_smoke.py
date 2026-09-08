@@ -425,6 +425,83 @@ def test_tmux_verify_driven_confirms_population_then_idle() -> None:
     )
 
 
+_MULTILINE_PROBE_TEXT = (
+    "Dispatch: establish ground truth first.\n\n"
+    "1. Read the driver channel code.\n"
+    "2. Fix the readiness gate.\n"
+    "3. Add rollback for a failed insert.\n"
+)
+"""A payload shaped like a real dispatch: multi-line, so the TUI COLLAPSES it
+in the composer instead of echoing it. ``_PROBE_TEXT`` above is 21 characters
+on one row — the only payload shape the pre-2026-09-07 population anchor
+could see, and the reason the defect below survived every earlier fix to this
+channel."""
+
+
+def _collapsed_paste_row(text: str) -> str:
+    """The composer row a Claude Code TUI renders for a collapsed bracketed
+    paste of ``text`` — measured live 2026-09-07 (``[Pasted text #1 +141
+    lines]`` for a 142-line payload, ``+8`` for a 9-line one; the declared
+    count is the payload's own newline count in both)."""
+    return f"❯ [Pasted text #1 +{text.count(chr(10))} lines]"
+
+
+def test_tmux_verify_driven_confirms_a_collapsed_multiline_paste() -> None:
+    """★ THE KILLING TEST for the 2026-09-07 drive false-negative.
+
+    ``_composer_content_matches`` required the composer row to be a PREFIX of
+    the driven text. A Claude Code TUI does not echo a multi-line paste into
+    the composer at all — it collapses it to ``[Pasted text #1 +N lines]``,
+    which is not a prefix of anything. Measured live: an 8.6KB real dispatch
+    brief held ``populated=False`` for the entire poll window, so
+    ``verify_driven`` ran its full 120s deadline observing nothing, returned
+    ``None``, and ``drive_session`` raised ``drive_unverified`` for a drive
+    that HAD been delivered — skipping the un-park and the ``report_by``
+    re-arm on the way out. The pane was live and healthy the whole time.
+
+    Deterministic in payload size, which is why it recurred on 2026-08-24,
+    08-30, 09-02, 09-06 and three times on 09-07 across fixes that each
+    correctly closed a different defect in this same channel.
+    """
+    runner = _FakeTmuxRunner(
+        capture_pane_sequence=[
+            _collapsed_paste_row(_MULTILINE_PROBE_TEXT),
+            "❯\xa0", "❯\xa0", "❯\xa0",
+        ],
+    )
+    channel = _tmux_channel(runner)
+    _check(
+        channel.verify_driven(_MULTILINE_PROBE_TEXT) is True,
+        "tmux verify_driven() confirms a submit whose composer form was a COLLAPSED paste",
+    )
+    _check(
+        runner.send_key_count() == 0,
+        "the collapsed-paste path still only ever READS the pane",
+    )
+
+
+def test_tmux_verify_driven_rejects_a_collapsed_paste_of_someone_elses_text() -> None:
+    """The discriminator that keeps the fix above from being a wildcard.
+
+    A paste placeholder is a WEAKER anchor than the prefix check — the row
+    carries no payload bytes, only a line count — so the count is what makes
+    it positive evidence about OUR drive rather than about any paste at all.
+    A placeholder whose line count is not ours must not satisfy the
+    population gate; without this, ``verify_driven`` would confirm a submit
+    against another writer's paste sitting in the composer, which is the
+    same class of lie (``ARMED != FIRED``) the method exists to close.
+    """
+    foreign = _collapsed_paste_row("one\ntwo\nthree\nfour\nfive\nsix\nseven\n")
+    runner = _FakeTmuxRunner(
+        capture_pane_sequence=[foreign, "❯\xa0", "❯\xa0", "❯\xa0", "❯\xa0"],
+    )
+    channel = _tmux_channel(runner)
+    _check(
+        channel.verify_driven(_MULTILINE_PROBE_TEXT) is None,
+        "a collapsed paste with a FOREIGN line count is not evidence of our drive",
+    )
+
+
 def test_tmux_verify_driven_detects_positive_stranded_input() -> None:
     """★ THE POSITIVE-FAILURE DETECTOR. Bright white (SGR 97) driven text
     still sitting in the composer is a definitive, immediate FALSE — no
@@ -517,6 +594,8 @@ def main() -> int:
         test_blind_driver_degrades_to_honest_naming_never_to_a_verdict,
         test_blind_driver_still_unparks_on_request,
         test_tmux_verify_driven_confirms_population_then_idle,
+        test_tmux_verify_driven_confirms_a_collapsed_multiline_paste,
+        test_tmux_verify_driven_rejects_a_collapsed_paste_of_someone_elses_text,
         test_tmux_verify_driven_detects_positive_stranded_input,
         test_tmux_verify_driven_does_not_treat_dim_ghost_text_as_stranded,
         test_tmux_verify_driven_rejects_idle_that_never_populated,

@@ -107,30 +107,73 @@ every time.
 
 ## Step 7 — file
 
-**Use the web chooser.** It renders the repository's issue forms, which carry
-the required evidence fields and the content-gate checkbox. This step needs the
-GitHub CLI: probe `gh --version` first, and if it is absent, offer
-`brew install gh` (the seed-hydration ladder normally installs it; a machine
-hydrated before that step, or where the offer was declined, will land here
-without it) before filing:
+**File non-interactively.** Issue forms are a browser UI, not an API: `gh issue
+create --title` and `--body-file` create the equivalent labeled issue without
+opening a chooser. Preserve the form's evidence discipline by structuring the
+draft with the exact visible labels of every required field in the matching
+form, followed by the content-gate acknowledgement. Complete the required
+fields before sending; the API does not enforce them for you.
 
-```bash
-gh issue create --web
+For example, a defect draft has these headings in this order (the other forms'
+required headings are in `.github/ISSUE_TEMPLATE/`):
+
+```markdown
+## Item number
+§N.M
+
+## The exact command or action
+...
+
+## Observed output
+...
+
+## Expected behavior
+...
+
+## Release measured against
+...
+
+## Content gate
+- [x] I re-read this issue and it contains no personal identifiers, no employer or business specifics, and no credentials or secret-looking values — including inside pasted output.
 ```
 
-Pick the form for the item class, transfer the drafted content into its fields,
-and tick the content-gate checkbox because the gate was actually run in Step 5.
+This step needs the GitHub CLI and non-interactive GitHub authentication: probe
+both first. If `gh` is absent, offer `brew install gh` (the seed-hydration
+ladder normally installs it; a machine hydrated before that step, or where the
+offer was declined, will land here without it). If `gh auth status` fails, stop
+and ask the operator to arrange an approved token-backed CLI login; do not open
+a browser or start an interactive login flow.
 
-**Why not `--title` and `--body` directly:** filing that way creates a plain
-issue that never goes through the form. The required fields are not enforced,
-the content-gate checkbox is not presented, and the evidence discipline the
-forms exist to carry is silently skipped. Use the flag form only when the web
-chooser genuinely cannot be reached, and say in the issue body that it was
-filed that way and which fields were supplied by hand.
+```bash
+gh --version
+gh auth status
+REPOSITORY="$(gh repo view "$(git remote get-url origin)" --json nameWithOwner --jq .nameWithOwner)"
+gh issue create --repo "$REPOSITORY" --title "§N.M — concise summary" \
+  --label defect --body-file workbench/part-N-item-M.md
+```
+
+Use the label matching the form: `defect`, `question`, `feature-request`,
+`closure-confirmation`, or `feedback-round`. The checked Markdown content-gate
+line is the non-interactive equivalent of ticking the form checkbox: include it
+only because the gate was actually run in Step 5.
+
+Do not use an unstructured `--body` as a shortcut: the API does not render or
+enforce issue forms, so the draft itself must visibly carry every required
+field and the checked content-gate acknowledgement. No disclosure or fallback
+is needed merely because it was filed non-interactively; this is the normal
+path.
 
 For a **multi-item round**, file the round's parent issue first using the
-feedback-round form, then file each item and attach it to the parent as a
-sub-issue. A single-item round needs no parent — file the one issue.
+feedback-round structure, then file each item and attach it to the parent as a
+sub-issue without opening a browser:
+
+```bash
+CHILD_ID="$(gh api "repos/$REPOSITORY/issues/$CHILD_NUMBER" --jq .id)"
+gh api --method POST "repos/$REPOSITORY/issues/$PARENT_NUMBER/sub_issues" \
+  -F sub_issue_id="$CHILD_ID"
+```
+
+A single-item round needs no parent — file the one issue.
 
 For a **design proposal**, use the feature-request form and put the design in
 its body — the outcome needed, the alternatives considered, the tradeoffs, the

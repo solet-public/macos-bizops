@@ -134,9 +134,23 @@ class _FakeChannel:
         self.sent.append(text)
 
 
+class _FakeParkInterruptingChannel(_FakeChannel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupts = 0
+
+    def interrupt_park(self) -> str:
+        self.interrupts += 1
+        return "interrupted_park"
+
+
 class _FakeDriverWithChannel:
-    def __init__(self, *, raise_on_send: bool = False) -> None:
-        self.channel = _FakeChannel(raise_on_send=raise_on_send)
+    def __init__(self, *, raise_on_send: bool = False, park_interrupt: bool = False) -> None:
+        self.channel = (
+            _FakeParkInterruptingChannel()
+            if park_interrupt
+            else _FakeChannel(raise_on_send=raise_on_send)
+        )
 
     def spawn(self, spec: object) -> str:
         del spec
@@ -160,8 +174,12 @@ class _FakeDriverWithChannel:
         return []
 
 
-def _install_fake_host(*, raise_on_send: bool = False) -> _FakeDriverWithChannel:
-    driver = _FakeDriverWithChannel(raise_on_send=raise_on_send)
+def _install_fake_host(
+    *, raise_on_send: bool = False, park_interrupt: bool = False,
+) -> _FakeDriverWithChannel:
+    driver = _FakeDriverWithChannel(
+        raise_on_send=raise_on_send, park_interrupt=park_interrupt,
+    )
     session_hosts._REGISTRY[_TEST_HOST] = driver  # noqa: SLF001 -- test-only monkeypatch
     return driver
 
@@ -220,6 +238,42 @@ class _FakePeerRegistry:
 
     def touch_binding(self, agent_instance_id: str) -> None:
         del agent_instance_id
+
+
+class _FaultNthQueryState(RealShapeState):
+    """Return a real-shape provider failure on one selected read call."""
+
+    def __init__(
+        self,
+        *,
+        fault_query_number: int | None = None,
+        fault_ordered_query_number: int | None = None,
+    ) -> None:
+        super().__init__()
+        self._fault_query_number = fault_query_number
+        self._fault_ordered_query_number = fault_ordered_query_number
+        self._query_number = 0
+        self._ordered_query_number = 0
+
+    @staticmethod
+    def _fault_result(label: str) -> dict[str, Any]:
+        return {
+            "action_status": "failed",
+            "error": {"message": f"injected {label} fault"},
+            "data": {},
+        }
+
+    def query_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+        self._query_number += 1
+        if self._query_number == self._fault_query_number:
+            return self._fault_result(f"query #{self._query_number}")
+        return super().query_state(namespace, query)
+
+    def query_ordered(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+        self._ordered_query_number += 1
+        if self._ordered_query_number == self._fault_ordered_query_number:
+            return self._fault_result(f"ordered query #{self._ordered_query_number}")
+        return super().query_ordered(namespace, query)
 
 
 def _bound_binding(agent_instance_id: str, *, bridge_id: str) -> BridgeBinding:
@@ -447,6 +501,10 @@ def test_wake_incapable_role_send_writes_no_spool() -> None:
         len(manager.events) == 1,
         "role-send: the existing channel-event notify still fires unchanged",
     )
+    _check(
+        outcome.to_payload().get("drive_on_delivery") == "not_managed",
+        "role-send exposes not_managed alongside delivery",
+    )
 
 
 class _LiveBridge:
@@ -553,6 +611,10 @@ def test_eligible_recipient_channel_receives_notice_alongside_notify() -> None:
                 outcome.delivery == DELIVERY_QUEUED_NOTIFICATION,
                 f"({eligible_state}) delivery_kind is untouched by the drive nudge",
             )
+            _check(
+                outcome.to_payload().get("drive_on_delivery") == "driver_sent",
+                f"({eligible_state}) sender sees driver_sent alongside delivery",
+            )
         finally:
             _remove_fake_host()
 
@@ -598,8 +660,50 @@ def test_ineligible_recipient_channel_receives_nothing() -> None:
                 outcome.delivery == DELIVERY_QUEUED_NOTIFICATION,
                 f"({ineligible_state}) delivery_kind is untouched",
             )
+            _check(
+                outcome.to_payload().get("drive_on_delivery") == "ineligible_state",
+                f"({ineligible_state}) sender sees ineligible_state",
+            )
         finally:
             _remove_fake_host()
+
+
+def test_parked_capable_recipient_interrupts_and_reports_detail() -> None:
+    """A parked Codex-capable pane is the narrow exception to the old gate.
+
+    Failing mutation: remove the parked capability check or the detail sink.
+    A generic parked driver remains ineligible in the preceding test, so this
+    does not broaden recovery to an unmeasured host.
+    """
+    driver = _install_fake_host(park_interrupt=True)
+    try:
+        state = _state()
+        _insert(state)
+        transition_lifecycle_state(
+            state, agent_instance_id=_RECIPIENT_AGI, from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE, directed_by="test:none",
+        )
+        transition_lifecycle_state(
+            state, agent_instance_id=_RECIPIENT_AGI, from_state=LIFECYCLE_LIVE,
+            to_state=LIFECYCLE_PARKED, directed_by="test:none",
+        )
+        outcome, manager = _send(state)
+        _check(driver.channel.interrupts == 1, "parked capable channel receives one interrupt")
+        _check(
+            driver.channel.sent == ["delivery waiting from Sender — drain peer_inbox"],
+            "parked capable channel receives the ordinary fixed notice after interrupt",
+        )
+        _check(
+            outcome.to_payload().get("drive_on_delivery") == "driver_sent",
+            "parked capable delivery reports driver_sent without changing durable delivery",
+        )
+        _check(
+            outcome.to_payload().get("drive_on_delivery_detail") == "interrupted_park",
+            "parked capable delivery exposes interrupted_park truthfully",
+        )
+        _check(len(manager.events) == 1, "park recovery stays alongside the durable notify")
+    finally:
+        _remove_fake_host()
 
 
 def test_raising_channel_never_fails_the_send() -> None:
@@ -619,7 +723,7 @@ def test_raising_channel_never_fails_the_send() -> None:
         raised = False
         outcome = None
         try:
-            outcome, manager = _send(state)
+            outcome, _manager = _send(state)
         except Exception:  # noqa: BLE001 — the whole point is it must NOT raise
             raised = True
         _check(not raised, "a raising driver channel does not propagate out of dispatch_peer_send")
@@ -630,6 +734,11 @@ def test_raising_channel_never_fails_the_send() -> None:
         _check(
             driver.channel.sent == [],
             "nothing recorded as sent (the raise happened inside send)",
+        )
+        _check(
+            outcome is not None
+            and outcome.to_payload().get("drive_on_delivery") == "driver_error",
+            "a contained channel exception is visible as driver_error",
         )
     finally:
         _remove_fake_host()
@@ -647,6 +756,59 @@ def test_non_managed_recipient_unaffected() -> None:
         "non-managed recipient: delivery_kind unchanged from pre-lane behaviour",
     )
     _check(len(manager.events) == 1, "non-managed recipient: the existing notify still fires")
+    _check(
+        outcome.to_payload().get("drive_on_delivery") == "not_managed",
+        "non-managed recipient: sender sees not_managed",
+    )
+
+
+def test_exact_query_empty_is_not_managed() -> None:
+    """A completed exact lookup with zero rows is genuine absence."""
+    outcome, _manager = _send(_state())
+    _check(
+        outcome.to_payload().get("drive_on_delivery") == "not_managed",
+        "exact query completed empty -> not_managed",
+    )
+
+
+def test_exact_query_fault_is_driver_unavailable() -> None:
+    """An exact-lookup provider fault is unknown, never absence."""
+    state = cast(
+        "StateManagementInterface", _FaultNthQueryState(fault_query_number=1),
+    )
+    outcome, _manager = _send(state)
+    _check(
+        outcome.to_payload().get("drive_on_delivery") == "driver_unavailable",
+        "exact query fault -> driver_unavailable (must not collapse to not_managed)",
+    )
+
+
+def test_fallback_query_empty_is_not_managed() -> None:
+    """After an exact miss, a completed empty stable-id lookup is absence."""
+    outcome, _manager = _send(
+        _state(),
+        binding=_binding(agent_session_id="ases-missing-managed-session"),
+    )
+    _check(
+        outcome.to_payload().get("drive_on_delivery") == "not_managed",
+        "fallback query completed empty -> not_managed",
+    )
+
+
+def test_fallback_query_fault_is_driver_unavailable() -> None:
+    """After an exact miss, a stable-id query fault remains unknown."""
+    state = cast(
+        "StateManagementInterface",
+        _FaultNthQueryState(fault_ordered_query_number=1),
+    )
+    outcome, _manager = _send(
+        state,
+        binding=_binding(agent_session_id="ases-faulted-managed-session"),
+    )
+    _check(
+        outcome.to_payload().get("drive_on_delivery") == "driver_unavailable",
+        "fallback query fault -> driver_unavailable (must not collapse to not_managed)",
+    )
 
 
 def test_report_by_unchanged_after_drive_on_delivery() -> None:
@@ -760,6 +922,10 @@ def test_watcher_identity_ambiguity_never_drives() -> None:
             outcome.delivery == DELIVERY_QUEUED_WATCHER,
             "ambiguous mapping does not change the delivery outcome",
         )
+        _check(
+            outcome.to_payload().get("drive_on_delivery") == "driver_unavailable",
+            "ambiguous stable identity is visible as driver_unavailable",
+        )
     finally:
         _remove_fake_host()
 
@@ -772,8 +938,9 @@ def test_state_service_none_never_raises() -> None:
     manager = _FakeBridgeManager()
     registry = _FakePeerRegistry()
     raised = False
+    outcome = None
     try:
-        dispatch_peer_send(
+        outcome = dispatch_peer_send(
             bridge_manager=manager,  # type: ignore[arg-type]
             peer_registry=registry,  # type: ignore[arg-type]
             agent_messaging_service=_FakeMessagingService(),
@@ -790,6 +957,28 @@ def test_state_service_none_never_raises() -> None:
     except Exception:  # noqa: BLE001 — the whole point is it must NOT raise
         raised = True
     _check(not raised, "state_service=None degrades silently, never raises")
+    _check(
+        outcome is not None
+        and outcome.to_payload().get("drive_on_delivery") == "driver_unavailable",
+        "state_service=None is visible as driver_unavailable",
+    )
+
+
+def test_managed_recipient_without_driver_is_visible() -> None:
+    """An eligible managed row whose host has no driver channel keeps the
+    durable delivery successful while reporting driver_unavailable."""
+    state = _state()
+    _insert(state, host="operator")
+    transition_lifecycle_state(
+        state, agent_instance_id=_RECIPIENT_AGI, from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE, directed_by="test:none",
+    )
+    outcome, manager = _send(state)
+    _check(len(manager.events) == 1, "driver-unavailable recipient still receives notify")
+    _check(
+        outcome.to_payload().get("drive_on_delivery") == "driver_unavailable",
+        "eligible managed recipient without a driver reports driver_unavailable",
+    )
 
 
 def test_sweep_deadline_edge_drives_a_live_managed_waiter() -> None:
@@ -927,12 +1116,18 @@ def main() -> int:
     print("=== drive-on-delivery lane smoke (slices 1-2) ===")
     test_eligible_recipient_channel_receives_notice_alongside_notify()
     test_ineligible_recipient_channel_receives_nothing()
+    test_parked_capable_recipient_interrupts_and_reports_detail()
     test_raising_channel_never_fails_the_send()
     test_non_managed_recipient_unaffected()
+    test_exact_query_empty_is_not_managed()
+    test_exact_query_fault_is_driver_unavailable()
+    test_fallback_query_empty_is_not_managed()
+    test_fallback_query_fault_is_driver_unavailable()
     test_report_by_unchanged_after_drive_on_delivery()
     test_watcher_identity_resolves_exact_managed_session()
     test_watcher_identity_ambiguity_never_drives()
     test_state_service_none_never_raises()
+    test_managed_recipient_without_driver_is_visible()
     test_sweep_deadline_edge_drives_a_live_managed_waiter()
     test_sweep_overdue_steward_notice_unmanaged_steward_byte_unchanged()
     test_sweep_overdue_steward_notice_drives_a_managed_steward()

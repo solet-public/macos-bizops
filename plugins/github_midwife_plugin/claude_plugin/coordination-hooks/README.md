@@ -231,7 +231,7 @@ empty value must not silently kill wakes on a watch deployment.
   local command (`$AGENT_WAKE_CLI wake --max-wait <seconds>`, fixed
   argv, no shell), discards its output, and emits only its own
   compiled-in text; the heartbeat and rotation-due watch hooks each
-  invoke the local `solet` CLI with a fixed `["solet", "call",
+  invoke the local `solet-bridge` CLI with a fixed `["solet-bridge", "call",
   "<fixed process_key>", <JSON payload>]` argv (no shell) and write only
   a small, secret-free timestamp marker file for throttling; `sync.py`
   (memory-passthrough, agent-invoked, never auto-fired) invokes the same

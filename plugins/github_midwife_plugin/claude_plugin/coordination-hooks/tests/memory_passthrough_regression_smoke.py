@@ -44,6 +44,8 @@ sys.path.insert(0, str(HOOKS_DIR))
 # ruff: noqa: E402
 # pyright: reportMissingImports=false
 import _journal  # type: ignore[import-not-found]
+import hydrate_render  # type: ignore[import-not-found]
+import sync  # type: ignore[import-not-found]
 
 _FACT_TEMPLATE = (
     "---\nname: {name}\ndescription: {desc}\nmetadata:\n  type: feedback\n---\n\n{body}\n"
@@ -110,9 +112,27 @@ def _drain_advance(env: dict[str, str]):  # noqa: ANN201 — subprocess.Complete
     )
 
 
+def _solet_bridge_absence_fails_closed(res: Results) -> None:
+    """The vendored sync hook must name a missing bridge before subprocess use."""
+    from unittest.mock import patch  # noqa: PLC0415 — isolated hook guard proof
+
+    with (
+        patch.object(sync, "which", return_value=None),
+        patch.object(sync.subprocess, "run") as run,
+    ):
+        envelope, error = sync._solet_call("service_interface::probe", {})
+    res.check(envelope is None, "sync missing bridge returns no envelope")
+    res.check(
+        error == "solet-bridge is unavailable on PATH; refusing the memory sync call",
+        f"sync missing bridge has a named condition (got {error!r})",
+    )
+    res.check(not run.called, "sync missing bridge never attempts subprocess.run")
+
+
 def main() -> int:
     preflight()
     res = Results(f"memory-passthrough MEM-06 regression (vendored) — {PLUGIN_ROOT.name}")
+    _solet_bridge_absence_fails_closed(res)
 
     scratch = Path(tempfile.mkdtemp())
     state = scratch / "state"
@@ -137,6 +157,46 @@ def main() -> int:
     res.check(_journal.pending_count() == 1, "capture journaled the fact write")
     _journal.advance_past_all_pending()
     res.check(_journal.pending_count() == 0, "clean slate before the regression scenario")
+
+    # A pending local edit must survive an older export. Once it has been
+    # drained, the same stale local file must again yield to canonical truth.
+    hydrate_fact = memory / "hydrate_probe.md"
+    canonical = _fact_text("hydrate_probe", "a canonical probe fact", "canonical body")
+    diverged = _fact_text(
+        "hydrate_probe",
+        "a locally edited probe fact",
+        "LOCALLY DIVERGED — must survive pending hydrate",
+    )
+    hydrate_fact.write_text(diverged, encoding="utf-8")
+    _capture(res, hydrate_fact, scratch_env)
+    hydrate_snapshot = state / "hydrate_snapshot.json"
+    hydrate_snapshot.write_text(
+        json.dumps({
+            "memories": [{
+                "id": "mem-hydrate",
+                "content": canonical,
+                "tags": [f"agent_memory:slot:{_journal.origin_tag()}:hydrate_probe"],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    pending_render = hydrate_render._render(str(hydrate_snapshot))
+    res.check(
+        pending_render["skipped_pending"] == [str(hydrate_fact.resolve())],
+        "pending hydrate visibly reports the skipped fact",
+        str(pending_render),
+    )
+    res.check(
+        hydrate_fact.read_text(encoding="utf-8") == diverged,
+        "pending local edit survives hydrate",
+    )
+    _journal.advance_past_all_pending()
+    clean_render = hydrate_render._render(str(hydrate_snapshot))
+    res.check(clean_render["skipped_pending"] == [], "clean hydrate reports no pending skips")
+    res.check(
+        hydrate_fact.read_text(encoding="utf-8") == canonical,
+        "clean stale fact is overwritten byte-identically",
+    )
 
     # MEM-06 regression: a capture landing BETWEEN drain.py's listing and its
     # later --advance must NOT be swallowed.

@@ -28,6 +28,7 @@ Standalone — not pytest. Run with::
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import os
 import signal
 import subprocess
@@ -39,6 +40,13 @@ from collections.abc import Callable
 # Use the caller-supplied solet name before importing modules that resolve
 # SOLET_NAME. Every sentinel created by this smoke is removed on the way out.
 NAME = os.environ["SOLET_NAME"]
+
+from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from ananta.core.runtime import (  # noqa: E402
     draining_sentinel_path,

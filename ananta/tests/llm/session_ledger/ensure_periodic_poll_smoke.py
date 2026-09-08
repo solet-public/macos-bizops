@@ -240,8 +240,19 @@ def test_starting_actions_process_key_matches() -> None:
     references this exact process_key."""
     import yaml  # noqa: PLC0415
     process_key = "service_interface::session_ledger_service::ensure_periodic_poll_schedule"
+    # ORIGIN-ONLY LEG. `initialization/` is absent from the seed manifest's `copy:`
+    # allowlist entirely, so these profiles exist only in this checkout: the
+    # assertion is about the ORIGIN's boot wiring, not about a born solet, which
+    # gets its profile from the midwife's own templates. Every other assertion in
+    # this smoke is hermetic and ships. Measured on the r21 born-clone verdict
+    # (sealed 254700866ab0…): this smoke was 1 of 14 BLOCKING, raising
+    # FileNotFoundError here after its earlier checks had all printed PASS.
+    profiles_root = REPO_ROOT / "initialization" / "profiles"
+    if not profiles_root.is_dir():
+        print("  SKIP  starting_actions profile wiring: initialization/profiles is origin-only (not shipped)")
+        return
     for profile_name in ("local.yaml", "cloud.yaml"):
-        text = (REPO_ROOT / "initialization" / "profiles" / profile_name).read_text()
+        text = (profiles_root / profile_name).read_text()
         raw = yaml.safe_load(text)
         keys = {entry["process_key"] for entry in raw.get("starting_actions", [])}
         _check(

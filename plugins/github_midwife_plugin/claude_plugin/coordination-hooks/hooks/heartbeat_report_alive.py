@@ -16,12 +16,12 @@ again, and nothing is left running to keep stamping on its behalf.
 Throttled to at most once per :data:`_THROTTLE_SECONDS` via a per-worker
 local marker file's mtime (cheap -- a stat(), no CLI/network round trip on
 most firings) rather than checking the platform on every single tool call.
-When the throttle allows a stamp, shells out to ``solet call
+When the throttle allows a stamp, shells out to ``solet-bridge call
 plugin::agent_messaging_plugin::report_alive`` -- PATH-resolved, argv
-literally ``["solet", "call", ...]`` per SECURITY.md's disclosed contract,
+literally ``["solet-bridge", "call", ...]`` per SECURITY.md's disclosed contract,
 but the PATH it resolves against is widened (see :func:`_solet_call_env`)
 to also search ``AGENT_WAKE_CLI``'s directory when that directory actually
-holds a ``solet`` binary (2026-08-16: a worker whose PATH excludes the venv
+holds a ``solet-bridge`` binary (2026-08-16: a worker whose PATH excludes the venv
 bin dir silently FileNotFoundError'd on a plain PATH lookup). report_alive
 takes ``agent_instance_id`` as an explicit argument, so the bare-CLI
 no-caller-identity trap does not apply, per the T1 ruling's own recon
@@ -68,7 +68,9 @@ if sys.version_info < (3, 11):  # noqa: UP036 -- see above; ruff assumes
 import json
 import os
 import subprocess
+import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 _MARKER_DIR_ENV = "AGENT_HEARTBEAT_MARKER_DIR"
@@ -96,6 +98,24 @@ def _marker_path(marker_dir: str, agent_instance_id: str) -> Path:
     return Path(marker_dir) / f"{agent_instance_id}.stamp"
 
 
+def _fallback_marker_dir() -> str | None:
+    """Return the established temporary marker root for a mis-wired worker.
+
+    A managed worker with no declared marker dir still needs a stable place
+    for its throttle marker and D-5.3 carry-forward record.  The sibling
+    rotation hook already uses this temp-root pattern for precisely that
+    frozen-environment migration case; it is deliberately not a guessed
+    project-relative path.
+    """
+    path = Path(tempfile.gettempdir()) / "agent_heartbeat_markers"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _warn(f"could not create fallback marker root {path}: {exc}")
+        return None
+    return str(path)
+
+
 def _throttled(marker_path: Path) -> bool:
     """True means "skip -- stamped recently enough". A marker that doesn't
     exist, or that fails to stat for any reason, is never throttled (the
@@ -112,26 +132,55 @@ def _touch_marker(marker_path: Path) -> None:
     marker_path.write_text(str(time.time()))
 
 
+def _failure_path(marker_path: Path) -> Path:
+    return marker_path.with_suffix(".failures.json")
+
+
+def _pending_failures(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _pending_failure_count(pending: dict[str, object]) -> int:
+    value = pending.get("count", 0)
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _record_failure(path: Path, reason: str) -> None:
+    previous = _pending_failures(path)
+    count = _pending_failure_count(previous) + 1
+    now = datetime.now(UTC).isoformat()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "count": count,
+        "first_failure_at": str(previous.get("first_failure_at") or now),
+        "last_reason": reason,
+    }))
+
+
 def _solet_call_env() -> dict[str, str]:
     """``os.environ``, with PATH APPENDED by ``AGENT_WAKE_CLI``'s directory
-    when that directory actually contains a file named ``solet`` --
+    when that directory actually contains a file named ``solet-bridge`` --
     SECURITY.md's disclosed contract for this hook keeps argv literally
-    ``["solet", "call", ...]`` (PATH-resolved, from the session's own
+    ``["solet-bridge", "call", ...]`` (PATH-resolved, from the session's own
     environment, same category as before); this widens WHICH directories
     PATH searches, not what gets exec'd by name.
 
     APPEND, not prepend (2026-08-16, cross-session review): a prepend would
     make the release venv's bin dir win PATH resolution for EVERY lookup in
-    this subprocess and anything it spawns, not just ``solet`` -- that
+    this subprocess and anything it spawns, not just ``solet-bridge`` -- that
     directory also carries ``python3``/``pip``, so a prepend would silently
     change which of those a child process resolves too, a behavior change
-    beyond "find the right solet" with no signal in the diff's intent.
-    Append fixes the identical missing-solet case (a PATH that lacks solet
+    beyond "find the right solet-bridge" with no signal in the diff's intent.
+    Append fixes the identical missing-solet-bridge case (a PATH that lacks solet-bridge
     entirely resolves it either way, first match or last) while never
     shadowing an existing resolution -- it only ever adds a location PATH
     lookup falls through to, never reorders one already there.
 
-    2026-08-16 dark-gauge root cause: a bare ``"solet"`` lookup against the
+    2026-08-16 dark-gauge root cause: a bare ``"solet-bridge"`` lookup against the
     UNMODIFIED PATH silently ``FileNotFoundError``s on a worker whose PATH
     excludes the venv bin dir -- caught by the ``except OSError`` below,
     warned to stderr (nothing reads it), exit 0. The throttle marker still
@@ -147,36 +196,72 @@ def _solet_call_env() -> dict[str, str]:
     ``is_file()`` guard -- a stat for the FILE, not merely the directory's
     existence -- means a dangling export contributes NOTHING to PATH -- no
     bogus directory gets appended at all -- so a session whose PATH already
-    resolves solet fine is completely unaffected either way; only a session
+    resolves solet-bridge fine is completely unaffected either way; only a session
     that would otherwise fail gains a chance to resolve."""
     cli = os.environ.get(_WAKE_CLI_ENV, "").strip()
     if not cli:
         return dict(os.environ)
     solet_dir = str(Path(cli).parent)
-    if not (Path(solet_dir) / "solet").is_file():
+    if not (Path(solet_dir) / "solet-bridge").is_file():
         return dict(os.environ)
     env = dict(os.environ)
     env["PATH"] = f"{env.get('PATH', '')}:{solet_dir}"
     return env
 
 
-def _call_report_alive(agent_instance_id: str) -> bool:
-    payload = json.dumps({
+def _report_alive_payload(agent_instance_id: str, pending: dict[str, object]) -> str:
+    payload_data: dict[str, object] = {
         "agent_instance_id": agent_instance_id,
-        "status": "working",
+        "status": "heartbeat",
         "status_note": "t2-posttooluse-heartbeat",
-    })
+        "heartbeat_failures_since_last": _pending_failure_count(pending),
+    }
+    failure_first_at = pending.get("first_failure_at")
+    if isinstance(failure_first_at, str) and failure_first_at:
+        payload_data["heartbeat_failure_first_at"] = failure_first_at
+    failure_last_reason = pending.get("last_reason")
+    if isinstance(failure_last_reason, str) and failure_last_reason:
+        payload_data["heartbeat_failure_last_reason"] = failure_last_reason
+    return json.dumps(payload_data)
+
+
+def _report_alive_rejection(stdout: str) -> str | None:
+    try:
+        response = json.loads(stdout)
+        action_result = response["result"]
+        success = action_result["success"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        return f"unreadable report_alive response: {exc}"
+    if success is True:
+        return None
+    error = action_result.get("error") if isinstance(action_result, dict) else None
+    return f"report_alive rejected the ledger write: {error!r}"
+
+
+def _call_report_alive(agent_instance_id: str, failure_path: Path | None = None) -> bool:
+    pending = _pending_failures(failure_path) if failure_path is not None else {}
+    payload = _report_alive_payload(agent_instance_id, pending)
     try:
         result = subprocess.run(
-            ["solet", "call", _REPORT_ALIVE_PROCESS_KEY, payload],
+            ["solet-bridge", "call", _REPORT_ALIVE_PROCESS_KEY, payload],
             capture_output=True, text=True, timeout=20, check=False,
             env=_solet_call_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         _warn(f"report_alive subprocess failed to run: {exc}")
+        if failure_path is not None:
+            _record_failure(failure_path, repr(exc))
         return False
     if result.returncode != 0:
         _warn(f"report_alive exited {result.returncode}: {result.stderr.strip()[:200]}")
+        if failure_path is not None:
+            _record_failure(failure_path, result.stderr.strip()[:200] or f"exit {result.returncode}")
+        return False
+    detail = _report_alive_rejection(result.stdout)
+    if detail is not None:
+        _warn(detail)
+        if failure_path is not None:
+            _record_failure(failure_path, detail)
         return False
     return True
 
@@ -218,32 +303,32 @@ def main() -> int:
         # with liveness reporting stopped and no error anywhere. Fail LOUD
         # on the contradiction, but still report: report_alive only needs
         # the instance id -- the marker dir exists solely for throttling.
-        # There is nowhere to stamp a throttle marker here, so every firing
-        # in this degraded state calls report_alive unthrottled. Deliberate,
-        # not an oversight: report_alive is a cheap local platform call with
-        # its own timeout/non-fatal handling (not an LLM call), this hook
-        # only fires once per completed tool call (naturally rate-bounded,
-        # not a background loop), and the affected population is fixed and
-        # only shrinks -- every session spawned after a correctly-wired
-        # marker dir env is unaffected. Restoring liveness immediately here
-        # beats waiting for the whole fleet to cycle.
+        # The sibling rotation hook already carries this exact migration
+        # condition through a temporary marker root.  Reuse that established
+        # marker mechanism here: it gives D-5.3's failure record a durable
+        # location beside the throttle marker, and lets the next successful
+        # report consume it instead of losing the failure at this branch.
+        fallback = _fallback_marker_dir()
+        if fallback is None:
+            _call_report_alive(agent_instance_id)
+            return 0
         _warn(
             f"{_INSTANCE_ID_ENV} is set but {_MARKER_DIR_ENV} is NOT -- this "
             "is a MANAGED session with a mis-wired heartbeat marker (its env "
             "was frozen at spawn before a wiring-variable rename landed), "
-            "not an unmanaged one. Reporting unthrottled: no marker dir to "
-            "throttle against.",
+            f"not an unmanaged one. Using fallback marker root {fallback}.",
         )
-        _call_report_alive(agent_instance_id)
-        return 0
+        marker_dir = fallback
 
     marker_path = _marker_path(marker_dir, agent_instance_id)
     if _throttled(marker_path):
         return 0
 
-    if _call_report_alive(agent_instance_id):
+    failure_path = _failure_path(marker_path)
+    if _call_report_alive(agent_instance_id, failure_path):
         try:
             _touch_marker(marker_path)
+            failure_path.unlink(missing_ok=True)
         except OSError as exc:
             _warn(f"failed to write marker file: {exc}")
 

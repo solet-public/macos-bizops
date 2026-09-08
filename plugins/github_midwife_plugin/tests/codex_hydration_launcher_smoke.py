@@ -36,10 +36,21 @@ class Results:
 
 
 def _render(source: str, clone_dir: Path) -> str:
-    rendered = source.replace("{{CLONE_DIR}}", str(clone_dir))
-    for token, value in TOKENS.items():
+    values = {
+        "{{CLONE_DIR}}": str(clone_dir),
+        "{{CLONE_DIR_ZSH}}": _zsh_quote(str(clone_dir)),
+        **TOKENS,
+    }
+    rendered = source
+    for token, value in values.items():
         rendered = rendered.replace(token, value)
     return rendered
+
+
+def _zsh_quote(value: str) -> str:
+    """Mirror the production hydration renderer's one-word zsh quoting."""
+
+    return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -138,15 +149,14 @@ def check_source_contract(res: Results) -> None:
         '--agent-id codex',
         '--role "$AGENT_ROLE"',
         '--exit-with-parent "$$"',
-        '--no-spool',
         '"watch": "armed"',
         'exec "$codex_bin" "$@"',
     ):
         res.check(required in source, f"launcher carries {required}")
     res.check(
-        source.count("--no-spool") == 1,
-        "--no-spool is passed exactly once (codex-0147-async-hook-regression: "
-        "no Stop handler remains to drain the wake-hook spool this disables)",
+        source.count("--no-spool") == 0,
+        "--no-spool is never passed (CDX-06, 2026-08-24: inbox_consumer.py "
+        "is now the Stop handler that drains the wake-hook spool)",
         str(source.count("--no-spool")),
     )
     for forbidden in ("nohup", "disown", "setsid", "--dangerously-", "mcp_servers"):
@@ -180,9 +190,9 @@ def check_watch_launch(res: Results, work: Path) -> None:
     )
     res.check("--exit-with-parent " in watch_argv_line, "watcher is parent-bound", watch)
     res.check(
-        watch_argv_line.split().count("--no-spool") == 1,
-        "watcher receives --no-spool so the wake-hook spool tee is disabled "
-        "(codex-0147-async-hook-regression: no Stop handler drains it)",
+        watch_argv_line.split().count("--no-spool") == 0,
+        "watcher does NOT receive --no-spool (CDX-06, 2026-08-24: "
+        "inbox_consumer.py drains the wake-hook spool as a Stop hook)",
         watch_argv_line,
     )
     res.check(_line_value(codex, "identity=") == "codex", "Codex inherits stock identity")

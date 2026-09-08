@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 from ananta.constants import CONTEXT_KEY_FLOW_ID, CONTEXT_KEY_SESSION_ID
 
-from . import completion_templates, record_actions, soql_actions
+from . import bulk_actions, completion_templates, record_actions, soql_actions
 from .client import SalesforceCliExecutor
 from .constants import ERROR_API_ERROR, PLUGIN_NAME
 
@@ -73,18 +73,26 @@ def _test_connection_action(
     }
 
 
-# action_name -> (action callable, needs_export_path_gate)
-ActionHandler = tuple[Callable[..., dict[str, Any]], bool]
+# action_name -> (action callable, gate_factory). gate_factory, when not
+# None, takes the plugin and returns the PathGate the action needs — export
+# gate for TSV/CSV writes, import gate for a bulk ingest CSV read. None means
+# the action takes no path (params-only, or a plain executor call).
+GateFactory = Callable[["SalesforcePlugin"], Any]
+ActionHandler = tuple[Callable[..., dict[str, Any]], GateFactory | None]
 ACTION_HANDLERS: dict[str, ActionHandler] = {
-    "soql_query": (soql_actions.soql_query, True),
-    "export_soql": (soql_actions.export_soql, True),
-    "get_record": (record_actions.get_record, False),
-    "describe_sobject": (record_actions.describe_sobject, False),
-    "list_sobjects": (record_actions.list_sobjects, False),
-    "create_record": (record_actions.create_record, False),
-    "update_record": (record_actions.update_record, False),
-    "delete_record": (record_actions.delete_record, False),
-    "test_connection": (_test_connection_action, False),
+    "soql_query": (soql_actions.soql_query, lambda plugin: plugin._export_path_gate),  # noqa: SLF001
+    "export_soql": (soql_actions.export_soql, lambda plugin: plugin._export_path_gate),  # noqa: SLF001
+    "get_record": (record_actions.get_record, None),
+    "describe_sobject": (record_actions.describe_sobject, None),
+    "list_sobjects": (record_actions.list_sobjects, None),
+    "create_record": (record_actions.create_record, None),
+    "update_record": (record_actions.update_record, None),
+    "delete_record": (record_actions.delete_record, None),
+    "test_connection": (_test_connection_action, None),
+    "bulk_ingest_submit": (bulk_actions.bulk_ingest_submit, lambda plugin: plugin._import_path_gate),  # noqa: SLF001
+    "bulk_job_status": (bulk_actions.bulk_job_status, None),
+    "bulk_job_results": (bulk_actions.bulk_job_results, lambda plugin: plugin._csv_export_path_gate),  # noqa: SLF001
+    "bulk_job_abort": (bulk_actions.bulk_job_abort, None),
 }
 
 
@@ -199,11 +207,10 @@ def _process_job(
         )
         return
     params = payload_result.get("data", {}).get("payload", {})
-    action_fn, needs_export_gate = ACTION_HANDLERS[action_name]
-    if needs_export_gate:
-        outcome = plugin._run(
-            lambda executor: action_fn(executor, params, plugin._export_path_gate), action_name,
-        )
+    action_fn, gate_factory = ACTION_HANDLERS[action_name]
+    if gate_factory is not None:
+        gate = gate_factory(plugin)
+        outcome = plugin._run(lambda executor: action_fn(executor, params, gate), action_name)
     else:
         outcome = plugin._run(lambda executor: action_fn(executor, params), action_name)
     if outcome.get("action_status") == "completed":

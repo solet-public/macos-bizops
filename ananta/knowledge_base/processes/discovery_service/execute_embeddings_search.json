@@ -8,7 +8,7 @@
     "result_type": "discovery_results",
     "result_description": "Matched processes from vector embeddings search",
     "presentation_guidance": "",
-    "output_action_guidance": "Review the user's request and the discovered processes.\nIf match_type is 'direct_response', respond directly to the user via post_message — do NOT call query_process_registry or any discovery process.\nIf none of the discovered processes match, check the Built-in Processes in the system prompt — they are always available.\nIMPORTANT — MULTI-STEP REQUESTS: If the user's request involves 2 or more steps, a numbered list, or creating files that feed into later steps, you MUST use create_extended_plan (Built-in Process) to decompose it into a plan. Return ONLY ONE action: create_extended_plan. Do NOT return multiple tool actions."
+    "output_action_guidance": "Review the user's request and the discovered processes.\nIf match_type is 'direct_response', resolve the active IO namespace with query_process_registry, then respond through plugin::<namespace>::post_message with message and any namespace-specific arguments from its schema.\nIf none of the discovered processes match, check the Built-in Processes in the system prompt — they are always available.\nIMPORTANT — MULTI-STEP REQUESTS: If the user's request involves 2 or more steps, a numbered list, or creating files that feed into later steps, you MUST use create_extended_plan (Built-in Process) to decompose it into a plan. Return ONLY ONE action: create_extended_plan. Do NOT return multiple tool actions."
   },
   "error_processor_customizations": {
     "action_context": "Executes vector embeddings search for process discovery",

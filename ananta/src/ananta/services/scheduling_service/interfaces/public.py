@@ -45,9 +45,25 @@ class SchedulingServiceAPI(ABC):
                 required=True,
                 type=ParameterType.STRING,
             ),
+            "action_definitions": ParameterMetadata(
+                description=(
+                    "Non-empty list of syntactically valid action objects in the "
+                    "canonical {process_key, arguments} shape. Registration validates "
+                    "the shape and scheduled-action policy; execution resolves "
+                    "process_key against processes registered at fire time. Provide "
+                    "exactly one of action_definitions or memory_tag."
+                ),
+                required=False,
+                type=ParameterType.LIST,
+            ),
             "memory_tag": ParameterMetadata(
-                description="Memory tag to wake up on each run. The scheduler retrieves memories with this tag and the model decides what to do next.",
-                required=True,
+                description=(
+                    "Memory tag to read on every run. The scheduled "
+                    "get_memories_by_tag action is terminal: its result is written to "
+                    "the action row and does not start a model turn. Provide exactly "
+                    "one of memory_tag or action_definitions."
+                ),
+                required=False,
                 type=ParameterType.STRING,
             ),
             "label": ParameterMetadata(
@@ -87,6 +103,7 @@ class SchedulingServiceAPI(ABC):
         self,
         cron_expression: str,
         actions: list[dict[str, Any]] | None = None,
+        action_definitions: list[dict[str, Any]] | None = None,
         memory_tag: str | None = None,
         label: str | None = None,
         tags: list[str] | str | None = None,
@@ -105,23 +122,30 @@ class SchedulingServiceAPI(ABC):
             ),
             "action_definitions": ParameterMetadata(
                 description=(
-                    "Actions to execute at fire time. List of {process_key, arguments} objects. "
-                    "Provide either action_definitions or memory_tag, not both."
+                    "Non-empty list of syntactically valid action objects in the "
+                    "canonical {process_key, arguments} shape. Registration validates "
+                    "the shape and scheduled-action policy; execution resolves "
+                    "process_key against processes registered at fire time. Provide "
+                    "exactly one of action_definitions or memory_tag."
                 ),
                 required=False,
                 type=ParameterType.LIST,
             ),
             "memory_tag": ParameterMetadata(
                 description=(
-                    "Memory tag to wake up after the delay. The scheduler retrieves memories with "
-                    "this tag and the model decides what to do next. "
-                    "Provide either memory_tag or action_definitions."
+                    "Memory tag to read after the delay. The scheduled "
+                    "get_memories_by_tag action is terminal: its result is written to "
+                    "the action row and does not start a model turn. Provide exactly "
+                    "one of memory_tag or action_definitions."
                 ),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "content": ParameterMetadata(
-                description="Follow-up instructions to stash as a tagged memory. When both content and memory_tag are provided, the scheduling plugin stores the memory automatically (one-step pattern).",
+                description=(
+                    "Follow-up instructions to stash as a tagged memory. Content is "
+                    "only valid with memory_tag; action-definition mode rejects it."
+                ),
                 required=False,
                 type=ParameterType.STRING,
             ),

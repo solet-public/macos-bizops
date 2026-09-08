@@ -30,10 +30,17 @@ Covers the M5 vault additions per spec §13.4 and §14.4:
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import base64
 import logging
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from ananta.vault_core import (
     VaultOAuthRegistry,
@@ -89,6 +96,16 @@ class _FakeOauthStore:
         if row is None:
             return False
         row["redirect_uris"] = redirect_uris
+        return True
+
+    def record_client_token_use(
+        self, client_id: str, fields: Mapping[str, str],
+    ) -> bool:
+        """Record last-use evidence on the in-memory record."""
+        record = self.rows.get(client_id)
+        if record is None:
+            return False
+        record.update(dict(fields))
         return True
 
     def insert_token(self, row: dict[str, Any]) -> None:

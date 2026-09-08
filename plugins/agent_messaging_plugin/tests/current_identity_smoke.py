@@ -299,8 +299,12 @@ def test_streamable_current_identity() -> None:
         "streamable transport is reported",
     )
     _check(
-        payload.get("identity_trust") == "bearer_verified",
-        "streamable bearer trust field",
+        payload.get("identity_trust") == "shared_oauth_bearer_verified",
+        "streamable trust names only shared OAuth bearer verification",
+    )
+    _check(
+        payload.get("sender_transport_principal") == "",
+        "manually constructed streamable fixture does not invent a transport principal",
     )
     _check(
         payload.get("agent_session_id") == "ases-stream",

@@ -51,7 +51,16 @@ from ananta.llm.agent_messaging.service import role_message_external_id
 
 from .bridge_sessions import BridgeNotFoundError, BridgeQueueFullError
 from .peer_registry import PeerAmbiguousError, PeerUnreachableError
-from .session_lifecycle_verbs import drive_on_delivery
+from .sender_provenance import (
+    SENDER_PRINCIPAL_KIND_STDIO_AGENT,
+    SENDER_PRINCIPAL_KIND_SYSTEM,
+    SENDER_PRINCIPAL_KIND_UNKNOWN,
+)
+from .session_lifecycle_verbs import (
+    DRIVE_DRIVER_UNAVAILABLE,
+    DriveOnDeliveryOutcome,
+    drive_on_delivery,
+)
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -83,6 +92,27 @@ EVENT_POST_MESSAGE: Final[str] = "post_message"
 IMPORTANT_MARKER_RE: Final[re.Pattern[str]] = re.compile(
     r"^\s*IMPORTANT[:\s]\s*", re.MULTILINE,
 )
+
+
+def _resolve_transport_provenance(
+    *,
+    sender_principal_kind: str,
+    sender_bridge_id: str,
+    sender_transport_principal: str,
+    sender_identity_trust: str,
+) -> tuple[str, str]:
+    """Return explicit, transport-derived provenance without inferring authority."""
+    if sender_principal_kind == SENDER_PRINCIPAL_KIND_STDIO_AGENT:
+        return (
+            sender_transport_principal or f"stdio_bridge:{sender_bridge_id}",
+            sender_identity_trust or "stdio_bridge_registered",
+        )
+    if sender_principal_kind == SENDER_PRINCIPAL_KIND_SYSTEM:
+        return (
+            sender_transport_principal or "system",
+            sender_identity_trust or "system",
+        )
+    return sender_transport_principal or "unknown", sender_identity_trust or "unknown"
 
 
 # Delivery discriminator literals.  Exported so callers can compare
@@ -130,7 +160,9 @@ class PeerSendOutcome:
     from_agent_id: str
     from_agent_instance_id: str
     delivery: str
+    drive_on_delivery: DriveOnDeliveryOutcome
     delivered_to_bridge_id: str
+    drive_on_delivery_detail: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """Return the response shape both transports serialise."""
@@ -143,6 +175,8 @@ class PeerSendOutcome:
             "from_agent_id": self.from_agent_id,
             "from_agent_instance_id": self.from_agent_instance_id,
             "delivery": self.delivery,
+            "drive_on_delivery": self.drive_on_delivery,
+            "drive_on_delivery_detail": self.drive_on_delivery_detail,
             "delivered_to_bridge_id": self.delivered_to_bridge_id,
         }
 
@@ -352,11 +386,13 @@ def dispatch_peer_send(
     # fires on every managed watcher-held worker, so a notice routed through
     # this default looks perfectly well behaved when hand-tested on a seat and
     # injects a turn on exactly the population it was meant to protect.
-    drive_on_delivery(
+    drive_details: list[str] = []
+    drive_outcome = drive_on_delivery(
         state_service,
         recipient_agent_instance_id=recipient.agent_instance_id,
         recipient_agent_session_id=recipient.agent_session_id,
         sender_label=sender_session_label,
+        detail_sink=drive_details.append,
     )
     return PeerSendOutcome(
         thread_id=str(result.thread_id),
@@ -367,7 +403,9 @@ def dispatch_peer_send(
         from_agent_id=sender_agent_id,
         from_agent_instance_id=sender_agent_instance_id,
         delivery=delivery_kind,
+        drive_on_delivery=drive_outcome,
         delivered_to_bridge_id=delivered_bridge,
+        drive_on_delivery_detail=drive_details[0] if drive_details else None,
     )
 
 
@@ -421,13 +459,17 @@ class RoleSendOutcome:
     message_id: str
     role: ResolvedRole
     delivery: str
+    drive_on_delivery: DriveOnDeliveryOutcome
     delivered_to_bridge_id: str
+    drive_on_delivery_detail: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "thread_id": self.thread_id,
             "message_id": self.message_id,
             "delivery": self.delivery,
+            "drive_on_delivery": self.drive_on_delivery,
+            "drive_on_delivery_detail": self.drive_on_delivery_detail,
             "delivered_to_bridge_id": self.delivered_to_bridge_id,
             "resolved_agent_id": self.role.agent_id,
             "resolved_agent_instance_id": self.role.agent_instance_id,
@@ -612,6 +654,9 @@ def dispatch_role_send(
     content: list[TextPart],
     message_id: str,
     reply_to_role: str = "",
+    sender_principal_kind: str = SENDER_PRINCIPAL_KIND_UNKNOWN,
+    sender_transport_principal: str = "",
+    sender_identity_trust: str = "",
 ) -> RoleSendOutcome:
     """Persist-first role-addressed dispatch (v10 Controls #1/#3/#4).
 
@@ -642,6 +687,12 @@ def dispatch_role_send(
     prose = "\n".join(part.text for part in content)
     marker_match = IMPORTANT_MARKER_RE.match(prose)
     delivered_prose = prose[marker_match.end():] if marker_match else prose
+    transport_principal, identity_trust = _resolve_transport_provenance(
+        sender_principal_kind=sender_principal_kind,
+        sender_bridge_id=sender_bridge_id,
+        sender_transport_principal=sender_transport_principal,
+        sender_identity_trust=sender_identity_trust,
+    )
     persisted = agent_messaging_service.persist_role_message(
         recipient_kind=RECIPIENT_KIND_ROLE,
         recipient_key=role_name,
@@ -649,6 +700,9 @@ def dispatch_role_send(
         sender_agent_id=sender_agent_id,
         sender_agent_instance_id=sender_agent_instance_id,
         sender_session_label=sender_session_label,
+        sender_principal_kind=sender_principal_kind,
+        sender_transport_principal=transport_principal,
+        sender_identity_trust=identity_trust,
         important=True,
         content=content,
     )
@@ -657,7 +711,18 @@ def dispatch_role_send(
         RECIPIENT_KIND_ROLE, role_name, message_id,
     )
     try:
-        recipient = peer_registry.resolve(role.agent_id, role.agent_instance_id)
+        # A parked Codex lane replaces its managed binding with an
+        # ``agi-watch-*`` binding. The role row keeps the stable session key,
+        # so preserve exact-instance precedence but use that key if the
+        # managed instance is no longer registered. Without it, the fleet's
+        # standard peer_send_by_name path leaves a live watcher queued only for
+        # replay even though its bridge is actively polling.
+        recipient = _resolve_peer_recipient(
+            peer_registry=peer_registry,
+            peer_id=role.agent_id,
+            peer_agent_instance_id=role.agent_instance_id,
+            peer_agent_session_id=role.agent_session_id,
+        )
         delivery_kind, delivered_to_bridge_id = _deliver_important_to_binding(
             bridge_manager=bridge_manager,
             peer_registry=peer_registry,
@@ -694,6 +759,7 @@ def dispatch_role_send(
             message_id=message_id,
             role=role,
             delivery=DELIVERY_QUEUED_FOR_REPLAY,
+            drive_on_delivery=DRIVE_DRIVER_UNAVAILABLE,
             delivered_to_bridge_id="",
         )
     # v10 Q3 — REVISED (Codex BLOCKER-3 / Architect 2026-06-19): NO send-time
@@ -709,18 +775,22 @@ def dispatch_role_send(
     # suppression — the flip is always whoever currently holds + drains.
     # Drive-on-delivery (2026-08-04): ALONGSIDE the notify above, never
     # instead of it — best-effort, cannot raise, cannot change delivery_kind.
-    drive_on_delivery(
+    drive_details: list[str] = []
+    drive_outcome = drive_on_delivery(
         state_service,
         recipient_agent_instance_id=recipient.agent_instance_id,
         recipient_agent_session_id=recipient.agent_session_id,
         sender_label=sender_session_label,
+        detail_sink=drive_details.append,
     )
     return RoleSendOutcome(
         thread_id=thread_id,
         message_id=message_id,
         role=role,
         delivery=delivery_kind,
+        drive_on_delivery=drive_outcome,
         delivered_to_bridge_id=delivered_to_bridge_id,
+        drive_on_delivery_detail=drive_details[0] if drive_details else None,
     )
 
 

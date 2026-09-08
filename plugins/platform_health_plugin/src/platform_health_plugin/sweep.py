@@ -7,23 +7,38 @@ registries without standing up a full orchestrator.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from platform_health_plugin.constants import (
+    OUTWARD_FACING_PLUGIN_NAMESPACES,
     READ_SHAPE_PREFIXES,
     SELF_PROCESS_KEY,
     SENTINEL_BOOLEAN,
     SENTINEL_INTEGER,
     SENTINEL_NUMBER,
     SENTINEL_STRING,
+    STATUS_DRY_RUN,
     STATUS_FAILED,
     STATUS_OK,
+    STATUS_SKIPPED_SCOPE,
     STATUS_SKIPPED_SELF,
     STATUS_SKIPPED_UNRESOLVED,
     STATUS_SKIPPED_WRITE,
 )
 
 RELOAD_SAFE = True
+
+
+@dataclass(frozen=True)
+class _EvaluationTarget:
+    """A parsed process that is eligible for dry-run or live evaluation."""
+
+    namespace: str
+    provider: str
+    method_name: str
+    shape: str
+    is_explicit_external_scope: bool
 
 # ─── Orchestrator protocol used by the sweep ────────────────────────────────
 
@@ -181,8 +196,20 @@ def run_sweep(
     *,
     write_enabled: bool = False,
     include_pattern: str | None = None,
+    dry_run: bool = True,
+    external_namespaces: tuple[str, ...] = (),
+    operator_confirmation: str | None = None,
 ) -> dict[str, Any]:
-    """Iterate the live process registry; return a per-process result list.
+    """Classify registry processes and, only with explicit scope, dispatch them.
+
+    ``dry_run`` defaults to true and never calls ``dispatch_one``. Live dispatch
+    requires ``dry_run=False``; its default scope is read-shape
+    ``service_interface`` processes only. Plugin providers are excluded unless
+    an outward-facing provider is explicitly enumerated with an operator
+    confirmation citation. ``OUTWARD_FACING_PLUGIN_NAMESPACES`` is the declared
+    classification table: a provider absent from it is fail-closed rather than
+    inferred safe. A diagnostic name does not make a verb safe: a read-shape
+    call can reach an external system.
 
     Result shape:
         {
@@ -202,30 +229,33 @@ def run_sweep(
             ],
         }
     """
+    external_namespace_set = _validate_external_scope(
+        external_namespaces, operator_confirmation,
+    )
     registry = orchestrator.get_process_registry()
     processes_obj = registry.get("processes", {})
     if not isinstance(processes_obj, dict):
         processes_obj = {}
     results: list[dict[str, object]] = []
-    counts = {"ok": 0, "failed": 0, "skipped": 0}
-    for process_key, process_def in processes_obj.items():
-        if not isinstance(process_key, str):
-            continue
-        if include_pattern is not None and include_pattern not in process_key:
-            continue
-        row = _evaluate_one(orchestrator, process_key, process_def, write_enabled)
-        if row["status"] == STATUS_OK:
-            counts["ok"] += 1
-        elif row["status"] == STATUS_FAILED:
-            counts["failed"] += 1
-        else:
-            counts["skipped"] += 1
+    counts = {"ok": 0, "failed": 0, "skipped": 0, "would_dispatch": 0}
+    for process_key, process_def in _filtered_processes(processes_obj, include_pattern):
+        row = _evaluate_one(
+            orchestrator,
+            process_key,
+            process_def,
+            write_enabled,
+            dry_run,
+            external_namespace_set,
+            operator_confirmation,
+        )
+        _count_row(counts, row)
         results.append(row)
     return {
         "total": len(results),
         "ok": counts["ok"],
         "failed": counts["failed"],
         "skipped": counts["skipped"],
+        "would_dispatch": counts["would_dispatch"],
         "results": results,
     }
 
@@ -235,45 +265,134 @@ def _evaluate_one(
     process_key: str,
     process_def: object,
     write_enabled: bool,
+    dry_run: bool,
+    external_namespaces: frozenset[str],
+    operator_confirmation: str | None,
 ) -> dict[str, object]:
-    if process_key == SELF_PROCESS_KEY:
-        return _row(process_key, "read", STATUS_SKIPPED_SELF, None, None)
-    split = split_process_key(process_key)
-    if split is None:
-        return _row(process_key, "write", STATUS_SKIPPED_UNRESOLVED, None,
-                    "malformed process_key")
-    namespace, provider, method_name = split
-    shape = classify_shape(method_name)
-    if shape == "write" and not write_enabled:
-        return _row(process_key, shape, STATUS_SKIPPED_WRITE, None, None)
+    target, skipped_row = _evaluation_target(
+        process_key, write_enabled, external_namespaces,
+    )
+    if skipped_row is not None:
+        return skipped_row
+    assert target is not None
+    if dry_run:
+        return _row(
+            process_key,
+            target.shape,
+            STATUS_DRY_RUN,
+            True,
+            None,
+            None,
+            _external_confirmation(target, operator_confirmation),
+        )
     parameters = _extract_parameters(process_def)
     args = build_sentinel_args(parameters)
     try:
-        dispatch_one(orchestrator, namespace, provider, method_name, args)
+        dispatch_one(orchestrator, target.namespace, target.provider, target.method_name, args)
     except Exception as exc:  # noqa: BLE001 — intentional broad capture: gate surfaces ANY exception
         return _row(
-            process_key,
-            shape,
-            STATUS_FAILED,
+            process_key, target.shape,
+            STATUS_FAILED, True,
             type(exc).__name__,
             str(exc),
+            _external_confirmation(target, operator_confirmation),
         )
-    return _row(process_key, shape, STATUS_OK, None, None)
+    return _row(
+        process_key, target.shape, STATUS_OK, True, None, None,
+        _external_confirmation(target, operator_confirmation),
+    )
+
+
+def _validate_external_scope(
+    external_namespaces: tuple[str, ...], operator_confirmation: str | None,
+) -> frozenset[str]:
+    if external_namespaces and not operator_confirmation:
+        names = ", ".join(external_namespaces)
+        raise ValueError(
+            "operator_confirmation is required when external_namespaces are "
+            f"enumerated: {names}",
+        )
+    namespace_set = frozenset(external_namespaces)
+    unknown_namespaces = sorted(namespace_set - OUTWARD_FACING_PLUGIN_NAMESPACES)
+    if unknown_namespaces:
+        raise ValueError(
+            "external_namespaces contains providers without a declared outward-facing "
+            f"classification: {', '.join(unknown_namespaces)}",
+        )
+    return namespace_set
+
+
+def _filtered_processes(
+    processes: dict[object, object], include_pattern: str | None,
+) -> list[tuple[str, object]]:
+    return [
+        (process_key, process_def)
+        for process_key, process_def in processes.items()
+        if isinstance(process_key, str)
+        and (include_pattern is None or include_pattern in process_key)
+    ]
+
+
+def _count_row(counts: dict[str, int], row: dict[str, object]) -> None:
+    if row["would_dispatch"]:
+        counts["would_dispatch"] += 1
+    status = row["status"]
+    if status == STATUS_OK:
+        counts["ok"] += 1
+    elif status == STATUS_FAILED:
+        counts["failed"] += 1
+    else:
+        counts["skipped"] += 1
+
+
+def _evaluation_target(
+    process_key: str, write_enabled: bool, external_namespaces: frozenset[str],
+) -> tuple[_EvaluationTarget | None, dict[str, object] | None]:
+    if process_key == SELF_PROCESS_KEY:
+        return None, _row(process_key, "read", STATUS_SKIPPED_SELF, False, None, None, None)
+    split = split_process_key(process_key)
+    if split is None:
+        return None, _row(
+            process_key, "write", STATUS_SKIPPED_UNRESOLVED, False, None,
+            "malformed process_key", None,
+        )
+    namespace, provider, method_name = split
+    shape = classify_shape(method_name)
+    if shape == "write" and not write_enabled:
+        return None, _row(process_key, shape, STATUS_SKIPPED_WRITE, False, None, None, None)
+    is_explicit_external_scope = namespace == "plugin" and provider in external_namespaces
+    if namespace != "service_interface" and not is_explicit_external_scope:
+        return None, _row(process_key, shape, STATUS_SKIPPED_SCOPE, False, None, None, None)
+    return _EvaluationTarget(
+        namespace, provider, method_name, shape, is_explicit_external_scope,
+    ), None
+
+
+def _external_confirmation(
+    target: _EvaluationTarget, operator_confirmation: str | None,
+) -> str | None:
+    if target.is_explicit_external_scope:
+        return operator_confirmation
+    return None
 
 
 def _row(
     process_key: str,
     shape: str,
     status: str,
+    would_dispatch: bool,
     error_class: str | None,
     error_message: str | None,
+    operator_confirmation: str | None,
 ) -> dict[str, object]:
     return {
         "process_key": process_key,
         "shape": shape,
         "status": status,
+        "would_dispatch": would_dispatch,
         "error_class": error_class,
         "error_message": error_message,
+        "operator_confirmation": operator_confirmation,
     }
 
 

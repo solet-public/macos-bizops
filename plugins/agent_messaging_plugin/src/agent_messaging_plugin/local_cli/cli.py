@@ -1,4 +1,4 @@
-"""`solet` — invoke a running solet over its localhost bridge (no MCP).
+"""`solet-bridge` — invoke a running solet over its localhost bridge (no MCP).
 
 Every command discovers THIS solet's bridge port from the CLI's own
 install location (never a flag or ambient env), opens a one-shot bridge
@@ -34,7 +34,6 @@ from ananta.llm.agent_messaging.schema import (
 # The parent package __init__ is lazy (PEP 562) and ``models`` is stdlib-only,
 # so this import keeps the console script's bare-PATH contract intact.
 from ..env_contract import AGENT_INSTANCE_ID_ENV, enforce_no_legacy_agent_env
-from ..models import WATCH_AGENT_INSTANCE_PREFIX
 from . import __version__
 from .client import (
     DEFAULT_JOB_TIMEOUT_S,
@@ -54,8 +53,8 @@ from .spool import (
     WATCH_SESSION_LABEL_ENV,
     default_spool_path,
     read_watch_marks,
+    resolve_watch_instance_id,
     spool_append,
-    watch_instance_digest,
     watch_marks_path,
     watch_pairing_path,
     watch_singleton_lock_path,
@@ -141,12 +140,12 @@ def _invoked_name() -> str:
 
     Read from click's root context rather than hardcoded, because this CLI is
     installed under the SOLET's own name in a born clone — printing a literal
-    "solet" would hand a clone's operator a command their shell does not have.
+    "solet-bridge" would hand a clone's operator a command their shell does not have.
     """
     context = click.get_current_context(silent=True)
     if context is None:
-        return "solet"
-    return context.find_root().info_name or "solet"
+        return "solet-bridge"
+    return context.find_root().info_name or "solet-bridge"
 
 
 def _emit(payload: dict[str, Any]) -> None:
@@ -154,7 +153,7 @@ def _emit(payload: dict[str, Any]) -> None:
 
 
 def _die(message: str, code: ExitCodes) -> NoReturn:
-    click.echo(f"solet: {message}", err=True)
+    click.echo(f"{_invoked_name()}: {message}", err=True)
     raise SystemExit(int(code))
 
 
@@ -218,7 +217,7 @@ def _run(
 
 
 @click.group()
-@click.version_option(__version__, prog_name="solet")
+@click.version_option(__version__)
 def cli() -> None:
     """Invoke this solet's capabilities over its localhost bridge (no MCP)."""
 
@@ -411,12 +410,12 @@ def inbox(limit: int) -> None:
     ``entries`` (addressed to this instance) and ``role_entries`` (addressed
     to a role this session holds; ``peer_send_by_name``, the documented
     preferred task-assignment tool, delivers there). A caller hand-parsing
-    the raw ``solet call ... peer_inbox`` JSON routinely reads only
+    the raw ``solet-bridge call ... peer_inbox`` JSON routinely reads only
     ``entries`` and never learns the other half exists, silently missing
     every role-addressed dispatch. This command drains both sections to
-    exhaustion — reusing the exact per-section paging algorithms `solet
-    watch` already proved correct, including the role section's opposite
-    (backward) cursor direction — and merges them into one chronological
+    exhaustion — reusing the exact per-section paging algorithms `solet-bridge
+    watch` already proved correct. Both sections page backward from their
+    newest rows and are merged here into one chronological
     feed, so there is no field left to forget.
 
     Exits non-zero, and marks ``"complete": false`` in the JSON, if either
@@ -482,7 +481,7 @@ def inbox(limit: int) -> None:
     _emit(payload)
     if not payload.get("complete", False):
         click.echo(
-            "solet inbox: DID NOT fully drain — treat this as a PARTIAL read, "
+            "solet-bridge inbox: DID NOT fully drain — treat this as a PARTIAL read, "
             "not the whole inbox (see role_section_status / *_exhausted above).",
             err=True,
         )
@@ -735,10 +734,9 @@ def _resolve_watch_identity(role: str | None, agent_id: str) -> WatchIdentity:
             "a PID is not an acceptable substitute",
             ExitCodes.UNKNOWN_ERROR,
         )
-    ledger_instance_id = os.environ.get(AGENT_INSTANCE_ID_ENV, "").strip()
-    resolved_instance_id = (
-        ledger_instance_id
-        or f"{WATCH_AGENT_INSTANCE_PREFIX}{watch_instance_digest(session_id)}"
+    resolved_instance_id = resolve_watch_instance_id(
+        session_id,
+        os.environ.get(AGENT_INSTANCE_ID_ENV),
     )
     return WatchIdentity(
         role=resolved_role,
@@ -1003,8 +1001,8 @@ def _one_shot_peer_inbox_page(
 ) -> dict[str, Any]:
     """Fetch one ``peer_inbox`` page through the no-MCP platform process.
 
-    Unlike `solet watch`'s ``client.peer_inbox`` (the registered-bridge HTTP
-    route, which needs a prior ``peer_register``), ``solet inbox`` runs as a
+    Unlike `solet-bridge watch`'s ``client.peer_inbox`` (the registered-bridge HTTP
+    route, which needs a prior ``peer_register``), ``solet-bridge inbox`` runs as a
     fresh, unregistered bridge — the exact caller ``peer_inbox_action``'s own
     module docstring names as having "no pull path at all" before it existed.
     So this goes through the platform PROCESS instead, naming the caller's own
@@ -1019,7 +1017,7 @@ def _one_shot_peer_inbox_page(
             **({"after": after} if after else {}),
             **({"role_after": role_after} if role_after else {}),
         },
-        reason="solet inbox: one-shot both-section drain (MSG-04)",
+        reason="solet-bridge inbox: one-shot both-section drain (MSG-04)",
     )
     outcome = dispatched.get("result")
     if not isinstance(outcome, dict) or outcome.get("action_status") != "completed":
@@ -1057,43 +1055,46 @@ def _forward_page_exhausted(nxt: str, after: str) -> bool:
     return not nxt or nxt == after
 
 
+def _entries_newer_than_mark(entries: list[Any], mark: str) -> tuple[list[Any], bool]:
+    """Return page rows newer than ``mark`` and whether the mark was reached."""
+    newer = [entry for entry in entries if _entry_created_at(entry) > mark]
+    return newer, len(newer) < len(entries)
+
+
 def _drain_instance_section(
     fetch_page: _PageFetcher, mark: str, *, seeding: bool,
 ) -> tuple[list[Any], str, bool]:
-    """Page FORWARD from ``mark`` to exhaustion; return (fresh, new mark, exhausted).
+    """Walk backward from newest, stopping at ``mark``.
 
-    ``fetch_page(after, role_after)`` is the one seam shared with
-    ``_drain_role_section`` (MSG-04): ``watch``'s marks-based drain and
-    `solet inbox`'s stateless one-shot drain supply DIFFERENT fetchers — a
-    registered-bridge route vs. the no-MCP ``peer_inbox`` platform process —
-    over the SAME proven forward-paging algorithm, so the opposite-direction
-    cursor handling this module already got right (2026-08-01) is never
-    re-derived by a caller hand-rolling its own parser.
-
-    ``exhausted`` is False only when ``WATCH_INBOX_MAX_PAGES`` was hit before
-    a natural stop (empty page, or no/non-advancing next cursor) — a caller
-    that must report a COMPLETE drain, rather than accept `watch`'s
-    per-arm bound, needs this to avoid presenting a partial page as the
-    whole inbox.
+    Direct and role sections now have the same newest-first direction. Fresh
+    entries are returned chronological so spool and ``solet-bridge inbox``
+    output remain human-readable.
     """
-    after = mark
+    after: str | None = None
     fresh: list[Any] = []
+    newest = mark
     for _ in range(WATCH_INBOX_MAX_PAGES):
-        page = fetch_page(after or None, None)
+        page = fetch_page(after, None)
         entries = _inbox_section(page, "entries")
         if not entries:
             break
-        if not seeding:
-            fresh.extend(entries)
+        newest = max(newest, _entry_created_at(entries[0]))
+        if seeding:
+            break
+        newer, reached_mark = _entries_newer_than_mark(entries, mark)
+        fresh.extend(newer)
+        if reached_mark:
+            break
         nxt = page.get("next_after_created_at")
         nxt = nxt if isinstance(nxt, str) and nxt else ""
-        if _forward_page_exhausted(nxt, after):
-            after = nxt or after
+        if _forward_page_exhausted(nxt, after or ""):
             break
         after = nxt
     else:
-        return fresh, after, False
-    return fresh, after, True
+        fresh.reverse()
+        return fresh, newest, False
+    fresh.reverse()
+    return fresh, newest, True
 
 
 def _role_cursor_exhausted(cursor: object, role_after: str | None) -> bool:

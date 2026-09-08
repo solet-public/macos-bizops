@@ -19,13 +19,25 @@ clients — R1 spike finding — so it is never cached across invocations),
 gated 0/1/N (exactly one match or refuse — the ambiguity trap this lane's
 own measurement found the sibling plugin's ``list()``/``_terminate_by_
 snapshot`` do NOT defend against, `iterm2_coding_agent_management_plugin/
-plugin.py:328,547-548`); send ``/clear`` and a separate ``\\r`` (the
-already-proven two-call shape `tmux_adapter.py`'s
-``_TmuxSendKeysDriverChannel.send`` uses for tmux-hosted workers, ported to
-iTerm2's one send primitive); poll-settle on a POSITIVE cleared-state
-signature (ruling 4 — quiescence alone does not prove clear); send the
-pickup prompt and a separate ``\\r``. Every step failure aborts in place and
-is reported — never proceeds to a later step on a failed earlier one.
+plugin.py:328,547-548`); CAPTURE any non-empty composer content from the
+screen (relay-not-disregard, 2026-08-28: killed text could be a stranded
+remote-control draft or a genuine unsent operator draft — it is carried in
+the envelope and printed immediately for the fire log, never silently
+destroyed); send the clear leg as FIVE separate sends with gaps — space,
+kill-line (C-u, 0x15), ``/clear``, ``\\r``, ``\\r``. The preamble is the
+2026-08-28 ghost-text-matrix finding: a leading flush-Enter is DANGEROUS
+(it SUBMITS a stranded remote-control draft as a prompt); the space
+suppresses any ghost suggestion and realizes composer state, and the
+kill-line empties all real content. The trailing double CR is the
+2026-08-27 injection joseki: a slash command's first CR can be consumed by
+the autocomplete menu as "accept selection", so a second CR performs the
+actual submit and is a no-op when no menu opened — a single CR after
+``/clear`` was measured live leaving the command accepted-but-unsubmitted,
+the stranded-composer signature. Then poll-settle on a POSITIVE
+cleared-state signature (ruling 4 — quiescence alone does not prove
+clear); send the pickup prompt and a separate ``\\r``. Every step failure
+aborts in place and is reported — never proceeds to a later step on a
+failed earlier one.
 """
 
 from __future__ import annotations
@@ -39,12 +51,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from .driver_texts import render_driver_text
+from .submit_conventions import ITERM2_SEAT_SUBMIT_CONVENTION
+
 try:
     import iterm2 as _iterm2_module  # pyright: ignore[reportMissingImports]
 except ModuleNotFoundError as _exc:  # pragma: no cover - covered by the blocked-import smoke leg
     # DISCLOSED, never silent, and never fatal at import. This plugin does not
     # DECLARE iterm2: the distribution arrives only with
-    # iterm2_coding_agent_management_plugin, which the shipped bizops profile
+    # iterm2_coding_agent_management_plugin, which the shipped macos-bizops profile
     # deliberately excludes. A module-scope hard import therefore made this whole
     # module -- pane resolution, settle detection, the send-sequence ordering
     # contract, all of it pure logic -- unimportable on a headless adopter box.
@@ -93,11 +108,31 @@ DEFAULT_STABLE_SAMPLES_REQUIRED = 3
 # keystroke, which is the one failure mode this whole helper exists to
 # eliminate. Asymmetric cost is the whole rationale: this errs long.
 DEFAULT_SETTLE_TIMEOUT_SECONDS = 120.0
+# Gap between the clear leg's individual sends (space, kill-line, /clear,
+# CR, menu-confirm CR) so no send lands while the prior one is still being
+# processed/rendered — the operator injection joseki (2026-08-27) specifies
+# "settle gaps between sends". Injectable per call so smokes run gapless.
+DEFAULT_SEND_GAP_SECONDS = 1.0
+
+# C-u: empties the composer of ALL real content, including a stranded
+# remote-control draft (measured 2026-08-28). The old flush-Enter preamble
+# would SUBMIT such a draft instead — that is why it was removed.
+COMPOSER_KILL_LINE = "\x15"
 
 STEP_RESOLVE_PANE = "resolve_pane"
+STEP_CAPTURE_COMPOSER = "capture_composer"
+STEP_SEND_CLEAR_PREAMBLE_SPACE = "send_clear_preamble_space"
+STEP_SEND_CLEAR_PREAMBLE_KILL = "send_clear_preamble_kill"
 STEP_SEND_CLEAR_TEXT = "send_clear_text"
 STEP_SEND_CLEAR_CR = "send_clear_cr"
+STEP_SEND_CLEAR_MENU_CONFIRM_CR = "send_clear_menu_confirm_cr"
 STEP_SETTLE_WAIT = "settle_wait"
+STEP_SEND_MODEL_PREAMBLE_SPACE = "send_model_preamble_space"
+STEP_SEND_MODEL_PREAMBLE_KILL = "send_model_preamble_kill"
+STEP_SEND_MODEL_TEXT = "send_model_text"
+STEP_SEND_MODEL_CR = "send_model_cr"
+STEP_SEND_MODEL_MENU_CONFIRM_CR = "send_model_menu_confirm_cr"
+STEP_MODEL_SETTLE_WAIT = "model_settle_wait"
 STEP_CONFIRM_COMPOSER_CONTENT = "confirm_composer_content"
 STEP_SEND_PICKUP_TEXT = "send_pickup_text"
 STEP_PASTE_STABLE_WAIT = "paste_stable_wait"
@@ -183,7 +218,9 @@ class SettleDiagnostics:
             "samples_taken": self.samples_taken,
             "streak_reset_count": self.streak_reset_count,
             "current_streak_first_match_sample_index": self.current_streak_first_match_sample_index,
-            "current_streak_first_match_elapsed_seconds": self.current_streak_first_match_elapsed_seconds,
+            "current_streak_first_match_elapsed_seconds": (
+                self.current_streak_first_match_elapsed_seconds
+            ),
             "elapsed_at_last_reset_seconds": self.elapsed_at_last_reset_seconds,
         }
 
@@ -357,6 +394,22 @@ def is_cleared_state(lines: list[str], cleared_signature: str) -> bool:
     return any(clean_screen_text(line).strip() == cleared_signature for line in lines)
 
 
+def composer_content_rows(lines: list[str], cleared_signature: str) -> list[str]:
+    """Screen rows showing a POPULATED composer: cleaned+stripped text that
+    starts with the empty-composer signature but carries content beyond it
+    (e.g. signature ``"❯"`` matches the row ``"❯ stranded draft"`` and not
+    the bare ``"❯"``). Captured BEFORE the preamble kill-line destroys the
+    content, so a stranded remote-control draft — or a genuine unsent
+    operator draft — is relayed via the envelope and fire log, never
+    silently discarded (relay-not-disregard, 2026-08-28)."""
+    rows: list[str] = []
+    for line in lines:
+        cleaned = clean_screen_text(line).strip()
+        if cleaned.startswith(cleared_signature) and cleaned != cleared_signature:
+            rows.append(cleaned)
+    return rows
+
+
 def last_nonempty_line(text: str) -> str:
     """The last non-blank, stripped line of ``text`` -- used by
     ``submit_only`` mode (fix loop #2 item 3) as the recognizable fragment
@@ -512,7 +565,7 @@ async def _send_pickup_and_confirm_submit(
     )
 
     try:
-        await session.async_send_text("\r")
+        await session.async_send_text(ITERM2_SEAT_SUBMIT_CONVENTION.submit_value or "")
     except Exception as exc:  # noqa: BLE001
         raise HelperStepError(STEP_SEND_PICKUP_CR, str(exc)) from exc
 
@@ -555,7 +608,7 @@ async def _submit_only_flow(
             ),
         }
     try:
-        await session.async_send_text("\r")
+        await session.async_send_text(ITERM2_SEAT_SUBMIT_CONVENTION.submit_value or "")
     except Exception as exc:  # noqa: BLE001
         raise HelperStepError(STEP_SEND_PICKUP_CR, str(exc)) from exc
     try:
@@ -577,6 +630,97 @@ async def _submit_only_flow(
         "submit_diagnostics": submit_diagnostics.to_dict(),
     }
 
+
+
+async def _send_slash_command_leg(
+    session: Any,
+    command_text: str,
+    *,
+    preamble_space_step: str,
+    preamble_kill_step: str,
+    command_step: str,
+    command_cr_step: str,
+    menu_confirm_cr_step: str,
+    send_gap_seconds: float,
+) -> None:
+    """Send the proven space, kill-line, slash-command, double-CR shape.
+
+    Both ``/clear`` and the opt-in ``/model <name>`` command need the exact
+    same preamble and menu-confirm discipline. Keeping their individual
+    step names preserves the failure envelope's actionable precision while
+    making divergence in the five-send sequence impossible.
+    """
+    command_cr = ITERM2_SEAT_SUBMIT_CONVENTION.submit_value or ""
+    command_leg: tuple[tuple[str, str], ...] = (
+        (preamble_space_step, " "),
+        (preamble_kill_step, COMPOSER_KILL_LINE),
+        (command_step, command_text),
+        (command_cr_step, command_cr),
+        (menu_confirm_cr_step, command_cr),
+    )
+    for step_name, payload in command_leg:
+        try:
+            await session.async_send_text(payload)
+        except Exception as exc:  # noqa: BLE001 -- surfaced verbatim via HelperStepError
+            raise HelperStepError(step_name, str(exc)) from exc
+        if send_gap_seconds > 0:
+            await asyncio.sleep(send_gap_seconds)
+
+
+async def _send_clear_leg(
+    session: Any, *, cleared_signature: str, send_gap_seconds: float,
+) -> list[str]:
+    """Capture-then-clear (2026-08-28), extracted from :func:`run_rotation`
+    to keep that function under the cyclomatic-complexity gate — the
+    sequence contract it documents is worth more unbroken than one inlined
+    block. Returns the captured composer rows.
+
+    The kill-line below destroys any composer content, and that content
+    could be a stranded remote-control draft or a genuine unsent operator
+    draft — so it is read off the screen FIRST and both returned for the
+    envelope and printed immediately (the fire log keeps it even if a later
+    step fails). The old flush-Enter preamble is GONE: measured 2026-08-28,
+    it SUBMITS a stranded RC draft as a prompt into the old context. Space
+    suppresses ghost-suggestion text and realizes composer state; C-u then
+    empties all real content. The double CR after the clear command is the
+    2026-08-27 injection joseki (the first CR can be consumed by the
+    slash-command autocomplete menu as "accept selection"; the second
+    performs the actual submit, a no-op when no menu opened — a single CR
+    was measured leaving "/clear" accepted-but-unsubmitted).
+    """
+    try:
+        contents = await session.async_get_screen_contents()
+        lines = [contents.line(i).string for i in range(contents.number_of_lines)]
+    except Exception as exc:  # noqa: BLE001 -- surfaced verbatim via HelperStepError
+        raise HelperStepError(STEP_CAPTURE_COMPOSER, str(exc)) from exc
+    composer_capture = composer_content_rows(lines, cleared_signature)
+    if composer_capture:
+        print(json.dumps({"composer_capture": composer_capture}), flush=True)
+    await _send_slash_command_leg(
+        session,
+        render_driver_text("seat.clear"),
+        preamble_space_step=STEP_SEND_CLEAR_PREAMBLE_SPACE,
+        preamble_kill_step=STEP_SEND_CLEAR_PREAMBLE_KILL,
+        command_step=STEP_SEND_CLEAR_TEXT,
+        command_cr_step=STEP_SEND_CLEAR_CR,
+        menu_confirm_cr_step=STEP_SEND_CLEAR_MENU_CONFIRM_CR,
+        send_gap_seconds=send_gap_seconds,
+    )
+    return composer_capture
+
+
+async def _send_model_leg(session: Any, model: str, *, send_gap_seconds: float) -> None:
+    """Send the opt-in model command using the same fail-closed command leg."""
+    await _send_slash_command_leg(
+        session,
+        render_driver_text("seat.model", model_name=model),
+        preamble_space_step=STEP_SEND_MODEL_PREAMBLE_SPACE,
+        preamble_kill_step=STEP_SEND_MODEL_PREAMBLE_KILL,
+        command_step=STEP_SEND_MODEL_TEXT,
+        command_cr_step=STEP_SEND_MODEL_CR,
+        menu_confirm_cr_step=STEP_SEND_MODEL_MENU_CONFIRM_CR,
+        send_gap_seconds=send_gap_seconds,
+    )
 
 
 async def _connect_app() -> Any:
@@ -603,11 +747,19 @@ async def run_rotation(
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     stable_samples_required: int = DEFAULT_STABLE_SAMPLES_REQUIRED,
     settle_timeout_seconds: float = DEFAULT_SETTLE_TIMEOUT_SECONDS,
+    send_gap_seconds: float = DEFAULT_SEND_GAP_SECONDS,
+    model: str | None = None,
     inject_only: bool = False,
     submit_only: bool = False,
 ) -> dict[str, Any]:
-    """The full sequence: resolve -> send /clear -> send CR -> settle-wait
-    -> send pickup -> wait-for-paste-stable -> send CR -> confirm-submit.
+    """The full sequence: resolve -> capture composer content (relayed via
+    envelope + immediate print, never silently killed) -> send space ->
+    send kill-line -> send /clear -> send CR -> send menu-confirm CR
+    (preamble per the 2026-08-28 ghost-text matrix, double CR per the
+    2026-08-27 injection joseki, ``send_gap_seconds`` between the clear
+    leg's sends) -> settle-wait -> optionally send the same five-step
+    ``/model <name>`` leg -> settle-wait again -> send pickup ->
+    wait-for-paste-stable -> send CR -> confirm-submit.
     Every step's own failure aborts in place and returns/raises a report
     naming exactly which step failed -- see module docstring. Returns a
     ``{"status": "completed", ...}`` envelope on success, or
@@ -655,15 +807,11 @@ async def run_rotation(
             settle_timeout_seconds=settle_timeout_seconds,
         )
 
+    composer_capture: list[str] = []
     if not inject_only:
-        try:
-            await session.async_send_text("/clear")
-        except Exception as exc:  # noqa: BLE001 -- surfaced verbatim via HelperStepError
-            raise HelperStepError(STEP_SEND_CLEAR_TEXT, str(exc)) from exc
-        try:
-            await session.async_send_text("\r")
-        except Exception as exc:  # noqa: BLE001
-            raise HelperStepError(STEP_SEND_CLEAR_CR, str(exc)) from exc
+        composer_capture = await _send_clear_leg(
+            session, cleared_signature=cleared_signature, send_gap_seconds=send_gap_seconds,
+        )
 
     try:
         settle_diagnostics = await wait_for_settle(
@@ -678,7 +826,28 @@ async def run_rotation(
             "status": "refused", "step": STEP_SETTLE_WAIT, "code": CODE_SETTLE_TIMEOUT,
             "message": str(exc),
             "settle_diagnostics": exc.diagnostics.to_dict(),
+            "composer_capture": composer_capture,
         }
+
+    model_settle_diagnostics: SettleDiagnostics | None = None
+    if model is not None:
+        await _send_model_leg(session, model, send_gap_seconds=send_gap_seconds)
+        try:
+            model_settle_diagnostics = await wait_for_settle(
+                session,
+                cleared_signature=cleared_signature,
+                poll_interval_seconds=poll_interval_seconds,
+                stable_samples_required=stable_samples_required,
+                timeout_seconds=settle_timeout_seconds,
+            )
+        except SettleTimeoutError as exc:
+            return {
+                "status": "refused", "step": STEP_MODEL_SETTLE_WAIT, "code": CODE_SETTLE_TIMEOUT,
+                "message": str(exc),
+                "settle_diagnostics": settle_diagnostics.to_dict(),
+                "model_settle_diagnostics": exc.diagnostics.to_dict(),
+                "composer_capture": composer_capture,
+            }
 
     try:
         submit_diagnostics = await _send_pickup_and_confirm_submit(
@@ -692,21 +861,27 @@ async def run_rotation(
         return {
             "status": "refused", "step": STEP_PASTE_STABLE_WAIT, "code": CODE_PASTE_STABLE_TIMEOUT,
             "message": str(exc), "paste_stable_diagnostics": exc.diagnostics.to_dict(),
+            "composer_capture": composer_capture,
         }
     except SettleTimeoutError as exc:
         return {
             "status": "refused", "step": STEP_CONFIRM_SUBMIT, "code": CODE_SUBMIT_TIMEOUT,
             "message": str(exc), "submit_diagnostics": exc.diagnostics.to_dict(),
+            "composer_capture": composer_capture,
         }
 
-    return {
+    result = {
         "status": "completed",
         "session_id": match.session_id,
         "tab_id": match.tab_id,
         "window_id": match.window_id,
         "settle_diagnostics": settle_diagnostics.to_dict(),
         "submit_diagnostics": submit_diagnostics.to_dict(),
+        "composer_capture": composer_capture,
     }
+    if model_settle_diagnostics is not None:
+        result["model_settle_diagnostics"] = model_settle_diagnostics.to_dict()
+    return result
 
 
 def _safe_int(value: Any) -> int:
@@ -753,6 +928,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--settle-timeout-seconds", type=float, default=DEFAULT_SETTLE_TIMEOUT_SECONDS,
     )
+    parser.add_argument(
+        "--send-gap-seconds", type=float, default=DEFAULT_SEND_GAP_SECONDS,
+        help="Gap between the clear leg's individual sends (space, kill-line, /clear, CR, "
+        "menu-confirm CR) so no send lands mid-render of the prior one.",
+    )
+    parser.add_argument(
+        "--model",
+        help="Optional Claude model name to select after /clear has positively settled and "
+        "before injecting the pickup prompt. Omit to preserve the existing rotation exactly.",
+    )
     recovery_group = parser.add_mutually_exclusive_group()
     recovery_group.add_argument(
         "--inject-only", action="store_true",
@@ -786,6 +971,8 @@ def main(argv: list[str] | None = None) -> int:
             poll_interval_seconds=args.poll_interval_seconds,
             stable_samples_required=args.stable_samples_required,
             settle_timeout_seconds=args.settle_timeout_seconds,
+            send_gap_seconds=args.send_gap_seconds,
+            model=args.model,
             inject_only=args.inject_only,
             submit_only=args.submit_only,
         ))

@@ -19,11 +19,22 @@ via run_smokes.py.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
+from pathlib import Path
 from typing import Any
 
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 from ananta.core.domain.enums import ActionStatus
-from code_vetting_plugin.live_state import VETTING_RUNS_NAMESPACE, VETTING_RUNS_TABLE, read_vetting_run
+from code_vetting_plugin.live_state import (
+    VETTING_RUNS_NAMESPACE,
+    VETTING_RUNS_TABLE,
+    read_vetting_run,
+)
 from code_vetting_plugin.plugin import CodeVettingPlugin
 
 _CHECKS_RUN: list[str] = []

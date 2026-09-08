@@ -63,6 +63,7 @@ def _old_row(**overrides: str) -> dict[str, str]:
     row = {
         "host": "tmux",
         "brief_ref": "workbench/some-brief.md",
+        "unit_id": "unt-restart-01234567",
         "work_class": "read_only",
         "budget_line": "some-budget-line",
         "visibility": "visible",
@@ -81,13 +82,14 @@ def test_build_restart_spawn_params_carries_ledger_fields() -> None:
     _check(
         params["role_class"] == "project"
         and params["lane_id"] == "lane-1"
+        and params["unit_id"] == "unt-restart-01234567"
         and params["role_name"] == "some-role"
         and params["host"] == "tmux"
         and params["work_class"] == "read_only"
         and params["budget_line"] == "some-budget-line"
         and params["model"] == "haiku"
         and params["effort"] == "low",
-        "_build_restart_spawn_params carries every ledger-backed field forward",
+        "_build_restart_spawn_params carries every ledger-backed field, including unit_id, forward",
     )
     _check(
         params["spawned_by_role"] == AgentMessagingPlugin._CHOREOGRAPHY_DIRECTED_BY,

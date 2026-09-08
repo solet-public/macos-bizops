@@ -154,7 +154,7 @@ def load_allowlist(path: Path) -> Allowlist:
         return Allowlist()
     entries: set[AllowlistEntry] = set()
     for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
+        line = raw.split("#", 1)[0].strip()
         if not line or line.startswith("#"):
             continue
         parts = line.split("::", 2)

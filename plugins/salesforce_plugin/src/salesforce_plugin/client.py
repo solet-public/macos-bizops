@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Generator, Mapping
@@ -40,9 +41,16 @@ from .constants import (
     DEFAULT_SF_CLI_PATH,
     ERROR_AUTH_FAILED,
     ERROR_NOT_CONFIGURED,
+    ERROR_PROVISION_CONSENT_REQUIRED,
     SF_CLI_TIMEOUT_SECONDS,
 )
 from .errors import SalesforceCliCallError, SalesforceServiceError
+
+_HOMEBREW_GUARD_ENV = {
+    "HOMEBREW_NO_AUTO_UPDATE": "1",
+    "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK": "1",
+    "HOMEBREW_NO_INSTALL_UPGRADE": "1",
+}
 
 
 class SalesforceCliExecutor:
@@ -81,6 +89,77 @@ class SalesforceCliExecutor:
         """Username of the verified org binding ('' before first call)."""
         return self._username
 
+    def probe_cli(self) -> dict[str, object]:
+        """Return a local, credential-free ``sf --version`` capability verdict."""
+        configured_path = self._sf_cli_path
+        executable_path = configured_path if os.path.isabs(configured_path) and os.path.isfile(configured_path) and os.access(configured_path, os.X_OK) else shutil.which(configured_path)
+        if executable_path is None:
+            return {
+                "executable_path": "",
+                "version": "",
+                "executable": False,
+                "configured": False,
+            }
+        try:
+            completed = subprocess.run(
+                [executable_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=SF_CLI_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return {
+                "executable_path": executable_path,
+                "version": "",
+                "executable": False,
+                "configured": False,
+            }
+        version = completed.stdout.strip().splitlines()[0] if completed.returncode == 0 and completed.stdout.strip() else ""
+        return {
+            "executable_path": executable_path,
+            "version": version,
+            "executable": bool(version),
+            "configured": (bool(version) and os.path.isabs(configured_path) and os.path.realpath(configured_path) == os.path.realpath(executable_path)),
+        }
+
+    def provision_cli(self, *, acknowledge_system_change: bool) -> dict[str, object]:
+        """Install the reviewed ``sf`` formula only when the local probe is unsatisfied.
+
+        This method owns no configuration persistence: its caller binds the verified
+        absolute executable through the plugin's ordinary config-update path.
+        """
+
+        observed = self.probe_cli()
+        if _cli_observation_has_executable(observed):
+            return {
+                "provisioned": False,
+                "reason": "already_present",
+                "executable_path": observed["executable_path"],
+                "version": observed["version"],
+            }
+        if not acknowledge_system_change:
+            raise SalesforceServiceError(
+                ERROR_PROVISION_CONSENT_REQUIRED,
+                "Explicit acknowledgement is required before Homebrew may install sf and its declared Node closure.",
+            )
+        brew = _homebrew_executable()
+        _require_sf_install_plan(brew)
+        _install_sf_formula(brew)
+        self._sf_cli_path = "sf"
+        verified = self.probe_cli()
+        if not _cli_observation_has_executable(verified):
+            raise SalesforceServiceError(
+                ERROR_NOT_CONFIGURED,
+                "The installed sf executable did not pass its required version probe.",
+            )
+        return {
+            "provisioned": True,
+            "reason": "installed",
+            "executable_path": verified["executable_path"],
+            "version": verified["version"],
+        }
+
     def run_json(
         self,
         argv_tail: list[str],
@@ -93,13 +172,26 @@ class SalesforceCliExecutor:
         completed = self._invoke(argv, env_overrides, target_org)
         return _parse_envelope(completed, target_org)
 
-    def run_rest(self, method: str, path: str, *, body: dict[str, Any] | None = None) -> Any:
+    def run_rest(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+        raw_response: bool = False,
+    ) -> Any:
         """Run `sf api request rest <path> --method <method> [--body @file]`.
 
         Used only where the stable `data create/update record --values`
         mini-language is unsafe for arbitrary field content (see
         `record_actions.py`). No `--json` support on this CLI command; the
         raw REST response/error body is parsed directly.
+
+        ``raw_response=True`` skips JSON-decoding a successful response and
+        returns the CLI's raw stdout text instead — Bulk v2's
+        successfulResults/failedResults/unprocessedrecords endpoints return
+        CSV bodies, not JSON (``bulk_actions.bulk_job_results``). Error
+        responses are still parsed as the usual REST error array either way.
         """
         target_org = self._ensure_verified()
         with _json_body_file(body) as body_path:
@@ -117,6 +209,8 @@ class SalesforceCliExecutor:
             if body_path is not None:
                 argv += ["--body", f"@{body_path}"]
             completed = self._invoke(argv, None, target_org)
+        if raw_response:
+            return _parse_rest_response_raw(completed, target_org)
         return _parse_rest_response(completed, target_org)
 
     def _ensure_verified(self) -> str:
@@ -163,20 +257,112 @@ class SalesforceCliExecutor:
         except FileNotFoundError as exc:
             raise SalesforceServiceError(
                 ERROR_NOT_CONFIGURED,
-                (
-                    f"sf CLI not found at {self._sf_cli_path!r}. Install the standalone "
-                    "bundle and pin its absolute path via the plugin config key "
-                    "'sf_cli_path'."
-                ),
+                (f"sf CLI not found at {self._sf_cli_path!r}. Install the standalone bundle and pin its absolute path via the plugin config key 'sf_cli_path'."),
             ) from exc
         except subprocess.TimeoutExpired as exc:
             raise SalesforceServiceError(
                 ERROR_AUTH_FAILED,
-                (
-                    f"sf CLI did not answer within {SF_CLI_TIMEOUT_SECONDS:.0f}s "
-                    f"for org {target_org!r}."
-                ),
+                (f"sf CLI did not answer within {SF_CLI_TIMEOUT_SECONDS:.0f}s for org {target_org!r}."),
             ) from exc
+
+
+def _cli_observation_has_executable(observed: dict[str, object]) -> bool:
+    """Accept a probe result only when its resolved executable and version are sound."""
+
+    executable_path = observed.get("executable_path")
+    version = observed.get("version")
+    return observed.get("executable") is True and isinstance(executable_path, str) and os.path.isabs(executable_path) and isinstance(version, str) and bool(version)
+
+
+def _homebrew_executable() -> str:
+    """Resolve the only supported package manager before any sf mutation."""
+
+    brew = shutil.which("brew")
+    if brew is None or not os.path.isabs(brew):
+        raise SalesforceServiceError(
+            ERROR_NOT_CONFIGURED,
+            "Homebrew must resolve to an absolute executable before sf can be provisioned.",
+        )
+    return brew
+
+
+def _require_sf_install_plan(brew: str) -> None:
+    """Require Homebrew's dry-run to match the reviewed sf and Node closure."""
+
+    dry_run = _run_sf_homebrew(
+        brew,
+        ("install", "--dry-run", "sf"),
+        "Homebrew could not produce the reviewed sf installation plan.",
+    )
+    if dry_run.returncode != 0 or not _sf_install_plan_is_exact(f"{dry_run.stdout}\n{dry_run.stderr}"):
+        raise SalesforceServiceError(
+            ERROR_NOT_CONFIGURED,
+            "Homebrew proposed a mutation outside the approved sf and Node package closure.",
+        )
+
+
+def _install_sf_formula(brew: str) -> None:
+    """Install exactly the package set admitted by the preceding dry-run."""
+
+    installed = _run_sf_homebrew(
+        brew,
+        ("install", "sf"),
+        "Homebrew could not complete the approved sf installation.",
+    )
+    if installed.returncode != 0:
+        raise SalesforceServiceError(
+            ERROR_NOT_CONFIGURED,
+            "Homebrew did not complete the approved sf installation.",
+        )
+
+
+def _run_sf_homebrew(brew: str, args: tuple[str, ...], failure_message: str) -> subprocess.CompletedProcess[str]:
+    """Run one guarded sf Homebrew vector and normalize launch failures."""
+
+    environment = {**os.environ, **_HOMEBREW_GUARD_ENV}
+    try:
+        return subprocess.run(
+            [brew, *args],
+            capture_output=True,
+            text=True,
+            timeout=SF_CLI_TIMEOUT_SECONDS,
+            check=False,
+            env=environment,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise SalesforceServiceError(ERROR_NOT_CONFIGURED, failure_message) from exc
+
+
+def _sf_install_plan_is_exact(output: str) -> bool:
+    """Accept exactly the reviewed ``sf`` formula and its declared Node closure."""
+
+    lines = [line.strip() for line in output.splitlines()]
+    if _sf_plan_has_prohibited_mutation(lines):
+        return False
+    return _sf_install_items(lines) == {"sf", "node"}
+
+
+def _sf_plan_has_prohibited_mutation(lines: list[str]) -> bool:
+    """Reject a dry-run that contains any unreviewed package mutation kind."""
+
+    prohibited = ("Would upgrade", "Would reinstall", "Would remove", "Would unlink")
+    return any(line.startswith(prohibited) for line in lines)
+
+
+def _sf_install_items(lines: list[str]) -> set[str] | None:
+    """Extract the one declared Salesforce formula closure from a dry-run."""
+
+    headers = [index for index, line in enumerate(lines) if line.startswith("Would install")]
+    if len(headers) != 1 or lines[headers[0]] != "Would install 2 formulae:":
+        return None
+    items: list[str] = []
+    for line in lines[headers[0] + 1 :]:
+        if line.startswith("Would "):
+            break
+        if line and not line.startswith("==>"):
+            items.append(line)
+    item_set = set(items)
+    return item_set if len(items) == len(item_set) == 2 else None
 
 
 def _parse_envelope(completed: subprocess.CompletedProcess[str], target_org: str) -> Any:
@@ -200,16 +386,27 @@ def _parse_rest_response(completed: subprocess.CompletedProcess[str], target_org
     if completed.returncode == 0:
         text = completed.stdout.strip()
         return _decode_json(text) if text else None
+    raise _rest_error(completed, target_org)
+
+
+def _parse_rest_response_raw(completed: subprocess.CompletedProcess[str], target_org: str) -> str:
+    """Parse `api request rest` output without JSON-decoding a successful body (CSV bodies)."""
+    if completed.returncode == 0:
+        return completed.stdout
+    raise _rest_error(completed, target_org)
+
+
+def _rest_error(completed: subprocess.CompletedProcess[str], target_org: str) -> Exception:
     payload = _decode_json(completed.stdout)
     if isinstance(payload, list) and payload and isinstance(payload[0], dict):
         first = payload[0]
         code = first.get("errorCode")
         message = first.get("message")
-        raise SalesforceCliCallError(
+        return SalesforceCliCallError(
             code if isinstance(code, str) else "",
             message if isinstance(message, str) else "",
         )
-    raise SalesforceServiceError(
+    return SalesforceServiceError(
         ERROR_AUTH_FAILED,
         f"sf CLI command failed for org {target_org!r} with no parseable output.",
     )
@@ -253,11 +450,7 @@ def _require_pinned_host(instance_url: str, pinned_host: str) -> None:
     if host != expected:
         raise SalesforceServiceError(
             ERROR_NOT_CONFIGURED,
-            (
-                f"sf CLI org resolves to instance host {host!r}, which does "
-                f"not match the registered instance_host {expected!r} — refusing "
-                "to connect. Fix the CLI alias or the salesforce_org entry."
-            ),
+            (f"sf CLI org resolves to instance host {host!r}, which does not match the registered instance_host {expected!r} — refusing to connect. Fix the CLI alias or the salesforce_org entry."),
         )
 
 

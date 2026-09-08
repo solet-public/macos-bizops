@@ -15,6 +15,7 @@ failure.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import logging
 import os
 import subprocess
@@ -22,6 +23,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from macos_coding_agent_session_plugin.bridge_tracker import BridgeTracker
 from macos_coding_agent_session_plugin.fsevents_watcher import (

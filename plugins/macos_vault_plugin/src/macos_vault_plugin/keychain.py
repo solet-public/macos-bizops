@@ -22,10 +22,13 @@ backed substrate; the plugin owns no Postgres driver per
 """
 
 import base64
+import contextlib
 import logging
 import os
 import urllib.parse
 from typing import Protocol
+
+from . import keychain_interaction
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +152,10 @@ class PerCredentialKeychain(Protocol):
     #4).
     """
 
+    def is_available(self) -> bool:
+        """Return whether the configured Keychain backend is usable."""
+        ...
+
     def store_credential(
         self, plugin_name: str, credential: str, value: bytes,
     ) -> None:
@@ -203,7 +210,20 @@ class PerCredentialKeychain(Protocol):
 class SystemKeychain:
     """macOS Keychain backend via the keyring library. Single substrate post-P0-A."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, allow_user_interaction: bool = False) -> None:
+        """Bind the per-solet service name and the credential-read prompt policy.
+
+        Args:
+            allow_user_interaction: whether this instance's credential READS may
+                block on a macOS Keychain confirmation dialog. Defaults to
+                ``False`` — the daemon-safe policy, under which an unauthorized
+                read fails loud with ``errSecAuthFailed`` instead of hanging
+                forever on a prompt nobody is watching (see
+                :mod:`macos_vault_plugin.keychain_interaction`). Operator-run
+                seed tooling passes ``True``: answering that prompt is how a
+                human re-grants an ACL after the signing identity changes, so
+                the repair path must stay interactive.
+        """
         import keyring
         from keyring.backends import fail
 
@@ -215,6 +235,7 @@ class SystemKeychain:
                 "service name.",
             )
         self._service_name: str = f"{name}-vault"
+        self._allow_user_interaction: bool = allow_user_interaction
         self._available: bool = not isinstance(keyring.get_keyring(), fail.Keyring)
 
     @property
@@ -232,6 +253,15 @@ class SystemKeychain:
         """Whether the host's ``keyring`` backend is a real one (not the fail-shim)."""
         return self._available
 
+    def _read_gate(self) -> contextlib.AbstractContextManager[None]:
+        """Prompt policy for this instance's credential reads.
+
+        Reads are gated, writes are not: a write to a NEW item needs no ACL
+        approval, and a write that DOES need one is only ever issued by operator
+        tooling that can answer it. Only reads produced the indefinite hang.
+        """
+        return keychain_interaction.read_gate(self._allow_user_interaction)
+
     def store(self, account: str, data: bytes) -> None:
         """Store binary data in keychain (base64 encoded)."""
         import keyring
@@ -244,7 +274,8 @@ class SystemKeychain:
         """Retrieve binary data from keychain."""
         import keyring
 
-        encoded = keyring.get_password(self.service_name, account)
+        with self._read_gate():
+            encoded = keyring.get_password(self.service_name, account)
         if encoded is None:
             return None
 
@@ -265,7 +296,8 @@ class SystemKeychain:
         """Check if account exists in keychain."""
         import keyring
 
-        return keyring.get_password(self.service_name, account) is not None
+        with self._read_gate():
+            return keyring.get_password(self.service_name, account) is not None
 
     # ─────────────────────────────────────────────────────────────────────
     # PerCredentialKeychain implementation (W-VAULT-LOCAL-KEYCHAIN Tier 3).
@@ -308,9 +340,10 @@ class SystemKeychain:
     ) -> bytes | None:
         import keyring
 
-        stored = keyring.get_password(
-            self._scoped_service_name(plugin_name), credential,
-        )
+        with self._read_gate():
+            stored = keyring.get_password(
+                self._scoped_service_name(plugin_name), credential,
+            )
         if stored is None:
             return None
         return _decode_credential_value(stored)
@@ -333,12 +366,13 @@ class SystemKeychain:
     ) -> bool:
         import keyring
 
-        return (
-            keyring.get_password(
-                self._scoped_service_name(plugin_name), credential,
+        with self._read_gate():
+            return (
+                keyring.get_password(
+                    self._scoped_service_name(plugin_name), credential,
+                )
+                is not None
             )
-            is not None
-        )
 
     def list_credentials_under_solet(self) -> list[tuple[str, str]]:
         """Enumerate per-credential entries owned by this solet.

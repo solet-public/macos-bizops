@@ -209,7 +209,7 @@ async def case_claude_peer_message_keeps_legacy_shape() -> None:
         "event_type": "post_message",
         "source_event_type": "peer_message",
         "flow_id": "flow-top",
-        "cursor": "7",
+        "cursor": "0",
     }
     if meta != expected_meta:
         _fail("claude legacy metadata shape", f"expected {expected_meta!r}, got {meta!r}")

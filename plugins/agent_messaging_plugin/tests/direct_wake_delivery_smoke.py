@@ -231,8 +231,8 @@ def test_n3_condense_long_body() -> None:
         "S5/N3-CONDENSE: the condensed form keeps the N3 marker prefix verbatim",
     )
     _check(
-        "peer_inbox" in content and "message_id=role:R:agm-long" in content,
-        "S5/N3-CONDENSE: the marker names the bounded retrieval call for the full text",
+        "solet-bridge inbox" in content and "message_id=role:R:agm-long" in content,
+        "S5/N3-CONDENSE: the marker names the complete merged drain for the full text",
     )
     _check(
         content.endswith("…") and _LONG_BODY[:REEMIT_BODY_HEAD_CHARS] in content,

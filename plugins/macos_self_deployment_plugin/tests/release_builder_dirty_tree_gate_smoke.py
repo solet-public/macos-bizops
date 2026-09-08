@@ -350,6 +350,28 @@ def _case_gate_follows_the_clone(rec: support.SmokeRecorder, root: Path) -> None
 
 
 # ---------------------------------------------------------------------------
+# Leg 5a — the release carries setup contracts and their editable target
+# ---------------------------------------------------------------------------
+
+def _case_setup_contracts_ship(rec: support.SmokeRecorder, root: Path) -> None:
+    tag = "setup-contracts-carry"
+    source = support.build_fake_source(root)
+    candidate = _build_or_fail(rec, tag, support.make_manager(source, root / "releases"))
+    rec.check(
+        candidate is not None
+        and (
+            candidate.code_root  # type: ignore[attr-defined]
+            / "solet_setup_contracts" / "src" / "solet_setup_contracts" / "__init__.py"
+        ).is_file(),
+        f"[{tag}] release code/ carries solet_setup_contracts for ananta imports",
+    )
+    rec.check(
+        candidate is not None and candidate.missing_pth_targets == (),  # type: ignore[attr-defined]
+        f"[{tag}] setup-contracts editable target resolves in release code/",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Leg 6 — untracked files ship too, so untracked dirt must refuse
 # ---------------------------------------------------------------------------
 
@@ -648,6 +670,7 @@ def main() -> int:
         _case_positive_attestation(rec, scratch / "positive")
         _case_override_is_disclosed(rec, scratch / "override")
         _case_gate_follows_the_clone(rec, scratch / "follows_clone")
+        _case_setup_contracts_ship(rec, scratch / "setup_contracts")
         _case_untracked_refuses(rec, scratch / "untracked")
         _case_unattestable_is_not_clean(rec, scratch / "unattestable")
         _case_torn_snapshot_refuses(rec, scratch / "torn")

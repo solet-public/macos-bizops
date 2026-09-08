@@ -61,8 +61,35 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parent
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from bootstrap_adapter.models import AdapterError, AdapterRuntime  # noqa: E402
+from bootstrap_adapter.postgres import atomic_write_scram_hba, postgres_binaries  # noqa: E402
+from bootstrap_adapter.protocol import resolve_brew_executable  # noqa: E402
+
+__all__ = ["execute_adapter_request"]
+
+
+def execute_adapter_request(raw: object, **kwargs: Any) -> dict[str, Any]:
+    """Load the stdlib adapter facade only when its transport is requested."""
+
+    from bootstrap_adapter import execute_adapter_request as execute
+
+    return execute(raw, **kwargs)
+
+
+def operation_adapter_main() -> int:
+    """Preserve the historical script while lazily entering adapter mode."""
+
+    from bootstrap_adapter import operation_adapter_main as run_adapter
+
+    return run_adapter()
 
 # The solet-name grammar, inlined from
 # `github_midwife_plugin.constants.NAME_PATTERN` (== `is_valid_solet_name`).
@@ -96,11 +123,7 @@ def _require_solet_name() -> str:
     """
     name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
-        raise RuntimeError(
-            "SOLET_NAME env var is required -- it is this solet's "
-            "database name (database per solet, named after it). The "
-            "driving agent must export it for the bootstrap->genesis chain."
-        )
+        raise RuntimeError("SOLET_NAME env var is required -- it is this solet's database name (database per solet, named after it). The driving agent must export it for the bootstrap->genesis chain.")
     if not _NAME_PATTERN.fullmatch(name):
         raise RuntimeError(
             f"SOLET_NAME {name!r} is not a valid solet name: it must "
@@ -112,7 +135,13 @@ def _require_solet_name() -> str:
     return name
 
 
-_DATABASE = _require_solet_name()
+_OPERATION_ADAPTER_FLAG = "--operation-adapter"
+# The ordinary bootstrap contract still fails at import when SOLET_NAME is
+# absent.  The adapter transport is the one deliberate exception: its closed
+# request carries the name, so binding it from ambient process state would
+# create two competing identities.  `_bind_adapter_solet_name` validates and
+# installs that single request identity before any database helper can run.
+_DATABASE = "" if _OPERATION_ADAPTER_FLAG in sys.argv[1:] else _require_solet_name()
 # This solet's OWN Postgres role. db = schema = role = SOLET_NAME
 # (operator per-solet-isolation ruling, 2026-07-12): a non-superuser role
 # named after the solet, owning its own database. The same single identity
@@ -134,12 +163,34 @@ _SEED_PACKAGE_NAME = "github_midwife_plugin"
 # `ananta` locally, so the three-package order below is the full closure.
 # Cold-agent acceptance finding F-5, 2026-07-12.
 _VAULT_PACKAGE_NAME = "macos_vault_plugin"
-_MIN_POSTGRES_MAJOR = 14  # pgvector's practical floor; keep in sync with the README (Slice H)
+_MESSAGING_PACKAGE_NAME = "agent_messaging_plugin"
+_REQUIRED_DISTRIBUTIONS: tuple[tuple[str, str], ...] = (
+    ("solet-setup-contracts", "solet_setup_contracts"),
+    ("ananta", "ananta"),
+    ("macos-vault-plugin", f"plugins/{_VAULT_PACKAGE_NAME}"),
+    (_SEED_PACKAGE_NAME, f"plugins/{_SEED_PACKAGE_NAME}"),
+    (_MESSAGING_PACKAGE_NAME, f"plugins/{_MESSAGING_PACKAGE_NAME}"),
+)
+_SUPPORTED_POSTGRES_MAJOR = 17
 _LM_SERVER_BASE_URL = "http://localhost:1234/v1"
-_NOMIC_MODEL_SUBSTRING = "nomic"
+# The exact serve-time identifier openai_embeddings_plugin sends as `model`. A substring
+# match on "nomic" is not sufficient: several nomic-embed-text-v1.5 builds exist, they are
+# not interchangeable (f16 vs Q4_K_M produce different vectors), and the wrong one produces
+# no fail-loud signal downstream. See
+# plugins/github_midwife_plugin/knowledge_base/profile_templates/lm_studio_models.yaml.
+_REQUIRED_EMBEDDING_MODEL_ID = "text-embedding-nomic-embed-text-v1.5-embedding"
 _PROBE_TIMEOUT_S = 10
 _INSTALL_TIMEOUT_S = 300
 _ASSUME_YES_ENV = "SOLET_ASSUME_YES"
+_FORMULA_KEG_MARKER = "/Cellar/solet/"
+_FINGERPRINT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ADAPTER_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{1,127}$")
+_ADAPTER_REF_PATTERN = re.compile(r"^[a-z][a-z0-9_]*::[a-z][a-z0-9_.]*$")
+_ADAPTER_INPUT_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,127}$")
+_SECRET_FIELD_PATTERN = re.compile(
+    r"password|secret|token|credential|private_key|oauth_code",
+    re.IGNORECASE,
+)
 
 # The default-scram pg_hba block (KB 20/03; per-role isolation R3,
 # 2026-07-12), inserted immediately ABOVE the blanket `trust` block
@@ -201,7 +252,9 @@ class LMServerState(enum.Enum):
 
 class VenvState(enum.Enum):
     ABSENT = "absent"
-    PRESENT = "present"
+    INCOMPLETE = "incomplete"
+    INTERPRETER_DANGLING = "interpreter_dangling"
+    PRESENT_CLOSED = "present_closed"
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -229,8 +282,7 @@ def confirm_interactive(message: str) -> bool:
     try:
         reply = input("Proceed? [y/N] ").strip().lower()
     except EOFError:
-        print("stdin is not interactive -- treating as decline. Re-run from a "
-              "terminal, or pipe an explicit 'y' to confirm this step.")
+        print("stdin is not interactive -- treating as decline. Re-run from a terminal, or pipe an explicit 'y' to confirm this step.")
         return False
     return reply in ("y", "yes")
 
@@ -272,24 +324,90 @@ def _print_command(cmd: Sequence[str]) -> None:
 # ── Homebrew ─────────────────────────────────────────────────────────
 
 
-def probe_homebrew() -> HomebrewState:
-    return HomebrewState.PRESENT if shutil.which("brew") else HomebrewState.ABSENT
+def _resolution_runtime(ctx: BootstrapContext) -> AdapterRuntime:
+    """Adapt Layer 0's injected seams to the shared executable resolvers."""
+
+    return AdapterRuntime(ctx.run, shutil.which, datetime.now, _DATABASE, ctx.target)
 
 
-def ensure_homebrew(_ctx: BootstrapContext) -> dict[str, Any]:
+def _brew_executable(ctx: BootstrapContext) -> str | None:
+    return resolve_brew_executable(_resolution_runtime(ctx))
+
+
+def _postgres_executables(ctx: BootstrapContext) -> dict[str, str | None]:
+    return postgres_binaries(_resolution_runtime(ctx))
+
+
+def _postgres_command(ctx: BootstrapContext, executable: str, *arguments: str) -> list[str]:
+    resolved = _postgres_executables(ctx)[executable]
+    if resolved is None:
+        raise BootstrapError(f"PostgreSQL executable `{executable}` is unavailable")
+    return [resolved, *arguments]
+
+
+def _run_host_command(
+    ctx: BootstrapContext,
+    command: list[str],
+    *,
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return ctx.run(command, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BootstrapError(f"host executable `{command[0]}` could not run: {exc}") from exc
+
+
+def _run_confirmed_brew_step(
+    ctx: BootstrapContext,
+    *,
+    step_name: str,
+    state: str,
+    command_arguments: Sequence[Sequence[str]],
+    message_prefix: str,
+    declined_detail: str,
+    completed_state: str,
+) -> dict[str, Any]:
+    brew = _brew_executable(ctx)
+    if brew is None:
+        return {
+            "step_name": step_name,
+            "status": "needs_user_action",
+            "state": state,
+            "detail": "Homebrew executable is unavailable",
+        }
+    commands = [[brew, *arguments] for arguments in command_arguments]
+    message = f"{message_prefix}\n  " + "\n  ".join(f"$ {' '.join(command)}" for command in commands)
+    if not ctx.confirm(message):
+        return {
+            "step_name": step_name,
+            "status": "needs_user_action",
+            "state": state,
+            "detail": declined_detail,
+        }
+    for command in commands:
+        _print_command(command)
+        result = _run_host_command(ctx, command, timeout=_INSTALL_TIMEOUT_S)
+        if result.returncode != 0:
+            raise BootstrapError(f"`{' '.join(command)}` failed (exit {result.returncode})")
+    return {"step_name": step_name, "status": "completed", "state": completed_state}
+
+
+def probe_homebrew(ctx: BootstrapContext) -> HomebrewState:
+    return HomebrewState.PRESENT if _brew_executable(ctx) is not None else HomebrewState.ABSENT
+
+
+def ensure_homebrew(ctx: BootstrapContext) -> dict[str, Any]:
     """Homebrew absence is ALWAYS a stop-and-ask -- bootstrap.py never
     pipes Homebrew's installer script itself (the exact curl|bash trust
     boundary genesis exists to avoid, per the design doc's framing).
     """
-    if probe_homebrew() is HomebrewState.PRESENT:
+    if probe_homebrew(ctx) is HomebrewState.PRESENT:
         return {"step_name": "homebrew", "status": "skipped", "state": "present"}
     return {
-        "step_name": "homebrew", "status": "needs_user_action", "state": "absent",
-        "detail": (
-            "Homebrew not found on PATH. Install it yourself from "
-            "https://brew.sh (bootstrap.py does not auto-run installer "
-            "scripts fetched from the internet), then re-run bootstrap.py."
-        ),
+        "step_name": "homebrew",
+        "status": "needs_user_action",
+        "state": "absent",
+        "detail": ("Homebrew not found on PATH. Install it yourself from https://brew.sh (bootstrap.py does not auto-run installer scripts fetched from the internet), then re-run bootstrap.py."),
     }
 
 
@@ -297,44 +415,53 @@ def ensure_homebrew(_ctx: BootstrapContext) -> dict[str, Any]:
 
 
 def _psql_version_major(ctx: BootstrapContext) -> int | None:
-    if not shutil.which("psql"):
+    psql = _postgres_executables(ctx)["psql"]
+    if psql is None:
         return None
-    result = ctx.run(["psql", "--version"], capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S)
+    try:
+        result = _run_host_command(ctx, [psql, "--version"], timeout=_PROBE_TIMEOUT_S)
+    except BootstrapError:
+        return None
     match = re.search(r"(\d+)(?:\.\d+)*", result.stdout)
     return int(match.group(1)) if match else None
 
 
 def _postgres_accepting_connections(ctx: BootstrapContext) -> bool:
-    if not shutil.which("pg_isready"):
+    pg_isready = _postgres_executables(ctx)["pg_isready"]
+    if pg_isready is None:
         return False
-    result = ctx.run(
-        ["pg_isready", "-h", "localhost", "-p", "5432"],
-        capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
-    )
+    try:
+        result = _run_host_command(
+            ctx,
+            [pg_isready, "-h", "localhost", "-p", "5432"],
+            timeout=_PROBE_TIMEOUT_S,
+        )
+    except BootstrapError:
+        return False
     return result.returncode == 0
 
 
 def _postgres_is_homebrew_managed(ctx: BootstrapContext) -> bool:
-    result = ctx.run(
-        ["brew", "list", "--formula"], capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
-    )
+    brew = _brew_executable(ctx)
+    if brew is None:
+        return False
+    try:
+        result = _run_host_command(ctx, [brew, "list", "--formula"], timeout=_PROBE_TIMEOUT_S)
+    except BootstrapError:
+        return False
     return any(line.startswith("postgresql") for line in result.stdout.splitlines())
 
 
 def probe_postgres(ctx: BootstrapContext) -> tuple[PostgresState, str]:
     major = _psql_version_major(ctx)
     if major is None:
-        return PostgresState.ABSENT, "no `psql` on PATH"
+        return PostgresState.ABSENT, "no resolved `psql` executable"
     if not _postgres_is_homebrew_managed(ctx):
-        return PostgresState.NON_HOMEBREW_INSTALL, (
-            f"psql {major}.x found but not Homebrew-managed (Postgres.app / "
-            "EDB / other install channel) -- adaptive handling for that "
-            "channel is out of scope for the golden path."
-        )
+        return PostgresState.NON_HOMEBREW_INSTALL, (f"psql {major}.x found but not Homebrew-managed (Postgres.app / EDB / other install channel) -- adaptive handling for that channel is out of scope for the golden path.")
     if not _postgres_accepting_connections(ctx):
         return PostgresState.PRESENT_NOT_RUNNING, "Homebrew postgresql installed but not accepting connections"
-    if major < _MIN_POSTGRES_MAJOR:
-        return PostgresState.RUNNING_WRONG_VERSION, f"running major version {major} < floor {_MIN_POSTGRES_MAJOR}"
+    if major != _SUPPORTED_POSTGRES_MAJOR:
+        return PostgresState.RUNNING_WRONG_VERSION, (f"running major version {major}; supported major is {_SUPPORTED_POSTGRES_MAJOR}")
     return PostgresState.RUNNING_HEALTHY_COMPATIBLE, f"running Homebrew postgresql {major}.x"
 
 
@@ -344,45 +471,46 @@ def ensure_postgres(ctx: BootstrapContext) -> dict[str, Any]:
         return {"step_name": "postgres", "status": "skipped", "state": state.value, "detail": detail}
     if state in (PostgresState.NON_HOMEBREW_INSTALL, PostgresState.RUNNING_WRONG_VERSION):
         return {
-            "step_name": "postgres", "status": "needs_user_action", "state": state.value,
-            "detail": (
-                f"{detail}. Reuse a healthy compatible install rather than force a "
-                "parallel one -- present the upgrade-vs-parallel-install decision "
-                "to the user; bootstrap.py never uninstalls or overwrites an "
-                "existing install."
-            ),
+            "step_name": "postgres",
+            "status": "needs_user_action",
+            "state": state.value,
+            "detail": (f"{detail}. Reuse a healthy compatible install rather than force a parallel one -- present the upgrade-vs-parallel-install decision to the user; bootstrap.py never uninstalls or overwrites an existing install."),
         }
     if state is PostgresState.PRESENT_NOT_RUNNING:
-        cmd = ["brew", "services", "start", "postgresql"]
-        message = f"Homebrew postgresql is installed but not running. Will run: {' '.join(cmd)}"
-        if not ctx.confirm(message):
-            return {"step_name": "postgres", "status": "needs_user_action", "state": state.value, "detail": "user declined to start postgresql"}
-        _print_command(cmd)
-        result = ctx.run(cmd, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_S)
-        if result.returncode != 0:
-            raise BootstrapError(f"`brew services start postgresql` failed (exit {result.returncode})")
-        return {"step_name": "postgres", "status": "completed", "state": "started"}
+        return _run_confirmed_brew_step(
+            ctx,
+            step_name="postgres",
+            state=state.value,
+            command_arguments=(("services", "start", "postgresql"),),
+            message_prefix="Homebrew postgresql is installed but not running. Will run:",
+            declined_detail="user declined to start postgresql",
+            completed_state="started",
+        )
 
     # ABSENT: install via Homebrew.
-    install_cmd = ["brew", "install", "postgresql"]
-    start_cmd = ["brew", "services", "start", "postgresql"]
-    message = f"Postgres not found. Will run:\n  $ {' '.join(install_cmd)}\n  $ {' '.join(start_cmd)}"
-    if not ctx.confirm(message):
-        return {"step_name": "postgres", "status": "needs_user_action", "state": "absent", "detail": "user declined to install postgresql"}
-    for cmd in (install_cmd, start_cmd):
-        _print_command(cmd)
-        result = ctx.run(cmd, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_S)
-        if result.returncode != 0:
-            raise BootstrapError(f"`{' '.join(cmd)}` failed (exit {result.returncode})")
-    return {"step_name": "postgres", "status": "completed", "state": "installed_and_started"}
+    return _run_confirmed_brew_step(
+        ctx,
+        step_name="postgres",
+        state=state.value,
+        command_arguments=(
+            ("install", "postgresql"),
+            ("services", "start", "postgresql"),
+        ),
+        message_prefix="Postgres not found. Will run:",
+        declined_detail="user declined to install postgresql",
+        completed_state="installed_and_started",
+    )
 
 
 def probe_pgvector(ctx: BootstrapContext) -> PgvectorState:
-    result = ctx.run(
-        ["psql", "-U", _ADMIN_ROLE, "-d", "postgres", "-tAc",
-         "SELECT 1 FROM pg_available_extensions WHERE name='vector'"],
-        capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
-    )
+    try:
+        result = _run_host_command(
+            ctx,
+            _postgres_command(ctx, "psql", "-U", _ADMIN_ROLE, "-d", "postgres", "-tAc", "SELECT 1 FROM pg_available_extensions WHERE name='vector'"),
+            timeout=_PROBE_TIMEOUT_S,
+        )
+    except BootstrapError:
+        return PgvectorState.NOT_INSTALLED
     return PgvectorState.AVAILABLE if result.stdout.strip() == "1" else PgvectorState.NOT_INSTALLED
 
 
@@ -390,33 +518,43 @@ def ensure_pgvector(ctx: BootstrapContext) -> dict[str, Any]:
     state = probe_pgvector(ctx)
     if state is PgvectorState.AVAILABLE:
         return {"step_name": "pgvector", "status": "skipped", "state": state.value}
-    cmd = ["brew", "install", "pgvector"]
-    if not ctx.confirm(f"pgvector extension not available. Will run: {' '.join(cmd)}"):
-        return {"step_name": "pgvector", "status": "needs_user_action", "state": "not_installed", "detail": "user declined to install pgvector"}
-    _print_command(cmd)
-    result = ctx.run(cmd, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_S)
-    if result.returncode != 0:
-        raise BootstrapError(f"`brew install pgvector` failed (exit {result.returncode})")
+    completed = _run_confirmed_brew_step(
+        ctx,
+        step_name="pgvector",
+        state=state.value,
+        command_arguments=(("install", "pgvector"),),
+        message_prefix="pgvector extension not available. Will run:",
+        declined_detail="user declined to install pgvector",
+        completed_state="installed",
+    )
+    if completed["status"] != "completed":
+        return completed
     state_after = probe_pgvector(ctx)
     if state_after is not PgvectorState.AVAILABLE:
         raise BootstrapError("pgvector install reported success but the extension is still not available")
-    return {"step_name": "pgvector", "status": "completed", "state": "installed"}
+    return completed
 
 
 # ── Role + database + scram (NO credential value -- Layer 1's job) ─
 
 
 def probe_role_and_db(ctx: BootstrapContext) -> RoleDbState:
-    role_exists = ctx.run(
-        ["psql", "-U", _ADMIN_ROLE, "-d", "postgres", "-tAc",
-         f"SELECT 1 FROM pg_roles WHERE rolname='{_ROLE_NAME}'"],
-        capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
-    ).stdout.strip() == "1"
-    db_exists = ctx.run(
-        ["psql", "-U", _ADMIN_ROLE, "-d", "postgres", "-tAc",
-         f"SELECT 1 FROM pg_database WHERE datname='{_DATABASE}'"],
-        capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
-    ).stdout.strip() == "1"
+    role_exists = (
+        _run_host_command(
+            ctx,
+            _postgres_command(ctx, "psql", "-U", _ADMIN_ROLE, "-d", "postgres", "-tAc", f"SELECT 1 FROM pg_roles WHERE rolname='{_ROLE_NAME}'"),
+            timeout=_PROBE_TIMEOUT_S,
+        ).stdout.strip()
+        == "1"
+    )
+    db_exists = (
+        _run_host_command(
+            ctx,
+            _postgres_command(ctx, "psql", "-U", _ADMIN_ROLE, "-d", "postgres", "-tAc", f"SELECT 1 FROM pg_database WHERE datname='{_DATABASE}'"),
+            timeout=_PROBE_TIMEOUT_S,
+        ).stdout.strip()
+        == "1"
+    )
     if role_exists and db_exists:
         return RoleDbState.PRESENT_HEALTHY
     if not role_exists and not db_exists:
@@ -432,7 +570,13 @@ def probe_role_and_db(ctx: BootstrapContext) -> RoleDbState:
 
 
 def _pg_hba_path(ctx: BootstrapContext) -> Path | None:
-    prefix = ctx.run(["brew", "--prefix"], capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S).stdout.strip()
+    brew = _brew_executable(ctx)
+    if brew is None:
+        return None
+    try:
+        prefix = _run_host_command(ctx, [brew, "--prefix"], timeout=_PROBE_TIMEOUT_S).stdout.strip()
+    except BootstrapError:
+        return None
     if not prefix:
         return None
     candidates = sorted(Path(prefix, "var").glob("postgresql@*"))
@@ -451,10 +595,10 @@ def _public_connect_revoked(ctx: BootstrapContext) -> bool:
     2026-07-13: the create path bundled the revoke but a manually-reconciled
     PRESENT_HEALTHY db skipped it silently).
     """
-    out = ctx.run(
-        ["psql", "-U", _ADMIN_ROLE, "-d", "postgres", "-tAc",
-         f"SELECT COALESCE(datacl::text, '') FROM pg_database WHERE datname='{_DATABASE}'"],
-        capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
+    out = _run_host_command(
+        ctx,
+        _postgres_command(ctx, "psql", "-U", _ADMIN_ROLE, "-d", "postgres", "-tAc", f"SELECT COALESCE(datacl::text, '') FROM pg_database WHERE datname='{_DATABASE}'"),
+        timeout=_PROBE_TIMEOUT_S,
     ).stdout.strip()
     if not out:
         return False
@@ -469,28 +613,11 @@ def _scram_lines_present(pg_hba_path: Path) -> bool:
     return all(line in content for line in _DEFAULT_SCRAM_LINES)
 
 
-def _hba_with_default_scram(content: str) -> str:
-    """Return `content` with the default-scram block inserted immediately
-    ABOVE the first blanket `all all ... trust` line (first-match-wins), or
-    prepended if no such line exists. Idempotent -- returns `content`
-    unchanged when the block is already present. Only INSERTS: existing lines
-    (e.g. a previous solet's own `ananta` scram lines) stay byte-identical.
-    """
-    if all(line in content for line in _DEFAULT_SCRAM_LINES):
-        return content
-    block = "\n".join(_DEFAULT_SCRAM_LINES) + "\n"
-    lines = content.splitlines(keepends=True)
-    for index, line in enumerate(lines):
-        parts = line.split()
-        if len(parts) >= 4 and parts[1] == "all" and parts[2] == "all" and parts[-1] == "trust":
-            lines.insert(index, block)
-            return "".join(lines)
-    return block + content
-
-
 def _inconsistent_role_db_report(state: RoleDbState) -> dict[str, Any]:
     return {
-        "step_name": "role_and_db", "status": "needs_user_action", "state": state.value,
+        "step_name": "role_and_db",
+        "status": "needs_user_action",
+        "state": state.value,
         "detail": (
             f"exactly one of (role={_ROLE_NAME!r}, db={_DATABASE!r}) already exists -- "
             "an inconsistent partial state. Under per-solet isolation both are "
@@ -504,7 +631,12 @@ def _inconsistent_role_db_report(state: RoleDbState) -> dict[str, Any]:
 
 
 def _role_db_action_plan(
-    state: RoleDbState, *, scram_ok: bool, revoke_ok: bool, vector_ok: bool, pg_hba_path: Path,
+    state: RoleDbState,
+    *,
+    scram_ok: bool,
+    revoke_ok: bool,
+    vector_ok: bool,
+    pg_hba_path: Path,
 ) -> list[str]:
     """The stop-and-present-facts action list for ensure_role_and_db's confirm."""
     actions: list[str] = []
@@ -530,7 +662,13 @@ def _role_db_action_plan(
 
 
 def _apply_role_db_actions(
-    ctx: BootstrapContext, state: RoleDbState, *, scram_ok: bool, revoke_ok: bool, vector_ok: bool, pg_hba_path: Path,
+    ctx: BootstrapContext,
+    state: RoleDbState,
+    *,
+    scram_ok: bool,
+    revoke_ok: bool,
+    vector_ok: bool,
+    pg_hba_path: Path,
 ) -> None:
     """Execute exactly what _role_db_action_plan presented (same branch logic)."""
     if state is RoleDbState.ABSENT:
@@ -579,11 +717,11 @@ def _create_role_db_and_revoke(ctx: BootstrapContext) -> None:
     connect to it.
     """
     for cmd in (
-        ["createuser", "-U", _ADMIN_ROLE, _ROLE_NAME],
-        ["createdb", "-U", _ADMIN_ROLE, "-O", _ROLE_NAME, _DATABASE],
+        _postgres_command(ctx, "createuser", "-U", _ADMIN_ROLE, _ROLE_NAME),
+        _postgres_command(ctx, "createdb", "-U", _ADMIN_ROLE, "-O", _ROLE_NAME, _DATABASE),
     ):
         _print_command(cmd)
-        result = ctx.run(cmd, capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S)
+        result = _run_host_command(ctx, cmd, timeout=_PROBE_TIMEOUT_S)
         if result.returncode != 0:
             raise BootstrapError(
                 f"`{' '.join(cmd)}` failed (exit {result.returncode}). "
@@ -609,17 +747,22 @@ def _create_role_db_and_revoke(ctx: BootstrapContext) -> None:
 def _revoke_public_connect(ctx: BootstrapContext) -> None:
     """The R4 `REVOKE ... FROM PUBLIC` statement, shared by the create path and
     the reconciled-db repair path (cold-run finding D3). Idempotent."""
-    revoke_cmd = [
-        "psql", "-U", _ADMIN_ROLE, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c",
+    revoke_cmd = _postgres_command(
+        ctx,
+        "psql",
+        "-U",
+        _ADMIN_ROLE,
+        "-d",
+        "postgres",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
         f'REVOKE CONNECT, TEMP ON DATABASE "{_DATABASE}" FROM PUBLIC;',
-    ]
+    )
     _print_command(revoke_cmd)
-    result = ctx.run(revoke_cmd, capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S)
+    result = _run_host_command(ctx, revoke_cmd, timeout=_PROBE_TIMEOUT_S)
     if result.returncode != 0:
-        raise BootstrapError(
-            f"R4 `REVOKE CONNECT, TEMP ON DATABASE {_DATABASE!r} FROM PUBLIC` failed "
-            f"(exit {result.returncode})"
-        )
+        raise BootstrapError(f"R4 `REVOKE CONNECT, TEMP ON DATABASE {_DATABASE!r} FROM PUBLIC` failed (exit {result.returncode})")
 
 
 def _vector_extension_installed(ctx: BootstrapContext) -> bool:
@@ -629,10 +772,10 @@ def _vector_extension_installed(ctx: BootstrapContext) -> bool:
     extension AVAILABLE machine-wide but does not activate it in any specific
     database. A freshly createdb'd database never has it.
     """
-    out = ctx.run(
-        ["psql", "-U", _ADMIN_ROLE, "-d", _DATABASE, "-tAc",
-         "SELECT 1 FROM pg_extension WHERE extname='vector'"],
-        capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
+    out = _run_host_command(
+        ctx,
+        _postgres_command(ctx, "psql", "-U", _ADMIN_ROLE, "-d", _DATABASE, "-tAc", "SELECT 1 FROM pg_extension WHERE extname='vector'"),
+        timeout=_PROBE_TIMEOUT_S,
     ).stdout.strip()
     return out == "1"
 
@@ -645,20 +788,22 @@ def _create_vector_extension(ctx: BootstrapContext) -> None:
     re-running safe, shared by the create path and the reconciled-db repair
     path.
     """
-    cmd = [
-        "psql", "-U", _ADMIN_ROLE, "-d", _DATABASE, "-v", "ON_ERROR_STOP=1", "-c",
+    cmd = _postgres_command(
+        ctx,
+        "psql",
+        "-U",
+        _ADMIN_ROLE,
+        "-d",
+        _DATABASE,
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
         "CREATE EXTENSION IF NOT EXISTS vector;",
-    ]
+    )
     _print_command(cmd)
-    result = ctx.run(cmd, capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S)
+    result = _run_host_command(ctx, cmd, timeout=_PROBE_TIMEOUT_S)
     if result.returncode != 0:
-        raise BootstrapError(
-            f"`CREATE EXTENSION IF NOT EXISTS vector` on database {_DATABASE!r} "
-            f"failed (exit {result.returncode}). Requires the pgvector "
-            f"extension files to be installed machine-wide first (see the "
-            f"pgvector step above) and {_ADMIN_ROLE!r} to have CREATE "
-            f"privilege on the database."
-        )
+        raise BootstrapError(f"`CREATE EXTENSION IF NOT EXISTS vector` on database {_DATABASE!r} failed (exit {result.returncode}). Requires the pgvector extension files to be installed machine-wide first (see the pgvector step above) and {_ADMIN_ROLE!r} to have CREATE privilege on the database.")
 
 
 def _write_default_scram_block(ctx: BootstrapContext, pg_hba_path: Path) -> None:
@@ -667,11 +812,21 @@ def _write_default_scram_block(ctx: BootstrapContext, pg_hba_path: Path) -> None
     `pg_reload_conf()`.
     """
     print(f"inserting the default-scram block above the trust block in {pg_hba_path}")
-    original = pg_hba_path.read_text() if pg_hba_path.is_file() else ""
-    pg_hba_path.write_text(_hba_with_default_scram(original))
-    reload_cmd = ["psql", "-U", _ADMIN_ROLE, "-d", "postgres", "-c", "SELECT pg_reload_conf();"]
+    try:
+        atomic_write_scram_hba(pg_hba_path)
+    except AdapterError as exc:
+        if "safety or layout changed" in str(exc):
+            raise BootstrapError(
+                "pg_hba.conf layout is unrecognized or unsafe; inspect the file, "
+                "extend the recognizer or edit it manually, and re-run bootstrap. "
+                "bootstrap will not auto-write an unrecognized authentication file"
+            ) from exc
+        raise BootstrapError(f"could not safely apply pg_hba.conf SCRAM policy: {exc}") from exc
+    except OSError as exc:
+        raise BootstrapError(f"could not safely apply pg_hba.conf SCRAM policy: {exc}") from exc
+    reload_cmd = _postgres_command(ctx, "psql", "-U", _ADMIN_ROLE, "-d", "postgres", "-c", "SELECT pg_reload_conf();")
     _print_command(reload_cmd)
-    result = ctx.run(reload_cmd, capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S)
+    result = _run_host_command(ctx, reload_cmd, timeout=_PROBE_TIMEOUT_S)
     if result.returncode != 0:
         raise BootstrapError(f"pg_reload_conf() failed (exit {result.returncode})")
 
@@ -686,7 +841,7 @@ def probe_lm_server(http_get: HttpGetter) -> LMServerState:
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return LMServerState.ABSENT
     model_ids = [str(m.get("id", "")) for m in payload.get("data", [])]
-    if any(_NOMIC_MODEL_SUBSTRING in model_id.lower() for model_id in model_ids):
+    if _REQUIRED_EMBEDDING_MODEL_ID in model_ids:
         return LMServerState.RUNNING_CORRECT_MODEL
     return LMServerState.RUNNING_NO_MATCHING_MODEL
 
@@ -701,15 +856,24 @@ def ensure_lm_server(ctx: BootstrapContext) -> dict[str, Any]:
         return {"step_name": "lm_server", "status": "skipped", "state": state.value}
     if state is LMServerState.RUNNING_NO_MATCHING_MODEL:
         return {
-            "step_name": "lm_server", "status": "needs_user_action", "state": state.value,
-            "detail": f"LM Server is running but no loaded model matches {_NOMIC_MODEL_SUBSTRING!r} -- load a nomic embedding model.",
+            "step_name": "lm_server",
+            "status": "needs_user_action",
+            "state": state.value,
+            "detail": (
+                f"LM Server is running but {_REQUIRED_EMBEDDING_MODEL_ID!r} is not loaded. "
+                f"Fetch it — the full HF URL is required, the owner/repo shorthand fails:\n"
+                f"  lms get \"https://huggingface.co/gaianet/Nomic-embed-text-v1.5-Embedding-GGUF\" --yes"
+            ),
         }
     return {
-        "step_name": "lm_server", "status": "needs_user_action", "state": state.value,
+        "step_name": "lm_server",
+        "status": "needs_user_action",
+        "state": state.value,
         "detail": (
-            f"no local embeddings server reachable at {_LM_SERVER_BASE_URL}. "
-            "Install/launch LM Studio, enable server mode, and load a nomic "
-            "embedding model (e.g. nomic-embed-text)."
+            f"no local embeddings server reachable at {_LM_SERVER_BASE_URL}. Install/launch LM Studio, "
+            f"enable server mode, then fetch {_REQUIRED_EMBEDDING_MODEL_ID!r} — the full HF URL is required, "
+            f"the owner/repo shorthand fails:\n"
+            f"  lms get \"https://huggingface.co/gaianet/Nomic-embed-text-v1.5-Embedding-GGUF\" --yes"
         ),
     }
 
@@ -718,60 +882,124 @@ def ensure_lm_server(ctx: BootstrapContext) -> dict[str, Any]:
 
 
 def probe_venv(ctx: BootstrapContext) -> VenvState:
-    return VenvState.PRESENT if (ctx.venv_dir / "bin" / "python3").exists() else VenvState.ABSENT
+    state, _facts = _probe_dependency_closure(ctx)
+    return state
+
+
+def _probe_dependency_closure(
+    ctx: BootstrapContext,
+) -> tuple[VenvState, dict[str, bool]]:
+    from bootstrap_adapter import ClosureState, probe_dependency_closure
+
+    state, facts = probe_dependency_closure(ctx.target, ctx.run)
+    if state is ClosureState.ABSENT:
+        return VenvState.ABSENT, facts
+    if state is ClosureState.INCOMPLETE:
+        return VenvState.INCOMPLETE, facts
+    if state is ClosureState.INTERPRETER_DANGLING:
+        return VenvState.INTERPRETER_DANGLING, facts
+    if state is ClosureState.PRESENT_CLOSED:
+        return VenvState.PRESENT_CLOSED, facts
+    raise BootstrapError(f"unrecognized dependency-closure state: {state!r}")
+
+
+def _resolve_long_lived_python(ctx: BootstrapContext, requested: str | None = None) -> str:
+    candidates: list[str] = []
+    if requested:
+        candidates.append(requested)
+    discovered = shutil.which("python3.13")
+    if discovered:
+        candidates.append(discovered)
+    candidates.extend(("/opt/homebrew/bin/python3.13", "/usr/local/bin/python3.13"))
+    if sys.version_info[:2] == (3, 13):
+        candidates.append(sys.executable)
+    for candidate in dict.fromkeys(candidates):
+        if _FORMULA_KEG_MARKER in candidate or not Path(candidate).is_file():
+            continue
+        try:
+            result = ctx.run(
+                [candidate, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=_PROBE_TIMEOUT_S,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0 and f"{result.stdout} {result.stderr}".strip().startswith(
+            "Python 3.13",
+        ):
+            return candidate
+    raise BootstrapError(
+        "no executable long-lived Python 3.13 outside the Solet formula keg is available",
+    )
+
+
+def _apply_dependency_closure(ctx: BootstrapContext, *, base_python: str | None = None) -> None:
+    interpreter = _resolve_long_lived_python(ctx, requested=base_python)
+    venv_python = ctx.venv_dir / "bin" / "python3"
+    venv_cmd = [interpreter, "-m", "venv"]
+    if ctx.venv_dir.exists():
+        venv_cmd.append("--upgrade")
+    venv_cmd.append(str(ctx.venv_dir))
+    _run_required(ctx, venv_cmd, "venv construction")
+    backend_cmd = [
+        str(venv_python),
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "pip",
+        "setuptools",
+        "wheel",
+    ]
+    _run_required(ctx, backend_cmd, "build-backend installation")
+    for _distribution, relative in _REQUIRED_DISTRIBUTIONS:
+        package_dir = ctx.target / relative
+        if not package_dir.is_dir():
+            raise BootstrapError(f"required seed package directory is missing: {relative}")
+        install_cmd = [
+            str(venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--no-build-isolation",
+            "-e",
+            str(package_dir),
+        ]
+        _run_required(ctx, install_cmd, f"seed install for {relative}")
+
+
+def _run_required(ctx: BootstrapContext, command: list[str], label: str) -> None:
+    _print_command(command)
+    try:
+        result = ctx.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=_INSTALL_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BootstrapError(f"{label} could not execute") from exc
+    if result.returncode != 0:
+        raise BootstrapError(f"{label} failed (exit {result.returncode})")
 
 
 def ensure_venv_and_seed(ctx: BootstrapContext) -> dict[str, Any]:
-    if probe_venv(ctx) is VenvState.PRESENT:
-        return {"step_name": "venv_and_seed", "status": "skipped", "state": "present"}
+    state = probe_venv(ctx)
+    if state is VenvState.PRESENT_CLOSED:
+        return {"step_name": "venv_and_seed", "status": "skipped", "state": state.value}
 
-    if not ctx.confirm(
-        f"Will create a venv at {ctx.venv_dir} and install the seed "
-        f"(ananta + {_VAULT_PACKAGE_NAME} + {_SEED_PACKAGE_NAME})."
-    ):
-        return {"step_name": "venv_and_seed", "status": "needs_user_action", "state": "absent", "detail": "user declined venv creation"}
+    if not ctx.confirm(f"Will create or repair the venv at {ctx.venv_dir} and install the closed seed package set plus its private solet bridge CLI."):
+        return {
+            "step_name": "venv_and_seed",
+            "status": "needs_user_action",
+            "state": state.value,
+            "detail": "user declined venv dependency-closure construction or repair",
+        }
 
-    venv_cmd = [sys.executable, "-m", "venv", str(ctx.venv_dir)]
-    _print_command(venv_cmd)
-    result = ctx.run(venv_cmd, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_S)
-    if result.returncode != 0:
-        raise BootstrapError(f"venv creation failed (exit {result.returncode})")
+    _apply_dependency_closure(ctx)
 
-    venv_python = ctx.venv_dir / "bin" / "python3"
-    # A stock python3.13 venv ships pip only -- no setuptools/wheel -- and the
-    # --no-build-isolation editable installs below then die with
-    # BackendUnavailable("Cannot import 'setuptools.build_meta'"). Same F8
-    # gotcha the Layer-1 seams patch via BUILD_BACKEND_PACKAGES
-    # (github_midwife_plugin/constants.py); Layer 0 is stdlib-only so the
-    # package list is inlined here. Caught live by the 2026-07-12 cold-agent
-    # seed acceptance test.
-    backend_cmd = [str(venv_python), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"]
-    _print_command(backend_cmd)
-    result = ctx.run(backend_cmd, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_S)
-    if result.returncode != 0:
-        raise BootstrapError(
-            f"build-backend install (pip/setuptools/wheel) failed (exit {result.returncode}): "
-            f"{(result.stderr or '').strip()[:500]}"
-        )
-
-    for package_dir in (
-        ctx.target / "ananta",
-        ctx.target / "plugins" / _VAULT_PACKAGE_NAME,
-        ctx.target / "plugins" / _SEED_PACKAGE_NAME,
-    ):
-        install_cmd = [str(venv_python), "-m", "pip", "install", "--no-build-isolation", "-e", str(package_dir)]
-        _print_command(install_cmd)
-        result = ctx.run(install_cmd, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_S)
-        if result.returncode != 0:
-            # stderr tail included (parity with acquisition.py's sibling): the
-            # pip resolution error IS the diagnosis; a bare exit code buried
-            # the F-5 finding behind a manual re-run.
-            raise BootstrapError(
-                f"seed install failed for {package_dir} (exit {result.returncode}): "
-                f"{(result.stderr or '').strip()[:500]}"
-            )
-
-    return {"step_name": "venv_and_seed", "status": "completed", "state": "created_and_seeded"}
+    return {"step_name": "venv_and_seed", "status": "completed", "state": "dependency_closure_applied"}
 
 
 # ── Handoff to Layer 1 ───────────────────────────────────────────────
@@ -781,7 +1009,7 @@ def handoff(ctx: BootstrapContext) -> dict[str, Any]:
     venv_python = ctx.venv_dir / "bin" / "python3"
     cmd = [str(venv_python), "-m", "github_midwife_plugin.genesis"]
     _print_command(cmd)
-    result = ctx.run(cmd, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_S)
+    result = _run_host_command(ctx, cmd, timeout=_INSTALL_TIMEOUT_S)
     if result.returncode != 0:
         # Codex must-fix (2026-07-09): genesis.py's main() prints its
         # "FATAL: ..." diagnostic to STDERR, not stdout -- the prior
@@ -819,7 +1047,8 @@ _TERMINAL_STATUSES = ("failed", "needs_user_action")
 
 
 def run_steps(
-    ctx: BootstrapContext, step_runners: Sequence[tuple[str, _StepRunner]] = BOOTSTRAP_STEP_RUNNERS,
+    ctx: BootstrapContext,
+    step_runners: Sequence[tuple[str, _StepRunner]] = BOOTSTRAP_STEP_RUNNERS,
 ) -> list[dict[str, Any]]:
     """Execute `step_runners` in order; stop at the first failure OR
     stop-and-ask. `step_runners` is injectable (mirrors the Layer 1
@@ -850,6 +1079,11 @@ def _step_summary_line(step: dict[str, Any]) -> str:
 
 
 def main() -> int:
+    if sys.argv[1:] == [_OPERATION_ADAPTER_FLAG]:
+        return operation_adapter_main()
+    if sys.argv[1:]:
+        print(f"unsupported bootstrap arguments: {sys.argv[1:]!r}", file=sys.stderr)
+        return 2
     target = Path(__file__).resolve().parent
     ctx = BootstrapContext(target=target, run=subprocess.run, confirm=confirm_interactive)
     steps = run_steps(ctx)

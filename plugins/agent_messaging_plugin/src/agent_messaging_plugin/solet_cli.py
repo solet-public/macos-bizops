@@ -1,4 +1,4 @@
-"""Runner-neutral resolution and exposure of the ``solet`` CLI for spawned
+"""Runner-neutral resolution and exposure of the ``solet-bridge`` CLI for spawned
 fleet workers.
 
 Every spawned worker — Claude Code or Codex, tmux-hosted or subprocess-hosted
@@ -6,7 +6,7 @@ Every spawned worker — Claude Code or Codex, tmux-hosted or subprocess-hosted
 absolute path:
 
 * ``heartbeat_report_alive.py`` (PostToolUse) shells out to a bare
-  ``["solet", "call", ...]``;
+  ``["solet-bridge", "call", ...]``;
 * ``wake_waiter.py`` (Stop) runs ``[$AGENT_WAKE_CLI, "wake", ...]``;
 * the ``/rename`` skill and the watch sidecar both invoke the CLI directly.
 
@@ -22,7 +22,7 @@ anywhere. That is the registration-loss mechanism measured on 2026-08-14
 Resolving the CLI is only half the contract; the resolved path also has to
 SURVIVE. Both rungs below land inside a versioned release directory, and a
 deploy reaps old releases — so on 2026-08-16/17 every long-running worker's
-``AGENT_WAKE_CLI``, ``PATH`` prepend, and ``solet watch`` sidecar went
+``AGENT_WAKE_CLI``, ``PATH`` prepend, and ``solet-bridge watch`` sidecar went
 dangling together on cutover, silently, for the same non-fatal-by-design
 reason. :func:`stable_release_path` expresses the resolved path through the
 deployment's atomically-swapped ``current`` pointer so a spawn survives the
@@ -50,10 +50,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-CLI_COMMAND_NAME = "solet"
+CLI_COMMAND_NAME = "solet-bridge"
 """The wake CLI's own BINARY name — never the solet INSTANCE name
 (``SOLET_NAME``, e.g. ``acme``). Conflating the two is the 2026-08-08
-deaf-wake defect: ``which <instance-name>`` fails, ``which solet`` resolves."""
+deaf-wake defect: ``which <instance-name>`` fails, ``which solet-bridge`` resolves."""
 
 RELEASE_ID_PREFIX = "rel-"
 """Basename prefix of a materialized release directory. Mirrors
@@ -65,6 +65,14 @@ must not take a plugin dependency to name a directory."""
 CURRENT_LINK_NAME = "current"
 """The deployment's stable pointer, swapped atomically on cutover. Mirrors
 ``release_manager.CURRENT_LINK_NAME``; duplicated for the same reason."""
+
+ANANTA_RELEASES_ROOT = Path.home() / ".ananta" / "releases"
+"""Canonical parent of per-instance materialized release trees.
+
+Kept as a module constant both to make the ownership boundary explicit and to
+let the smoke exercise a synthetic release tree without writing under a real
+operator home directory.
+"""
 
 
 def _pointer_names_release(pointer: Path, release_dir: Path) -> bool:
@@ -93,12 +101,12 @@ def _pointer_names_release(pointer: Path, release_dir: Path) -> bool:
 def stable_release_path(binary_path: str) -> str:
     """Rewrite a VERSIONED release path onto the deployment's stable pointer.
 
-    ``~/.ananta/releases/<name>/rel-<ts>-<sha>/venv/bin/solet`` becomes
-    ``~/.ananta/releases/<name>/current/venv/bin/solet`` — the same file
+    ``~/.ananta/releases/<name>/rel-<ts>-<sha>/venv/bin/solet-bridge`` becomes
+    ``~/.ananta/releases/<name>/current/venv/bin/solet-bridge`` — the same file
     today, and still a valid file after the next cutover swaps ``current``.
 
     This is the fix for the systemic defect measured 2026-08-16/17: a spawned
-    worker's ``AGENT_WAKE_CLI``, its ``PATH`` prepend, and its ``solet watch``
+    worker's ``AGENT_WAKE_CLI``, its ``PATH`` prepend, and its ``solet-bridge watch``
     registration sidecar were all pinned into a versioned directory, and a
     deploy REAPS old releases (``release_manager`` keeps the last K), so every
     deploy dangled every long-running worker's CLI at once — silently, because
@@ -110,7 +118,7 @@ def stable_release_path(binary_path: str) -> str:
     ``binary_path`` UNCHANGED. Two consequences worth stating:
 
     * A path outside a release layout (a developer checkout, an operator's
-      ``/usr/local/bin/solet``, a test's temp dir) is returned untouched — no
+      ``/usr/local/bin/solet-bridge``, a test's temp dir) is returned untouched — no
       release layout is assumed to exist anywhere.
     * Mid-cutover skew, where ``current`` already names a DIFFERENT release
       than the running process, is REFUSED rather than rewritten. Redirecting
@@ -120,7 +128,7 @@ def stable_release_path(binary_path: str) -> str:
 
     The non-regression the Repair-4 guard established still holds either way:
     a dangling export contributes nothing anywhere, so a session that would
-    resolve ``solet`` from PATH is never made worse by this.
+    resolve ``solet-bridge`` from PATH is never made worse by this.
     """
     if not binary_path:
         return binary_path
@@ -141,21 +149,126 @@ def stable_release_path(binary_path: str) -> str:
     return binary_path
 
 
+def _resolve_path(path: Path) -> Path | None:
+    """Resolve symlinks without making a reaped release an exception path."""
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return None
+
+
+def _venv_instance_root(python_executable: str | None) -> Path | None:
+    """Return the active environment's owning root, resolving symlinks.
+
+    Inspect the invoked Python spelling before resolving it: a normal
+    ``venv/bin/python3`` is a symlink to a framework interpreter, and resolving
+    that file itself would erase the venv ownership evidence. Resolving the
+    environment directory still follows a release's ``current`` pointer to its
+    concrete ``rel-*`` directory while retaining a developer venv's owner.
+    """
+    executable = Path(python_executable or sys.executable)
+    if executable.parent.name != "bin":
+        return None
+    environment = executable.parent.parent
+    if environment.name not in {"venv", ".venv"}:
+        return None
+    resolved_environment = _resolve_path(environment)
+    if resolved_environment is None:
+        return None
+    return resolved_environment.parent
+
+
+def _release_instance_root(instance_root: Path) -> Path | None:
+    """Return ``~/.ananta/releases/<instance>`` owning ``instance_root``."""
+    releases_root = _resolve_path(ANANTA_RELEASES_ROOT)
+    if releases_root is None:
+        return None
+    candidate = instance_root.parent
+    if candidate.parent == releases_root:
+        return candidate
+    return None
+
+
+def _is_venv_console_script(path: Path) -> bool:
+    """Whether a resolved path has the expected console-script shape."""
+    return (
+        path.name == CLI_COMMAND_NAME
+        and path.parent.name == "bin"
+        and path.parent.parent.name in {"venv", ".venv"}
+    )
+
+
+def _is_release_family_member(candidate: Path, instance_root: Path) -> bool:
+    """Whether ``candidate`` is a current/rel-* CLI of this instance family."""
+    release_root = _release_instance_root(instance_root)
+    candidate_environment_root = candidate.parent.parent.parent
+    if release_root is None or candidate_environment_root.parent != release_root:
+        return False
+    return candidate_environment_root.name == CURRENT_LINK_NAME or (
+        candidate_environment_root.name.startswith(RELEASE_ID_PREFIX)
+    )
+
+
+def _is_instance_cli(
+    candidate: str,
+    *,
+    python_executable: str | None,
+) -> bool:
+    """Return whether ``candidate`` is owned by the active instance.
+
+    A lexical ``venv/bin/solet-bridge`` suffix is not ownership proof: an unrelated
+    vendor virtualenv can use exactly that layout.  Resolve both the candidate
+    and active Python environment, then accept only a console script whose
+    environment owner equals that environment's root. A materialized release
+    additionally recognizes its own ``~/.ananta/releases/<instance>`` family.
+    Its ``current`` and ``rel-*`` spellings retain the established blue-green
+    behavior without admitting a foreign instance or global package manager.
+
+    The original candidate string is deliberately never rewritten here.  The
+    stable-pointer spelling must reach :func:`stable_release_path` intact.
+    """
+    path = Path(candidate)
+    resolved = _resolve_path(path)
+    instance_root = _venv_instance_root(python_executable)
+    if resolved is None or instance_root is None or not path.is_absolute():
+        return False
+    if not _is_venv_console_script(resolved):
+        return False
+    candidate_environment_root = resolved.parent.parent.parent
+    if candidate_environment_root == instance_root:
+        return True
+    return _is_release_family_member(resolved, instance_root)
+
+
 def _discover_solet_bin(
     explicit: str | None,
     python_executable: str | None,
 ) -> str:
-    """PATH first, then the active Python environment's sibling console
-    script. Split out of :func:`resolve_solet_bin` so the discovery rungs and
-    the release-pointer stabilization stay independently readable."""
+    """Return an owned CLI from PATH or the active virtualenv sibling.
+
+    A PATH candidate is still considered first for the established release
+    behavior, but it must prove ownership by the supplied active Python
+    environment or its recognized release family. A rejected foreign candidate
+    does not terminate discovery: the active virtualenv sibling remains the
+    next owned rung. Explicit paths obey the same check; an override is a
+    source of a candidate, not an authority to cross the instance boundary.
+    """
     if explicit is not None:
-        return explicit
+        return explicit if _is_instance_cli(
+            explicit, python_executable=python_executable,
+        ) else ""
     discovered = shutil.which(CLI_COMMAND_NAME)
-    if discovered:
+    if discovered and _is_instance_cli(
+        discovered, python_executable=python_executable,
+    ):
         return discovered
     executable = Path(python_executable or sys.executable)
     sibling = executable.parent / CLI_COMMAND_NAME
-    if sibling.is_file() and os.access(sibling, os.X_OK):
+    if (
+        sibling.is_file()
+        and os.access(sibling, os.X_OK)
+        and _is_instance_cli(str(sibling), python_executable=python_executable)
+    ):
         return str(sibling)
     return ""
 
@@ -165,18 +278,21 @@ def resolve_solet_bin(
     *,
     python_executable: str | None = None,
 ) -> str:
-    """Resolve the CLI from PATH, then from the active Python environment,
+    """Resolve an owned CLI from PATH, then the active Python environment,
     then express the result through the stable release pointer when there is
     one.
 
     Materialized blue-green releases intentionally run with a minimal PATH
     that does not include their own ``venv/bin`` directory.  The release's
-    Python executable and ``solet`` console script are siblings, so that
+    Python executable and ``solet-bridge`` console script are siblings, so that
     directory is the deterministic second rung when PATH lookup is empty.
 
-    Both rungs (and an ``explicit`` override) hand back a path inside a
-    VERSIONED release directory, which the next deploy may reap. Every spawn
-    surface derives from this one function — ``expose_worker_cli``'s
+    Every candidate, including an ``explicit`` override, must prove ownership
+    by the supplied/active Python environment (with symlinks resolved), or by
+    that environment's own recognized materialized-release family. Both
+    accepted rungs can hand back a path inside a VERSIONED release directory,
+    which the next deploy may reap. Every spawn surface derives from this one
+    function — ``expose_worker_cli``'s
     ``AGENT_WAKE_CLI`` and ``PATH`` prepend, ``watch_sidecar_argv``'s
     registration sidecar, ``worker_path``, and the Codex config overrides —
     so :func:`stable_release_path` is applied HERE, once, rather than at six
@@ -234,10 +350,10 @@ class WakeCliResolver:
     Re-resolving on every read fixes that and, on its own, INTRODUCES A SECOND
     DEFECT. Measured minimal repro before this class existed:
 
-    * ``current`` -> ``rel-OLD``; resolve once -> ``.../current/venv/bin/solet``.
+    * ``current`` -> ``rel-OLD``; resolve once -> ``.../current/venv/bin/solet-bridge``.
     * Deploy: materialize ``rel-NEW``, flip ``current``, REAP ``rel-OLD``.
     * The cached value still resolves through ``current`` and EXECUTES.
-    * A fresh resolution returns ``.../rel-OLD/venv/bin/solet``, which no longer
+    * A fresh resolution returns ``.../rel-OLD/venv/bin/solet-bridge``, which no longer
       exists — the discovery rung hands back the construction-time versioned path
       (an explicit override, or ``sys.executable``'s sibling, which is equally
       fixed for a process's life), and the skew branch then refuses to rewrite it.
@@ -281,19 +397,29 @@ class WakeCliResolver:
     and it never substitutes a version while the honest answer is still alive.
     """
 
-    __slots__ = ("_fallback", "_override")
+    __slots__ = ("_fallback", "_override", "_python_executable")
 
-    def __init__(self, override: str | None) -> None:
+    def __init__(
+        self,
+        override: str | None,
+        *,
+        python_executable: str | None = None,
+    ) -> None:
         self._override = override
+        self._python_executable = python_executable
         # Resolved once, at construction, on purpose: this is the LAST-KNOWN-GOOD
         # rung, not the answer. It is only ever consulted when the fresh answer
         # has become unusable, which is precisely the case the pre-R11 cache
         # handled correctly and a naive re-resolve regressed.
-        self._fallback = resolve_solet_bin(override)
+        self._fallback = resolve_solet_bin(
+            override, python_executable=self._python_executable,
+        )
 
     def resolve(self) -> str:
         """The wake CLI to hand a worker, resolved now."""
-        fresh = resolve_solet_bin(self._override)
+        fresh = resolve_solet_bin(
+            self._override, python_executable=self._python_executable,
+        )
         if fresh and Path(fresh).is_file() and os.access(fresh, os.X_OK):
             return fresh
         if self._fallback and Path(self._fallback).is_file() and os.access(
@@ -320,7 +446,7 @@ def expose_worker_cli(env: dict[str, str], solet_bin: str) -> None:
     Sets ``AGENT_WAKE_CLI`` to the ABSOLUTE binary (so the Stop hook's
     ``subprocess.run([$AGENT_WAKE_CLI, ...])`` never depends on PATH at all)
     AND prepends its directory to ``PATH`` (so the hooks and skills that
-    invoke a bare ``solet`` — which this fix deliberately does not rewrite —
+    invoke a bare ``solet-bridge`` — which this fix deliberately does not rewrite —
     resolve it too). Mutates ``env`` in place.
     """
     env["AGENT_WAKE_CLI"] = solet_bin or CLI_COMMAND_NAME
@@ -355,15 +481,22 @@ def watch_sidecar_argv(
     (``local_cli.cli._register_without_claim``). It also keeps the
     claim-under-inherited-session-id trap out of the launcher path entirely.
 
-    ``spool`` is the ONE axis where the runners legitimately differ, so it is
-    a required keyword rather than a default anyone can drift into:
+    ``spool`` is a required keyword rather than a default anyone can drift
+    into, since a caller genuinely can want either value:
 
-    * Claude Code -> ``True``. ``wake_waiter.py`` is a real async Stop hook
-      and the spool tee is precisely what it consumes; arming without it
-      would re-deafen the wake this sidecar exists to enable.
-    * stock Codex -> ``False``. Async command hooks do not execute there, so
-      the tee would only accumulate an unread file for the pane's lifetime
-      (codex-0147-dead-spool-retirement, 2026-08-13).
+    * Claude Code -> ``True``. ``wake_waiter.py`` is a real Stop hook and
+      the spool tee is precisely what it consumes; arming without it would
+      re-deafen the wake this sidecar exists to enable.
+    * NEITHER current Codex host driver (``codex_tmux.py``,
+      ``codex_app_server.py``) calls this helper at all -- they build their
+      watch argv inline, and as of CDX-06 (2026-08-24) that inline argv
+      keeps the spool armed too: ``inbox_consumer.py`` is now a real
+      synchronous Stop hook that drains it, the same shape as Claude's.
+      codex-0147-dead-spool-retirement (2026-08-13) disabled it because
+      stock Codex then had no Stop-hook consumer at all -- that premise no
+      longer holds, and ``spool=False`` here is exercised only as this
+      helper's own mechanics (see ``test_sidecar_argv_contract``), not
+      current policy for any live caller.
     """
     argv = [solet_bin, "watch", "--agent-id", agent_id, "--no-claim"]
     if not spool:

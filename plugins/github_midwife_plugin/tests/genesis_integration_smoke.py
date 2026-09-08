@@ -22,24 +22,67 @@ plugins/github_midwife_plugin/tests/genesis_integration_smoke.py``.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import io
 import json
-import os
 import subprocess
 import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
 import yaml
 from fake_keychain import FakeKeychain  # noqa: E402
-from github_midwife_plugin.genesis import GenesisError, _resolve_profile_name, run_genesis  # noqa: E402
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+_SELF_DEPLOYMENT_PLUGIN_ROOT = _PLUGIN_ROOT.parent / "macos_self_deployment_plugin"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from github_midwife_plugin.genesis import (  # noqa: E402
+    GenesisError,
+    _write_genesis_marker,
+    resolve_profile_name,
+    run_genesis,
+)
+from github_midwife_plugin.setup_adapter_contract import AdapterRequest  # noqa: E402
+from github_midwife_plugin.setup_adapter_runtime import SystemRuntime  # noqa: E402
+from github_midwife_plugin.setup_operations import genesis_artifacts_valid  # noqa: E402
+from github_midwife_plugin.steps import GENESIS_STEP_RUNNERS  # noqa: E402
 
 _CHECKS_RUN: list[str] = []
 _SENTINEL_PW = "INTEGRATION_SENTINEL_PW_do_not_leak_54321"
 _VAULT_SENTINEL = "INTEGRATION_SENTINEL_VAULT_PASSPHRASE_do_not_leak_98765"
 _PROFILE_NAME = "fixture-genesis-profile"
+_GENESIS_STEP_NAMES = tuple(step_name for step_name, _runner in GENESIS_STEP_RUNNERS)
+
+
+@dataclass(frozen=True)
+class BundlePluginSkip:
+    """A visible skip caused only by a sealed bundle omitting a plugin."""
+
+    profile: str
+    plugin: str
+
+    def render(self) -> str:
+        return f"SKIP  {self.plugin} not in bundle {self.profile}; blue-green router leg is not shipped"
+
+
+def _bundle_plugin_skip(plugin_root: Path, plugin: str) -> BundlePluginSkip | None:
+    if plugin_root.is_dir():
+        return None
+    provenance_path = _PLUGIN_ROOT.parents[1] / "PROVENANCE.json"
+    if not provenance_path.is_file():
+        raise AssertionError(f"red: {plugin} is absent outside a sealed bundle")
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    bundle = provenance.get("bundle")
+    profile = bundle.get("name") if isinstance(bundle, dict) else None
+    if not isinstance(profile, str) or not profile:
+        raise AssertionError("red: sealed bundle has no valid PROVENANCE.json bundle.name")
+    return BundlePluginSkip(profile=profile, plugin=plugin)
 
 
 class SmokeFailureError(AssertionError):
@@ -74,9 +117,9 @@ def _make_fixture_clone(root: Path) -> Path:
     )
     (clone / ".venv" / "bin").mkdir(parents=True)
     (clone / ".venv" / "bin" / "python3").write_text("#!/bin/sh\n")
-    # The `solet` console script the command-launcher birth step symlinks
+    # The `solet-bridge` console script the command-launcher birth step symlinks
     # to (installed by `pip install -e` of agent_messaging_plugin in a real venv).
-    (clone / ".venv" / "bin" / "solet").write_text("#!/bin/sh\n")
+    (clone / ".venv" / "bin" / "solet-bridge").write_text("#!/bin/sh\n")
 
     plugin_dir = clone / "plugins" / "github_midwife_plugin"
     plugin_dir.mkdir(parents=True)
@@ -103,36 +146,76 @@ def _check_profile_resolution_from_provenance(root: Path) -> None:
     clone = _make_fixture_clone(root)
     _check(
         "provenance-less seeds keep the legacy free-profile default",
-        _resolve_profile_name(clone) == "macos-free-solet",
+        resolve_profile_name(clone) == "macos-free-solet",
     )
 
     (clone / "PROVENANCE.json").write_text(json.dumps({
-        "bundle": {"name": "bizops_standard", "platform": "local"},
+        "bundle": {"name": "macos-bizops", "platform": "local"},
     }))
     _check(
-        "bizops_standard provenance selects the bizops profile",
-        _resolve_profile_name(clone) == "macos-bizops-solet",
+        "canonical sealed-style provenance selects macos-bizops without an override",
+        resolve_profile_name(clone) == "macos-bizops",
     )
 
-    with patch.dict(os.environ, {"SOLET_PROFILE": "fixture-profile"}):
+    try:
+        resolve_profile_name(clone, "macos-bizops-solet")
+    except GenesisError as exc:
         _check(
-            "SOLET_PROFILE overrides provenance profile selection",
-            _resolve_profile_name(clone) == "fixture-profile",
+            "a declared canonical bundle cannot be overridden by a retired profile",
+            "profile identity mismatch" in str(exc),
+            str(exc),
         )
+    else:
+        raise SmokeFailureError("declared-bundle-override: resolver did not raise")
 
     (clone / "PROVENANCE.json").write_text(json.dumps({
         "bundle": {"name": "unknown_bundle"},
     }))
     try:
-        _resolve_profile_name(clone)
+        resolve_profile_name(clone)
     except GenesisError as exc:
         _check(
             "unknown provenance bundle fails loud instead of falling back to free",
-            "unknown_bundle" in str(exc) and "SOLET_PROFILE" in str(exc),
+            "unknown_bundle" in str(exc) and "cannot be overridden" in str(exc),
             str(exc),
         )
     else:
         raise SmokeFailureError("unknown-provenance-bundle: resolver did not raise")
+
+    (clone / "PROVENANCE.json").unlink()
+    _check(
+        "an explicit custom profile remains available without declared provenance",
+        resolve_profile_name(clone, "fixture-profile") == "fixture-profile",
+    )
+
+
+def _check_run_genesis_refuses_before_allowlist(root: Path) -> None:
+    clone = _make_fixture_clone(root)
+    (clone / "PROVENANCE.json").write_text(
+        json.dumps({"bundle": {"name": "macos-bizops", "platform": "local"}}),
+        encoding="utf-8",
+    )
+    with patch("github_midwife_plugin.genesis.load_plugin_allowlist") as load_allowlist, \
+         patch("github_midwife_plugin.genesis.install_profile_allowlist") as install_allowlist:
+        try:
+            run_genesis(
+                name="bizops",
+                clone_root=clone,
+                profile_name="bizops_standard",
+            )
+        except GenesisError as exc:
+            _check(
+                "run_genesis rejects provenance/profile mismatch",
+                "profile identity mismatch" in str(exc),
+                str(exc),
+            )
+        else:
+            raise SmokeFailureError("run-genesis-profile-mismatch: did not raise")
+    _check(
+        "run_genesis mismatch occurs before allowlist load or installation",
+        load_allowlist.call_count == 0 and install_allowlist.call_count == 0,
+        f"load={load_allowlist.call_count}, install={install_allowlist.call_count}",
+    )
 
 
 def _fake_pip_subprocess_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -171,7 +254,11 @@ class _FakeStaleMasterKeychain(FakeKeychain):
         return account == "master-key"
 
 
-def _run_sandboxed_genesis(root: Path) -> tuple[dict[str, object], Path, FakeKeychain, _FakeLaunchctl, str]:
+def _run_sandboxed_genesis(
+    root: Path,
+    *,
+    autostart: bool = True,
+) -> tuple[dict[str, object], Path, FakeKeychain, _FakeLaunchctl, str]:
     clone = _make_fixture_clone(root)
     keychain = FakeKeychain()
     fake_launchctl = _FakeLaunchctl()
@@ -194,9 +281,84 @@ def _run_sandboxed_genesis(root: Path) -> tuple[dict[str, object], Path, FakeKey
             home_dir=root / "home",
             launchctl_run=fake_launchctl,
             command_launcher_bin_dir=root / "bin",
+            autostart=autostart,
         )
     combined_output = captured_out.getvalue() + captured_err.getvalue()
     return result, clone, keychain, fake_launchctl, combined_output
+
+
+def _adapter_request(target: Path) -> AdapterRequest:
+    return AdapterRequest(
+        request_id="8f2f3ed3-03fc-4f58-915e-eb400a172a67",
+        operation_id="genesis_artifacts_valid",
+        operation_ref="genesis::solet.verify",
+        phase="probe",
+        probe_purpose="stage_exit",
+        attempt=1,
+        name="testhum",
+        target=target,
+        flow_source_revision="a" * 40,
+        answers_fingerprint="sha256:" + "b" * 64,
+        approval_fingerprint=None,
+        dry_run=True,
+        timeout_seconds=30,
+        public_inputs={"autostart": "enabled"},
+    )
+
+
+def _check_autostart_disabled_skips_install(root: Path) -> None:
+    with patch("github_midwife_plugin.genesis._install_autostart") as install:
+        result, _clone, _keychain, fake_launchctl, _output = _run_sandboxed_genesis(
+            root,
+            autostart=False,
+        )
+    _check(
+        install.call_count == 0 and not any(call[1] == "load" for call in fake_launchctl.calls),
+        "autostart-disabled Genesis never calls the autostart installer",
+        str(fake_launchctl.calls),
+    )
+    _check(
+        result["autostart"] == {"status": "not_requested", "label": None},
+        "autostart-disabled Genesis records the selected topology",
+        str(result.get("autostart")),
+    )
+
+
+def _check_genesis_artifact_content_validation(root: Path) -> None:
+    result, clone, _keychain, _launchctl, _output = _run_sandboxed_genesis(root)
+    _write_genesis_marker(
+        name="testhum",
+        clone_root=clone,
+        profile_name=_PROFILE_NAME,
+        result=result,
+    )
+    home = root / "adapter-home"
+    launcher = home / ".local/bin/testhum"
+    launcher.parent.mkdir(parents=True)
+    launcher.symlink_to(clone / ".venv/bin/solet-bridge")
+    request = _adapter_request(clone)
+    runtime = SystemRuntime(home=home)
+    _check(
+        genesis_artifacts_valid(request, runtime),
+        "valid final Genesis marker and declared artifacts verify",
+    )
+    marker = clone / ".solet/genesis.json"
+    marker.write_text('{"status":"failed"}\n', encoding="utf-8")
+    _check(
+        not genesis_artifacts_valid(request, runtime),
+        "corrupt Genesis marker content is rejected rather than accepted by existence",
+    )
+    _write_genesis_marker(
+        name="testhum",
+        clone_root=clone,
+        profile_name=_PROFILE_NAME,
+        result=result,
+    )
+    launcher.unlink()
+    _check(
+        not genesis_artifacts_valid(request, runtime),
+        "missing declared named launcher invalidates Genesis artifacts",
+    )
 
 
 def _check_end_to_end_happy_path(root: Path) -> None:
@@ -204,10 +366,8 @@ def _check_end_to_end_happy_path(root: Path) -> None:
 
     _check(
         "run_genesis returns the 6-step spine, all completed",
-        [s["step_name"] for s in result["steps"]] == [  # type: ignore[union-attr]
-            "validate_name", "resolve_target", "materialize_configs",
-            "seed_root_manifest", "materialize_kb_symlinks", "write_manifest_marker",
-        ]
+        [s["step_name"] for s in result["steps"]]  # type: ignore[union-attr]
+        == list(_GENESIS_STEP_NAMES)
         and all(s["status"] == "completed" for s in result["steps"]),  # type: ignore[union-attr]
         str(result["steps"]),
     )
@@ -312,7 +472,7 @@ def _check_end_to_end_happy_path(root: Path) -> None:
         "the command-launcher phase installed the per-solet PATH symlink",
         result["command_launcher"]["status"] == "installed"  # type: ignore[index]
         and launcher_link.is_symlink()
-        and launcher_link.readlink() == clone / ".venv" / "bin" / "solet",
+        and launcher_link.readlink() == clone / ".venv" / "bin" / "solet-bridge",
         f"{result.get('command_launcher')} link={launcher_link}",
     )
 
@@ -482,6 +642,48 @@ def _check_phase_failure_writes_failed_marker(root: Path) -> None:
     )
 
 
+def _check_vault_passphrase_failure_writes_failed_marker(root: Path) -> None:
+    """A vault-passphrase filesystem failure is a classified phase failure."""
+    clone = _make_fixture_clone(root)
+    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), \
+         patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), \
+         patch("github_midwife_plugin.genesis.seed_vault_passphrase", side_effect=OSError("disk full")):
+        try:
+            run_genesis(
+                name="testhum-vault-failure",
+                clone_root=clone,
+                profile_name=_PROFILE_NAME,
+                keychain=FakeKeychain(),
+                alter_role_password=lambda _pw: None,
+                role_authenticates=lambda pw: pw == _SENTINEL_PW,
+                role_exists=lambda: True,
+                plist_dir=root / "LaunchAgents",
+                home_dir=root / "home",
+                launchctl_run=_FakeLaunchctl(),
+            )
+        except GenesisError as exc:
+            _check(
+                "a vault-passphrase filesystem failure surfaces as GenesisError",
+                "vault passphrase seed failed" in str(exc),
+                str(exc),
+            )
+        else:
+            raise SmokeFailureError("vault-passphrase-failure: run_genesis did not raise")
+
+    marker_path = clone / "profile" / "data" / "github_midwife" / "attempt.json"
+    _check("the attempt marker exists after vault-passphrase failure", marker_path.is_file(), str(marker_path))
+    marker = json.loads(marker_path.read_text())
+    failed_records = [step for step in marker.get("steps", []) if step.get("status") == "failed"]
+    _check(
+        "the vault-passphrase failure finalizes the attempt marker as failed",
+        marker.get("status") == "failed"
+        and len(failed_records) == 1
+        and failed_records[0].get("step_name") == "vault_passphrase"
+        and "disk full" in str(failed_records[0].get("error", "")),
+        str(marker),
+    )
+
+
 def _check_stale_vault_master_fails_before_autostart(root: Path) -> None:
     clone = _make_fixture_clone(root)
     fake_launchctl = _FakeLaunchctl()
@@ -574,6 +776,10 @@ def _check_router_installed_for_blue_green_profile(root: Path) -> None:
     allowlist) gets the router installed: genesis invokes the SHIPPED installer
     via the NEWBORN's own venv python, with argv [venv python, install_router.py,
     name]. End-to-end proof of the SEED-06 wiring's install branch."""
+    skip = _bundle_plugin_skip(_SELF_DEPLOYMENT_PLUGIN_ROOT, "macos_self_deployment_plugin")
+    if skip is not None:
+        print(skip.render())
+        return
     clone = _make_fixture_clone(root)
     installer = _add_blue_green_capability(clone)
     router_runner = _FakeRouterInstaller()
@@ -619,11 +825,19 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as tmp:
             _check_profile_resolution_from_provenance(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
+            _check_run_genesis_refuses_before_allowlist(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
             _check_end_to_end_happy_path(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_autostart_disabled_skips_install(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_genesis_artifact_content_validation(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_router_installed_for_blue_green_profile(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_phase_failure_writes_failed_marker(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_vault_passphrase_failure_writes_failed_marker(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_stale_vault_master_fails_before_autostart(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:

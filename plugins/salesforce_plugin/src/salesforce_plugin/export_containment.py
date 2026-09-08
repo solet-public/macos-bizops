@@ -39,11 +39,15 @@ def assert_export_path_allowed(
     *,
     config_key: str,
     plugin_name: str,
+    required_suffix: str = TSV_SUFFIX,
 ) -> str:
-    """Admit an absolute ``.tsv`` path contained under one allowed root.
+    """Admit an absolute path (``required_suffix``-terminated) contained under one allowed root.
 
     Returns the realpath-resolved path to write. Refusals name the config key
     so the operator knows exactly which knob opts a workspace root in.
+    ``required_suffix`` defaults to ``.tsv`` (SOQL exports); bulk_job_results
+    passes ``.csv`` to admit the same ``export_allowed_roots`` config for its
+    result files, via the same containment logic.
     """
     if not os.path.isabs(output_tsv_path):
         raise ExportPathRefusedError(
@@ -51,10 +55,9 @@ def assert_export_path_allowed(
             "pass a path under one of the operator-configured workspace roots "
             f"({config_key} in the {plugin_name} config)",
         )
-    if not output_tsv_path.endswith(TSV_SUFFIX):
+    if not output_tsv_path.endswith(required_suffix):
         raise ExportPathRefusedError(
-            f"output_tsv_path must end in '{TSV_SUFFIX}' (got {output_tsv_path!r}); "
-            "this verb writes tab-separated values",
+            f"output_tsv_path must end in '{required_suffix}' (got {output_tsv_path!r})",
         )
     if not allowed_roots:
         raise ExportPathRefusedError(

@@ -130,7 +130,9 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         ``postgres_state_management_plugin`` already uses) rather than
         depending on this method having already run. This method is kept as
         a defensive re-bind — re-applies the config and, if
-        ``config_provider`` already exists, rebuilds it — in case the
+        ``config_provider`` already exists, rebuilds it.  When a live backend
+        already exists, it also rebinds its export containment policy; this is
+        the hot-reload consumer of ``export_allowed_roots``.  In case the
         platform's config genuinely changes between the two steps, or a
         future startup-order change reintroduces reliance on this path.
         Never the primary source of truth anymore.
@@ -138,6 +140,8 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         self._operator_config = config or {}
         if self.config_provider is not None:
             self.config_provider = ConfigProvider(self.name, self._operator_config)
+        if self._backend is not None:
+            self._backend._export_allowed_roots = self._resolve_export_allowed_roots()
 
     def get_default_config(self) -> dict[str, Any]:
         """Return default configuration."""

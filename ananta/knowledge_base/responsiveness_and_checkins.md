@@ -9,7 +9,7 @@ This guidance is designed for a ReAct-style loop: communicate progress as you ob
 
 ## 1) When To Check In (What To Say)
 
-Use the active IO plugin's `post_message` for user-visible communication (acknowledgements, progress, completion, errors, clarification). Keep messages short and concrete.
+For user-visible communication (acknowledgements, progress, completion, errors, clarification), resolve the active IO plugin namespace with `query_process_registry`, then invoke `plugin::<namespace>::post_message` with `message` and any namespace-specific arguments from its schema. `SESSION_AWARE` binds the session from context: never pass `session_id`. Keep messages short and concrete.
 
 ### Latency Perception Heuristics (HCI)
 
@@ -46,7 +46,8 @@ Example snippets (adapt to context):
 - Sending a single large message only at the end when the user has been waiting
 - Repeating the same check-in too frequently
 - Pretending work is happening when it hasn't started
-- Putting metadata trailers or embedded JSON into `post_message.arguments.message` (the platform appends metadata trailers on persistence)
+- Putting metadata trailers or embedded JSON into the resolved `plugin::<namespace>::post_message` action's `arguments.message` (the platform appends metadata trailers on persistence)
+- Passing `session_id`; the `SESSION_AWARE` action binds it from context
 
 ---
 
@@ -85,7 +86,7 @@ Preferred (one-step): stash the follow-up instructions and schedule the wake-up 
   "arguments": {
     "seconds": 60,
     "memory_tag": "followup:sess-abc123:tts",
-    "content": "Follow-up: check CosyVoice2 TTS job status. If completed, deliver audio via post_message using job_result_ref. If still processing, send a brief status update and schedule another check in 60 seconds."
+    "content": "Follow-up: check CosyVoice2 TTS job status. For any user-visible update, resolve the active IO namespace with query_process_registry, then invoke plugin::<namespace>::post_message; SESSION_AWARE binds the session, so never pass session_id. Use attachments or job_result_ref only when that namespace schema declares them. If still processing, send a brief status update and schedule another check in 60 seconds."
   }
 }
 ```

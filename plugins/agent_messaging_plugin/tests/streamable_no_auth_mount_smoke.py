@@ -261,6 +261,21 @@ class _FakeVault:
             return self._client
         return None
 
+    def record_oauth_client_token_use(
+        self,
+        client_id: str,
+        *,
+        client_ip: str = "",
+        user_agent: str = "",
+        transport: str = "",
+    ) -> bool:
+        if client_id != self._client["client_id"]:
+            return False
+        self._client["last_use_ip"] = client_ip
+        self._client["last_use_user_agent"] = user_agent
+        self._client["last_use_transport"] = transport
+        return True
+
     def verify_oauth_client_credentials(
         self, client_id: str, client_secret: str,
     ) -> dict[str, object] | None:

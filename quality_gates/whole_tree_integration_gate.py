@@ -18,12 +18,30 @@ Scope (Cycle 1, structural mode only — no live solet needed):
          (walks plugins/*/src/*/plugin.py +
           plugins/*/knowledge_base/processes/*.json)
   C3.* — call-site references to bound-plugin process_keys
-         (greps "plugin::<X>::<verb>" + "service_interface::<svc>::<verb>"
-          literal strings across ananta/src + plugins/*/src + ananta/tests).
-          A test-file line carrying the inline marker "# wint:negative-fixture"
-          is treated as an intentional unregistered-key fixture and skipped
-          (test-path-only, line-scoped — see _NEGATIVE_FIXTURE_MARKER + the KB
-          negative-fixture-convention article).
+         (AST-walks ananta/src + plugins/*/src + ananta/tests and reports each
+          string literal whose ENTIRE value is "plugin::<X>::<verb>" or
+          "service_interface::<svc>::<verb>"). Executable context only:
+          comments are not AST nodes, docstrings are excluded, and a key quoted
+          inside a longer literal (a "Returns:" example, a `description=`
+          format example) is prose, not a reference. Two ASSEMBLED-key forms
+          are out of scope, for DIFFERENT reasons, and neither is an
+          oversight: an f-string with interpolation
+          (f"plugin::{ns}::post_message") and a runtime concatenation
+          ("::".join(...)) are not statically resolvable at all, so they are
+          permanently out of scope and the live registry is what proves them;
+          IMPLICIT adjacent-literal concatenation
+          ("plugin::x::" "verb") IS statically provable — Python folds it at
+          parse time — and is excluded only because a C3 finding must name a
+          key some author wrote as one greppable token. That second one is a
+          known gate-completeness gap, tracked as a low-priority follow-on
+          (Architect ruling 2026-09-05, arm-1a787994); it is NOT a live miss,
+          since its only current instance sits in a file unt_cf2d70d7 prunes.
+          See _scan_single_file_for_refs and _is_single_string_token. A
+          test-file line carrying the inline
+          marker "# wint:negative-fixture" is treated as an intentional
+          unregistered-key fixture and skipped (test-path-only, line-scoped —
+          see _NEGATIVE_FIXTURE_MARKER + the KB negative-fixture-convention
+          article).
   C5.* — scheduled-action result_processor_kind propagation
          (AST-walks scheduling-plugin construction sites; asserts every
           action dict literal includes `result_processor_kind`)
@@ -67,14 +85,21 @@ from __future__ import annotations
 
 import argparse
 import ast
+import io
 import json
 import re
 import sys
+import tokenize
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
+
+from ananta.core.services.service_interface_decorator import (  # noqa: E402
+    is_service_interface_process_enabled,
+)
 
 
 def _rel(path: Path) -> str:
@@ -121,12 +146,22 @@ _OPERATOR_TOOLING_PLUGIN_SEGMENTS = frozenset({
 # in-tree, author≠verifier act.
 _NEGATIVE_FIXTURE_MARKER = "# wint:negative-fixture"
 
-_PROCESS_KEY_RE = re.compile(
-    r"""["']                              # opening quote
-        (plugin|service_interface)        # namespace
+# Executable-context C3 matching (2026-09-05, iss_3dc2ecc3). A process_key is a
+# REFERENCE only when some string literal's ENTIRE value is that key. The
+# previous detector applied an equivalent pattern to each RAW LINE, so a key
+# quoted inside prose — a docstring "Returns:" example, a `description=` kwarg
+# carrying a format example, a `#` comment — was reported as a call site. In a
+# born clone those prose hits are the Group A/C findings; in the origin checkout
+# they are permanent allowlist entries that describe documentation, not debt.
+#
+# Anchoring the pattern (^...$) and applying it to `ast.Constant` values rather
+# than to text is what makes the distinction STRUCTURAL instead of heuristic: a
+# comment is not an AST node at all, and a key embedded in a longer literal
+# cannot match an anchored pattern. See `_scan_single_file_for_refs`.
+_WHOLE_PROCESS_KEY_RE = re.compile(
+    r"""^(plugin|service_interface)       # namespace
         ::([A-Za-z_][A-Za-z0-9_]*)        # provider
-        ::([A-Za-z_][A-Za-z0-9_]*)        # verb
-        ["']                              # closing quote
+        ::([A-Za-z_][A-Za-z0-9_]*)$       # verb
     """,
     re.VERBOSE,
 )
@@ -195,7 +230,7 @@ def load_allowlist(path: Path) -> Allowlist:
         return Allowlist()
     entries: set[AllowlistEntry] = set()
     for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
+        line = raw.split("#", 1)[0].strip()
         if not line or line.startswith("#"):
             continue
         parts = line.split("::", 2)
@@ -214,19 +249,83 @@ def load_allowlist(path: Path) -> Allowlist:
 # ---------------------------------------------------------------------------
 
 
+class BindingsResolutionError(RuntimeError):
+    """The gate cannot determine which service→plugin bindings to check against.
+
+    A `RuntimeError` subclass on purpose: `main` maps that to exit 2 (harness
+    error). An unresolvable binding set is a harness failure, never a clean run.
+    """
+
+
+def _bindings_from_profile_template(root: Path) -> dict[str, str]:
+    """Derive bindings from the SAME shipped profile template genesis uses.
+
+    A born clone has no `profile/config/service_bindings.json`: the seed
+    manifest never copies it, and genesis writes it at birth. Answering `{}`
+    there (the pre-2026-09-05 behaviour, iss_06a5d953) is the worst available
+    answer — with an empty map every bound-plugin reference reclassifies from
+    C3.2 to C3.1, so the gate reports a tree-wide wave of drift that is really
+    one missing file, and an origin allowlist keyed on C3.2 cannot cover a
+    single row of it.
+
+    This deliberately does NOT re-declare the bundle→profile map: a second copy
+    would drift from the one genesis obeys, and a gate measuring against a
+    profile the newborn will not actually be born into is worse than no gate.
+    It calls genesis's own `resolve_profile_name` and the same
+    `config_materialize.load_profile` that writes the bindings file, so the
+    gate and birth read one source.
+
+    Provenance absence is checked HERE rather than delegated, because
+    `resolve_profile_name` answers a provenance-less tree with the free-tier
+    default. That is right for birthing a legacy seed and wrong for a gate: the
+    gate must say "I cannot know" instead of silently measuring every call site
+    against a profile nobody selected.
+    """
+    provenance_path = root / "PROVENANCE.json"
+    if not provenance_path.is_file():
+        raise BindingsResolutionError(
+            f"no materialized service_bindings.json and no {provenance_path.name} at {root} — "
+            "cannot determine which profile's bindings to check against. Run against a born "
+            "clone (which carries PROVENANCE.json) or a tree with materialized bindings."
+        )
+    try:
+        from github_midwife_plugin.config_materialize import load_profile  # noqa: PLC0415
+        from github_midwife_plugin.genesis import resolve_profile_name  # noqa: PLC0415
+    except ImportError as exc:  # birth spine absent/unimportable — cannot resolve
+        raise BindingsResolutionError(
+            f"cannot import the birth spine to resolve the profile template: {exc}"
+        ) from exc
+
+    # Both raise RuntimeError subclasses (GenesisError / ConfigMaterializeError)
+    # on an unknown bundle or a missing template; `main` renders those as exit 2.
+    profile_name = resolve_profile_name(root)
+    # Mirrors genesis `_resolve_kb_root`: the birth spine's own knowledge base.
+    kb_root = root / "plugins" / "github_midwife_plugin" / "knowledge_base"
+    profile = load_profile(kb_root, profile_name)
+
+    raw_bindings = profile.get("service_bindings")
+    if not isinstance(raw_bindings, dict) or not raw_bindings:
+        raise BindingsResolutionError(
+            f"profile template {profile_name!r} declares no non-empty 'service_bindings' mapping"
+        )
+    return {str(k): str(v) for k, v in raw_bindings.items()}
+
+
 def load_bindings(profile_name: str) -> dict[str, str]:
     """Return service→plugin map for the requested profile.
 
-    Cycle 1 reads `profile/config/service_bindings.json` for the local
-    default. Cycle 2 will walk `initialization/profiles/<profile>.yaml`
-    when bound-provider modeling needs profile-aware semantics.
+    Prefers the materialized `profile/config/service_bindings.json`. When that
+    file is absent — the born-clone case, pre-genesis — falls back to the
+    shipped profile template rather than to an empty map; see
+    `_bindings_from_profile_template` for why an empty map is not a safe
+    default here.
     """
     if profile_name == "local":
         bindings_path = _DEFAULT_BINDINGS
     else:
         bindings_path = REPO_ROOT / "deployment" / "04_aws_provisioning" / "profile" / "config" / "service_bindings.json"
-    if not bindings_path.exists():
-        return {}
+    if not bindings_path.is_file():
+        return _bindings_from_profile_template(REPO_ROOT)
     payload = json.loads(bindings_path.read_text(encoding="utf-8"))
     return {str(k): str(v) for k, v in payload.items()}
 
@@ -358,6 +457,18 @@ def _decorator_name_is_static(decorator: ast.Call) -> bool:
     return True
 
 
+def _service_decorator_is_enabled(decorator: ast.Call) -> bool:
+    """Evaluate the literal ``is_enabled`` marker through the shared predicate."""
+    for kw in decorator.keywords:
+        if kw.arg == "is_enabled":
+            return (
+                isinstance(kw.value, ast.Constant)
+                and isinstance(kw.value.value, bool)
+                and is_service_interface_process_enabled(kw.value.value)
+            )
+    return is_service_interface_process_enabled(True)
+
+
 # ---------------------------------------------------------------------------
 # C1.* — Service interface consistency
 # ---------------------------------------------------------------------------
@@ -408,7 +519,7 @@ def _collect_service_interface_decorated(
 ) -> dict[str, ast.FunctionDef]:
     out: dict[str, ast.FunctionDef] = {}
     for func, decorator in _function_decorator_calls(module, "service_interface_process"):
-        if not _decorator_name_is_static(decorator):
+        if not _decorator_name_is_static(decorator) or not _service_decorator_is_enabled(decorator):
             continue
         name = _decorator_kwarg_str(decorator, "name") or func.name
         out[name] = func
@@ -647,28 +758,146 @@ def _scan_call_sites() -> list[CallSiteRef]:
     return refs
 
 
+def _executable_string_constants(module: ast.Module) -> Iterator[tuple[ast.Constant, str]]:
+    """Every string Constant in executable position, NOT descending into f-strings.
+
+    An f-string's literal chunks are `ast.Constant` nodes too, so a plain
+    `ast.walk` reports the prefix of
+    `f"plugin::audio_processing_plugin::ffmpeg_{name}"` as though it were a
+    whole key. It is not: the verb is computed at runtime, and the static
+    prefix references nothing on its own.
+    """
+    stack: list[ast.AST] = [module]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.JoinedStr):
+            continue
+        if isinstance(node, ast.Constant):
+            # Bind the narrowed value: `ast.Constant.value` is typed as the
+            # union of every literal type, and the narrowing does not survive
+            # the yield unless it is carried out explicitly.
+            value = node.value
+            if isinstance(value, str):
+                yield node, value
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _is_single_string_token(source: str, node: ast.Constant) -> bool:
+    """False when this Constant was built by IMPLICIT concatenation.
+
+    Python folds adjacent literals at parse time, so
+    `"plugin::audio_processing_plugin::" "ffmpeg_aphaser"` reaches the AST as
+    one Constant indistinguishable from a single literal. The value is
+    statically knowable, but it is still an ASSEMBLED key, and the C3 contract
+    puts assembled keys out of scope: the detector reports keys an author wrote
+    as one token, so that a finding always names something greppable in the
+    source. Re-tokenizing the node's own source segment is the only way to tell
+    the two apart after parsing.
+
+    Parenthesizing the segment makes a multi-line fragment tokenizable on its
+    own; an unreadable segment is treated as a single token (report it) rather
+    than silently dropped, so this can never hide a real reference.
+    """
+    segment = ast.get_source_segment(source, node)
+    if segment is None:
+        return True
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(f"({segment})").readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return True
+    return sum(1 for tok in tokens if tok.type == tokenize.STRING) == 1
+
+
+def _docstring_constant_ids(module: ast.Module) -> set[int]:
+    """`id()` of every Constant node serving as a module/class/function docstring.
+
+    A docstring is documentation, never an executable reference — including the
+    degenerate case where its whole value happens to be a process key.
+    """
+    docstring_ids: set[int] = set()
+    doc_owners = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in ast.walk(module):
+        if not isinstance(node, doc_owners) or not node.body:
+            continue
+        first = node.body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            docstring_ids.add(id(first.value))
+    return docstring_ids
+
+
+def _negative_fixture_lines(path: Path, text: str) -> frozenset[int]:
+    """Line numbers whose process_key literals the author marked as fixtures.
+
+    A deliberate negative fixture: the test author marked this line's
+    process_key literal as intentionally unregistered (exercising a rejection
+    path). Test-path-only + line-scoped, so `src` detection is untouched and
+    the file is never blanket-wildcarded.
+    """
+    if not _is_test_path(path):
+        return frozenset()
+    return frozenset(
+        lineno
+        for lineno, line in enumerate(text.splitlines(), start=1)
+        if _NEGATIVE_FIXTURE_MARKER in line
+    )
+
+
 def _scan_single_file_for_refs(path: Path) -> Iterator[CallSiteRef]:
+    """Yield one ref per string literal whose ENTIRE value is a process_key.
+
+    Executable context only (iss_3dc2ecc3): comments never reach the AST,
+    docstrings are excluded explicitly, and a key embedded in a longer literal
+    — a "Returns: (e.g., 'plugin::x::y')" line, a `description=` kwarg quoting
+    the key as a format example — cannot match the anchored pattern. Those
+    three shapes were the Group A/C born-clone false positives.
+
+    OUT OF SCOPE by construction: an ASSEMBLED key, in all three forms —
+    an f-string (`f"plugin::{ns}::post_message"`), a runtime concatenation
+    (`"::".join(parts)`, `prefix + verb`), and IMPLICIT adjacent-literal
+    concatenation (`"plugin::audio_processing_plugin::" "ffmpeg_aphaser"`).
+    The third one is the subtle case: Python folds it at parse time, so it
+    reaches the AST as a single Constant and only re-tokenizing the source
+    segment distinguishes it (see `_is_single_string_token`). It is excluded
+    with the other two so that every C3 finding names a key some author wrote
+    as one greppable token — a finding a reader cannot locate by searching for
+    the string it reports is a finding they cannot act on.
+    """
+    module = _parse_source_safely(path)
+    if module is None:
+        # `_parse_source_safely` already warned. A file the AST cannot read is
+        # reported there, not silently swallowed here — the WARN is the signal.
+        return
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return
-    honor_marker = _is_test_path(path)
-    for lineno, line in enumerate(text.splitlines(), start=1):
-        if honor_marker and _NEGATIVE_FIXTURE_MARKER in line:
-            # A deliberate negative fixture: the test author has marked this
-            # line's process_key literal(s) as intentionally unregistered
-            # (exercising a rejection / denial path). Suppress the line's refs
-            # entirely — test-path-only + line-scoped, so src detection is
-            # untouched and the file is NOT blanket-wildcarded.
+
+    suppressed_lines = _negative_fixture_lines(path, text)
+    docstring_ids = _docstring_constant_ids(module)
+    for node, value in _executable_string_constants(module):
+        if id(node) in docstring_ids:
             continue
-        for match in _PROCESS_KEY_RE.finditer(line):
-            yield CallSiteRef(
-                namespace=match.group(1),
-                provider=match.group(2),
-                verb=match.group(3),
-                file_path=path,
-                lineno=lineno,
-            )
+        match = _WHOLE_PROCESS_KEY_RE.match(value)
+        if match is None:
+            continue
+        if not _is_single_string_token(text, node):
+            continue
+        # Line-scoped exactly as the raw-line detector was: a whole-value key
+        # literal is a single token, so the node's `lineno` IS the line the
+        # author marked.
+        if node.lineno in suppressed_lines:
+            continue
+        yield CallSiteRef(
+            namespace=match.group(1),
+            provider=match.group(2),
+            verb=match.group(3),
+            file_path=path,
+            lineno=node.lineno,
+        )
 
 
 def check_call_sites(

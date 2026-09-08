@@ -125,6 +125,13 @@ class ServiceInterfaceActionMetadata:
         return result
 
 
+def is_service_interface_process_enabled(
+    metadata: ServiceInterfaceActionMetadata | bool,
+) -> bool:
+    """Return whether a decorated service-interface process is registrable."""
+    return metadata if isinstance(metadata, bool) else metadata.is_enabled
+
+
 def service_interface_process(
     *,
     name: str,

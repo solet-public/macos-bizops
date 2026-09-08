@@ -8,7 +8,7 @@ platform stores no Salesforce secret of its own, nor does any access token
 ever enter this process. Full read/write including delete_record (record
 deletion is an acceptable-loss class, RATIFY-2).
 
-Verbs (all EDGE, all on the D0.3 deferred-completion shape —
+Verbs (all EDGE; the data/org verbs use the D0.3 deferred-completion shape —
 workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md):
 every dispatch handler below returns ``{"job_id", "status": "queued"}`` in
 milliseconds; ``async_jobs.py``'s single background worker thread does the
@@ -22,6 +22,7 @@ concurrency of one.
   - get_record / describe_sobject / list_sobjects   — read
   - create_record / update_record / delete_record   — write
   - test_connection                                 — diagnostic
+  - probe_cli                                       — offline local CLI diagnostic
 
 Security posture (umbrella design §2; process_export deny retired by operator
 ruling 2026-07-15 — see
@@ -59,13 +60,16 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import async_jobs, export_containment
+from . import async_jobs, export_containment, import_containment
 from .app_config import AppConfigError, AppConfigLoader
 from .client import SalesforceCliExecutor
 from .constants import (
+    BULK_INGEST_OPERATIONS,
     CONFIG_KEY_API_VERSION,
     CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
+    CONFIG_KEY_IMPORT_ALLOWED_ROOTS,
     CONFIG_KEY_SF_CLI_PATH,
+    CSV_SUFFIX,
     DEFAULT_API_VERSION,
     DEFAULT_ROW_LIMIT,
     DEFAULT_SF_CLI_PATH,
@@ -73,15 +77,22 @@ from .constants import (
     ERROR_API_ERROR,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
+    ERROR_PROVISION_CONSENT_REQUIRED,
     PARAM_ACKNOWLEDGE_OVERRIDE,
     PARAM_ROW_LIMIT,
     PLUGIN_NAME,
+    RESULT_TYPE_BULK_INGEST_SUBMIT,
+    RESULT_TYPE_BULK_JOB_ABORT,
+    RESULT_TYPE_BULK_JOB_RESULTS,
+    RESULT_TYPE_BULK_JOB_STATUS,
     RESULT_TYPE_CREATE_RECORD,
     RESULT_TYPE_DELETE_RECORD,
     RESULT_TYPE_DESCRIBE_SOBJECT,
     RESULT_TYPE_EXPORT_SOQL,
     RESULT_TYPE_GET_RECORD,
     RESULT_TYPE_LIST_SOBJECTS,
+    RESULT_TYPE_PROBE_CLI,
+    RESULT_TYPE_PROVISION_CLI,
     RESULT_TYPE_SOQL_QUERY,
     RESULT_TYPE_TEST_CONNECTION,
     RESULT_TYPE_UPDATE_RECORD,
@@ -207,6 +218,54 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             plugin_name=self.name,
         )
 
+    def _csv_export_path_gate(self, output_csv_path: str) -> str:
+        """Admit a bulk_job_results output path — same export_allowed_roots gate, .csv suffix."""
+        raw_roots = self._load_plugin_config().get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS)
+        roots: list[str] = []
+        if raw_roots is not None:
+            if not isinstance(raw_roots, list) or not all(
+                isinstance(entry, str) for entry in raw_roots
+            ):
+                raise SalesforceServiceError(
+                    ERROR_NOT_CONFIGURED,
+                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory "
+                    "path strings",
+                )
+            roots = list(raw_roots)
+        return export_containment.assert_export_path_allowed(
+            output_csv_path,
+            roots,
+            config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
+            plugin_name=self.name,
+            required_suffix=CSV_SUFFIX,
+        )
+
+    def _import_path_gate(self, csv_path: str) -> str:
+        """Admit a bulk_ingest_submit csv_path via workspace-root containment; return the realpath.
+
+        Binds the operator's ``import_allowed_roots`` config (yaml default
+        ``[]`` = refuse-all) to the read-side containment gate — the mirror
+        of ``_export_path_gate`` for Bulk v2 ingest input files.
+        """
+        raw_roots = self._load_plugin_config().get(CONFIG_KEY_IMPORT_ALLOWED_ROOTS)
+        roots: list[str] = []
+        if raw_roots is not None:
+            if not isinstance(raw_roots, list) or not all(
+                isinstance(entry, str) for entry in raw_roots
+            ):
+                raise SalesforceServiceError(
+                    ERROR_NOT_CONFIGURED,
+                    f"{CONFIG_KEY_IMPORT_ALLOWED_ROOTS} must be a list of directory "
+                    "path strings",
+                )
+            roots = list(raw_roots)
+        return import_containment.assert_import_path_allowed(
+            csv_path,
+            roots,
+            config_key=CONFIG_KEY_IMPORT_ALLOWED_ROOTS,
+            plugin_name=self.name,
+        )
+
     def _success(self, data: dict[str, Any]) -> dict[str, Any]:
         return {
             "action_status": ActionStatus.COMPLETED.value,
@@ -249,6 +308,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         except (
             SalesforceServiceError,
             export_containment.ExportPathRefusedError,
+            import_containment.ImportPathRefusedError,
         ) as exc:
             return self._error(exc.code, str(exc))
         except Exception as exc:  # noqa: BLE001 — topology-safety boundary, classified below
@@ -287,6 +347,10 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
 
     def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
         return {
+            "probe_cli": _edge("probe_cli", RESULT_TYPE_PROBE_CLI, retryable=True),
+            "provision_cli": _edge(
+                "provision_cli", RESULT_TYPE_PROVISION_CLI, retryable=True
+            ),
             "soql_query": _edge(
                 "soql_query", RESULT_TYPE_SOQL_QUERY, retryable=True
             ),
@@ -324,11 +388,141 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
                 RESULT_TYPE_TEST_CONNECTION,
                 retryable=True,
             ),
+            "bulk_ingest_submit": _edge(
+                "bulk_ingest_submit",
+                RESULT_TYPE_BULK_INGEST_SUBMIT,
+                retryable=False,
+            ),
+            "bulk_job_status": _edge(
+                "bulk_job_status",
+                RESULT_TYPE_BULK_JOB_STATUS,
+                retryable=True,
+            ),
+            "bulk_job_results": _edge(
+                "bulk_job_results",
+                RESULT_TYPE_BULK_JOB_RESULTS,
+                retryable=True,
+            ),
+            "bulk_job_abort": _edge(
+                "bulk_job_abort",
+                RESULT_TYPE_BULK_JOB_ABORT,
+                retryable=False,
+            ),
         }
 
     # ------------------------------------------------------------------
     # @platform_process implementations
     # ------------------------------------------------------------------
+
+    @platform_process(
+        name="probe_cli",
+        display_name="Salesforce: Probe CLI",
+        description="Verify the local sf executable and read its version without contacting a Salesforce org.",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Bounded local CLI verdict: executable_path, version, executable, and absolute binding compliance.",
+            properties={
+                "executable_path": ParameterMetadata(type=ParameterType.STRING, description="Resolved local sf executable path, or empty."),
+                "version": ParameterMetadata(type=ParameterType.STRING, description="Local sf version string, or empty."),
+                "executable": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when sf --version completed successfully."),
+                "configured": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when sf_cli_path is an absolute path resolving to the verified executable."),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def probe_cli(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "action_status": ActionStatus.COMPLETED.value,
+            "data": self._require_executor().probe_cli(),
+            "actions": [],
+            "error": None,
+        }
+
+    @platform_process(
+        name="provision_cli",
+        display_name="Salesforce: Provision CLI",
+        description=(
+            "Provision the local sf formula only after explicit system-change acknowledgement, "
+            "then bind the verified absolute executable path into salesforce_plugin config. "
+            "A compliant executable is never reinstalled; this does not log in to Salesforce."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "acknowledge_system_change": ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=True,
+                description="Must be true before this process may install sf or update its executable binding.",
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Provisioning verdict with no secret or Salesforce-org data.",
+            properties={
+                "provisioned": ParameterMetadata(type=ParameterType.BOOLEAN, description="True only when Homebrew installed sf."),
+                "reason": ParameterMetadata(type=ParameterType.STRING, description="Whether sf was installed or an existing executable was bound."),
+                "executable_path": ParameterMetadata(type=ParameterType.STRING, description="Verified absolute sf executable path."),
+                "version": ParameterMetadata(type=ParameterType.STRING, description="Verified local sf version string."),
+                "configuration_boundary": ParameterMetadata(type=ParameterType.STRING, description="States the config update boundary; no restart or reload is hidden."),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def provision_cli(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Provision and bind sf through one consent-gated, probe-first path."""
+
+        acknowledge = params.get("acknowledge_system_change") is True
+        try:
+            observed = self._require_executor().provision_cli(
+                acknowledge_system_change=acknowledge
+            )
+            executable_path = observed.get("executable_path")
+            version = observed.get("version")
+            if not isinstance(executable_path, str) or not executable_path.startswith("/"):
+                raise RuntimeError("sf provisioner did not return an absolute executable path")
+            if not isinstance(version, str) or not version:
+                raise RuntimeError("sf provisioner did not return a version")
+            if not acknowledge:
+                raise SalesforceServiceError(
+                    ERROR_PROVISION_CONSENT_REQUIRED,
+                    "Explicit acknowledgement is required before the sf executable binding may change.",
+                )
+            self._bind_sf_cli_path(executable_path)
+            return self._success(
+                {
+                    "provisioned": observed["provisioned"],
+                    "reason": observed["reason"],
+                    "executable_path": executable_path,
+                    "version": version,
+                    "configuration_boundary": "config_updated_and_executor_rebound_no_reload_or_restart",
+                }
+            )
+        except SalesforceServiceError as exc:
+            return self._error(exc.code, str(exc))
+        except RuntimeError as exc:
+            return self._error(ERROR_NOT_CONFIGURED, str(exc))
+
+    def _bind_sf_cli_path(self, executable_path: str) -> None:
+        """Persist one verified executable path and rebind this plugin immediately."""
+
+        if self.orchestrator_ref is None or self._app_config_loader is None:
+            raise RuntimeError("salesforce_plugin is not ready to update its CLI configuration")
+        config_manager = getattr(self.orchestrator_ref, "config_manager", None)
+        if config_manager is None or not hasattr(config_manager, "save_plugin_config"):
+            raise RuntimeError("ordinary plugin config update path is unavailable")
+        updated = self._load_plugin_config()
+        updated[CONFIG_KEY_SF_CLI_PATH] = executable_path
+        if config_manager.save_plugin_config(self.name, updated) is not True:
+            raise RuntimeError("ordinary plugin config update path refused the verified sf executable")
+        api_version = updated.get(CONFIG_KEY_API_VERSION, DEFAULT_API_VERSION)
+        self._cli_executor = SalesforceCliExecutor(
+            self._app_config_loader,
+            api_version=api_version if isinstance(api_version, str) and api_version else DEFAULT_API_VERSION,
+            sf_cli_path=executable_path,
+        )
 
     @platform_process(
         name="soql_query",
@@ -676,6 +870,176 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
     )
     def test_connection(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         return self._dispatch_async("test_connection", params, state)
+
+    @platform_process(
+        name="bulk_ingest_submit",
+        display_name="Salesforce: Bulk Ingest Submit",
+        description=(
+            "Submit a Bulk API v2 ingest job (insert, update, upsert, or delete — NOT hardDelete, "
+            "which is excluded) from a CSV file already on disk. Returns immediately with a job_id "
+            "and status 'queued' (D0.3 deferred-completion shape) — this is the PLUGIN's own async "
+            "job envelope, distinct from the Salesforce Bulk job id delivered when this job "
+            "completes. The Salesforce job is submitted with --async and NEVER waited on inline — "
+            "a bulk job can run minutes, well past this connector's per-call subprocess bound — so "
+            "poll bulk_job_status with the delivered job_id to track it to completion. csv_path "
+            "must be an ABSOLUTE path contained under an operator-configured import_allowed_roots "
+            "entry (empty config refuses every ingest). external_id_field is required when, and "
+            "only when, operation is 'upsert'."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "operation": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description=(
+                    f"One of: {', '.join(sorted(BULK_INGEST_OPERATIONS))}. hardDelete is excluded — "
+                    "bypasses the recycle bin and needs a separate org permission."
+                ),
+            ),
+            "sobject": ParameterMetadata(
+                type=ParameterType.STRING, required=True, description="The sobject API name, e.g. 'Account'."
+            ),
+            "csv_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description=(
+                    "ABSOLUTE path to the ingest CSV, contained under an import_allowed_roots entry."
+                ),
+            ),
+            "external_id_field": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="Required iff operation is 'upsert'; refused for every other operation.",
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the Salesforce bulk job itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def bulk_ingest_submit(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("bulk_ingest_submit", params, state)
+
+    @platform_process(
+        name="bulk_job_status",
+        display_name="Salesforce: Bulk Job Status",
+        description=(
+            "Fetch a Bulk API v2 ingest job's current state and record counts — the poll target "
+            "for a job created by bulk_ingest_submit. Returns immediately with a job_id and status "
+            "'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as "
+            "the job finishing; the Salesforce job's state (Open, UploadComplete, InProgress, "
+            "JobComplete, Failed, or Aborted) and processed/failed record counts are delivered when "
+            "THIS dispatch's job completes."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "job_id": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="The Salesforce Bulk v2 job id, from bulk_ingest_submit's delivered result.",
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the bulk job's state itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def bulk_job_status(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("bulk_job_status", params, state)
+
+    @platform_process(
+        name="bulk_job_results",
+        display_name="Salesforce: Bulk Job Results",
+        description=(
+            "Fetch a completed Bulk API v2 ingest job's three result CSVs (successful, failed, "
+            "unprocessed records) and write each to a caller-supplied ABSOLUTE path, contained "
+            "under an operator-configured export_allowed_roots entry (empty config refuses every "
+            "write) — never returned inline. Call this only after bulk_job_status reports the job "
+            "reached JobComplete (or Failed/Aborted, which can still carry partial results). "
+            "Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) "
+            "— the three written paths are delivered when this dispatch's job completes."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "job_id": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="The Salesforce Bulk v2 job id, from bulk_ingest_submit's delivered result.",
+            ),
+            "successful_results_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE .csv destination for successfully processed records.",
+            ),
+            "failed_results_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE .csv destination for records that failed processing.",
+            ),
+            "unprocessed_results_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE .csv destination for records the job never reached (e.g. an aborted job).",
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the written CSV files themselves.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def bulk_job_results(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("bulk_job_results", params, state)
+
+    @platform_process(
+        name="bulk_job_abort",
+        display_name="Salesforce: Bulk Job Abort",
+        description=(
+            "Abort a running Bulk API v2 ingest job — the recovery lever for a job submitted in "
+            "error or running against bad data. Returns immediately with a job_id and status "
+            "'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as "
+            "the abort taking effect; the Salesforce job's resulting state is delivered when this "
+            "dispatch's job completes. Records already processed before the abort are NOT rolled "
+            "back — check bulk_job_results for what landed."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "job_id": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="The Salesforce Bulk v2 job id, from bulk_ingest_submit's delivered result.",
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Dispatch envelope — job_id + status: queued. Not the abort confirmation itself.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def bulk_job_abort(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("bulk_job_abort", params, state)
 
 
 def _edge(

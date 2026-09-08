@@ -229,6 +229,7 @@ def _ticking(state: Any, agent_instance_id: str, *, last_alive: datetime) -> Non
         {
             "report_by_seconds": window_s,
             "report_by": (last_alive + timedelta(seconds=window_s)).isoformat(),
+            "report_by_source": "explicit_self_report",
             "last_transition_at": (last_alive - timedelta(days=1)).isoformat(),
         },
     )

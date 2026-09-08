@@ -10,7 +10,7 @@ adapters did neither.
 
 Named mutations this suite must catch:
 
-* a Claude adapter exporting the BARE command name ``solet`` as
+* a Claude adapter exporting the BARE command name ``solet-bridge`` as
   ``AGENT_WAKE_CLI`` again (dies FileNotFoundError, silently, under the
   minimal PATH a tmux pane or a materialized release actually runs with);
 * the tmux ``-e`` allowlist dropping ``PATH`` again (52edfb559's lesson,
@@ -86,6 +86,7 @@ def _check(condition: object, label: str) -> None:
 
 
 def _executable(directory: Path, name: str) -> str:
+    directory.mkdir(parents=True, exist_ok=True)
     target = directory / name
     target.write_text("#!/bin/sh\nexit 0\n")
     target.chmod(0o755)
@@ -107,6 +108,13 @@ def _tmux_env(solet_bin: str, *, transport: str = "watch") -> dict[str, str]:
         agent_instance_id="agi-test", agent_session_id="ases-agi-test",
         label="lane-x", solet_name="testsolet", solet_bin=solet_bin,
         allowed_tools=(), transport=transport,
+        context_gauge_reporter_path=(
+            Path(solet_bin).parent / "rotation_due_watch.py"
+        ),
+        # The spawn's RESOLVED lane root (2026-09-07, iss_2236d297) -- these
+        # CLI/PATH assertions are indifferent to which root it is, so this
+        # passes the same directory the fixture already built.
+        cwd=Path(solet_bin).parent,
     ))
 
 
@@ -115,20 +123,20 @@ def test_tmux_env_exports_absolute_cli_and_path() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         bin_dir = Path(tmp) / "venv" / "bin"
         bin_dir.mkdir(parents=True)
-        solet_bin = _executable(bin_dir, "solet")
+        solet_bin = _executable(bin_dir, "solet-bridge")
         env = _tmux_env(solet_bin)
     _check(
         env.get("AGENT_WAKE_CLI") == solet_bin,
-        "AGENT_WAKE_CLI is the ABSOLUTE binary, not the bare name 'solet'",
+        "AGENT_WAKE_CLI is the ABSOLUTE binary, not the bare name 'solet-bridge'",
     )
     _check(
-        env.get("AGENT_WAKE_CLI") != "solet",
+        env.get("AGENT_WAKE_CLI") != "solet-bridge",
         "AGENT_WAKE_CLI is not the bare command name (the silent-death shape)",
     )
     _check("PATH" in env, "PATH crosses the tmux -e allowlist boundary")
     _check(
         env.get("PATH", "").split(os.pathsep)[0] == str(bin_dir),
-        "the CLI's directory is PREPENDED to PATH, so a bare `solet` resolves",
+        "the CLI's directory is PREPENDED to PATH, so a bare `solet-bridge` resolves",
     )
     _check(
         env.get("AGENT_WAKE_CLI") != env.get("SOLET_NAME"),
@@ -140,7 +148,7 @@ def test_tmux_pane_command_arms_registration_sidecar_with_spool() -> None:
     print("\ntmux pane command arms the presence sidecar (watch transport)")
     with tempfile.TemporaryDirectory() as tmp:
         bin_dir = Path(tmp)
-        solet_bin = _executable(bin_dir, "solet")
+        solet_bin = _executable(bin_dir, "solet-bridge")
         pane = _pane_command(
             ["claude", "--print"], label="lane-x",
             solet_bin=solet_bin, transport="watch",
@@ -155,7 +163,7 @@ def test_tmux_pane_command_arms_registration_sidecar_with_spool() -> None:
         )
     _check(
         f"{shlex.quote(solet_bin)} watch" in pane or f"{solet_bin} watch" in pane,
-        "a `solet watch` sidecar is armed at all — THE registration step",
+        "a `solet-bridge watch` sidecar is armed at all — THE registration step",
     )
     _check("--no-claim" in pane, "the sidecar registers presence WITHOUT claiming a role")
     _check(
@@ -204,14 +212,18 @@ def test_headless_env_and_watcher() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         bin_dir = Path(tmp) / "venv" / "bin"
         bin_dir.mkdir(parents=True)
-        solet_bin = _executable(bin_dir, "solet")
+        solet_bin = _executable(bin_dir, "solet-bridge")
         driver = HeadlessHostDriver(
             claude_bin="/bin/true", solet_name="testsolet", solet_bin=solet_bin,
-            transport="watch", cwd=Path(tmp), popen_fn=_popen,
+            transport="watch", cwd=Path(tmp),
+            python_executable=str(bin_dir / "python3"), popen_fn=_popen,
         )
         env = driver._spawn_env(  # noqa: SLF001 -- offline shape assertion
             agent_instance_id="agi-test", agent_session_id="ases-agi-test",
             label="lane-x", allowed_tools=(), transport="watch",
+            context_gauge_reporter_path=(
+                Path(tmp) / ".claude" / "hooks" / "rotation_due_watch.py"
+            ),
         )
         watcher = _arm_watcher(
             _popen, solet_bin, Path(tmp), 999, env, "watch",
@@ -221,6 +233,12 @@ def test_headless_env_and_watcher() -> None:
         )
 
     _check(env.get("AGENT_WAKE_CLI") == solet_bin, "headless AGENT_WAKE_CLI is absolute")
+    _check(
+        env.get("AGENT_CONTEXT_GAUGE_REPORTER_PATH", "").endswith(
+            ".claude/hooks/rotation_due_watch.py"
+        ),
+        "headless exports its designated gauge reporter path",
+    )
     _check(
         env.get("PATH", "").split(os.pathsep)[0] == str(bin_dir),
         "headless PATH is prepended with the CLI's directory",
@@ -249,9 +267,9 @@ def test_headless_env_and_watcher() -> None:
 def test_resolver_falls_back_to_the_active_venv() -> None:
     print("\nCLI resolution survives a minimal PATH")
     with tempfile.TemporaryDirectory() as tmp:
-        bin_dir = Path(tmp) / "bin"
+        bin_dir = Path(tmp) / "venv" / "bin"
         bin_dir.mkdir(parents=True)
-        solet_bin = _executable(bin_dir, "solet")
+        solet_bin = _executable(bin_dir, "solet-bridge")
         fake_python = str(bin_dir / "python3")
         original = os.environ.get("PATH", "")
         try:
@@ -263,7 +281,10 @@ def test_resolver_falls_back_to_the_active_venv() -> None:
         resolved == solet_bin,
         "resolves the venv-sibling CLI when PATH cannot (the release/pane case)",
     )
-    _check(resolve_solet_bin("/declared/solet") == "/declared/solet", "explicit wins")
+    _check(
+        resolve_solet_bin(solet_bin, python_executable=fake_python) == solet_bin,
+        "owned explicit path wins",
+    )
     _check(
         resolve_solet_bin(None, python_executable="/nope/python3") == ""
         or Path(resolve_solet_bin(None, python_executable="/nope/python3")).is_absolute(),
@@ -272,12 +293,12 @@ def test_resolver_falls_back_to_the_active_venv() -> None:
     degraded: dict[str, str] = {"PATH": "/usr/bin"}
     expose_worker_cli(degraded, "")
     _check(
-        degraded["AGENT_WAKE_CLI"] == "solet" and degraded["PATH"] == "/usr/bin",
+        degraded["AGENT_WAKE_CLI"] == "solet-bridge" and degraded["PATH"] == "/usr/bin",
         "an unresolved CLI degrades to the bare name and leaves PATH untouched",
     )
     idempotent = {"PATH": f"/a{os.pathsep}/usr/bin"}
-    expose_worker_cli(idempotent, "/a/solet")
-    expose_worker_cli(idempotent, "/a/solet")
+    expose_worker_cli(idempotent, "/a/solet-bridge")
+    expose_worker_cli(idempotent, "/a/solet-bridge")
     _check(
         idempotent["PATH"].split(os.pathsep).count("/a") == 1,
         "PATH prepend is idempotent — no unbounded growth across re-exposure",
@@ -286,11 +307,18 @@ def test_resolver_falls_back_to_the_active_venv() -> None:
 
 def test_sidecar_argv_contract() -> None:
     print("\nwatch_sidecar_argv encodes the presence-not-ownership contract")
-    claude = watch_sidecar_argv("/x/solet", agent_id="claude_code", spool=True)
-    codex = watch_sidecar_argv("/x/solet", agent_id="codex", spool=False)
+    # Neither actual Codex host driver (codex_tmux.py, codex_app_server.py)
+    # calls this shared helper -- they build their watch argv inline (see
+    # codex_managed_session_smoke.py's spool-parity legs for the real,
+    # CDX-06-updated Codex call-site behavior). This leg only pins the
+    # helper's OWN mechanics: it must still honor whatever `spool` value a
+    # future caller passes, in both directions -- not a claim about which
+    # value any current caller uses.
+    claude = watch_sidecar_argv("/x/solet-bridge", agent_id="claude_code", spool=True)
+    codex = watch_sidecar_argv("/x/solet-bridge", agent_id="codex", spool=False)
     _check("--no-claim" in claude and "--no-claim" in codex, "--no-claim on BOTH runtimes")
-    _check("--no-spool" not in claude, "claude keeps the spool")
-    _check("--no-spool" in codex, "codex drops the spool (no async Stop hook)")
+    _check("--no-spool" not in claude, "spool=True never emits --no-spool")
+    _check("--no-spool" in codex, "spool=False still emits --no-spool (helper mechanics only)")
     _check("--role" not in claude, "the sidecar never passes --role: presence, not ownership")
     _check(
         claude[claude.index("--agent-id") + 1] == "claude_code",
@@ -302,7 +330,7 @@ def test_presence_and_liveness_regress_independently() -> None:
     """RCA of record (Lane R, 2026-08-14): PRESENCE (the watch sidecar
     ``_pane_command`` arms) and LIVENESS (the ``AGENT_WAKE_CLI``/``PATH``
     export ``_env_pairs``/``expose_worker_cli`` build, which
-    ``heartbeat_report_alive.py``'s bare ``subprocess.run(["solet", ...])``
+    ``heartbeat_report_alive.py``'s bare ``subprocess.run(["solet-bridge", ...])``
     depends on to resolve) are two separate mechanisms built by two
     functions that never call each other or share mutable state. A future
     change could restore one without the other and still look green if
@@ -316,18 +344,18 @@ def test_presence_and_liveness_regress_independently() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         bin_dir = Path(tmp) / "venv" / "bin"
         bin_dir.mkdir(parents=True)
-        solet_bin = _executable(bin_dir, "solet")
+        solet_bin = _executable(bin_dir, "solet-bridge")
         pane = _pane_command(
             ["claude", "--print"], label="lane-x",
             solet_bin=solet_bin, transport="watch",
         )
         env = _tmux_env(solet_bin)
-        # Resolved while the stub `solet` still exists on disk -- shutil.which
+        # Resolved while the stub `solet-bridge` still exists on disk -- shutil.which
         # stats the candidate, so this must run inside the tempdir's lifetime.
-        liveness_ok = shutil.which("solet", path=env.get("PATH", "")) == solet_bin
+        liveness_ok = shutil.which("solet-bridge", path=env.get("PATH", "")) == solet_bin
     presence_ok = "watch" in pane and "--no-claim" in pane
     # The literal dependency heartbeat_report_alive.py's bare
-    # `subprocess.run(["solet", ...])` has on PATH -- not a proxy for it.
+    # `subprocess.run(["solet-bridge", ...])` has on PATH -- not a proxy for it.
     _check(
         presence_ok,
         "LEG 1 baseline: presence assertion is green (sidecar armed in the pane) -- "
@@ -337,7 +365,7 @@ def test_presence_and_liveness_regress_independently() -> None:
     _check(
         liveness_ok,
         "LEG 2 baseline: liveness assertion is green (PATH resolves the bare "
-        "`solet` heartbeat_report_alive.py shells out to) -- named mutation: "
+        "`solet-bridge` heartbeat_report_alive.py shells out to) -- named mutation: "
         "skip the PATH-prepend in solet_cli.py::expose_worker_cli; must redden "
         "ONLY this assertion",
     )

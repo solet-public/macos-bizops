@@ -7,9 +7,10 @@ ledger/symlink code paths without cloning the real 1.8 GB ``.venv`` or
 touching the operator's real releases directory.
 
 The synthetic tree mirrors the repo shape the production builder
-snapshots: ``ananta/`` + ``plugins/`` first-party code and a ``.venv``
-carrying plain-path ``__editable__*.pth`` files (optionally including a
-deliberately-stale one whose target dir is absent, for the §8.6 check).
+snapshots: ``ananta/``, ``plugins/``, ``solet_cli/``, and
+``solet_setup_contracts/`` first-party code plus a ``.venv`` carrying
+plain-path ``__editable__*.pth`` files (optionally including a deliberately-
+stale one whose target dir is absent, for the §8.6 check).
 """
 
 from __future__ import annotations
@@ -72,10 +73,14 @@ def build_fake_source(
         <root>/src_tree/
           ananta/src/ananta/__init__.py
           plugins/foo_plugin/src/foo_plugin/__init__.py
+          solet_cli/src/solet_manager/__init__.py
+          solet_setup_contracts/src/solet_setup_contracts/__init__.py
           .venv/bin/python3                         (stub)
           .venv/pyvenv.cfg
           .venv/lib/python3.13/site-packages/__editable__.ananta-2.0.0.pth
           .venv/lib/python3.13/site-packages/__editable__.foo_plugin-1.0.0.pth
+          .venv/lib/python3.13/site-packages/__editable__.solet_cli-0.1.0.pth
+          .venv/lib/python3.13/site-packages/__editable__.solet_setup_contracts-1.0.0.pth
           [.venv/.../__editable__.deleted_plugin-1.0.0.pth]   (stale target)
           [.venv/.../big_lib.bin]                             (CoW dedup probe)
     """
@@ -86,6 +91,12 @@ def build_fake_source(
     foo_pkg = source / "plugins" / "foo_plugin" / "src" / "foo_plugin"
     foo_pkg.mkdir(parents=True)
     (foo_pkg / "__init__.py").write_text("# synthetic foo_plugin marker\n")
+    cli_pkg = source / "solet_cli" / "src" / "solet_manager"
+    cli_pkg.mkdir(parents=True)
+    (cli_pkg / "__init__.py").write_text("# synthetic solet_manager marker\n")
+    contracts_pkg = source / "solet_setup_contracts" / "src" / "solet_setup_contracts"
+    contracts_pkg.mkdir(parents=True)
+    (contracts_pkg / "__init__.py").write_text("# synthetic setup contracts marker\n")
 
     venv = source / ".venv"
     (venv / "bin").mkdir(parents=True)
@@ -95,6 +106,10 @@ def build_fake_source(
     site.mkdir(parents=True)
     (site / "__editable__.ananta-2.0.0.pth").write_text(f"{ananta_pkg.parent}\n")
     (site / "__editable__.foo_plugin-1.0.0.pth").write_text(f"{foo_pkg.parent}\n")
+    (site / "__editable__.solet_cli-0.1.0.pth").write_text(f"{cli_pkg.parent}\n")
+    (site / "__editable__.solet_setup_contracts-1.0.0.pth").write_text(
+        f"{contracts_pkg.parent}\n"
+    )
     if include_stale_pth:
         stale_target = source / "plugins" / STALE_PLUGIN_NAME / "src"
         (site / f"__editable__.{STALE_PLUGIN_NAME}-1.0.0.pth").write_text(

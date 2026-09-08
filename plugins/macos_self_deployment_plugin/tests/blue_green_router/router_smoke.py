@@ -339,26 +339,47 @@ async def case_session_affinity(
 
 
 async def case_status_and_rollback(mgmt: _Mgmt) -> bool:
-    print("\n[case_status_and_rollback] status snapshot + rollback to drain entry")
-    # Cycle blue back into drain; activate green; then rollback blue.
+    print("\n[case_status_and_rollback] exact-instance rollback to drain entry")
+    # Build TWO still-draining blue instances. A color-only rollback would pick
+    # the first, SIGTERM'd blue; this request must restore the newest blue.
     await mgmt.call("activate", {"color": "blue", "instance_id": "i-blue"})
+    await mgmt.call("activate", {"color": "green", "instance_id": "i-green"})
+    newest_blue_id = "i-blue-newest"
+    await mgmt.call("register_color", {"color": "blue", "port": 8102, "instance_id": newest_blue_id})
+    await mgmt.call("activate", {"color": "blue", "instance_id": newest_blue_id})
     await mgmt.call("activate", {"color": "green", "instance_id": "i-green"})
     status_resp = await mgmt.call("status")
     has_active = status_resp.get("active_color") == "green"
-    has_drain = any(
-        e.get("color") == "blue" for e in status_resp.get("drain_entries", [])
-    )
+    blue_drain_ids = [
+        e.get("instance_id")
+        for e in status_resp.get("drain_entries", [])
+        if e.get("color") == "blue"
+    ]
+    has_two_blue_drains = {"i-blue", newest_blue_id}.issubset(blue_drain_ids)
     _stamp("status: active=green", has_active, repr(status_resp.get("active_color")))
-    _stamp("status: blue in drain_entries", has_drain, repr(status_resp.get("drain_entries")))
+    _stamp(
+        "status: two blue instances in drain_entries",
+        has_two_blue_drains,
+        repr(status_resp.get("drain_entries")),
+    )
 
-    rb = await mgmt.call("rollback", {"color": "blue"})
+    rb = await mgmt.call("rollback", {"color": "blue", "instance_id": newest_blue_id})
     ok_rb = rb.get("rolled_back") is True and rb.get("active_color") == "blue"
-    _stamp("rollback to blue", ok_rb, repr(rb))
+    post_rollback = await mgmt.call("status")
+    restored_exact_instance = post_rollback.get("active_instance_id") == newest_blue_id
+    _stamp("rollback to newest blue", ok_rb, repr(rb))
+    _stamp(
+        "rollback restored requested blue instance, not first same-color drain",
+        restored_exact_instance,
+        repr(post_rollback),
+    )
 
     # After rollback to blue, GREEN is now in drain (it was the active
     # color at the rollback moment). Try to rollback to itself: blue is
     # now active, not draining, so this should be rejected.
-    rb_self = await mgmt.call("rollback", {"color": "blue"})
+    rb_self = await mgmt.call(
+        "rollback", {"color": "blue", "instance_id": newest_blue_id}
+    )
     ok_rb_self = rb_self.get("rolled_back") is False
     _stamp(
         "rollback to blue when already active → rejected",
@@ -366,7 +387,13 @@ async def case_status_and_rollback(mgmt: _Mgmt) -> bool:
         repr(rb_self),
     )
 
-    return has_active and has_drain and ok_rb and ok_rb_self
+    return (
+        has_active
+        and has_two_blue_drains
+        and ok_rb
+        and restored_exact_instance
+        and ok_rb_self
+    )
 
 
 async def case_heartbeat(mgmt: _Mgmt) -> bool:

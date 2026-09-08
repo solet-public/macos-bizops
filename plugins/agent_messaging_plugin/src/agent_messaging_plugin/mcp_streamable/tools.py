@@ -115,9 +115,12 @@ _PEER_INBOX_DESCRIPTION: Final[str] = "\n".join(
         "Use an `after` timestamp when polling during an active incident so",
         "old history does not flood the context window.",
         "",
-        "Spans every peer thread targeting you, regardless of which bridge owns",
-        "the thread. Pagination uses after (ISO-8601 timestamp); pass the previous",
-        "page's next_after_created_at back to read incrementally.",
+                "Spans every peer thread targeting you, regardless of which bridge owns",
+                "the thread. Both sections are newest-first; page by echoing the",
+                "previous page's next_after_created_at and stop only when",
+                "instance_exhausted is true. Omit after only for the first page, not a",
+                "full inbox. This signal applies to the existing timestamp-only cursor",
+                "and does not claim duplicate-timestamp rows are globally lossless.",
         "",
         "Reading the inbox does NOT obligate you to reply.",
     ],
@@ -374,7 +377,7 @@ TOOLS: Final[list[dict[str, Any]]] = [
             "properties": {
                 "after": {
                     "type": "string",
-                    "description": "ISO-8601 high-water mark; omit for full inbox.",
+                    "description": "ISO-8601 backward cursor; omit only for the first page.",
                 },
                 "limit": {
                     "type": "integer",

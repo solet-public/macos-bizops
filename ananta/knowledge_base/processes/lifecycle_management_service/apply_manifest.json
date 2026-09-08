@@ -3,6 +3,70 @@
   "display_name": "Apply manifest",
   "description": "Validate, atomically write, and delegate restart with a new manifest. v1 scope (Architect §15.1, updated v1.1): the new_manifest carries {plugins: list[str], profile_name?: str, service_bindings?: dict[str, str]}. Only plugin_config_overrides is rejected before any disk activity, with the stable token forbidden_v1_keys_present (config-override externalization is deferred to v2). Caller-supplied service_bindings ARE accepted and MERGED over the currently-bound snapshot (effective_bindings = {**current, **caller}) — the mechanism for plugin renames/rebinds; a non-dict service_bindings is rejected with service_bindings_shape_invalid. When service_bindings is OMITTED, the verb auto-synthesizes it from the currently-bound services so binding-satisfaction pre-flight, diff computation, and atomic writes all see a coherent manifest shape. It runs binding_validator (every currently-bound provider must remain in the new plugin list; the self_deployment_service binding must still be present), computes a set-level diff of added/removed plugins plus rebound_services (services whose bound provider changed when caller service_bindings are supplied — empty when bindings are unchanged), atomically writes service_bindings.json first then manifest.yaml under a sha256 CAS, then invokes the bound self_deployment_service plugin's restart_with_manifest verb to schedule the actual restart. Per Codex review #2 Finding 1, the bound plugin's restart status propagates into the response: a write that succeeds but cannot schedule the cutover surfaces as status='restart_failed_after_manifest_commit' (NOT 'applied'), so the operator never sees a green envelope for a partial remote commit. Pass dry_run=true to preview the diff and read the current etag without writing or restarting. Pass expected_etag (from a prior call's current_etag) as the CAS precondition; the verb returns status='rejected' with reason='precondition_failed' if the on-disk etag has shifted in the interim. The new manifest takes effect after the deployment plugin's restart completes; on local profiles the watchdog terminates the solet and re-launches, on cloud profiles the blue-green swap cuts over.",
   "embedding_description": "Apply a new plugin manifest atomically. Kubernetes-apply semantics: declarative target + pre-flight + atomic write + delegated restart via bound self_deployment_service plugin. Pre-flight rejects manifests leaving self_deployment_service unbound. dry_run previews diff; expected_etag CAS prevents races. Returns diff (added/removed/rebound), new_etag, manifest_written_to, restart_action_id.",
+  "arguments": {
+    "type": "object",
+    "required": [
+      "new_manifest",
+      "reason"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "new_manifest": {
+        "type": "object",
+        "required": [
+          "plugins"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "plugins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "profile_name": {
+            "type": "string"
+          },
+          "service_bindings": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "reason": {
+        "type": "string"
+      },
+      "expected_etag": {
+        "type": "string"
+      },
+      "dry_run": {
+        "type": "boolean",
+        "default": false
+      }
+    }
+  },
+  "binding_rule": {
+    "version": 1,
+    "service_bindings": {
+      "input_path": "new_manifest.service_bindings",
+      "provided_input": "merge_over_current_bindings",
+      "omitted_input": "copy_current_bindings",
+      "materialized_path": "profile/config/service_bindings.json"
+    },
+    "receipt": {
+      "path": ".solet/genesis.json",
+      "required_completed_steps": [
+        "validate_name",
+        "resolve_target",
+        "materialize_configs",
+        "seed_root_manifest",
+        "materialize_kb_symlinks",
+        "write_manifest_marker"
+      ]
+    }
+  },
   "result_processor_customizations": {
     "action_label": "apply_manifest outcome",
     "result_type": "apply_manifest_result",

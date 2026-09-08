@@ -152,6 +152,7 @@ class SchedulingService(BootstrappableServiceInterface):
         self,
         cron_expression: str,
         actions: list[dict[str, Any]] | None = None,
+        action_definitions: list[dict[str, Any]] | None = None,
         memory_tag: str | None = None,
         label: str | None = None,
         tags: list[str] | str | None = None,
@@ -164,6 +165,8 @@ class SchedulingService(BootstrappableServiceInterface):
             tags = self._merge_memory_tag_into_tags(memory_tag, tags)
         if actions is not None:
             params["actions"] = actions
+        if action_definitions is not None:
+            params["action_definitions"] = action_definitions
         if label is not None:
             params["label"] = label
         if tags is not None:

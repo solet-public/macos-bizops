@@ -59,7 +59,7 @@ group leader. :meth:`terminate` signals the WHOLE group (``os.killpg`` via
 ``headless_adapter``'s single-pid ``_sigterm_then_kill``/``_pid_alive``
 helpers only if ``os.getpgid`` itself fails), not just the leader pid — a
 child the claude process backgrounds (e.g. a watch-transport worker's own
-``solet watch --role X &``, the standard rename-skill onboarding path)
+``solet-bridge watch --role X &``, the standard rename-skill onboarding path)
 shares the pane's process group and would otherwise survive the leader's
 death as a launchd orphan, still holding the worker's role in the peer
 registry (measured live, 2026-08-09/10 restart_session run — see
@@ -91,14 +91,17 @@ from .headless_adapter import (
     _resolve_heartbeat_marker_dir,
     _resolve_local_label,
     _resolve_session_mapping_spool_dir,
+    _resolve_spawn_cwd,
     _resolve_worker_hook_paths,
     _sigterm_then_kill,
 )
+from .lane_worktrees import worktree_pythonpath
 from .solet_cli import (
     WakeCliResolver,
     expose_worker_cli,
     watch_sidecar_argv,
 )
+from .submit_conventions import TMUX_CLAUDE_SUBMIT_CONVENTION
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +226,7 @@ def _emit_role_tag_path() -> Path:
 def _env_pairs(
     *, agent_instance_id: str, agent_session_id: str, label: str,
     solet_name: str, solet_bin: str, allowed_tools: object, transport: str,
+    context_gauge_reporter_path: Path, cwd: Path,
 ) -> list[str]:
     """``-e KEY=VAL`` args for ``tmux new-session`` — split out of
     :meth:`TmuxHostDriver.spawn` to keep it under the radon cc threshold.
@@ -234,12 +238,12 @@ def _env_pairs(
     # Registration-loss fix (2026-08-14): AGENT_WAKE_CLI must be the wake
     # CLI's own binary, never `solet_name` (the solet INSTANCE name, e.g.
     # "mysolet") -- that conflation was the 2026-08-08 deaf-wake defect. The
-    # 2026-08-08 fix used the bare command name "solet", which is only
+    # 2026-08-08 fix used the bare command name "solet-bridge", which is only
     # correct when PATH can resolve it. A tmux pane inherits the tmux
     # SERVER's environment, not this process's, so a worker ran with a
     # minimal PATH carrying no venv/bin: MEASURED live in a spawned pane,
     # `heartbeat_report_alive.py` -> "[Errno 2] No such file or directory:
-    # 'solet'", exit 0, silent. Absolute binary + PATH prepend closes both
+    # 'solet-bridge'", exit 0, silent. Absolute binary + PATH prepend closes both
     # halves (the same treatment codex_common landed on 2026-08-13).
     cli_env: dict[str, str] = {"PATH": os.environ.get("PATH", "")}
     expose_worker_cli(cli_env, solet_bin)
@@ -250,6 +254,9 @@ def _env_pairs(
         "AGENT_INSTANCE_ID": agent_instance_id,
         "AGENT_SESSION_ID": agent_session_id,
         "AGENT_SESSION_LABEL": label,
+        # GAU-01(a): preserve exactly one reporting writer for this spawned
+        # worker even when a user-scope plugin-cache hook also fires.
+        "AGENT_CONTEXT_GAUGE_REPORTER_PATH": str(context_gauge_reporter_path.resolve()),
         "AGENT_WAKE_CLI": cli_env["AGENT_WAKE_CLI"],
         "FLEET_TRANSPORT": transport,
         # `new-session -e` is an explicit allowlist boundary -- tmux drops
@@ -257,8 +264,22 @@ def _env_pairs(
         # Codex path lost its release PATH until 52edfb559 passed it
         # through. Same boundary, same fix.
         "PATH": cli_env["PATH"],
+        # A lane worktree isolates FILES, not IMPORTS (2026-09-07,
+        # iss_2236d297): a pane opened in the lane tree with no matching
+        # import path still resolves `agent_messaging_plugin` and every
+        # other repo module out of the SHARED checkout -- a quieter version
+        # of exactly the contamination the worktree exists to prevent. The
+        # Codex drivers already anchor this (codex_tmux._spawn_env ->
+        # worktree_pythonpath); this is the same helper, not a second
+        # implementation. `cwd` is the spawn's RESOLVED root, so on a spawn
+        # with no worktree_path this reduces to the driver's own default
+        # cwd and the value is what a shared-root spawn already had.
+        "PYTHONPATH": worktree_pythonpath(cwd, os.environ.get("PYTHONPATH", "")),
     }.items():
         pairs += ["-e", f"{key}={value}"]
+    git_controller_name = os.environ.get("GIT_CONTROLLER_NAME", "").strip()
+    if git_controller_name:
+        pairs += ["-e", f"GIT_CONTROLLER_NAME={git_controller_name}"]
     if isinstance(allowed_tools, (list, tuple)) and allowed_tools:
         pairs += ["-e", f"FLEET_HEADLESS_TOOL_ALLOWLIST={','.join(str(t) for t in allowed_tools)}"]
     # T1 usage-capture lane (ruling 2026-08-05, Q1(a)): same declared-not-
@@ -288,7 +309,7 @@ def _pane_command(
 
     REGISTRATION SIDECAR (2026-08-14, ratified — mirrors
     ``codex_tmux._pane_command`` exactly): on the ``watch`` transport this
-    also backgrounds ``solet watch``, which is what actually REGISTERS the
+    also backgrounds ``solet-bridge watch``, which is what actually REGISTERS the
     worker's presence (``local_cli.cli.watch``: "Hold this session's
     REGISTERED PRESENCE"). Before this, no claude_code spawn path armed it —
     registration depended entirely on the worker model volunteering to run
@@ -400,6 +421,23 @@ a long timeout costs nothing in the common case (the poll returns as soon as
 either signal is confirmed) while a short one reports a real submit as
 unverified."""
 
+_PASTE_PLACEHOLDER_RE = re.compile(
+    r"^\[Pasted text #\d+ \+(?P<lines>\d+) lines?\]$",
+)
+"""The composer row a Claude Code TUI renders for a BRACKETED paste it has
+collapsed rather than echoed inline — measured live 2026-09-07 against a real
+pane (``[Pasted text #1 +141 lines]`` for a 142-line payload,
+``[Pasted text #1 +8 lines]`` for a 9-line one).
+
+The declared count is the payload's own ``text.count("\n")`` in BOTH
+measurements, which is what makes this a legitimate POPULATION anchor rather
+than a wildcard: the number is derived from the driven text, so another
+writer's paste sitting in the composer does not match ours unless it happens
+to have the identical line count. It is a weaker anchor than the inline
+prefix check (a coincidental line-count collision is possible where a prefix
+collision is not), and it is used ONLY as an alternative to that check, never
+as a replacement for it."""
+
 _STRANDED_INPUT_SGR = "\x1b[97m"
 """Bright-white SGR — the measured signature of REAL stranded input sitting
 in a composer (public issue #9 / GAU-09 pane read, backlog.md GAU-09)."""
@@ -421,6 +459,39 @@ within ~2s and stayed stable, never resolving on its own — consistent with
 tmux's local paste-chunking completing fast once ``send-keys -l`` returns).
 Flagged as an open item if further tuning is ever warranted; not treated as
 precisely measured for tmux specifically the way the iTerm2 defaults were."""
+
+
+def _is_collapsed_paste_of(composer_content: str, probe_text: str) -> bool:
+    """Whether the composer row is the TUI's collapsed stand-in for
+    exactly ``probe_text``.
+
+    ★ THE PREFIX CHECK ABOVE CANNOT SEE A REAL DISPATCH. Measured live
+    2026-09-07: a Claude Code TUI does not echo a multi-line paste into
+    the composer at all — it collapses it to ``[Pasted text #1 +141
+    lines]``. That row is not a prefix of the driven text, so the
+    population anchor never fired, ``verify_driven`` polled its full
+    120s deadline observing nothing, and ``drive_session`` raised
+    ``drive_unverified`` for a drive that had in fact been delivered —
+    skipping the un-park and the ``report_by`` re-arm on the way out.
+    The failure is a deterministic function of payload size, which is
+    why it outlived every earlier fix to this channel: every regression
+    in the suite drives ``"claim role and report"``, 21 characters on
+    one composer row — the one payload shape the prefix check handles.
+
+    The line count is what keeps this a POSITIVE anchor. It is read off
+    the payload (``text.count("\n")``, matching both live measurements
+    exactly), so a paste some other writer left in the composer only
+    matches when its line count collides with ours. That is a genuinely
+    weaker guarantee than the prefix check — hence an alternative to it,
+    never a replacement — and a single-line payload, which the TUI
+    echoes inline rather than collapsing, is still held to the prefix
+    check alone.
+    """
+    match = _PASTE_PLACEHOLDER_RE.match(composer_content)
+    if match is None:
+        return False
+    declared_lines = int(match.group("lines"))
+    return declared_lines > 0 and declared_lines == probe_text.count("\n")
 
 
 class _TmuxSendKeysDriverChannel:
@@ -499,30 +570,98 @@ class _TmuxSendKeysDriverChannel:
         self._sleep_fn = sleep_fn
         self._now_fn = now_fn
 
-    def send(self, text: str) -> None:
+    convention = TMUX_CLAUDE_SUBMIT_CONVENTION
+
+    def insert(self, text: str) -> None:
+        """Put ``text`` in the pane's composer, raising if it did not land.
+
+        The Codex twin (``codex_tmux._CodexTmuxDriverChannel.insert``) raises
+        on a failed insert; this one used to CALL :meth:`_insert` and discard
+        its boolean, so a caller using the declared insert/submit split
+        (``session_hosts.DriverChannel``) got a silent no-op followed by a
+        bare ``Enter`` into whatever the composer already held. Nothing in
+        this build drives the split externally today — :meth:`send` is the
+        only caller — so this is closing a latent protocol hazard, not a
+        measured field failure, and :meth:`send` deliberately keeps using
+        ``_insert``'s boolean so its established fire-and-forget contract is
+        unchanged.
+        """
+        from .session_hosts import DriverChannelSendError  # noqa: PLC0415
+
+        if not self._insert(text):
+            raise DriverChannelSendError(
+                f"tmux pane {self._session!r} did not accept the composer insert.",
+            )
+
+    def _insert(self, text: str) -> bool:
+        """Load ``text`` into a private tmux buffer and BRACKETED-paste it.
+
+        ★ THIS REPLACES ``send-keys -l``, WHICH SILENTLY TRUNCATED THE HEAD
+        OF EVERY LARGE PAYLOAD. Measured live 2026-09-07 against a real
+        Claude Code TUI pane: a 10.8KB / 142-line payload beginning
+        ``HEADMARKERZZ1`` and ending ``TAILMARKERZZ2`` was sent with
+        ``send-keys -l``; the receiving model, asked for the first and last
+        25 characters of what it had actually received, answered with filler
+        from the MIDDLE of the payload and the intact tail, and the head
+        marker appeared zero times anywhere in the pane's full scrollback.
+        The identical payload delivered through ``load-buffer`` +
+        ``paste-buffer -p`` came back with the head marker intact. Same pane,
+        same payload, only the mechanism differs. A dispatch brief driven
+        through the old path arrived with its opening scope and authority
+        sections missing, and nothing anywhere reported an error.
+
+        Bracketed paste (``-p``) is also what makes the payload's own
+        newlines literal. Under ``send-keys -l`` an embedded newline is a
+        submission the pane may act on mid-payload; inside a bracketed paste
+        it is just a character, so a multi-line brief becomes ONE turn rather
+        than a race between its own lines and the submitting ``Enter``.
+
+        The buffer name is per-call and ``paste-buffer -d`` deletes it on the
+        way out, so two lanes driving different panes concurrently cannot
+        read each other's payload out of a shared buffer name.
+
+        Fire-and-forget by contract (``session_hosts.DriverChannel``), same
+        as before: a pane that died between ``driver_channel()``'s liveness
+        check and this write (TOCTOU) gets a swallowed, logged failure rather
+        than an unmapped exception escaping through the verb layer, and
+        :meth:`send` never attempts the ``Enter`` when this returns ``False``
+        — nor does anything here touch ``capture-pane``
+        (``tmux_driver_channel_smoke.py``'s own pre-existing invariant): a
+        session we could not even write to gets zero further probing.
+        """
+        buffer_name = f"adadrv-{os.getpid()}-{time.monotonic_ns()}"
         try:
+            loaded = self._run_fn(
+                [self._tmux_bin, "load-buffer", "-b", buffer_name, "-"],
+                input=text, capture_output=True, text=True, timeout=10,
+            )
+            if getattr(loaded, "returncode", 1) != 0:
+                logger.warning(
+                    "tmux driver channel send() failed — session %r rejected the "
+                    "payload buffer load",
+                    self._session,
+                )
+                return False
             self._run_fn(
-                [self._tmux_bin, "send-keys", "-t", self._session, "-l", "--", text],
+                [
+                    self._tmux_bin, "paste-buffer", "-b", buffer_name,
+                    "-t", self._session, "-d", "-p",
+                ],
                 capture_output=True, text=True, timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired):
-            # Fire-and-forget by contract (session_hosts.DriverChannel) — a
-            # pane that died between driver_channel()'s liveness check and
-            # this write (TOCTOU) gets a swallowed, logged send rather than
-            # an unmapped exception escaping through the verb layer. Never
-            # attempts the Enter if the text send itself already failed —
-            # and never touches capture-pane either (tmux_driver_channel_
-            # smoke.py's own pre-existing invariant): a session we couldn't
-            # even write to gets zero further probing, not a wasted read.
             logger.warning(
                 "tmux driver channel send() failed — session %r is no longer reachable",
                 self._session,
             )
-            return
+            return False
+        return True
+
+    def submit(self) -> None:
         self._wait_for_paste_stable()
         try:
             self._run_fn(
-                [self._tmux_bin, "send-keys", "-t", self._session, "Enter"],
+                [self._tmux_bin, "send-keys", "-t", self._session, self.convention.submit_value],
                 capture_output=True, text=True, timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -531,6 +670,10 @@ class _TmuxSendKeysDriverChannel:
                 "longer reachable",
                 self._session,
             )
+
+    def send(self, text: str) -> None:
+        if self._insert(text):
+            self.submit()
 
     def _capture_pane(self) -> str | None:
         """The pane's own rendered content, or ``None`` on any capture
@@ -658,7 +801,12 @@ class _TmuxSendKeysDriverChannel:
             return False
         composer_content = stripped[len(self._cleared_signature) :].strip()
         probe = probe_text.strip()
-        return bool(composer_content) and bool(probe) and probe.startswith(composer_content)
+        if not (composer_content and probe):
+            return False
+        if probe.startswith(composer_content):
+            return True
+        return _is_collapsed_paste_of(composer_content, probe_text)
+
 
     def _composer_style_at_content(self, raw_line: str) -> str | None:
         """The SGR style in effect at the first content character after the
@@ -1087,6 +1235,7 @@ class TmuxHostDriver:
         transport: str | None = None,
         mcp_config_path: Path | None = None,
         cwd: Path | None = None,
+        python_executable: str | None = None,
         run_fn: Any = subprocess.run,
         grace_seconds: float = DEFAULT_TERMINATE_GRACE_SECONDS,
         pane_width: int = DEFAULT_PANE_WIDTH,
@@ -1106,7 +1255,9 @@ class TmuxHostDriver:
         self._solet_name = _resolve_str(solet_name, "SOLET_NAME")
         # R11 (2026-08-17): resolve the wake CLI per read, never once here.
         # See the `_solet_bin` property and WakeCliResolver's own note.
-        self._cli_resolver = WakeCliResolver(solet_bin)
+        self._cli_resolver = WakeCliResolver(
+            solet_bin, python_executable=python_executable,
+        )
         self._permission_mode = _resolve_str(permission_mode, _ENV_PERMISSION_MODE)
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
         # mirrors headless_adapter.HeadlessHostDriver's own floor exactly --
@@ -1231,6 +1382,7 @@ class TmuxHostDriver:
 
     def _spawn_command(
         self, spec: Mapping[str, object], *, transport: str, label: str,
+        resolved_hooks: Mapping[str, Path] | None = None,
     ) -> list[str]:
         permission_mode = str(spec.get("permission_mode") or "") or self._permission_mode
         # R4 Package C (2026-08-10): resolved via the two-rung ladder
@@ -1240,7 +1392,7 @@ class TmuxHostDriver:
         # HostCannotSpawnError by the caller (spawn()), if any file
         # resolves at neither rung -- never silently emits settings
         # pointing at a missing path.
-        resolved_hooks = _resolve_worker_hook_paths(self._cwd)
+        resolved_hooks = resolved_hooks or _resolve_worker_hook_paths(self._cwd)
         allowlist_hook_path = resolved_hooks["headless_tool_allowlist_gate.py"]
         capture_hook_path = resolved_hooks["capture_session_mapping.py"]
         heartbeat_hook_path = resolved_hooks["heartbeat_report_alive.py"]
@@ -1363,12 +1515,34 @@ class TmuxHostDriver:
         # evaluations of an identity expression is two identities).
         agent_session_id = f"ases-{agent_instance_id}"
 
+        # The lane root this spawn actually runs in (2026-09-07,
+        # iss_2236d297): spawn_session provisions a lane worktree and hands
+        # it over as `worktree_path`, and until this landed the tmux driver
+        # was the one host driver that ignored the key -- the worktree was
+        # created, registered, and silently abandoned while the pane opened
+        # in the shared checkout. `_resolve_spawn_cwd` is headless_adapter's
+        # own helper, shared for the same reason `_resolve_local_label` is:
+        # the two Claude host drivers must never disagree about which tree a
+        # worker runs in, and it raises HostCannotSpawnError rather than
+        # falling back, so a declared-but-unusable worktree fails loudly.
+        # Resolved BEFORE the env pairs, which anchor PYTHONPATH to it: the
+        # pane's cwd and its import root are two halves of one isolation
+        # decision and must never be computed from different roots.
+        cwd = _resolve_spawn_cwd(spec, self._cwd)
+        try:
+            resolved_hooks = _resolve_worker_hook_paths(self._cwd)
+        except WorkerHookResolutionError as exc:
+            raise HostCannotSpawnError(str(exc)) from exc
         env_pairs = _env_pairs(
             agent_instance_id=agent_instance_id, agent_session_id=agent_session_id,
             label=label, solet_name=self._solet_name, solet_bin=self._solet_bin,
-            allowed_tools=spec.get("allowed_tools") or (), transport=transport)
+            allowed_tools=spec.get("allowed_tools") or (), transport=transport,
+            context_gauge_reporter_path=resolved_hooks["rotation_due_watch.py"],
+            cwd=cwd)
         try:
-            claude_cmd = self._spawn_command(spec, transport=transport, label=label)
+            claude_cmd = self._spawn_command(
+                spec, transport=transport, label=label, resolved_hooks=resolved_hooks,
+            )
         except WorkerHookResolutionError as exc:
             raise HostCannotSpawnError(str(exc)) from exc
         pane_command = _pane_command(
@@ -1377,7 +1551,7 @@ class TmuxHostDriver:
             self._tmux_bin, "new-session", "-d", "-s", session_name,
             "-x", str(self._pane_width), "-y", str(self._pane_height),
             *env_pairs,
-            "-c", str(self._cwd),
+            "-c", str(cwd),
             "sh", "-c", pane_command,
         ]
         self._launch_new_session(new_session_cmd)
@@ -1515,7 +1689,7 @@ class TmuxHostDriver:
             # Signal the pane's WHOLE process group, not just pane_pid: a
             # tmux pane is a fresh process-group leader, and any child the
             # pane's own claude process backgrounds (e.g. a watch-transport
-            # worker's `solet watch --role X &`, the standard
+            # worker's `solet-bridge watch --role X &`, the standard
             # rename-skill onboarding path for every non-MCP spawn) inherits
             # that same group. Signaling pane_pid alone leaves such a child
             # orphaned under launchd, still holding the worker's role in the

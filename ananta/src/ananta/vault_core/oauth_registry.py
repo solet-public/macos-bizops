@@ -50,7 +50,11 @@ from .oauth_clients import (
     normalize_oauth_register_params,
     project_oauth_client_metadata,
 )
-from .records import mint_client_credentials
+from .records import (
+    MAX_LAST_USE_USER_AGENT_LEN,
+    mint_client_credentials,
+    utc_now_iso,
+)
 
 
 class OauthClientNotFoundError(LookupError):
@@ -88,6 +92,17 @@ class OAuthClientStorage(Protocol):
         self, client_id: str, redirect_uris: list[str],
     ) -> bool:
         """Overwrite the redirect_uris column. Returns True iff a row matched."""
+        ...
+
+    def record_client_token_use(
+        self, client_id: str, fields: Mapping[str, str],
+    ) -> bool:
+        """Write the last-use evidence columns. True iff a row matched.
+
+        ``fields`` carries ``last_used_at`` plus the corroboration
+        columns; it is passed as a mapping rather than as keyword
+        arguments so a backend can persist it with one write.
+        """
         ...
 
 
@@ -244,6 +259,54 @@ class VaultOAuthRegistry:
             "added": True,
         }
 
+    def record_token_use(
+        self,
+        client_id: str,
+        *,
+        used_at: str | None = None,
+        client_ip: str = "",
+        user_agent: str = "",
+        transport: str = "",
+    ) -> bool:
+        """Record evidence observed at a successful token issuance.
+
+        Called on EVERY successful ``/oauth/token`` response — both
+        first issuance and silent refresh — so ``last_used_at`` is a
+        truthful answer to "when did this credential last mint a
+        token". It previously had no answer at all: the field was
+        documented and projected but never written, and on the local
+        Postgres backend the column did not exist.
+
+        The three corroboration fields are deliberately separate from
+        ``client_name``. ``client_name`` is operator-typed at
+        registration and asserts what a client claims to be;
+        ``last_use_ip`` / ``last_use_user_agent`` / ``last_use_transport``
+        are observed at use and are what it actually presented as. An
+        operator comparing the two can see a divergence; with only
+        ``client_name`` there is nothing to compare against.
+
+        Returns True iff a row matched. A miss is logged and swallowed
+        rather than raised: the token has already been minted by the
+        time this runs, and failing the caller's request after a
+        successful issuance would deny a legitimately-authenticated
+        client over a bookkeeping write.
+        """
+        stamp = used_at or utc_now_iso()
+        fields = {
+            "last_used_at": stamp,
+            "last_use_ip": client_ip,
+            "last_use_user_agent": user_agent[:MAX_LAST_USE_USER_AGENT_LEN],
+            "last_use_transport": transport,
+        }
+        matched = self._clients.record_client_token_use(client_id, fields)
+        if not matched:
+            self._logger.warning(
+                "OAuth token-use not recorded: no client row matched "
+                "client_id=%s (token was still issued)",
+                client_id,
+            )
+        return matched
+
     def list_clients(self) -> list[dict[str, Any]]:
         """Return all clients (public projection) sorted by created_at.
 
@@ -264,6 +327,15 @@ class VaultOAuthRegistry:
             projected["last_used_at"] = (
                 str(last_used) if last_used is not None else ""
             )
+            for evidence_field in (
+                "last_use_ip",
+                "last_use_user_agent",
+                "last_use_transport",
+            ):
+                raw_evidence = row.get(evidence_field)
+                projected[evidence_field] = (
+                    str(raw_evidence) if raw_evidence is not None else ""
+                )
             clients.append(projected)
         clients.sort(key=lambda c: str(c.get("created_at") or ""))
         return clients

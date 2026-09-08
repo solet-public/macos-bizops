@@ -3,10 +3,11 @@
 Exposes a single ``@platform_process`` verb:
 ``plugin::platform_health_plugin::execute_registry_sweep``.
 
-The verb iterates the live process registry and invokes every registered
-``@platform_process`` and ``@service_interface_process`` with sentinel
-arguments. Read-shape calls (``list_*``, ``get_*``) execute live; write-shape
-calls are skipped unless the caller passes ``write_enabled=True``.
+WARNING: a diagnostic name does not make this verb diagnose-safe. Read-shape
+calls can reach external systems. The default is ``dry_run=True``, which only
+classifies; live dispatch requires ``dry_run=False`` and is restricted to
+in-process ``service_interface`` providers unless named external plugin
+namespaces and an operator-confirmation citation are supplied.
 
 Per Architect Q1 ruling (2026-05-30) the verb is **NOT** a startup-blocking
 gate. The plugin sits idle until an operator or CI explicitly calls the
@@ -83,6 +84,32 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
                     "test schema; do not run against production state."
                 ),
             ),
+            "dry_run": ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=(
+                    "Defaults to true. When true, returns every classification "
+                    "row and never dispatches a process. Set false only for an "
+                    "explicitly scoped live sweep."
+                ),
+            ),
+            "external_namespaces": ParameterMetadata(
+                type=ParameterType.LIST,
+                required=False,
+                description=(
+                    "Explicit list of declared outward-facing plugin provider "
+                    "namespaces to include in a live sweep. This is a list, not "
+                    "a broad enable flag, and requires operator_confirmation."
+                ),
+            ),
+            "operator_confirmation": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description=(
+                    "Authorizing operator turn or message id, required whenever "
+                    "external_namespaces is non-empty. Echoed in those result rows."
+                ),
+            ),
             "include_pattern": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=False,
@@ -117,7 +144,11 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
                 ),
                 "results": ParameterMetadata(
                     type=ParameterType.LIST,
-                    description="Per-process rows: process_key, shape, status, error_class, error_message.",
+                    description=(
+                        "Per-process rows: process_key, shape, status, "
+                        "would_dispatch, error_class, error_message, and "
+                        "operator_confirmation."
+                    ),
                 ),
             },
         ),
@@ -141,13 +172,23 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
                 f"{self.name}: orchestrator_ref unavailable; cannot read registry",
             )
         write_enabled = bool(params.get("write_enabled", False))
+        dry_run = params.get("dry_run", True)
+        if not isinstance(dry_run, bool):
+            raise ValueError("dry_run must be a boolean when supplied")
         include_pattern = params.get("include_pattern")
         if include_pattern is not None and not isinstance(include_pattern, str):
             raise ValueError("include_pattern must be a string when supplied")
+        external_namespaces = _parse_external_namespaces(params.get("external_namespaces", []))
+        operator_confirmation = params.get("operator_confirmation")
+        if operator_confirmation is not None and not isinstance(operator_confirmation, str):
+            raise ValueError("operator_confirmation must be a string when supplied")
         report = sweep.run_sweep(
             self.orchestrator_ref,
             write_enabled=write_enabled,
             include_pattern=include_pattern,
+            dry_run=dry_run,
+            external_namespaces=external_namespaces,
+            operator_confirmation=operator_confirmation,
         )
         return {
             "action_status": ActionStatus.COMPLETED.value,
@@ -156,3 +197,12 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
             "error": None,
             "timestamp": datetime.now(UTC).isoformat(),
         }
+
+
+def _parse_external_namespaces(value: object) -> tuple[str, ...]:
+    """Validate the explicit external-provider enumeration without coercion."""
+    if not isinstance(value, list) or not all(isinstance(name, str) and name for name in value):
+        raise ValueError("external_namespaces must be a list of non-empty strings")
+    if len(set(value)) != len(value):
+        raise ValueError("external_namespaces must not contain duplicates")
+    return tuple(value)

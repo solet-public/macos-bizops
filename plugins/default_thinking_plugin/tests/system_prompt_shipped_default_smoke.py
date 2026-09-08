@@ -23,11 +23,17 @@ Run directly: ``.venv/bin/python3 plugins/default_thinking_plugin/tests/system_p
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import logging
 import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from default_thinking_plugin import plugin as _plugin_module  # noqa: E402
 from default_thinking_plugin.plugin import (  # noqa: E402

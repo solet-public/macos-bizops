@@ -79,7 +79,22 @@ SOQL_MAX_RECORDS_CAP: Final[int] = 1000
 # REST fact if a vendor number is wanted at all.
 SOQL_EXPORT_ROW_CAP: Final[int] = 50_000
 TSV_SUFFIX: Final[str] = ".tsv"
+CSV_SUFFIX: Final[str] = ".csv"
 CONFIG_KEY_EXPORT_ALLOWED_ROOTS: Final[str] = "export_allowed_roots"
+# Bulk v2 ingest input containment — the read-side mirror of
+# export_allowed_roots (refuse-all default; realpath+commonpath containment
+# via import_containment.py). See knowledge_base/01_salesforce_overview.md
+# "Bulk v2 ingest" section for the full posture.
+CONFIG_KEY_IMPORT_ALLOWED_ROOTS: Final[str] = "import_allowed_roots"
+
+# ---------------------------------------------------------------------------
+# Bulk v2 ingest — operation set (hardDelete is explicitly EXCLUDED: bypasses
+# the recycle bin, needs an org permission, and is not obviously inside the
+# RATIFY-2 acceptable-loss ratification — 2026-08-24 plan §1).
+# ---------------------------------------------------------------------------
+BULK_INGEST_OPERATIONS: Final[frozenset[str]] = frozenset({"insert", "update", "upsert", "delete"})
+BULK_INGEST_HARD_DELETE_OPERATION: Final[str] = "hardDelete"
+BULK_JOB_ABORT_STATE: Final[str] = "Aborted"
 
 # ---------------------------------------------------------------------------
 # Override friction (§5) — required together or not at all; absent means the
@@ -105,6 +120,8 @@ ERROR_MALFORMED_QUERY: Final[str] = "sf.malformed_query"
 ERROR_RATE_LIMITED: Final[str] = "sf.rate_limited"
 ERROR_API_ERROR: Final[str] = "sf.api_error"
 ERROR_EXPORT_PATH_REFUSED: Final[str] = "sf.export_path_refused"
+ERROR_IMPORT_PATH_REFUSED: Final[str] = "sf.import_path_refused"
+ERROR_PROVISION_CONSENT_REQUIRED: Final[str] = "sf.provision_consent_required"
 
 # ---------------------------------------------------------------------------
 # Result types
@@ -118,3 +135,9 @@ RESULT_TYPE_CREATE_RECORD: Final[str] = "salesforce_create_record_result"
 RESULT_TYPE_UPDATE_RECORD: Final[str] = "salesforce_update_record_result"
 RESULT_TYPE_DELETE_RECORD: Final[str] = "salesforce_delete_record_result"
 RESULT_TYPE_TEST_CONNECTION: Final[str] = "salesforce_test_connection_result"
+RESULT_TYPE_PROBE_CLI: Final[str] = "salesforce_probe_cli_result"
+RESULT_TYPE_PROVISION_CLI: Final[str] = "salesforce_provision_cli_result"
+RESULT_TYPE_BULK_INGEST_SUBMIT: Final[str] = "salesforce_bulk_ingest_submit_result"
+RESULT_TYPE_BULK_JOB_STATUS: Final[str] = "salesforce_bulk_job_status_result"
+RESULT_TYPE_BULK_JOB_RESULTS: Final[str] = "salesforce_bulk_job_results_result"
+RESULT_TYPE_BULK_JOB_ABORT: Final[str] = "salesforce_bulk_job_abort_result"

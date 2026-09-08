@@ -15,4 +15,4 @@
 # and proceed only when the two counts match.
 
 exec env SOLET_NAME={{SOLET_NAME}} \
-  "{{CLONE_DIR}}/.venv/bin/python3" -m ananta.cli --app-home "{{CLONE_DIR}}/profile"
+  {{CLONE_DIR_ZSH}}/.venv/bin/python3 -m ananta.cli --app-home {{CLONE_DIR_ZSH}}/profile

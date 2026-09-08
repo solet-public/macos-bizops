@@ -21,11 +21,19 @@ Run directly: ``.venv/bin/python3 plugins/code_vetting_plugin/tests/foreign_scan
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import sys
 import tempfile
 from pathlib import Path
 
-from code_vetting_plugin.scanners.deps import _pip_audit_foreign_gap  # noqa: PLC2701 — pin the tool-independent gap logic
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from code_vetting_plugin.scanners.deps import (
+    _pip_audit_foreign_gap,  # noqa: PLC2701 — pin the tool-independent gap logic
+)
 from code_vetting_plugin.scanners.sast import scan_bandit
 from code_vetting_plugin.targets import TargetTree
 from code_vetting_plugin.toolrun import tool_available
@@ -172,6 +180,7 @@ def main() -> int:
         return 1
     print(f"foreign_scanner_scope_smoke OK: {len(_CHECKS_RUN)} checks passed")
     if _bandit_checks_skipped:
+        print('BORN_CLONE_SKIP_WITNESS={"reason":"ambient_executable_missing","executable":"bandit"}')
         print(
             "SKIP: bandit not on PATH -- bandit-specific live assertions "
             "disclosed a gap rather than running; the structural assertions "

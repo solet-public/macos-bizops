@@ -16,14 +16,30 @@ work with the solet afterwards.** It exists to be installed. Once installed, the
 solet runs as a service; the human works from their own project directories and
 talks to it from there.
 
+## Preferred Mac installation
+
+For an ordinary Mac installation, keep the two commands separate:
+
+```console
+brew install solet-public/tap/solet
+solet create bizops
+```
+
+Homebrew installs only the global manager. `solet create` is the separately
+reviewed, consented transaction that creates an instance; never join these with
+`&&`. If Homebrew is absent, send the human to [brew.sh](https://brew.sh), its
+canonical installer source. Do not fetch or execute an installer from a README,
+and do not invent a Solet `curl | bash` path.
+
 ## Is it installed yet?
 
 ```sh
 ls profile/config/manifest.yaml 2>/dev/null && echo INSTALLED || echo NOT INSTALLED
 ```
 
-- **NOT INSTALLED** → your task is to install it. Read `README.md` §Genesis and
-  work the numbered ladder. That section is written for you, not for the human.
+- **NOT INSTALLED** → for a normal Mac install, use the two-command Homebrew
+  route above. For a direct seed clone, read `README.md` §Genesis and work the
+  numbered ladder. That section is written for you, not for the human.
 - **INSTALLED** → installation is done. The hydration runbook's managed block —
   merged into this file at hydration time — governs how to reach the running solet.
 

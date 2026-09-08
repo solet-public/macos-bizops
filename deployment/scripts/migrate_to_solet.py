@@ -2,7 +2,7 @@
 """Migrate a deployed solet's machine surface from homunculus-era names.
 
 The P2 rename (2026-08-13) cut every live identifier over to solet forms:
-the ``solet`` CLI console script, the ``SOLET_*`` environment family, the
+the ``solet-bridge`` CLI console script, the ``SOLET_*`` environment family, the
 ``solet_name`` root-manifest key, launchd labels ``local.solet.<name>``, and
 the ``--solet`` flag on the router/ingress/tunnel entry points. Deployed
 machines carry the OLD names in persistent state that no release cutover
@@ -19,7 +19,7 @@ rewrites. This script migrates exactly that persistent surface, fail-loud:
      plist predates ``autostart_manager``'s log redirection.
   2. ``~/.zshrc`` launcher functions: ``AGENT_WAKE_CLI="homunculus"`` values.
   3. The repo checkout's editable venv: reinstall agent_messaging_plugin so
-     the ``solet`` console script replaces the ``homunculus`` shim (no alias
+     the ``solet-bridge`` console script replaces the ``homunculus`` shim (no alias
      is kept — no-shims culture).
   4. The checkout's root_manifest.yaml ``homunculus_name:`` key (a git-tracked
      file — on the origin checkout this lands with P2 itself; on an adopter's
@@ -301,7 +301,7 @@ def plan_zshrc() -> int:
 def apply_zshrc() -> None:
     text = ZSHRC.read_text(encoding="utf-8")
     ZSHRC.write_text(
-        text.replace('AGENT_WAKE_CLI="homunculus"', 'AGENT_WAKE_CLI="solet"'),
+        text.replace('AGENT_WAKE_CLI="homunculus"', 'AGENT_WAKE_CLI="solet-bridge"'),
         encoding="utf-8",
     )
 
@@ -320,7 +320,7 @@ def apply_manifest() -> None:
 
 def shim_state() -> tuple[bool, bool]:
     bin_dir = REPO / ".venv" / "bin"
-    return (bin_dir / "homunculus").exists(), (bin_dir / "solet").exists()
+    return (bin_dir / "homunculus").exists(), (bin_dir / "solet-bridge").exists()
 
 
 def apply_reinstall() -> None:
@@ -328,7 +328,7 @@ def apply_reinstall() -> None:
     _run([str(pip), "install", "-e", str(REPO / "plugins" / "agent_messaging_plugin")])
     old_shim, new_shim = shim_state()
     if not new_shim:
-        raise SystemExit("REFUSING to finish: reinstall did not create .venv/bin/solet")
+        raise SystemExit("REFUSING to finish: reinstall did not create .venv/bin/solet-bridge")
     if old_shim:
         (REPO / ".venv" / "bin" / "homunculus").unlink()
         print("  removed lingering .venv/bin/homunculus shim (no-shims)")
@@ -570,7 +570,7 @@ def _apply_all(
         apply_claude_json(claude_json_plan)
         print("migrated ~/.claude.json mcpServers env keys")
     apply_reinstall()
-    print("reinstalled agent_messaging_plugin; `solet` CLI active")
+    print("reinstalled agent_messaging_plugin; `solet-bridge` CLI active")
     print("NEXT (manual, from the runbook): refresh installed coordination-hooks "
           "plugin caches, wait for the platform log to go stable, then run the "
           "config-store residual check (fail loud on any homunculus_name key).")
@@ -602,7 +602,7 @@ def main() -> int:
     _print_plist_plan(plans)
     print(f"~/.zshrc AGENT_WAKE_CLI values to flip: {zsh_hits}")
     print(f"root_manifest.yaml old key present: {manifest_old}")
-    print(f"venv shims: homunculus={old_shim} solet={new_shim}")
+    print(f"venv shims: homunculus={old_shim} solet-bridge={new_shim}")
     _print_claude_json_plan(claude_json_plan, claude_json_running)
 
     if not args.apply:

@@ -19,9 +19,17 @@ gate-smoke runner or directly; the ``code_vetting_plugin`` package must be insta
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import dataclasses
 import inspect
 import re
+import sys
+from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from code_vetting_plugin import inference_wiring
 from code_vetting_plugin.models import (

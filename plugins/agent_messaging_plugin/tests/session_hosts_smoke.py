@@ -18,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
+from agent_messaging_plugin import session_hosts  # noqa: E402
 from agent_messaging_plugin.session_hosts import (  # noqa: E402
     OPERATOR_HOST,
     HostCannotSpawnError,
@@ -122,6 +123,31 @@ def main() -> int:
     )
     _check(driver.driver_channel("anything") is None, "operator driver has no driver channel")
     _check(driver.verify_config() == [], "operator driver's config is always ready (no remedies)")
+
+    original_which = session_hosts.shutil.which
+    original_popen = session_hosts.subprocess.Popen
+    session_hosts.shutil.which = lambda _name: None
+
+    def _unexpected_popen(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("missing bridge guard invoked subprocess.Popen")
+
+    session_hosts.subprocess.Popen = _unexpected_popen  # type: ignore[assignment]
+    missing_bridge_refused = False
+    try:
+        session_hosts.QualificationHostDriver().spawn(
+            {"agent_instance_id": "agi-qualification", "local_name": "qualification-probe"},
+        )
+    except HostCannotSpawnError as exc:
+        missing_bridge_refused = "solet-bridge is required for qualification host" in str(exc)
+    except AssertionError:
+        missing_bridge_refused = False
+    finally:
+        session_hosts.shutil.which = original_which
+        session_hosts.subprocess.Popen = original_popen  # type: ignore[assignment]
+    _check(
+        missing_bridge_refused,
+        "qualification host refuses a missing solet-bridge before subprocess spawn",
+    )
 
     print()
     print(f"PASSED: {_passed}")

@@ -6,88 +6,118 @@ Article Role: joseki_catalog
 
 Article Tags: planning-stage:post-approval, planning-stage:wbs-execution, evidence-category:joseki, domain:agent-lifecycle, domain:agent-messaging
 
-
 JOSEKI_KEY: dispatch_managed_worker
-DESCRIPTION: Spawn a worker session onto a bounded lane and stay responsible for it: write the brief to the workbench FIRST so the spawn carries a citable provenance reference, spawn with an explicit role class, work class, budget line, model, effort and TTL plus a report-by deadline generous enough to survive a lost registration, confirm the worker is actually reachable, drive its first work turn directly when it is not, require a per-item plan read-back before it edits anything, hold it off files another lane is editing, and accept only a workbench report whose file list was derived from git status. Use when work is parallelizable, mechanical, or long-running enough to belong in its own session. Not for work the dispatching session can finish inline, and never a path to escalate a capability the dispatcher does not already hold.
-EMBEDDING_DESCRIPTION: Start another agent session to do a piece of work and supervise it until it delivers. Write the instructions to a shared document first so the spawn can point at them, then create the session with its purpose, permitted work class, budget line, model, effort level, time limit, and a deadline for its first report chosen long enough that a lost registration does not get a working session killed. Check that the new session is reachable, and if it is not, send its first work turn straight to its terminal instead. Make it repeat back its plan before it changes any file, keep it off files another lane is editing until a go arrives on its own channel, require progress reports before its deadline, and accept only a final written report listing the files it actually touched.
+DESCRIPTION: Dispatch a bounded worker lane through the durable managed-dispatch composite, prove uptake only with a structured worker ACK, supervise liveness and deadlines from platform state, route blockers to the correct authority, and accept completion only after independent evidence validation.
+EMBEDDING_DESCRIPTION: Start and supervise a managed worker through one durable dispatch contract. The platform writes the contract before spawning, records first-turn transport evidence without treating it as uptake, requires structured ACK and progress events, reconciles native host liveness, surfaces blockers and deadlines, and lets only a coordinator acceptance event complete the lane.
 
 ## Input Contract
 
-- A bounded, self-contained unit of work that is worth its own session: parallelizable, mechanical, or long-running
-- A lane identity for the work, and a declared file surface the worker may edit
-- A budget line the spawn rolls up to, and a deliberate model / effort / TTL choice matched to the work rather than inherited from the dispatching session
-- Bindings: lane_id, brief_ref, role_class, work_class, budget_line, model, effort, ttl_seconds, report_by_seconds, worker_instance_id, dispatch_text
+- An immutable brief that exists before dispatch, plus its measured SHA-256.
+- A bounded lane, role, role class, work class, budget line, model, effort,
+  runtime, host/allowed-host policy, visibility, local name, report/TTL windows,
+  and tool/permission/transport policy.
+- An exact expected artifact path and structured completion contract.
+- Absolute timezone-aware `uptake_due_at`, `report_by`, `watchdog_due_at`, and
+  `expires_at` deadlines.
+- The spawning coordinator's durable role. The server derives its instance and
+  session from authenticated call context; callers never authorize themselves.
 
 ## Output Contract
 
-- A workbench brief that exists BEFORE the spawn and is cited by it, so the dispatch has provenance independent of any session's memory
-- A spawned worker session with its identity, host, and lifecycle state recorded, whose dispatch parameters were all stated explicitly at spawn time
-- Evidence that the worker received its work — either a confirmed registration and a plan read-back, or a verified direct drive of its first turn
-- A final workbench report from the worker whose file list was derived from git status over its declared surface, plus the per-item progress reports that arrived inside the report-by window
+- One server-issued `dispatch_id` whose durable row exists before any host side
+  effect, plus one linked current attempt.
+- Durable first-turn source, delivered/error outcome, and time. This is
+  transport evidence only; it never means the worker understood the brief.
+- A structured worker ACK before `active`, then causal milestone, blocker, or
+  completion events.
+- Tri-state native host liveness (`alive`, `dead`, or `unknown`), bounded
+  unknown re-probe/escalation, and explicit supervision conditions for failed
+  starts, uptake, report-by, watchdog, blockers, acceptance, and TTL.
+- `completed` only after the coordinator re-reads the exact artifact, verifies
+  its SHA-256 and contract evidence, and records `accept_completion`.
 
 ## Sequence
 
-[ ] 1. Write the brief to the workbench before spawning anything
-    a) Author the lane brief — scope, owned file surface, constraints, per-item deliverables, and the reporting cadence expected — as a workbench artifact whose path becomes the spawn's provenance reference [agent-executed: the brief is authored, not produced by a verb]
+[ ] 1. Write and hash the exact brief before dispatch
+    a) Author the bounded brief, including writable paths, authority limits, required KB/ledger searches, gate procedure, reporting cadence, and completion signal.
+    b) Measure the brief SHA-256; do not accept a caller-supplied digest without comparing it to the file.
 
-[ ] 2. Spawn the worker with every dispatch parameter stated explicitly
+[ ] 2. Atomically dispatch the managed worker
     RESULT_PROCESSOR_KIND: deterministic_continuation
-    a) Spawn the worker session for this lane (plugin::agent_messaging_plugin::spawn_session)
-        Arguments:
-        {"lane_id": "<<BIND:lane_id>>", "brief_ref": "<<BIND:brief_ref>>", "role_class": "<<BIND:role_class>>", "work_class": "<<BIND:work_class>>", "budget_line": "<<BIND:budget_line>>", "model": "<<BIND:model>>", "effort": "<<BIND:effort>>", "ttl_seconds": "<<BIND:ttl_seconds>>", "report_by_seconds": "<<BIND:report_by_seconds>>"}
+    a) Call `plugin::agent_messaging_plugin::dispatch_managed_work` with every Input Contract field.
+    b) Record the returned `dispatch_id`, attempt identity, state, and first-turn evidence.
+    c) Treat `uptake_pending` as "submission confirmed; ACK absent" and `uptake_uncertain` as "submission failed or is unknown". Neither is active work. A host failure returns the durable failed-start dispatch identity/state/version and remains supervised.
 
-[ ] 3. Confirm the worker is actually reachable
+[ ] 3. Require a structured model-turn ACK
     RESULT_PROCESSOR_KIND: deterministic_continuation
-    a) Read the live peer snapshot and look for the spawned instance (plugin::agent_messaging_plugin::peer_list)
-        Arguments:
-        {}
+    a) The worker calls `plugin::agent_messaging_plugin::report_managed_dispatch` with `event_kind="ack"`, a unique `event_id`, current `prior_version`, current attempt identity, exact brief digest, role binding, scope-readback digest, and plan digest. The server derives and verifies the worker instance/session and held role.
+    b) Only the accepted ACK transition makes the dispatch `active`. Peer registration, presence, queued delivery, and first-turn-delivered are subordinate receipts.
 
-[ ] 4. Drive the first work turn directly when the worker is not reachable
+[ ] 4. Report milestones and blockers causally
     RESULT_PROCESSOR_KIND: deterministic_continuation
-    a) Dispatch the work turn into the spawned session over its host driver (plugin::agent_messaging_plugin::drive_session)
-        Arguments:
-        {"agent_instance_id": "<<BIND:worker_instance_id>>", "text": "<<BIND:dispatch_text>>"}
+    a) The worker reports `milestone`, `blocked`, or `completion` through `report_managed_dispatch`, always with the current causal version and attempt identity.
+    b) `blocked_internal` names the coordinator-owned question, evidence, safe options, exact owner, and a timezone-aware future decision deadline before TTL. `blocked_operator` uses owner `operator` and names the authority gap and exact question.
+    c) The coordinator answers, retries, cancels, or accepts/rejects through `plugin::agent_messaging_plugin::resolve_managed_dispatch`; a stale causal version is rejected and retained for audit.
 
-[ ] 5. Require a per-item plan read-back before the worker edits anything
-    a) Require and read the worker's per-item plan read-back, and correct any item whose scope drifts from the brief before it touches a file [agent-executed: the read-back is the dispatcher's last cheap correction point]
-
-[ ] 6. Hold the worker off any file another lane is editing until a named go
+[ ] 5. Supervise from durable platform state
     RESULT_PROCESSOR_KIND: deterministic_continuation
-    a) Send the hold, and later the explicit go, for each shared file on the worker's own channel (plugin::agent_messaging_plugin::peer_send_by_name)
-        Arguments:
-        {"name": "<<BIND:worker_role_name>>", "content": "<<BIND:hold_or_go_message>>"}
+    a) Read `plugin::agent_messaging_plugin::managed_dispatch_status` when making a decision.
+    b) The platform lifecycle sweep evaluates every nonterminal attempt and dispatch without a coordinator-owned cron: it reconciles native liveness, detects failed-start, uptake, milestone, watchdog, blocker, acceptance, and TTL conditions, and emits one notice per condition and causal version.
+    c) `dead` converges the attempt out of a false-live lifecycle state and the dispatch to `worker_lost`. Probe faults remain `unknown` with bounded next-probe/escalation obligations; no sweep silently respawns an ambiguous worker.
 
-[ ] 7. Accept the deliverable only as a workbench report with a derived file list
-    a) Accept the worker's final workbench report, confirm its file list was derived from git status over the declared surface rather than written from memory, and reconcile it against the brief's item list [agent-executed: acceptance is the dispatcher's judgment, not a verb]
-
-## Expected Step Count
-
-7 steps for a full supervised dispatch; step 4 is skipped when step 3 shows the worker reachable and its first turn already delivered, and step 6 is skipped when the lane shares no file with another lane.
+[ ] 6. Independently accept exact completion evidence
+    RESULT_PROCESSOR_KIND: deterministic_continuation
+    a) A worker completion event must name the exact expected path, current artifact SHA-256, completion-contract digest, allowed verdict, every required evidence obligation, and an explicit reason for each skip/not-applicable item.
+    b) The coordinator re-reads and re-hashes the artifact, independently checks every declared obligation/verdict, binds acceptance to the exact worker-evidence digest, then calls `resolve_managed_dispatch(action="accept_completion")` with a fresh event ID and current version.
+    c) Request scoped Git-Controller landing separately. Dispatch completion never mutates Git and never proves landing, deployment, or publication.
 
 ## Binding Guidance
 
-- Bind `brief_ref` to the artifact written in step 1, and write that artifact BEFORE step 2 runs. The spawn records the reference as provenance; a reference to a file that does not yet exist records a promise instead of a brief.
-- Bind `role_class` and `work_class` deliberately: the role class decides lifecycle expectations, the work class decides what the worker is permitted to do. Choose the narrowest work class that lets the lane finish.
-- Bind `model`, `effort`, and `ttl_seconds` explicitly on EVERY spawn, matched to the work — a mechanical or gate-running lane on a cheaper tier with bounded effort, a judgment-heavy lane on a stronger one — never inherited silently from the dispatching session. Bind `budget_line` to the ledger key the spawn rolls up to, so the cost lands somewhere accountable.
-- Bind `report_by_seconds` generously. Liveness in the session ledger keys on the worker's peer registration, so a worker whose registration is lost to transport churn can be reaped while it is alive and working. Until that is fixed at the platform, a report-by window long enough to outlast a churn window is what keeps a healthy worker from being killed for a transport fault, and a direct pane drive is the expected fallback rather than an exception.
-- Bind `worker_instance_id` in step 4 to the identity step 2 returned, re-confirmed against step 3's snapshot rather than remembered — instance identity changes across a reconnect, and a remembered one silently addresses a session that no longer exists.
-- Bind `dispatch_text` to a SELF-CONTAINED first turn: the brief's path plus the instruction to read it in full and reply with a plan read-back. A driven turn that assumes context the worker never had produces a confident worker doing the wrong lane.
-- Bind step 6's `worker_role_name` to the worker's OWN channel identity. A go relayed through a third party, or observed on someone else's surface, is not a go for this worker.
-- Where a lane's founding words were captured as a charter before the spawn, the spawn resolves the latest charter for that lane and drives it as the worker's literal first turn; step 4's drive is then a fallback for the case where no first turn was delivered, not a second dispatch. Sending a second first-turn to a worker that already got one produces two competing readings of the same lane.
+- Use a fresh unique `event_id` for each semantic event; a retry of the same
+  event reuses its ID and is idempotent.
+- Read the current version immediately before reporting or resolving. A stale
+  event must lose loudly; do not overwrite the winning transition.
+- Match model and effort to the lane and bound it with explicit deadlines.
+  These are dispatch contract fields, not inferred coordinator preferences.
+- `expected_path` is an identity and validation target, not a completion
+  predicate. Path existence, dirty-tree presence, a draft, a worker claim, or
+  a routing receipt cannot complete the dispatch.
+- A human plan or task list is a projection for operator readability. The
+  dispatch row and append-only events are the control-plane truth; stale plan
+  text must not hide or strand a durable dispatch.
+- Raw `spawn_session` rejects project-class managed work without a valid
+  server-issued preparing `dispatch_id`, and the public raw process refuses
+  project work even when one is supplied. The internal retry path compares
+  every spawn/lineage field to the immutable row. Do not build a compatibility
+  path around that refusal.
 
 ## Coherence Obligations
 
-- The brief exists before the worker does. A spawn whose brief is written afterwards has no provenance at the moment it matters — the worker's first turn — and every later reconstruction of "what this lane was told" is a memory claim.
-- A session that appears in a presence listing is not a session that received its work. Presence is evidence of a process; a plan read-back is evidence of a briefed worker. Treat a missing read-back as a delivery failure and drive the turn, not as a worker that is thinking.
-- When the driver path is unavailable and the worker's terminal must be driven by hand, send the text and the newline as SEPARATE actions and then read the pane back to verify the turn was accepted. A paste and its newline in one burst can be swallowed, leaving a fully composed dispatch sitting unsent in the input line, which reads exactly like a worker that received the work and went quiet.
-- Never let a worker's edits ride into another lane's staging window. Files shared between lanes are held until an explicit go arrives on the worker's own channel, and the dispatcher owns sequencing the two lanes; an operator-surface relay of a go is not a go, and neither is a summary the dispatcher wrote itself.
-- The dispatcher stays responsible after the spawn. A worker that misses its report-by window is chased or stood down deliberately; silence is not a status, and a lane left running past its usefulness spends budget on nothing.
-- This card dispatches work the dispatcher is already permitted to do. It never mints a capability the dispatching session does not hold, and a lane that turns out to need one routes back to the surface that can grant it rather than working around the gap.
+- The brief and contract exist before the worker and remain hash-bound.
+- Runtime-specific behavior stays in host/driver adapters. The state machine,
+  ACK, blocker, completion, and acceptance semantics are runtime-neutral.
+- `registered/live` is session lifecycle evidence, never a dispatch state.
+- `unknown` liveness is not folded into alive or dead.
+- Worker death, unsupported submission, TTL expiry, and completion rejection
+  require an explicit coordinator decision. Replacement attempts are created
+  only by `resolve_managed_dispatch(action="request_retry")` under the same
+  dispatch, with fresh derived deadlines and an actual linked attempt; no
+  watchdog silently creates a second worker.
+- This joseki never grants new authority. Capability escalation, destructive
+  Git, deploy, and other operator-only actions route to the seat that owns
+  them.
 
 ## Next Joseki
 
-`request_scoped_landing` — the usual successor when the dispatched lane produced edits that must reach the main branch. The worker writes its own evidence record and file list; the landing request is a separate, verified exchange with Git-Controller and does not happen implicitly when a lane reports done.
+`request_scoped_landing` is the usual successor after accepted completion.
+The worker report and coordinator acceptance are evidence inputs to that
+separate Git-Controller exchange, not an implicit landing request.
 
-## Repair Joseki
+## Repair Semantics
 
-Explicitly absent as a card. The failures are distinguishable and take different repairs: a spawn that returns no session is read for its own error before any retry, since a blind second spawn can leave two sessions on one lane; a session that spawned but never registered is driven directly rather than re-spawned; a worker that registered but never read back its plan is re-driven with the same self-contained text, never with a shortened one; a worker reaped while alive is re-spawned with a longer report-by window and the same brief reference. A worker that has already edited files is never abandoned silently — recover its file list from git status over its declared surface before standing it down, or the edits become an unowned dirty tree for the next lane to inherit.
+Use the state and `next_required_action` returned by
+`managed_dispatch_status`. `uptake_uncertain`, `failed_start`, `worker_lost`,
+and `expired` permit an explicit bounded retry. Internal and operator blockers
+stay visibly typed until resolved. Completion evidence can be rejected back to
+`active` for repair. Never infer a retry, ACK, resolution, or completion from
+silence.

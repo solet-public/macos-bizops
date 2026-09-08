@@ -216,9 +216,13 @@ class RouterState:
             drain_window_seconds=self.drain_window_seconds,
         )
 
-    def rollback(self, color: str) -> RollbackResult:
+    def rollback(self, color: str, instance_id: str) -> RollbackResult:
         for entry in self.drain_entries:
-            if entry.binding.color == color and entry.drain_ends_at > self.now():
+            if (
+                entry.binding.color == color
+                and entry.binding.instance_id == instance_id
+                and entry.drain_ends_at > self.now()
+            ):
                 self.active_instance_id = entry.binding.instance_id
                 self.drain_entries = [
                     d for d in self.drain_entries if d is not entry

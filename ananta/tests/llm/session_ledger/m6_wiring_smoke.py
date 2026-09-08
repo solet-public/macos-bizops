@@ -955,8 +955,17 @@ def test_assemble_transcript_honors_max_chars_and_skips_null() -> None:
 def test_starting_actions_present_in_both_profiles() -> None:
     import yaml  # noqa: PLC0415
     process_key = "service_interface::session_ledger_service::ensure_periodic_summarize_schedule"
+    # ORIGIN-ONLY LEG — identical shape and identical reason to the same guard in
+    # ensure_periodic_poll_smoke: `initialization/` is absent from the seed
+    # manifest's `copy:` allowlist, so these profiles describe the ORIGIN's boot
+    # wiring only. Also 1 of the r21 verdict's 14 BLOCKING failures, failing here
+    # after its schema and denormalization checks had passed.
+    profiles_root = REPO_ROOT / "initialization" / "profiles"
+    if not profiles_root.is_dir():
+        print("  SKIP  starting_actions profile wiring: initialization/profiles is origin-only (not shipped)")
+        return
     for profile_name in ("local.yaml", "cloud.yaml"):
-        text = (REPO_ROOT / "initialization" / "profiles" / profile_name).read_text()
+        text = (profiles_root / profile_name).read_text()
         raw = yaml.safe_load(text)
         keys = {entry["process_key"] for entry in raw.get("starting_actions", [])}
         _check(

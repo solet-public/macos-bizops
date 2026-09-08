@@ -199,10 +199,27 @@ def _init_plugin_manager(orch: Any) -> None:
     orch.plugin_manager.discover_plugins(
         orch.config_manager, allowed_plugins=allowed_plugins
     )
+    _report_plugin_discovery_completeness(orch.plugin_manager, allowed_plugins)
     orch.plugin_manager.set_orchestrator_ref(orch)
     orch.plugin_manager.set_event_bus_ref(orch.event_bus)
     logger.debug(
         f"Plugin manager initialized, discovered {len(orch.plugin_manager.plugins)} plugins"
+    )
+
+
+def _report_plugin_discovery_completeness(
+    plugin_manager: Any, allowed_plugins: set[str] | None
+) -> None:
+    """Log an incomplete manifest-governed roster without changing boot outcome."""
+    if allowed_plugins is None:
+        return
+    missing = sorted(allowed_plugins - set(plugin_manager.plugins))
+    if not missing:
+        return
+    logger.error(
+        "Plugin discovery incomplete: manifest plugins were not loaded: %s; "
+        "continuing boot per ruling rul_a4b34267",
+        missing,
     )
 
 

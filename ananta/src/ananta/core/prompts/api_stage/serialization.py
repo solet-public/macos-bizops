@@ -129,16 +129,16 @@ def serialize_blocks_with_spec(
     # vs ACTIVE_PLAN focus are separate assistant messages).
     merged = role_content_pairs
     if spec.requires_role_alternation:
-        merged = _merge_adjacent_same_role(merged)
+        merged = merge_adjacent_same_role(merged)
 
     # Single-system-message handling
     if not spec.supports_multiple_system_messages:
-        merged = _consolidate_system_messages(merged)
+        merged = consolidate_system_messages(merged)
 
     return [{"role": role, "content": content} for role, content in merged]
 
 
-def _merge_adjacent_same_role(
+def merge_adjacent_same_role(
     pairs: list[tuple[str, str]],
 ) -> list[tuple[str, str]]:
     """Merge consecutive pairs with the same role."""
@@ -159,7 +159,7 @@ def _merge_adjacent_same_role(
     return merged
 
 
-def _consolidate_system_messages(
+def consolidate_system_messages(
     pairs: list[tuple[str, str]],
 ) -> list[tuple[str, str]]:
     """Merge all system-role messages into one leading system message."""

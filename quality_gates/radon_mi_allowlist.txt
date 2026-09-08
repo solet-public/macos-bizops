@@ -20,20 +20,20 @@
 # ------------------------------------------------------------
 
 # §9.E god-class also fails MI rank C.
-ananta/src/ananta/core/actions/action_queue_poller.py
+ananta/src/ananta/core/actions/action_queue_poller.py  # legacy: 2026-09-03 W2-1
 
 # §9.D-adjacent: ActionProcessor is god-class flagged; same file MI rank C.
-ananta/src/ananta/core/actions/action_processor.py
+ananta/src/ananta/core/actions/action_processor.py  # legacy: 2026-09-03 W2-1
 
 # §9.I god-class flag (TemplateFunctionRegistry) overlaps with MI rank C.
-ananta/src/ananta/core/templates/template_functions.py
+ananta/src/ananta/core/templates/template_functions.py  # legacy: 2026-09-03 W2-1
 
 # §9.H follow-on: ACTRMemoryBackend is god-class flagged; MI also rank C.
-plugins/actr_memory_plugin/src/actr_memory_plugin/backend.py
+plugins/actr_memory_plugin/src/actr_memory_plugin/backend.py  # legacy: 2026-09-03 W2-1
 
 # §9.K standalone: pure DSP module, no @platform_process methods to
 # strip; split by function family (pitch / envelope / spectral).
-plugins/audio_processing_plugin/src/audio_processing_plugin/audio_analysis.py
+plugins/audio_processing_plugin/src/audio_processing_plugin/audio_analysis.py  # legacy: 2026-09-03 W2-1
 
 # ------------------------------------------------------------
 # Files that were rank-C in Git-Controller's earlier gate report
@@ -43,12 +43,27 @@ plugins/audio_processing_plugin/src/audio_processing_plugin/audio_analysis.py
 # ------------------------------------------------------------
 
 
-plugins/default_inference_plugin/src/default_inference_plugin/plugin.py
-plugins/default_thinking_plugin/src/default_thinking_plugin/plugin.py
-plugins/macos_vault_plugin/src/macos_vault_plugin/plugin.py
+plugins/default_inference_plugin/src/default_inference_plugin/plugin.py  # legacy: 2026-09-03 W2-1
+plugins/default_thinking_plugin/src/default_thinking_plugin/plugin.py  # legacy: 2026-09-03 W2-1
+plugins/macos_vault_plugin/src/macos_vault_plugin/plugin.py  # legacy: 2026-09-03 W2-1
 
 # agent_messaging_plugin is god-class-allowlisted; the GAP-5 STUB-2
 # list_threads interface delegation (FORCED by the new ABC abstractmethod
 # that obligates this nominal subclass) tipped MI B(9.11)->C(8.95).
 # Operator-approved 2026-06-22 (Decision 1).
-plugins/agent_messaging_plugin/src/agent_messaging_plugin/plugin.py
+plugins/agent_messaging_plugin/src/agent_messaging_plugin/plugin.py  # legacy: 2026-09-03 W2-1
+
+# Added 2026-08-28 (Git-Controller-ratified pre-existing debt).
+# Skeptical review: Git-Controller measured this file at HEAD as C(6.60);
+# the earlier models-stage test additions measured C(6.40), a real 0.20 movement,
+# not a neutral diff. The revised adapter-side scope measures C(6.60), but the
+# pre-existing C debt remains. Remediation contract: split scenario families,
+# then remove this entry as the burn-down unit; no new-code MI exceptions are implied.
+solet_cli/tests/discovered_decision_scenarios.py  # legacy: 2026-09-03 W2-1
+
+# Added 2026-08-30 (coordinator ruling for lane-cdx-fix-review-r1-r1-defects).
+# Inherited from master's c60cbce87 Unit-A refactor, which folded the live
+# operation-selection family into plan_builder.py and deleted operation_selection.py.
+# This lane's D1 delta did not introduce or worsen the C-grade MI. Proper remediation:
+# extract that selection family into a dedicated module in a separately reviewed unit.
+solet_cli/src/solet_manager/plan_builder.py  # legacy: 2026-09-03 W2-1

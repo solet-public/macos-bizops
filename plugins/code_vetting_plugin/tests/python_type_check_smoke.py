@@ -19,6 +19,7 @@ Run directly or via run_smokes.py.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import json
 import os
 import sys
@@ -26,6 +27,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from code_vetting_plugin import toolrun
 from code_vetting_plugin.models import Dimension, Severity
 from code_vetting_plugin.report import DEFAULT_ZERO_FP_DIMENSIONS
 from code_vetting_plugin.runner import SCANNERS, Applicability
@@ -167,7 +174,11 @@ def _write_executable(path: Path, body: str) -> None:
 
 
 def _check_failed_shim_is_gap(base: Path) -> None:
-    """A PATH shim that exits 127 is incomplete coverage, never clean."""
+    """A binary that qualifies (answers --version) but fails the real invocation is incomplete
+    coverage, never clean. The shim must succeed unconditionally on --version: qualify_tool's own
+    probe (toolrun.py) runs from an arbitrary cwd, never the target's, so a shim conditioned on cwd
+    would be misclassified as globally unusable at qualification and never reach the target-cwd-aware
+    checker invocation this check exists to exercise."""
     fake_bin = base / "fake-bin"
     fake_bin.mkdir()
     target = base / "shim-target"
@@ -178,29 +189,25 @@ def _check_failed_shim_is_gap(base: Path) -> None:
     _write_executable(
         fake_bin / "mypy",
         "#!/bin/sh\n"
-        'if [ "$PWD" != "$TYPECHECK_TARGET" ]; then\n'
-        "  printf '%s\\n' 'pyenv: mypy: command not found' >&2\n"
-        "  exit 127\n"
-        "fi\n"
         'if [ "$1" = "--version" ]; then\n'
         "  printf '%s\\n' 'mypy 9.9.9'\n"
         "  exit 0\n"
         "fi\n"
-        "printf '%s\\n' 'pyenv: mypy: command not found' >&2\n"
+        "printf '%s\\n' 'mypy: internal error: corrupt cache' >&2\n"
         "exit 127\n",
     )
     prior_path = os.environ.get("PATH", "")
-    prior_target = os.environ.get("TYPECHECK_TARGET")
     os.environ["PATH"] = f"{fake_bin}:{prior_path}"
-    os.environ["TYPECHECK_TARGET"] = str(target.resolve())
+    # A prior check's real-host qualification of "mypy" (e.g. RIDER-2, absent on a host with no
+    # ambient mypy) is cached for the process lifetime (toolrun._TOOL_QUALIFICATIONS). Left
+    # uncleared, that stale verdict shadows this shim on PATH and the scan never invokes it —
+    # see l1_scanners_smoke.py for the same PATH-mutation-needs-a-cache-clear pattern.
+    toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
     try:
         result = scan(TargetTree.from_walk(target), "vr-typecheck-shim-gap", execute_target_toolchain=True)
     finally:
         os.environ["PATH"] = prior_path
-        if prior_target is None:
-            os.environ.pop("TYPECHECK_TARGET", None)
-        else:
-            os.environ["TYPECHECK_TARGET"] = prior_target
+        toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
     reason = result.coverage.gap_reason or ""
     _check("failed pyenv shim marks coverage ran=False", result.coverage.ran is False, str(result.coverage))
     _check("exit 127 is disclosed", "exited 127" in reason, reason)

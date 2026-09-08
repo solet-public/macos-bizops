@@ -33,6 +33,11 @@ from agent_messaging_plugin.authority_contract import (  # noqa: E402
     UnresolvedPlaceholderError,
     render_authority_delegation_contract,
 )
+from agent_messaging_plugin.headless_adapter import _authority_system_prompt  # noqa: E402
+from agent_messaging_plugin.plugin import (  # noqa: E402
+    AgentMessagingPlugin,
+    _spawn_session_request_from_params,
+)
 
 _passed = 0
 _failed: list[str] = []
@@ -159,6 +164,74 @@ def test_missing_fields_render_as_blank_not_raise() -> None:
     _check("{role_class}" not in text, "an empty-string field is still a resolved substitution")
 
 
+def test_optional_unit_id_reaches_the_authority_contract() -> None:
+    """Killing test: raw spawn input must retain its exact optional work-unit
+    identity through the typed request and the adapter's trusted contract.
+    Omitting it must produce precisely the legacy contract, not a blank field."""
+    raw = {
+        "role_class": "ephemeral",
+        "lane_id": "lane-unit-id",
+        "brief_ref": "workbench/unit-id.md",
+        "unit_id": "unt-01234567-89ab-cdef-0123-456789abcdef",
+        "work_class": "read_only",
+        "budget_line": "test",
+    }
+    request = _spawn_session_request_from_params(raw, "operator:test")
+    metadata = AgentMessagingPlugin.spawn_session._platform_process_metadata  # type: ignore[attr-defined]  # noqa: SLF001
+    _check("unit_id" in metadata.parameters, "spawn_session declares unit_id in its closed invocation schema")
+    _check(
+        metadata.parameters["unit_id"].required is False,
+        "spawn_session keeps unit_id optional",
+    )
+    present = _authority_system_prompt(
+        {
+            "agent_instance_id": "agi-unit-id",
+            "role_class": request.role_class,
+            "lane_id": request.lane_id,
+            "brief_ref": request.brief_ref,
+            "unit_id": request.unit_id,
+            "spawned_by_role": "Test-Dispatcher",
+        },
+    )
+    _check(
+        request.unit_id == raw["unit_id"],
+        "spawn_session raw unit_id reaches SpawnSessionRequest unaltered",
+    )
+    _check(
+        f"UNIT ID: {raw['unit_id']}" in present,
+        "the exact unit_id reaches the adapter-rendered authority contract",
+    )
+
+    absent_request = _spawn_session_request_from_params(
+        {key: value for key, value in raw.items() if key != "unit_id"}, "operator:test",
+    )
+    absent = _authority_system_prompt(
+        {
+            "agent_instance_id": "agi-unit-id",
+            "role_class": absent_request.role_class,
+            "lane_id": absent_request.lane_id,
+            "brief_ref": absent_request.brief_ref,
+            "unit_id": absent_request.unit_id,
+            "spawned_by_role": "Test-Dispatcher",
+        },
+    )
+    legacy_template = authority_contract._TEMPLATE_PATH.read_text().replace(  # noqa: SLF001
+        "UNIT ID: {unit_id}\n", "",
+    )
+    legacy_values = {
+        "agent_instance_id": "agi-unit-id",
+        "role_class": absent_request.role_class,
+        "lane_id": absent_request.lane_id,
+        "brief_ref": absent_request.brief_ref,
+        "spawned_by_role": "Test-Dispatcher",
+    }
+    for name, value in legacy_values.items():
+        legacy_template = legacy_template.replace("{" + name + "}", value)
+    _check(absent_request.unit_id == "", "omitted unit_id stays optional and empty")
+    _check("UNIT ID:" not in absent, "omitted unit_id emits no blank authority-contract field")
+    _check(absent == legacy_template, "omitted unit_id is byte-identical to the legacy contract")
+
+
 def test_unresolved_placeholder_raises() -> None:
     """RED-FIRST, the seat's explicitly-required leg: the KB-ships-unrendered
     trap class. A template with a genuine unresolved placeholder (a typo,
@@ -200,6 +273,7 @@ def main() -> int:
     test_edit_2_first_actions_never_claims_the_class_string()
     test_edit_3_tier_statement_replaces_never_wait_clause()
     test_missing_fields_render_as_blank_not_raise()
+    test_optional_unit_id_reaches_the_authority_contract()
     test_unresolved_placeholder_raises()
     test_render_is_deterministic()
 

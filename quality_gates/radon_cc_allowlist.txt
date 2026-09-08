@@ -15,13 +15,13 @@
 
 # Added 2026-05-26 (operator-approved). First-time-in-scope after dev_tools/ elimination
 # Phase 1+2 structurally-moved http_routes.py for docstring path-updates.
-plugins/agent_messaging_plugin/src/agent_messaging_plugin/http_routes.py::_peer_send_impl
+plugins/agent_messaging_plugin/src/agent_messaging_plugin/http_routes.py::_peer_send_impl  # legacy: 2026-09-03 W2-1
 # Added 2026-05-26 (operator-approved). Pure-move-revealed-debt after Phase 4 relocated
 # peer_registry_migration_live_smoke.py (renamed from ..._smoke.py, P6) from dev_tools/ to plugins/agent_messaging_plugin/tests/.
 # Same shape as other allowlisted linear smoke mains (per-check sequences,
 # operator-facing smoke harness with all cases inlined in main, hits D(23) cc, refactorable
 # by extracting _case_* helpers but deferred per Task #74 pattern.
-plugins/agent_messaging_plugin/tests/peer_registry_migration_live_smoke.py::main
+plugins/agent_messaging_plugin/tests/peer_registry_migration_live_smoke.py::main  # legacy: 2026-09-03 W2-1
 
 # Added 2026-07-07 (operator-ratified, GTE-05 ananta/tests enforcement).
 # The 10 pre-existing C+ functions inventoried by the read-only debt audit
@@ -32,22 +32,31 @@ plugins/agent_messaging_plugin/tests/peer_registry_migration_live_smoke.py::main
 # without operator approval. The F(55) entry below is marked RETIRE-FIRST:
 # it is the single largest item and leads the remediation queue.
 # RETIRE-FIRST — CC F(55), the campaign's first target:
-ananta/tests/llm/agent_messaging/repository_migration_smoke.py::main
+ananta/tests/llm/agent_messaging/repository_migration_smoke.py::main  # legacy: 2026-09-03 W2-1
 # CC D(21):
-ananta/tests/llm/session_ledger/list_sessions_m17_filters_smoke.py::_matches
+ananta/tests/llm/session_ledger/list_sessions_m17_filters_smoke.py::_matches  # legacy: 2026-09-03 W2-1
 # CC C(20):
-ananta/tests/llm/session_ledger/events_window_fold_smoke.py::_matches
+ananta/tests/llm/session_ledger/events_window_fold_smoke.py::_matches  # legacy: 2026-09-03 W2-1
 # CC C(15):
-ananta/tests/llm/session_ledger/census_fold_smoke.py::test_per_source_tallies
+ananta/tests/llm/session_ledger/census_fold_smoke.py::test_per_source_tallies  # legacy: 2026-09-03 W2-1
 # CC C(14):
-ananta/tests/llm/session_ledger/read_migration_active_sessions_live_smoke.py::test_list_active_sessions
+ananta/tests/llm/session_ledger/read_migration_active_sessions_live_smoke.py::test_list_active_sessions  # legacy: 2026-09-03 W2-1
 # CC C(12):
-ananta/tests/llm/session_ledger/read_migration_slice6b_live_smoke.py::test_get_session_timeline_cursor_content_json_cap
+ananta/tests/llm/session_ledger/read_migration_slice6b_live_smoke.py::test_get_session_timeline_cursor_content_json_cap  # legacy: 2026-09-03 W2-1
 # CC C(12):
-ananta/tests/services/vault_service/vault_service_proxy_smoke.py::_subsmoke_parity
+ananta/tests/services/vault_service/vault_service_proxy_smoke.py::_subsmoke_parity  # legacy: 2026-09-03 W2-1
 # CC C(12):
-ananta/tests/session_ledger_service/interfaces_split_no_god_class_smoke.py::check_verb_counts
+ananta/tests/session_ledger_service/interfaces_split_no_god_class_smoke.py::check_verb_counts  # legacy: 2026-09-03 W2-1
 # CC C(11):
-ananta/tests/llm/session_ledger/deployment_migration_live_smoke.py::test_full_pairing_lifecycle
+ananta/tests/llm/session_ledger/deployment_migration_live_smoke.py::test_full_pairing_lifecycle  # legacy: 2026-09-03 W2-1
 # CC C(11):
-ananta/tests/llm/session_ledger/polling_driver_migration_live_smoke.py::test_polling_driver_lifecycle
+ananta/tests/llm/session_ledger/polling_driver_migration_live_smoke.py::test_polling_driver_lifecycle  # legacy: 2026-09-03 W2-1
+
+# Added 2026-08-28 (Git-Controller-ratified pre-existing debt).
+# Skeptical review: Git-Controller measured HEAD directly and found these
+# byte-identical functions at CC D(21) and CC C(17), respectively. This
+# models-stage change does not grant a new-code complexity exception.
+# Remediation contract: extract coherent scenario helpers; remove these entries
+# as the burn-down unit rather than extending this tracked-debt register.
+solet_cli/tests/discovered_decision_scenarios.py::_verified_scenario  # legacy: 2026-09-03 W2-1
+solet_cli/tests/discovered_decision_scenarios.py::_future_model_carrier_scenario  # legacy: 2026-09-03 W2-1

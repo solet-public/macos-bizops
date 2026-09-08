@@ -74,6 +74,42 @@ CurrentReleaseLookup = Callable[[], str | None]
 # at ERROR + SIGTERMs the running process; smokes inject a recording
 # stub so the test runner survives.
 SigtermCallback = Callable[[str], None]
+SetColorActive = Callable[[bool], None]
+
+
+class PollerGateReactivation:
+    """Restore a quiesced poller only after router authority returns to it.
+
+    The gate is process-local, so a ``swap_rollback`` action running on the
+    currently active process cannot restore the drained process directly.  Its
+    heartbeat observes the router instead.  A current-self snapshot alone is
+    deliberately insufficient: quiesce runs while self is still router-active,
+    before the forward cutover is committed.  Only a transition through another
+    active instance proves this process was drained and later reactivated.
+    """
+
+    def __init__(
+        self,
+        *,
+        self_instance_id: str,
+        set_color_active: SetColorActive,
+    ) -> None:
+        self._self_instance_id = self_instance_id
+        self._set_color_active = set_color_active
+        self._observed_other_active = False
+
+    def observe(self, snapshot: dict[str, Any]) -> None:
+        """Apply a proven other-active → self-active router transition."""
+        active_instance_id = snapshot.get("active_instance_id")
+        if not isinstance(active_instance_id, str):
+            return
+        if active_instance_id != self._self_instance_id:
+            self._observed_other_active = True
+            return
+        if not self._observed_other_active:
+            return
+        self._set_color_active(True)
+        self._observed_other_active = False
 
 
 def run(
@@ -85,6 +121,7 @@ def run(
     stop_event: threading.Event,
     sigterm_callback: SigtermCallback,
     logger: logging.Logger,
+    set_color_active: SetColorActive,
     pending_finisher_file: Path | None = None,
     current_release_lookup: CurrentReleaseLookup | None = None,
     budget_seconds: float = DEFAULT_TRANSIENT_STATE_BUDGET_SECONDS,
@@ -149,6 +186,7 @@ def run(
         pending_finisher_file=pending_finisher_file,
         current_release_lookup=current_release_lookup,
         logger=logger,
+        set_color_active=set_color_active,
         streamable_port_lookup=streamable_port_lookup,
     )
 
@@ -265,6 +303,7 @@ def _process_heartbeat_response(
     logger: logging.Logger,
     streamable_port_lookup: PortLookup | None,
     streamable_delivered: bool,
+    poller_gate_reactivation: PollerGateReactivation,
 ) -> bool:
     """Act on one heartbeat response; return the updated ``streamable_delivered``.
 
@@ -293,6 +332,11 @@ def _process_heartbeat_response(
         self_instance_id=self_instance_id,
         logger=logger,
     )
+    _observe_poller_gate_reactivation(
+        client=client,
+        poller_gate_reactivation=poller_gate_reactivation,
+        logger=logger,
+    )
     if streamable_delivered or streamable_port_lookup is None:
         return streamable_delivered
     streamable_port = streamable_port_lookup()
@@ -308,6 +352,23 @@ def _process_heartbeat_response(
     return streamable_delivered
 
 
+def _observe_poller_gate_reactivation(
+    *,
+    client: RouterClient,
+    poller_gate_reactivation: PollerGateReactivation,
+    logger: logging.Logger,
+) -> None:
+    """Feed one router snapshot into the local poller-gate transition guard."""
+    try:
+        poller_gate_reactivation.observe(client.status())
+    except RouterClientError as exc:
+        logger.warning(
+            "%s: status check for poller-gate reactivation failed: %s",
+            PLUGIN_NAME,
+            exc,
+        )
+
+
 def _run_steady_state_heartbeat(
     *,
     client: RouterClient,
@@ -318,6 +379,7 @@ def _run_steady_state_heartbeat(
     pending_finisher_file: Path | None,
     current_release_lookup: CurrentReleaseLookup | None,
     logger: logging.Logger,
+    set_color_active: SetColorActive,
     streamable_port_lookup: PortLookup | None = None,
 ) -> None:
     """Heartbeat every ``DEFAULT_HEARTBEAT_INTERVAL_SECONDS``; re-register on miss.
@@ -353,6 +415,10 @@ def _run_steady_state_heartbeat(
     once delivery succeeds.
     """
     streamable_delivered = streamable_port_lookup is None
+    poller_gate_reactivation = PollerGateReactivation(
+        self_instance_id=self_instance_id,
+        set_color_active=set_color_active,
+    )
     while not stop_event.is_set():
         try:
             response = client.heartbeat(self_instance_id)
@@ -368,6 +434,7 @@ def _run_steady_state_heartbeat(
                 logger=logger,
                 streamable_port_lookup=streamable_port_lookup,
                 streamable_delivered=streamable_delivered,
+                poller_gate_reactivation=poller_gate_reactivation,
             )
         if pending_finisher_file is not None and current_release_lookup is not None:
             _run_pending_finisher_backstop(

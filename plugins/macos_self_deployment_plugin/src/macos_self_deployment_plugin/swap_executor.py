@@ -26,7 +26,6 @@ phase (status probe, color derivation, build-or-rehydrate, preflight).
 from __future__ import annotations
 
 import logging
-import os
 import shlex
 import time
 import uuid
@@ -37,7 +36,6 @@ from typing import Protocol
 
 from ananta.interfaces.lifecycle_result_types import RestartResult, RestartStatus
 
-from macos_self_deployment_plugin import process_identity
 from macos_self_deployment_plugin.constants import (
     COMPLETE_SWAP_PROCESS_KEY,
     DEFAULT_POST_ACTIVATE_GRACE_SECONDS,
@@ -45,7 +43,10 @@ from macos_self_deployment_plugin.constants import (
     STATUS_QUEUED,
     RestartReasonCode,
 )
-from macos_self_deployment_plugin.green_candidate import GreenCandidate
+from macos_self_deployment_plugin.green_candidate import (
+    CandidateReadiness,
+    GreenCandidate,
+)
 from macos_self_deployment_plugin.pending_finisher import (
     PendingFinisher,
     clear_pending_finisher,
@@ -76,6 +77,37 @@ class ActionFactoryProtocol(Protocol):
         action_definition: dict[str, object],
         context: dict[str, object] | None = None,
     ) -> str: ...
+
+
+class DurableQueueUnavailableAtTargetLocalEntryError(RuntimeError):
+    """The target-local adapter may not open the state-service queue path."""
+
+
+class TargetLocalUnavailableActionFactory:
+    """Typed fail-closed queue collaborator for the adapter subprocess.
+
+    The shared executor already treats an enqueue failure after the durable
+    pointer swap as a backstop handoff. Returning a synthetic action id would
+    violate the paired session/action-row invariant; raising preserves the
+    existing B2 recovery path instead.
+    """
+
+    def submit_action_definition(
+        self,
+        action_definition: dict[str, object],
+        context: dict[str, object] | None = None,
+    ) -> str:
+        del action_definition, context
+        raise DurableQueueUnavailableAtTargetLocalEntryError(
+            "target-local cutover cannot submit a database-backed complete_swap action",
+        )
+
+
+def target_local_unavailable_session() -> str:
+    """Refuse before minting a synthetic session identifier in the adapter."""
+    raise DurableQueueUnavailableAtTargetLocalEntryError(
+        "target-local cutover cannot create a database-backed complete_swap session",
+    )
 
 
 class SetActiveTarget(Protocol):
@@ -213,6 +245,9 @@ class SwapExecutor:
         expected_etag: str,
         self_instance_id: str,
         self_color: str,
+        prior_pid: int,
+        prior_start_token: str | None,
+        poller_gate: str,
         set_active_targets: Iterable[SetActiveTarget],
         symlink_swap: SymlinkSwapFn,
         spawn_failure: tuple[RestartStatus, str],
@@ -247,14 +282,38 @@ class SwapExecutor:
             return spawned
         spawned_pid = spawned
 
-        if not self._candidate.wait_until_registered(next_instance_id):
+        readiness = self._candidate.wait_until_registered(
+            next_instance_id, pid=spawned_pid,
+        )
+        if readiness is not CandidateReadiness.REGISTERED:
             # Kill AND unregister: a registered-but-unhealthy candidate (it
             # passed register but failed the TCP health probe) is in the router's
             # registry, so killing it without unregistering leaves a stale
             # binding (heartbeat GC self-heals it, but we clean up eagerly).
             # unregister is idempotent — a no-op when the child never registered.
+            # kill is idempotent too — a no-op on an already-dead candidate.
             self._candidate.kill(spawned_pid)
             self._candidate.unregister(next_instance_id)
+            if readiness is CandidateReadiness.EXITED:
+                # The candidate DIED rather than merely being slow. The severity
+                # is the same class as never having spawned at all — retryable
+                # for a forward cutover, needs-intervention for a rollback whose
+                # safety net will not stay up — so the STATUS comes from
+                # ``spawn_failure``; only the reason_code is sharpened, because
+                # "it died" and "it timed out" send an operator to different
+                # evidence.
+                return build_failed_result(
+                    status=spawn_failure[0],
+                    reason_code=RestartReasonCode.SPAWN_DIED,
+                    message=(
+                        f"next color {next_color} pid={spawned_pid} exited before "
+                        f"registering with the router (detected within one poll "
+                        f"interval, not after the {self._ready_timeout}s timeout); "
+                        f"unregister issued. Check the spawn log and the shared "
+                        f"profile log for the candidate's own startup output."
+                    ),
+                    reason=reason, expected_etag=expected_etag, logger=self._logger,
+                )
             return build_failed_result(
                 status=register_failure[0], reason_code=register_failure[1],
                 message=(
@@ -275,6 +334,8 @@ class SwapExecutor:
         swap = self._swap_or_compensate(
             candidate=candidate, symlink_swap=symlink_swap, prior_color=self_color,
             self_instance_id=self_instance_id,
+            prior_pid=prior_pid,
+            prior_start_token=prior_start_token,
             instance_id=next_instance_id, pid=spawned_pid,
             reason=reason, expected_etag=expected_etag,
             compensation_codes=compensation_codes,
@@ -284,7 +345,10 @@ class SwapExecutor:
 
         return self._finish_queued(
             next_color=next_color, next_instance_id=next_instance_id,
-            pid=spawned_pid, self_instance_id=self_instance_id, self_color=self_color,
+            candidate_release_id=candidate.release_id,
+            pid=spawned_pid, prior_pid=prior_pid,
+            prior_instance_id=self_instance_id, prior_color=self_color,
+            prior_start_token=prior_start_token, poller_gate=poller_gate,
             set_active_targets=set_active_targets, activate_result=activate_result,
             reason=reason, expected_etag=expected_etag,
         )
@@ -354,7 +418,8 @@ class SwapExecutor:
 
     def _swap_or_compensate(
         self, *, candidate: CandidatePaths, symlink_swap: SymlinkSwapFn,
-        prior_color: str, self_instance_id: str, instance_id: str, pid: int,
+        prior_color: str, self_instance_id: str, prior_pid: int,
+        prior_start_token: str | None, instance_id: str, pid: int,
         reason: str, expected_etag: str, compensation_codes: tuple[str, str],
     ) -> SwapResult | RestartResult:
         """Run the durable symlink swap; on failure compensate + return the
@@ -371,7 +436,9 @@ class SwapExecutor:
         # IMMEDIATELY BEFORE the irreversible symlink swap, so it provably
         # exists the instant the cutover is durable — closing the
         # {swap → record-write} window rather than merely narrowing it. The
-        # prior color is THIS draining process (our own pid + self_instance_id).
+        # prior color is supplied by the caller that observed it. The normal
+        # service path supplies its own identity; the target-local adapter
+        # supplies the router-served identity it observed.
         # Written OUTSIDE the try: a write failure must abort before the
         # irreversible swap (no undurable-finisher cutover), so it propagates.
         #
@@ -379,16 +446,16 @@ class SwapExecutor:
         # backstop stays INERT until ``current`` actually names this candidate —
         # writing-before-swap closed the post-swap window without opening a
         # premature-action one. B2·3: ``prior_start_token`` is captured here about
-        # OUR OWN live pid, so the backstop can prove a later kill targets the
-        # same process (not a reused pid).
+        # supplied prior pid, so the backstop can prove a later kill targets
+        # the same process (not a reused pid).
         write_pending_finisher(
             self._pending_finisher_path,
             PendingFinisher(
-                prior_pid=os.getpid(),
+                prior_pid=prior_pid,
                 prior_instance_id=self_instance_id,
                 prior_color=prior_color,
                 candidate_release_id=candidate.release_id,
-                prior_start_token=process_identity.start_token(os.getpid()),
+                prior_start_token=prior_start_token,
             ),
         )
         try:
@@ -400,7 +467,11 @@ class SwapExecutor:
             # just wrote so the heartbeat backstop never SIGTERMs the prior.
             clear_pending_finisher(self._pending_finisher_path)
             outcome = self._candidate.compensate_failed_swap(
-                prior_color=prior_color, instance_id=instance_id, pid=pid, exc=exc,
+                prior_color=prior_color,
+                prior_instance_id=self_instance_id,
+                instance_id=instance_id,
+                pid=pid,
+                exc=exc,
             )
             confirmed_code, unconfirmed_code = compensation_codes
             # F2-iv: a CONFIRMED router rollback restored the pre-swap pair →
@@ -423,8 +494,9 @@ class SwapExecutor:
         return swap
 
     def _finish_queued(
-        self, *, next_color: str, next_instance_id: str, pid: int,
-        self_instance_id: str, self_color: str,
+        self, *, next_color: str, next_instance_id: str, candidate_release_id: str,
+        pid: int, prior_pid: int, prior_instance_id: str, prior_color: str,
+        prior_start_token: str | None, poller_gate: str,
         set_active_targets: Iterable[SetActiveTarget],
         activate_result: dict[str, object], reason: str, expected_etag: str,
     ) -> RestartResult:
@@ -444,12 +516,14 @@ class SwapExecutor:
         # durable cutover — the record + the heartbeat backstop on the NEW active
         # color guarantee the prior color is still SIGTERM'd + unregistered.
         restart_action_id = ""
+        finisher = "queued"
         try:
             restart_action_id = self._enqueue_complete_swap(
-                prior_pid=os.getpid(), prior_instance_id=self_instance_id,
-                prior_color=self_color, reason=reason,
+                prior_pid=prior_pid, prior_instance_id=prior_instance_id,
+                prior_color=prior_color, reason=reason,
             )
         except Exception:  # noqa: BLE001 — cutover is durable; the backstop completes cleanup
+            finisher = "backstop"
             self._logger.exception(
                 "complete_swap enqueue FAILED after a durable cutover; the "
                 "pending-finisher backstop on the new active color will "
@@ -472,6 +546,24 @@ class SwapExecutor:
             expected_etag=expected_etag,
             dry_run=False,
             reason_code=RestartReasonCode.NONE,
+            probe={
+                "cutover_evidence": {
+                    "candidate_release_id": candidate_release_id,
+                    "candidate_instance_id": next_instance_id,
+                    "candidate_color": next_color,
+                    "router_transitions": [
+                        f"registered:{next_color}:{next_instance_id}",
+                        f"activated:{next_color}:{next_instance_id}",
+                        f"durable_current:{candidate_release_id}",
+                    ],
+                    "finisher": finisher,
+                    "poller_gate": poller_gate,
+                    "prior_pid": prior_pid,
+                    "prior_instance_id": prior_instance_id,
+                    "prior_color": prior_color,
+                    "prior_start_token": prior_start_token,
+                },
+            },
         )
 
     def _quiesce_local_plugins(
@@ -538,10 +630,13 @@ class SwapExecutor:
 
 __all__ = [
     "ActionFactoryProtocol",
+    "DurableQueueUnavailableAtTargetLocalEntryError",
     "SetActiveTarget",
     "SetColorActiveFn",
     "SpawnFn",
     "SwapExecutor",
     "SymlinkSwapFn",
+    "TargetLocalUnavailableActionFactory",
     "build_failed_result",
+    "target_local_unavailable_session",
 ]

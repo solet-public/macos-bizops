@@ -6,6 +6,7 @@ its own FastAPI/uvicorn server for the HTTPS OAuth callback (ALB-routable in
 cloud deployment).
 
 Verbs:
+  - test_connection  — bounded Gmail profile read for connection qualification
   - connect_account   — returns the Google consent URL + state nonce (PKCE)
   - start_interface   — starts the OAuth callback uvicorn server
   - stop_interface    — shuts down the server
@@ -95,6 +96,7 @@ from .constants import (
     RESULT_TYPE_SLIDES_CREATE,
     RESULT_TYPE_SLIDES_EXPORT,
     RESULT_TYPE_SLIDES_GET,
+    RESULT_TYPE_TEST_CONNECTION,
     SHEETS_DEFAULT_ROW_LIMIT,
     SHEETS_ROW_LIMIT_CAP,
     VAULT_KEY_ACCESS_TOKEN,
@@ -592,6 +594,9 @@ class GSuitePlugin(ServicePlugin, EdgeProcessProvider):
 
     def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
         return {
+            "test_connection": _edge(
+                "test_connection", RESULT_TYPE_TEST_CONNECTION, retryable=True
+            ),
             "connect_account": _edge(
                 "connect_account", RESULT_TYPE_CONNECT, retryable=False
             ),
@@ -723,6 +728,40 @@ class GSuitePlugin(ServicePlugin, EdgeProcessProvider):
     # ------------------------------------------------------------------
     # @platform_process implementations — OAuth bootstrap
     # ------------------------------------------------------------------
+
+    @platform_process(
+        name="test_connection",
+        display_name="Google Workspace: Test Connection",
+        description=(
+            "Verify the connected Workspace account with Gmail's minimal profile read. "
+            "This does not list Drive files or return any third-party content."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Bounded connection verdict: account_identity and harmless_read_ok.",
+            properties={
+                "account_identity": ParameterMetadata(
+                    type=ParameterType.STRING, description="Connected account email identity."
+                ),
+                "harmless_read_ok": ParameterMetadata(
+                    type=ParameterType.BOOLEAN, description="True when the minimal profile read succeeded."
+                ),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def test_connection(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        def _profile() -> dict[str, Any]:
+            profile = self._require_factory().gmail().users().getProfile(userId="me").execute()
+            account_identity = profile.get("emailAddress")
+            if not isinstance(account_identity, str) or not account_identity:
+                raise ValueError("Gmail profile response did not contain emailAddress")
+            return {"account_identity": account_identity, "harmless_read_ok": True}
+
+        return self._run(_profile, "test_connection")
 
     @platform_process(
         name="connect_account",

@@ -675,9 +675,10 @@ def _dispatch_activate(state: RouterState, args: dict[str, object]) -> dict[str,
 
 def _dispatch_rollback(state: RouterState, args: dict[str, object]) -> dict[str, object]:
     color = args.get("color")
-    if not isinstance(color, str):
+    instance_id = args.get("instance_id")
+    if not isinstance(color, str) or not isinstance(instance_id, str):
         return {"rolled_back": False, "reason": "bad_args"}
-    result = state.rollback(color)
+    result = state.rollback(color, instance_id)
     out: dict[str, object] = {"rolled_back": result.rolled_back}
     if result.active_color is not None:
         out["active_color"] = result.active_color

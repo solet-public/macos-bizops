@@ -50,7 +50,7 @@ class _DirectiveClause:
 # The single load-bearing tier assignment (Architect ruling §38): the POLICY lens's
 # fast-fail / absence-of-raw-SQL / single-user-category-error / RB-SCOPE clauses are
 # ``project_local``; everything else is ``universal``.
-_REFUTE_CLAUSES: dict[SkepticLens, tuple[_DirectiveClause, ...]] = {
+REFUTE_CLAUSES: dict[SkepticLens, tuple[_DirectiveClause, ...]] = {
     SkepticLens.CORRECTNESS: (
         _DirectiveClause(
             PolicyTier.UNIVERSAL,
@@ -107,7 +107,7 @@ _REFUTE_CLAUSES: dict[SkepticLens, tuple[_DirectiveClause, ...]] = {
 def refute_directive(lens: SkepticLens, tiers: frozenset[PolicyTier] = ALL_TIERS) -> str:
     """The lens-specific adversarial instruction, rendered from the active policy-tier stack (FT-2).
 
-    W3-C: the clauses now render FROM the assembled, hash-verified rulebook artifact (``_REFUTE_CLAUSES``
+    W3-C: the clauses now render FROM the assembled, hash-verified rulebook artifact (``REFUTE_CLAUSES``
     below is the ASSEMBLER's SOURCE; the runtime reads the artifact). ``project_local`` clauses drop on a
     foreign target so the project-local refute grounds never refute a real foreign finding. Byte-identical to
     the pre-assembly directive (clauses stored verbatim) — the self-vet render is the W3C-1 regression bar.

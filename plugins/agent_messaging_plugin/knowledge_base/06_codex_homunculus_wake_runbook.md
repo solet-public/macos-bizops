@@ -340,8 +340,8 @@ Check in this order:
    `[mcp_servers.<server-name>.env]`.
 4. The target Codex session is registered in `mcp__<server-name>__peer_list`.
 5. The receiver can see missed messages with
-   `mcp__<server-name>__peer_inbox` — the full durable catch-up view,
-   returned unconditionally.
+   `mcp__<server-name>__peer_inbox` — page the durable catch-up view until
+   `instance_exhausted=true` (or use `solet-bridge inbox` for the merged drain).
 6. solet bridge forwarder smokes still pass.
 
 If the stock Homebrew binary was launched by mistake, restart through

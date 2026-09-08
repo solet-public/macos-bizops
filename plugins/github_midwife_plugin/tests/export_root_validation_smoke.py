@@ -20,11 +20,17 @@ plugins/github_midwife_plugin/tests/export_root_validation_smoke.py``.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import json
 import os
 import sys
 import tempfile
 from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from github_midwife_plugin.export_root_validation import (
     BUSINESS_CONNECTOR_PLUGINS,

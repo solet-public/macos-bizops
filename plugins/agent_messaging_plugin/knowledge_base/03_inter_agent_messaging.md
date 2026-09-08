@@ -135,8 +135,8 @@ common receive pattern is:
    Role claiming is a process-registry operation because the durable
    role table lives in platform state.
 3. Poll `peer_inbox(...)` for catch-up and
-   receive — the tool returns the full durable catch-up view
-   unconditionally (A4, 2026-08-04: `include_important` is retired from
+   receive — page the durable catch-up view to `instance_exhausted=true`
+   for instance mail (A4, 2026-08-04: `include_important` is retired from
    this tool's schema). `peer_inbox` reads the same durable thread store
    used by
    stdio bridge peers, keyed by identity and role binding. This is a
@@ -223,6 +223,17 @@ A sender who needs a stronger guarantee than "delivered, and the recipient is
 current on its own liveness contract" should follow up directly rather than
 rely on resend/escalation machinery — none remains.
 
+### Interim overdue-notice routing (D-4.8 / iss_8126960b)
+
+`report_by` remains a produced-work promise: a heartbeat never re-arms it.
+Until R3-U2 replaces this worker-row notice key with its produced-work
+predicate, the overdue-notice consumer uses the server's `last_heartbeat_at`
+only for routing. A stamp no older than the shipped heartbeat hook's 180-second
+cadence emits a visible, low-priority `session_overdue_quiet_notice` and never
+uses the direct managed-driver wake. A stale or absent heartbeat retains the
+existing `session_overdue_notice` alarm and wake. In both cases the row remains
+`overdue`; this is deliberately noise routing, not a report-by state change.
+
 The role-addressed durability guarantee is unaffected by any of this: an
 unreachable role holder gets `queued_for_replay`, and the envelope replays
 through the surviving `list_undelivered_for` / `mark_delivered_for_instance`
@@ -308,8 +319,7 @@ non-managed session gets any extra push — it does not, by design.
 mcp__<server-name>__peer_inbox(after="<recent ISO time>")                  # default: catch-up mode
 ```
 
-- Returns the full durable catch-up view — every message addressed to this
-  identity, unconditionally (A4, 2026-08-04: the old silent/IMPORTANT split
+- Returns one bounded page of the durable catch-up view (A4, 2026-08-04: the old silent/IMPORTANT split
   at send time is retired, so there is only one view left, and it is the
   only one this tool now offers). Use a recent `after` timestamp during
   incident polling; otherwise old history can flood the context window.
@@ -342,8 +352,11 @@ different answers and the verb keeps them different.
 The response carries two sections with two independent cursors, and mixing
 them is the mistake this section exists to prevent:
 
-- `entries` + `next_after_created_at` — messages addressed to this instance,
-  paged by `after` (an ISO-8601 timestamp).
+- `entries` + `next_after_created_at` + `instance_exhausted` — messages
+  addressed to this instance, oldest-first and paged by `after` (an ISO-8601
+  timestamp). Stop paging only when `instance_exhausted` is true. It means
+  exhausted under this legacy timestamp-only cursor, not that equal-timestamp
+  durable rows were globally observed.
 - `role_entries` + `next_role_cursor` — messages addressed to any role this
   session holds, merged across roles, paged by `role_after` (an opaque token).
 
@@ -352,6 +365,12 @@ fault-domain flag, not a progress flag: `"ok"` means that section was computed
 without error and says nothing about whether it is drained. **The role section
 is exhausted only when `next_role_cursor` is null**; `"error"` means it failed
 (detail in `role_section_error`) while the instance section was still served.
+
+A successful page is not a drain; continue until `next_role_cursor` is null.
+`role_limit` reports the effective limit of a successful role page;
+`role_page_truncated` and `role_truncation_reason` disclose whether a
+continuation was bounded by `row_limit` or `byte_ceiling`. When the reason is
+`byte_ceiling`, `role_byte_ceiling` contains the applied ceiling value.
 
 Page rather than widen. An entry carries the whole message — a 50-entry
 instance section plus a 50-entry role section measured 422,513 characters on

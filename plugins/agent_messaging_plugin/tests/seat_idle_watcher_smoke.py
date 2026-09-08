@@ -32,6 +32,7 @@ import importlib
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -409,33 +410,31 @@ def test_is_poke_on_cooldown_exact_boundary_is_false() -> None:
 
 
 def test_resolve_pending_count_extracts_only_the_length() -> None:
-    original = watcher._solet_call
+    original = watcher._solet_inbox
     marker = "SECRET_INBOX_BODY_MARKER_ALPHA"
     try:
-        watcher._solet_call = lambda *_a, **_k: {  # type: ignore[assignment]
-            "status": "completed",
-            "result": {"data": {"role_entries": [
-                {"message": {"content": [{"text": marker}]}},
-                {"message": {"content": [{"text": "second entry"}]}},
-            ]}},
+        watcher._solet_inbox = lambda: {  # type: ignore[assignment]
+            "complete": True,
+            "messages": [{"message": {"content": [{"text": marker}]}}],
+            "role_count": 2,
         }
         count = watcher.resolve_pending_count("ases-x")
-        _check(count == 2, "resolve_pending_count returns the entry count")
+        _check(count == 2, "resolve_pending_count returns the merged role count")
         _check(isinstance(count, int), "resolve_pending_count's return type is a bare int")
     finally:
-        watcher._solet_call = original
+        watcher._solet_inbox = original
 
 
 def test_resolve_pending_count_none_on_call_failure() -> None:
-    original = watcher._solet_call
+    original = watcher._solet_inbox
     try:
-        watcher._solet_call = lambda *_a, **_k: None  # type: ignore[assignment]
+        watcher._solet_inbox = lambda: None  # type: ignore[assignment]
         _check(
             watcher.resolve_pending_count("ases-x") is None,
             "resolve_pending_count returns None on a failed solet call, never a guess",
         )
     finally:
-        watcher._solet_call = original
+        watcher._solet_inbox = original
 
 
 # ─── _confirm_pane_ready_for_action — condition 5's ACT-time gate ────────────
@@ -684,7 +683,7 @@ def test_module_imports_and_discloses_when_iterm2_bindings_are_absent() -> None:
     """The module must IMPORT with no ``iterm2``, and disclose at the ACT gate.
 
     ``iterm2`` is undeclared by this plugin and arrives only with
-    iterm2_coding_agent_management_plugin, which the shipped bizops profile
+    iterm2_coding_agent_management_plugin, which the shipped macos-bizops profile
     deliberately excludes -- so a module-scope hard import made the whole
     watcher, cooldown/threshold logic included, unimportable on an adopter box.
     """
@@ -702,6 +701,35 @@ def test_module_imports_and_discloses_when_iterm2_bindings_are_absent() -> None:
     _check(
         "iterm2" in reason.lower(),
         f"the refusal DISCLOSES the missing bindings by name (got {reason!r})",
+    )
+
+
+def test_solet_inbox_fails_closed_with_named_absence_when_cli_is_not_on_path() -> None:
+    """A missing bridge must never surface as an unclassified subprocess failure."""
+    original_shutil = getattr(watcher, "shutil", None)
+    original_log = watcher._log
+    original_run = watcher.subprocess.run
+    logs: list[str] = []
+    watcher.shutil = SimpleNamespace(which=lambda _name: None)  # type: ignore[attr-defined]
+    watcher._log = logs.append
+
+    def _unexpected_run(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("missing bridge guard invoked subprocess.run")
+
+    watcher.subprocess.run = _unexpected_run
+    try:
+        result = watcher._solet_inbox()
+    finally:
+        watcher._log = original_log
+        watcher.subprocess.run = original_run
+        if original_shutil is None:
+            del watcher.shutil
+        else:
+            watcher.shutil = original_shutil
+    _check(result is None, "missing solet-bridge fails closed without invoking a subprocess")
+    _check(
+        logs == ["solet-bridge is unavailable on PATH; refusing the seat-idle inbox read"],
+        f"missing solet-bridge produces the named condition (got {logs!r})",
     )
 
 
@@ -741,6 +769,7 @@ def main() -> int:
     test_run_tick_pokes_with_the_fixed_constant_and_records_cooldown_state()
     test_run_tick_rotates_when_nothing_pending_past_rotate_threshold()
     test_module_imports_and_discloses_when_iterm2_bindings_are_absent()
+    test_solet_inbox_fails_closed_with_named_absence_when_cli_is_not_on_path()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

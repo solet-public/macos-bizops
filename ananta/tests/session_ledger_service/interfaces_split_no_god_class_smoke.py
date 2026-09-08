@@ -47,6 +47,9 @@ EXPECTED_VERBS_BY_ABC: dict[str, set[str]] = {
         "list_canonical_contributors",
         "census",
     },
+    "SessionLedgerQualificationAPI": {
+        "qualify_selected_sources",
+    },
     "SessionLedgerIngestAPI": {
         "register_source",
         "ingest_raw_chunk",

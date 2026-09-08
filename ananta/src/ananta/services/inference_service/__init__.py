@@ -7,9 +7,10 @@ Bootstrap Mode: NOT SUPPORTED (inference not needed during system startup)
 Plugin Mode: Wraps default_inference_plugin (or configured alternative via env)
 """
 
+import json
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ananta.constants import DEFAULT_INFERENCE_PLUGIN as DEFAULT_INFERENCE_PLUGIN
 from ananta.core.domain.types import ActionResult
@@ -90,7 +91,65 @@ def _warn_provider_vacant_once() -> None:
     )
 
 
-class InferenceService(BootstrappableServiceInterface, InferenceServiceInterface):
+def _qualify_provider(
+    *,
+    provider_name: str,
+    plugin: InferenceProvider,
+) -> ActionResult:
+    """Run one private, bounded structured request against a ready provider."""
+    schema: dict[str, Any] = {
+        "type": "object",
+        "required": ["qualified"],
+        "properties": {"qualified": {"type": "boolean"}},
+        "additionalProperties": False,
+    }
+    request = InferenceRequest(
+        "Return exactly the JSON object required by the response schema.",
+        temperature=0.0,
+        max_tokens=16,
+        response_schema=schema,
+        use_structured_output=True,
+        hide_from_context=True,
+    )
+    result = plugin.generate_completion(request)
+    result_data = result.get("data", {})
+    raw_result = result_data.get("result", {})
+    completion = raw_result.get("completion") if isinstance(raw_result, dict) else None
+    structured_result_valid = False
+    if isinstance(completion, str):
+        try:
+            parsed = json.loads(completion)
+        except json.JSONDecodeError:
+            parsed = None
+        structured_result_valid = parsed == {"qualified": True}
+    return {
+        "action_status": "completed",
+        "actions": [],
+        "data": {
+            "provider": provider_name,
+            "model": plugin.get_configured_model_name(),
+            "completed": result.get("action_status") == "completed"
+            and result.get("error") is None,
+            "structured_result_valid": structured_result_valid,
+        },
+        "error": None,
+    }
+
+
+class _InferenceQualificationMixin:
+    """Keeps the public provider probe outside the orchestration wrapper."""
+
+    def qualify(self, params: dict[str, Any], state: dict[str, Any]) -> ActionResult:
+        del params, state
+        service = cast("InferenceService", self)
+        plugin = service._ensure_provider_ready()
+        return _qualify_provider(
+            provider_name=service._inference_plugin_name or type(plugin).__name__,
+            plugin=plugin,
+        )
+
+
+class InferenceService(_InferenceQualificationMixin, BootstrappableServiceInterface, InferenceServiceInterface):
     """Service wrapper for inference plugin providers.
 
     Provides stable interface for LLM inference operations, enabling provider

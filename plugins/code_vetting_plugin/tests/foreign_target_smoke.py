@@ -21,11 +21,17 @@ Run directly: ``.venv/bin/python3 plugins/code_vetting_plugin/tests/foreign_targ
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PLUGIN_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from code_vetting_plugin.plugin import CodeVettingPlugin, TargetValidationError
 from code_vetting_plugin.runner import SCANNERS, Applicability, run_all

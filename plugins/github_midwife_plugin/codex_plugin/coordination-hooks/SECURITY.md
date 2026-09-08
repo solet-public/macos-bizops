@@ -1,30 +1,38 @@
 # Security notes — stock-Codex coordination-hooks
 
-This page describes the complete WS-4b.3 package. The plugin currently
-registers four handler entries backed by four entry-point scripts: the fixed
+This page describes the complete stock-Codex package. The plugin currently
+registers six handler entries backed by six entry-point scripts: the fixed
 `step_zero_reminder.js`, `check_messages_reminder.js`, and
-`role_binding_reminder.js` scripts, and the WS-4b.1 Git-Controller gate. The
+`role_binding_reminder.js` scripts, the WS-4b.1 Git-Controller gate, the
+async `context_status_reporter.py` Stop reporter, and the SYNCHRONOUS
+`inbox_consumer.py` Stop hook (CDX-06, 2026-08-24). The
 sibling hydration package renders the launcher-owned watcher and exact
 durable-inbox instructions; those deployment-specific surfaces are
 intentionally outside the byte-identical plugin bundle.
 
-**codex-0147-async-hook-regression (2026-08-13): no background `Stop` handler
-ships.** Commit 906753eb7 asserted stock Codex parses async command hooks,
-"checked against 0.141.0 acceptance," and added a `wake_waiter.js` `Stop`
-handler registered `async: true` on that basis. That assertion is contradicted
-by a preserved 2026-07-31 probe
-(`workbench/2026-07-31_codex_phase4_probe/evidence/async_unsupported.md`),
-which already recorded 0.141.0 emitting `skipping async hook … async hooks
-are not supported yet` for the identical handler shape; 0.147.0 emits the same
-diagnostic now. Async command-hook support was never present in either
-measured version, so the binding never fired. The binding and `wake_waiter.js`
-itself were removed — not left registered-but-dead, and not kept as a dormant
-file — rather than reverted to the synchronous predecessor design, which
-blocked the turn boundary. The removed handler's reviewed behavior (arming
-matrix, loop guard, one-bit output, POSIX process-group cancellation) remains
-historical record in this document's prior revisions and in git history;
-re-introducing a `Stop` binding requires first confirming async command-hook
-support on the target stock Codex build.
+The context reporter's background binding is defined by the current official
+Codex hook contract. Live stock-process execution remains a separate
+acceptance leg. It is context telemetry only: it neither reads peer messages
+nor returns continuation instructions. Its one subprocess is an argv-only
+call to the launcher-provided `AGENT_WAKE_CLI`; it never constructs a shell
+command.
+
+`inbox_consumer.py` is the deliberate exception to "never returns
+continuation instructions": it CAN return `{"decision": "block", "reason":
+"<fixed nudge>"}`, and measured live against the actual codex-0.149.0
+binary this fleet runs (isolated proof, a dev-checkout workbench evidence
+report, not part of this shipped bundle), that decision DOES force Codex to
+continue the turn. This is exactly why it must be
+synchronous rather than async (an async hook's decision is discarded — Codex
+does not wait for it) and exactly why its bounded park uses
+`solet-bridge wake --max-wait 2400` with a paired 2430-second registration.
+The live stock-Codex 0.149.0 probe established that this synchronous shape
+survives beyond the former 30-second registration and can force continuation;
+it is still finite and never reads or relays peer-message
+CONTENT itself (same discipline as the Claude sibling's `wake_waiter.py`);
+its own two subprocesses are argv-only calls to the launcher-provided
+`AGENT_WAKE_CLI` (`wake`, then `call report_inbox_consumption`), never a
+shell command.
 
 ## Trust boundary
 
@@ -51,6 +59,17 @@ Inputs, exhaustively:
   unconditionally armed and reads no environment variable at all (§7 re-key,
   2026-08-02; parity with the Claude sibling's `2fb49dbf2`);
 - `GIT_CONTROLLER_NAME` and `AGENT_ROLE`, used only by the Bash gate;
+- `AGENT_INSTANCE_ID`, `AGENT_SESSION_ID`, and `AGENT_WAKE_CLI`, which arm the
+  context reporter, and separately arm the inbox consumer, only when all
+  three are present in each hook's own environment read (no shared state
+  between the two);
+- the reporter's host-provided `session_id`, `transcript_path`, and `model`,
+  cross-checked against `session_meta` and `turn_context` in that transcript;
+- the inbox consumer's host-provided `hook_event_name` (must equal `"Stop"`);
+  it reads no other field of the hook payload — deliberately not even
+  `stop_hook_active`, since the spool-existence check is what terminates the
+  block/continue chain, not a self-imposed reentrancy counter — and never
+  inspects prompt or message content;
 - Codex's `${PLUGIN_ROOT}` expansion in the manifest command paths.
 
 The reminder scripts never read a prompt or message field. The shared
@@ -65,9 +84,25 @@ Outputs, exhaustively:
   `hookSpecificOutput.additionalContext`;
 - gate allow/no-op: no output, exit `0`;
 - gate block: a fixed-format stderr explanation and exit `2`.
+- context reporter success/no-reading/unarmed: inert `{}` JSON, exit `0`;
+- armed reporter contract or delivery failure: fixed-prefix stderr, exit `1`.
+- inbox consumer, nothing pending or unarmed: inert `{}` JSON, exit `0`;
+- inbox consumer, pending found: `{"decision": "block", "reason": "<fixed
+  nudge>"}` JSON, exit `0` — Codex's continuation contract is driven by the
+  JSON body, not the exit code (unlike the Claude sibling's Stop-hook
+  contract, where exit `2` is the wake signal); best-effort diagnostic
+  stderr on a failed subprocess call, never a nonzero exit either way (see
+  Failure modes below — this hook must never trap the session in a failing
+  Stop hook).
 
-No handler writes a file, accesses the network, reads credentials, spawns a
-child process, or relays peer-message content. One of the three Node hooks
+No handler writes a file, opens a direct network connection, reads credentials,
+or relays peer-message content. The context reporter reads only the transcript
+path supplied by Codex and spawns exactly one argv-only `solet-bridge call` child to
+the declared `report_context_status` process. The inbox consumer spawns at
+most two argv-only children per invocation: `solet-bridge wake --max-wait <N>`
+(discarding its stdout, same discipline as `wake_waiter.py`) and, always,
+`solet-bridge call report_inbox_consumption <json>` — never a shell command, never
+more than these two. One of the three Node hooks
 (`check_messages_reminder.js`) uses built-in `fs` to read stdin; the other two
 (`step_zero_reminder.js`, `role_binding_reminder.js`) never touch stdin —
 `step_zero_reminder.js` reads no environment variable at all, and
@@ -104,15 +139,24 @@ check: even when `AGENT_IDENTITY`, `AGENT_INSTANCE_ID`, `AGENT_SESSION_LABEL`,
 `Git-Controller`, a missing or non-controller `AGENT_ROLE` still blocks a
 detected mutation. `AGENT_ROLE` is the only authority input.
 
-No `Stop` handler is registered (codex-0147-async-hook-regression, see the
-top of this document). A synchronous command hook on `Stop` blocks the
-triggering operation, holding the turn boundary and queuing composer input
-behind the next tool/hook completion — that defect is why an async handler
-was attempted in the first place, and it is why the fix removes the binding
-rather than reverting to a synchronous one. `"async": true` is not a
-substitute: no measured stock Codex build (0.141.0, 0.147.0) executes an
-async command hook at all, so a bound one neither blocks the turn boundary
-nor ever runs.
+`context_status_reporter.py` is explicitly `"async": true`; the current
+official hook contract defines that background mode, and the manifest smoke
+requires it stay that way (removing it is a named failing mutation) —
+transcript parsing and the platform call must never hold the turn boundary
+for a hook that only reports telemetry. `inbox_consumer.py` is the one
+deliberate exception in this manifest: it carries NO `async` key (the
+manifest smoke requires exactly that, for every `Stop` entry other than the
+reporter), because measured live (isolated proof, a dev-checkout workbench
+evidence report, not part of this shipped bundle) an async hook's
+`decision` output is discarded by Codex — only a synchronous hook can gate
+or continue a turn. This is not "a synchronous command hook on Stop would
+hold the turn boundary" being ignored; it is bounded by construction to forty
+minutes (`solet-bridge wake --max-wait 2400`) with a 2430-second registration.
+Multiple matching
+hooks may run concurrently; reporter rows therefore carry both
+`reporter_surface` and a content-generation integer rather than assuming
+this source copy is unique — `inbox_consumer.py`'s own `report_inbox_consumption`
+rows carry `reporter_surface` for the same reason.
 
 ## Failure modes
 
@@ -128,9 +172,32 @@ nor ever runs.
   detected git mutation is blocked and reports role `<unknown>`.
 - Unexpected gate parse/runtime error: allow, consistent with its explicitly
   documented same-user mistake-prevention scope.
+- All three reporter identity variables missing: deliberate non-fleet no-op.
+- Partially armed reporter: fail loud; no guessed identity or CLI path.
+- No positive `token_count` after the newest `context_compacted` row: no-op;
+  never reuse the pre-compaction reading.
+- Transcript/session/model disagreement, malformed measured fields, or a
+  failed platform response: fail loud and do not emit a report.
+- All three inbox-consumer identity variables missing: deliberate non-fleet
+  no-op, same precondition shape as the reporter but a DIFFERENT failure
+  posture (see below).
+- Partially armed inbox consumer, or any inbox-consumer subprocess failure
+  (`wake` spawn error, `report_inbox_consumption` call failure): fixed-prefix
+  stderr, but exit `0` — deliberately NOT fail-loud like the reporter. This
+  hook's whole value is its ability to gate a turn via its JSON decision
+  body; an untested interaction between a nonzero exit and Codex honoring
+  that body is a risk this hook does not take, so every failure degrades to
+  "report nothing pending" rather than a nonzero exit.
+- `hook_event_name` not `"Stop"`: silent no-op (a misregistration should not
+  crash a hook bound to the wrong event).
 
-Context hooks never exit `2` or request continuation. The only blocking
-outcome is an affirmative Bash policy match in the gate.
+`context_status_reporter.py` never exits `2` or requests continuation — the
+only blocking outcome for a Codex hook in this manifest is `git_controller_gate.py`'s
+affirmative Bash policy match (`exit 2`), and `inbox_consumer.py`'s
+`decision:block` JSON body, which is a DIFFERENT mechanism from an exit
+code (Codex's Stop-hook continuation contract is JSON-body-driven, not
+exit-code-driven — measured live, see the isolated proof cited above).
+`inbox_consumer.py` itself always exits `0`; it never uses exit `2`.
 
 ## Trust revocation
 
@@ -178,7 +245,7 @@ retirement does not touch.
 Peer enumeration is confirmed as an MCP-only capability. Discovering which
 peer sessions are currently registered works only over the MCP transport. A
 session on a non-MCP transport reaches the platform solely through
-`solet call <process_key>`, and no registered process returns the peer
+`solet-bridge call <process_key>`, and no registered process returns the peer
 registry: the CLI exposes no `peers` subcommand, semantic discovery over the
 knowledge base surfaces no peer-registry verb, and `peer_list` exists only
 as an MCP tool. Sending is unaffected — `peer_send_by_name` resolves and
@@ -193,26 +260,35 @@ fix is scoped but not built: three thin CLI subcommands (`solet
 inbox`, `solet peers`, `solet whoami`) over routes that already
 exist would close this gap; none of the three exist today.
 
-Idle-session auto-drive is a managed-session capability, not a background-hook
-capability, and this plugin currently carries no automatic delivery-triggered
-notice on either transport (codex-0147-async-hook-regression: no `Stop`
-binding ships). An operator-launched Codex session on `watch` gets durable
-delivery: the message lands in the durable store and the watch process's own
-log (redirected there by the launcher, not the live terminal), and the
-operator must drain `peer_inbox` itself on its own next user/model turn; the
-`SessionStart` unread-coordination reminder fires only at
-startup/resume/`clear`, not per turn. With no `Stop` handler left to drain it,
-the wake-hook spool is retired end to end for Codex: the hydration-rendered
-launcher arms `<name> watch --no-spool` (stopping the watch process's own
-client-side tee), and the platform-side tee that wrote the same spool path on
-every dispatch to a `wake_capable=False` recipient
-(`_tee_spool_if_wake_incapable`, `agent_messaging_plugin/peer_dispatch.py`) is
-retired in the same landing. A managed `spawn_session` worker is unaffected by
-any of this — it receives a driver-channel notice from `drive_on_delivery`,
-which can start its next turn independent of this plugin's hooks entirely. An
-unmanaged session on either transport must be driven externally. Delivery
-durability is unchanged: the peer message is persisted before any of these
-best-effort notifications.
+Idle-session auto-drive is a managed-session capability (`spawn_session`'s
+`drive_on_delivery`), not a background-hook capability, and this plugin
+still carries no automatic delivery-triggered WAKE on either transport — an
+idle Codex pane with no turn in flight gets no notice from `inbox_consumer.py`,
+because Stop only fires when a turn ends (confirmed live in a dev-checkout
+workbench evidence report, and by source, `codex-rs/core/src/session/turn.rs:383`
+per the 2026-07-26 investigation).
+That gap is CDX-05/CDX-06's part B (interim managed-drive restart), not
+this hook's job.
+
+What CHANGED (CDX-06, 2026-08-24): a turn that IS ending no longer walks
+past mail that is already queued. `inbox_consumer.py` checks the session's
+already-armed sidecar watcher (`solet-bridge wake --max-wait 2400`) on every
+`Stop`, and if it finds something, forces the turn to continue with a nudge
+rather than letting the session go idle unaware.
+Because a real consumer now exists, the wake-hook spool is RE-ARMED for
+Codex — the hydration-rendered launcher no longer passes `--no-spool` to
+`<name> watch`. It was disabled by codex-0147-dead-spool-retirement
+(2026-08-13) specifically because nothing consumed it then; that premise no
+longer holds. An operator-launched Codex session still gets no automatic
+DRAIN of message content from this hook (it nudges, never relays content —
+see Inputs and outputs above) and the `SessionStart` unread-coordination
+reminder still fires only at startup/resume/`clear`, not per turn — the
+operator (or the model, on an armed session, in its continued turn) still
+reads `peer_inbox` explicitly. A managed `spawn_session` worker still also
+gets `drive_on_delivery`'s driver-channel notice, independent of this
+plugin's hooks entirely, for the idle-wake case this hook does not cover.
+Delivery durability is unchanged throughout: the peer message is persisted
+before any of these best-effort notifications, on both transports.
 
 Delivery durability across a coordination-service cutover is checked,
 confirmed equivalent on both transports. A message sent to a session
@@ -251,14 +327,23 @@ gets its own entry rather than a silent gap.
 
 This package does not prove or claim:
 
-- live watcher/inbox consumption or lifecycle survival, despite the delivered
-  hydration launcher, marketplace, and paging contract;
+- production-fleet-wide inbox consumption or lifecycle survival, despite the
+  delivered hydration launcher, marketplace, and paging contract. What IS
+  proven live, against real codex-0.149.0 in an isolated marketplace/CODEX_HOME
+  (never a live checkout or a working lane — recorded in a dev-checkout
+  workbench evidence report, not part of this shipped bundle): the Stop-hook
+  synchronous `decision:block` continuation mechanism itself, both that async
+  discards it and that sync honors it. Not yet proven live: `inbox_consumer.py`
+  driving a REAL peer-inbox delivery end to end against the running fleet
+  (that live-fleet acceptance follows the interim managed-drive restart,
+  coordinated separately);
 - a fresh externally addressed idle stock-Codex model sample;
 - Phase-5 MCP/non-MCP equality;
 - patched-binary retirement or a stock-binary launcher swap.
 
-Those are WS-4b.4 and WS-4b.6. A routing receipt, inbox visibility, direct
-script output, or self-addressed send is not evidence for them.
+Those (other than the CDX-06 Stop-hook mechanism proof above) are WS-4b.4 and
+WS-4b.6. A routing receipt, inbox visibility, direct script output, or
+self-addressed send is not evidence for them.
 
 ## Verification map
 
@@ -268,8 +353,11 @@ script output, or self-addressed send is not evidence for them.
 | conservative manifest handlers match the shipped entry points and Bash routing | `tests/manifest_consistency_smoke.py` |
 | repo marketplace resolves to this plugin and manifest metadata is consistent | `tests/marketplace_consistency_smoke.py` |
 | Bash allow/block and AGENT_ROLE-only authority | `tests/git_controller_gate_smoke.py` |
-| no `Stop` binding is registered | `tests/manifest_consistency_smoke.py`'s `_check_no_stop_binding` |
+| reporter uses the latest positive post-compaction native measurement, refuses identity mismatch, and never invents cache state | development-checkout behavioral smoke for the reporter (not shipped) |
+| `context_status_reporter.py` is the single declared async subprocess exception; every other `Stop` entry carries no `async` key | `tests/manifest_consistency_smoke.py`'s inventory and source contract |
+| `inbox_consumer.py` gates the fleet precondition, checks pending via `wake --max-wait`, reports via `report_inbox_consumption` on every run, decodes decision:block only when pending, and always exits 0 | `plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/inbox_consumer_smoke.py` |
+| a synchronous Stop hook's `decision:block` actually forces Codex to continue a turn, and an async hook's decision is discarded, on real codex-0.149.0 | a dev-checkout workbench evidence report (live, isolated, not part of this shipped suite) |
 
-Run all five with `python3 tests/run_all.py`. These are offline source and
+Run all seven with `python3 tests/run_all.py`. These are offline source and
 behavioral checks. The live untrusted/trusted stock-process sentinel is a
 separate acceptance leg because only Codex itself can prove hook trust state.
