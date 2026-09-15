@@ -11,3 +11,6 @@ venv/
 # Editor / OS noise
 .idea/
 .DS_Store
+
+# Per-operator local MCP config (CLAUDE.md: MCP here is opt-in, not shared team infra)
+.mcp.json
