@@ -4,6 +4,74 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-09-08 — The Homebrew install path: `brew install solet-public/tap/solet`, then `solet create`
+
+**This release is the install path.** Since the 2026-08-20 release the seed
+has gained a global manager, `solet`, installed from a public Homebrew tap,
+and a declared setup flow that the manager drives one stage at a time with a
+preview you approve before anything is written. New installs no longer start
+from a clone and a bootstrap script; they start from two commands:
+
+```console
+brew install solet-public/tap/solet
+solet create <name>
+```
+
+Read the tap's README first (https://github.com/solet-public/homebrew-tap).
+It is the install guide, the stage-by-stage troubleshooting reference, and
+the list of what this release does not do yet. The same guidance ships in
+this tree as `plugins/github_midwife_plugin/knowledge_base/09_homebrew_install_troubleshooting_runbook.md`,
+searchable once the solet is up.
+
+### What is in it
+
+- **Solet Manager `manager-v0.1.0-r25`** (`solet 0.1.0_24`), pinned to this
+  seed release. `solet create` previews and applies the install one stage at
+  a time (`preflight`, `decision_review`, `system_dependencies`, `genesis`,
+  `models`, `coding_agents`, `optional_accounts`, `session_sources`,
+  `completion`), records a transaction journal, and refuses to apply a plan
+  the machine has drifted away from. `solet status`, `solet doctor`, `solet
+  list`, `solet inspect`, `solet start` and the reconcile verbs come with it.
+- **The setup-flow contract ships in the seed** (`macos_setup_flow.json` and
+  its schemas under `plugins/github_midwife_plugin/knowledge_base/`). The
+  previous public seed did not carry it, so the manager's `doctor` could not
+  verify an install made from it.
+- **Install-order fixes found on clean machines this week:** the models
+  stage runs before genesis, so genesis no longer fails for want of an
+  inference server; pgvector is installed after PostgreSQL is running instead
+  of before; sibling stage preconditions are full predicates rather than
+  subsets of their postconditions; the LaunchAgent status parser handles a
+  service that never exited; the genesis MCP stanza is idempotent;
+  stage-boundary fingerprints pin the evidence they were computed from; the
+  Codex client cask installs; a shell-substitution bypass in the shipped git
+  policy is closed.
+- **Platform fixes since 2026-08-20:** peer-message delivery and role-inbox
+  drain pacing, bridge reconnect cursor fencing, tmux drive truncation, and
+  the messaging-reliability work listed in the commit history.
+
+### What is NOT in it, stated plainly
+
+- **The `models` stage stops on a fresh Mac** with `model_discovery_failed`
+  until LM Studio is installed, the two models are downloaded, and the local
+  server is running. The manager does not do that yet. The runbook gives the
+  exact commands and the one trap (LM Studio's bundled nomic model is the
+  wrong build and looks right); it is a ten-minute manual step.
+- **LM Studio is not started at login** by anything this release installs.
+- **Stages after `models`** have had less clean-machine coverage.
+- **Existing solets** created by cloning an earlier seed and running
+  `bootstrap.py` keep updating through the seed-update runbook (fast-forward
+  pull, restart). The manager does not adopt them, by design, and the
+  self-directed "check the seed and converge onto the Homebrew path" update
+  is not yet proven; do not attempt it on a solet you depend on.
+- **The machine needs 24 GB of memory or more.** That is the supported
+  minimum; smaller machines fail at the models stage.
+
+### Updating an existing solet from this release
+
+Unchanged: `git pull --ff-only` in the clone, restart, wait for startup to
+finish. The complete procedure is the seed-update runbook in your solet's
+knowledge base.
+
 ## 2026-08-20 — A fresh install can do work again, and the hook errors on a stock Mac are gone
 
 **This release exists because two defects together made a correctly-installed

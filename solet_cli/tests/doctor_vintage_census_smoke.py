@@ -10,7 +10,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from solet_manager.doctor import _doctor_result  # pyright: ignore[reportPrivateUsage]  # noqa: E402
-from solet_manager.doctor_vintage_census import collect_doctor_advisories  # noqa: E402
+from solet_manager.doctor_vintage_census import (  # noqa: E402
+    _launchctl_observation,
+    collect_doctor_advisories,
+)
 from solet_manager.models import CheckpointStatus, InstanceRecord, JsonValue  # noqa: E402
 from solet_manager.release_lock import SeedLock  # noqa: E402
 from solet_manager.transaction import Transaction, canonical_sha256  # noqa: E402
@@ -103,6 +106,10 @@ def _launchctl(command: tuple[str, ...]) -> tuple[int, str, str]:
     return 0, "state = running\nlast exit code = 0\nruns = 2\n", ""
 
 
+def _launchctl_output(output: str) -> tuple[int, str, str]:
+    return 0, output, ""
+
+
 def _by_id(advisories: list[JsonValue]) -> dict[str, dict[str, JsonValue]]:
     values: dict[str, dict[str, JsonValue]] = {}
     for item in advisories:
@@ -164,8 +171,48 @@ def _assert_report_only_census_names_all_skew() -> None:
     )
 
 
+def _assert_launchctl_first_launch_sentinel() -> None:
+    first_launch = _launchctl_observation(
+        "local.solet.fixture",
+        lambda _command: _launchctl_output(
+            "state = running\nlast exit code = (never exited)\nruns = 1\n"
+        ),
+    )
+    _check(first_launch["query_status"] == "readable", "first launch was unreadable")
+    _check(
+        first_launch["last_exit_code"] == "(never exited)",
+        "first-launch sentinel was not preserved",
+    )
+
+    malformed = _launchctl_observation(
+        "local.solet.fixture",
+        lambda _command: _launchctl_output(
+            "state = running\nlast exit code = unavailable\nruns = 1\n"
+        ),
+    )
+    _check(malformed["query_status"] == "unknown", "malformed exit status became readable")
+
+    stopped = _launchctl_observation(
+        "local.solet.fixture",
+        lambda _command: _launchctl_output(
+            "state = stopped\nlast exit code = (never exited)\nruns = 1\n"
+        ),
+    )
+    _check(stopped["query_status"] == "unknown", "stopped sentinel became readable")
+
+    retried = _launchctl_observation(
+        "local.solet.fixture",
+        lambda _command: _launchctl_output(
+            "state = running\nlast exit code = 1\nruns = 2\n"
+        ),
+    )
+    _check(retried["query_status"] == "readable", "numeric crash-loop status became unreadable")
+    _check(retried["runs"] == 2, "crash-loop run count changed")
+
+
 def main() -> int:
     _assert_report_only_census_names_all_skew()
+    _assert_launchctl_first_launch_sentinel()
     print(f"doctor_vintage_census_smoke OK: {_CHECKS} checks passed")
     return 0
 

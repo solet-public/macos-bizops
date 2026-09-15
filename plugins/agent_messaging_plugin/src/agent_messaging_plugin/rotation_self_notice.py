@@ -32,9 +32,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
+from ananta.core.domain.timestamps import to_naive_utc
 from ananta.llm.agent_messaging.models import PeerSendRequest, TextPart
 
 from . import rotation_thresholds
@@ -868,6 +869,22 @@ def _sweep_gauge_silent_notices(
     return tally, watcher_held, detected, notifiable
 
 
+def _active_agent_instance_ids(
+    lifecycle: dict[str, dict[str, Any]],
+    peer_registry: PeerRegistry,
+) -> set[str]:
+    """The identities whose stale gauges remain L4c candidates."""
+    active_ids = set(lifecycle)
+    registry_snapshot = peer_registry.list_agent_ids()
+    active_ids.update(
+        binding.agent_instance_id
+        for bindings in registry_snapshot.values()
+        for binding in bindings
+        if binding.agent_instance_id
+    )
+    return active_ids
+
+
 def sweep_rotation_self_notice(
     state: StateManagementInterface,
     *,
@@ -965,7 +982,13 @@ def sweep_rotation_self_notice(
     clock = now or datetime.now(UTC)
     gate = latch if latch is not None else BandEdgeLatch()
     lifecycle = live_lifecycle_rows_by_instance(state)
-    context_rows = list_session_context_statuses(state)
+    context_rows = list_session_context_statuses(
+        state,
+        measured_since=to_naive_utc(
+            clock - timedelta(seconds=SELF_NOTICE_STALENESS_S),
+        ),
+        active_agent_instance_ids=_active_agent_instance_ids(lifecycle, peer_registry),
+    )
     context_tally, context_watcher_held, context_notifiable = _sweep_context_band_notices(
         context_rows,
         clock=clock,

@@ -147,6 +147,7 @@ class DispatchSpec:
     watchdog_due_at: str
     expires_at: str
     unit_id: str = ""
+    repository_root: str = ""
     dispatch_kind: str = ""
     reviewed_report_vendor: str = ""
     pair_id: str = ""
@@ -162,6 +163,7 @@ def _file_sha256(path: Path) -> str:
 
 
 def _parse_aware_utc(value: str, field: str) -> datetime:
+    """Parse a public deadline; callers must always provide its timezone."""
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:
@@ -169,6 +171,63 @@ def _parse_aware_utc(value: str, field: str) -> datetime:
     if parsed.tzinfo is None:
         raise DispatchError(f"{field}_invalid", f"{field} must include a timezone.")
     return parsed.astimezone(UTC)
+
+
+def _parse_persisted_utc(value: object, field: str) -> datetime:
+    """Decode a trusted state-service timestamp, whose ``DATETIME`` is naive UTC.
+
+    This is deliberately separate from :func:`_parse_aware_utc`: public spec and
+    worker-event values retain their timezone requirement, while a value read
+    from the house state service may have lost its UTC offset during DATETIME
+    serialization.  Malformed or absent persisted values remain errors.
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise DispatchError(f"{field}_invalid", f"{field} must be ISO-8601.") from exc
+    else:
+        raise DispatchError(f"{field}_invalid", f"{field} must be an ISO-8601 timestamp.")
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+_PERSISTED_UTC_FIELDS = (
+    "uptake_due_at",
+    "report_by",
+    "watchdog_due_at",
+    "expires_at",
+    "decision_due_at",
+    "next_liveness_probe_at",
+    "liveness_escalation_due_at",
+    "first_turn_at",
+    "last_ack_at",
+    "last_milestone_at",
+    "completion_reported_at",
+    "completion_accepted_at",
+    "host_liveness_observed_at",
+    "last_reconciled_at",
+    "watchdog_fired_at",
+)
+
+
+def _decode_persisted_dispatch_times(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a JSON-safe UTC view of one persisted dispatch row.
+
+    State-service ``DATETIME`` columns can materialize as Python datetimes as
+    well as strings.  Normalizing the returned projection keeps accepted-event
+    receipts serializable while retaining the original stored bytes untouched.
+    """
+    decoded = dict(row)
+    for field in _PERSISTED_UTC_FIELDS:
+        value = decoded.get(field)
+        if value in (None, ""):
+            continue
+        decoded[field] = _parse_persisted_utc(value, field).isoformat()
+    return decoded
 
 
 def _require_text(value: object, field: str) -> str:
@@ -339,7 +398,7 @@ def read_managed_dispatch(
     row = _find_dispatch(state, dispatch_id)
     if row is None:
         raise DispatchError("dispatch_not_found", f"No managed dispatch {dispatch_id!r}.")
-    return row
+    return _decode_persisted_dispatch_times(row)
 
 
 def _event_external_id(dispatch_id: str, event_id: str) -> str:
@@ -655,7 +714,7 @@ def _validate_internal_blocker(
             "decision_due_at_not_future",
             "Internal blocker decision deadline must be future.",
         )
-    if deadline >= _parse_aware_utc(str(row["expires_at"]), "expires_at"):
+    if deadline >= _parse_persisted_utc(row["expires_at"], "expires_at"):
         raise DispatchError(
             "decision_due_at_after_ttl",
             "Internal blocker decision deadline must precede TTL.",
@@ -691,7 +750,7 @@ def _blocked_updates(
     return {
         "state": state,
         "blocked_at": at.isoformat(),
-        "decision_due_at": str(payload.get("decision_due_at") or ""),
+        "decision_due_at": payload.get("decision_due_at") or None,
         "blocker_class": blocker_class,
         "blocker_owner": owner,
         "blocker_question": question,
@@ -757,7 +816,7 @@ def _milestone_updates(
     )
     if next_report <= at.astimezone(UTC):
         raise DispatchError("next_report_deadline_not_future", "Next report deadline must be future.")
-    if next_report >= _parse_aware_utc(str(row["expires_at"]), "expires_at"):
+    if next_report >= _parse_persisted_utc(row["expires_at"], "expires_at"):
         raise DispatchError("next_report_after_ttl", "Next report deadline must precede TTL.")
     return {
         "last_milestone_at": at.isoformat(),
@@ -967,17 +1026,17 @@ def _retry_updates(
         "first_turn_source": "",
         "first_turn_delivered": False,
         "first_turn_error": "",
-        "first_turn_at": "",
-        "last_ack_at": "",
-        "last_milestone_at": "",
-        "completion_reported_at": "",
-        "completion_accepted_at": "",
+        "first_turn_at": None,
+        "last_ack_at": None,
+        "last_milestone_at": None,
+        "completion_reported_at": None,
+        "completion_accepted_at": None,
         "reported_artifact_sha256": "",
         "reported_completion_evidence": {},
         "reported_completion_verdict": "",
         "acceptance_evidence": {},
-        "blocked_at": "",
-        "decision_due_at": "",
+        "blocked_at": None,
+        "decision_due_at": None,
         "blocker_class": "",
         "blocker_owner": "",
         "blocker_question": "",
@@ -986,12 +1045,12 @@ def _retry_updates(
         "current_host_ref": "",
         "current_agent_runtime": "",
         "host_liveness": "",
-        "host_liveness_observed_at": "",
+        "host_liveness_observed_at": None,
         "host_liveness_detail": "",
         "liveness_unknown_count": 0,
-        "next_liveness_probe_at": "",
-        "liveness_escalation_due_at": "",
-        "watchdog_fired_at": "",
+        "next_liveness_probe_at": None,
+        "liveness_escalation_due_at": None,
+        "watchdog_fired_at": None,
         "terminal_reason": "",
         "next_required_action": "spawn_current_attempt",
         "responsible_role": actor_role,
@@ -1016,7 +1075,7 @@ def _resolve_blocker_updates(
         "blocker_class": "",
         "blocker_owner": "",
         "blocker_question": "",
-        "decision_due_at": "",
+        "decision_due_at": None,
         "next_required_action": "worker_execute_and_report",
         "responsible_role": str(row["role_name"]),
     }
@@ -1188,6 +1247,7 @@ def _spawn_retry_attempt(
         work_class=str(row["work_class"]),
         budget_line=str(row["budget_line"]),
         unit_id=str(row.get("unit_id") or ""),
+        repository_root=str(row.get("repository_root") or ""),
         dispatch_id=str(row["dispatch_id"]),
         agent_runtime=str(row["agent_runtime"]),
         role_name=str(row["role_name"]),
@@ -1309,8 +1369,8 @@ def record_dispatch_liveness(
         updates.update(
             {
                 "liveness_unknown_count": 0,
-                "next_liveness_probe_at": "",
-                "liveness_escalation_due_at": "",
+                "next_liveness_probe_at": None,
+                "liveness_escalation_due_at": None,
             },
         )
     require_updated(
@@ -1385,7 +1445,7 @@ def managed_dispatch_status(
     condition = _condition_for(row, clock)
     aggregate = dict(row)
     deadline_overdue = {
-        name: clock >= _parse_aware_utc(str(row[name]), name)
+        name: clock >= _parse_persisted_utc(row[name], name)
         for name in ("uptake_due_at", "report_by", "watchdog_due_at", "expires_at")
     }
     aggregate.update(

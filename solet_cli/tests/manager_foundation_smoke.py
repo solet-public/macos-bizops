@@ -1180,7 +1180,7 @@ def main() -> int:
         )
         _check(
             all((
-                len(bundle.completion_probe_ids) == 18,
+                len(bundle.completion_probe_ids) == 26,
                 "instance_environment_dependency_closure_valid" in bundle.completion_probe_ids,
             )),
             "dependency closure probe is pinned as required completion evidence",

@@ -112,7 +112,7 @@ def _assert_sweep_is_exact(root: Path, environment: dict[str, str]) -> int:
     provision_lane_worktree(live, environment=environment)
     provision_lane_worktree(orphan, environment=environment)
     sweep = sweep_orphaned_lane_worktrees(
-        repo, active_paths=(live.path,), environment=environment,
+        repo, terminal_paths=(orphan.path,), environment=environment,
     )
     assert sweep.removed == (orphan.path.resolve(),), sweep
     assert sweep.skipped == (), sweep
@@ -120,6 +120,54 @@ def _assert_sweep_is_exact(root: Path, environment: dict[str, str]) -> int:
     _run_git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{orphan.branch}", environment=environment)
     remove_lane_worktree(live, environment=environment)
     return 5
+
+
+def _assert_lock_refusal_preserves_shared_venv(root: Path, environment: dict[str, str]) -> int:
+    """A lock refusal must retain the provisioned interpreter link.
+
+    Red mutation: move ``_remove_shared_venv_link`` back before Git's removal
+    request. Git then refuses the locked worktree while its `.venv` is already
+    missing, breaking a still-live lane without removing it.
+    """
+    repo = _fixture(root, environment)
+    lane = lane_worktree_for(repo, role_name="lane-locked", agent_instance_id="agi-locked")
+    provision_lane_worktree(lane, environment=environment)
+    link = lane.path / ".venv"
+    _run_git(repo, "worktree", "lock", str(lane.path), environment=environment)
+    refused = False
+    try:
+        remove_lane_worktree(lane, environment=environment)
+    except LaneWorktreeError:
+        refused = True
+    assert refused, "a locked worktree removal must be refused"
+    assert link.is_symlink(), "a lock refusal must preserve the provisioned .venv link"
+    _run_git(repo, "worktree", "unlock", str(lane.path), environment=environment)
+    remove_lane_worktree(lane, environment=environment)
+    assert not lane.path.exists(), "an unlocked disposable lane still removes normally"
+    return 3
+
+
+def _assert_foreign_venv_refuses_before_git_removal(
+    root: Path, environment: dict[str, str],
+) -> int:
+    """A foreign `.venv` must refuse before the earned force reaches Git."""
+    repo = _fixture(root, environment)
+    lane = lane_worktree_for(repo, role_name="lane-foreign-venv", agent_instance_id="agi-foreign")
+    provision_lane_worktree(lane, environment=environment)
+    link = lane.path / ".venv"
+    link.unlink()
+    link.mkdir()
+    refused = False
+    try:
+        remove_lane_worktree(lane, environment=environment)
+    except LaneWorktreeError:
+        refused = True
+    assert refused, "a non-provisioned .venv must refuse removal"
+    assert lane.path.exists() and link.is_dir(), "foreign .venv survives the refusal"
+    link.rmdir()
+    link.symlink_to(repo / ".venv", target_is_directory=True)
+    remove_lane_worktree(lane, environment=environment)
+    return 2
 
 
 def _advance_master(repo: Path, name: str, body: str, environment: dict[str, str]) -> None:
@@ -150,7 +198,11 @@ def _assert_sweep_tolerates_a_stuck_orphan(root: Path, environment: dict[str, st
     provision_lane_worktree(clean, environment=environment)
     (stuck.path / "tracked.txt").write_text("divergent lane bytes\n", encoding="utf-8")
 
-    sweep = sweep_orphaned_lane_worktrees(repo, active_paths=(), environment=environment)
+    sweep = sweep_orphaned_lane_worktrees(
+        repo,
+        terminal_paths=(stuck.path, clean.path),
+        environment=environment,
+    )
 
     assert sweep.removed == (clean.path.resolve(),), sweep
     assert len(sweep.skipped) == 1, sweep
@@ -307,6 +359,10 @@ def main() -> int:
         checks = _assert_red_pre_fix_shape(root / "red", environment)
         checks += _assert_shared_dirt_isolation(root / "green", environment)
         checks += _assert_sweep_is_exact(root / "sweep", environment)
+        checks += _assert_lock_refusal_preserves_shared_venv(root / "locked", environment)
+        checks += _assert_foreign_venv_refuses_before_git_removal(
+            root / "foreign-venv", environment,
+        )
         checks += _assert_sweep_tolerates_a_stuck_orphan(root / "stuck", environment)
         checks += _assert_disposability_predicate(root / "disposability", environment)
         checks += _assert_build_output_allowlist(root / "build-output", environment)

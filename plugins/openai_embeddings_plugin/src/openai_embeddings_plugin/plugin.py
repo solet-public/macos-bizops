@@ -5,6 +5,8 @@ Configuration is loaded from address book (not hardcoded).
 """
 
 import logging
+import threading
+import time
 from typing import Any, cast
 
 import httpx
@@ -26,6 +28,8 @@ from .constants import ADDRESS_BOOK_ENTRY_NAME, PLUGIN_NAME, EntryField, ErrorCo
 from .response_builders import error_result, success_result
 
 logger = logging.getLogger(__name__)
+
+_QUALIFICATION_RETRY_SECONDS = 2.0
 
 
 class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessProvider):
@@ -61,6 +65,10 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
 
         # Service references
         self._address_book_service: Any = None
+        self._qualification_complete = threading.Event()
+        self._qualification_thread: threading.Thread | None = None
+        self._qualification_lock = threading.Lock()
+        self.qualification_status: dict[str, str] = {"state": "not_started"}
 
     @property
     def service_interfaces(self) -> tuple[type, ...]:
@@ -91,11 +99,79 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
         self._load_config_from_address_book()
 
         self._initialized = True
-        logger.debug(
-            f"{self.name} initialized (base_url={self._base_url}, model={self._default_model})"
-        )
-
+        self.qualification_status = {"state": "pending"}
         self.set_ready()
+
+    def start_post_registration_qualification(self) -> None:
+        """Qualify the model only after this process is router-active."""
+        with self._qualification_lock:
+            if self._qualification_thread is not None and self._qualification_thread.is_alive():
+                return
+            self._qualification_thread = threading.Thread(
+                target=self._qualify_until_ready,
+                name=f"{self.name}-qualification",
+                daemon=True,
+            )
+            self._qualification_thread.start()
+
+    def wait_for_post_registration_qualification(self) -> None:
+        """Wait in the post-registration worker until embedding qualification succeeds."""
+        self._qualification_complete.wait()
+
+    def _qualify_until_ready(self) -> None:
+        while True:
+            try:
+                self._qualify_configured_model()
+            except RuntimeError as exc:
+                self.qualification_status = {"state": "pending", "error": str(exc)}
+                logger.warning("%s embedding qualification pending: %s", self.name, exc)
+                time.sleep(_QUALIFICATION_RETRY_SECONDS)
+            else:
+                self.qualification_status = {"state": "ready"}
+                self._qualification_complete.set()
+                logger.info("%s configured embedding model qualified after registration", self.name)
+                return
+
+    def _qualify_configured_model(self) -> None:
+        """Prove the configured embedding binding can serve one request.
+
+        Identity-memory seeding is a mandatory later startup step.  Qualifying
+        the same configured model here keeps that dependency before lifecycle
+        workers start, so a bad endpoint or model produces a supervised failed
+        boot instead of a partial platform startup.
+        """
+        url = f"{self._base_url}/embeddings"
+        payload = {"model": self._default_model, "input": ["startup readiness probe"]}
+        response_data, api_error = self._call_embeddings_api(url, payload)
+        if api_error is not None:
+            error = api_error.get("error")
+            message = (
+                error.get("message", "unknown embedding API error")
+                if isinstance(error, dict)
+                else str(error)
+            )
+            raise RuntimeError(
+                f"{self.name}: configured embedding model '{self._default_model}' "
+                f"failed startup qualification: {message}"
+            )
+        if response_data is None:
+            raise RuntimeError(
+                f"{self.name}: configured embedding model '{self._default_model}' "
+                "returned no response during startup qualification"
+            )
+
+        result = self._parse_embeddings_response(response_data, self._default_model)
+        if result.get("action_status") != "completed":
+            error = result.get("error")
+            message = (
+                error.get("message", "invalid embedding response")
+                if isinstance(error, dict)
+                else str(error)
+            )
+            raise RuntimeError(
+                f"{self.name}: configured embedding model '{self._default_model}' "
+                f"failed startup qualification: {message}"
+            )
 
     def _load_config_from_address_book(self) -> None:
         """Load configuration from address book entry.
@@ -449,6 +525,8 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
             return f"Missing 'base_url' in address book entry '{ADDRESS_BOOK_ENTRY_NAME}'"
         if not self._default_model:
             return f"Missing 'model' in address book entry '{ADDRESS_BOOK_ENTRY_NAME}'"
+        if self.qualification_status["state"] != "ready":
+            return "Configured embedding model qualification pending after router registration"
         return None
 
     async def cleanup(self) -> None:

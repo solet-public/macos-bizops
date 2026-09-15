@@ -76,6 +76,7 @@ HOOK_KEYWORDS: dict[str, tuple[str, ...]] = {
 AGENT_INVOKED_CLI_UTILITIES = frozenset(
     {"drain.py", "hydrate_render.py", "index_render.py", "sync.py"},
 )
+NON_HOOK_MODULES = frozenset({"coordination_owner.py"})
 
 # R4 Package C (2026-08-10): files that are entry-point-SHAPED and are ALSO
 # invoked by a DIFFERENT plugin's spawn mechanism -- a spawned headless/tmux
@@ -242,6 +243,7 @@ def _entry_point_hooks() -> list[str]:
         path.name
         for path in HOOKS_DIR.iterdir()
         if path.is_file() and path.suffix in {".js", ".py"} and not path.name.startswith("_")
+        and path.name not in NON_HOOK_MODULES
     )
 
 
@@ -683,7 +685,10 @@ def check_stdlib_only(res: Results, hooks: list[str], siblings: list[str]) -> No
     # sync.py imports drain and hydrate_render directly to avoid an extra
     # subprocess layer) -- same "local module, not a third-party package"
     # reasoning as sibling_modules above, just for the non-underscore set.
-    utility_modules = {Path(name).stem for name in AGENT_INVOKED_CLI_UTILITIES}
+    utility_modules = {
+        *(Path(name).stem for name in AGENT_INVOKED_CLI_UTILITIES),
+        *(Path(name).stem for name in NON_HOOK_MODULES),
+    }
     for name in hooks + siblings:
         source = (HOOKS_DIR / name).read_text(encoding="utf-8")
         allowed_cross_platform = ALLOWED_CROSS_PLATFORM_IMPORTS.get(name, frozenset())

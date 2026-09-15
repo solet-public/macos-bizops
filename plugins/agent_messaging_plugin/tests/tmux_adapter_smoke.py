@@ -695,6 +695,10 @@ def test_spawn_local_name_drives_label_session_name_and_claude_name() -> None:
             f"claude is launched with --name <local_name> -- without this the "
             f"guard reads an auto-derived name and blocks (got {pane_command!r})",
         )
+        _check(
+            "--remote-control Git-Controller" in pane_command.replace("'", ""),
+            f"claude is remote-controllable by <local_name> (got {pane_command!r})",
+        )
 
 
 def test_spawn_without_local_name_keeps_lane_id_behaviour() -> None:
@@ -943,6 +947,10 @@ def test_spawn_env_heartbeat_marker_dir() -> None:
         f"AGENT_HEARTBEAT_MARKER_DIR={expected}" in env_str,
         "AGENT_HEARTBEAT_MARKER_DIR is rooted under APP_HOME's data dir",
     )
+    _check(
+        f"AGENT_COORDINATION_RECEIPT_PATH={app_home}/data/coordination-hooks/claude/installation.v1.json" in env_str,
+        "tmux explicit environment allowlist carries the APP_HOME-rooted ownership receipt",
+    )
 
     calls.clear()
     orig = os.environ.get("APP_HOME")
@@ -962,6 +970,10 @@ def test_spawn_env_heartbeat_marker_dir() -> None:
         "AGENT_HEARTBEAT_MARKER_DIR" not in env_str,
         "APP_HOME unset -> the heartbeat marker dir env var is ENTIRELY ABSENT "
         "from the tmux new-session -e pairs",
+    )
+    _check(
+        "AGENT_COORDINATION_RECEIPT_PATH" not in env_str,
+        "APP_HOME unset -> tmux does not inject a guessed ownership receipt path",
     )
 
 

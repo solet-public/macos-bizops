@@ -33,15 +33,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum, auto
 
-_CURSOR_VERSION = "v1"
+_CURSOR_VERSION = "v2"
 # Pull-surface boundary (design §5b.ii): a SECOND cursor kind, wire-distinct
 # from an ordinary continuation cursor, seeded at a role_covered_mark instead
 # of "now". Echoing this token back is the only way to disable the default
 # drain's floor for a deliberate pre-mark read (R2) — there is no separate
 # caller-supplied boolean, so an accidental deep read is unconstructable.
-_HISTORY_CURSOR_VERSION = "v1h"
+_HISTORY_CURSOR_VERSION = "v2h"
 _FIELD_SEP = "|"
-_FIELD_COUNT = 5  # version | important | roles_hash | created_at_iso | id
+_FIELD_COUNT = 6  # version | important | roles_hash | instance_hash | created_at_iso | id
 _ROLE_JOIN = "\n"  # role names cannot contain a newline
 _ROLES_HASH_LEN = 16  # truncated sha256 hex — collision-irrelevant (not a secret)
 
@@ -72,11 +72,15 @@ class RoleCursorScope:
 
     include_important: bool
     held_roles: tuple[str, ...]
+    agent_instance_id: str = ""
 
     def roles_hash(self) -> str:
         joined = _ROLE_JOIN.join(sorted(self.held_roles))
         digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()
         return digest[:_ROLES_HASH_LEN]
+
+    def instance_hash(self) -> str:
+        return hashlib.sha256(self.agent_instance_id.encode("utf-8")).hexdigest()[:_ROLES_HASH_LEN]
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +95,10 @@ class RoleCursorDecoded:
 
     outcome: RoleCursorOutcome
     created_at: datetime | None = None
+    # Preserve the encoded database value for the subsequent state query.
+    # ``created_at`` is the typed naïve-UTC view needed by existing callers;
+    # this raw ISO form keeps offset-bearing in-memory rows tie-comparable.
+    created_at_iso: str | None = None
     row_id: str | None = None
     is_history_token: bool = False
 
@@ -128,9 +136,7 @@ def _encode(
     version: str, scope: RoleCursorScope, *, created_at_iso: str, row_id: str,
 ) -> str:
     important_flag = "1" if scope.include_important else "0"
-    raw = _FIELD_SEP.join(
-        (version, important_flag, scope.roles_hash(), created_at_iso, row_id),
-    )
+    raw = _FIELD_SEP.join((version, important_flag, scope.roles_hash(), scope.instance_hash(), created_at_iso, row_id))
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
 
 
@@ -144,19 +150,21 @@ def decode_role_cursor(token: str, scope: RoleCursorScope) -> RoleCursorDecoded:
     wrong-arity, wrong-version, or non-ISO token. ``is_history_token`` is
     ``True`` only for a ``VALID`` outcome decoded from a ``v1h`` token.
     """
-    version, important_flag, roles_hash, created_at_iso, row_id = _decode_parts(token)
+    version, important_flag, roles_hash, instance_hash, created_at_iso, row_id = _decode_parts(token)
     if version not in (_CURSOR_VERSION, _HISTORY_CURSOR_VERSION) or important_flag not in (
         "0", "1",
     ):
         raise RoleCursorRejectedError(f"unsupported role cursor: {token!r}")
     issued_important = important_flag == "1"
-    if issued_important != scope.include_important or roles_hash != scope.roles_hash():
+    if (issued_important != scope.include_important or roles_hash != scope.roles_hash()
+            or instance_hash != scope.instance_hash()):
         return RoleCursorDecoded(outcome=RoleCursorOutcome.SCOPE_CHANGED)
     if not row_id:
         raise RoleCursorRejectedError("role cursor is missing the row id")
     return RoleCursorDecoded(
         outcome=RoleCursorOutcome.VALID,
         created_at=_parse_iso(created_at_iso),
+        created_at_iso=created_at_iso,
         row_id=row_id,
         is_history_token=version == _HISTORY_CURSOR_VERSION,
     )

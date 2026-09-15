@@ -115,9 +115,10 @@ def _flow() -> dict[str, Any]:
 def _check_stage_wiring(flow: dict[str, Any]) -> None:
     preflight = flow["stages"]["preflight"]
     _check(
-        preflight.get("entry_probe_refs") == ["git_checkout_valid"]
+        preflight.get("entry_probe_refs")
+        == ["minimum_physical_memory_valid", "git_checkout_valid"]
         and preflight["exit_probe_refs"] == ["python_version_valid"],
-        "red: move git checkout back to preflight exit",
+        "red: preserve RAM and checkout preflight entry probes",
     )
     session_stage = flow["stages"]["session_sources"]
     _check(

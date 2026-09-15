@@ -108,8 +108,27 @@ class InitializationManager:
             runner.run(orchestrator)
         except StartupError as e:
             logger.critical(f"FATAL: Startup sequence failed: {e}")
+            self._stop_lifecycle_services_after_startup_failure(orchestrator)
             self._capture_probe_failure_if_applicable(orchestrator, e)
             raise
+
+    @staticmethod
+    def _stop_lifecycle_services_after_startup_failure(orchestrator: "EventOrchestrator") -> None:
+        """Stop every lifecycle service before propagating a startup fatal.
+
+        ``start_service_plugins`` can start non-daemon worker threads before a
+        later startup step fails.  Letting that failure reach ``sys.exit`` with
+        those workers still alive strands the interpreter in finalization and
+        prevents launchd from supervising the failed boot.
+        """
+        from ananta.core.plugins.capabilities import stop_lifecycle_plugins
+
+        try:
+            stop_lifecycle_plugins(orchestrator.plugin_manager.plugins)
+        except Exception:
+            # The original startup failure remains the process disposition, but
+            # cleanup failure must be visible rather than silently masking it.
+            logger.exception("Failed to stop all lifecycle services after startup failure")
 
     def _capture_probe_failure_if_applicable(
         self,

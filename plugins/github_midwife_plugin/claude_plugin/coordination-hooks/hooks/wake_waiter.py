@@ -91,6 +91,11 @@ if sys.version_info < (3, 11):  # noqa: UP036 -- see above; ruff assumes
 import os
 import subprocess
 
+_OWNER_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+if _OWNER_DIRECTORY not in sys.path:
+    sys.path.insert(0, _OWNER_DIRECTORY)
+import coordination_owner  # noqa: E402 -- sibling path follows runtime floor
+
 _WAKE_EXIT_SIGNAL = 2
 # 40 minutes -- inside the ~1h prompt-cache TTL with margin. See the module
 # docstring: this is the constant that keeps "idle" reachable at all.
@@ -133,7 +138,21 @@ def resolve_max_wait_s() -> int:
     return value
 
 
+def _has_verified_runtime_state() -> bool:
+    ownership = coordination_owner.verify("wake", __file__)
+    if not ownership.eligible:
+        if ownership.managed:
+            coordination_owner.report_refusal(ownership)
+        return False
+    if coordination_owner.runtime_identity_directory(ownership) is None:
+        print("[wake_waiter] verified owner has no receipt-derived runtime state root", file=sys.stderr)
+        return False
+    return True
+
+
 def main() -> int:
+    if not _has_verified_runtime_state():
+        return 0
     session_id = os.environ.get("AGENT_SESSION_ID", "").strip()
     cli = os.environ.get("AGENT_WAKE_CLI", "").strip()
     transport = os.environ.get("FLEET_TRANSPORT", "").strip()

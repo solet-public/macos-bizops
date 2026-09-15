@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, cast
 
+from .answer_validation import static_option_available
 from .condition_evaluator import condition_matches
 from .contracts import ContractBundle, active_decision_ids
 from .decision_state import is_declined_answer
@@ -12,6 +13,9 @@ from .models import JsonValue
 
 
 class DecisionPromptPlan(Protocol):
+    @property
+    def answers(self) -> dict[str, JsonValue]: ...
+
     @property
     def unresolved_decisions(self) -> tuple[str, ...]: ...
 
@@ -134,6 +138,7 @@ def static_decision_prompts(
         prompt = _static_decision_prompt(
             decision_id,
             bundle.decisions[decision_id],
+            _answer_decisions(plan.answers),
         )
         if prompt is not None:
             prompts.append(prompt)
@@ -143,6 +148,7 @@ def static_decision_prompts(
 def _static_decision_prompt(
     decision_id: str,
     definition: dict[str, JsonValue],
+    decisions: dict[str, JsonValue],
 ) -> JsonValue | None:
     source = definition.get("option_source")
     if not isinstance(source, dict) or source.get("mode") != "static":
@@ -163,7 +169,7 @@ def _static_decision_prompt(
         "review_required": definition.get("review_required") is True,
         "selected": None,
         "sort_by": "recommended_first",
-        "candidates": _static_candidates(decision_id, options, recommendations),
+        "candidates": _static_candidates(decision_id, options, recommendations, decisions),
     }
 
 
@@ -171,6 +177,7 @@ def _static_candidates(
     decision_id: str,
     options: dict[str, JsonValue],
     recommendations: list[JsonValue],
+    decisions: dict[str, JsonValue],
 ) -> list[JsonValue]:
     order = {
         str(option_id): rank
@@ -182,6 +189,7 @@ def _static_candidates(
         for fallback_rank, (option_id, option) in enumerate(
             options.items(), start=len(recommendations)
         )
+        if static_option_available(option, decisions)
     ]
     candidates.sort(
         key=lambda item: (
@@ -363,7 +371,22 @@ def _reviewed_default(
         isinstance(item, str) for item in recommendations
     ):
         return None
-    return _recommended_selection(definition.get("selection_mode"), recommendations)
+    selected = _recommended_selection(definition.get("selection_mode"), recommendations)
+    options = source.get("options")
+    if selected is None or not isinstance(options, dict):
+        return None
+    if not _recommended_options_available(selected, options, decisions):
+        return None
+    return selected
+
+
+def _recommended_options_available(
+    selected: JsonValue,
+    options: dict[str, JsonValue],
+    decisions: dict[str, JsonValue],
+) -> bool:
+    values = selected if isinstance(selected, list) else [selected]
+    return all(static_option_available(options[str(value)], decisions) for value in values)
 
 
 def _default_is_eligible(

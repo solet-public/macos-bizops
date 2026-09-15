@@ -39,12 +39,23 @@ TABLE_AGENT_DIRECT_WAKE = "agent_direct_wake"
 # plugin's agent_messaging_plugin namespace) because it must be read INLINE on
 # every peer_inbox call alongside agent_role_message, same-namespace.
 TABLE_ROLE_COVERED_MARK = "role_covered_mark"
+# Weak display receipts are intentionally separate from the strong handover
+# mark above.  A receipt belongs to one concrete bridge instance and is never
+# evidence that a successor consumed or covered a role.
+TABLE_ROLE_READ_WATERMARK = "role_read_watermark"
+TABLE_ROLE_READ_RECEIPT = "role_read_receipt"
+TABLE_ROLE_READ_PAGE = "role_read_page"
+TABLE_ROLE_READ_PAGE_ITEM = "role_read_page_item"
 
 ID_PREFIX_THREAD = "agt"
 ID_PREFIX_MESSAGE = "agm"
 ID_PREFIX_ROLE_MESSAGE = "arm"
 ID_PREFIX_DIRECT_WAKE = "adw"
 ID_PREFIX_ROLE_COVERED_MARK = "arc"  # R7: collision-checked clear against every ID_PREFIX_* in the repo at build time.
+ID_PREFIX_ROLE_READ_WATERMARK = "arr"
+ID_PREFIX_ROLE_READ_RECEIPT = "arrc"
+ID_PREFIX_ROLE_READ_PAGE = "arrp"
+ID_PREFIX_ROLE_READ_PAGE_ITEM = "arri"
 
 # REL-05 consumption + re-emit bookkeeping columns, shared verbatim across
 # schema.py, the service drain/reconcile methods, the escalation reconciler, and
@@ -128,6 +139,7 @@ META_KEY_DELIVERY_EXTERNAL_ID = "delivery_external_id"
 # all. Absent on a pre-deploy server; readers MUST treat "" as "cannot advance"
 # and leave the mark alone rather than substituting one of the above.
 META_KEY_ROLE_CREATED_AT = "role_created_at"
+META_KEY_ROLE_ROW_ID = "role_row_id"
 
 _THREAD_STATUS_VALUES = (
     "open",
@@ -1029,6 +1041,85 @@ def get_role_covered_mark_schema() -> SchemaDefinition:
     )
 
 
+def get_role_read_schema() -> SchemaDefinition:
+    """Schemas for two-phase, per-instance display receipts.
+
+    The page/item pair freezes exactly what was returned before a caller can
+    acknowledge it.  Only immutable receipt rows are suppression authority;
+    the watermark is an indexed diagnostic and monotonic performance hint.
+    """
+    watermark = TableSchema(
+        table_name=TABLE_ROLE_READ_WATERMARK,
+        id_prefix=ID_PREFIX_ROLE_READ_WATERMARK,
+        description="Per-instance diagnostic role display watermark.",
+        columns={
+            "recipient_key": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "agent_instance_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "read_created_at": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "read_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "read_message_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "observed_at": ColumnDefinition(type=ColumnType.DATETIME, not_null=True),
+        },
+        indexes=[IndexDefinition(name="idx_role_read_watermark_lookup", columns=["recipient_key", "agent_instance_id"])],
+    )
+    receipt = TableSchema(
+        table_name=TABLE_ROLE_READ_RECEIPT,
+        id_prefix=ID_PREFIX_ROLE_READ_RECEIPT,
+        description="Immutable exact row receipt after receiver-side display acknowledgement.",
+        columns={
+            "recipient_key": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "agent_instance_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "role_row_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "role_message_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "role_created_at": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "acknowledged_at": ColumnDefinition(type=ColumnType.DATETIME, not_null=True),
+        },
+        indexes=[IndexDefinition(name="idx_role_read_receipt_lookup", columns=["recipient_key", "agent_instance_id", "role_row_id"])],
+    )
+    page = TableSchema(
+        table_name=TABLE_ROLE_READ_PAGE,
+        id_prefix=ID_PREFIX_ROLE_READ_PAGE,
+        description="Pending or acknowledged opaque role display page.",
+        columns={
+            "token_hash": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "agent_session_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "agent_instance_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "held_role_scope_hash": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "include_important": ColumnDefinition(type=ColumnType.BOOLEAN, not_null=True),
+            "expected_item_count": ColumnDefinition(type=ColumnType.INTEGER, not_null=True),
+            "item_digest": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "status": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "issued_at": ColumnDefinition(type=ColumnType.DATETIME, not_null=True),
+            "acked_at": ColumnDefinition(type=ColumnType.DATETIME),
+        },
+        indexes=[IndexDefinition(name="idx_role_read_page_token", columns=["token_hash"])],
+    )
+    item = TableSchema(
+        table_name=TABLE_ROLE_READ_PAGE_ITEM,
+        id_prefix=ID_PREFIX_ROLE_READ_PAGE_ITEM,
+        description="Immutable exact role envelope rows belonging to an issued page.",
+        columns={
+            "page_external_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "recipient_key": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "role_row_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "role_message_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "role_created_at": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+        },
+        indexes=[IndexDefinition(name="idx_role_read_page_item_page", columns=["page_external_id"])],
+    )
+    return SchemaDefinition(
+        namespace=NAMESPACE,
+        version="1.0.0",
+        description="Agent messaging per-instance role display receipts.",
+        tables={
+            TABLE_ROLE_READ_WATERMARK: watermark,
+            TABLE_ROLE_READ_RECEIPT: receipt,
+            TABLE_ROLE_READ_PAGE: page,
+            TABLE_ROLE_READ_PAGE_ITEM: item,
+        },
+    )
+
+
 __all__ = [
     "COL_CONSUMED",
     "COL_ACTIVITY_AT_EMISSION",
@@ -1045,11 +1136,16 @@ __all__ = [
     "ID_PREFIX_DIRECT_WAKE",
     "ID_PREFIX_MESSAGE",
     "ID_PREFIX_ROLE_COVERED_MARK",
+    "ID_PREFIX_ROLE_READ_PAGE",
+    "ID_PREFIX_ROLE_READ_PAGE_ITEM",
+    "ID_PREFIX_ROLE_READ_RECEIPT",
+    "ID_PREFIX_ROLE_READ_WATERMARK",
     "ID_PREFIX_ROLE_MESSAGE",
     "ID_PREFIX_THREAD",
     "META_KEY_DELIVERY_EXTERNAL_ID",
     "META_KEY_RECIPIENT_KEY",
     "META_KEY_RECIPIENT_KIND",
+    "META_KEY_ROLE_ROW_ID",
     "NAMESPACE",
     "RECIPIENT_KIND_INSTANCE",
     "RECIPIENT_KIND_ROLE",
@@ -1063,9 +1159,14 @@ __all__ = [
     "TABLE_AGENT_ROLE_MESSAGE",
     "TABLE_AGENT_THREAD",
     "TABLE_ROLE_COVERED_MARK",
+    "TABLE_ROLE_READ_PAGE",
+    "TABLE_ROLE_READ_PAGE_ITEM",
+    "TABLE_ROLE_READ_RECEIPT",
+    "TABLE_ROLE_READ_WATERMARK",
     "get_agent_direct_wake_schema",
     "get_agent_messaging_schema",
     "get_agent_role_message_schema",
     "get_role_covered_mark_schema",
+    "get_role_read_schema",
     "role_covered_mark_external_id",
 ]

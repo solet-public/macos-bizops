@@ -1099,6 +1099,7 @@ class Forwarder:
         limit: int | None = None,
         include_important: bool = True,
         role_after: str | None = None,
+        observer: bool = False,
     ) -> dict[str, Any]:
         params: dict[str, str] = {}
         if after is not None:
@@ -1109,6 +1110,8 @@ class Forwarder:
             params["include_important"] = "false"
         if role_after is not None:
             params["role_after"] = role_after
+        if observer:
+            params["observer"] = "true"
         query = f"?{urlencode(params)}" if params else ""
 
         async def call() -> dict[str, Any]:

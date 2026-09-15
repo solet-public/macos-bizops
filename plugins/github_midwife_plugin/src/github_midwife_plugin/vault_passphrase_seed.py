@@ -39,6 +39,7 @@ from secrets import token_urlsafe
 
 _VAULT_PLUGIN_NAME = "macos_vault_plugin"
 _PASSPHRASE_FILENAME = "passphrase"
+_STALE_CHECK_PENDING_FILENAME = "passphrase.stale-check-pending"
 _PASSPHRASE_TOKEN_BYTES = 32
 _PASSPHRASE_FILE_MODE = 0o600
 
@@ -51,6 +52,30 @@ def vault_passphrase_path(target: Path) -> Path:
         target / "profile" / "config" / "plugins"
         / _VAULT_PLUGIN_NAME / _PASSPHRASE_FILENAME
     )
+
+
+def vault_passphrase_stale_check_pending_path(target: Path) -> Path:
+    """Return the non-secret provenance marker for a Genesis-seeded passphrase.
+
+    The marker exists only between creation of a passphrase by Genesis and a
+    successful stale-Keychain master-key check.  It makes an interrupted or
+    refused first attempt distinguishable from a passphrase that pre-dated
+    Genesis, without recording the passphrase itself.
+    """
+    return vault_passphrase_path(target).with_name(_STALE_CHECK_PENDING_FILENAME)
+
+
+def vault_passphrase_stale_check_is_pending(target: Path) -> bool:
+    """Whether a Genesis-seeded passphrase still requires stale-key validation."""
+    return vault_passphrase_stale_check_pending_path(target).is_file()
+
+
+def clear_vault_passphrase_stale_check_pending(target: Path) -> None:
+    """Clear the marker only after the stale-Keychain check succeeds."""
+    try:
+        vault_passphrase_stale_check_pending_path(target).unlink()
+    except FileNotFoundError:
+        return
 
 
 def seed_vault_passphrase(target: Path) -> bool:
@@ -66,6 +91,20 @@ def seed_vault_passphrase(target: Path) -> bool:
     if path.exists():
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Record provenance before creating the passphrase.  A crash between these
+    # operations is conservative: the next attempt still performs the stale
+    # Keychain check rather than silently accepting an unvalidated seed.
+    pending_path = vault_passphrase_stale_check_pending_path(target)
+    try:
+        pending_fd = os.open(
+            pending_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            _PASSPHRASE_FILE_MODE,
+        )
+    except FileExistsError:
+        pass
+    else:
+        os.close(pending_fd)
     # Bound as a module-level name (not `secrets.token_urlsafe`) so a test can
     # patch it independently of credential_seed's own `secrets.token_urlsafe`
     # (both would otherwise resolve to the same shared secrets-module attr).
@@ -82,4 +121,10 @@ def seed_vault_passphrase(target: Path) -> bool:
     return True
 
 
-__all__ = ["seed_vault_passphrase", "vault_passphrase_path"]
+__all__ = [
+    "clear_vault_passphrase_stale_check_pending",
+    "seed_vault_passphrase",
+    "vault_passphrase_path",
+    "vault_passphrase_stale_check_is_pending",
+    "vault_passphrase_stale_check_pending_path",
+]

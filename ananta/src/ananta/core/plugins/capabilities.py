@@ -24,6 +24,8 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, TypeGuard
@@ -234,23 +236,47 @@ def stop_lifecycle_plugins(plugins: dict[str, PluginBase]) -> None:
 
     Single source of truth for lifecycle shutdown.
 
+    Awaitable ``stop_services`` implementations are completed before this
+    function returns.  Startup is synchronous, but several lifecycle plugins
+    own non-daemon workers behind async stop methods; merely constructing those
+    coroutines leaves the workers alive during interpreter shutdown.
+
     Raises:
-        PluginCapabilityError: If any plugin's stop_services() fails.
+        PluginCapabilityError: If any plugin's stop_services() fails. Every
+            lifecycle plugin is still offered shutdown before the error is
+            raised, so one faulty cleanup cannot strand a later worker.
     """
+    failures: list[tuple[str, Exception]] = []
     for name, plugin in plugins.items():
         if not is_lifecycle_managed(plugin):
             continue
 
         try:
-            plugin.stop_services()
+            result = plugin.stop_services()
+            if inspect.isawaitable(result):
+                asyncio.run(result)
             logger.debug(f"Stopped services for {name}")
         except Exception as e:
-            raise PluginCapabilityError(
-                plugin_name=name,
-                capability="LifecycleManaged",
-                operation="stop_services",
-                original_error=e,
-            ) from e
+            failures.append((name, e))
+            logger.exception("Failed to stop services for %s", name)
+
+    if failures:
+        name, error = failures[0]
+        exception = PluginCapabilityError(
+            plugin_name=name,
+            capability="LifecycleManaged",
+            operation="stop_services",
+            original_error=error,
+        )
+        if len(failures) > 1:
+            exception.add_note(
+                "Additional lifecycle cleanup failures: "
+                + ", ".join(
+                    f"{failed_name}: {type(failed_error).__name__}"
+                    for failed_name, failed_error in failures[1:]
+                )
+            )
+        raise exception from error
 
 
 def prepare_lifecycle_plugins(plugins: dict[str, PluginBase]) -> None:

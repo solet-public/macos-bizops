@@ -34,6 +34,7 @@ Run:
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -60,13 +61,17 @@ from ananta.llm.agent_messaging.role_cursor import (  # noqa: E402
     RoleCursorScope,
     decode_role_cursor,
     encode_role_cursor,
+    encode_role_history_cursor,
 )
+from ananta.llm.agent_messaging.role_read_receipts import receipt_external_id  # noqa: E402
 from ananta.llm.agent_messaging.schema import (  # noqa: E402
     NAMESPACE as ROLE_NAMESPACE,
 )
 from ananta.llm.agent_messaging.schema import (  # noqa: E402
     TABLE_AGENT_ROLE_MESSAGE,
     TABLE_ROLE_COVERED_MARK,
+    TABLE_ROLE_READ_PAGE_ITEM,
+    TABLE_ROLE_READ_RECEIPT,
 )
 from ananta.llm.agent_messaging.service import (  # noqa: E402
     AgentMessagingConfig,
@@ -850,6 +855,185 @@ def test_role_page_metadata_discloses_byte_ceiling() -> None:
     )
 
 
+def test_acknowledged_prefix_refills_to_older_unreceipted_rows() -> None:
+    """Receipt filtering must not turn a raw lookahead into false exhaustion."""
+    state = _FakeState()
+    _seed_binding(state, "R1")
+    for index in range(5):
+        row_id = f"receipt-refill-{index}"
+        _seed_role_msg(state, row_id=row_id, role="R1", created_at=f"2026-06-19T09:00:0{index}")
+        if index >= 2:
+            state.upsert_state(ROLE_NAMESPACE, {
+                "table": TABLE_ROLE_READ_RECEIPT,
+                "record": {
+                    "external_id": receipt_external_id("R1", _INSTANCE, row_id),
+                    "recipient_key": "R1", "agent_instance_id": _INSTANCE,
+                    "role_row_id": row_id, "role_message_id": f"msg-{row_id}",
+                    "role_created_at": f"2026-06-19T09:00:0{index}",
+                    "acknowledged_at": "2026-06-19T10:00:00",
+                }, "conflict_columns": ["external_id"],
+            })
+    entries, cursor, _, _ = _make_service(state).list_silent_for_roles(
+        agent_instance_id=_INSTANCE, include_important=True, limit=2, role_after=None,
+    )
+    _check(
+        _page_ids(entries) == ["msg-receipt-refill-1", "msg-receipt-refill-0"]
+        and cursor is None,
+        "acknowledged raw prefix refills to older unreceipted rows without false exhaustion",
+    )
+
+
+def _ack_request() -> PeerInboxRequest:
+    return PeerInboxRequest(
+        recipient_agent_id="claude_code", recipient_agent_instance_id=_INSTANCE,
+        recipient_agent_session_id="sess-agi-holder", limit=2,
+    )
+
+
+def _assert_exact_page_ack(service: AgentMessagingService, request: PeerInboxRequest) -> None:
+    issued = service.peer_inbox(request)
+    _check(
+        issued.role_read_page_token is not None and issued.role_read_page_status == "pending_ack",
+        "normal role page issues an immutable pending ACK token",
+    )
+    token = issued.role_read_page_token or ""
+    try:
+        service.acknowledge_role_read_page(
+            agent_session_id="foreign-session", agent_instance_id=_INSTANCE, token=token,
+        )
+        _check(False, "foreign session cannot ACK a server-issued page")
+    except AgentRequestInvalidError:
+        _check(True, "foreign session cannot ACK a server-issued page")
+    ack = service.acknowledge_role_read_page(
+        agent_session_id="sess-agi-holder", agent_instance_id=_INSTANCE, token=token,
+    )
+    _check(ack.status == "acked" and ack.receipt_count == 2, "ACK writes exact page receipts")
+    again = service.acknowledge_role_read_page(
+        agent_session_id="sess-agi-holder", agent_instance_id=_INSTANCE, token=token,
+    )
+    _check(again.status == "already_acked", "ACK retry preserves the first receipt fact")
+
+
+def _assert_receipt_bounds(service: AgentMessagingService) -> None:
+    try:
+        service.role_read_receipts(
+            agent_instance_id=_INSTANCE, candidates=[("R1", "x")] * 1001,
+        )
+        _check(False, "receipt API rejects more than 1000 candidates")
+    except AgentRequestInvalidError:
+        _check(True, "receipt API rejects more than 1000 candidates")
+    try:
+        service.role_read_receipts(
+            agent_instance_id=_INSTANCE, candidates=[("R1", "x" * 300_000)],
+        )
+        _check(False, "receipt API rejects candidate payload above 256KiB")
+    except AgentRequestInvalidError:
+        _check(True, "receipt API rejects candidate payload above 256KiB")
+
+
+def _assert_receipt_visibility(
+    service: AgentMessagingService, request: PeerInboxRequest,
+) -> None:
+    regular = service.peer_inbox(request)
+    _check(not regular.role_entries, "regular inbox suppresses exact acknowledged rows")
+    observer = service.peer_inbox(PeerInboxRequest(
+        recipient_agent_id="claude_code", recipient_agent_instance_id=_INSTANCE,
+        recipient_agent_session_id="sess-agi-holder", limit=2, observer=True,
+    ))
+    _check(
+        len(observer.role_entries) == 2 and observer.role_read_page_token is None,
+        "observer sees receipt-backed rows and cannot issue an ACK page",
+    )
+    history = encode_role_history_cursor(
+        RoleCursorScope(include_important=True, held_roles=("R1",), agent_instance_id=_INSTANCE),
+        created_at_iso="2026-06-19T09:01:00", row_id="history-boundary",
+    )
+    historical = service.peer_inbox(PeerInboxRequest(
+        recipient_agent_id="claude_code", recipient_agent_instance_id=_INSTANCE,
+        recipient_agent_session_id="sess-agi-holder", limit=2, role_after=history,
+    ))
+    _check(
+        len(historical.role_entries) == 2 and historical.role_read_page_token is None,
+        "explicit history bypasses receipts and cannot issue an ACK page",
+    )
+
+
+def _assert_incomplete_page_rejected(request: PeerInboxRequest) -> None:
+    tamper_state = _FakeState()
+    _seed_binding(tamper_state, "R1")
+    _seed_role_msg(tamper_state, row_id="tamper", role="R1", created_at="2026-06-19T10:00:00")
+    tamper_service = _make_service(tamper_state, include_direct_inbox=True)
+    tamper_issued = tamper_service.peer_inbox(request)
+    tamper_state._table(ROLE_NAMESPACE, TABLE_ROLE_READ_PAGE_ITEM).clear()
+    try:
+        tamper_service.acknowledge_role_read_page(
+            agent_session_id="sess-agi-holder", agent_instance_id=_INSTANCE,
+            token=tamper_issued.role_read_page_token or "",
+        )
+        _check(False, "ACK refuses an incomplete immutable item set")
+    except Exception:
+        _check(True, "ACK refuses an incomplete immutable item set")
+
+
+def test_exact_page_ack_observer_history_and_tamper_guards() -> None:
+    """ACK is complete, scope-bound, idempotent, and never observer/history work."""
+    state = _FakeState()
+    _seed_binding(state, "R1")
+    _seed_role_msg(state, row_id="ack-1", role="R1", created_at="2026-06-19T09:00:01")
+    _seed_role_msg(state, row_id="ack-2", role="R1", created_at="2026-06-19T09:00:02")
+    service = _make_service(state, include_direct_inbox=True)
+    request = _ack_request()
+    _assert_exact_page_ack(service, request)
+    _assert_receipt_bounds(service)
+    _assert_receipt_visibility(service, request)
+    _assert_incomplete_page_rejected(request)
+
+
+def test_tied_213_row_ack_walk_has_no_cursor_gap() -> None:
+    """A typed cursor retains its raw ISO value across tied timestamp cuts."""
+    for limit in (25, 50, 100):
+        state = _FakeState()
+        _seed_binding(state, "R1")
+        _seed_binding(state, "R2")
+        for index in range(213):
+            _seed_role_msg(
+                state,
+                row_id=f"tied-213-{index:04d}",
+                role="R1" if index % 2 else "R2",
+                created_at=(
+                    datetime(2026, 9, 12, tzinfo=UTC) + timedelta(seconds=index // 2)
+                ).isoformat(),
+            )
+        service = _make_service(state, include_direct_inbox=True)
+        cursor: str | None = None
+        seen: list[str] = []
+        pages = 0
+        while True:
+            page = service.peer_inbox(PeerInboxRequest(
+                recipient_agent_id="claude_code", recipient_agent_instance_id=_INSTANCE,
+                recipient_agent_session_id="sess-agi-holder", limit=limit,
+                role_after=cursor,
+            ))
+            seen.extend(_page_ids(page.role_entries))
+            pages += 1
+            if page.role_read_page_token:
+                service.acknowledge_role_read_page(
+                    agent_session_id="sess-agi-holder", agent_instance_id=_INSTANCE,
+                    token=page.role_read_page_token,
+                )
+            cursor = page.next_role_cursor
+            if cursor is None:
+                break
+            if pages > 20:
+                _check(False, f"tied 213 cap {limit}: bounded pagination terminates")
+                break
+        expected = {f"msg-tied-213-{index:04d}" for index in range(213)}
+        _check(
+            len(seen) == 213 and set(seen) == expected,
+            f"tied 213 cap {limit}: ACK-after-each-page has no cursor gap",
+        )
+
+
 # ---------------------------------------------------------------------------
 # 9. Q1 role-section fault-domain boundary (peer_inbox._collect_role_section)
 # ---------------------------------------------------------------------------
@@ -940,6 +1124,9 @@ def main() -> int:
     test_byte_ceiling_admits_at_least_one_oversized_entry()
     test_role_page_metadata_discloses_limits_and_full_drain()
     test_role_page_metadata_discloses_byte_ceiling()
+    test_acknowledged_prefix_refills_to_older_unreceipted_rows()
+    test_exact_page_ack_observer_history_and_tamper_guards()
+    test_tied_213_row_ack_walk_has_no_cursor_gap()
     test_q1_boundary_isolates_query_failure()
     test_q1_boundary_malformed_cursor_isolated()
     test_q1_boundary_ok_passthrough()

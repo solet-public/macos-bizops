@@ -225,6 +225,12 @@ class LMStudioProvider:
             response = self.session.get(f"{self.base_url}/models", timeout=2)
             response.raise_for_status()
             models_data = response.json()
+            loaded_models = self._loaded_model_ids(models_data)
+            if self.model not in loaded_models:
+                raise ValueError(
+                    f"Configured model '{self.model}' is not loaded; "
+                    f"loaded models: {sorted(loaded_models)!r}"
+                )
 
             return {
                 "action_status": ActionStatus.COMPLETED.value,
@@ -238,7 +244,6 @@ class LMStudioProvider:
                 "error": None,
                 "timestamp": datetime.now(UTC).isoformat(),
             }
-
         except Exception as e:
             logger.error(f"LM Studio health check failed: {e}")
             error_detail: ErrorDetail = {
@@ -260,6 +265,22 @@ class LMStudioProvider:
                 "error": error_detail,
                 "timestamp": datetime.now(UTC).isoformat(),
             }
+
+    @staticmethod
+    def _loaded_model_ids(models_data: object) -> set[str]:
+        """Return the OpenAI-compatible model IDs advertised by LM Studio."""
+        if not isinstance(models_data, dict):
+            raise ValueError("LM Studio /models response must be an object")
+        raw_models = models_data.get("data")
+        if not isinstance(raw_models, list):
+            raise ValueError("LM Studio /models response is missing its data list")
+        return {
+            model_id
+            for item in raw_models
+            if isinstance(item, dict)
+            and isinstance((model_id := item.get("id")), str)
+            and model_id
+        }
 
     def get_model_info(self) -> ActionResult:
         """Get model information."""

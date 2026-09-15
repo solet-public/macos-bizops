@@ -39,17 +39,16 @@ confirmed live, nine consecutive forced continuations in one test run. So
 `inbox_consumer.py` runs synchronously; `context_status_reporter.py` stays
 async because it only reports and never needs to gate anything.
 
-`inbox_consumer.py` parks synchronously for at most 2400 seconds on its
-already-armed sidecar watcher (`<solet-name> wake --max-wait 2400`). The
-paired 2430-second Stop registration is required because Codex enforces it;
-it includes the wake timeout plus the hook's always-following inbox-consumption
-report. A live stock-Codex 0.149.0 probe kept a 2410-second registration alive
-for 77.576 seconds and then accepted `decision:block` as a forced continuation.
-Async remains unsuitable: its decision output is discarded. The model reads
-actual message content only by calling the peer-inbox process in its continued
-turn.
+`inbox_consumer.py` uses `<solet-name> wake --max-wait 0` to observe only its
+already-armed sidecar spool. The paired eight-second Stop registration covers
+the two-second wake and report children plus startup margin. A pending result
+continues the model turn; empty is reported as an empty observation; timeout,
+exception, malformed output, and non-contract exits are unknown and do not
+refresh the observation. Future delivery belongs to native qualified driving
+and bounded reconciliation, not a parked Stop hook. The model reads actual
+message content only in its continued turn.
 
-Because this hook now drains it, the wake-hook spool is RE-ARMED for Codex:
+Because this hook observes it, the wake-hook spool is RE-ARMED for Codex:
 the hydration-rendered launcher no longer passes `--no-spool` to `<name>
 watch`. (It was disabled by codex-0147-dead-spool-retirement, 2026-08-13,
 specifically because nothing consumed it then — that premise no longer
@@ -57,9 +56,9 @@ holds.) A `spawn_session`-managed worker also still gets
 `drive_on_delivery`'s driver-channel notice, independent of this plugin's
 hooks entirely, for turn initiation while idle.
 
-`report_inbox_consumption` is called on EVERY invocation of the consumer
-hook, whether or not anything was found pending — the CDX-06 part C honesty
-field. `session_inbox_consumption_status` reads it back with the same
+`report_inbox_consumption` is called after each known pending or empty
+observation — never for unknown — so its `checked_at` remains an honest
+successful-check timestamp. `session_inbox_consumption_status` reads it back with the same
 `resolved=False`-never-defaulted-true contract `session_context_status`
 established: a session whose consumer has never run is loudly distinguishable
 from one that ran and found nothing, which is distinguishable from one that
@@ -92,7 +91,7 @@ not rewrite Codex's private trust state behind that review boundary.
 | `SessionStart` (`startup`, `resume`, `clear`) | `role_binding_reminder.js` | fixed label-versus-role reminder |
 | `PreToolUse` (`Bash` only) | `git_controller_gate.py` | opt-in Git-Controller mistake-prevention gate |
 | `Stop` (background) | `context_status_reporter.py` | report the latest positive native context reading after the last compaction boundary |
-| `Stop` (synchronous) | `inbox_consumer.py` | check the peer inbox for anything already queued; block/continue with a fixed nudge if so; always report the check via `report_inbox_consumption` |
+| `Stop` (synchronous) | `inbox_consumer.py` | observe the already-queued wake spool; block/continue on pending; report known pending/empty observations only |
 
 **Cadence ruling (2026-08-11):** `step_zero_reminder.js` and
 `check_messages_reminder.js` moved from `UserPromptSubmit` to
@@ -133,9 +132,9 @@ removing its `async` flag is a manifest-contract failure the smoke pins
 (`context_status_reporter.py` is the ONLY entry required to carry
 `"async": true` — every other `Stop` entry, including `inbox_consumer.py`,
 must carry no `async` key at all). `inbox_consumer.py` is the deliberate
-exception to "a synchronous hook would block the turn boundary": it has a
-measured forty-minute bound with an explicitly paired registration (see above),
-not an unbounded wait. Autonomous Codex workers also still get turn initiation
+exception to "a synchronous hook would block the turn boundary": it has an
+eight-second paired registration and never waits for future delivery.
+Autonomous Codex workers also still get turn initiation
 through `spawn_session`'s `drive_on_delivery`, which uses the host driver
 channel and does not depend on either `Stop` hook. `inbox_consumer.py` arms
 on the same three-variable fleet precondition

@@ -85,6 +85,7 @@ from ananta.llm.agent_messaging.schema import (
     get_agent_messaging_schema,
     get_agent_role_message_schema,
     get_role_covered_mark_schema,
+    get_role_read_schema,
 )
 from ananta.llm.agent_messaging.service import (
     AgentMessagingConfig,
@@ -157,6 +158,18 @@ from .constants import (
 )
 from .context_status_verbs import report_context_status as lifecycle_report_context_status
 from .context_status_verbs import session_context_status as lifecycle_session_context_status
+from .fleet_check_run_verbs import (
+    recent_fleet_liveness_runs as lifecycle_recent_fleet_liveness_runs,
+)
+from .fleet_check_run_verbs import (
+    recent_fleet_progress_runs as lifecycle_recent_fleet_progress_runs,
+)
+from .fleet_check_run_verbs import (
+    record_fleet_liveness_run as lifecycle_record_fleet_liveness_run,
+)
+from .fleet_check_run_verbs import (
+    record_fleet_progress_run as lifecycle_record_fleet_progress_run,
+)
 from .fleet_status import FleetStatusError
 from .fleet_status import fleet_status as lifecycle_fleet_status
 from .gauge_canary import (
@@ -2118,6 +2131,36 @@ class AgentMessagingPlugin(
                     retryable=True,
                 ),
             ),
+            # Append-only operational observations: a retry could write a
+            # second run record, so recording is deliberately non-retryable.
+            "record_fleet_liveness_run": EdgeProcessDefinition(
+                name="record_fleet_liveness_run",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "record_fleet_progress_run": EdgeProcessDefinition(
+                name="record_fleet_progress_run",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "recent_fleet_liveness_runs": EdgeProcessDefinition(
+                name="recent_fleet_liveness_runs",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            "recent_fleet_progress_runs": EdgeProcessDefinition(
+                name="recent_fleet_progress_runs",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
             "budget_report": EdgeProcessDefinition(
                 name="budget_report",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
@@ -2430,6 +2473,26 @@ class AgentMessagingPlugin(
                     retryable=True,
                 ),
             ),
+            # Acknowledges a page only after the caller has rendered it. The
+            # service persists immutable item receipts and a monotonic
+            # watermark, so retrying the same token after a transient result
+            # delivery fault is safe.
+            "peer_ack_role_read_page": EdgeProcessDefinition(
+                name="peer_ack_role_read_page",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # Exact receipt lookup is read-only and bounded; retrying it cannot
+            # create, acknowledge, or otherwise advance delivery state.
+            "peer_role_read_receipts": EdgeProcessDefinition(
+                name="peer_role_read_receipts",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
             # Peer-enumeration asymmetry close (WS-1a pattern, operator-
             # prompted 2026-08-02): a no-MCP session could read its own mail
             # via peer_inbox but had no way to see who else was live.
@@ -2540,6 +2603,7 @@ class AgentMessagingPlugin(
             get_agent_role_message_schema(),
             get_agent_direct_wake_schema(),
             get_role_covered_mark_schema(),
+            get_role_read_schema(),
             get_peer_binding_schema_definition(),
             get_agent_role_binding_schema_definition(),
             get_role_model_schema_definition(),
@@ -3018,7 +3082,11 @@ class AgentMessagingPlugin(
         try:
             principal = extract_authenticated_principal(state)
         except PermissionError as exc:
-            instance_id = str(state.get("inference_vertex_session_id") or "").strip()
+            instance_id = str(
+                state.get("inference_vertex_session_id")
+                or state.get("caller_attribution_instance_id")
+                or ""
+            ).strip()
             if not instance_id:
                 raise DispatchError("dispatch_authentication_required", str(exc)) from exc
             session_id = self._claimant_session_id(instance_id)
@@ -3272,6 +3340,15 @@ class AgentMessagingPlugin(
                 required=False,
                 type=ParameterType.STRING,
             ),
+            "repository_root": ParameterMetadata(
+                description=(
+                    "Optional absolute Git checkout for this lane. Required when the "
+                    "dispatched unit targets a repository other than the serving Solet's "
+                    "own checkout; validated before any worktree side effect."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
             "work_class": ParameterMetadata(
                 description="read_only | analysis_deliverable | production_mutation.",
                 required=True,
@@ -3496,6 +3573,7 @@ class AgentMessagingPlugin(
             "lane_id": ParameterMetadata(required=True, type=ParameterType.STRING),
             "role_name": ParameterMetadata(required=True, type=ParameterType.STRING),
             "brief_ref": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "repository_root": ParameterMetadata(required=False, type=ParameterType.STRING),
             "brief_sha256": ParameterMetadata(required=True, type=ParameterType.STRING),
             "expected_path": ParameterMetadata(required=True, type=ParameterType.STRING),
             "completion_contract": ParameterMetadata(required=True, type=ParameterType.OBJECT),
@@ -4147,11 +4225,28 @@ class AgentMessagingPlugin(
             ),
             "limit": ParameterMetadata(
                 description=(
-                    f"Hard result bound; defaults to {LIST_SESSIONS_DEFAULT_LIMIT} and may not "
-                    f"exceed {LIST_SESSIONS_MAX_LIMIT}. Over-limit matches refuse, never truncate."
+                    f"Page size; defaults to {LIST_SESSIONS_DEFAULT_LIMIT} and may not exceed "
+                    f"{LIST_SESSIONS_MAX_LIMIT}. A full page returns next_cursor; never infer "
+                    "that a full page is the complete roster."
                 ),
                 required=False,
                 type=ParameterType.INTEGER,
+            ),
+            "after_created_at": ParameterMetadata(
+                description=(
+                    "First cursor component: echo next_cursor.created_at from the prior page "
+                    "with after_id. Omit both on the first page."
+                ),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "after_id": ParameterMetadata(
+                description=(
+                    "Second cursor component: echo next_cursor.id from the prior page with "
+                    "after_created_at. Omit both on the first page."
+                ),
+                required=False,
+                type=ParameterType.STRING,
             ),
         },
         output_type="object",
@@ -4161,6 +4256,9 @@ class AgentMessagingPlugin(
             description="list_sessions outcome",
             properties={
                 "sessions": ParameterMetadata(type=ParameterType.LIST),
+                "returned": ParameterMetadata(type=ParameterType.INTEGER),
+                "truncated": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "next_cursor": ParameterMetadata(type=ParameterType.OBJECT),
             },
         ),
     )
@@ -4189,6 +4287,8 @@ class AgentMessagingPlugin(
                 filters or None,
                 live_only=raw.get("live_only") is True,
                 limit=raw_limit,
+                after_created_at=raw.get("after_created_at"),
+                after_id=raw.get("after_id"),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -4233,6 +4333,150 @@ class AgentMessagingPlugin(
         try:
             result = lifecycle_fleet_status(state_service, scope=raw.get("scope", "lanes"))
         except FleetStatusError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="record_fleet_liveness_run",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "observed_at": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "checked": ParameterMetadata(required=True, type=ParameterType.OBJECT),
+            "stuck": ParameterMetadata(required=True, type=ParameterType.LIST),
+            "actions": ParameterMetadata(required=True, type=ParameterType.LIST),
+            "outcome": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "role_inbox_drain": ParameterMetadata(required=True, type=ParameterType.OBJECT),
+            "sleep_check": ParameterMetadata(required=True, type=ParameterType.OBJECT),
+            "escalations": ParameterMetadata(required=True, type=ParameterType.LIST),
+        },
+        output_type="object",
+        output_description="Append one structured Phase-A fleet-liveness run in deployment-native state.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="record_fleet_liveness_run outcome",
+            properties={"status": ParameterMetadata(type=ParameterType.STRING)},
+        ),
+    )
+    def record_fleet_liveness_run(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            result = lifecycle_record_fleet_liveness_run(
+                state_service,
+                observed_at=raw.get("observed_at") if isinstance(raw.get("observed_at"), str) else "",
+                checked=raw.get("checked"), stuck=raw.get("stuck"), actions=raw.get("actions"),
+                outcome=raw.get("outcome") if isinstance(raw.get("outcome"), str) else "",
+                role_inbox_drain=raw.get("role_inbox_drain"), sleep_check=raw.get("sleep_check"),
+                escalations=raw.get("escalations"),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="record_fleet_progress_run",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "reviewed_at": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "workstream_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "objective_citation": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "metrics": ParameterMetadata(required=True, type=ParameterType.OBJECT),
+            "delta": ParameterMetadata(required=True, type=ParameterType.OBJECT),
+            "assessment": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "recommendation": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "independent_critique": ParameterMetadata(required=True, type=ParameterType.OBJECT),
+            "escalations": ParameterMetadata(required=True, type=ParameterType.LIST),
+            "phase_a_run_id": ParameterMetadata(required=False, type=ParameterType.STRING),
+        },
+        output_type="object",
+        output_description="Append one structured Phase-B workstream assessment in deployment-native state.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="record_fleet_progress_run outcome",
+            properties={"status": ParameterMetadata(type=ParameterType.STRING)},
+        ),
+    )
+    def record_fleet_progress_run(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            result = lifecycle_record_fleet_progress_run(
+                state_service,
+                reviewed_at=raw.get("reviewed_at") if isinstance(raw.get("reviewed_at"), str) else "",
+                workstream_id=raw.get("workstream_id") if isinstance(raw.get("workstream_id"), str) else "",
+                objective_citation=raw.get("objective_citation") if isinstance(raw.get("objective_citation"), str) else "",
+                metrics=raw.get("metrics"), delta=raw.get("delta"),
+                assessment=raw.get("assessment") if isinstance(raw.get("assessment"), str) else "",
+                recommendation=raw.get("recommendation") if isinstance(raw.get("recommendation"), str) else "",
+                independent_critique=raw.get("independent_critique"),
+                escalations=raw.get("escalations"), phase_a_run_id=_opt_str(raw.get("phase_a_run_id")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="recent_fleet_liveness_runs",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "limit": ParameterMetadata(required=False, type=ParameterType.INTEGER),
+            "after_observed_at": ParameterMetadata(required=False, type=ParameterType.STRING),
+            "after_id": ParameterMetadata(required=False, type=ParameterType.STRING),
+        },
+        output_type="object",
+        output_description="Read a bounded newest-first page of structured Phase-A liveness runs.",
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="recent_fleet_liveness_runs outcome"),
+    )
+    def recent_fleet_liveness_runs(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            result = lifecycle_recent_fleet_liveness_runs(
+                state_service, limit=raw.get("limit", 64),
+                after_observed_at=_opt_str(raw.get("after_observed_at")), after_id=_opt_str(raw.get("after_id")),
+            )
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="recent_fleet_progress_runs",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "workstream_id": ParameterMetadata(required=False, type=ParameterType.STRING),
+            "limit": ParameterMetadata(required=False, type=ParameterType.INTEGER),
+            "after_reviewed_at": ParameterMetadata(required=False, type=ParameterType.STRING),
+            "after_id": ParameterMetadata(required=False, type=ParameterType.STRING),
+        },
+        output_type="object",
+        output_description="Read a bounded newest-first page of structured Phase-B assessments, optionally by workstream.",
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="recent_fleet_progress_runs outcome"),
+    )
+    def recent_fleet_progress_runs(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            result = lifecycle_recent_fleet_progress_runs(
+                state_service, workstream_id=_opt_str(raw.get("workstream_id")), limit=raw.get("limit", 64),
+                after_reviewed_at=_opt_str(raw.get("after_reviewed_at")), after_id=_opt_str(raw.get("after_id")),
+            )
+        except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
@@ -6981,6 +7225,12 @@ class AgentMessagingPlugin(
                 required=False,
                 type=ParameterType.STRING,
             ),
+            "observer": ParameterMetadata(
+                description="Read operational pending state without issuing a display-receipt page.",
+                required=False,
+                type=ParameterType.BOOLEAN,
+                default=False,
+            ),
             "limit": ParameterMetadata(
                 description=(
                     "Maximum entries per section, clamped to 1..100. Default 5 "
@@ -7041,6 +7291,8 @@ class AgentMessagingPlugin(
                 "role_byte_ceiling": ParameterMetadata(type=ParameterType.INTEGER),
                 "role_floor_applied": ParameterMetadata(type=ParameterType.BOOLEAN),
                 "role_history_cursor": ParameterMetadata(type=ParameterType.STRING),
+                "role_read_page_token": ParameterMetadata(type=ParameterType.STRING),
+                "role_read_page_status": ParameterMetadata(type=ParameterType.STRING),
             },
         ),
     )
@@ -7140,6 +7392,86 @@ class AgentMessagingPlugin(
         return _success_result(
             data=serialize_peer_inbox_page(page, binding.agent_instance_id),
         )
+
+    @platform_process(
+        name="peer_ack_role_read_page",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_session_id": ParameterMetadata(required=True, type=ParameterType.STRING,
+                description="The acknowledging caller's own stable session id."),
+            "page_token": ParameterMetadata(required=True, type=ParameterType.STRING,
+                description="Opaque token returned by peer_inbox after role rows were output."),
+        },
+        output_type="object",
+        output_description="Acknowledge a successfully rendered role inbox page.",
+    )
+    def peer_ack_role_read_page(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        raw = params.get("parameters", params)
+        session_id = str(raw.get("agent_session_id", "")).strip()
+        token = str(raw.get("page_token", "")).strip()
+        if not session_id or not token:
+            return _failure_result(code="missing_argument", message="peer_ack_role_read_page requires agent_session_id and page_token.")
+        if self._peer_registry is None:
+            return _failure_result(code="bridge.not_running", message="agent messaging bridge is not active.")
+        try:
+            binding = self._peer_registry.resolve_by_agent_session_id(session_id)
+        except PeerSessionAmbiguousError as exc:
+            return _failure_result(code="peer_session_ambiguous", message=str(exc))
+        if binding is None:
+            return _failure_result(code="identity_not_registered", message="no live peer binding for agent_session_id.")
+        try:
+            result = self._require_service().acknowledge_role_read_page(
+                agent_session_id=session_id, agent_instance_id=binding.agent_instance_id, token=token,
+            )
+        except AgentMessagingError as exc:
+            return _failure_result(code="role_read_page_rejected", message=str(exc))
+        return _success_result(data={"status": result.status, "receipt_count": result.receipt_count})
+
+    @platform_process(
+        name="peer_role_read_receipts",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_session_id": ParameterMetadata(required=True, type=ParameterType.STRING,
+                description="The querying caller's own stable session id."),
+            "candidates": ParameterMetadata(required=True, type=ParameterType.LIST,
+                description="Exact recipient_key/role_row_id pairs from a wake spool record."),
+        },
+        output_type="object",
+        output_description="Read exact acknowledged role display receipts for the caller's held roles.",
+    )
+    def peer_role_read_receipts(
+        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        raw = params.get("parameters", params)
+        session_id = str(raw.get("agent_session_id", "")).strip()
+        raw_candidates = raw.get("candidates")
+        if not session_id or not isinstance(raw_candidates, list):
+            return _failure_result(code="missing_argument", message="peer_role_read_receipts requires agent_session_id and candidates.")
+        try:
+            candidates = _coerce_role_receipt_candidates(raw_candidates)
+        except ValueError as exc:
+            return _failure_result(code="invalid_candidates", message=str(exc))
+        if self._peer_registry is None:
+            return _failure_result(code="bridge.not_running", message="agent messaging bridge is not active.")
+        try:
+            binding = self._peer_registry.resolve_by_agent_session_id(session_id)
+        except PeerSessionAmbiguousError as exc:
+            return _failure_result(code="peer_session_ambiguous", message=str(exc))
+        if binding is None:
+            return _failure_result(code="identity_not_registered", message="no live peer binding for agent_session_id.")
+        try:
+            results = self._require_service().role_read_receipts(
+                agent_instance_id=binding.agent_instance_id, candidates=candidates,
+            )
+        except AgentMessagingError as exc:
+            return _failure_result(code="role_read_receipts_rejected", message=str(exc))
+        return _success_result(data={
+            "agent_instance_id": binding.agent_instance_id,
+            "results": [{"recipient_key": item.recipient_key, "role_row_id": item.role_row_id,
+                         "served": item.served} for item in results],
+        })
 
     @platform_process(
         name="peer_list",
@@ -10417,6 +10749,7 @@ def _spawn_session_identity_params(raw: dict[str, Any]) -> dict[str, Any]:
         "lane_id": _param_text(raw, "lane_id"),
         "brief_ref": _param_text(raw, "brief_ref"),
         "unit_id": _param_text(raw, "unit_id"),
+        "repository_root": _param_text(raw, "repository_root"),
         "work_class": _param_text(raw, "work_class"),
         "budget_line": _param_text(raw, "budget_line"),
         "dispatch_id": _param_text(raw, "dispatch_id"),
@@ -10469,6 +10802,7 @@ def _dispatch_spec_from_params(
         budget_line=req.budget_line,
         brief_ref=req.brief_ref,
         unit_id=req.unit_id,
+        repository_root=req.repository_root,
         brief_sha256=str(raw.get("brief_sha256") or ""),
         expected_path=str(raw.get("expected_path") or ""),
         completion_contract=_as_object(raw.get("completion_contract")),
@@ -10653,6 +10987,24 @@ def _build_resume_action(row: dict[str, object]) -> dict[str, Any]:
     return action_def
 
 
+def _coerce_role_receipt_candidates(raw_candidates: object) -> list[tuple[str, str]]:
+    """Validate bounded, exact wake receipt lookup candidates."""
+    if not isinstance(raw_candidates, list):
+        raise ValueError("candidates must be a list.")
+    encoded = json.dumps(raw_candidates, separators=(",", ":"))
+    if len(raw_candidates) > 1000 or len(encoded.encode()) > 256 * 1024:
+        raise ValueError("receipt candidates exceed fixed bounds.")
+    candidates: list[tuple[str, str]] = []
+    for item in raw_candidates:
+        if not isinstance(item, dict):
+            raise ValueError("every candidate must be an object.")
+        key, row_id = item.get("recipient_key"), item.get("role_row_id")
+        if not isinstance(key, str) or not key or not isinstance(row_id, str) or not row_id:
+            raise ValueError("candidates require recipient_key and role_row_id.")
+        candidates.append((key, row_id))
+    return candidates
+
+
 def _build_peer_inbox_request(
     raw: dict[str, Any],
     binding: BridgeBinding,
@@ -10691,6 +11043,7 @@ def _build_peer_inbox_request(
         # read-and-branch code both go, not just one.
         include_important=True,
         role_after=(str(role_after_raw) if role_after_raw not in (None, "") else None),
+        observer=bool(raw.get("observer", False)),
     )
 
 

@@ -12,6 +12,7 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from .model_dispatch_policy import DispatchPolicy, load_dispatch_policy
 from .peer_registry import PeerAmbiguousError, PeerSessionAmbiguousError, PeerUnreachableError
 from .session_lifecycle_verbs import drive_on_delivery
 from .steward_resolution import resolve_steward_binding
@@ -114,7 +115,7 @@ def _notify_steward(
 
 
 def _unpaired_candidate(
-    row: dict[str, Any], rows: list[dict[str, Any]], clock: datetime,
+    row: dict[str, Any], rows: list[dict[str, Any]], clock: datetime, policy: DispatchPolicy,
 ) -> str | None:
     from .session_sweep import DISPATCH_POLICY_PAIR_WINDOW_S
 
@@ -122,6 +123,8 @@ def _unpaired_candidate(
     spawned_at = _pair_spawned_at(row)
     agent_instance_id = str(row.get("agent_instance_id") or "")
     if kind not in {"diagnose", "design"} or not agent_instance_id or spawned_at is None:
+        return None
+    if policy.budget_vendor_override is not None and policy.budget_vendor_override.allows_same_vendor(kind):
         return None
     if (clock - spawned_at).total_seconds() < DISPATCH_POLICY_PAIR_WINDOW_S:
         return None
@@ -139,12 +142,13 @@ def sweep_unpaired_dispatch_policy(
     if peer_registry is None or bridge_manager is None:
         return 0
     clock = now or datetime.now(UTC)
+    policy = load_dispatch_policy()
     rows = _managed_sessions_in_state(state, LIFECYCLE_LIVE)
     gate = _latch_or_transient(latch)
     active: set[str] = set()
     sent = 0
     for row in rows:
-        agent_instance_id = _unpaired_candidate(row, rows, clock)
+        agent_instance_id = _unpaired_candidate(row, rows, clock, policy)
         if agent_instance_id is None:
             continue
         active.add(agent_instance_id)

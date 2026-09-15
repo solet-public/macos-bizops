@@ -206,7 +206,8 @@ def _answers(target: Path) -> dict[str, object]:
             "autostart": "enabled",
             "embeddings_implementation": "lm_studio",
             "embedding_model": "fixture-embedding",
-            "inference_implementation": "none",
+            "inference_implementation": "lm_studio",
+            "inference_model": "fixture-inference",
             "coding_agents": ["codex", "claude_code"],
             "execution_topology": "fleet",
             "connector_configuration_timing": "first_use",
@@ -427,8 +428,8 @@ def _assert_postcondition_scope_contract(bundle: ContractBundle) -> None:
             "install_shell_integration",
             ("fresh_shell_path_valid", "fresh_shell_python_valid"),
         ),
-        ("configure_lm_studio_embeddings", ("embedding_request_succeeds",)),
-        ("configure_lm_studio_inference", ("structured_action_qualification",)),
+        ("configure_lm_studio_embeddings", ("embedding_model_qualification",)),
+        ("configure_lm_studio_inference", ()),
     )
     for operation_id, expected in precondition_subset_controls:
         idempotency = _flow_at(bundle.flow, "operations", operation_id, "idempotency")
@@ -745,10 +746,11 @@ def main() -> int:
         _check("stage_probe_statuses" in serialized, "journal serializes stage probe statuses")
         _check("stage_probe_attempts" in serialized, "journal serializes stage probe attempts")
         _check(
-            set(serialized["stage_probe_statuses"]["preflight"]["entry"]) == {"git_checkout_valid"}
+            set(serialized["stage_probe_statuses"]["preflight"]["entry"])
+            == {"minimum_physical_memory_valid", "git_checkout_valid"}
             and set(serialized["stage_probe_statuses"]["preflight"]["exit"])
             == {"python_version_valid"},
-            "preflight separates checkout entry and runtime exit probe keys",
+            "preflight separates host-and-checkout entry probes from runtime exit keys",
         )
         _check(
             current_frontier_stage_ids(bundle, transaction, answers) == ("preflight",),
@@ -806,7 +808,30 @@ def main() -> int:
             "unknown operation stage raises StateError rather than KeyError",
         )
         _assert_boundary_remediation(bundle, transaction, answers, Path(raw))
-        first = transaction.with_stage_probe_status(
+        ram_verified = transaction.with_stage_probe_status(
+            "preflight",
+            "entry",
+            "minimum_physical_memory_valid",
+            CheckpointStatus.VERIFIED,
+            attempt={
+                "probe_id": "minimum_physical_memory_valid",
+                "stage_id": "preflight",
+                "boundary": "entry",
+                "attempt": 1,
+                "request_id": "7f2f3ed3-03fc-4f58-915e-eb400a172a67",
+                "checkpoint_status": "verified",
+                "error_kind": None,
+                "retry_safe": True,
+                "evidence": [],
+                "repair": None,
+                "recorded_at": "2026-08-21T03:29:00Z",
+            },
+        )
+        _check(
+            ram_verified.stages["preflight"] is CheckpointStatus.PENDING,
+            "one verified entry cannot verify a stage with another pending entry",
+        )
+        first = ram_verified.with_stage_probe_status(
             "preflight",
             "entry",
             "git_checkout_valid",
@@ -827,7 +852,7 @@ def main() -> int:
         )
         _check(
             first.stages["preflight"] is CheckpointStatus.PENDING,
-            "one verified entry cannot verify a stage with a pending exit",
+            "verified entries cannot verify a stage with a pending exit",
         )
         transaction = first.with_stage_probe_status(
             "preflight",

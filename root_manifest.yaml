@@ -138,6 +138,10 @@ sanctioned:
     reason: "development-checkout surface; agent working notes are origin-only and never shipped in a seed"
     operator_approved: "2026-07-28"
 
+  - path: docs
+    reason: "development-checkout surface; a coordinator dispatch-brief convention (register-CLI backlog burndown work, first appeared 2026-09-11), same lifecycle class as workbench above -- agent working notes, origin-only, never shipped in a seed"
+    operator_approved: "2026-09-11"
+
   # Birth-time surfaces — created by or for a newborn; absent in the platform
   # origin checkout, which is not itself seed-born.
   - path: PROVENANCE.json

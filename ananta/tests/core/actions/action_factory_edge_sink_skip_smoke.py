@@ -66,7 +66,7 @@ def _make_factory() -> ActionFactory:
                 },
             },
             _INFERENCE_BASE: {
-                "action_definition_template": {"arguments": {}},
+                "action_definition_template": {"arguments": {"params": {}}},
             },
         },
     }

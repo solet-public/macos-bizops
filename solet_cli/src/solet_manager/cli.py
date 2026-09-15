@@ -59,6 +59,13 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--target", type=Path)
     create.add_argument("--config", type=Path)
     create.add_argument(
+        "--resume-stage",
+        help=(
+            "Require an existing transaction whose sole executable frontier is this "
+            "named stage before resuming it."
+        ),
+    )
+    create.add_argument(
         "--seed",
         help="Use one named seed from this install's live seed set.",
     )

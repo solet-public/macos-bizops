@@ -60,11 +60,18 @@ from .manifest_marker import build_marker_payload, write_marker
 from .profile_install import ProfileInstallError, install_profile_allowlist, load_plugin_allowlist
 from .router_install import RouterInstallError, RouterInstallResult, install_router_at_birth
 from .steps import GenesisContext, run_steps
-from .vault_passphrase_seed import seed_vault_passphrase
+from .vault_passphrase_seed import (
+    clear_vault_passphrase_stale_check_pending,
+    seed_vault_passphrase,
+    vault_passphrase_stale_check_is_pending,
+)
 
 _DEFAULT_PROFILE_NAME = "macos-free-solet"
 _PROFILE_ENV_VAR = "SOLET_PROFILE"
 _AUTOSTART_ENV_VAR = "SOLET_AUTOSTART"
+_OPERATION_REF_ENV_VAR = "SOLET_OPERATION_REF"
+_FULL_GENESIS_OPERATION_REF = "genesis::solet.run"
+_AUTOSTART_INSTALL_OPERATION_REF = "genesis::autostart.install"
 _PROVENANCE_FILENAME = "PROVENANCE.json"
 _PROFILE_TEMPLATE_BY_BUNDLE = {
     "macos_free_minimal": "macos-free-solet",
@@ -276,7 +283,7 @@ def run_genesis(
     })
 
     vault_stale_record = _run_vault_stale_check_phase(
-        name, keychain, vault_passphrase_created, phases, _finalize_marker,
+        name, clone_root, keychain, vault_passphrase_created, phases, _finalize_marker,
     )
     phases.append(vault_stale_record)
 
@@ -351,6 +358,23 @@ def run_genesis(
         },
         "git_init": {"status": git_init_record["status"]},
     }
+
+
+def run_autostart_install(
+    *,
+    name: str,
+    clone_root: Path,
+    plist_dir: Path | None = None,
+    home_dir: Path | None = None,
+    launchctl_run: Runner | None = None,
+) -> AutostartResult:
+    """Install only the main LaunchAgent for the scoped autostart operation.
+
+    ``genesis::autostart.install`` is a repair operation, not a request to
+    replay birth.  In particular it must not run the profile installer, spine,
+    router installer, command-launcher writer, marker writer, or git init.
+    """
+    return _install_autostart(name, clone_root, plist_dir, home_dir, launchctl_run)
 
 
 def _install_autostart(
@@ -477,6 +501,7 @@ def _run_command_launcher_phase(
 
 def _run_vault_stale_check_phase(
     name: str,
+    clone_root: Path,
     keychain: PerCredentialKeychain | None,
     fresh_passphrase_created: bool,
     phases: list[dict[str, Any]],
@@ -485,6 +510,7 @@ def _run_vault_stale_check_phase(
     try:
         return _check_for_stale_vault_master(
             name=name,
+            clone_root=clone_root,
             keychain=keychain,
             fresh_passphrase_created=fresh_passphrase_created,
         )
@@ -510,7 +536,11 @@ def _run_vault_passphrase_phase(
 
 
 def _check_for_stale_vault_master(
-    *, name: str, keychain: PerCredentialKeychain | None, fresh_passphrase_created: bool,
+    *,
+    name: str,
+    clone_root: Path,
+    keychain: PerCredentialKeychain | None,
+    fresh_passphrase_created: bool,
 ) -> dict[str, Any]:
     """Refuse a fresh clone paired with an old macOS Keychain vault master key.
 
@@ -519,7 +549,8 @@ def _check_for_stale_vault_master(
     wrote a new passphrase file, that old wrapped master key cannot be unwrapped
     and launchd will crash-loop. Detect the mismatch before autostart.
     """
-    if not fresh_passphrase_created:
+    pending_stale_check = vault_passphrase_stale_check_is_pending(clone_root)
+    if not fresh_passphrase_created and not pending_stale_check:
         return {
             "step_name": "vault_stale_check",
             "status": "completed",
@@ -547,6 +578,8 @@ def _check_for_stale_vault_master(
             "but genesis just created a fresh vault passphrase file. Use a real "
             "teardown path or delete that Keychain item before re-birthing this name."
         )
+    if pending_stale_check:
+        clear_vault_passphrase_stale_check_pending(clone_root)
     return {
         "step_name": "vault_stale_check",
         "status": "completed",
@@ -602,6 +635,15 @@ def main() -> int:
 
     try:
         clone_root = _resolve_clone_root()
+        operation_ref = _operation_ref_from_environment()
+        if operation_ref == _AUTOSTART_INSTALL_OPERATION_REF:
+            if not _autostart_from_environment():
+                raise GenesisError(
+                    "genesis::autostart.install requires SOLET_AUTOSTART=enabled"
+                )
+            installed = run_autostart_install(name=name, clone_root=clone_root)
+            print(f"LaunchAgent {installed.label} {installed.status}")
+            return 0
         profile_name = resolve_profile_name(
             clone_root,
             os.environ.get(_PROFILE_ENV_VAR, ""),
@@ -639,6 +681,16 @@ def _autostart_from_environment() -> bool:
         return False
     raise GenesisError(
         f"{_AUTOSTART_ENV_VAR} must be exactly 'enabled' or 'disabled', got {value!r}"
+    )
+
+
+def _operation_ref_from_environment() -> str:
+    value = os.environ.get(_OPERATION_REF_ENV_VAR, _FULL_GENESIS_OPERATION_REF)
+    if value in {_FULL_GENESIS_OPERATION_REF, _AUTOSTART_INSTALL_OPERATION_REF}:
+        return value
+    raise GenesisError(
+        f"{_OPERATION_REF_ENV_VAR} must be one of "
+        f"{_FULL_GENESIS_OPERATION_REF!r} or {_AUTOSTART_INSTALL_OPERATION_REF!r}, got {value!r}"
     )
 
 

@@ -7,6 +7,7 @@ from typing import cast
 
 from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
 
+from .coordination_hook_installation import receipt_matches_hook_root, receipt_path
 from .installation_doctor import (
     _boolean_probe,
     _call_payload,
@@ -42,13 +43,17 @@ def plugin_visible(request: AdapterRequest, runtime: Runtime) -> JsonObject:
     root = _installed_plugin_root(request, runtime, cli, selector, listed)
     manifest = _hook_manifest(request, cli, root)
     bound = _manifest_absolute(manifest, request.target)
+    receipt_ok = cli != "claude" or (
+        root is not None
+        and _receipt_matches_request(request, root)
+    )
     return _boolean_probe(
         request,
         evidence_id=f"{cli}_plugin_visible",
-        ok=root is not None and bound,
-        observed=root is not None and bound,
+        ok=root is not None and bound and receipt_ok,
+        observed=root is not None and bound and receipt_ok,
         source=str(manifest),
-        repair=f"Install {selector} and bind its Python hooks to target Python 3.13.",
+        repair=f"Install {selector}, bind its Python hooks, and repair its owner-qualified receipt.",
     )
 
 
@@ -73,22 +78,15 @@ def hook_behavior(request: AdapterRequest, runtime: Runtime) -> JsonObject:
             f"Install {selector} through the supported {cli} plugin route.",
         )
     manifest = _hook_manifest(request, cli, root)
-    hook_name = "step_zero_reminder.py" if cli == "claude" else "step_zero_reminder.js"
-    hook = manifest.parent / hook_name
-    if cli == "claude":
-        vector = (str(request.target / ".venv/bin/python3"), str(hook))
-    else:
-        node = resolve_executable(runtime, "node")
-        if node is None:
-            return _boolean_probe(
-                request,
-                evidence_id=f"{cli}_hook_behavior",
-                ok=False,
-                observed=False,
-                source="executable:node unresolved",
-                repair="Resolve Node before proving the Codex hook behavior.",
-            )
-        vector = (node, str(hook))
+    receipt_failure = _receipt_failure(request, cli, root)
+    if receipt_failure is not None:
+        return receipt_failure
+    vector = _behavior_vector(request, runtime, cli, manifest)
+    if vector is None:
+        return _boolean_probe(
+            request, evidence_id=f"{cli}_hook_behavior", ok=False, observed=False,
+            source="executable:node unresolved", repair="Resolve Node before proving the Codex hook behavior.",
+        )
     outcome = runtime.run(
         vector,
         timeout_seconds=10,
@@ -103,9 +101,40 @@ def hook_behavior(request: AdapterRequest, runtime: Runtime) -> JsonObject:
         evidence_id=f"{cli}_hook_behavior",
         ok=active,
         observed=active,
-        source=f"{hook}; executable:{vector[0]}",
+        source=f"{vector[1]}; executable:{vector[0]}",
         repair=f"Repair {cli} plugin cache and prove the Step Zero hook behaviorally.",
     )
+
+
+def _receipt_failure(request: AdapterRequest, cli: str, root: Path) -> JsonObject | None:
+    if cli != "claude" or _receipt_matches_request(request, root):
+        return None
+    return blocked(
+        request,
+        "coordination_receipt_drift",
+        "Repair the selected Claude plugin through the supported installer; cache bytes do not match its receipt.",
+    )
+
+
+def _receipt_matches_request(request: AdapterRequest, root: Path) -> bool:
+    return receipt_matches_hook_root(
+        receipt_path(request.target / "profile"),
+        root / "hooks",
+        solet_name=request.name,
+        app_home=request.target / "profile",
+        plugin_selector=f"coordination-hooks@{request.name.replace('_', '-')}",
+        interpreter=request.target / ".venv/bin/python3",
+    )
+
+
+def _behavior_vector(
+    request: AdapterRequest, runtime: Runtime, cli: str, manifest: Path,
+) -> tuple[str, str] | None:
+    hook = manifest.parent / ("step_zero_reminder.py" if cli == "claude" else "step_zero_reminder.js")
+    if cli == "claude":
+        return str(request.target / ".venv/bin/python3"), str(hook)
+    node = resolve_executable(runtime, "node")
+    return (node, str(hook)) if node is not None else None
 
 
 def _hook_manifest(request: AdapterRequest, cli: str, root: Path | None = None) -> Path:
@@ -148,11 +177,13 @@ def _claude_plugin_root(home: Path, selector: str) -> Path | None:
     rows = plugins.get(selector) if isinstance(plugins, dict) else None
     if not isinstance(rows, list):
         return None
-    for row in cast(list[JsonValue], rows):
-        install_path = row.get("installPath") if isinstance(row, dict) else None
-        if isinstance(install_path, str) and Path(install_path).is_dir():
-            return Path(install_path)
-    return None
+    roots = [
+        Path(install_path)
+        for row in cast(list[JsonValue], rows)
+        for install_path in [row.get("installPath") if isinstance(row, dict) else None]
+        if isinstance(install_path, str) and Path(install_path).is_dir()
+    ]
+    return roots[0] if len(roots) == 1 else None
 
 
 def _codex_plugin_root(

@@ -138,7 +138,7 @@
     },
     "local_inference": {
       "title": "Local inference",
-      "description": "Profiles that bind inference_service require a selected implementation and a model that passes structured-action qualification. The free profile may leave inference declared vacant.",
+      "description": "Profiles that bind inference_service require a selected implementation and a model served by the selected implementation. The free profile may leave inference declared vacant.",
       "necessity": "optional",
       "required_when": {
         "decision_ref": "setup_profile",
@@ -149,8 +149,7 @@
         "mode": "decision",
         "decision_ref": "inference_implementation",
         "probe_refs": [
-          "inference_request_succeeds",
-          "structured_action_qualification"
+          "inference_request_succeeds"
         ]
       }
     },
@@ -326,7 +325,7 @@
               "cost": "No per-call fee; consumes local compute.",
               "privacy": "Embedding text remains local.",
               "security": "Local HTTP service should remain bound to a trusted interface.",
-              "operator_effort": "Install the app, start its server, and load an embedding model.",
+              "operator_effort": "Approve automatic CLI installation, model provisioning, and the shared login job.",
               "performance": "Depends on selected model and hardware."
             },
             "activates": {
@@ -337,10 +336,21 @@
                 "openai_embeddings_plugin"
               ],
               "operation_refs": [
-                "configure_lm_studio_embeddings"
+                "configure_lm_studio_embeddings",
+                "install_lm_studio",
+                "start_lm_studio_server",
+                "pull_lm_studio_embedding_model",
+                "load_lm_studio_embedding_model",
+                "install_lm_studio_login_agent"
               ],
               "probe_refs": [
                 "lm_studio_models_discoverable"
+              ],
+              "consent_refs": [
+                "lm_studio_background_service_consent"
+              ],
+              "permission_refs": [
+                "lm_studio_background_items_permission"
               ]
             },
             "verification_probe_refs": [
@@ -423,6 +433,11 @@
           "none": {
             "label": "Leave inference vacant",
             "description": "Use selected coding-agent sessions as the frontier driver and do not load a platform inference plugin.",
+            "available_when": {
+              "decision_ref": "setup_profile",
+              "operator": "equals",
+              "value": "free"
+            },
             "availability": "supported",
             "implications": {
               "cost": "No local inference setup or metered platform model cost.",
@@ -441,7 +456,7 @@
               "cost": "No per-call fee; significant local compute and memory may be required.",
               "privacy": "Prompts remain local.",
               "security": "Local HTTP service and model downloads must be trusted.",
-              "operator_effort": "Load and keep a compatible model available.",
+              "operator_effort": "Approve automatic CLI installation, model provisioning, and the shared login job.",
               "performance": "Depends heavily on model, context size, and hardware."
             },
             "activates": {
@@ -452,12 +467,21 @@
                 "default_inference_plugin"
               ],
               "operation_refs": [
-                "configure_lm_studio_inference"
+                "configure_lm_studio_inference",
+                "install_lm_studio",
+                "start_lm_studio_server",
+                "pull_lm_studio_inference_model",
+                "load_lm_studio_inference_model",
+                "install_lm_studio_login_agent"
+              ],
+              "consent_refs": [
+                "lm_studio_background_service_consent"
+              ],
+              "permission_refs": [
+                "lm_studio_background_items_permission"
               ]
             },
-            "verification_probe_refs": [
-              "structured_action_qualification"
-            ],
+            "verification_probe_refs": [],
             "followup_decision_refs": [
               "inference_model"
             ]
@@ -471,16 +495,14 @@
               "privacy": "Implementation-specific.",
               "security": "Implementation-specific and must be reviewed before activation.",
               "operator_effort": "Requires a shipped plugin contract.",
-              "performance": "Must pass structured-action qualification."
+              "performance": "Behavior qualification is reported by doctor after setup."
             },
             "activates": {
               "plugin_refs": [
                 "alternative_inference_plugin"
               ]
             },
-            "verification_probe_refs": [
-              "structured_action_qualification"
-            ],
+            "verification_probe_refs": [],
             "followup_decision_refs": [
               "inference_model"
             ]
@@ -492,7 +514,7 @@
     "inference_model": {
       "title": "Inference model",
       "prompt": "Which discovered inference model should the platform use?",
-      "description": "Model choice is not a free-text afterthought: the wizard discovers candidates, shows context and resource facts, then tests structured output and representative actions.",
+      "description": "Model choice is not a free-text afterthought: the wizard discovers served candidates and shows context and resource facts. Behavior qualification is reported by doctor after setup without blocking model selection.",
       "selection_mode": "single",
       "required": true,
       "resolution_stage_ref": "models",
@@ -511,10 +533,7 @@
             "structured_output_support",
             "estimated_memory_bytes"
           ],
-          "qualification_probe_refs": [
-            "structured_action_qualification",
-            "representative_inference_probe"
-          ],
+          "qualification_probe_refs": [],
           "sort_by": "recommended_first"
         },
         "empty_result_behavior": "block"
@@ -556,7 +575,7 @@
                 "github_midwife_plugin",
                 "agent_messaging_plugin"
               ],
-            "operation_refs": [
+              "operation_refs": [
                 "install_codex_cli",
                 "install_node",
                 "install_codex_plugin"
@@ -586,7 +605,7 @@
                 "github_midwife_plugin",
                 "agent_messaging_plugin"
               ],
-            "operation_refs": [
+              "operation_refs": [
                 "install_claude_cli",
                 "install_claude_plugin"
               ]
@@ -669,7 +688,10 @@
       "selection_mode": "single",
       "required": true,
       "resolution_stage_ref": "decision_review",
-      "recommended_option_refs": ["single_session", "designated_controller"],
+      "recommended_option_refs": [
+        "single_session",
+        "designated_controller"
+      ],
       "option_source": {
         "mode": "static",
         "options": {
@@ -697,7 +719,11 @@
               "operator_effort": "The controller must be provisioned before it can land work.",
               "performance": "Implementation can proceed in parallel while Git mutation remains serialized."
             },
-            "activates": {"input_refs": ["git_controller_name"]}
+            "activates": {
+              "input_refs": [
+                "git_controller_name"
+              ]
+            }
           }
         }
       },
@@ -905,13 +931,13 @@
           },
           "salesforce": {
             "label": "Salesforce",
-  "description": "Consent-provisioned Salesforce CLI browser login owned by the CLI and macOS Keychain.",
+            "description": "Consent-provisioned Salesforce CLI browser login owned by the CLI and macOS Keychain.",
             "availability": "supported",
             "implications": {
               "cost": "Uses Salesforce account and API limits.",
               "privacy": "Org data within the authenticated user's permissions becomes available.",
               "security": "The Salesforce CLI owns the credential; setup records only alias and instance host.",
-    "operator_effort": "Approve the reviewed sf provisioning action and complete browser login."
+              "operator_effort": "Approve the reviewed sf provisioning action and complete browser login."
             },
             "activates": {
               "plugin_refs": [
@@ -923,9 +949,9 @@
               "auth_flow_refs": [
                 "salesforce_cli_login"
               ],
-    "operation_refs": [
-      "provision_salesforce_cli",
-      "configure_salesforce"
+              "operation_refs": [
+                "provision_salesforce_cli",
+                "configure_salesforce"
               ]
             },
             "verification_probe_refs": [
@@ -1154,9 +1180,9 @@
     "lm_studio": {
       "name": "LM Studio",
       "kind": "model_host",
-      "description": "Current recommended local host for OpenAI-compatible embeddings and platform inference. User-managed: the wizard discovers models already loaded in LM Studio and blocks if none are found — it does not download or load models. The model name in the profile config is the SERVE-TIME key, which LM Studio derives from the download source and which cannot be used to find it: fetch with `lms get \"https://huggingface.co/<owner>/<repo>\" --yes` (the bare owner/repo shorthand fails) and the config's key follows automatically. The per-model map is in profile_templates/lm_studio_models.yaml.",
+      "description": "Setup installs the pinned vendor CLI at its absolute user path, disables JIT, downloads and explicitly loads the reviewed model artifacts, and registers a shared host login job. Model decisions are qualified separately in the models stage.",
       "source": "vendor_download",
-      "lifecycle": "user_managed",
+      "lifecycle": "managed_by_setup",
       "input_refs": [
         "lm_studio_base_url"
       ],
@@ -1165,7 +1191,23 @@
         "configure_lm_studio_inference"
       ],
       "probe_refs": [
-        "lm_studio_models_discoverable"
+        "lm_studio_cli_available",
+        "lm_studio_server_ready",
+        "lm_studio_embedding_artifact_present",
+        "lm_studio_embedding_model_served",
+        "lm_studio_inference_artifact_present",
+        "lm_studio_inference_model_served",
+        "lm_studio_login_agent_valid",
+        "lm_studio_jit_disabled"
+      ],
+      "install_operation_refs": [
+        "install_lm_studio",
+        "start_lm_studio_server",
+        "pull_lm_studio_embedding_model",
+        "load_lm_studio_embedding_model",
+        "pull_lm_studio_inference_model",
+        "load_lm_studio_inference_model",
+        "install_lm_studio_login_agent"
       ]
     },
     "ollama": {
@@ -1291,7 +1333,7 @@
       "description": "Vector extension for the local PostgreSQL installation.",
       "necessity": "required",
       "probe_refs": [
-        "pgvector_ready"
+        "pgvector_package_available"
       ],
       "install_operation_refs": [
         "install_postgresql"
@@ -1346,6 +1388,35 @@
       ],
       "install_operation_refs": [
         "provision_salesforce_cli"
+      ]
+    },
+    "lm_studio_server": {
+      "name": "LM Studio model service",
+      "kind": "service",
+      "description": "Host-shared loopback inference service with explicit loading and JIT disabled.",
+      "necessity": "required",
+      "required_when": {
+        "any": [
+          {
+            "decision_ref": "embeddings_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          },
+          {
+            "decision_ref": "inference_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          }
+        ]
+      },
+      "probe_refs": [
+        "lm_studio_cli_available",
+        "lm_studio_server_ready",
+        "lm_studio_jit_disabled"
+      ],
+      "install_operation_refs": [
+        "install_lm_studio",
+        "start_lm_studio_server"
       ]
     }
   },
@@ -2129,6 +2200,37 @@
         "consequence": "Snowflake remains not connected.",
         "reoffer": "first_use"
       }
+    },
+    "lm_studio_background_service_consent": {
+      "title": "Run LM Studio after login",
+      "prompt": "Authorize the shared LM Studio login job and explicit model loading.",
+      "category": "background_service",
+      "scope": [
+        "Host-shared LM Studio LaunchAgent local.solet.lm-studio",
+        "Reviewed Nomic and Qwen model loading with JIT disabled; retained when a solet is removed"
+      ],
+      "required": false,
+      "required_when": {
+        "any": [
+          {
+            "decision_ref": "embeddings_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          },
+          {
+            "decision_ref": "inference_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          }
+        ]
+      },
+      "explicit_assent": true,
+      "decline": {
+        "allowed": true,
+        "state": "blocked",
+        "consequence": "LM Studio provisioning remains blocked until the background-service change is approved.",
+        "reoffer": "settings_only"
+      }
     }
   },
   "permissions": {
@@ -2231,6 +2333,17 @@
       "grant_actor": "user",
       "probe_ref": "keychain_available",
       "denial_behavior": "block"
+    },
+    "lm_studio_background_items_permission": {
+      "name": "LM Studio background item",
+      "platform": "macos",
+      "kind": "background_items",
+      "purpose": "Allow the host-shared LM Studio service to start after login.",
+      "grant_actor": "user",
+      "system_settings_path": "General > Login Items & Extensions",
+      "grant_operation_ref": "open_background_items_settings",
+      "probe_ref": "lm_studio_login_agent_valid",
+      "denial_behavior": "disable_capability"
     }
   },
   "plugins": {
@@ -2414,10 +2527,7 @@
       "input_refs": [
         "lm_studio_base_url"
       ],
-      "verification_probe_refs": [
-        "structured_action_qualification",
-        "representative_inference_probe"
-      ],
+      "verification_probe_refs": [],
       "access_posture": {
         "reads_external_data": false,
         "writes_external_data": false,
@@ -2886,7 +2996,8 @@
           "pgvector_ready"
         ],
         "postcondition_probe_refs": [
-          "postgres_binary_version_valid"
+          "postgres_binary_version_valid",
+          "pgvector_package_available"
         ]
       }
     },
@@ -2947,12 +3058,22 @@
       "implementation_status": "implemented",
       "risk": "medium",
       "requires_confirmation": true,
-      "consent_refs": ["system_change_consent"],
-      "acquisition": {"kind": "cask", "name": "codex", "approved_closure": []},
+      "consent_refs": [
+        "system_change_consent"
+      ],
+      "acquisition": {
+        "kind": "cask",
+        "name": "codex",
+        "approved_closure": []
+      },
       "idempotency": {
         "mode": "probe_then_apply",
-        "precondition_probe_refs": ["codex_cli_available"],
-        "postcondition_probe_refs": ["codex_cli_available"]
+        "precondition_probe_refs": [
+          "codex_cli_available"
+        ],
+        "postcondition_probe_refs": [
+          "codex_cli_available"
+        ]
       }
     },
     "install_claude_cli": {
@@ -2963,12 +3084,22 @@
       "implementation_status": "implemented",
       "risk": "medium",
       "requires_confirmation": true,
-      "consent_refs": ["system_change_consent"],
-      "acquisition": {"kind": "cask", "name": "claude-code", "approved_closure": []},
+      "consent_refs": [
+        "system_change_consent"
+      ],
+      "acquisition": {
+        "kind": "cask",
+        "name": "claude-code",
+        "approved_closure": []
+      },
       "idempotency": {
         "mode": "probe_then_apply",
-        "precondition_probe_refs": ["claude_cli_available"],
-        "postcondition_probe_refs": ["claude_cli_available"]
+        "precondition_probe_refs": [
+          "claude_cli_available"
+        ],
+        "postcondition_probe_refs": [
+          "claude_cli_available"
+        ]
       }
     },
     "install_node": {
@@ -2979,12 +3110,22 @@
       "implementation_status": "implemented",
       "risk": "medium",
       "requires_confirmation": true,
-      "consent_refs": ["system_change_consent"],
-      "acquisition": {"kind": "formula", "name": "node", "approved_closure": []},
+      "consent_refs": [
+        "system_change_consent"
+      ],
+      "acquisition": {
+        "kind": "formula",
+        "name": "node",
+        "approved_closure": []
+      },
       "idempotency": {
         "mode": "probe_then_apply",
-        "precondition_probe_refs": ["node_available"],
-        "postcondition_probe_refs": ["node_available"]
+        "precondition_probe_refs": [
+          "node_available"
+        ],
+        "postcondition_probe_refs": [
+          "node_available"
+        ]
       }
     },
     "run_genesis": {
@@ -3129,16 +3270,16 @@
       "idempotency": {
         "mode": "upsert",
         "precondition_probe_refs": [
-          "embedding_request_succeeds"
+          "embedding_model_qualification"
         ],
         "postcondition_probe_refs": [
-          "embedding_request_succeeds"
+          "embedding_model_qualification"
         ]
       }
     },
     "configure_lm_studio_inference": {
       "name": "Configure LM Studio inference",
-      "description": "Write the selected base URL and qualified inference model into the active profile.",
+      "description": "Write the selected base URL and served inference model into the active profile.",
       "operation_ref": "setup::models.configure_lm_studio_inference",
       "runner": "hydration",
       "implementation_status": "adapter_required",
@@ -3154,12 +3295,8 @@
       },
       "idempotency": {
         "mode": "upsert",
-        "precondition_probe_refs": [
-          "structured_action_qualification"
-        ],
-        "postcondition_probe_refs": [
-          "structured_action_qualification"
-        ]
+        "precondition_probe_refs": [],
+        "postcondition_probe_refs": []
       }
     },
     "install_codex_plugin": {
@@ -3383,12 +3520,22 @@
       "implementation_status": "implemented",
       "risk": "medium",
       "requires_confirmation": true,
-      "consent_refs": ["system_change_consent"],
-      "parameters": {"acknowledge_system_change": {"public_constant": true}},
+      "consent_refs": [
+        "system_change_consent"
+      ],
+      "parameters": {
+        "acknowledge_system_change": {
+          "public_constant": true
+        }
+      },
       "idempotency": {
         "mode": "probe_then_apply",
-        "precondition_probe_refs": ["salesforce_cli_available"],
-        "postcondition_probe_refs": ["salesforce_cli_available"]
+        "precondition_probe_refs": [
+          "salesforce_cli_available"
+        ],
+        "postcondition_probe_refs": [
+          "salesforce_cli_available"
+        ]
       }
     },
     "configure_schwab": {
@@ -3495,9 +3642,314 @@
           "external_postgres_connection_valid"
         ]
       }
+    },
+    "install_lm_studio": {
+      "name": "Install lm studio",
+      "description": "Install the pinned llmster 0.0.23-1 vendor distribution only when the absolute CLI is absent.",
+      "operation_ref": "setup::lm_studio.install",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "risk": "medium",
+      "requires_confirmation": true,
+      "required_when": {
+        "any": [
+          {
+            "decision_ref": "embeddings_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          },
+          {
+            "decision_ref": "inference_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          }
+        ]
+      },
+      "consent_refs": [
+        "system_change_consent"
+      ],
+      "input_refs": [
+        "lm_studio_base_url"
+      ],
+      "parameters": {
+        "embeddings_implementation": {
+          "decision_ref": "embeddings_implementation"
+        },
+        "inference_implementation": {
+          "decision_ref": "inference_implementation"
+        }
+      },
+      "idempotency": {
+        "mode": "probe_then_apply",
+        "precondition_probe_refs": [
+          "lm_studio_cli_available"
+        ],
+        "postcondition_probe_refs": [
+          "lm_studio_cli_available"
+        ]
+      }
+    },
+    "start_lm_studio_server": {
+      "name": "Start lm studio server",
+      "description": "Disable JIT while preserving server settings, then start the loopback model service.",
+      "operation_ref": "setup::lm_studio.start_server",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "risk": "medium",
+      "requires_confirmation": true,
+      "required_when": {
+        "any": [
+          {
+            "decision_ref": "embeddings_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          },
+          {
+            "decision_ref": "inference_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          }
+        ]
+      },
+      "consent_refs": [
+        "system_change_consent"
+      ],
+      "input_refs": [
+        "lm_studio_base_url"
+      ],
+      "parameters": {
+        "embeddings_implementation": {
+          "decision_ref": "embeddings_implementation"
+        },
+        "inference_implementation": {
+          "decision_ref": "inference_implementation"
+        }
+      },
+      "idempotency": {
+        "mode": "probe_then_apply",
+        "precondition_probe_refs": [
+          "lm_studio_server_ready",
+          "lm_studio_jit_disabled"
+        ],
+        "postcondition_probe_refs": [
+          "lm_studio_server_ready",
+          "lm_studio_jit_disabled"
+        ]
+      }
+    },
+    "pull_lm_studio_embedding_model": {
+      "name": "Pull lm studio embedding model",
+      "description": "Resume the exact gaianet Nomic f16 artifact download.",
+      "operation_ref": "setup::lm_studio.pull_embedding",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "risk": "medium",
+      "requires_confirmation": true,
+      "required_when": {
+        "decision_ref": "embeddings_implementation",
+        "operator": "equals",
+        "value": "lm_studio"
+      },
+      "consent_refs": [
+        "system_change_consent"
+      ],
+      "input_refs": [
+        "lm_studio_base_url"
+      ],
+      "parameters": {
+        "embeddings_implementation": {
+          "decision_ref": "embeddings_implementation"
+        },
+        "inference_implementation": {
+          "decision_ref": "inference_implementation"
+        }
+      },
+      "idempotency": {
+        "mode": "probe_then_apply",
+        "precondition_probe_refs": [
+          "lm_studio_embedding_artifact_present"
+        ],
+        "postcondition_probe_refs": [
+          "lm_studio_embedding_artifact_present"
+        ]
+      },
+      "apply_timeout_seconds": 900
+    },
+    "load_lm_studio_embedding_model": {
+      "name": "Load lm studio embedding model",
+      "description": "Explicitly load the reviewed Nomic artifact with GPU off.",
+      "operation_ref": "setup::lm_studio.load_embedding",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "risk": "medium",
+      "requires_confirmation": true,
+      "required_when": {
+        "decision_ref": "embeddings_implementation",
+        "operator": "equals",
+        "value": "lm_studio"
+      },
+      "consent_refs": [
+        "system_change_consent"
+      ],
+      "input_refs": [
+        "lm_studio_base_url"
+      ],
+      "parameters": {
+        "embeddings_implementation": {
+          "decision_ref": "embeddings_implementation"
+        },
+        "inference_implementation": {
+          "decision_ref": "inference_implementation"
+        }
+      },
+      "idempotency": {
+        "mode": "probe_then_apply",
+        "precondition_probe_refs": [
+          "lm_studio_embedding_model_served"
+        ],
+        "postcondition_probe_refs": [
+          "lm_studio_embedding_model_served"
+        ]
+      }
+    },
+    "pull_lm_studio_inference_model": {
+      "name": "Pull lm studio inference model",
+      "description": "Resume the exact Qwen3 14B Q4_K_M artifact download.",
+      "operation_ref": "setup::lm_studio.pull_inference",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "risk": "medium",
+      "requires_confirmation": true,
+      "required_when": {
+        "decision_ref": "inference_implementation",
+        "operator": "equals",
+        "value": "lm_studio"
+      },
+      "consent_refs": [
+        "system_change_consent"
+      ],
+      "input_refs": [
+        "lm_studio_base_url"
+      ],
+      "parameters": {
+        "embeddings_implementation": {
+          "decision_ref": "embeddings_implementation"
+        },
+        "inference_implementation": {
+          "decision_ref": "inference_implementation"
+        }
+      },
+      "idempotency": {
+        "mode": "probe_then_apply",
+        "precondition_probe_refs": [
+          "lm_studio_inference_artifact_present"
+        ],
+        "postcondition_probe_refs": [
+          "lm_studio_inference_artifact_present"
+        ]
+      },
+      "apply_timeout_seconds": 900
+    },
+    "load_lm_studio_inference_model": {
+      "name": "Load lm studio inference model",
+      "description": "Explicitly load Qwen3 14B with GPU off and context 8192.",
+      "operation_ref": "setup::lm_studio.load_inference",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "risk": "medium",
+      "requires_confirmation": true,
+      "required_when": {
+        "decision_ref": "inference_implementation",
+        "operator": "equals",
+        "value": "lm_studio"
+      },
+      "consent_refs": [
+        "system_change_consent"
+      ],
+      "input_refs": [
+        "lm_studio_base_url"
+      ],
+      "parameters": {
+        "embeddings_implementation": {
+          "decision_ref": "embeddings_implementation"
+        },
+        "inference_implementation": {
+          "decision_ref": "inference_implementation"
+        }
+      },
+      "idempotency": {
+        "mode": "probe_then_apply",
+        "precondition_probe_refs": [
+          "lm_studio_inference_model_served"
+        ],
+        "postcondition_probe_refs": [
+          "lm_studio_inference_model_served"
+        ]
+      }
+    },
+    "install_lm_studio_login_agent": {
+      "name": "Install lm studio login agent",
+      "description": "Install the shared host login job; solet abandon never removes it.",
+      "operation_ref": "setup::lm_studio.install_login_agent",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "risk": "medium",
+      "requires_confirmation": true,
+      "required_when": {
+        "any": [
+          {
+            "decision_ref": "embeddings_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          },
+          {
+            "decision_ref": "inference_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          }
+        ]
+      },
+      "consent_refs": [
+        "system_change_consent",
+        "lm_studio_background_service_consent"
+      ],
+      "input_refs": [
+        "lm_studio_base_url"
+      ],
+      "parameters": {
+        "embeddings_implementation": {
+          "decision_ref": "embeddings_implementation"
+        },
+        "inference_implementation": {
+          "decision_ref": "inference_implementation"
+        }
+      },
+      "idempotency": {
+        "mode": "upsert",
+        "precondition_probe_refs": [
+          "lm_studio_login_agent_valid"
+        ],
+        "postcondition_probe_refs": [
+          "lm_studio_login_agent_valid"
+        ]
+      },
+      "permission_refs": [
+        "lm_studio_background_items_permission"
+      ]
     }
   },
   "probes": {
+    "minimum_physical_memory_valid": {
+      "name": "Physical memory meets the supported minimum",
+      "description": "Confirms this Mac has at least 24 GB of physical memory before dependency, local-model, or genesis work starts.",
+      "probe_ref": "bootstrap::host.probe_physical_memory",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "level": "precondition",
+      "expectation": {
+        "operator": "truthy"
+      }
+    },
     "git_checkout_valid": {
       "name": "Git checkout is valid",
       "description": "Confirms repository identity, selected revision, tracked setup artifacts, and no reliance on an opaque native executable.",
@@ -3595,6 +4047,20 @@
       "remediation_operation_refs": [
         "install_postgresql",
         "configure_postgresql"
+      ]
+    },
+    "pgvector_package_available": {
+      "name": "pgvector package is available",
+      "description": "Confirms the running PostgreSQL server advertises the vector extension package before configuration attempts to activate it in the target database.",
+      "probe_ref": "bootstrap::postgres.probe_pgvector_package",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "level": "readiness",
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "install_postgresql"
       ]
     },
     "postgres_role_policy_valid": {
@@ -3733,7 +4199,7 @@
     },
     "representative_inference_probe": {
       "name": "Representative inference behavior",
-      "description": "Runs representative classification, planning, and process-selection requests rather than accepting a model-list response as readiness.",
+      "description": "Runs representative classification, planning, and process-selection requests after setup as a doctor advisory; a failed result is reported but does not block model selection or setup completion.",
       "probe_ref": "setup::models.qualify_representative_inference",
       "runner": "hydration",
       "implementation_status": "adapter_required",
@@ -3815,8 +4281,12 @@
       "runner": "external_cli",
       "implementation_status": "adapter_required",
       "level": "precondition",
-      "expectation": {"operator": "truthy"},
-      "remediation_operation_refs": ["install_codex_cli"]
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "install_codex_cli"
+      ]
     },
     "claude_cli_available": {
       "name": "Claude CLI is available",
@@ -3825,8 +4295,12 @@
       "runner": "external_cli",
       "implementation_status": "adapter_required",
       "level": "precondition",
-      "expectation": {"operator": "truthy"},
-      "remediation_operation_refs": ["install_claude_cli"]
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "install_claude_cli"
+      ]
     },
     "node_available": {
       "name": "Node.js is available",
@@ -3835,9 +4309,17 @@
       "runner": "system",
       "implementation_status": "adapter_required",
       "level": "precondition",
-      "required_when": {"decision_ref": "coding_agents", "operator": "contains", "value": "codex"},
-      "expectation": {"operator": "truthy"},
-      "remediation_operation_refs": ["install_node"]
+      "required_when": {
+        "decision_ref": "coding_agents",
+        "operator": "contains",
+        "value": "codex"
+      },
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "install_node"
+      ]
     },
     "codex_plugin_visible": {
       "name": "Codex plugin is visible",
@@ -4069,8 +4551,12 @@
         "operator": "contains",
         "value": "salesforce"
       },
-      "expectation": {"operator": "truthy"},
-      "remediation_operation_refs": ["provision_salesforce_cli"]
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "provision_salesforce_cli"
+      ]
     },
     "salesforce_connection_valid": {
       "name": "Salesforce connection is valid",
@@ -4200,6 +4686,194 @@
       "expectation": {
         "operator": "truthy"
       }
+    },
+    "lm_studio_cli_available": {
+      "name": "Lm studio cli available",
+      "description": "Install the pinned llmster 0.0.23-1 vendor distribution only when the absolute CLI is absent.",
+      "probe_ref": "setup::lm_studio.cli_available",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "level": "readiness",
+      "required_when": {
+        "any": [
+          {
+            "decision_ref": "embeddings_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          },
+          {
+            "decision_ref": "inference_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          }
+        ]
+      },
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "install_lm_studio"
+      ]
+    },
+    "lm_studio_server_ready": {
+      "name": "Lm studio server ready",
+      "description": "Disable JIT while preserving server settings, then start the loopback model service.",
+      "probe_ref": "setup::lm_studio.server_ready",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "level": "readiness",
+      "required_when": {
+        "any": [
+          {
+            "decision_ref": "embeddings_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          },
+          {
+            "decision_ref": "inference_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          }
+        ]
+      },
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "start_lm_studio_server"
+      ]
+    },
+    "lm_studio_embedding_artifact_present": {
+      "name": "Lm studio embedding artifact present",
+      "description": "Resume the exact gaianet Nomic f16 artifact download.",
+      "probe_ref": "setup::lm_studio.embedding_artifact_present",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "level": "readiness",
+      "required_when": {
+        "decision_ref": "embeddings_implementation",
+        "operator": "equals",
+        "value": "lm_studio"
+      },
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "pull_lm_studio_embedding_model"
+      ]
+    },
+    "lm_studio_embedding_model_served": {
+      "name": "Lm studio embedding model served",
+      "description": "Explicitly load the reviewed Nomic artifact with GPU off.",
+      "probe_ref": "setup::lm_studio.embedding_model_served",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "level": "readiness",
+      "required_when": {
+        "decision_ref": "embeddings_implementation",
+        "operator": "equals",
+        "value": "lm_studio"
+      },
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "load_lm_studio_embedding_model"
+      ]
+    },
+    "lm_studio_inference_artifact_present": {
+      "name": "Lm studio inference artifact present",
+      "description": "Resume the exact Qwen3 14B Q4_K_M artifact download.",
+      "probe_ref": "setup::lm_studio.inference_artifact_present",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "level": "readiness",
+      "required_when": {
+        "decision_ref": "inference_implementation",
+        "operator": "equals",
+        "value": "lm_studio"
+      },
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "pull_lm_studio_inference_model"
+      ]
+    },
+    "lm_studio_inference_model_served": {
+      "name": "Lm studio inference model served",
+      "description": "Explicitly load Qwen3 14B with GPU off and context 8192.",
+      "probe_ref": "setup::lm_studio.inference_model_served",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "level": "readiness",
+      "required_when": {
+        "decision_ref": "inference_implementation",
+        "operator": "equals",
+        "value": "lm_studio"
+      },
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "load_lm_studio_inference_model"
+      ]
+    },
+    "lm_studio_login_agent_valid": {
+      "name": "Lm studio login agent valid",
+      "description": "Install the shared host login job; solet abandon never removes it.",
+      "probe_ref": "setup::lm_studio.login_agent_valid",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "level": "readiness",
+      "required_when": {
+        "any": [
+          {
+            "decision_ref": "embeddings_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          },
+          {
+            "decision_ref": "inference_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          }
+        ]
+      },
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "install_lm_studio_login_agent"
+      ]
+    },
+    "lm_studio_jit_disabled": {
+      "name": "LM Studio JIT is disabled",
+      "description": "Read back justInTimeModelLoading as the literal JSON boolean false; absence or any other value fails closed.",
+      "probe_ref": "setup::lm_studio.jit_disabled",
+      "runner": "bootstrap",
+      "implementation_status": "implemented",
+      "level": "readiness",
+      "required_when": {
+        "any": [
+          {
+            "decision_ref": "embeddings_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          },
+          {
+            "decision_ref": "inference_implementation",
+            "operator": "equals",
+            "value": "lm_studio"
+          }
+        ]
+      },
+      "expectation": {
+        "operator": "truthy"
+      },
+      "remediation_operation_refs": [
+        "start_lm_studio_server"
+      ]
     }
   },
   "stages": {
@@ -4210,6 +4884,7 @@
       "checkpoint": true,
       "operation_refs": [],
       "entry_probe_refs": [
+        "minimum_physical_memory_valid",
         "git_checkout_valid"
       ],
       "exit_probe_refs": [
@@ -4246,13 +4921,28 @@
         "install_node",
         "install_postgresql",
         "configure_postgresql",
-        "install_tmux"
+        "install_tmux",
+        "install_lm_studio",
+        "start_lm_studio_server",
+        "pull_lm_studio_embedding_model",
+        "load_lm_studio_embedding_model",
+        "pull_lm_studio_inference_model",
+        "load_lm_studio_inference_model",
+        "install_lm_studio_login_agent"
       ],
       "exit_probe_refs": [
         "python_version_valid",
         "postgres_ready",
         "postgres_role_policy_valid",
-        "pgvector_ready"
+        "pgvector_ready",
+        "lm_studio_cli_available",
+        "lm_studio_server_ready",
+        "lm_studio_embedding_artifact_present",
+        "lm_studio_embedding_model_served",
+        "lm_studio_inference_artifact_present",
+        "lm_studio_inference_model_served",
+        "lm_studio_login_agent_valid",
+        "lm_studio_jit_disabled"
       ]
     },
     "genesis": {
@@ -4567,7 +5257,15 @@
       "genesis_artifacts_valid",
       "launchagent_running",
       "router_ready",
-      "install_state_projection_matches"
+      "install_state_projection_matches",
+      "lm_studio_cli_available",
+      "lm_studio_server_ready",
+      "lm_studio_embedding_artifact_present",
+      "lm_studio_embedding_model_served",
+      "lm_studio_inference_artifact_present",
+      "lm_studio_inference_model_served",
+      "lm_studio_login_agent_valid",
+      "lm_studio_jit_disabled"
     ],
     "allow_health_only": false,
     "report": {
@@ -4581,7 +5279,7 @@
   "known_gaps": [
     {
       "id": "probe_expectations_advisory_only",
-      "summary": "All 54 declared probe expectation values are advisory documentation and are not evaluated against observed probe values.",
+      "summary": "All 64 declared probe expectation values are advisory documentation and are not evaluated against observed probe values.",
       "impact": "Doctor reports probe checkpoint status from the probe implementation; expectation declarations do not independently validate or block that status.",
       "status": "open",
       "evidence": [

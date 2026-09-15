@@ -28,7 +28,6 @@ from ananta.services.inference_service.schema import (
     COL_ATTEMPTS,
     COL_FLOW_ID,
     COL_FORWARDED_AT,
-    COL_IS_DELETED,
     COL_METHOD,
     COL_ROLE,
     COL_STATE,
@@ -40,6 +39,7 @@ from ananta.services.inference_service.schema import (
     STATE_FORWARDED,
     TABLE_INFERENCE_DEFERRED_VERTEX,
 )
+from ananta.services.state_service.bounded_read import iter_table_rows
 
 if TYPE_CHECKING:
     from ananta.core.domain.types import ActionResult
@@ -51,6 +51,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_DEFERRED_VERTEX_QUEUE_CEILING = 1_000_000
+_DEFERRED_VERTEX_QUEUE_CEILING_REASON = (
+    "the durable deferred-vertex queue is paged for complete sweep, drain, and "
+    "observability reads while the explicit ceiling keeps an unexpected runaway "
+    "queue loud"
+)
+
+
 @runtime_checkable
 class DeferredVertexStore(Protocol):
     """The state-interface surface the durable deferred-vertex queue needs."""
@@ -58,6 +66,8 @@ class DeferredVertexStore(Protocol):
     def upsert_state(self, namespace: str, data: dict[str, object]) -> object: ...
 
     def query_state(self, namespace: str, filters: dict[str, object]) -> object: ...
+
+    def query_ordered(self, namespace: str, data: dict[str, object]) -> object: ...
 
     def update_state(
         self, namespace: str, query: dict[str, object], updates: dict[str, object],
@@ -366,14 +376,14 @@ def live_rows_in_state(
     store: DeferredVertexStore, *, state: str,
 ) -> list[dict[str, object]]:
     """Every live (``is_deleted=0``) row in ``state`` — the sweep/drain input."""
-    result = store.query_state(
-        INFERENCE_DEFERRED_VERTEX_NAMESPACE,
-        {
-            "table": TABLE_INFERENCE_DEFERRED_VERTEX,
-            "filters": {COL_STATE: state, COL_IS_DELETED: 0},
-        },
-    )
-    return list(require_records(result))
+    return list(iter_table_rows(
+        store,
+        namespace=INFERENCE_DEFERRED_VERTEX_NAMESPACE,
+        table=TABLE_INFERENCE_DEFERRED_VERTEX,
+        filters={COL_STATE: state},
+        ceiling=_DEFERRED_VERTEX_QUEUE_CEILING,
+        reason=_DEFERRED_VERTEX_QUEUE_CEILING_REASON,
+    ))
 
 
 def increment_attempts(store: DeferredVertexStore, *, flow_id: str) -> None:
@@ -439,15 +449,15 @@ def deferred_vertices_snapshot(
     role-keyed shape held only the last flow per role). This is the hook the
     sub-slice-2 vacancy-fill drain + the SUB-05 re-drive read.
     """
-    result = store.query_state(
-        INFERENCE_DEFERRED_VERTEX_NAMESPACE,
-        {
-            "table": TABLE_INFERENCE_DEFERRED_VERTEX,
-            "filters": {COL_IS_DELETED: 0},
-        },
-    )
     snapshot: dict[str, dict[str, object]] = {}
-    for row in require_records(result):
+    for row in iter_table_rows(
+        store,
+        namespace=INFERENCE_DEFERRED_VERTEX_NAMESPACE,
+        table=TABLE_INFERENCE_DEFERRED_VERTEX,
+        filters={},
+        ceiling=_DEFERRED_VERTEX_QUEUE_CEILING,
+        reason=_DEFERRED_VERTEX_QUEUE_CEILING_REASON,
+    ):
         flow_id = row.get(COL_FLOW_ID)
         if not isinstance(flow_id, str):
             continue

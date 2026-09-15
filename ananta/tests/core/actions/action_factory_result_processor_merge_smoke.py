@@ -16,7 +16,7 @@ This smoke is the HERMETIC half of the B5 acceptance (offline, no live solet / L
 Studio — the gate_smokes.txt contract). It exercises the REAL merge method over a
 registry whose ``process_results`` / ``process_error`` base templates mirror the
 shipping shape (``ananta/knowledge_base/processes/inference_service/process_results.json``:
-``model`` + ``prompt.observation`` carrying ``<<RESULT>>`` + ``prompt.user.output_schema``
+``params.model`` + ``params.prompt.observation`` carrying ``<<RESULT>>`` + ``params.prompt.user.output_schema``
 = the actions decode contract). The live LM-Studio end-to-end run — a real
 result-processing inference turn through the running platform — is the SEPARATE
 acceptance evidence reported to the coordinator; it is intentionally NOT
@@ -86,7 +86,7 @@ def _check(condition: bool, message: str) -> None:
 
 
 def _base_prompt() -> dict[str, object]:
-    """A base ``action_definition_template.arguments.prompt`` mirroring the
+    """A base ``action_definition_template.arguments.params.prompt`` mirroring the
     shipping ``process_results.json`` shape (observation w/ ``<<RESULT>>`` +
     user.output_schema = actions decode contract)."""
     return {
@@ -108,12 +108,22 @@ def _make_factory() -> ActionFactory:
         "processes": {
             _RESULTS_BASE: {
                 "action_definition_template": {
-                    "arguments": {"model": copy.deepcopy(_BASE_MODEL_MARKER), "prompt": _base_prompt()},
+                    "arguments": {
+                        "params": {
+                            "model": copy.deepcopy(_BASE_MODEL_MARKER),
+                            "prompt": _base_prompt(),
+                        },
+                    },
                 },
             },
             _ERROR_BASE: {
                 "action_definition_template": {
-                    "arguments": {"model": copy.deepcopy(_BASE_MODEL_MARKER), "prompt": _base_prompt()},
+                    "arguments": {
+                        "params": {
+                            "model": copy.deepcopy(_BASE_MODEL_MARKER),
+                            "prompt": _base_prompt(),
+                        },
+                    },
                 },
             },
             _VERB: {
@@ -135,8 +145,12 @@ def _arguments(processor: dict[str, object]) -> dict[str, object]:
     return _dict_at(processor, "arguments")
 
 
+def _params(processor: dict[str, object]) -> dict[str, object]:
+    return _dict_at(_arguments(processor), "params")
+
+
 def _prompt(processor: dict[str, object]) -> dict[str, object]:
-    return _dict_at(_arguments(processor), "prompt")
+    return _dict_at(_params(processor), "prompt")
 
 
 def _user(processor: dict[str, object]) -> dict[str, object]:
@@ -170,8 +184,8 @@ def test_result_processor_merge_assembles_from_base_and_customizations() -> None
         "merged processor targets the local-inference process_results base (kind=inference sink)",
     )
     _check(
-        _arguments(processor).get("model") == _BASE_MODEL_MARKER,
-        "merged processor INHERITS the base template arguments (model marker survived the deepcopy)",
+        _params(processor).get("model") == _BASE_MODEL_MARKER,
+        "merged processor INHERITS the base params (model marker survived the deepcopy)",
     )
     _check(
         _user(processor).get("output_schema") == _BASE_OUTPUT_SCHEMA,

@@ -60,11 +60,16 @@ from .lane_worktrees import (
     DirtyStaleWorktreeSkippedWarning,
     LaneWorktree,
     LaneWorktreeError,
+    LaneWorktreeRepoRootError,
     lane_worktree_disposability,
     lane_worktree_for,
     provision_lane_worktree,
     remove_lane_worktree,
+    resolve_lane_repo_root,
     sweep_orphaned_lane_worktrees,
+)
+from .lane_worktrees import (
+    active_lane_worktree_inventory as _active_lane_worktree_inventory,
 )
 from .managed_dispatch import (
     DISPATCH_PREPARING,
@@ -582,6 +587,11 @@ class SpawnSessionRequest:
     work_class: str
     budget_line: str
     unit_id: str = ""
+    # The dispatcher's checked-out repository root for this lane.  The project
+    # register persists repository identity, not a machine-local checkout path,
+    # so the spawn boundary must carry the latter explicitly when it differs
+    # from the serving Solet's own checkout.
+    repository_root: str = ""
     # Server-issued durable work contract. Project-class managed work is a
     # hard cutover: raw spawn without a valid preparing dispatch is refused.
     dispatch_id: str = ""
@@ -698,6 +708,7 @@ def _dispatch_contract_mismatches(row: Mapping[str, Any], req: SpawnSessionReque
         "budget_line": req.budget_line,
         "brief_ref": req.brief_ref,
         "unit_id": req.unit_id,
+        "repository_root": req.repository_root,
         "agent_runtime": req.agent_runtime,
         "host": str(req.host or ""),
         "visibility": req.visibility,
@@ -767,51 +778,23 @@ def _record_dispatch_first_turn(
     )
 
 
-def _resolve_lane_repo_root() -> Path:
-    """Resolve the source checkout the serving Solet was launched from."""
+def _resolve_lane_repo_root(repository_root: str = "") -> Path:
+    """Map worktree-root validation errors onto the lifecycle verb contract."""
     app_home = os.environ.get("APP_HOME", "").strip()
-    if not app_home:
+    if not repository_root.strip() and not app_home:
         raise VerbError(
             "lane_worktree_app_home_required",
             "lane worktree provisioning requires an explicit APP_HOME-derived checkout",
         )
-    candidate = Path(app_home).resolve().parent
-    if not (candidate / ".git").exists():
+    try:
+        return resolve_lane_repo_root(repository_root, app_home)
+    except LaneWorktreeRepoRootError as exc:
         raise VerbError(
-            "lane_worktree_repo_missing",
-            f"lane worktree provisioning needs a Git checkout; resolved {candidate}",
-        )
-    return candidate
+            exc.code,
+            str(exc),
+        ) from exc
 
 
-def _active_lane_worktree_paths(
-    state: StateManagementInterface, repo_root: Path
-) -> tuple[Path, ...]:
-    """Derive active lane paths from durable session identity, never a glob."""
-    paths: list[Path] = []
-    live_states = [
-        LIFECYCLE_SPAWNING,
-        LIFECYCLE_LIVE,
-        LIFECYCLE_IDLE,
-        LIFECYCLE_OVERDUE,
-        LIFECYCLE_PARKED,
-    ]
-    for row in list_managed_sessions(state, {"lifecycle_state": live_states}):
-        role_name = str(row.get("role_name") or row.get("local_name") or "")
-        agent_instance_id = str(row.get("agent_instance_id") or "")
-        if not role_name or not agent_instance_id:
-            continue
-        try:
-            paths.append(
-                lane_worktree_for(
-                    repo_root,
-                    role_name=role_name,
-                    agent_instance_id=agent_instance_id,
-                ).path,
-            )
-        except LaneWorktreeError as exc:
-            raise VerbError("lane_worktree_identity_invalid", str(exc)) from exc
-    return tuple(paths)
 
 
 def _provision_spawn_worktree(
@@ -819,16 +802,24 @@ def _provision_spawn_worktree(
     *,
     role_name: str,
     agent_instance_id: str,
+    repository_root: str = "",
 ) -> LaneWorktree:
     """Sweep only registered stale lane trees, then create this lane's exact tree."""
-    repo_root = _resolve_lane_repo_root()
+    repo_root = _resolve_lane_repo_root(repository_root)
     try:
-        sweep = sweep_orphaned_lane_worktrees(
-            repo_root,
-            active_paths=_active_lane_worktree_paths(state, repo_root),
-        )
-        for warning in sweep.skipped:
-            _log_dirty_stale_worktree_skipped(warning)
+        inventory = _active_lane_worktree_inventory(state, repo_root)
+        if inventory.cleanup_safe:
+            sweep = sweep_orphaned_lane_worktrees(
+                repo_root,
+                terminal_paths=inventory.terminal_paths,
+            )
+            for warning in sweep.skipped:
+                _log_dirty_stale_worktree_skipped(warning)
+        else:
+            logger.warning(
+                "lane_worktree_cleanup_skipped: incomplete_active_inventory=%s",
+                "; ".join(inventory.incomplete_rows),
+            )
         worktree = lane_worktree_for(
             repo_root,
             role_name=role_name,
@@ -876,7 +867,12 @@ def _provision_worktree_for_request(
         state,
         role_name=req.role_name or local_name,
         agent_instance_id=agent_instance_id,
+        repository_root=req.repository_root,
     )
+
+
+def _provisioned_lane_repo_root(worktree: LaneWorktree | None) -> str:
+    return "" if worktree is None else str(worktree.repo_root)
 
 
 _WORKTREE_DISPOSITION_REMOVED = "removed"
@@ -887,14 +883,18 @@ _WORKTREE_DISPOSITION_NOT_PROVISIONED = "not_provisioned"
 
 def _retiring_lane_worktree(row: Mapping[str, object]) -> LaneWorktree | None:
     """Resolve the one retiring worktree, or no target for a synthetic session."""
-    if str(row.get("provisioning_mode") or "worktree") == "synthetic_no_worktree":
+    if str(row.get("provisioning_mode") or "worktree") in {
+        "synthetic_no_worktree", "operator_existing_checkout",
+    }:
         return None
     role_name = str(row.get("role_name") or row.get("local_name") or "")
     agent_instance_id = str(row.get("agent_instance_id") or "")
     if not role_name or not agent_instance_id:
         return None
+    recorded_root = str(row.get("lane_repo_root") or "")
+    repo_root = _resolve_lane_repo_root(recorded_root)
     return lane_worktree_for(
-        _resolve_lane_repo_root(),
+        repo_root,
         role_name=role_name,
         agent_instance_id=agent_instance_id,
     )
@@ -1089,6 +1089,7 @@ def spawn_session(
         provisioning_mode=(
             "synthetic_no_worktree" if req.synthetic_qualification_no_worktree else "worktree"
         ),
+        lane_repo_root=_provisioned_lane_repo_root(lane_worktree),
     )
     row = _insert_spawn_session_with_worktree(state, spec, lane_worktree)
 
@@ -1303,28 +1304,32 @@ def list_sessions(
     *,
     live_only: bool = False,
     limit: object = LIST_SESSIONS_DEFAULT_LIMIT,
+    after_created_at: object = None,
+    after_id: object = None,
 ) -> dict[str, Any]:
-    """§4 filter-required, hard-bounded fleet roster.
+    """§4 filter-required, cursor-paginated fleet roster.
 
     ``limit`` defaults to 50 because this is an operator context payload, not
     an export; its maximum of 250 admits broad filtered coordination queries
-    without reinstating a whole-ledger dump. The walk probes row ``limit + 1``
-    and refuses rather than silently truncating.
+    without reinstating a whole-ledger dump.  A full page carries a tie-safe
+    ``next_cursor`` instead of refusing an append-mostly operator backlog.
     """
     try:
-        rows = list_session_rows(
+        result = list_session_rows(
             state,
             filters,
             live_only=live_only,
             limit=limit,
+            after_created_at=after_created_at,
+            after_id=after_id,
         )
     except SessionListError as exc:
         raise VerbError(exc.code, exc.message) from exc
-    return {
-        "sessions": [
-            {**row, "coordination_state": _coordination_state_projection(row)} for row in rows
-        ],
-    }
+    result["sessions"] = [
+        {**row, "coordination_state": _coordination_state_projection(row)}
+        for row in result["sessions"]
+    ]
+    return result
 
 
 def _coordination_state_projection(row: Mapping[str, Any]) -> str:
@@ -2503,6 +2508,9 @@ def _rearm_report_by(
     column existed). Re-arming to a SHORTER window than the spawn requested
     was a live-measured bug: a worker spawned with ``report_by_seconds=900``
     got its deadline silently shortened to 300s on its first report/drive."""
+    row = read_managed_session(state, agent_instance_id)
+    if row.get("provisioning_mode") == "operator_existing_checkout" and not report_by_seconds:
+        return
     window = report_by_seconds or DEFAULT_REPORT_BY_SECONDS
     next_report_by = (datetime.now(UTC) + timedelta(seconds=window)).isoformat()
     state.update_state(

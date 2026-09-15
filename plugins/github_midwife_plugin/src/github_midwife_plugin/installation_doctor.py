@@ -109,8 +109,10 @@ def probe_handlers() -> dict[str, ProbeHandler]:
         session_retrieval,
         session_roots,
     )
+    from .lm_studio_provisioning import probe_handlers as lm_studio_handlers
 
     handlers: dict[str, ProbeHandler] = {
+        **lm_studio_handlers(),
         "setup::tmux.probe": _tmux,
         "hydration::shell.probe_path": shell_path,
         "hydration::shell.probe_python": shell_python,

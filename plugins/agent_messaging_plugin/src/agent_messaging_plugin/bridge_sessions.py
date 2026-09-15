@@ -15,7 +15,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
-from .models import BridgeSessionState, QueuedEvent
+from .models import EVENTS_AFTER_PAGE_LIMIT, BridgeSessionState, QueuedEvent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -309,7 +309,7 @@ class BridgeSessionManager:
         # wait() starts (returns immediately).
         wakeup = self._ensure_wakeup(bridge_id)
         wakeup.clear()
-        acked, events = bridge.events_after(after_cursor)
+        acked, events = bridge.events_after(after_cursor, limit=EVENTS_AFTER_PAGE_LIMIT)
         if events:
             return acked, events
         deadline = timeout_s if timeout_s is not None else self._long_poll_timeout_s
@@ -320,7 +320,7 @@ class BridgeSessionManager:
         # Wakeup fired — either a new event landed or the bridge closed.
         if bridge.closed:
             return acked, []
-        _, late_events = bridge.events_after(after_cursor)
+        _, late_events = bridge.events_after(after_cursor, limit=EVENTS_AFTER_PAGE_LIMIT)
         return acked, late_events
 
     # ------------------------------------------------------------------

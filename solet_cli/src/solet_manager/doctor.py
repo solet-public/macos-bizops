@@ -11,6 +11,11 @@ from .contracts import ContractBundle, target_contract_directory
 from .doctor_blue_green_census import collect_blue_green_advisories
 from .doctor_credential_copy_census import collect_credential_copy_advisories
 from .doctor_genesis_marker_census import collect_genesis_marker_advisories
+from .doctor_inference_qualification import (
+    collect_inference_probe_advisories,
+    collect_inference_qualification_advisories,
+)
+from .doctor_lm_studio_census import collect_lm_studio_advisories
 from .doctor_plugin_version_skew_census import collect_plugin_version_skew_advisories
 from .doctor_postgres_pin_census import collect_postgres_pin_advisories
 from .doctor_residue_census import collect_residue_advisories
@@ -74,6 +79,15 @@ class InstallationDoctor:
         advisories.extend(collect_router_identity_advisories(record))
         advisories.extend(collect_credential_copy_advisories(record))
         advisories.extend(collect_plugin_version_skew_advisories(record))
+        advisories.extend(collect_lm_studio_advisories(record))
+        advisories.extend(
+            collect_inference_qualification_advisories(
+                bundle,
+                transaction,
+                adapter_registry,
+            )
+        )
+        advisories.extend(collect_inference_probe_advisories(transaction))
         return _doctor_result(name, transaction, checks, seed_tree_verification, advisories)
 
 

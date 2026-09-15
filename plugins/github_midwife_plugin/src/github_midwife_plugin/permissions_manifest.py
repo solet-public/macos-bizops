@@ -65,6 +65,23 @@ def _condition_text(entry: Mapping[str, Any], *, default: str) -> str:
         return default
     if not isinstance(condition, Mapping):
         raise PermissionsManifestError("required_when must be an object")
+    for connective, word in (("any", "or"), ("all", "and")):
+        if connective in condition:
+            return _compound_condition_text(condition, connective, word, default)
+    return _leaf_condition_text(condition)
+
+
+def _compound_condition_text(condition: Mapping[str, Any], connective: str, word: str, default: str) -> str:
+    children = condition[connective]
+    if set(condition) != {connective} or not isinstance(children, list) or not children:
+        raise PermissionsManifestError("compound required_when must contain a non-empty condition list")
+    if not all(isinstance(child, Mapping) for child in children):
+        raise PermissionsManifestError("compound required_when children must be objects")
+    rendered = [_condition_text({"required_when": child}, default=default)[5:-1] for child in children]
+    return "When (" + f") {word} (".join(rendered) + ")."
+
+
+def _leaf_condition_text(condition: Mapping[str, Any]) -> str:
     decision = condition.get("decision_ref")
     operator = condition.get("operator")
     value = condition.get("value")

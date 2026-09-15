@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 import urllib.error
 from pathlib import Path
 from typing import cast
@@ -19,6 +20,8 @@ from .setup_adapter_contract import AdapterRequest, JsonObject, JsonValue, publi
 from .setup_adapter_runtime import Runtime, read_json_object
 
 __all__ = ("_platform_embedding_dimension",)
+
+_INFERENCE_QUALIFICATION_TIMEOUT_SECONDS = 180
 
 
 def shell_path(request: AdapterRequest, runtime: Runtime) -> JsonObject:
@@ -64,7 +67,7 @@ def model_discovery(request: AdapterRequest, runtime: Runtime) -> JsonObject:
         return blocked(
             request,
             "model_discovery_failed",
-            "Start or repair the selected model service, then resume.",
+            "The model host became unavailable after provisioning. Restore its service, then resume the reviewed solet create command.",
         )
     except json.JSONDecodeError:
         return blocked(
@@ -76,7 +79,7 @@ def model_discovery(request: AdapterRequest, runtime: Runtime) -> JsonObject:
         return blocked(
             request,
             "model_discovery_failed",
-            "Start or repair the selected model service, then resume.",
+            "The model host became unavailable after provisioning. Restore its service, then resume the reviewed solet create command.",
         )
     models = _model_rows(payload)
     if models is None:
@@ -321,46 +324,74 @@ def inference_qualification(request: AdapterRequest, runtime: Runtime) -> JsonOb
         )
     payload: JsonObject = {
         "model": candidate,
-        "messages": [{"role": "user", "content": "Return JSON with action set to qualify."}],
+        "messages": [
+            {
+                "role": "user",
+                "content": "What model is this?",
+            }
+        ],
         "temperature": 0,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "qualification_action",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {"action": {"type": "string"}},
-                    "required": ["action"],
-                    "additionalProperties": False,
-                },
-            },
-        },
+        "max_tokens": 8,
     }
-    status, body = runtime.http_json(
-        f"{base_url.rstrip('/')}/chat/completions",
-        timeout_seconds=20,
-        payload=payload,
-    )
+    source = f"{base_url}/chat/completions"
+    started_at = time.monotonic()
+    try:
+        status, body = runtime.http_json(
+            f"{base_url.rstrip('/')}/chat/completions",
+            timeout_seconds=_INFERENCE_QUALIFICATION_TIMEOUT_SECONDS,
+            payload=payload,
+        )
+    except TimeoutError:
+        duration_ms = round((time.monotonic() - started_at) * 1000)
+        return _boolean_probe(
+            request,
+            evidence_id="inference_qualification",
+            ok=False,
+            observed=False,
+            source=source,
+            repair=_inference_repair(candidate, None, timed_out=True),
+            duration_ms=duration_ms,
+            extra_evidence=_inference_timing_evidence(duration_ms, None),
+            error_kind="inference_qualification_timed_out",
+        )
+    duration_ms = round((time.monotonic() - started_at) * 1000)
     returned_candidate = _response_model_identity(body)
-    valid = (
-        status == 200
-        and returned_candidate == candidate
-        and _valid_structured_action(body)
-    )
+    valid = status == 200 and returned_candidate == candidate
     return _boolean_probe(
         request,
         evidence_id="inference_qualification",
         ok=valid,
         observed=valid,
-        source=f"{base_url}/chat/completions",
-        repair=_inference_repair(candidate, returned_candidate),
+        source=source,
+        repair=_inference_repair(
+            candidate,
+            returned_candidate,
+            timed_out=status == 408,
+        ),
+        duration_ms=duration_ms,
+        extra_evidence=_inference_timing_evidence(duration_ms, _reasoning_tokens(body)),
+        error_kind=(
+            "inference_model_identity_mismatch"
+            if status == 200 and returned_candidate != candidate
+            else None
+        ),
     )
 
 
-def _inference_repair(requested_candidate: str, returned_candidate: str | None) -> str:
+def _inference_repair(
+    requested_candidate: str,
+    returned_candidate: str | None,
+    *,
+    timed_out: bool,
+) -> str:
     """Describe an inference qualification failure without accepting substitution."""
 
+    if timed_out:
+        return (
+            "Inference qualification timed out before the response could be validated. Keep the "
+            "requested inference model loaded and retry; a slow reasoning model may need the "
+            "full qualification budget."
+        )
     if returned_candidate != requested_candidate:
         returned = returned_candidate if returned_candidate is not None else "unavailable"
         return (
@@ -369,21 +400,39 @@ def _inference_repair(requested_candidate: str, returned_candidate: str | None) 
             f"returned public model ID {returned!r}. Load the requested inference "
             "model in the local server and retry setup."
         )
-    return "Load a model that supports the reviewed structured-output request."
+    return "Inference qualification request did not return HTTP 200; retry the local model service."
 
 
-def _valid_structured_action(payload: JsonValue) -> bool:
-    if not isinstance(payload, dict) or not isinstance(payload.get("choices"), list):
-        return False
-    choices = cast(list[JsonValue], payload["choices"])
-    if len(choices) != 1 or not isinstance(choices[0], dict):
-        return False
-    message = choices[0].get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if not isinstance(content, str):
-        return False
-    try:
-        decoded: object = json.loads(content)
-    except json.JSONDecodeError:
-        return False
-    return isinstance(decoded, dict) and decoded.get("action") == "qualify"
+def _inference_timing_evidence(
+    duration_ms: int, reasoning_tokens: int | None
+) -> list[JsonObject]:
+    evidence_items = [
+        _evidence(
+            "inference_qualification_elapsed_seconds",
+            True,
+            "monotonic:inference_qualification",
+            duration_ms / 1000,
+            _INFERENCE_QUALIFICATION_TIMEOUT_SECONDS,
+        )
+    ]
+    if reasoning_tokens is not None:
+        evidence_items.append(
+            _evidence(
+                "inference_qualification_reasoning_tokens",
+                True,
+                "response:usage.reasoning_tokens",
+                reasoning_tokens,
+                "reported by model response",
+            )
+        )
+    return evidence_items
+
+
+def _reasoning_tokens(payload: JsonValue) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    tokens = usage.get("reasoning_tokens")
+    return tokens if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0 else None

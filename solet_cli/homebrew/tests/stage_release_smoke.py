@@ -148,35 +148,47 @@ def _build_seed_fixture(root: Path) -> tuple[Path, Path, str]:
 
 
 def _stage(
-    seed_checkout: Path, manager_checkout: Path, manager_ref: str, output_root: Path
+    seed_checkout: Path,
+    manager_checkout: Path,
+    manager_ref: str,
+    output_root: Path,
+    *,
+    dev_mode: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    arguments = [
+        sys.executable,
+        str(_SCRIPT),
+        "--seed-checkout",
+        str(seed_checkout),
+        "--release-tag",
+        _RELEASE_TAG,
+        "--seed-repository",
+        _CANONICAL_SEED_REPOSITORY,
+        "--seed-profile",
+        _CANONICAL_SEED_PROFILE,
+        "--manager-checkout",
+        str(manager_checkout),
+        "--manager-ref",
+        manager_ref,
+        "--manager-source-repository",
+        _MANAGER_SOURCE_REPOSITORY,
+        "--formula-revision",
+        "0",
+    ]
+    if dev_mode:
+        arguments.append("--dev-mode")
+    else:
+        arguments.extend(
+            (
+                "--manager-repository",
+                _MANAGER_REPOSITORY,
+                "--manager-release-tag",
+                _MANAGER_RELEASE_TAG,
+            )
+        )
+    arguments.extend(("--output-root", str(output_root)))
     result = subprocess.run(
-        [
-            sys.executable,
-            str(_SCRIPT),
-            "--seed-checkout",
-            str(seed_checkout),
-            "--release-tag",
-            _RELEASE_TAG,
-            "--seed-repository",
-            _CANONICAL_SEED_REPOSITORY,
-            "--seed-profile",
-            _CANONICAL_SEED_PROFILE,
-            "--manager-repository",
-            _MANAGER_REPOSITORY,
-            "--manager-release-tag",
-            _MANAGER_RELEASE_TAG,
-            "--manager-checkout",
-            str(manager_checkout),
-            "--manager-ref",
-            manager_ref,
-            "--manager-source-repository",
-            _MANAGER_SOURCE_REPOSITORY,
-            "--formula-revision",
-            "0",
-            "--output-root",
-            str(output_root),
-        ],
+        arguments,
         check=False,
         capture_output=True,
         text=True,
@@ -648,6 +660,72 @@ def _check_staged_metadata_is_rerenderable(output_root: Path) -> None:
         )
 
 
+def _install_source_receipt(formula: str) -> dict[str, object]:
+    marker = '(libexec/"share"/"solet"/"install-source.json").write <<~JSON\n'
+    start = formula.find(marker)
+    end = formula.find("    JSON\n", start + len(marker))
+    _check(start != -1 and end != -1, "Formula embeds an install-source receipt")
+    if start == -1 or end == -1:
+        raise AssertionError("install-source receipt is absent")
+    value: object = json.loads(formula[start + len(marker) : end])
+    _check(isinstance(value, dict), "install-source receipt is a JSON object")
+    if not isinstance(value, dict):
+        raise AssertionError("install-source receipt is not an object")
+    return value
+
+
+def _check_dev_mode_stage(
+    checkout: Path,
+    manager_checkout: Path,
+    manager_ref: str,
+    root: Path,
+) -> None:
+    output = root / "stage-dev"
+    _stage(checkout, manager_checkout, manager_ref, output, dev_mode=True)
+    metadata = json.loads((output / "release_metadata.json").read_text(encoding="utf-8"))
+    archive = _payload_archive_path(output)
+    _check(
+        metadata["install_mode"] == "dev",
+        "dev stage records dev mode in release metadata",
+    )
+    _check(
+        metadata["manager_url"] == archive.resolve().as_uri(),
+        "dev Formula URL resolves to the worktree-built payload archive",
+    )
+    formula = (output / "Formula" / "solet.rb").read_text(encoding="utf-8")
+    receipt = _install_source_receipt(formula)
+    _check(
+        receipt == {
+            "schema_version": 1,
+            "mode": "dev",
+            "source_commit": manager_ref,
+        },
+        "dev Formula installs mode and immutable source commit receipt",
+    )
+
+    mistaken_release = dict(metadata)
+    mistaken_release["install_mode"] = "release"
+    metadata_path = root / "dev-claimed-as-release.json"
+    metadata_path.write_text(json.dumps(mistaken_release), encoding="utf-8")
+    refusal = subprocess.run(
+        [
+            sys.executable,
+            str(_RENDERER),
+            "--metadata",
+            str(metadata_path),
+            "--output-root",
+            str(root / "dev-claimed-as-release"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    _check(
+        refusal.returncode != 0 and "manager_url" in refusal.stderr,
+        "a dev file payload cannot be rendered as release provenance",
+    )
+
+
 def _check_lock_only(
     checkout: Path,
     output_root: Path,
@@ -880,6 +958,7 @@ def main() -> int:
         )
         _check_rendered_outputs(output_a, real_sha256)
         _check_staged_metadata_is_rerenderable(output_a)
+        _check_dev_mode_stage(checkout, manager_checkout, manager_ref, root)
         _check_archive_guard_rejects_pre_fix_omission()
 
         output_b = root / "stage-b"

@@ -12,9 +12,11 @@ description: |
   KB 2026-07-20), the seed-update runbook (pull-based update of a
   live solet from a re-mint, added 2026-07-22), the upstream
   feedback runbook (how a deployment reports defects and requests
-  features from the seed's maintainers, added 2026-08-11), and the
+  features from the seed's maintainers, added 2026-08-11), the
   deployment report card article (the fully-deployed-state roster and
-  operator-facing card, added 2026-08-11). The seed factory data files (seed_manifest.yaml,
+  operator-facing card, added 2026-08-11), and the Homebrew install
+  troubleshooting runbook (driving `solet create` past its stops on the
+  brew-install path, added 2026-09-08). The seed factory data files (seed_manifest.yaml,
   capability_bundles.yaml), the seed-README render-source, and the seed
   publish/licensing articles moved to seed_factory_plugin in the 2026-07-20
   split.

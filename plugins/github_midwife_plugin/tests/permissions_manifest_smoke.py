@@ -22,6 +22,7 @@ if str(_SRC) not in sys.path:
 
 from github_midwife_plugin.permissions_manifest import (  # noqa: E402
     PermissionsManifestDriftError,
+    PermissionsManifestError,
     check_artifacts,
     load_flow,
     manifest_entries,
@@ -108,8 +109,24 @@ def main() -> int:
     _check_committed_artifacts_green()
     _check_mutated_contract_red(flow)
     _check_human_rendering_completeness(flow)
+    _check_lm_studio_condition(flow)
     print(f"permissions_manifest_smoke: {len(_CHECKS)}/{len(_CHECKS)} checks passed")
     return 0
+
+
+def _check_lm_studio_condition(flow: dict[str, Any]) -> None:
+    entries = manifest_entries(flow)
+    consent = next(entry for entry in entries if entry["id"] == "lm_studio_background_service_consent")
+    _check("LM Studio consent describes either existing implementation choice", consent["when"] == "When (`embeddings_implementation` equals `lm_studio`) or (`inference_implementation` equals `lm_studio`).")
+    for condition in ({"any": []}, {"any": [None]}, {"all": ["invalid"]}):
+        malformed = copy.deepcopy(flow)
+        malformed["consents"]["lm_studio_background_service_consent"]["required_when"] = condition
+        try:
+            render_manifest(malformed)
+        except PermissionsManifestError:
+            _check("malformed compound condition refused", True)
+        else:
+            raise SmokeFailureError("malformed compound condition rendered silently")
 
 
 if __name__ == "__main__":

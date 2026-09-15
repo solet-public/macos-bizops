@@ -440,6 +440,7 @@ class BridgeClient:
         session_label: str,
         agent_session_id: str,
         watcher_declared: bool = False,
+        operator_tmux_host: str = "",
     ) -> dict[str, Any]:
         """Register this bridge as a peer identity (the receive prerequisite).
 
@@ -454,7 +455,7 @@ class BridgeClient:
         the legacy ``agi-watch-`` prefix it used to infer that from.
         """
         bridge_id = self._require_bridge()
-        return self._post_or_reject(
+        response = self._post_or_reject(
             f"{API_PREFIX}/{bridge_id}/peer/register",
             {
                 "agent_id": agent_id,
@@ -463,8 +464,20 @@ class BridgeClient:
                 "parent_pid": os.getpid(),
                 "agent_session_id": agent_session_id,
                 "watcher_declared": watcher_declared,
+                "operator_tmux_host": operator_tmux_host,
             },
         )
+        if operator_tmux_host:
+            qualified = response.get("operator_codex_host")
+            expected = {
+                "host": "tmux", "host_ref": operator_tmux_host,
+                "agent_runtime": "codex", "qualification": "verified_local_watcher",
+            }
+            if not isinstance(qualified, dict) or any(
+                qualified.get(key) != value for key, value in expected.items()
+            ):
+                raise BridgeCallError("service did not qualify the requested operator Codex host")
+        return response
 
     def peer_inbox(
         self,
@@ -473,6 +486,7 @@ class BridgeClient:
         limit: int,
         after: str | None = None,
         role_after: str | None = None,
+        observer: bool = False,
     ) -> dict[str, Any]:
         """Read this registered identity's durable inbox (catch-up on start).
 
@@ -491,6 +505,8 @@ class BridgeClient:
             query.append(f"after={quote(after, safe='')}")
         if role_after:
             query.append(f"role_after={quote(role_after, safe='')}")
+        if observer:
+            query.append("observer=true")
         return self._get(
             f"{API_PREFIX}/{bridge_id}/peer/inbox?" + "&".join(query),
         )

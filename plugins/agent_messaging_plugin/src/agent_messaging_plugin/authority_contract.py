@@ -46,14 +46,11 @@ _TEMPLATE_PATH = (
     Path(__file__).resolve().parents[2] / "templates" / "authority_delegation_contract.txt"
 )
 
-# Matches a Python-identifier-shaped {placeholder} -- deliberately does NOT
-# match the template's own literal {"op": "is_null"} JSON example (which
-# starts with a quote, not a letter/underscore), so this check only ever
-# flags a GENUINE unresolved named placeholder.
 _PLACEHOLDER_RE = re.compile(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}")
 
 _PLACEHOLDER_NAMES = (
     "agent_instance_id", "role_class", "lane_id", "brief_ref", "unit_id", "spawned_by_role",
+    "repository_root",
 )
 _OPTIONAL_UNIT_ID_LINE = "UNIT ID: {unit_id}\n"
 
@@ -72,6 +69,7 @@ def render_authority_delegation_contract(
     brief_ref: str,
     spawned_by_role: str,
     unit_id: str = "",
+    repository_root: str = "",
 ) -> str:
     """Renders the delegation contract for one spawn. Raises
     :class:`UnresolvedPlaceholderError` if any named placeholder in the
@@ -88,6 +86,7 @@ def render_authority_delegation_contract(
         "brief_ref": brief_ref,
         "unit_id": unit_id,
         "spawned_by_role": spawned_by_role,
+        "repository_root": repository_root,
     }
     rendered = template
     for name in _PLACEHOLDER_NAMES:

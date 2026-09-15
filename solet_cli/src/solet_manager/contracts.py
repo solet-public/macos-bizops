@@ -16,6 +16,10 @@ from .contract_reconciliation_rules import (
     FirstUseInactiveProbeMigration,
     parse_first_use_inactive_probe_migrations,
 )
+from .contract_reconciliation_validation import (
+    parse_operation_statuses_to_reset,
+    reconciliation_entry,
+)
 from .contract_validation import validate_contract_bundle
 from .decision_activation import active_decision_ids
 from .errors import ContractError
@@ -35,15 +39,6 @@ _CONTRACT_FILENAMES = (
 )
 _RECONCILIATION_MANIFEST = "released_metadata/contract_reconciliation_manifest.json"
 _RECONCILIATION_MANIFEST_KEYS = frozenset({"schema_version", "migrations"})
-_RECONCILIATION_ENTRY_KEYS = frozenset(
-    {
-        "migration_id",
-        "source",
-        "destination",
-        "stage_probe_mappings",
-        "first_use_inactive_probe_migrations",
-    }
-)
 _RECONCILIATION_MAPPING_KEYS = frozenset({"source", "destination"})
 _RECONCILIATION_STAGE_PROBE_KEYS = frozenset({"stage_id", "boundary", "probe_id"})
 RECONCILIATION_DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
@@ -106,6 +101,7 @@ class ContractReconciliation:
     source_digest: str
     destination_digest: str
     stage_probe_mappings: tuple[StageProbeMapping, ...]
+    operation_statuses_to_reset: tuple[str, ...] = ()
     first_use_inactive_probe_migrations: tuple[FirstUseInactiveProbeMigration, ...] = ()
 
 
@@ -158,7 +154,7 @@ def load_contract_reconciliations(
 
 
 def _parse_reconciliation(value: JsonValue) -> ContractReconciliation:
-    entry = _reconciliation_entry(value)
+    entry = reconciliation_entry(value)
     source = _manifest_identity(
         entry["source"],
         fields=("flow_id", "flow_source_revision", "flow_contract_digest"),
@@ -188,6 +184,9 @@ def _parse_reconciliation(value: JsonValue) -> ContractReconciliation:
         source_digest=source[2],
         destination_digest=destination[1],
     )
+    operation_statuses_to_reset = parse_operation_statuses_to_reset(
+        entry["operation_statuses_to_reset"]
+    )
     return ContractReconciliation(
         migration_id=migration_id,
         flow_id=source[0],
@@ -195,14 +194,9 @@ def _parse_reconciliation(value: JsonValue) -> ContractReconciliation:
         source_digest=source[2],
         destination_digest=destination[1],
         stage_probe_mappings=parsed_mappings,
+        operation_statuses_to_reset=operation_statuses_to_reset,
         first_use_inactive_probe_migrations=parsed_first_use_migrations,
     )
-
-
-def _reconciliation_entry(value: JsonValue) -> dict[str, JsonValue]:
-    if not isinstance(value, dict) or frozenset(value) != _RECONCILIATION_ENTRY_KEYS:
-        raise ContractError("contract reconciliation entry does not match closed v1 schema")
-    return value
 
 
 def _manifest_identity(
@@ -591,6 +585,9 @@ def _normalize_legacy_resume_flow_v1(
     normalized_operations = cast(
         dict[str, dict[str, dict[str, JsonValue]]], normalized["operations"]
     )
+    normalized_decisions = cast(
+        dict[str, dict[str, dict[str, JsonValue]]], normalized["decisions"]
+    )
     normalized_operations["install_python_runtime"]["idempotency"]["postcondition_probe_refs"] = [
         "python_version_valid"
     ]
@@ -615,7 +612,13 @@ def _normalize_legacy_resume_flow_v1(
     ] = ["embedding_request_succeeds"]
     normalized_operations["configure_lm_studio_inference"]["idempotency"][
         "precondition_probe_refs"
-    ] = ["structured_action_qualification"]
+    ] = []
+    normalized_operations["configure_lm_studio_inference"]["idempotency"][
+        "postcondition_probe_refs"
+    ] = []
+    normalized_decisions["inference_model"]["option_source"]["candidate_contract"][
+        "qualification_probe_refs"
+    ] = []
     normalized_operations["open_background_items_settings"]["idempotency"][
         "postcondition_probe_refs"
     ] = []

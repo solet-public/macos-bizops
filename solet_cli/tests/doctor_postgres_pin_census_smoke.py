@@ -17,11 +17,11 @@ on every target would pass a warn-only assertion while being useless, so each re
 asserts its NAMED ``reason_code``, and the failure shapes produce DIFFERENT names:
 
 * a major that is not the pinned one -> postgres_major_unpinned
-* psql that cannot be run            -> postgres_version_unreadable
-* a version string that will not parse -> postgres_version_unparseable
+* a server that cannot be queried       -> postgres_version_unreadable
+* a server version number that will not parse -> postgres_version_unparseable
 
-Offline: constructed ``psql --version`` output only.  Nothing here runs psql,
-touches a database, or reads a real target.  The one file it does read is the
+Offline: constructed ``SHOW server_version_num`` output only. Nothing here runs
+psql, touches a database, or reads a real target. The one file it does read is the
 repo-root ``bootstrap.py``, and only to pin a single integer literal against the
 census's own copy -- noted here because the shipped-smoke register filter keys on
 the smoke file, not on its data dependencies.
@@ -30,9 +30,11 @@ the smoke file, not on its data dependencies.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -78,7 +80,7 @@ def _advisory(code: int, stdout: str, stderr: str = "") -> dict[str, object]:
 
 
 def _assert_pinned_major_is_green() -> None:
-    advisory = _advisory(0, f"psql (PostgreSQL) {_REQUIRED_POSTGRES_MAJOR}.4\n")
+    advisory = _advisory(0, f"{_REQUIRED_POSTGRES_MAJOR}0004\n")
     _check(
         advisory["status"] == "verified",
         f"the pinned major was not verified: {advisory['status']}",
@@ -99,7 +101,7 @@ def _assert_unpinned_major_is_named() -> None:
     """The exact residue: Homebrew's unversioned formula supplied another major."""
 
     other = _REQUIRED_POSTGRES_MAJOR + 1
-    advisory = _advisory(0, f"psql (PostgreSQL) {other}.0\n")
+    advisory = _advisory(0, f"{other}0000\n")
     _check(
         advisory["reason_code"] == "postgres_major_unpinned",
         f"an unpinned major was not named: {advisory['reason_code']}",
@@ -121,29 +123,29 @@ def _assert_unpinned_major_is_named() -> None:
 def _assert_older_major_is_also_named() -> None:
     """The divergence is two-sided: an older major is as unpinned as a newer one."""
 
-    advisory = _advisory(0, f"psql (PostgreSQL) {_REQUIRED_POSTGRES_MAJOR - 1}.9\n")
+    advisory = _advisory(0, f"{_REQUIRED_POSTGRES_MAJOR - 1}0009\n")
     _check(
         advisory["reason_code"] == "postgres_major_unpinned",
         f"an older major was not named: {advisory['reason_code']}",
     )
 
 
-def _assert_unrunnable_psql_is_unknown_not_green() -> None:
-    """An unreadable probe is not a passing probe."""
+def _assert_unreadable_server_is_unknown_not_green() -> None:
+    """An unreadable server probe is not a passing probe."""
 
-    advisory = _advisory(127, "", "psql: command not found")
+    advisory = _advisory(2, "", "psql: connection to server failed")
     _check(
         advisory["status"] == "unknown",
-        f"an unrunnable psql did not read as unknown: {advisory['status']}",
+        f"an unreadable server did not read as unknown: {advisory['status']}",
     )
     _check(
         advisory["reason_code"] == "postgres_version_unreadable",
-        f"an unrunnable psql was not named: {advisory['reason_code']}",
+        f"an unreadable server was not named: {advisory['reason_code']}",
     )
 
 
 def _assert_unparseable_version_is_its_own_name() -> None:
-    advisory = _advisory(0, "psql (PostgreSQL) unknown-build\n")
+    advisory = _advisory(0, "unknown-build\n")
     _check(
         advisory["status"] == "unknown",
         f"an unparseable version did not read as unknown: {advisory['status']}",
@@ -151,6 +153,38 @@ def _assert_unparseable_version_is_its_own_name() -> None:
     _check(
         advisory["reason_code"] == "postgres_version_unparseable",
         f"an unparseable version was not named: {advisory['reason_code']}",
+    )
+
+
+def _assert_default_reader_queries_the_running_server() -> None:
+    """The default reader must not mistake a client binary for the server."""
+
+    commands: list[list[str]] = []
+
+    def _run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, f"{_REQUIRED_POSTGRES_MAJOR}0004\n", "")
+
+    with patch("solet_manager.doctor_postgres_pin_census.subprocess.run", _run):
+        entries = collect_postgres_pin_advisories(_Record())
+
+    _check(len(entries) == 1, f"the default reader emitted {len(entries)} checks")
+    entry = entries[0]
+    assert isinstance(entry, dict)
+    _check(entry["status"] == "verified", "the queried pinned server was not verified")
+    _check(
+        commands
+        == [
+            [
+                "psql",
+                "--no-psqlrc",
+                "--tuples-only",
+                "--no-align",
+                "--command",
+                "SHOW server_version_num",
+            ]
+        ],
+        f"doctor did not issue the runtime server-version query: {commands}",
     )
 
 
@@ -178,8 +212,9 @@ def main() -> int:
     _assert_pinned_major_is_green()
     _assert_unpinned_major_is_named()
     _assert_older_major_is_also_named()
-    _assert_unrunnable_psql_is_unknown_not_green()
+    _assert_unreadable_server_is_unknown_not_green()
     _assert_unparseable_version_is_its_own_name()
+    _assert_default_reader_queries_the_running_server()
     _assert_required_major_matches_bootstrap()
     print(f"doctor_postgres_pin_census_smoke OK: {_CHECKS} checks passed")
     return 0

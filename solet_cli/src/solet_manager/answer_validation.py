@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Protocol, cast
 
+from .condition_evaluator import condition_matches, condition_refs
 from .decision_activation import DecisionCatalog, active_decision_ids
 from .decision_state import is_declined_answer, selected_value
 from .errors import ContractError
@@ -46,6 +47,16 @@ def validate_normalized_answers(
     _validate_known_carriers(bundle, public_inputs, decisions, consents)
     _validate_public_inputs(bundle, public_inputs)
     _validate_active_decisions(bundle, decisions)
+    validate_decision_selections(bundle, decisions)
+    _validate_consents(consents)
+
+
+def validate_decision_selections(
+    bundle: DecisionCatalog,
+    decisions: dict[str, JsonValue],
+) -> None:
+    """Validate selected options against the complete resolved decision context."""
+
     for decision_id, selected in decisions.items():
         if is_declined_answer(selected):
             continue
@@ -53,8 +64,8 @@ def validate_normalized_answers(
             decision_id,
             selected_value(selected),
             bundle.decisions[decision_id],
+            decisions,
         )
-    _validate_consents(consents)
 
 
 def _validate_answer_identity(
@@ -155,6 +166,7 @@ def validate_decision_selection(
     decision_id: str,
     selected: JsonValue,
     definition: dict[str, JsonValue],
+    decisions: dict[str, JsonValue],
 ) -> None:
     selection_mode = definition.get("selection_mode")
     _validate_selection_shape(decision_id, selected, selection_mode, definition)
@@ -164,7 +176,7 @@ def validate_decision_selection(
     if source.get("mode") == "discovered":
         _validate_discovered_selection(decision_id, selected, selection_mode)
         return
-    _validate_static_selection(decision_id, selected, source)
+    _validate_static_selection(decision_id, selected, source, decisions)
 
 
 def _validate_selection_shape(
@@ -224,6 +236,7 @@ def _validate_static_selection(
     decision_id: str,
     selected: JsonValue,
     source: dict[str, JsonValue],
+    decisions: dict[str, JsonValue],
 ) -> None:
     options = source.get("options")
     if not isinstance(options, dict):
@@ -234,6 +247,30 @@ def _validate_static_selection(
         raise ContractError(
             f"decision {decision_id!r} selects an unknown option: {selected!r}"
         )
+    for value in values:
+        if not static_option_available(options[str(value)], decisions):
+            raise ContractError(
+                f"decision {decision_id!r} option {value!r} is not available "
+                "under the resolved decisions"
+            )
+
+
+def static_option_available(
+    option: JsonValue,
+    decisions: dict[str, JsonValue],
+) -> bool:
+    """Require supported declared status and every input to an option condition."""
+
+    if not isinstance(option, dict):
+        raise ContractError("static decision option must be an object")
+    if "availability" in option and option["availability"] != "supported":
+        return False
+    if "available_when" not in option:
+        return True
+    condition = option["available_when"]
+    if any(ref not in decisions for ref in condition_refs(condition)):
+        return False
+    return condition_matches(condition, decisions)
 
 
 def _validate_consents(consents: dict[str, JsonValue]) -> None:

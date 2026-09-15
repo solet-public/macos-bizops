@@ -82,8 +82,12 @@ def main() -> int:
         raise SystemExit("--manager-checkout is required unless --lock-only is used")
     manager_checkout = args.manager_checkout.resolve()
     output_root = _output_root(args.output_root, seed_checkout, manager_checkout)
-    manager_repository = _require_manager_repository(args.manager_repository)
-    manager_release_tag = _require_manager_release_tag(args.manager_release_tag)
+    manager_repository = (
+        None if args.dev_mode else _require_manager_repository(args.manager_repository)
+    )
+    manager_release_tag = (
+        None if args.dev_mode else _require_manager_release_tag(args.manager_release_tag)
+    )
     manager_ref = _require_manager_ref(args.manager_ref)
     manager_source_repository = _require_manager_source_repository(
         args.manager_source_repository
@@ -109,12 +113,19 @@ def main() -> int:
         manager_checkout, manager_identity.commit, payload_path
     )
 
+    install_mode = "dev" if args.dev_mode else "release"
+    manager_url = (
+        payload_path.as_uri()
+        if args.dev_mode
+        else (
+            f"https://github.com/{_owner_repo(_require_value(manager_repository))}/releases/download/"
+            f"{_require_value(manager_release_tag)}/{asset_name}"
+        )
+    )
     metadata = {
         "formula_revision": args.formula_revision,
-        "manager_url": (
-            f"https://github.com/{_owner_repo(manager_repository)}/releases/download/"
-            f"{manager_release_tag}/{asset_name}"
-        ),
+        "install_mode": install_mode,
+        "manager_url": manager_url,
         "manager_source_repository": manager_source_repository,
         "manager_source_ref": manager_ref,
         "manager_source_commit": manager_identity.commit,
@@ -135,6 +146,7 @@ def main() -> int:
     print(f"release metadata: {metadata_path}")
     print(f"rendered formula: {output_root / 'Formula' / 'solet.rb'}")
     print(f"rendered lock:    {output_root / 'solet_cli' / 'homebrew' / 'seed.lock.json'}")
+    print(f"install mode:     {install_mode} ({manager_identity.commit})")
     print(f"setup contracts:  {contract_digest} (manager payload == seed artifact)")
     print("Nothing was pushed, tagged, released, or uploaded.")
     return 0
@@ -200,6 +212,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--formula-revision", type=int, default=0)
     parser.add_argument(
+        "--dev-mode",
+        action="store_true",
+        help=(
+            "render a Formula overlay whose URL is the staged local payload and whose "
+            "installed receipt is explicitly dev-mode; never use this for published-pair acceptance"
+        ),
+    )
+    parser.add_argument(
         "--lock-only",
         action="store_true",
         help=(
@@ -263,6 +283,13 @@ def _require_profile(profile: str) -> None:
 
 def _owner_repo(seed_repository: str) -> str:
     return seed_repository.removeprefix("https://github.com/").removesuffix(".git")
+
+
+def _require_value(value: str | None) -> str:
+    """Narrow an already validated release-only CLI value for the renderer."""
+    if value is None:
+        raise AssertionError("release-only argument was not validated")
+    return value
 
 
 def _require_paths_present(checkout: Path) -> None:

@@ -108,6 +108,12 @@ from pathlib import Path
 from typing import Final
 
 from macos_self_deployment_plugin.constants import PLUGIN_NAME
+from macos_self_deployment_plugin.release_code_collection import (
+    CollectionPlan,
+    ReleaseCodeCollectionError,
+    ReleaseCodeCollector,
+    write_selected_file_manifest,
+)
 from macos_self_deployment_plugin.venv_interpreter_pin import (
     VenvInterpreterPinError,
     pin_and_report,
@@ -124,6 +130,7 @@ VENV_DIRNAME: Final[str] = "venv"
 VENV_BIN_DIRNAME: Final[str] = "bin"
 VENV_PYTHON_BASENAME: Final[str] = "python3"
 VERSION_FILENAME: Final[str] = "VERSION"
+SELECTED_FILE_MANIFEST_FILENAME: Final[str] = "SELECTED_FILES.json"
 
 #: Why ``VERSION.reconciliation_provenance`` exists and why it is written even
 #: when empty. A seed-materialized target has no git identity to appeal to, so
@@ -736,6 +743,77 @@ def _pin_staged_interpreter(venv_dir: Path, logger: logging.Logger) -> None:
         ) from exc
 
 
+def _repoint_and_validate_pth(
+    venv_root: Path,
+    *,
+    source_root: Path,
+    final_code_root: Path,
+    strict_pth_validation: bool,
+    logger: logging.Logger,
+    excluded_roots: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Repoint editable paths while refusing references to excluded code."""
+    source_prefix = f"{source_root}{os.sep}"
+    final_prefix = f"{final_code_root}{os.sep}"
+    staging_code_root = venv_root.parent / CODE_DIRNAME
+    missing: list[str] = []
+    for pth in sorted(venv_root.glob(f"lib/python*/site-packages/*{os.extsep}pth")):
+        missing.extend(
+            _rewrite_one_pth(
+                pth, source_prefix, final_prefix, staging_code_root, excluded_roots
+            )
+        )
+    _assert_no_residual_prefix(venv_root, source_prefix)
+    if missing and strict_pth_validation:
+        raise ReleaseManagerError(f".pth targets do not resolve: {missing}")
+    for target in missing:
+        logger.warning(".pth target does not resolve (stale editable install?): %s", target)
+    return tuple(missing)
+
+
+def _rewrite_one_pth(
+    pth: Path,
+    source_prefix: str,
+    final_prefix: str,
+    staging_code_root: Path,
+    excluded_roots: tuple[str, ...],
+) -> list[str]:
+    """Repoint one editable path file and return non-excluded missing targets."""
+    rewritten: list[str] = []
+    missing: list[str] = []
+    changed = False
+    for line in pth.read_text().splitlines():
+        if not line.startswith(source_prefix):
+            rewritten.append(line)
+            continue
+        remainder = line[len(source_prefix):]
+        if any(remainder == root or remainder.startswith(f"{root}{os.sep}") for root in excluded_roots):
+            raise ReleaseManagerError(
+                f".pth target points into excluded nested Python environment: {line}"
+            )
+        new_line = final_prefix + remainder
+        rewritten.append(new_line)
+        changed = True
+        if not (staging_code_root / remainder).exists():
+            missing.append(new_line)
+    if changed:
+        pth.write_text("\n".join(rewritten) + "\n")
+    return missing
+
+
+def _assert_no_residual_prefix(venv_root: Path, source_prefix: str) -> None:
+    """Fail if a materialized venv would still import mutable source bytes."""
+    residual = [
+        str(pth)
+        for pth in venv_root.glob(f"lib/python*/site-packages/*{os.extsep}pth")
+        if source_prefix in pth.read_text()
+    ]
+    if residual:
+        raise ReleaseManagerError(
+            f"residual source-root references after .pth rewrite: {residual}"
+        )
+
+
 class ReleaseBuilder:
     """Materializes one immutable release from the working tree (§4.4 / §4.7).
 
@@ -833,6 +911,16 @@ class ReleaseBuilder:
             raise ReleaseManagerError(msg)
         self._releases_root.mkdir(parents=True, exist_ok=True)
         tree_state, dirty_paths = self._attest_tree_state(allow_dirty=allow_dirty)
+        collector = ReleaseCodeCollector(
+            source_root=self._source_root,
+            code_subtrees=CODE_SUBTREES,
+            cp_binary=self._cp_binary,
+            clone_timeout_seconds=self._clone_timeout,
+        )
+        try:
+            collection_plan = collector.plan()
+        except ReleaseCodeCollectionError as exc:
+            raise ReleaseManagerError(f"release code collection refused: {exc}") from exc
         git_sha = self._resolve_git_sha()
         release_id = self._mint_release_id(git_sha)
         final_dir = self._releases_root / release_id
@@ -846,7 +934,7 @@ class ReleaseBuilder:
             shutil.rmtree(staging)
 
         final_code_root = final_dir / CODE_DIRNAME
-        self._build_into_staging(staging)
+        self._build_into_staging(staging, collector, collection_plan)
         tree_state, dirty_paths = self._reattest_after_clone(
             staging, before=dirty_paths, before_state=tree_state, allow_dirty=allow_dirty
         )
@@ -855,7 +943,27 @@ class ReleaseBuilder:
             if schema_snapshot_fn is not None
             else None
         )
-        missing = self._repoint_and_validate_pth(staging / VENV_DIRNAME, final_code_root)
+        missing = _repoint_and_validate_pth(
+            staging / VENV_DIRNAME,
+            source_root=self._source_root,
+            final_code_root=final_code_root,
+            strict_pth_validation=self._strict_pth_validation,
+            logger=self._logger,
+            excluded_roots=tuple(item.relative_path for item in collection_plan.exclusions),
+        )
+        try:
+            collector.verify_source_identity(collection_plan)
+            selected_file_manifest_sha256 = write_selected_file_manifest(
+                staging / SELECTED_FILE_MANIFEST_FILENAME,
+                collector.manifest_payload(collection_plan),
+            )
+            collector.verify_materialized_manifest(
+                collection_plan,
+                staging / CODE_DIRNAME,
+                staging / SELECTED_FILE_MANIFEST_FILENAME,
+            )
+        except ReleaseCodeCollectionError as exc:
+            raise ReleaseManagerError(f"release code collection verification refused: {exc}") from exc
         self._write_version(
             staging / VERSION_FILENAME,
             release_id=release_id,
@@ -867,6 +975,7 @@ class ReleaseBuilder:
             tree_state=tree_state,
             dirty_paths=dirty_paths,
             reconciliation_provenance=reconciliation_provenance,
+            selected_file_manifest_sha256=selected_file_manifest_sha256,
         )
         self._fsync_staging(staging)
         os.replace(staging, final_dir)
@@ -944,7 +1053,12 @@ class ReleaseBuilder:
             manifest_plugins_error=manifest_plugins_error,
         )
 
-    def _build_into_staging(self, staging: Path) -> None:
+    def _build_into_staging(
+        self,
+        staging: Path,
+        collector: ReleaseCodeCollector,
+        collection_plan: CollectionPlan,
+    ) -> None:
         """CoW-clone the code subtrees + venv into the staging dir, then pin.
 
         The cloned venv inherits the checkout's FLOATING base-interpreter
@@ -953,9 +1067,10 @@ class ReleaseBuilder:
         host's current brew state.
         """
         code_root = staging / CODE_DIRNAME
-        code_root.mkdir(parents=True)
-        for subtree in CODE_SUBTREES:
-            self._clone_tree(self._source_root / subtree, code_root / subtree)
+        try:
+            collector.materialize(collection_plan, code_root)
+        except ReleaseCodeCollectionError as exc:
+            raise ReleaseManagerError(f"release code materialization refused: {exc}") from exc
         self._clone_tree(self._source_root / VENV_SUBTREE, staging / VENV_DIRNAME)
         _pin_staged_interpreter(staging / VENV_DIRNAME, self._logger)
 
@@ -985,83 +1100,6 @@ class ReleaseBuilder:
             )
             raise ReleaseManagerError(msg)
 
-    def _repoint_and_validate_pth(
-        self, venv_root: Path, final_code_root: Path
-    ) -> tuple[str, ...]:
-        """Rewrite the cloned venv's ``.pth`` repo-root prefix → ``code/``.
-
-        Every first-party editable install is a plain-path ``.pth`` whose
-        single line points at the dev tree (e.g.
-        ``<source_root>/ananta/src``). Re-point = rewrite the
-        ``<source_root>/`` prefix to ``<release>/code/`` so the release's
-        interpreter resolves imports from its own ``code/`` independent of
-        CWD. Returns the re-pointed targets that do not resolve (§8.6).
-        """
-        src_prefix = f"{self._source_root}{os.sep}"
-        new_prefix = f"{final_code_root}{os.sep}"
-        # The .pth content is re-pointed at the FINAL release path, but the
-        # final dir does not exist until the atomic rename at the end of the
-        # build — so existence is validated against the staging ``code/``
-        # (``<staging>/venv`` and ``<staging>/code`` are siblings).
-        staging_code_root = venv_root.parent / CODE_DIRNAME
-        missing: list[str] = []
-        for pth in sorted(venv_root.glob(f"lib/python*/site-packages/*{os.extsep}pth")):
-            missing.extend(
-                self._rewrite_one_pth(pth, src_prefix, new_prefix, staging_code_root)
-            )
-        self._assert_no_residual_prefix(venv_root, src_prefix)
-        if missing and self._strict_pth_validation:
-            raise ReleaseManagerError(f".pth targets do not resolve: {missing}")
-        for target in missing:
-            self._logger.warning(
-                ".pth target does not resolve (stale editable install?): %s", target,
-            )
-        return tuple(missing)
-
-    def _rewrite_one_pth(
-        self, pth: Path, src_prefix: str, new_prefix: str, staging_code_root: Path
-    ) -> list[str]:
-        """Rewrite one ``.pth`` file in place; return its missing targets.
-
-        The rewritten line points at the FINAL release path (what the
-        release's interpreter resolves at runtime); existence is checked
-        against the staging ``code/`` because the final path is not on
-        disk until the build's atomic rename.
-        """
-        rewritten: list[str] = []
-        missing: list[str] = []
-        changed = False
-        for line in pth.read_text().splitlines():
-            if line.startswith(src_prefix):
-                remainder = line[len(src_prefix):]
-                new_line = new_prefix + remainder
-                rewritten.append(new_line)
-                changed = True
-                if not (staging_code_root / remainder).exists():
-                    missing.append(new_line)
-            else:
-                rewritten.append(line)
-        if changed:
-            pth.write_text("\n".join(rewritten) + "\n")
-        return missing
-
-    def _assert_no_residual_prefix(self, venv_root: Path, src_prefix: str) -> None:
-        """Fail loudly if any ``.pth`` still references the source tree.
-
-        Mirrors the design §4.4 "0 residual repo-prefix references"
-        acceptance evidence: a residual would make the release import
-        from the mutable dev tree, defeating the rollback guarantee.
-        """
-        residual = [
-            str(pth)
-            for pth in venv_root.glob(f"lib/python*/site-packages/*{os.extsep}pth")
-            if src_prefix in pth.read_text()
-        ]
-        if residual:
-            raise ReleaseManagerError(
-                f"residual source-root references after .pth rewrite: {residual}"
-            )
-
     def _write_version(
         self,
         path: Path,
@@ -1075,6 +1113,7 @@ class ReleaseBuilder:
         tree_state: str,
         dirty_paths: tuple[str, ...],
         reconciliation_provenance: dict[str, str] | None,
+        selected_file_manifest_sha256: str,
     ) -> None:
         payload = {
             "release_id": release_id,
@@ -1101,6 +1140,10 @@ class ReleaseBuilder:
             # the scope keeps "tree_state: clean" from being read as "artifact
             # fully attested".
             "tree_state_scope": list(CODE_SUBTREES),
+            "selected_file_manifest": {
+                "filename": SELECTED_FILE_MANIFEST_FILENAME,
+                "sha256": selected_file_manifest_sha256,
+            },
             # See RECONCILIATION_PROVENANCE_NOTE: null on ordinary deploys.
             "reconciliation_provenance": reconciliation_provenance,
         }
@@ -1108,9 +1151,10 @@ class ReleaseBuilder:
 
     def _fsync_staging(self, staging: Path) -> None:
         """``fsync`` the ``VERSION`` file + the staging dir before finalize."""
-        version_file = staging / VERSION_FILENAME
-        if version_file.is_file():
-            _fsync_file(version_file)
+        for filename in (VERSION_FILENAME, SELECTED_FILE_MANIFEST_FILENAME):
+            path = staging / filename
+            if path.is_file():
+                _fsync_file(path)
         _fsync_dir(staging)
 
     def _mint_release_id(self, git_sha: str) -> str:

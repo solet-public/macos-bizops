@@ -53,6 +53,15 @@ prose, and there is no longer a full-trust content class to describe here.
 
 ## Inputs and outputs — the complete data-flow surface
 
+The heartbeat, rotation-due, and wake entrypoints first import
+`coordination_owner.py`. For a managed session it requires
+`AGENT_COORDINATION_RECEIPT_PATH` to be the fixed profile-data receipt for the
+exact `SOLET_NAME`, selector, selected root, manifest, interpreter, and hook
+bytes. A missing, corrupt, foreign, stale, symlink-escaping, or unrecorded
+designation refuses before every marker, lock, watcher, lifecycle write, or
+bridge call. This receipt detects installed-state drift; it is not a grant of
+authority.
+
 Inputs, exhaustively:
 
 - **stdin**: the JSON payload Claude Code passes to every hook (event name,

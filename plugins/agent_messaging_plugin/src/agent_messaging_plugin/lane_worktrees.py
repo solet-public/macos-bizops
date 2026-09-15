@@ -14,7 +14,20 @@ import subprocess
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Any, Literal
+
+from ananta.interfaces.state_management_interface import StateManagementInterface
+from ananta.services.state_service.bounded_read import PagedReadError
+
+from .schema import (
+    LIFECYCLE_IDLE,
+    LIFECYCLE_LIVE,
+    LIFECYCLE_OVERDUE,
+    LIFECYCLE_PARKED,
+    LIFECYCLE_RETIRED,
+    LIFECYCLE_SPAWNING,
+    LIFECYCLE_TERMINATED,
+)
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _GIT_ENV_PREFIX = "GIT_"
@@ -34,6 +47,42 @@ _DISPOSABLE_UNTRACKED_SUFFIXES = (".egg-info",)
 
 class LaneWorktreeError(RuntimeError):
     """A requested worktree cannot be safely provisioned or removed."""
+
+
+class LaneWorktreeRepoRootError(LaneWorktreeError):
+    """A supplied source checkout cannot safely host a lane worktree."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def resolve_lane_repo_root(repository_root: str, app_home: str) -> Path:
+    """Resolve an explicit checkout root, or the serving checkout when absent."""
+    if repository_root.strip() and not Path(repository_root).is_absolute():
+        raise LaneWorktreeRepoRootError(
+            "lane_worktree_repo_override_invalid",
+            "lane worktree repository_root must be an absolute checkout path",
+        )
+    candidate = (
+        Path(repository_root)
+        if repository_root.strip()
+        else Path(app_home).resolve().parent
+    )
+    source = "repository_root override" if repository_root.strip() else "APP_HOME"
+    try:
+        resolved = candidate.expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise LaneWorktreeRepoRootError(
+            "lane_worktree_repo_missing",
+            f"lane worktree provisioning needs a Git checkout; {source} resolved {candidate}",
+        ) from exc
+    if not (resolved / ".git").exists():
+        raise LaneWorktreeRepoRootError(
+            "lane_worktree_repo_missing",
+            f"lane worktree provisioning needs a Git checkout; {source} resolved {resolved}",
+        )
+    return resolved
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +120,112 @@ class LaneWorktreeSweep:
 
     removed: tuple[Path, ...]
     skipped: tuple[DirtyStaleWorktreeSkippedWarning, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveLaneWorktreeInventory:
+    """Complete active-path inventory plus whether automatic cleanup is safe."""
+
+    paths: tuple[Path, ...]
+    terminal_paths: tuple[Path, ...]
+    cleanup_safe: bool
+    incomplete_rows: tuple[str, ...]
+
+
+def active_lane_worktree_inventory(
+    state: StateManagementInterface,
+    repo_root: Path,
+) -> ActiveLaneWorktreeInventory:
+    """Derive protected and terminal paths from complete managed-session evidence."""
+    from .session_lifecycle_store import list_managed_sessions
+
+    active_states = [
+        LIFECYCLE_SPAWNING,
+        LIFECYCLE_LIVE,
+        LIFECYCLE_IDLE,
+        LIFECYCLE_OVERDUE,
+        LIFECYCLE_PARKED,
+    ]
+    try:
+        rows = list_managed_sessions(
+            state,
+            {"lifecycle_state": [*active_states, LIFECYCLE_TERMINATED, LIFECYCLE_RETIRED]},
+        )
+    except PagedReadError as exc:
+        return ActiveLaneWorktreeInventory(
+            paths=(),
+            terminal_paths=(),
+            cleanup_safe=False,
+            incomplete_rows=(f"managed_session inventory unreadable: {exc}",),
+        )
+    paths: list[Path] = []
+    terminal_paths: list[Path] = []
+    incomplete_rows: list[str] = []
+    for row in rows:
+        active, row_paths, error = _inventory_row(row, repo_root, active_states)
+        if error:
+            if active:
+                incomplete_rows.append(error)
+            continue
+        (paths if active else terminal_paths).extend(row_paths)
+    active_path_set = set(paths)
+    return ActiveLaneWorktreeInventory(
+        paths=tuple(paths),
+        terminal_paths=tuple(path for path in terminal_paths if path not in active_path_set),
+        cleanup_safe=not incomplete_rows,
+        incomplete_rows=tuple(incomplete_rows),
+    )
+
+
+def _inventory_row(
+    row: dict[str, Any], repo_root: Path, active_states: list[str]
+) -> tuple[bool, tuple[Path, ...], str]:
+    """Return one row's protected paths or a durable-identity error."""
+    if str(row.get("provisioning_mode") or "") in {
+        "operator_existing_checkout",
+        "synthetic_no_worktree",
+    }:
+        return False, (), ""
+    active = str(row.get("lifecycle_state") or "") in active_states
+    row_id = str(row.get("id") or row.get("agent_instance_id") or "<unknown>")
+    try:
+        if _inventory_row_root(row, repo_root) is None:
+            return active, (), ""
+        return active, _inventory_row_paths(row, repo_root), ""
+    except ValueError as exc:
+        return active, (), f"{row_id}: {exc}"
+    except LaneWorktreeError as exc:
+        return active, (), f"{row_id}: lane identity invalid: {exc}"
+
+
+def _inventory_row_root(row: dict[str, Any], repo_root: Path) -> Path | None:
+    """Validate a worktree row's durable root, or ignore another repository."""
+    if str(row.get("provisioning_mode") or "") != "worktree":
+        raise ValueError("provisioning_mode invalid")
+    recorded_root = str(row.get("lane_repo_root") or "")
+    if not recorded_root:
+        raise ValueError("lane_repo_root missing")
+    if not Path(recorded_root).is_absolute():
+        raise ValueError("lane_repo_root not absolute")
+    try:
+        row_root = Path(recorded_root).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("lane_repo_root invalid") from exc
+    return row_root if row_root == repo_root.resolve() else None
+
+
+def _inventory_row_paths(row: dict[str, Any], repo_root: Path) -> tuple[Path, ...]:
+    """Reconstruct every durable role/local path associated with one row."""
+    role_name = str(row.get("role_name") or "")
+    local_name = str(row.get("local_name") or "")
+    agent_instance_id = str(row.get("agent_instance_id") or "")
+    if not agent_instance_id or not (role_name or local_name):
+        raise ValueError("lane identity incomplete")
+    return tuple(
+        lane_worktree_for(repo_root, role_name=name, agent_instance_id=agent_instance_id).path
+        for name in dict.fromkeys((role_name, local_name))
+        if name
+    )
 
 
 GitRun = Callable[..., subprocess.CompletedProcess[str]]
@@ -226,11 +381,11 @@ def remove_lane_worktree(
 def sweep_orphaned_lane_worktrees(
     repo_root: Path,
     *,
-    active_paths: Iterable[Path],
+    terminal_paths: Iterable[Path],
     run: GitRun = subprocess.run,
     environment: Mapping[str, str] | None = None,
 ) -> LaneWorktreeSweep:
-    """Remove registered, inactive, provably disposable lane worktrees only.
+    """Remove registered, terminal, provably disposable lane worktrees only.
 
     Opportunistic tidying must never fail the operation it is tidying for, so a
     candidate that will not remove is collected in ``skipped`` with the reason
@@ -245,7 +400,7 @@ def sweep_orphaned_lane_worktrees(
     root = lane_worktree_root(repo_root)
     if not root.exists():
         return LaneWorktreeSweep(removed=(), skipped=())
-    active = {path.resolve() for path in active_paths}
+    terminal = {path.resolve() for path in terminal_paths}
     registered = _registered_worktree_paths(
         repo_root.resolve(), run=run, environment=environment,
     )
@@ -256,9 +411,9 @@ def sweep_orphaned_lane_worktrees(
             continue
         _assert_under_root(candidate, root)
         resolved = candidate.resolve()
-        if resolved in active:
-            continue
         if resolved not in registered:
+            continue
+        if resolved not in terminal:
             continue
         worktree = LaneWorktree(
             repo_root=repo_root.resolve(), root=root.resolve(), path=resolved, branch="",
@@ -472,13 +627,18 @@ def _remove_exact_worktree(
         return
     flags = ("--force",) if force else ()
     try:
-        _remove_shared_venv_link(worktree)
+        _assert_shared_venv_link_owned(worktree)
         _run_git(
             worktree.repo_root,
             ("worktree", "remove", *flags, str(worktree.path)),
             run=run,
             environment=environment,
         )
+        # Git owns the decision to remove a registered worktree.  In
+        # particular, a lock refusal must leave the provisioned interpreter
+        # usable; only unlink the owned convenience link after Git accepted
+        # the teardown.
+        _remove_shared_venv_link(worktree)
     except LaneWorktreeError:
         if not suppress:
             raise
@@ -486,13 +646,20 @@ def _remove_exact_worktree(
 
 def _remove_shared_venv_link(worktree: LaneWorktree) -> None:
     """Discard only the provisioning-owned venv link before clean teardown."""
+    _assert_shared_venv_link_owned(worktree)
+    link = worktree.path / ".venv"
+    if link.exists() or link.is_symlink():
+        link.unlink()
+
+
+def _assert_shared_venv_link_owned(worktree: LaneWorktree) -> None:
+    """Refuse a foreign `.venv` before Git receives a destructive request."""
     link = worktree.path / ".venv"
     if not link.exists() and not link.is_symlink():
         return
     shared_venv = (worktree.repo_root / ".venv").resolve()
     if not link.is_symlink() or link.resolve() != shared_venv:
         raise LaneWorktreeError(f"refusing to remove non-provisioned venv entry: {link}")
-    link.unlink()
 
 
 def _registered_worktree_paths(

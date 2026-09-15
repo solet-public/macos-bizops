@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
-from ananta.services.state_service.bounded_read import ReadCeilingError
-
 from .schema import (
     LIFECYCLE_IDLE,
     LIFECYCLE_LIVE,
@@ -13,7 +11,7 @@ from .schema import (
     LIFECYCLE_PARKED,
     LIFECYCLE_SPAWNING,
 )
-from .session_lifecycle_store import list_managed_sessions_bounded
+from .session_lifecycle_store import read_managed_sessions_page
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -89,26 +87,63 @@ def _validated_limit(limit: object) -> int:
     return limit
 
 
+def _validated_cursor(
+    after_created_at: object,
+    after_id: object,
+) -> list[str] | None:
+    if after_created_at is None and after_id is None:
+        return None
+    if (
+        not isinstance(after_created_at, str)
+        or not after_created_at.strip()
+        or not isinstance(after_id, str)
+        or not after_id.strip()
+    ):
+        raise SessionListError(
+            "invalid_cursor",
+            "list_sessions cursor requires non-empty after_created_at and after_id.",
+        )
+    return [after_created_at, after_id]
+
+
 def list_session_rows(
     state: StateManagementInterface,
     filters: dict[str, Any] | None,
     *,
     live_only: bool,
     limit: object,
-) -> list[dict[str, Any]]:
-    """Return a complete bounded roster or refuse before returning any rows."""
+    after_created_at: object = None,
+    after_id: object = None,
+) -> dict[str, Any]:
+    """Return one bounded roster page and an honest continuation cursor."""
     selected_filters = _selected_filters(filters, live_only=live_only)
     selected_limit = _validated_limit(limit)
-    try:
-        return list_managed_sessions_bounded(
-            state, selected_filters, limit=selected_limit,
-        )
-    except ReadCeilingError as exc:
-        raise SessionListError(
-            "result_over_limit",
-            f"list_sessions matched more than limit={selected_limit} rows; narrow the fleet "
-            "filters and retry.",
-        ) from exc
+    cursor = _validated_cursor(after_created_at, after_id)
+    rows, truncated = read_managed_sessions_page(
+        state, selected_filters, limit=selected_limit, after=cursor,
+    )
+    next_cursor = None
+    if truncated:
+        if not rows:
+            raise SessionListError(
+                "pagination_stalled",
+                "list_sessions found a follow-up page without a row to advance from.",
+            )
+        last = rows[-1]
+        created_at = last.get("created_at")
+        row_id = last.get("id")
+        if not isinstance(created_at, str) or not created_at or not isinstance(row_id, str) or not row_id:
+            raise SessionListError(
+                "pagination_stalled",
+                "list_sessions cannot advance because a row lacks created_at or id.",
+            )
+        next_cursor = {"created_at": created_at, "id": row_id}
+    return {
+        "sessions": rows,
+        "returned": len(rows),
+        "truncated": truncated,
+        "next_cursor": next_cursor,
+    }
 
 
 __all__ = [

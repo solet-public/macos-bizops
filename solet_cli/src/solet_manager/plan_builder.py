@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
-from .answer_validation import _INDEPENDENT_CARRIERS
+from .answer_validation import _INDEPENDENT_CARRIERS, validate_decision_selections
 from .config import CreateConfig
 from .contracts import ContractBundle, active_decision_ids, validate_normalized_answers
 from .decision_resolution import (
@@ -18,6 +18,7 @@ from .decision_resolution import (
 )
 from .errors import ContractError
 from .models import JsonValue
+from .probe_input_retention import retain_probe_inputs
 from .release_lock import SeedLock
 
 
@@ -32,6 +33,7 @@ class PlannedOperation:
     precondition_probe_ids: tuple[str, ...]
     postcondition_probe_ids: tuple[str, ...]
     public_inputs: dict[str, JsonValue]
+    apply_timeout_seconds: int = 300
 
     def to_dict(self) -> dict[str, JsonValue]:
         return {
@@ -44,6 +46,7 @@ class PlannedOperation:
             "precondition_probe_ids": list(self.precondition_probe_ids),
             "postcondition_probe_ids": list(self.postcondition_probe_ids),
             "public_inputs": self.public_inputs,
+            "apply_timeout_seconds": self.apply_timeout_seconds,
         }
 
 
@@ -101,6 +104,7 @@ def build_setup_plan(
         public_inputs,
         operation_stage_ids,
     )
+    flow_default_evidence.extend(retain_probe_inputs(bundle, decisions, recorded_answers, public_inputs))
     operations = _plan_operations(
         bundle,
         decisions,
@@ -532,6 +536,7 @@ def selected_operation_ids(
     bundle: ContractBundle,
     decisions: dict[str, JsonValue],
 ) -> set[str]:
+    validate_decision_selections(bundle, decisions)
     selected = required_operation_ids(bundle)
     active = active_decision_ids(bundle, decisions)
     for decision_id, answer in decisions.items():
@@ -743,7 +748,15 @@ def _planned_operation(
             idempotency.get("postcondition_probe_refs"), allow_missing=True
         ),
         public_inputs=safe_inputs,
+        apply_timeout_seconds=_apply_timeout_seconds(definition),
     )
+
+
+def _apply_timeout_seconds(definition: dict[str, JsonValue]) -> int:
+    value = definition.get("apply_timeout_seconds", 300)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 900:
+        raise ContractError("operation apply_timeout_seconds must be an integer from 1 through 900")
+    return value
 
 
 def remediation_operations(

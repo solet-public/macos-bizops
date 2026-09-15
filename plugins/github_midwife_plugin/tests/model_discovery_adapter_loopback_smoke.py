@@ -314,7 +314,7 @@ def main() -> int:
             _check(
                 unavailable.get("checkpoint_status") == "blocked"
                 and unavailable.get("error_kind") == "model_discovery_failed"
-                and "Start or repair" in str(unavailable.get("repair")),
+                and "Restore its service" in str(unavailable.get("repair")),
                 "HTTP 503 remains an actionable transport/service failure",
             )
             malformed = _exercise_mode(
@@ -335,7 +335,7 @@ def main() -> int:
                 unavailable_endpoint.get("checkpoint_status") == "blocked"
                 and unavailable_endpoint.get("error_kind") == "model_discovery_failed"
                 and unavailable_endpoint.get("retry_safe") is True
-                and "Start or repair" in str(unavailable_endpoint.get("repair")),
+                and "Restore its service" in str(unavailable_endpoint.get("repair")),
                 "connection refusal remains an actionable retry-safe discovery failure",
             )
             base_url = _exercise_ollama_gate(target, environment, server)

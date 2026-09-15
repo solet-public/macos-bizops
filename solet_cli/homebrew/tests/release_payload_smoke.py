@@ -112,6 +112,7 @@ def _check_formula_boundary(
 ) -> None:
     _check_formula_install_shape(formula, lock)
     _check_rendered_identity(formula, lock, metadata)
+    _check_install_source_receipt(formula, metadata)
     brewfile = (_ROOT / "ci" / "Brewfile.enterprise.example").read_text(encoding="utf-8")
     _check(
         'trusted: { formula: "solet" }' in brewfile and "trusted: true" not in brewfile,
@@ -151,6 +152,25 @@ def _check_formula_install_shape(formula: str, lock: dict[str, object]) -> None:
         "formula does not create machine or instance state",
     )
     _check_seeds_symlink_shape(formula, lock)
+
+
+def _check_install_source_receipt(formula: str, metadata: dict[str, object]) -> None:
+    marker = '(libexec/"share"/"solet"/"install-source.json").write <<~JSON\n'
+    start = formula.find(marker)
+    end = formula.find("    JSON\n", start + len(marker))
+    _check(start != -1 and end != -1, "formula writes an installed source receipt")
+    if start == -1 or end == -1:
+        return
+    receipt: object = json.loads(formula[start + len(marker) : end])
+    _check(
+        receipt
+        == {
+            "schema_version": 1,
+            "mode": "release",
+            "source_commit": metadata["manager_source_commit"],
+        },
+        "published Formula receipt records release mode and its immutable source commit",
+    )
 
 
 def _check_seeds_symlink_shape(formula: str, lock: dict[str, object]) -> None:
@@ -483,7 +503,7 @@ def _check_packaged_flow_dry_run(root: Path) -> None:
                 "commit": "a" * 40,
                 "tree_hash": "b" * 40,
                 "archive_sha256": "c" * 64,
-                "profile": "macos-bizops",
+                "profile": "free",
             }
         ),
         encoding="utf-8",
@@ -501,12 +521,6 @@ def _check_packaged_flow_dry_run(root: Path) -> None:
             "brew-test",
             "--target",
             str(target),
-            "--decision",
-            "inference_implementation=none",
-            "--decision",
-            "execution_topology=solo",
-            "--decision",
-            "git_mutation_control=single_session",
             "--decision",
             "session_sources=",
             "--dry-run",

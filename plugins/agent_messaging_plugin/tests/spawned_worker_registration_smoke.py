@@ -296,12 +296,24 @@ def test_resolver_falls_back_to_the_active_venv() -> None:
         degraded["AGENT_WAKE_CLI"] == "solet-bridge" and degraded["PATH"] == "/usr/bin",
         "an unresolved CLI degrades to the bare name and leaves PATH untouched",
     )
-    idempotent = {"PATH": f"/a{os.pathsep}/usr/bin"}
+    absent = {"PATH": "/usr/bin:/bin"}
+    expose_worker_cli(absent, "/a/solet-bridge")
+    _check(
+        absent["PATH"] == f"/a{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "an absent CLI directory is prepended to PATH",
+    )
+    idempotent = {"PATH": f"/a{os.pathsep}/usr/bin{os.pathsep}/bin"}
     expose_worker_cli(idempotent, "/a/solet-bridge")
     expose_worker_cli(idempotent, "/a/solet-bridge")
     _check(
-        idempotent["PATH"].split(os.pathsep).count("/a") == 1,
-        "PATH prepend is idempotent — no unbounded growth across re-exposure",
+        idempotent["PATH"] == f"/a{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "an already-leading CLI directory remains leading and unique across re-exposure",
+    )
+    later_and_duplicate = {"PATH": f"/usr/bin{os.pathsep}/a{os.pathsep}/bin{os.pathsep}/a"}
+    expose_worker_cli(later_and_duplicate, "/a/solet-bridge")
+    _check(
+        later_and_duplicate["PATH"] == f"/a{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "later and duplicate CLI-directory entries are removed before one leading prepend",
     )
 
 

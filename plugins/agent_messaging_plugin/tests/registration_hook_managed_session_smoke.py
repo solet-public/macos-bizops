@@ -132,6 +132,7 @@ def _register(
     *,
     agent_instance_id: str,
     agent_session_id: str,
+    session_label: str = "session-label",
 ) -> Any:
     return client.post(
         f"/api/v1/bridge/{bridge_id}/peer/register",
@@ -139,7 +140,7 @@ def _register(
             "agent_id": "claude_code",
             "agent_instance_id": agent_instance_id,
             "agent_session_id": agent_session_id,
-            "session_label": "session-label",
+            "session_label": session_label,
         },
     )
 
@@ -261,6 +262,37 @@ def test_hand_launched_registration_creates_operator_inventory_row() -> None:
             row.get("report_by") is None and row.get("expires_at") is None,
             "the row carries no report-by or TTL deadline the session never agreed to",
         )
+        _check(
+            row.get("provisioning_mode") == "operator_existing_checkout",
+            "the operator row records its shared checkout rather than a fabricated worktree",
+        )
+        _check(
+            row.get("local_name") == "session-label",
+            "the operator row uses the effective registration label as its local name",
+        )
+        _check(
+            row.get("model") == "" and row.get("effort") == "",
+            "model and effort stay intentionally empty when registration has no launcher evidence",
+        )
+
+
+def test_hand_launched_empty_label_uses_instance_id_as_local_name() -> None:
+    """No peer label must not mint an empty local-name collision key."""
+    manager, registry, state = _bridge_manager(), _fresh_peer_registry(), _state()
+    client = _client(manager, registry, state)
+    resp = _register(
+        client,
+        _open_bridge(manager),
+        agent_instance_id="agi-empty-label",
+        agent_session_id="sess-empty-label",
+        session_label="",
+    )
+    _check(resp.status_code == 200, "an unlabeled hand-launched registration still returns 200")
+    row = read_managed_session(state, "agi-empty-label")
+    _check(
+        row.get("local_name") == "agi-empty-label",
+        "an empty effective label falls back to the registering instance id",
+    )
 
 
 def main() -> int:
@@ -268,6 +300,7 @@ def main() -> int:
     test_first_registration_fires_spawning_to_live_and_backfills()
     test_reconnect_does_not_refire_edge_or_clobber_later_state()
     test_hand_launched_registration_creates_operator_inventory_row()
+    test_hand_launched_empty_label_uses_instance_id_as_local_name()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

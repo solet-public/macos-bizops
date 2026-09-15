@@ -44,6 +44,7 @@ from ananta.llm.agent_messaging.schema import (
     META_KEY_RECIPIENT_KEY,
     META_KEY_RECIPIENT_KIND,
     META_KEY_ROLE_CREATED_AT,
+    META_KEY_ROLE_ROW_ID,
     RECIPIENT_KIND_ROLE,
     ROLE_THREAD_PREFIX,
 )
@@ -526,6 +527,7 @@ def _deliver_important_to_binding(
     recipient_key: str,
     delivery_external_id: str,
     role_created_at: str,
+    role_row_id: str,
     reply_to_role: str = "",
 ) -> tuple[str, str]:
     """Deliver an IMPORTANT role message to a resolved recipient binding.
@@ -589,6 +591,7 @@ def _deliver_important_to_binding(
                     META_KEY_RECIPIENT_KEY: recipient_key,
                     META_KEY_DELIVERY_EXTERNAL_ID: delivery_external_id,
                     META_KEY_ROLE_CREATED_AT: role_created_at,
+                    META_KEY_ROLE_ROW_ID: role_row_id,
                 },
             )
         except Exception as exc:  # noqa: BLE001 — adapter contract: any exception is failure
@@ -617,6 +620,7 @@ def _deliver_important_to_binding(
     meta[META_KEY_RECIPIENT_KEY] = recipient_key
     meta[META_KEY_DELIVERY_EXTERNAL_ID] = delivery_external_id
     meta[META_KEY_ROLE_CREATED_AT] = role_created_at
+    meta[META_KEY_ROLE_ROW_ID] = role_row_id
     # REL-01 Fork 4 (Codex blocker): the no-adapter path serves Codex + streamable
     # recipients (no native wake adapter). Carry the reply-to on the PROSE so
     # two-way ROLE addressing works for them too — the SAME helper the native wake
@@ -744,6 +748,7 @@ def dispatch_role_send(
             # section pages on. Never a clock read taken here — see
             # RoleMessagePersisted.
             role_created_at=persisted.created_at,
+            role_row_id=persisted.role_row_id,
             reply_to_role=reply_to_role,
         )
     except (

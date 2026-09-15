@@ -284,6 +284,9 @@ class PeerInboxRequest:
     # newest-first timestamp cursor) — the two are never mixed. Default None = first
     # role page; existing instance-only callers are unaffected.
     role_after: str | None = None
+    # Observers (watch/status/hidden-output callers) are read-only: they must
+    # neither issue a page token nor create a display receipt.
+    observer: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +309,7 @@ class RoleMessagePersisted:
 
     message_id: str
     created_at: str
+    role_row_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +404,8 @@ class PeerInbox:
     role_page_truncated: bool = False
     role_truncation_reason: RoleTruncationReason | None = None
     role_byte_ceiling: int | None = None
+    role_read_page_token: str | None = None
+    role_read_page_status: str = "disabled"
 
 
 @dataclass(frozen=True, slots=True)

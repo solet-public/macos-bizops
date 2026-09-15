@@ -571,6 +571,8 @@ _EXPECTED_KEYS = {
     # §5) — additive, False/None until a session calls peer_mark_role_covered.
     "role_floor_applied",
     "role_history_cursor",
+    "role_read_page_token",
+    "role_read_page_status",
 }
 
 

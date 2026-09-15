@@ -32,6 +32,9 @@ def surface_digest(root: Path, relative_roots: Iterable[Path]) -> str:
     files escaping the real root are rejected: an attestation must not turn an
     ambiguous release tree into a confident digest.
     """
+    root_status = root.lstat()
+    if stat.S_ISLNK(root_status.st_mode) or not stat.S_ISDIR(root_status.st_mode):
+        raise ValueError(f"surface root is not a real directory: {root}")
     real_root = root.resolve(strict=True)
     entries = [
         entry
@@ -48,19 +51,25 @@ def surface_digest(root: Path, relative_roots: Iterable[Path]) -> str:
 
 def _surface_entries_for_root(real_root: Path, relative_root: Path) -> list[SurfaceEntry]:
     candidate = _resolve_surface_root(real_root, relative_root)
-    return [
-        _surface_entry(real_root, path)
-        for path in sorted(candidate.rglob("*"))
-        if not path.is_dir()
-    ]
+    entries: list[SurfaceEntry] = []
+    for path in sorted(candidate.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"surface contains a non-regular file: {path}")
+        if path.is_dir():
+            continue
+        entries.append(_surface_entry(real_root, path))
+    return entries
 
 
 def _resolve_surface_root(real_root: Path, relative_root: Path) -> Path:
     if relative_root.is_absolute() or ".." in relative_root.parts:
         raise ValueError(f"surface root must be a safe relative path: {relative_root}")
-    candidate = real_root / relative_root
-    if not candidate.is_dir() or candidate.is_symlink():
-        raise ValueError(f"surface root is not a real directory: {candidate}")
+    candidate = real_root
+    for component in relative_root.parts:
+        candidate /= component
+        status = candidate.lstat()
+        if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
+            raise ValueError(f"surface root is not a real directory: {candidate}")
     return candidate
 
 
@@ -79,12 +88,26 @@ def _surface_entry(real_root: Path, path: Path) -> SurfaceEntry:
 
 def reconciliation_surface_digest(code_root: Path) -> str:
     """Digest the reconcile allowlist frozen into an immutable release."""
-    plugin_roots = sorted(
-        path.relative_to(code_root)
-        for path in (code_root / "plugins").glob("*/src")
-        if path.is_dir()
-    )
+    plugins_root = code_root / "plugins"
+    _require_real_directory(plugins_root)
+    plugin_roots = [
+        _reconciliation_plugin_src_root(code_root, plugin_root)
+        for plugin_root in sorted(plugins_root.iterdir())
+    ]
     return surface_digest(code_root, (*plugin_roots, Path("solet_setup_contracts/src")))
+
+
+def _reconciliation_plugin_src_root(code_root: Path, plugin_root: Path) -> Path:
+    _require_real_directory(plugin_root)
+    src_root = plugin_root / "src"
+    _require_real_directory(src_root)
+    return src_root.relative_to(code_root)
+
+
+def _require_real_directory(path: Path) -> None:
+    status = path.lstat()
+    if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
+        raise ValueError(f"surface root is not a real directory: {path}")
 
 
 def release_surface_digest(code_root: Path) -> str:

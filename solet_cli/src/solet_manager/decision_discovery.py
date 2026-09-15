@@ -16,9 +16,14 @@ from .adapters import (
 from .contracts import ContractBundle
 from .errors import StateConflictError
 from .flow import SetupPlan, active_discovered_decision_ids
+from .inference_probe_policy import advisory_inference_probe_result
 from .models import CheckpointStatus, JsonValue
 from .operation_records import next_attempt
 from .transaction import Transaction, canonical_sha256
+
+_DEFAULT_ADAPTER_TIMEOUT_SECONDS = 30
+_INFERENCE_QUALIFICATION_TIMEOUT_SECONDS = 180
+_INFERENCE_QUALIFICATION_PROBE_REF = "setup::models.qualify_structured_actions"
 
 
 @dataclass(frozen=True)
@@ -215,6 +220,12 @@ def _candidate_contract(
         raw.get("qualification_probe_refs"),
         f"decision {decision_id!r} qualification probes are invalid",
     )
+    # Operator ruling rul_29e3c969 makes every inference qualification advisory.
+    # A resumed transaction owns its pinned contract bytes, so an arbitrary
+    # historical contract can still declare these refs.  Do not make that
+    # historical metadata an eligibility gate; the doctor reports it later.
+    if decision_id == "inference_model":
+        qualification_ids = ()
     sort_by = raw.get("sort_by")
     if sort_by != "recommended_first":
         raise StateConflictError(
@@ -269,7 +280,7 @@ def _run_discovery_probe(
         answers_fingerprint=canonical_sha256(plan.answers),
         approval_fingerprint=None,
         dry_run=True,
-        timeout_seconds=30,
+        timeout_seconds=_DEFAULT_ADAPTER_TIMEOUT_SECONDS,
         public_inputs={"decision_id": decision_id},
     )
     return invoke_adapter(registry, runner=str(definition["runner"]), request=request)
@@ -390,13 +401,17 @@ def _qualify_candidate(
             answers_fingerprint=canonical_sha256(plan.answers),
             approval_fingerprint=None,
             dry_run=True,
-            timeout_seconds=30,
+            timeout_seconds=_qualification_timeout_seconds(str(definition["probe_ref"])),
             public_inputs=public_inputs,
         )
-        result = invoke_adapter(
-            registry,
-            runner=str(definition["runner"]),
-            request=request,
+        result = advisory_inference_probe_result(
+            plan.answers,
+            request,
+            invoke_adapter(
+                registry,
+                runner=str(definition["runner"]),
+                request=request,
+            ),
         )
         status: dict[str, JsonValue] = {
             "checkpoint_status": result.checkpoint_status.value,
@@ -407,6 +422,14 @@ def _qualify_candidate(
             status["observed_summary"] = _qualification_observed_summary(result)
         statuses[probe_id] = status
     return statuses
+
+
+def _qualification_timeout_seconds(probe_ref: str) -> int:
+    """Keep reasoning-model qualification alive for its handler's full budget."""
+
+    if probe_ref == _INFERENCE_QUALIFICATION_PROBE_REF:
+        return _INFERENCE_QUALIFICATION_TIMEOUT_SECONDS
+    return _DEFAULT_ADAPTER_TIMEOUT_SECONDS
 
 
 def _qualification_observed_summary(result: OperationResult) -> str:

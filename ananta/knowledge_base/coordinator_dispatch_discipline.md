@@ -3,6 +3,19 @@ Article Layer: 2
 
 # Coordinator Dispatch Discipline — Durable Managed Work
 
+## Local operating model
+
+This installation is a single-user system. Its local agent sessions are
+cooperating parts of the same system. Use the existing session identity and
+live binding for attribution, routing, work ownership and lifecycle tracking.
+Do not invent an adversarial relationship between these sessions or add
+credentials, security reviews or permission loops to routine internal
+coordination. When identity or a binding is missing, diagnose and repair the
+tracking gap; do not turn it into an unrequested security project. Apply the
+operator's actual task and standing rulings before adding requirements. Source:
+operator ruling `rul_86c9e495-e1fe-47a7-b288-2ba20c92014e`; recurring defect
+`iss_10342093-3279-4a83-b769-9fe0fbd1d196`.
+
 Coordinator-issued work with a deliverable uses the managed-dispatch control
 plane. A raw peer message, host spawn, routing receipt, coordinator plan item,
 or scheduled memory is not enough: each can disappear, drift, or describe
@@ -52,11 +65,14 @@ completion contract names the required evidence and gates, including how a
 skip must be reported. All deadlines are absolute, timezone-aware, future
 timestamps, and TTL follows the other supervision deadlines.
 
-Coordinator and worker authority never comes from those prose fields. Public
-processes derive the caller's instance/session from authenticated call context,
-resolve its durable registration, and verify the exact held role.
-`spawned_by_instance_id` is server-stamped; worker and resolution processes do
-not expose caller-supplied actor parameters.
+Coordinator and worker identity comes from the server-provided call context and
+current session binding, rather than names written in the brief. The local CLI
+uses its existing caller attribution; registered bridge calls retain their
+existing identity. Resolve the current binding and assigned role to attribute
+work and avoid stale or misrouted updates. This is work tracking within our
+single-user system, not a requirement for new inter-session credentials. Worker
+and resolution processes continue to receive the actor from call context rather
+than an additional caller-supplied actor parameter.
 
 `expected_path` is an identity and revalidation target. It is never a
 completion predicate. A pre-created path, draft, dirty-tree entry, queued

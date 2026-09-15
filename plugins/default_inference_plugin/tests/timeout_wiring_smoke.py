@@ -36,6 +36,7 @@ from ananta.interfaces import (  # noqa: E402
     InferenceRequest,
     InferenceTimeoutError,
 )
+
 from default_inference_plugin.providers.lm_studio_provider import (  # noqa: E402
     LMStudioProvider,
 )
@@ -91,6 +92,32 @@ class _RecordingSession:
         return _FakeResponse()
 
 
+class _ModelsResponse:
+    """Minimal successful response for the ``/models`` readiness probe."""
+
+    def __init__(self, payload: object) -> None:
+        self._payload = payload
+
+    @staticmethod
+    def raise_for_status() -> None:
+        return None
+
+    def json(self) -> object:
+        return self._payload
+
+
+class _ModelsSession:
+    """HTTP-session double for model-loaded readiness checks."""
+
+    def __init__(self, payload: object) -> None:
+        self.payload = payload
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def get(self, url: str, **kwargs: Any) -> _ModelsResponse:
+        self.calls.append((url, kwargs))
+        return _ModelsResponse(self.payload)
+
+
 def _make_request() -> InferenceRequest:
     return InferenceRequest(
         prompt="ping",
@@ -143,10 +170,41 @@ def test_session_timeout_surfaces_as_inference_timeout_error() -> None:
     )
 
 
+def test_model_loaded_is_required_for_availability() -> None:
+    provider = LMStudioProvider("http://localhost:1234/v1", "test-model", _TIMEOUT_SECONDS)
+    unavailable_session = _ModelsSession({"data": []})
+    provider.session = unavailable_session  # type: ignore[assignment]
+
+    unavailable = provider.validate_availability()
+    unavailable_error = unavailable.get("error")
+    _check(
+        unavailable.get("action_status") == ActionStatus.ERROR.value,
+        "a reachable LM Studio with no loaded model is not available",
+    )
+    _check(
+        isinstance(unavailable_error, dict)
+        and "Configured model 'test-model' is not loaded" in unavailable_error.get("message", ""),
+        "the no-model readiness error names the configured model",
+    )
+    _check(
+        unavailable_session.calls == [("http://localhost:1234/v1/models", {"timeout": 2})],
+        "availability checks the OpenAI-compatible models endpoint",
+    )
+
+    ready_session = _ModelsSession({"data": [{"id": "test-model"}]})
+    provider.session = ready_session  # type: ignore[assignment]
+    available = provider.validate_availability()
+    _check(
+        available.get("action_status") == ActionStatus.COMPLETED.value,
+        "availability succeeds only when the configured model is advertised as loaded",
+    )
+
+
 def main() -> int:
     print("=== timeout_wiring_smoke (lm_studio_provider dead-timeout fix 2026-07-01) ===")
     test_post_carries_configured_timeout()
     test_session_timeout_surfaces_as_inference_timeout_error()
+    test_model_loaded_is_required_for_availability()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

@@ -90,7 +90,7 @@ def _answers(
     }
     if autostart is not None:
         decisions["autostart"] = autostart
-    return {"decisions": decisions, "consents": {"system_change_consent": True}}
+    return {"decisions": decisions, "consents": {"system_change_consent": True}, "public_inputs": {"lm_studio_base_url": "http://localhost:1234/v1"}}
 
 
 def _seed() -> SeedLock:

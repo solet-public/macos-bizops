@@ -34,10 +34,9 @@ from _harness import HOOKS_DIR, PLUGIN_ROOT, Results, preflight  # noqa: E402
 # Stop hook, inbox_consumer.py, which is deliberately SYNCHRONOUS -- measured
 # live (workbench/2026-08-24_cdx06_isolated_stop_hook_proof.md) that an
 # async hook's decision output is discarded, so only a synchronous hook can
-# gate/continue a turn. R1 extends its bounded Stop park to 2400 seconds;
-# the paired 2430-second manifest timeout is a runtime contract, not a
-# decorative setting, and reports its execution on every run regardless of
-# outcome (the CDX-06 part C honesty field).
+# gate/continue a turn. The finite observer has an eight-second manifest
+# deadline around its two-second wake and report children; unknown wake results
+# deliberately do not report a completed observation.
 EXPECTED = Counter(
     {
         ("SessionStart", "startup|resume|clear", "step_zero_reminder.js"): 1,
@@ -226,8 +225,8 @@ def _record_entry(
         res.check("async" not in entry, f"{script} has no undeclared async mode")
     if script == "inbox_consumer.py":
         res.check(
-            entry.get("timeout") == 2430,
-            "inbox consumer has the paired 2430-second Stop timeout",
+            entry.get("timeout") == 8,
+            "inbox consumer has the paired 8-second Stop timeout",
             repr(entry.get("timeout")),
         )
     referenced.add(script)

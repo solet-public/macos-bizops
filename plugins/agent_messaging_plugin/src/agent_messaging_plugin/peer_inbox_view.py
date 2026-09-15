@@ -113,4 +113,6 @@ def serialize_peer_inbox_page(
             else None
         ),
         "role_byte_ceiling": page.role_byte_ceiling,
+        "role_read_page_token": page.role_read_page_token,
+        "role_read_page_status": page.role_read_page_status,
     }

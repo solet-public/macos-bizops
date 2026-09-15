@@ -243,7 +243,8 @@ def build_initial_vertex_action(
     action_def["flow_id"] = flow_id
 
     arguments = action_def.setdefault("arguments", {})
-    prompt = arguments.setdefault("prompt", {})
+    params = arguments.setdefault("params", {})
+    prompt = params.setdefault("prompt", {})
 
     # CRITICAL: Remove observation key entirely so _is_processor_callback() returns False.
     # This ensures the generic non-callback INPUT storage path fires.

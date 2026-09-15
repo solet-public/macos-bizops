@@ -68,6 +68,7 @@ class CreateManager:
         decision_selections: dict[str, JsonValue] | None = None,
         decision_source: str = "flag",
         decision_sources: dict[str, str] | None = None,
+        stop_after_stage: str | None = None,
     ) -> CommandResult:
         """Execute the current approved preview through the resumable transaction."""
 
@@ -82,4 +83,5 @@ class CreateManager:
             decision_selections=decision_selections,
             decision_source=decision_source,
             decision_sources=decision_sources,
+            stage_limit=stop_after_stage,
         )

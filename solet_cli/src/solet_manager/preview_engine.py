@@ -39,6 +39,7 @@ from .flow import (
     static_decision_prompts,
     validate_stage_probe_state,
 )
+from .inference_probe_policy import advisory_inference_probe_result
 from .models import CheckpointStatus, CommandResult, ExitCode, JsonValue
 from .operation_records import next_attempt, operation_request
 from .paths import ManagerPaths
@@ -833,7 +834,11 @@ def _probe_operations(
             attempt=next_attempt(transaction, operation.operation_id),
             answers_fingerprint=canonical_sha256(plan.answers),
         )
-        result = invoke_adapter(registry, runner=operation.runner, request=request)
+        result = advisory_inference_probe_result(
+            transaction.answers,
+            request,
+            invoke_adapter(registry, runner=operation.runner, request=request),
+        )
         results[operation.operation_id] = result
         if _operation_probe_blocks(operation.requires_confirmation, result):
             failures.append(operation.operation_id)

@@ -8,6 +8,9 @@ from collections.abc import Callable
 from typing import TextIO
 
 from .installation_doctor import READINESS_PUBLIC_INPUT_KEYS, probe_handlers
+from .lm_studio_provisioning import PUBLIC_INPUT_KEYS as LM_STUDIO_PUBLIC_INPUT_KEYS
+from .lm_studio_provisioning import operation_handlers as lm_studio_operations
+from .lm_studio_provisioning import probe_handlers as lm_studio_probes
 from .setup_adapter_contract import (
     AdapterInputError,
     AdapterRequest,
@@ -29,6 +32,7 @@ _IDENTITY_INPUT_REFS = {
     "hydration::codex.install_plugin",
 }
 _ALLOWED_PUBLIC_INPUTS: dict[str, frozenset[str]] = {
+    **dict.fromkeys((*lm_studio_operations(), *lm_studio_probes()), LM_STUDIO_PUBLIC_INPUT_KEYS),
     "hydration::shell.install": frozenset({"git_controller_name"}),
     "service_interface::embedding_service.get_embedding_dimension": (
         READINESS_PUBLIC_INPUT_KEYS
@@ -36,6 +40,7 @@ _ALLOWED_PUBLIC_INPUTS: dict[str, frozenset[str]] = {
     "genesis::solet.run": frozenset(
         {"solet_name", "clone_directory", "setup_profile", "autostart"}
     ),
+    "genesis::autostart.install": frozenset({"setup_profile", "autostart"}),
     "genesis::solet.verify": frozenset({"autostart"}),
     "genesis::autostart.verify": frozenset({"autostart"}),
     "setup::coding_agents.verify_plugins": frozenset({"selected_coding_agents"}),
@@ -146,6 +151,8 @@ def _validate_operation_inputs(request: AdapterRequest) -> JsonObject | None:
     allowed = _ALLOWED_PUBLIC_INPUTS.get(request.operation_ref, frozenset())
     if set(request.public_inputs) - allowed:
         return _protocol_failure(request)
+    if request.operation_ref == "genesis::autostart.install":
+        return _validate_autostart_install_inputs(request)
     if request.operation_ref not in _IDENTITY_INPUT_REFS:
         return None
     expected: JsonObject = {
@@ -160,6 +167,16 @@ def _validate_operation_inputs(request: AdapterRequest) -> JsonObject | None:
         if expected["autostart"] not in {"enabled", "disabled"}:
             return _protocol_failure(request)
     if request.public_inputs != expected:
+        return _protocol_failure(request)
+    return None
+
+
+def _validate_autostart_install_inputs(request: AdapterRequest) -> JsonObject | None:
+    setup_profile = request.public_inputs.get("setup_profile")
+    autostart = request.public_inputs.get("autostart")
+    if not isinstance(setup_profile, str) or not setup_profile:
+        return _protocol_failure(request)
+    if autostart not in {"enabled", "disabled"}:
         return _protocol_failure(request)
     return None
 

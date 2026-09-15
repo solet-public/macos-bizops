@@ -20,33 +20,24 @@ hook returning `{"decision": "block", "reason": "..."}` DOES force Codex to
 continue the turn, feeding `reason` back as the next input -- confirmed live,
 nine consecutive forced continuations in one test run.
 
-This is a bounded park for a FUTURE delivery, not the retired unbounded
-waiter. `solet wake --max-wait 2400` waits for a sidecar notification for at
-most forty minutes, then returns one bit. The 2026-09-03 live stock-Codex
-0.149.0 probe registered a 2410-second synchronous Stop timeout, remained
-live for 77.576 seconds, and produced the forced continuation after release;
-the paired shipped 2430-second registration leaves time for this hook's wake
-and honesty-report subprocesses. A managed-drive / `drive_session` delivery
-can still start a turn sooner; this path keeps an otherwise idle pane parked
-long enough to receive a direct watcher delivery.
+This hook never parks for a FUTURE delivery. `solet wake --max-wait 0` is a
+bounded observation of the ALREADY-ARMED sidecar spool. Native qualified
+driving and bounded reconciliation own future delivery. The paired eight-second
+registration leaves a small startup margin around the two-second wake and
+honesty-report subprocess limits.
 
 `solet wake` is the SAME primitive Claude's `wake_waiter.py` blocks on, read
 non-blockingly here instead: it reads the session's ALREADY-ARMED sidecar
 watcher's spool (both Codex host drivers, `codex_tmux.py` and
 `codex_app_server.py`, arm the same `--no-claim` sidecar `tmux_adapter.py`
 arms for Claude, so the spool exists for a managed Codex worker today) and
-reports the NEW lines since the last time anything read it -- so this hook's
-own calls are what drain the spool's notification backlog. Once wake finds an
-arrival, the hook also invokes the local CLI's ``inbox`` command. That command
-is the single MSG-04 reader: it drains both independently-paged durable
-sections to their newest-first backward frontiers, including ``role_after``
-until ``next_role_cursor`` is null. The hook still conveys no message content
-in its decision reason; the command's stdout is discarded and the continued
-turn remains the place where the model acts.
+reports the NEW lines since the last time anything read it. A pending result
+forces one continued model turn, which is the sole reader of the durable inbox.
+This hook never invokes ``inbox`` or otherwise drains message content.
 
-Part C, the honesty field: `report_inbox_consumption` is called on EVERY
-invocation of this hook, whether or not anything was found pending. That
-call, not the block/continue decision, is what lets
+Part C, the honesty field: `report_inbox_consumption` is called only after a
+successful `pending` or `empty` observation. That call, not the block/continue
+decision, is what lets
 `session_inbox_consumption_status` distinguish "this session's consumer has
 never run" (no row, `resolved=False`) from "it ran and found nothing" (a
 fresh `checked_at`, null `pending_found_at`) from "it ran and found
@@ -68,8 +59,10 @@ Exit contract: this hook ALWAYS exits 0. `decision:block` in the JSON stdout
 payload is what asks Codex to continue, not a nonzero exit -- unlike
 Claude's Stop-hook contract (exit 2 = wake), Codex's is JSON-body-driven
 (confirmed live in the isolated proof above). A broken wake or report path
-must never trap the session in a failing Stop hook: any subprocess failure
-here is swallowed, logged to stderr, and treated as "nothing pending".
+must never trap the session in a failing Stop hook. A wake timeout, exception,
+malformed output, or non-contract exit is `unknown`: it is logged to stderr
+and does not report a successful check. A report failure never changes a
+completed pending/empty observation.
 
 Python since 2026-08-08 (see `wake_waiter.py`'s own note): every runtime
 this plugin uses declares `python3` as a guaranteed prerequisite, but Claude
@@ -96,17 +89,19 @@ import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 REPORT_PROCESS_KEY = "plugin::agent_messaging_plugin::report_inbox_consumption"
 RUNTIME = "codex"
 
-# The paired Stop registration is 2430 seconds: 2400 for the long poll, five
-# for the child-process timeout margin, and fifteen for the always-following
-# report_inbox_consumption call, with a small startup margin. Keep this value
-# and hooks.json coupled; Codex enforces the manifest timeout.
-_WAKE_MAX_WAIT_S = 2400
+# Keep these values coupled to hooks.json. The Stop hook must remain finite
+# even if its configured bridge child hangs.
+_WAKE_MAX_WAIT_S = 0
+_CHILD_TIMEOUT_S = 2
 _WAKE_EXIT_PENDING = 2
+_WAKE_EXIT_EMPTY = 0
+
+CheckOutcome = Literal["pending", "empty", "unknown"]
 
 _NUDGE = (
     "Your peer-message inbox has unread deliveries that arrived while this "
@@ -158,53 +153,33 @@ def _fleet_environment() -> tuple[str, str, Path] | None:
     return values["AGENT_INSTANCE_ID"], values["AGENT_SESSION_ID"], cli
 
 
-def _check_pending(cli: Path) -> bool:
-    """Non-blocking-in-spirit existence check: did the session's ALREADY-ARMED
-    sidecar watcher's spool have anything new queued right now? Never raises
-    -- a broken wake path reports "nothing pending", never a crash."""
+def _check_pending(cli: Path) -> CheckOutcome:
+    """Read the already-present spool once, without waiting for a future wake."""
     try:
         result = subprocess.run(
             [str(cli), "wake", "--max-wait", str(_WAKE_MAX_WAIT_S)],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
             check=False,
-            timeout=_WAKE_MAX_WAIT_S + 5,
+            text=True,
+            timeout=_CHILD_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"inbox_consumer: could not run the configured wake CLI: {exc}", file=sys.stderr)
-        return False
-    if result.returncode not in (0, _WAKE_EXIT_PENDING):
+        return "unknown"
+    if result.stdout.strip():
+        print("inbox_consumer: wake CLI emitted malformed stdout", file=sys.stderr)
+        return "unknown"
+    if result.returncode == _WAKE_EXIT_PENDING:
+        return "pending"
+    if result.returncode == _WAKE_EXIT_EMPTY:
+        return "empty"
+    if result.returncode not in (_WAKE_EXIT_EMPTY, _WAKE_EXIT_PENDING):
         print(
             f"inbox_consumer: wake CLI exited with status {result.returncode}",
             file=sys.stderr,
         )
-    return result.returncode == _WAKE_EXIT_PENDING
-
-
-def _drain_pending_inbox(cli: Path) -> None:
-    """Read both durable inbox sections to the CLI's proven MSG-04 frontier.
-
-    ``inbox`` exits non-zero for a partial section, so success is the only
-    outcome presented as a completed park drain. Five seconds keeps the fixed
-    2430-second Stop-hook envelope intact after its 2400-second wake and the
-    existing fifteen-second honesty-report allowance.
-    """
-    try:
-        result = subprocess.run(
-            [str(cli), "inbox"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(f"inbox_consumer: could not drain the parked inbox: {exc}", file=sys.stderr)
-        return
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
-        print(f"inbox_consumer: parked inbox drain did not complete: {detail}", file=sys.stderr)
+    return "unknown"
 
 
 def _report(
@@ -215,7 +190,8 @@ def _report(
     checked_at: str,
     pending: bool,
 ) -> None:
-    """Part C -- always called, whether or not `pending` is True. Best-effort:
+    """Record one successfully observed pending/empty state, best effort.
+
     a failed report never blocks the hook's own decision, it only leaves the
     honesty row stale, which `session_inbox_consumption_status` surfaces as
     exactly that (an old `checked_at`), not as a crash."""
@@ -240,9 +216,9 @@ def _report(
             capture_output=True,
             check=False,
             text=True,
-            timeout=15,
+            timeout=_CHILD_TIMEOUT_S,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except Exception as exc:  # noqa: BLE001 -- report faults cannot cancel a pending continuation.
         print(f"inbox_consumer: report_inbox_consumption call failed: {exc}", file=sys.stderr)
         return
     if proc.returncode != 0:
@@ -265,17 +241,19 @@ def _run() -> dict[str, Any]:
         # Bound only to Stop; a misconfigured registration should not crash.
         return {}
     checked_at = datetime.now(UTC).isoformat()
-    pending = _check_pending(cli)
-    if pending:
-        _drain_pending_inbox(cli)
+    outcome = _check_pending(cli)
+    if outcome not in {"pending", "empty"}:
+        if outcome != "unknown":
+            print(f"inbox_consumer: invalid wake outcome: {outcome!r}", file=sys.stderr)
+        return {}
     _report(
         cli,
         agent_instance_id=agent_instance_id,
         agent_session_id=agent_session_id,
         checked_at=checked_at,
-        pending=pending,
+        pending=outcome == "pending",
     )
-    if pending:
+    if outcome == "pending":
         return {"decision": "block", "reason": _NUDGE}
     return {}
 

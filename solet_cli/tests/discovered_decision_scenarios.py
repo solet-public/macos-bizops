@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+import solet_manager.doctor_inference_qualification as doctor_inference_qualification_module
 import solet_manager.lifecycle as lifecycle_module
 from discovered_decision_barrier_scenarios import run_barrier_scenario
 from discovered_decision_entry_fixture import prepare_with_decision_review_entry_probe
@@ -59,13 +60,14 @@ from discovered_decision_support import (
     operation_executor_module,
     preview_engine_module,
 )
+from solet_manager.adapters import OperationRequest, OperationResult
 from solet_manager.config import CreateConfig
 from solet_manager.contracts import ContractBundle, target_contract_directory
 from solet_manager.create import CreateManager
 from solet_manager.decision_prompt import prompt_discovered_decisions
 from solet_manager.doctor import InstallationDoctor
 from solet_manager.errors import ContractError, ProbeDriftError, StateError
-from solet_manager.flow import initial_stage_probe_statuses
+from solet_manager.flow import SetupPlan, initial_stage_probe_statuses
 from solet_manager.lifecycle import LifecycleManager
 from solet_manager.models import CheckpointStatus, CommandResult, JsonValue
 from solet_manager.paths import ManagerPaths
@@ -115,10 +117,10 @@ def _assert_pre_model_projection(
     answers = cast(dict[str, object], data["normalized_answers"])
     public_inputs = cast(dict[str, object], answers["public_inputs"])
     _check(
-        "lm_studio_base_url" not in public_inputs
+        public_inputs.get("lm_studio_base_url") == "http://localhost:1234/v1"
         and not set(_rendered_model_operation_inputs(data["operations"]))
         and _has_no_model_operation_requests(fake),
-        "pre-model frontier projects no model input and invokes no model operation",
+        "system-dependencies frontier projects the provisioning URL without selecting or configuring models early",
     )
 
 
@@ -607,6 +609,150 @@ def _decision_failure_scenarios(
     _models_frontier_missing_adapter_scenario(root, original_invoke_adapter)
 
 
+def _representative_inference_fallback_scenario(
+    root: Path,
+    selections: dict[str, str],
+) -> None:
+    """A failed representative probe warns in doctor without blocking setup."""
+
+    paths, config, manager, _transaction = _prepare(root, name="representativefallback")
+    fake = FakeAdapter()
+    _set_invoke_adapter(fake)
+    _dependencies, _genesis, models_preview = _advance_to_model_review(
+        manager,
+        config,
+        decision_selections=selections,
+    )
+    _check(
+        models_preview.status == "preview_ready"
+        and _inference_qualification_refs(fake) == set(),
+        "inference qualification does not gate the models frontier",
+    )
+    _check(
+        _inference_qualification_timeout_seconds(fake) == set(),
+        "manager does not spend the models frontier on inference qualification",
+    )
+    _models, _coding_agents, create_result = _finish_from_model_review(
+        manager,
+        config,
+        selections,
+    )
+    original_advisory_invoke = doctor_inference_qualification_module.invoke_adapter
+    try:
+        doctor_inference_qualification_module.invoke_adapter = partial(
+            _representative_timeout_adapter,
+            fake,
+        )
+        doctor = InstallationDoctor(paths=paths, contract_directory=_CONTRACTS).run(config.name)
+    finally:
+        doctor_inference_qualification_module.invoke_adapter = original_advisory_invoke
+    _check(
+        create_result.status == "verified"
+        and doctor.exit_code == 0
+        and doctor.data.get("setup_stage_blockers") == []
+        and _inference_qualification_warnings_match(doctor),
+        "timed-out representative inference stays eligible and surfaces only doctor warnings",
+    )
+    _check(
+        _representative_warning_preserves_timeout_shape(doctor),
+        "doctor retains the recorded adapter-timeout no-evidence shape",
+    )
+def _inference_qualification_refs(fake: FakeAdapter) -> set[str]:
+    return {
+        request.operation_ref
+        for request in fake.requests
+        if request.probe_purpose == "decision_qualification"
+        and request.public_inputs.get("decision_id") == "inference_model"
+    }
+
+
+def _inference_qualification_timeout_seconds(fake: FakeAdapter) -> set[int]:
+    return {
+        request.timeout_seconds
+        for request in fake.requests
+        if request.probe_purpose == "decision_qualification"
+        and request.operation_ref == "setup::models.qualify_structured_actions"
+    }
+
+
+def _representative_timeout_adapter(
+    fake: FakeAdapter,
+    registry: object,
+    *,
+    runner: str,
+    request: OperationRequest,
+) -> OperationResult:
+    if request.operation_id not in {
+        "structured_action_qualification",
+        "representative_inference_probe",
+    }:
+        return fake(registry, runner=runner, request=request)
+    fake.requests.append(request)
+    return fake._result(
+        request,
+        CheckpointStatus.FAILED,
+        error_kind="adapter_timeout",
+        repair="Inspect the target-local adapter and retry after resolving the timeout.",
+    )
+
+
+def _representative_probe_timeout_seconds(fake: FakeAdapter) -> int | None:
+    requests = [
+        request for request in fake.requests if request.operation_id == "representative_inference_probe"
+    ]
+    return requests[0].timeout_seconds if len(requests) == 1 else None
+
+
+def _representative_warning(doctor: CommandResult) -> dict[str, object] | None:
+    advisories = doctor.data.get("advisories")
+    if not isinstance(advisories, list):
+        return None
+    return next(
+        (
+            item
+            for item in advisories
+            if isinstance(item, dict)
+            and item.get("check_id") == "doctor::representative_inference_qualification"
+        ),
+        None,
+    )
+
+
+def _representative_warning_matches(doctor: CommandResult) -> bool:
+    warning = _representative_warning(doctor)
+    return (
+        isinstance(warning, dict)
+        and warning.get("status") == "warn"
+        and warning.get("blocking") is False
+        and warning.get("reason_code") == "representative_inference_qualification_failed"
+    )
+
+
+def _inference_qualification_warnings_match(doctor: CommandResult) -> bool:
+    advisories = doctor.data.get("advisories")
+    if not isinstance(advisories, list):
+        return False
+    warning_ids = {
+        item.get("check_id")
+        for item in advisories
+        if isinstance(item, dict)
+        and item.get("status") == "warn"
+        and item.get("blocking") is False
+    }
+    return "doctor::representative_inference_qualification" in warning_ids
+
+
+def _representative_warning_preserves_timeout_shape(doctor: CommandResult) -> bool:
+    warning = _representative_warning(doctor)
+    observed = warning.get("observed") if isinstance(warning, dict) else None
+    return (
+        isinstance(observed, dict)
+        and observed.get("error_kind") == "adapter_timeout"
+        and observed.get("summary")
+        == "No adapter evidence was returned; checkpoint status is failed."
+    )
+
+
 def _provisional_registry_scenario(root: Path) -> None:
     """The create-execution materialization seam retains incomplete setup."""
 
@@ -833,7 +979,7 @@ def _stage_boundary_scenarios(root: Path) -> None:
     first = manager.preview(config, decision_selections=selections)
     first_count = sum(request.probe_purpose == "preview" for request in chain_adapter.requests)
     _check(
-        first_count == 8,
+        first_count == 15,
         "system-dependencies preview includes the consented tool provisioners",
     )
     manager.create(
@@ -858,7 +1004,7 @@ def _stage_boundary_scenarios(root: Path) -> None:
         all(
             (
                 first.data.get("frontier") == ["system_dependencies"],
-                first_count == 8,
+                first_count == 15,
                 second.data.get("frontier") == ["genesis"],
                 second_count == 2,
                 third.status == "preview_ready",
@@ -1174,6 +1320,13 @@ def _legacy_contract_resume_scenario(
         "resume normalizes the known legacy Background Items postcondition declaration",
     )
     _check(
+        legacy_bundle.flow["decisions"]["inference_model"]["option_source"][
+            "candidate_contract"
+        ]["qualification_probe_refs"]
+        == [],
+        "resumed served inference remains eligible when qualification times out",
+    )
+    _check(
         flow_path.read_bytes() == frozen_bytes,
         "resume normalization never mutates the pinned legacy flow bytes",
     )
@@ -1199,6 +1352,75 @@ def _legacy_contract_resume_scenario(
     )
 
 
+def _any_pinned_inference_contract_scenario(root: Path) -> None:
+    """A non-legacy pinned inference contract cannot restore a probe gate."""
+
+    _paths, config, _manager, transaction = _prepare(root, name="any-pinned-inference")
+    contract_directory = target_contract_directory(config.target)
+    flow_path = contract_directory / "macos_setup_flow.json"
+    pinned_flow = json.loads(flow_path.read_text(encoding="utf-8"))
+    candidate_contract = pinned_flow["decisions"]["inference_model"]["option_source"][
+        "candidate_contract"
+    ]
+    candidate_contract["qualification_probe_refs"] = [
+        "structured_action_qualification",
+        "representative_inference_probe",
+    ]
+    flow_path.write_text(json.dumps(pinned_flow, indent=2), encoding="utf-8")
+    pinned_bundle = ContractBundle.load(
+        source_revision="non-legacy-pinned-flow",
+        directory=contract_directory,
+        resume_compatibility=True,
+    )
+    pinned_refs = pinned_bundle.flow["decisions"]["inference_model"]["option_source"][
+        "candidate_contract"
+    ]["qualification_probe_refs"]
+    _check(
+        pinned_refs == ["structured_action_qualification", "representative_inference_probe"],
+        "non-legacy pinned flow retains its exact qualification refs",
+    )
+
+    fake = FakeAdapter(fail_qualification="inference_model")
+    _set_invoke_adapter(fake)
+    plan = SetupPlan(
+        answers=transaction.answers,
+        operations=(),
+        unresolved_decisions=(),
+        unresolved_consents=(),
+    )
+    discovery = decision_discovery_module._discover_decision(  # noqa: SLF001
+        bundle=pinned_bundle,
+        transaction=transaction,
+        plan=plan,
+        registry=cast(object, None),
+        decision_id="inference_model",
+        selected="inference_model.recommended",
+    )
+    candidates = discovery.prompt["candidates"]
+    _check(
+        discovery.errors == ()
+        and isinstance(candidates, list)
+        and len(candidates) == 2
+        and not _inference_qualification_refs(fake),
+        "served inference stays eligible for any pinned flow despite stale probe refs",
+    )
+
+    exact_refusal = decision_discovery_module._discover_decision(  # noqa: SLF001
+        bundle=pinned_bundle,
+        transaction=transaction,
+        plan=plan,
+        registry=cast(object, None),
+        decision_id="inference_model",
+        selected="not-returned-by-discovery",
+    )
+    _check(
+        len(exact_refusal.errors) == 1
+        and isinstance(exact_refusal.errors[0], dict)
+        and exact_refusal.errors[0].get("error_kind") == "decision_selection_ambiguous",
+        "inference eligibility waiver does not permit an undiscovered exact-model selection",
+    )
+
+
 def run_journal_resume_round_trip_scenario() -> None:
     """Drive the hermetic interrupted-apply resume guarantee in isolation."""
 
@@ -1211,6 +1433,8 @@ def run_journal_resume_round_trip_scenario() -> None:
             _applied_crash_scenario(Path(raw), original_write)
         with tempfile.TemporaryDirectory() as raw:
             _legacy_contract_resume_scenario(Path(raw), original_write)
+        with tempfile.TemporaryDirectory() as raw:
+            _any_pinned_inference_contract_scenario(Path(raw))
     finally:
         _set_invoke_adapter(original)
         _set_plan_builder(original_plan_builder)
@@ -1454,6 +1678,7 @@ def run_scenarios() -> None:
             context = _verified_scenario(root, original_plan_builder)
             _lifecycle_and_contract_scenario(context)
             _decision_failure_scenarios(root, context.selections, original)
+            _representative_inference_fallback_scenario(root, context.selections)
             _stage_boundary_scenarios(root)
             _corrupt_state_scenario(root)
             _applied_crash_scenario(root, original_write)

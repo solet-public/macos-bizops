@@ -68,10 +68,14 @@ if sys.version_info < (3, 11):  # noqa: UP036 -- see above; ruff assumes
 import json
 import os
 import subprocess
-import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+
+_OWNER_DIRECTORY = str(Path(__file__).resolve().parent)
+if _OWNER_DIRECTORY not in sys.path:
+    sys.path.insert(0, _OWNER_DIRECTORY)
+import coordination_owner  # noqa: E402 -- sibling path follows runtime floor
 
 _MARKER_DIR_ENV = "AGENT_HEARTBEAT_MARKER_DIR"
 _INSTANCE_ID_ENV = "AGENT_INSTANCE_ID"
@@ -94,26 +98,14 @@ def _warn(message: str) -> None:
         pass
 
 
-def _marker_path(marker_dir: str, agent_instance_id: str) -> Path:
-    return Path(marker_dir) / f"{agent_instance_id}.stamp"
+def _marker_path(identity_dir: Path, agent_instance_id: str) -> Path:
+    """The heartbeat's own state below a verified receipt-derived root.
 
-
-def _fallback_marker_dir() -> str | None:
-    """Return the established temporary marker root for a mis-wired worker.
-
-    A managed worker with no declared marker dir still needs a stable place
-    for its throttle marker and D-5.3 carry-forward record.  The sibling
-    rotation hook already uses this temp-root pattern for precisely that
-    frozen-environment migration case; it is deliberately not a guessed
-    project-relative path.
+    Keep the original instance id in the leaf for diagnostic continuity, but
+    never use the inherited shared marker directory as a namespace.  The
+    identity directory has already separated solet, instance, and session.
     """
-    path = Path(tempfile.gettempdir()) / "agent_heartbeat_markers"
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        _warn(f"could not create fallback marker root {path}: {exc}")
-        return None
-    return str(path)
+    return Path(identity_dir) / "heartbeat" / f"{agent_instance_id}.stamp"
 
 
 def _throttled(marker_path: Path) -> bool:
@@ -267,7 +259,15 @@ def _call_report_alive(agent_instance_id: str, failure_path: Path | None = None)
 
 
 def main() -> int:
-    marker_dir = os.environ.get(_MARKER_DIR_ENV, "").strip()
+    ownership = coordination_owner.verify("heartbeat", __file__)
+    if not ownership.eligible:
+        if ownership.managed:
+            coordination_owner.report_refusal(ownership)
+        return 0
+    identity_dir = coordination_owner.runtime_identity_directory(ownership)
+    if identity_dir is None:
+        _warn("verified heartbeat owner has no receipt-derived runtime state root")
+        return 0
     agent_instance_id = os.environ.get(_INSTANCE_ID_ENV, "").strip()
 
     if not agent_instance_id:
@@ -289,38 +289,7 @@ def main() -> int:
         # is exactly when a real one gets missed.
         return 0
 
-    if not marker_dir:
-        # MIGRATION-FAIL-OPEN GUARD, not a rename fix (2026-08-08). An
-        # instance id alone proves this session IS fleet-managed, so a
-        # missing marker dir here is never "unmanaged" -- it is managed
-        # AND MIS-WIRED (e.g. spawned before a wiring-variable rename
-        # landed; a process's env is frozen at spawn and cannot pick up a
-        # renamed variable in place). The prior combined check
-        # (`not marker_dir or not agent_instance_id`) could not tell this
-        # apart from the genuinely-unmanaged case and silently reclassified
-        # the whole running fleet as unmanaged after the 2026-08-08
-        # ANANTA_HEARTBEAT_MARKER_DIR -> AGENT_HEARTBEAT_MARKER_DIR rename,
-        # with liveness reporting stopped and no error anywhere. Fail LOUD
-        # on the contradiction, but still report: report_alive only needs
-        # the instance id -- the marker dir exists solely for throttling.
-        # The sibling rotation hook already carries this exact migration
-        # condition through a temporary marker root.  Reuse that established
-        # marker mechanism here: it gives D-5.3's failure record a durable
-        # location beside the throttle marker, and lets the next successful
-        # report consume it instead of losing the failure at this branch.
-        fallback = _fallback_marker_dir()
-        if fallback is None:
-            _call_report_alive(agent_instance_id)
-            return 0
-        _warn(
-            f"{_INSTANCE_ID_ENV} is set but {_MARKER_DIR_ENV} is NOT -- this "
-            "is a MANAGED session with a mis-wired heartbeat marker (its env "
-            "was frozen at spawn before a wiring-variable rename landed), "
-            f"not an unmanaged one. Using fallback marker root {fallback}.",
-        )
-        marker_dir = fallback
-
-    marker_path = _marker_path(marker_dir, agent_instance_id)
+    marker_path = _marker_path(identity_dir, agent_instance_id)
     if _throttled(marker_path):
         return 0
 

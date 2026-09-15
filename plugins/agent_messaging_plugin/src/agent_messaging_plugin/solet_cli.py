@@ -454,10 +454,8 @@ def expose_worker_cli(env: dict[str, str], solet_bin: str) -> None:
         return
     cli_dir = str(Path(solet_bin).parent)
     path_entries = env.get("PATH", "").split(os.pathsep)
-    if cli_dir in path_entries:
-        return
     env["PATH"] = os.pathsep.join(
-        [cli_dir, *[entry for entry in path_entries if entry]],
+        [cli_dir, *[entry for entry in path_entries if entry and entry != cli_dir]],
     )
 
 

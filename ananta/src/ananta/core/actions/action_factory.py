@@ -17,6 +17,7 @@ from ananta.constants import (
     TEMPLATE_VAR_SESSION_ID,
 )
 from ananta.core.actions.action_submission_types import QueuedAction
+from ananta.core.actions.inference_processor_templates import merge_processor_template
 from ananta.core.contexts.normalization import normalize_flow_id, normalize_session_id
 from ananta.core.domain.error_codes import ErrorCode
 from ananta.core.plugins.plugin_contracts import ActionStatus
@@ -67,33 +68,6 @@ def validate_process_arguments(
                 "provided_arguments": list(arguments.keys()),
             },
         )
-
-
-def _deep_merge(base: JsonDict, overrides: JsonDict) -> JsonDict:
-    """Deep merge two dictionaries, with overrides taking precedence.
-
-    Used for merging action_definition_template with customizations at runtime.
-
-    Args:
-        base: The base dictionary (e.g., from action_definition_template)
-        overrides: The override dictionary (e.g., from customizations merge)
-
-    Returns:
-        Merged dictionary with overrides taking precedence for matching keys
-    """
-    result = base.copy()
-
-    for key, override_value in overrides.items():
-        if key in result:
-            existing = result[key]
-            if isinstance(existing, dict) and isinstance(override_value, dict):
-                result[key] = _deep_merge(existing, override_value)
-            else:
-                result[key] = override_value
-        else:
-            result[key] = override_value
-
-    return result
 
 
 class TemplateEngine(Protocol):
@@ -695,9 +669,16 @@ class ActionFactory:
         user_content = self._build_customization_user_content(customizations)
 
         args = merged["arguments"]
-        if "prompt" not in args:
-            args["prompt"] = {}
-        prompt = args["prompt"]
+        params = args.get("params")
+        if not isinstance(params, dict):
+            raise FrameworkError(
+                message="process_results template must declare an object arguments.params",
+                error_code=ErrorCode.ACTION_INVALID_DEFINITION,
+                details={"process_key": inference_process_key},
+            )
+        if "prompt" not in params:
+            params["prompt"] = {}
+        prompt = params["prompt"]
         if isinstance(prompt, dict):
             self._enrich_result_processor_prompt(prompt, user_content, customizations, process_key)
 
@@ -734,9 +715,16 @@ class ActionFactory:
 
         user_content = self._build_customization_user_content(customizations)
         args = merged["arguments"]
-        if "prompt" not in args:
-            args["prompt"] = {}
-        prompt = args["prompt"]
+        params = args.get("params")
+        if not isinstance(params, dict):
+            raise FrameworkError(
+                message="process_error template must declare an object arguments.params",
+                error_code=ErrorCode.ACTION_INVALID_DEFINITION,
+                details={"process_key": process_error_key},
+            )
+        if "prompt" not in params:
+            params["prompt"] = {}
+        prompt = params["prompt"]
         if isinstance(prompt, dict):
             self._enrich_result_processor_prompt(
                 prompt, user_content, customizations, process_key,
@@ -1108,21 +1096,7 @@ class ActionFactory:
         if not base_template:
             return processor_template
 
-        override_args = processor_template.get("arguments", {})
-        if not isinstance(override_args, dict) or "prompt" not in override_args:
-            return _deep_merge(base_template, processor_template)
-
-        # Smart merge: inherit model config but REPLACE prompt
-        merged = _deep_merge(base_template, processor_template)
-        base_args = base_template.get("arguments", {})
-        merged_args = merged.get("arguments")
-
-        if isinstance(base_args, dict) and isinstance(merged_args, dict):
-            if "model" in base_args and "model" not in override_args:
-                merged_args["model"] = base_args["model"]
-            merged_args["prompt"] = override_args["prompt"]
-
-        return merged
+        return merge_processor_template(base_template, processor_template)
 
     def _ensure_action_name(self, resolved_obj: dict[str, object]) -> None:
         """Ensure resolved action has a name field."""
@@ -1146,11 +1120,6 @@ class ActionFactory:
         normalized_session = normalize_session_id(results.get(TEMPLATE_VAR_SESSION_ID))
         if normalized_session:
             resolved_obj[CONTEXT_KEY_SESSION_ID] = normalized_session
-            if "arguments" not in resolved_obj:
-                resolved_obj["arguments"] = {}
-            args = resolved_obj.get("arguments")
-            if isinstance(args, dict):
-                args[CONTEXT_KEY_SESSION_ID] = normalized_session
 
         normalized_flow = normalize_flow_id(results.get(TEMPLATE_VAR_FLOW_ID))
         if normalized_flow:

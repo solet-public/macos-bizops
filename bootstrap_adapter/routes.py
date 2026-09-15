@@ -6,11 +6,13 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from .dependency import dependency_closure_route
 from .homebrew import HomebrewInstallError, run_homebrew_install_required
+from .lm_studio import lm_studio_route
 from .models import (
     FORMULA_KEG_MARKER,
     SUPPORTED_POSTGRES_MAJOR,
@@ -24,6 +26,7 @@ from .models import (
 )
 from .postgres import (
     apply_postgres_configuration,
+    pgvector_package_available,
     postgres_configure_actions,
     postgres_evidence,
     postgres_incompatibility,
@@ -56,9 +59,17 @@ _ROUTES: dict[str, tuple[str, str]] = {
     "install_codex_cli": ("setup::coding_agents.install_codex", "operation"),
     "install_claude_cli": ("setup::coding_agents.install_claude", "operation"),
     "install_node": ("setup::coding_agents.install_node", "operation"),
+    "install_lm_studio": ("setup::lm_studio.install", "operation"),
+    "start_lm_studio_server": ("setup::lm_studio.start_server", "operation"),
+    "pull_lm_studio_embedding_model": ("setup::lm_studio.pull_embedding", "operation"),
+    "load_lm_studio_embedding_model": ("setup::lm_studio.load_embedding", "operation"),
+    "pull_lm_studio_inference_model": ("setup::lm_studio.pull_inference", "operation"),
+    "load_lm_studio_inference_model": ("setup::lm_studio.load_inference", "operation"),
+    "install_lm_studio_login_agent": ("setup::lm_studio.install_login_agent", "operation"),
     "install_postgresql": ("bootstrap::postgres.install", "operation"),
     "configure_postgresql": ("bootstrap::postgres.configure_solet", "operation"),
     "git_checkout_valid": ("setup::git.verify_checkout", "probe"),
+    "minimum_physical_memory_valid": ("bootstrap::host.probe_physical_memory", "probe"),
     "python_version_valid": ("bootstrap::python.probe_version", "probe"),
     "instance_environment_dependency_closure_valid": (
         "bootstrap::environment.probe_dependency_closure",
@@ -67,9 +78,63 @@ _ROUTES: dict[str, tuple[str, str]] = {
     "homebrew_available": ("bootstrap::homebrew.probe", "probe"),
     "postgres_binary_version_valid": ("bootstrap::postgres.probe_version", "probe"),
     "postgres_ready": ("bootstrap::postgres.probe_ready", "probe"),
+    "pgvector_package_available": ("bootstrap::postgres.probe_pgvector_package", "probe"),
     "postgres_role_policy_valid": ("bootstrap::postgres.probe_role_policy", "probe"),
     "pgvector_ready": ("bootstrap::postgres.probe_pgvector", "probe"),
+    "lm_studio_cli_available": ("setup::lm_studio.cli_available", "probe"),
+    "lm_studio_server_ready": ("setup::lm_studio.server_ready", "probe"),
+    "lm_studio_embedding_artifact_present": ("setup::lm_studio.embedding_artifact_present", "probe"),
+    "lm_studio_embedding_model_served": ("setup::lm_studio.embedding_model_served", "probe"),
+    "lm_studio_inference_artifact_present": ("setup::lm_studio.inference_artifact_present", "probe"),
+    "lm_studio_inference_model_served": ("setup::lm_studio.inference_model_served", "probe"),
+    "lm_studio_login_agent_valid": ("setup::lm_studio.login_agent_valid", "probe"),
+    "lm_studio_jit_disabled": ("setup::lm_studio.jit_disabled", "probe"),
 }
+
+_MINIMUM_PHYSICAL_MEMORY_BYTES = 24_000_000_000
+_REPAIR_MAX_LENGTH = 2048
+_POSTGRES_CONFIGURATION_REPAIR_GUIDANCE = (
+    "Inspect the PostgreSQL policy and resume after repairing the failed action."
+)
+
+
+def _postgres_configuration_repair(error: AdapterError) -> str:
+    """Keep subprocess diagnostics within the closed result-envelope repair cap."""
+
+    context = f"{error}. "
+    repair = f"{context}{_POSTGRES_CONFIGURATION_REPAIR_GUIDANCE}"
+    if len(repair) <= _REPAIR_MAX_LENGTH:
+        return repair
+    marker = f"... [truncated, {len(repair)} chars total]"
+    available_context = _REPAIR_MAX_LENGTH - len(marker) - len(
+        _POSTGRES_CONFIGURATION_REPAIR_GUIDANCE
+    )
+    if available_context < 0:
+        raise AdapterError("PostgreSQL repair guidance exceeds the envelope repair cap")
+    return (
+        f"{context[:available_context]}{marker}"
+        f"{_POSTGRES_CONFIGURATION_REPAIR_GUIDANCE}"
+    )
+
+_LM_STUDIO_OPERATION_IDS = frozenset(
+    {
+        "install_lm_studio",
+        "start_lm_studio_server",
+        "pull_lm_studio_embedding_model",
+        "load_lm_studio_embedding_model",
+        "pull_lm_studio_inference_model",
+        "load_lm_studio_inference_model",
+        "install_lm_studio_login_agent",
+        "lm_studio_cli_available",
+        "lm_studio_server_ready",
+        "lm_studio_embedding_artifact_present",
+        "lm_studio_embedding_model_served",
+        "lm_studio_inference_artifact_present",
+        "lm_studio_inference_model_served",
+        "lm_studio_login_agent_valid",
+        "lm_studio_jit_disabled",
+    }
+)
 
 _CODING_TOOL_ACQUISITIONS: dict[str, tuple[str, str, str]] = {
     "install_codex_cli": ("codex", "cask", "codex"),
@@ -223,6 +288,46 @@ def _git_checkout_route(request: Request, runtime: AdapterRuntime) -> dict[str, 
     return result(request, status="verified", evidence_items=evidence_items)
 
 
+def _physical_memory_route(request: Request, runtime: AdapterRuntime) -> dict[str, Any]:
+    """Refuse setup before model provisioning when host RAM is unsupported."""
+
+    completed = run_public(runtime, ["/usr/sbin/sysctl", "-n", "hw.memsize"])
+    observed = completed.stdout.strip() if completed is not None and completed.returncode == 0 else ""
+    memory_bytes = int(observed) if re.fullmatch(r"[1-9][0-9]*", observed) else None
+    supported = memory_bytes is not None and memory_bytes >= _MINIMUM_PHYSICAL_MEMORY_BYTES
+    evidence_items = [
+        evidence(
+            runtime,
+            evidence_id="host.physical_memory_bytes",
+            kind="host_capacity",
+            status="verified" if supported else "blocked",
+            summary="Physical memory was measured before dependency and model provisioning.",
+            observed=memory_bytes if memory_bytes is not None else "unavailable",
+            expected=_MINIMUM_PHYSICAL_MEMORY_BYTES,
+            source="sysctl:hw.memsize",
+        )
+    ]
+    if memory_bytes is None:
+        return result(
+            request,
+            status="blocked",
+            error_kind="physical_memory_unavailable",
+            retry_safe=False,
+            evidence_items=evidence_items,
+            repair="Run /usr/sbin/sysctl -n hw.memsize successfully before setup; this host requires at least 24 GB of physical memory.",
+        )
+    if not supported:
+        return result(
+            request,
+            status="blocked",
+            error_kind="physical_memory_below_minimum",
+            retry_safe=False,
+            evidence_items=evidence_items,
+            repair="This Mac has less than 24 GB of physical memory. Use a supported host before setup downloads or loads local models.",
+        )
+    return result(request, status="verified", evidence_items=evidence_items)
+
+
 def _homebrew_probe_route(request: Request, runtime: AdapterRuntime) -> dict[str, Any]:
     brew = resolve_brew_executable(runtime)
     present = brew is not None
@@ -366,7 +471,14 @@ def _coding_tool_route(request: Request, runtime: AdapterRuntime) -> dict[str, A
 
 def _validate_route_inputs(request: Request) -> None:
     inputs = request["public_inputs"]
-    allowed = {"solet_name"} if request["operation_id"] == "configure_postgresql" else set()
+    if request["operation_id"] in _LM_STUDIO_OPERATION_IDS:
+        allowed = {
+            "embeddings_implementation",
+            "inference_implementation",
+            "lm_studio_base_url",
+        }
+    else:
+        allowed = {"solet_name"} if request["operation_id"] == "configure_postgresql" else set()
     if set(inputs) - allowed:
         raise AdapterRequestError("operation public_inputs are outside the closed registry")
     if "solet_name" in inputs and inputs["solet_name"] != request["name"]:
@@ -429,7 +541,6 @@ def _postgres_install_route(request: Request, runtime: AdapterRuntime) -> dict[s
         ),
     }
     try:
-        applied_action_ids: set[str] = set()
         for item in actions:
             action_id = str(item["id"])
             command, label = commands[action_id]
@@ -437,20 +548,6 @@ def _postgres_install_route(request: Request, runtime: AdapterRuntime) -> dict[s
                 run_homebrew_install_required(runtime, brew, command[2], label)
             else:
                 run_required(runtime, command, label)
-            applied_action_ids.add(action_id)
-            if action_id != "postgres.start_homebrew_service":
-                continue
-            refreshed = postgres_observation(runtime)
-            for follow_up in postgres_install_actions(refreshed):
-                follow_up_id = str(follow_up["id"])
-                if (
-                    follow_up_id != "postgres.install_pgvector_formula"
-                    or follow_up_id in applied_action_ids
-                ):
-                    continue
-                command, label = commands[follow_up_id]
-                run_homebrew_install_required(runtime, brew, command[2], label)
-                applied_action_ids.add(follow_up_id)
     except AdapterError as exc:
         return _homebrew_failure_result(
             request,
@@ -513,14 +610,14 @@ def _postgres_configure_route(request: Request, runtime: AdapterRuntime) -> dict
         )
     try:
         apply_postgres_configuration(runtime, policy, actions)
-    except AdapterError:
+    except AdapterError as exc:
         return result(
             request,
             status="failed",
             error_kind="postgres_configuration_failed",
             retry_safe=True,
             evidence_items=evidence_items,
-            repair="Inspect the PostgreSQL policy and resume after repairing the failed action.",
+            repair=_postgres_configuration_repair(exc),
         )
     return result(request, status="applied", evidence_items=evidence_items)
 
@@ -532,10 +629,10 @@ def _postgres_probe_status(
     evidence_items: list[dict[str, Any]],
 ) -> tuple[bool, str | None]:
     operation_id = request["operation_id"]
-    if operation_id == "postgres_binary_version_valid":
-        return observed.major == SUPPORTED_POSTGRES_MAJOR and observed.homebrew_managed, None
-    if operation_id == "postgres_ready":
-        return observed.ready, None
+    if operation_id == "pgvector_package_available":
+        if not observed.ready:
+            return False, "postgres_service_not_ready"
+        return pgvector_package_available(observed), None
     if operation_id == "pgvector_ready":
         if not observed.ready:
             return False, "postgres_service_not_ready"
@@ -558,6 +655,30 @@ def _postgres_probe_status(
             )
         )
         return present, None
+    return _postgres_non_pgvector_probe_status(
+        operation_id,
+        runtime,
+        observed,
+        evidence_items,
+    )
+
+
+def _postgres_non_pgvector_probe_status(
+    operation_id: str,
+    runtime: AdapterRuntime,
+    observed: PostgresObservation,
+    evidence_items: list[dict[str, Any]],
+) -> tuple[bool, str | None]:
+    basic_statuses = {
+        "postgres_binary_version_valid": (
+            observed.major == SUPPORTED_POSTGRES_MAJOR and observed.homebrew_managed,
+            None,
+        ),
+        "postgres_ready": (observed.ready, None),
+    }
+    basic_status = basic_statuses.get(operation_id)
+    if basic_status is not None:
+        return basic_status
     policy = role_policy_observation(runtime) if observed.ready else None
     if policy is None:
         return False, None
@@ -600,10 +721,22 @@ def _postgres_probe_route(request: Request, runtime: AdapterRuntime) -> dict[str
     )
 
 
+_ExactRoute = Callable[[Request, AdapterRuntime], dict[str, Any]]
+
+_EXACT_OPERATION_ROUTES: dict[str, _ExactRoute] = {
+    "request_homebrew_install": _homebrew_install_route,
+    "install_postgresql": _postgres_install_route,
+    "configure_postgresql": _postgres_configure_route,
+    "git_checkout_valid": _git_checkout_route,
+    "minimum_physical_memory_valid": _physical_memory_route,
+    "homebrew_available": _homebrew_probe_route,
+}
+
+
 def _dispatch(request: Request, runtime: AdapterRuntime) -> dict[str, Any]:
     operation_id = request["operation_id"]
-    if operation_id == "request_homebrew_install":
-        return _homebrew_install_route(request, runtime)
+    if operation_id in _LM_STUDIO_OPERATION_IDS:
+        return lm_studio_route(request, runtime)
     if operation_id in {"install_python_runtime", "python_version_valid"}:
         return _python_route(request, runtime)
     if operation_id in {
@@ -613,14 +746,9 @@ def _dispatch(request: Request, runtime: AdapterRuntime) -> dict[str, Any]:
         return dependency_closure_route(request, runtime)
     if operation_id in _CODING_TOOL_ACQUISITIONS:
         return _coding_tool_route(request, runtime)
-    if operation_id == "install_postgresql":
-        return _postgres_install_route(request, runtime)
-    if operation_id == "configure_postgresql":
-        return _postgres_configure_route(request, runtime)
-    if operation_id == "git_checkout_valid":
-        return _git_checkout_route(request, runtime)
-    if operation_id == "homebrew_available":
-        return _homebrew_probe_route(request, runtime)
+    exact_route = _EXACT_OPERATION_ROUTES.get(operation_id)
+    if exact_route is not None:
+        return exact_route(request, runtime)
     return _postgres_probe_route(request, runtime)
 
 

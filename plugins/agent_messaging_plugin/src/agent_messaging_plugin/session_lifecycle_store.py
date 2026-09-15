@@ -55,7 +55,11 @@ from ananta.llm.agent_messaging.state_results import (
     require_records,
     require_updated,
 )
-from ananta.services.state_service.bounded_read import iter_table_rows
+from ananta.services.state_service.bounded_read import (
+    PagedReadError,
+    ReadCeilingError,
+    iter_table_rows,
+)
 
 from .schema import (
     LIFECYCLE_IDLE,
@@ -98,6 +102,16 @@ _MANAGED_SESSION_CEILING_REASON = (
     "is not pruned (106 live rows measured 2026-08-16)."
 )
 _COL_LIFECYCLE_STATE = "lifecycle_state"
+
+# These deliberately mirror bounded_read's ordered cursor contract. Managed
+# sessions are lifecycle authority: an absent ``data.records`` envelope or a
+# non-row member cannot be silently interpreted as proof that no active owner
+# exists. Keep the strict decoder local rather than weakening the shared
+# helper's compatibility contract for unrelated readers.
+_MANAGED_SESSION_PAGE_ROWS = 100
+_MANAGED_SESSION_ORDER_BY = [["created_at", "asc"], ["id", "asc"]]
+_COL_CREATED_AT = "created_at"
+_COL_ID = "id"
 
 # Single source of truth (session_lifecycle_verbs.py's _rearm_report_by
 # imports this rather than redefining it) — interim fixed window, pending
@@ -190,6 +204,10 @@ class ManagedSessionSpec:
     ttl_seconds: int = 0
     directed_by: str = ""
     provisioning_mode: str = "worktree"
+    # The resolved source checkout used at spawn.  Retire reads this row, not
+    # a live process environment, so a foreign-repository lane removes the
+    # same worktree it provisioned.
+    lane_repo_root: str = ""
     dispatch_kind: str = ""
     reviewed_report_vendor: str = ""
     pair_id: str = ""
@@ -237,6 +255,7 @@ def insert_managed_session(
         "last_transition_at": now,
         "directed_by": spec.directed_by,
         "provisioning_mode": spec.provisioning_mode,
+        "lane_repo_root": spec.lane_repo_root,
         "dispatch_kind": spec.dispatch_kind,
         "reviewed_report_vendor": spec.reviewed_report_vendor,
         "pair_id": spec.pair_id,
@@ -392,21 +411,91 @@ def _iter_managed_session_rows(
     ceiling: int,
     reason: str,
 ) -> Iterator[dict[str, Any]]:
-    """The one soft-delete-aware managed-session keyset walk."""
+    """The one soft-delete-aware, complete managed-session keyset walk."""
     query_filters = dict(filters)
     requested_is_deleted = query_filters.pop(_COL_IS_DELETED, 0)
     include_deleted = requested_is_deleted != 0
     if include_deleted:
         query_filters[_COL_IS_DELETED] = requested_is_deleted
-    yield from iter_table_rows(
-        state,
-        namespace=AGENT_ROLE_BINDING_NAMESPACE,
-        table=TABLE_MANAGED_SESSION,
-        filters=query_filters,
-        ceiling=ceiling,
-        reason=reason,
-        include_deleted=include_deleted,
-    )
+    after: list[object] | None = None
+    seen = 0
+    while True:
+        query: dict[str, object] = {
+            "table": TABLE_MANAGED_SESSION,
+            "filters": query_filters,
+            "order_by": _MANAGED_SESSION_ORDER_BY,
+            "limit": _MANAGED_SESSION_PAGE_ROWS,
+            "include_deleted": include_deleted,
+        }
+        if after is not None:
+            query["after"] = after
+        records = _complete_managed_session_page(
+            state.query_ordered(AGENT_ROLE_BINDING_NAMESPACE, query),
+        )
+        if not records:
+            return
+        for record in records:
+            seen += 1
+            if seen > ceiling:
+                raise ReadCeilingError(
+                    f"paged walk of table {TABLE_MANAGED_SESSION!r} passed its declared ceiling "
+                    f"of {ceiling} rows, so it was refused rather than run to completion. "
+                    f"The ceiling was justified as: {reason}",
+                )
+            yield record
+        if len(records) < _MANAGED_SESSION_PAGE_ROWS:
+            return
+        last = records[-1]
+        if _COL_CREATED_AT not in last or _COL_ID not in last:
+            raise PagedReadError(
+                f"paged read of table {TABLE_MANAGED_SESSION!r}: a row is missing the cursor "
+                f"columns {_COL_CREATED_AT!r}/{_COL_ID!r}, so the walk cannot advance "
+                f"without risking skipped or repeated rows: {last!r}",
+            )
+        after = [last[_COL_CREATED_AT], last[_COL_ID]]
+
+
+def _complete_managed_session_page(result: object) -> list[dict[str, Any]]:
+    """Decode lifecycle authority pages without discarding incomplete evidence."""
+    records = _managed_session_page_records(result)
+    if not all(_managed_session_cursor_is_complete(record) for record in records):
+        raise PagedReadError(
+            f"paged read of table {TABLE_MANAGED_SESSION!r}: "
+            f"a row has missing cursor values {_COL_CREATED_AT!r}/{_COL_ID!r}: {records!r}",
+        )
+    return records
+
+
+def _managed_session_page_records(result: object) -> list[dict[str, Any]]:
+    """Require the completed result envelope and its homogeneous row list."""
+    if not isinstance(result, dict):
+        raise PagedReadError(
+            f"paged read of table {TABLE_MANAGED_SESSION!r}: "
+            f"state result is not a dict: {result!r}",
+        )
+    if str(result.get("action_status", "")) != "completed":
+        raise PagedReadError(
+            f"paged read of table {TABLE_MANAGED_SESSION!r} did not complete "
+            f"(action_status={result.get('action_status')!r}): {result!r}",
+        )
+    data = result.get("data")
+    records = data.get("records") if isinstance(data, dict) else None
+    if not isinstance(records, list):
+        raise PagedReadError(
+            f"paged read of table {TABLE_MANAGED_SESSION!r}: "
+            f"data.records is not a list: {records!r}",
+        )
+    if not all(isinstance(record, dict) for record in records):
+        raise PagedReadError(
+            f"paged read of table {TABLE_MANAGED_SESSION!r}: "
+            f"data.records contains a non-row: {records!r}",
+        )
+    return records
+
+
+def _managed_session_cursor_is_complete(record: dict[str, Any]) -> bool:
+    """A full page may advance only from durable, nonempty cursor columns."""
+    return all(str(record.get(column) or "").strip() for column in (_COL_CREATED_AT, _COL_ID))
 
 
 def iter_managed_sessions_unbounded(
@@ -482,6 +571,46 @@ def list_managed_sessions_bounded(
             ),
         )
     )
+
+
+def read_managed_sessions_page(
+    state: StateManagementInterface,
+    filters: dict[str, Any],
+    *,
+    limit: int,
+    after: list[str] | None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read one tie-safe ascending managed-session page.
+
+    ``managed_session`` is append-mostly, so an operator roster must page
+    rather than make a claim about a maximum live population.  The cursor is
+    the immutable ``(created_at, id)`` pair used by :func:`iter_table_rows`;
+    keeping the id tie-break prevents same-timestamp rows from disappearing at
+    a page boundary.
+    """
+    if not filters:
+        raise ManagedSessionFilterRequiredError(
+            "read_managed_sessions_page requires a non-empty filter"
+        )
+    query: dict[str, Any] = {
+        "table": TABLE_MANAGED_SESSION,
+        "filters": filters,
+        "order_by": [["created_at", "asc"], ["id", "asc"]],
+        # The extra row proves that a next page exists.  A caller may request
+        # up to 250 rows, above the state service's default 100-row page cap,
+        # so this explicit flag is consent to this bounded page, not a scan.
+        "limit": limit + 1,
+        "unbounded": True,
+    }
+    if after is not None:
+        query["after"] = after
+    rows = [
+        dict(row)
+        for row in require_records(
+            state.query_ordered(AGENT_ROLE_BINDING_NAMESPACE, query)
+        )
+    ]
+    return rows[:limit], len(rows) > limit
 
 
 _SPAWN_AGENT_SESSION_ID_PREFIX = "ases-"
@@ -1060,9 +1189,9 @@ _SupervisionCondition = tuple[str, str, str]
 
 
 def _dispatch_deadline(row: Mapping[str, Any], field: str) -> datetime:
-    from .managed_dispatch import _parse_aware_utc  # noqa: PLC0415
+    from .managed_dispatch import _parse_persisted_utc  # noqa: PLC0415
 
-    return _parse_aware_utc(str(row[field]), field)
+    return _parse_persisted_utc(row[field], field)
 
 
 def _ttl_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:

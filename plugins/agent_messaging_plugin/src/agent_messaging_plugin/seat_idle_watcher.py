@@ -329,7 +329,7 @@ def _solet_inbox() -> dict[str, Any] | None:
         return None
     try:
         result = subprocess.run(
-            ["solet-bridge", "inbox"], capture_output=True, text=True,
+            ["solet-bridge", "inbox", "--observer"], capture_output=True, text=True,
             timeout=20, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

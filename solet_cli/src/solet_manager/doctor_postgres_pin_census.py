@@ -38,7 +38,6 @@ installer.
 
 from __future__ import annotations
 
-import re
 import subprocess
 from collections.abc import Callable
 
@@ -51,34 +50,37 @@ from .models import InstanceRecord, JsonValue
 # drift between the two is a red rather than a silent disagreement.
 _REQUIRED_POSTGRES_MAJOR = 17
 
-# The same expression ``bootstrap._psql_version_major`` parses with, so this
-# advisory and the installer read an identical version string identically.
-_VERSION_PATTERN = re.compile(r"(\d+)(?:\.\d+)*")
-
 _PIN_CHECK_ID = "doctor::postgres_major_pin_v1"
 
 _PROBE_TIMEOUT_S = 10
 
-VersionReader = Callable[[], tuple[int, str, str]]
+ServerVersionReader = Callable[[], tuple[int, str, str]]
 
 
 def collect_postgres_pin_advisories(
     record: InstanceRecord,
     *,
-    version_reader: VersionReader | None = None,
+    version_reader: ServerVersionReader | None = None,
 ) -> list[JsonValue]:
     """Return the report-only check for the target's postgres major version."""
 
-    reader = _run_psql_version if version_reader is None else version_reader
+    reader = _run_psql_server_version if version_reader is None else version_reader
     return [_postgres_major_pin_advisory(record, reader)]
 
 
-def _run_psql_version() -> tuple[int, str, str]:
-    """Return ``(returncode, stdout, stderr)`` for ``psql --version``."""
+def _run_psql_server_version() -> tuple[int, str, str]:
+    """Return the connected server's ``server_version_num`` through ``psql``."""
 
     try:
         completed = subprocess.run(
-            ["psql", "--version"],
+            [
+                "psql",
+                "--no-psqlrc",
+                "--tuples-only",
+                "--no-align",
+                "--command",
+                "SHOW server_version_num",
+            ],
             capture_output=True,
             text=True,
             timeout=_PROBE_TIMEOUT_S,
@@ -90,41 +92,45 @@ def _run_psql_version() -> tuple[int, str, str]:
 
 
 def _postgres_major_pin_advisory(
-    record: InstanceRecord, reader: VersionReader
+    record: InstanceRecord, reader: ServerVersionReader
 ) -> dict[str, JsonValue]:
     expected: dict[str, JsonValue] = {
         "postgres_major": _REQUIRED_POSTGRES_MAJOR,
         "instance_name": record.name,
     }
-    observed: dict[str, JsonValue] = {"postgres_major": None, "version_output": None}
-    source = "psql --version"
+    observed: dict[str, JsonValue] = {
+        "postgres_major": None,
+        "server_version_num": None,
+    }
+    source = "psql --no-psqlrc --tuples-only --no-align --command 'SHOW server_version_num'"
 
     code, stdout, stderr = reader()
     if code != 0:
         return advisory_unknown(
             _PIN_CHECK_ID,
-            "psql could not be run, so the target's postgres major version is unknown.",
+            "The running postgres server could not be queried, so its major version is unknown.",
             expected,
             observed,
             source,
             "postgres_version_unreadable",
-            (stderr or stdout).strip() or f"psql --version exited {code}",
+            (stderr or stdout).strip() or f"postgres server version query exited {code}",
         )
 
-    observed["version_output"] = stdout.strip()
-    match = _VERSION_PATTERN.search(stdout)
-    if match is None:
+    server_version_num = stdout.strip()
+    if not server_version_num.isdecimal():
         return advisory_unknown(
             _PIN_CHECK_ID,
-            "psql reported a version string this check cannot parse, so the major is unknown.",
+            "The running postgres server reported a version number this check cannot parse, so the major is unknown.",
             expected,
             observed,
             source,
             "postgres_version_unparseable",
-            "An unparseable version is not a passing version; the major could not be compared.",
+            "An unparseable server version is not a passing version; the major could not be compared.",
         )
 
-    major = int(match.group(1))
+    version_num = int(server_version_num)
+    major = version_num // 10_000
+    observed["server_version_num"] = version_num
     observed["postgres_major"] = major
     if major != _REQUIRED_POSTGRES_MAJOR:
         return advisory_warn(

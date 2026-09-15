@@ -91,5 +91,6 @@ SOLET_NAME="{{SOLET_NAME}}" \
 AGENT_SESSION_LABEL="$label" \
 AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
 AGENT_WAKE_CLI="{{SOLET_NAME}}" \
+AGENT_COORDINATION_RECEIPT_PATH="{{CLONE_DIR}}/profile/data/coordination-hooks/claude/installation.v1.json" \
 GIT_CONTROLLER_NAME="{{GIT_CONTROLLER_NAME}}" \
 exec claude --name "$label" "${extra_flags[@]}"

@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """Prove the stock-Codex Stop-hook inbox consumer (CDX-06 parts A and C):
-gates on the fleet precondition, checks pending via a bounded `wake
---max-wait`, ALWAYS reports its own execution via `report_inbox_consumption`
-regardless of outcome, decodes `decision:block` only when something was
-found, and always exits 0 -- never a nonzero exit, even on a subprocess
-failure (see the hook's own module docstring on why)."""
+gates on the fleet precondition, checks already-present work via a zero-wait
+`wake`, reports only known pending/empty observations, never drains the durable
+inbox itself, and always exits 0 -- even when its bounded observer is unknown."""
 
 from __future__ import annotations
 
+import importlib.util
+import io
 import json
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
-from _harness import Results, preflight, run_hook
+from _harness import HOOKS_DIR, Results, preflight, run_hook
 
 _NUDGE = (
     "Your peer-message inbox has unread deliveries that arrived while this "
@@ -30,25 +31,22 @@ def _fake_cli(path: Path) -> None:
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 capture_path = Path(os.environ["REPORT_CAPTURE_PATH"])
-drain_capture_path = Path(os.environ["DRAIN_CAPTURE_PATH"])
+command_capture_path = Path(os.environ["COMMAND_CAPTURE_PATH"])
+commands = json.loads(command_capture_path.read_text()) if command_capture_path.exists() else []
+commands.append(sys.argv[1:])
+command_capture_path.write_text(json.dumps(commands))
 
 if sys.argv[1] == "wake":
     assert sys.argv[2] == "--max-wait"
-    assert sys.argv[3] == "2400"
+    assert sys.argv[3] == "0"
+    if os.environ.get("FAKE_WAKE_SLEEP"):
+        time.sleep(float(os.environ["FAKE_WAKE_SLEEP"]))
+    sys.stdout.write(os.environ.get("FAKE_WAKE_STDOUT", ""))
     raise SystemExit(int(os.environ.get("FAKE_WAKE_EXIT", "0")))
-
-if sys.argv[1] == "inbox":
-    drains = (
-        json.loads(drain_capture_path.read_text(encoding="utf-8"))
-        if drain_capture_path.exists()
-        else []
-    )
-    drains.append(sys.argv[1:])
-    drain_capture_path.write_text(json.dumps(drains), encoding="utf-8")
-    raise SystemExit(int(os.environ.get("FAKE_INBOX_EXIT", "0")))
 
 if sys.argv[1] == "call":
     process_key = sys.argv[2]
@@ -58,6 +56,9 @@ if sys.argv[1] == "call":
     if os.environ.get("FAKE_REPORT_FAIL") == "1":
         print("simulated report failure", file=sys.stderr)
         raise SystemExit(1)
+    if os.environ.get("FAKE_REPORT_INVALID_UTF8") == "1":
+        sys.stdout.buffer.write(b"\\xff")
+        raise SystemExit(0)
     captures = (
         json.loads(capture_path.read_text(encoding="utf-8"))
         if capture_path.exists()
@@ -84,20 +85,25 @@ def _payload(*, event: str = "Stop") -> str:
 
 def _env(
     fake_cli: Path, capture: Path, *, wake_exit: int = 0, report_fail: bool = False,
-    partial: bool = False, inbox_exit: int = 0,
+    partial: bool = False, wake_stdout: str = "", wake_sleep: float = 0,
+    report_invalid_utf8: bool = False,
 ) -> dict[str, str]:
     env = {
         "AGENT_SESSION_ID": "ases-test",
         "AGENT_WAKE_CLI": str(fake_cli),
         "REPORT_CAPTURE_PATH": str(capture),
-        "DRAIN_CAPTURE_PATH": str(capture.with_name(f"{capture.stem}-drain.json")),
+        "COMMAND_CAPTURE_PATH": str(capture.with_name(f"{capture.stem}-commands.json")),
         "FAKE_WAKE_EXIT": str(wake_exit),
-        "FAKE_INBOX_EXIT": str(inbox_exit),
+        "FAKE_WAKE_STDOUT": wake_stdout,
     }
     if not partial:
         env["AGENT_INSTANCE_ID"] = "agi-test"
     if report_fail:
         env["FAKE_REPORT_FAIL"] = "1"
+    if report_invalid_utf8:
+        env["FAKE_REPORT_INVALID_UTF8"] = "1"
+    if wake_sleep:
+        env["FAKE_WAKE_SLEEP"] = str(wake_sleep)
     return env
 
 
@@ -109,13 +115,22 @@ def _captured(capture: Path) -> list[dict[str, Any]]:
     return value
 
 
-def _drains(capture: Path) -> list[list[str]]:
-    drain_capture = capture.with_name(f"{capture.stem}-drain.json")
-    if not drain_capture.exists():
+def _commands(capture: Path) -> list[list[str]]:
+    command_capture = capture.with_name(f"{capture.stem}-commands.json")
+    if not command_capture.exists():
         return []
-    value = json.loads(drain_capture.read_text(encoding="utf-8"))
+    value = json.loads(command_capture.read_text(encoding="utf-8"))
     assert isinstance(value, list)
     return value
+
+
+def _load_hook() -> Any:
+    path = HOOKS_DIR / "inbox_consumer.py"
+    spec = importlib.util.spec_from_file_location("inbox_consumer_under_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def main() -> int:
@@ -170,7 +185,11 @@ def main() -> int:
         )
         res.check(proc.returncode == 0, "nothing pending: exits 0", proc.stderr)
         res.check(proc.stdout.strip() == "{}", "nothing pending: no decision emitted", proc.stdout)
-        res.check(not _drains(capture), "nothing pending: does not drain a durable inbox")
+        res.check(
+            all(command[0] != "inbox" for command in _commands(capture)),
+            "nothing pending: never drains a durable inbox",
+            repr(_commands(capture)),
+        )
         res.check(len(_captured(capture)) == 1, "nothing pending: still reports the check ran")
         if _captured(capture):
             params = _captured(capture)[0]
@@ -207,9 +226,9 @@ def main() -> int:
         res.check(decision.get("decision") == "block", "pending found: decision is block", proc.stdout)
         res.check(decision.get("reason") == _NUDGE, "pending found: reason is the fixed nudge", proc.stdout)
         res.check(
-            _drains(capture) == [["inbox"]],
-            "pending found: park drains both inbox sections to the CLI frontier",
-            repr(_drains(capture)),
+            all(command[0] != "inbox" for command in _commands(capture)),
+            "pending found: leaves durable inbox for the continued model turn",
+            repr(_commands(capture)),
         )
         res.check(len(_captured(capture)) == 1, "pending found: reports the check")
         if _captured(capture):
@@ -223,38 +242,52 @@ def main() -> int:
                 "pending found: pending_reason is the SAME text as the emitted decision reason",
             )
 
-        # 6. A partial/failing CLI drain is surfaced instead of being presented
-        #    as completed. The fixed decision still continues the turn so the
-        #    message cannot strand behind an operational CLI failure.
-        capture = tmp / "partial_drain.json"
-        proc = run_hook(
-            "inbox_consumer.py",
-            env=_env(fake_cli, capture, wake_exit=2, inbox_exit=1),
-            stdin=_payload(),
-        )
-        res.check(proc.returncode == 0, "partial drain: exits 0", proc.stderr)
-        decision = json.loads(proc.stdout)
-        res.check(decision.get("decision") == "block", "partial drain: decision remains block")
-        res.check(_drains(capture) == [["inbox"]], "partial drain: CLI was attempted")
-        res.check(
-            "parked inbox drain did not complete: exit 1" in proc.stderr,
-            "partial drain: incomplete frontier is named on stderr",
-            proc.stderr,
-        )
-
-        # 7. wake exits something other than 0/2: treated as not-pending, but
-        #    the failure is still surfaced on stderr and the check is still
-        #    reported (never silently swallowed into a clean run).
+        # 6. Unknown observer results must not refresh an honesty record.
         capture = tmp / "wake_error.json"
         proc = run_hook(
             "inbox_consumer.py",
             env=_env(fake_cli, capture, wake_exit=1),
             stdin=_payload(),
         )
-        res.check(proc.returncode == 0, "wake error: exits 0 (never traps the session)", proc.stderr)
-        res.check(proc.stdout.strip() == "{}", "wake error: degrades to no decision", proc.stdout)
-        res.check("exited with status 1" in proc.stderr, "wake error: stderr names the exit status", proc.stderr)
-        res.check(len(_captured(capture)) == 1, "wake error: still reports the check ran")
+        res.check(proc.returncode == 0, "unknown exit: exits 0", proc.stderr)
+        res.check(proc.stdout.strip() == "{}", "unknown exit: emits no decision", proc.stdout)
+        res.check(
+            "exited with status 1" in proc.stderr,
+            "unknown exit: stderr names the exit status",
+            proc.stderr,
+        )
+        res.check(not _captured(capture), "unknown exit: does not report a successful check")
+
+        # 7. Malformed output and timeout are also unknown, with no report.
+        capture = tmp / "malformed.json"
+        proc = run_hook(
+            "inbox_consumer.py",
+            env=_env(fake_cli, capture, wake_stdout="unexpected"),
+            stdin=_payload(),
+        )
+        res.check(proc.returncode == 0, "malformed output: exits 0", proc.stderr)
+        res.check("malformed stdout" in proc.stderr, "malformed output: stderr names the fault", proc.stderr)
+        res.check(not _captured(capture), "malformed output: does not report")
+        capture = tmp / "timeout.json"
+        proc = run_hook(
+            "inbox_consumer.py",
+            env=_env(fake_cli, capture, wake_sleep=3),
+            stdin=_payload(),
+        )
+        res.check(proc.returncode == 0, "timeout: exits 0", proc.stderr)
+        res.check("could not run" in proc.stderr, "timeout: stderr names the fault", proc.stderr)
+        res.check(not _captured(capture), "timeout: does not report")
+
+        # A future helper regression must fail closed: _run accepts only the
+        # two contract outcomes before it can call the reporter.
+        hook = _load_hook()
+        with patch.object(hook, "_fleet_environment", return_value=("agi-test", "ases-test", fake_cli)), patch.object(
+            hook, "_check_pending", return_value="invalid-outcome",
+        ), patch.object(hook, "_report") as report, patch("sys.stdin", io.StringIO(_payload())):
+            result = hook._run()
+        res.check(result == {}, "invalid helper outcome: emits no decision", repr(result))
+        report.assert_not_called()
+        res.check(True, "invalid helper outcome: never reports")
 
         # 8. report_inbox_consumption itself fails: the hook's OWN decision
         #    (derived from wake, not from the report call) still reaches
@@ -278,6 +311,27 @@ def main() -> int:
             proc.stderr,
         )
         res.check(not capture.exists(), "report failure: the fake CLI never wrote a capture")
+
+        # 9. Unexpected report decoding failures cannot replace a pending
+        # continuation with an empty result.
+        capture = tmp / "report_invalid_utf8.json"
+        proc = run_hook(
+            "inbox_consumer.py",
+            env=_env(fake_cli, capture, wake_exit=2, report_invalid_utf8=True),
+            stdin=_payload(),
+        )
+        res.check(proc.returncode == 0, "invalid report output: still exits 0", proc.stderr)
+        decision = json.loads(proc.stdout)
+        res.check(
+            decision.get("decision") == "block",
+            "invalid report output: preserves the pending continuation",
+            proc.stdout,
+        )
+        res.check(
+            "report_inbox_consumption call failed" in proc.stderr,
+            "invalid report output: stderr names the report fault",
+            proc.stderr,
+        )
 
     return res.finish()
 

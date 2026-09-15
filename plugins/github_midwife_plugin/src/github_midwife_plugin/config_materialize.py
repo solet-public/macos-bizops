@@ -159,8 +159,10 @@ def copy_baseline_plugin_configs(
     for config_file in sorted(baseline_dir.glob("*.json")):
         if config_file.stem not in plugin_set:
             continue
-        raw = json.loads(config_file.read_text(encoding="utf-8"))
         dst = dest_dir / config_file.name
+        if dst.exists():
+            continue
+        raw = json.loads(config_file.read_text(encoding="utf-8"))
         write_json(dst, raw)
         written.append(dst)
     return written

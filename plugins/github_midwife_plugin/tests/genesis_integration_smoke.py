@@ -42,10 +42,12 @@ _SELF_DEPLOYMENT_PLUGIN_ROOT = _PLUGIN_ROOT.parent / "macos_self_deployment_plug
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from github_midwife_plugin.autostart import AutostartResult  # noqa: E402
 from github_midwife_plugin.genesis import (  # noqa: E402
     GenesisError,
     _write_genesis_marker,
     resolve_profile_name,
+    run_autostart_install,
     run_genesis,
 )
 from github_midwife_plugin.setup_adapter_contract import AdapterRequest  # noqa: E402
@@ -690,27 +692,12 @@ def _check_stale_vault_master_fails_before_autostart(root: Path) -> None:
     with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), \
          patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), \
          patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL):
-        try:
-            run_genesis(
-                name="testhum4",
-                clone_root=clone,
-                profile_name=_PROFILE_NAME,
-                keychain=_FakeStaleMasterKeychain(),
-                alter_role_password=lambda _pw: None,
-                role_authenticates=lambda pw: pw == _SENTINEL_PW,
-                role_exists=lambda: True,
-                plist_dir=root / "LaunchAgents",
-                home_dir=root / "home",
-                launchctl_run=fake_launchctl,
-            )
-        except GenesisError as exc:
-            _check(
-                "stale Keychain master fails genesis before autostart",
-                "stale macOS Keychain vault state" in str(exc),
-                str(exc),
-            )
-        else:
-            raise SmokeFailureError("stale-vault-master: run_genesis did not raise")
+        first_error = _run_stale_vault_genesis(root, clone, fake_launchctl)
+    _check(
+        "stale Keychain master fails genesis before autostart",
+        "stale macOS Keychain vault state" in str(first_error),
+        str(first_error),
+    )
 
     marker_path = clone / "profile" / "data" / "github_midwife" / "attempt.json"
     _check("the attempt marker exists after stale-vault failure", marker_path.is_file(), str(marker_path))
@@ -734,6 +721,45 @@ def _check_stale_vault_master_fails_before_autostart(root: Path) -> None:
         fake_launchctl.calls == [],
         str(fake_launchctl.calls),
     )
+
+    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), \
+         patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), \
+         patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL):
+        retry_error = _run_stale_vault_genesis(root, clone, fake_launchctl)
+    _check(
+        "an unchanged retry still refuses the stale Keychain master",
+        "stale macOS Keychain vault state" in str(retry_error),
+        str(retry_error),
+    )
+    _check(
+        "launchctl remains uninvoked after the unchanged stale-Keychain retry",
+        fake_launchctl.calls == [],
+        str(fake_launchctl.calls),
+    )
+
+
+def _run_stale_vault_genesis(
+    root: Path,
+    clone: Path,
+    fake_launchctl: _FakeLaunchctl,
+) -> GenesisError:
+    """Run the stale-master fixture and require the Genesis refusal."""
+    try:
+        run_genesis(
+            name="testhum4",
+            clone_root=clone,
+            profile_name=_PROFILE_NAME,
+            keychain=_FakeStaleMasterKeychain(),
+            alter_role_password=lambda _pw: None,
+            role_authenticates=lambda pw: pw == _SENTINEL_PW,
+            role_exists=lambda: True,
+            plist_dir=root / "LaunchAgents",
+            home_dir=root / "home",
+            launchctl_run=fake_launchctl,
+        )
+    except GenesisError as exc:
+        return exc
+    raise SmokeFailureError("stale-vault-master: run_genesis did not raise")
 
 
 class _FakeRouterInstaller:
@@ -820,6 +846,38 @@ def _check_router_installed_for_blue_green_profile(root: Path) -> None:
     )
 
 
+def _check_operation_scoped_launchagent_install(root: Path) -> None:
+    """The autostart operation must not replay genesis or touch router state."""
+    clone = _make_fixture_clone(root)
+    router_state = root / "router-state.json"
+    router_state.write_text("router remains active", encoding="utf-8")
+    expected = AutostartResult(
+        status="success",
+        verb="install_autostart",
+        label="local.solet.scoped",
+        plist_path=str(root / "LaunchAgents/local.solet.scoped.plist"),
+        prior_state="loaded",
+        message="fixture",
+    )
+    with patch(
+        "github_midwife_plugin.genesis._install_autostart", return_value=expected
+    ) as install, patch(
+        "github_midwife_plugin.genesis.run_genesis",
+        side_effect=AssertionError("full genesis replay must not run"),
+    ):
+        result = run_autostart_install(name="scoped", clone_root=clone)
+
+    _check("scoped launchagent install invokes only autostart", install.call_count == 1)
+    _check(
+        "scoped launchagent install preserves router state",
+        router_state.read_text(encoding="utf-8") == "router remains active",
+    )
+    _check(
+        "scoped launchagent install returns its main LaunchAgent result",
+        result == expected,
+    )
+
+
 def main() -> int:
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -834,6 +892,8 @@ def main() -> int:
             _check_genesis_artifact_content_validation(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_router_installed_for_blue_green_profile(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_operation_scoped_launchagent_install(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_phase_failure_writes_failed_marker(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:

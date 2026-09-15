@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -18,10 +19,14 @@ from discovered_decision_support import (
 )
 from solet_manager.adapters import OperationRequest, OperationResult
 from solet_manager.config import CreateConfig
+from solet_manager.contracts import ContractBundle, target_contract_directory
 from solet_manager.create import CreateManager
+from solet_manager.flow import build_setup_plan, initial_stage_probe_statuses
 from solet_manager.lifecycle import LifecycleManager
 from solet_manager.models import CommandResult
 from solet_manager.paths import ManagerPaths
+from solet_manager.release_lock import SeedLock
+from solet_manager.transaction import Transaction, canonical_sha256, write_transaction
 
 type JsonObject = dict[str, object]
 
@@ -52,6 +57,7 @@ _ARTIFACT_PATHS = {
 }
 _PERSISTENT_KEYS = frozenset(_ARTIFACT_PATHS)
 _MANAGED_BLOCK = "# >>> solet fixture >>>"
+_LM_STUDIO_INPUTS: JsonObject = {"embeddings_implementation": "lm_studio", "inference_implementation": "lm_studio", "lm_studio_base_url": "http://localhost:1234/v1"}
 _GOLDEN_APPLY_TRACE: tuple[tuple[str, str, JsonObject], ...] = (
     ("request_homebrew_install", "setup::homebrew.request_install", {}),
     ("install_python_runtime", "setup::python.install_313", {}),
@@ -69,6 +75,13 @@ _GOLDEN_APPLY_TRACE: tuple[tuple[str, str, JsonObject], ...] = (
         "bootstrap::postgres.configure_solet",
         {"solet_name": "barrier-terminal"},
     ),
+    ("install_lm_studio", "setup::lm_studio.install", _LM_STUDIO_INPUTS),
+    ("start_lm_studio_server", "setup::lm_studio.start_server", _LM_STUDIO_INPUTS),
+    ("pull_lm_studio_embedding_model", "setup::lm_studio.pull_embedding", _LM_STUDIO_INPUTS),
+    ("load_lm_studio_embedding_model", "setup::lm_studio.load_embedding", _LM_STUDIO_INPUTS),
+    ("pull_lm_studio_inference_model", "setup::lm_studio.pull_inference", _LM_STUDIO_INPUTS),
+    ("load_lm_studio_inference_model", "setup::lm_studio.load_inference", _LM_STUDIO_INPUTS),
+    ("install_lm_studio_login_agent", "setup::lm_studio.install_login_agent", _LM_STUDIO_INPUTS),
     (
         "run_genesis",
         "genesis::solet.run",
@@ -117,10 +130,17 @@ _GOLDEN_PLANNED_ORDER = (
     "configure_postgresql",
     "install_claude_cli",
     "install_codex_cli",
+    "install_lm_studio",
+    "install_lm_studio_login_agent",
     "install_node",
     "install_postgresql",
     "install_python_runtime",
+    "load_lm_studio_embedding_model",
+    "load_lm_studio_inference_model",
+    "pull_lm_studio_embedding_model",
+    "pull_lm_studio_inference_model",
     "request_homebrew_install",
+    "start_lm_studio_server",
     "install_shell_integration",
     "run_genesis",
     "configure_lm_studio_embeddings",
@@ -399,6 +419,73 @@ def _model_matrix_case(
     }
 
 
+def _inactive_inference_case(root: Path) -> JsonObject:
+    """The supported free profile exercises an inactive inference model at models."""
+    name = "barrier-inference-free"
+    fixture_root = root / f"{name}-fixture"
+    _initialize_fixture_state(fixture_root)
+    paths = ManagerPaths.resolve(explicit_home=root / f"manager-{name}", home=root)
+    target = root / "Solets" / name
+    contracts = target_contract_directory(target)
+    shutil.copytree(
+        Path(__file__).resolve().parents[2] / "plugins/github_midwife_plugin/knowledge_base",
+        contracts,
+    )
+    seed = SeedLock("https://github.com/solet-public/free.git", "fixture", "a" * 40, "b" * 40, "c" * 64, "free")
+    bundle = ContractBundle.load(source_revision=seed.commit, directory=contracts)
+    config = CreateConfig(name=name, target=target, autostart=True)
+    plan = build_setup_plan(
+        bundle=bundle, config=config, seed=seed, journal_path=paths.transaction_path(name),
+        decision_selections={"coding_agents": ["codex", "claude_code"], "session_sources": []},
+    )
+    transaction = Transaction.create(
+        name=name, target=target, input_fingerprint=canonical_sha256(config.to_identity_dict()),
+        answers=plan.answers, seed=seed, flow_id=bundle.flow_id,
+        flow_source_revision=bundle.source_revision, flow_contract_digest=bundle.contract_digest,
+        stage_ids=tuple(bundle.stages), completion_probe_ids=bundle.completion_probe_ids,
+        stage_probe_statuses=initial_stage_probe_statuses(bundle, plan.answers),
+    )
+    write_transaction(paths.transaction_path(name), transaction)
+    manager = CreateManager(paths=paths, contract_directory=None, seed_lock_path=root / "unused.seed.lock.json")
+    trace: list[JsonObject] = []
+    adapter = PersistentArtifactAdapter(fixture_root, event_trace=trace)
+    _set_invoke_adapter(adapter)
+    selections = {"embedding_model": "embedding_model.recommended"}
+    dependencies, result = _apply_current_frontier(manager, config, decision_selections=selections)
+    _check(
+        dependencies.data["frontier"] == ["system_dependencies"]
+        and result.error_kind == "next_stage_preview_required",
+        "free profile advances the dependency frontier",
+    )
+    genesis, result = _apply_current_frontier(manager, config, decision_selections=selections)
+    _check(
+        genesis.data["frontier"] == ["genesis"]
+        and result.error_kind == "next_stage_preview_required",
+        "free profile advances genesis before the model barrier",
+    )
+    before = _artifact_census(fixture_root, paths, name)
+    trace_start = len(trace)
+    preview = manager.preview(config, decision_selections=selections)
+    after = _artifact_census(fixture_root, paths, name)
+    _check(preview.data.get("frontier") == ["models"], "free inverse reaches the actual model barrier")
+    return {
+        "frontier": preview.data.get("frontier"),
+        "status": preview.status,
+        "error_kind": preview.error_kind,
+        "decision_ids": sorted(_decision_error_ids(preview)),
+        "zero_effect_after_models": (
+            not _has_prohibited_effect(trace[trace_start:])
+            and _persistent_slice(before) == _persistent_slice(after)
+        ),
+        "inference_probed": any(
+            request.public_inputs.get("decision_id") == "inference_model"
+            or "inference" in request.operation_ref
+            or request.operation_ref == "setup::models.qualify_structured_actions"
+            for request in adapter.requests
+        ),
+    }
+
+
 def _refused_arm(root: Path, selections: dict[str, str]) -> JsonObject:
     fixture_root = root / "barrier-blocked-fixture"
     _initialize_fixture_state(fixture_root)
@@ -497,9 +584,6 @@ def _expected_planned_actions(operation_ids: tuple[str, ...]) -> list[JsonObject
 def _closure_matrix(root: Path, selections: dict[str, str]) -> JsonObject:
     outside = dict(selections)
     outside["embedding_model"] = "embedding_model.outside-permitted-set"
-    no_inference = {
-        key: value for key, value in selections.items() if key != "inference_model"
-    }
     return {
         "platform_expectation_missing": _model_matrix_case(
             root,
@@ -536,12 +620,8 @@ def _closure_matrix(root: Path, selections: dict[str, str]) -> JsonObject:
             fail_qualification="inference_model",
             selections=selections,
         ),
-        "inverse_inference_none": _model_matrix_case(
-            root,
-            name="barrier-inference-none",
-            inference_implementation="none",
-            selections=no_inference,
-        ),
+        # Retain the consumer key; the inverse now uses the legal free topology.
+        "inverse_inference_none": _inactive_inference_case(root),
     }
 
 

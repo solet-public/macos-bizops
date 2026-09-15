@@ -43,6 +43,25 @@ If Homebrew is not installed, start at [brew.sh](https://brew.sh). That is
 Homebrew's installer and canonical source. This seed does not provide a Solet
 installer script or a `curl | bash` alternative.
 
+Three things to know before the first `solet create`:
+
+- **The machine needs 24 GB of memory or more.** That is the supported
+  minimum, because the solet runs a local inference model; smaller machines
+  fail at the models stage in a way that looks like a manager defect.
+- **`solet create` is a preview-then-approve loop**, run several times. A
+  pass that exits with code 3 and `"status": "awaiting_user"` has not failed;
+  it has finished a stage or needs an input. Read its `message` and `repair`,
+  then preview again. Drive it with `--json`.
+- **The models stage needs LM Studio and two models provisioned by hand in
+  this release.** The manager discovers models from a running LM Studio
+  server and does not yet install it. The exact commands, the bundled-model
+  trap to avoid, and stage-by-stage recovery are in the Homebrew install
+  troubleshooting runbook that ships in this tree:
+  `plugins/github_midwife_plugin/knowledge_base/09_homebrew_install_troubleshooting_runbook.md`
+  (searchable as "solet create troubleshooting" once the solet is up). The
+  tap's README at `solet-public/homebrew-tap` carries the same guide for
+  reading before anything is installed.
+
 ## Getting this seed directly
 
 Clone this repository to your machine, then work from inside it:

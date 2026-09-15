@@ -48,10 +48,17 @@ def condition_matches(
 ) -> bool:
     if not isinstance(value, dict):
         raise ContractError("required_when must be an object")
+    if any(not _has_resolved_selection(decisions.get(ref)) for ref in condition_refs(value)):
+        return False
     compound = _compound_result(value, decisions)
     if compound is not None:
         return compound
     return _leaf_result(value, decisions)
+
+
+def _has_resolved_selection(value: JsonValue | None) -> bool:
+    selected = selected_value(value)
+    return selected is not None and selected is not False and selected != ""
 
 
 def _compound_result(

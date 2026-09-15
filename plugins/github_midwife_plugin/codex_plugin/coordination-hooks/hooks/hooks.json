@@ -52,7 +52,7 @@
           {
             "type": "command",
             "command": "python3 ${PLUGIN_ROOT}/hooks/inbox_consumer.py",
-            "timeout": 2430,
+            "timeout": 8,
             "statusMessage": "Checking peer inbox before ending turn"
           }
         ]

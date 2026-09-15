@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
+
+import jsonschema
 
 # ruff: noqa: E402
 
@@ -14,9 +17,15 @@ _ROOT = Path(__file__).resolve().parents[3]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+_SCHEMA = json.loads(
+    (
+        _ROOT / "plugins/github_midwife_plugin/knowledge_base/setup_adapter_envelope.schema.json"
+    ).read_text()
+)
+
 from bootstrap_adapter.homebrew import _homebrew_plan_is_exact
-from bootstrap_adapter.models import AdapterRuntime, PostgresObservation
-from bootstrap_adapter.routes import _coding_tool_route, _postgres_install_route
+from bootstrap_adapter.models import AdapterRuntime, PostgresObservation, RolePolicyObservation
+from bootstrap_adapter.routes import _coding_tool_route, _postgres_configure_route, _postgres_install_route
 
 _RECEIPT_049_CODEX = "==> Would install 1 cask:\ncodex\n"
 _RECEIPT_054_POSTGRES_STDOUT = """codex-cli 0.153.4
@@ -47,7 +56,7 @@ def _request(operation_id: str) -> dict[str, object]:
         "operation_id": operation_id,
         "phase": "apply",
         "probe_purpose": None,
-        "request_id": "fixture",
+        "request_id": "00000000-0000-0000-0000-000000000000",
         "name": "fixture",
     }
 
@@ -123,8 +132,8 @@ def _check_failure_envelopes() -> None:
     )
 
 
-def _check_fresh_postgres_installs_pgvector_after_service_start() -> None:
-    """A fresh host can discover pgvector only after PostgreSQL starts."""
+def _check_fresh_postgres_plans_pgvector_before_apply() -> None:
+    """A stopped service must disclose pgvector before applying the reviewed plan."""
 
     commands: list[list[str]] = []
 
@@ -148,22 +157,31 @@ def _check_fresh_postgres_installs_pgvector_after_service_start() -> None:
         target=Path("/fixture"),
     )
     fresh = PostgresObservation(True, "/fixture/brew", False, False, None, False, None)
-    started_without_pgvector = PostgresObservation(
-        True, "/fixture/brew", True, True, 17, True, False
-    )
+    preview_request = _request("install_postgresql")
+    preview_request["phase"] = "probe"
     with patch(
         "bootstrap_adapter.routes.postgres_observation",
-        side_effect=[fresh, started_without_pgvector],
+        return_value=fresh,
     ) as observe:
+        preview = _postgres_install_route(preview_request, runtime)
         applied = _postgres_install_route(_request("install_postgresql"), runtime)
 
+    _check(
+        [action["id"] for action in preview["planned_actions"]]
+        == [
+            "postgres.install_homebrew_formula",
+            "postgres.start_homebrew_service",
+            "postgres.install_pgvector_formula",
+        ],
+        "preview exposes every PostgreSQL action that apply may execute",
+    )
     _check(
         applied["checkpoint_status"] == "applied",
         "fresh PostgreSQL install applies successfully",
     )
     _check(
         observe.call_count == 2,
-        "fresh PostgreSQL install re-observes after starting the service",
+        "preview and apply each observe PostgreSQL once without post-start expansion",
     )
     _check(
         commands
@@ -174,8 +192,87 @@ def _check_fresh_postgres_installs_pgvector_after_service_start() -> None:
             ["/fixture/brew", "install", "--dry-run", "pgvector"],
             ["/fixture/brew", "install", "pgvector"],
         ],
-        "fresh PostgreSQL install adds pgvector only after the post-start observation reports it absent",
+        "PostgreSQL apply executes the pgvector package action disclosed in its approved plan",
     )
+
+
+def _check_postgres_configuration_failure_keeps_psql_diagnostics() -> None:
+    observed = PostgresObservation(True, "/fixture/brew", True, True, 17, True, True)
+    policy = RolePolicyObservation(
+        role_exists=True,
+        database_exists=True,
+        role_safe=True,
+        database_owner_matches=True,
+        schema_exists=False,
+        schema_owner_matches=None,
+        public_connect_revoked=True,
+        vector_installed=True,
+        hba_path=None,
+        hba_safe=True,
+        hba_layout_recognized=True,
+        scram_present=True,
+    )
+    diagnostics_by_stream = {
+        "stderr": "psql: error: permission denied for schema fixture\n",
+        "stdout": "psql: schema fixture output\n",
+    }
+    for stream, diagnostics in diagnostics_by_stream.items():
+        runtime = _runtime(
+            diagnostics if stream == "stdout" else "",
+            diagnostics if stream == "stderr" else "",
+            1,
+        )
+        with (
+            patch("bootstrap_adapter.routes.postgres_observation", return_value=observed),
+            patch("bootstrap_adapter.routes.role_policy_observation", return_value=policy),
+            patch(
+                "bootstrap_adapter.postgres.postgres_binaries",
+                return_value={"psql": "/fixture/psql"},
+            ),
+        ):
+            failed = _postgres_configure_route(_request("configure_postgresql"), runtime)
+
+        _check(
+            failed["checkpoint_status"] == "failed"
+            and failed["error_kind"] == "postgres_configuration_failed",
+            f"failing PostgreSQL configuration returns its canonical {stream} failure envelope",
+        )
+        _check(
+            diagnostics.strip() in str(failed["repair"]),
+            f"failing psql {stream} reaches the PostgreSQL configuration result",
+        )
+
+    for stream in ("stderr", "stdout"):
+        diagnostics = "psql: " + ("X" * 2048)
+        runtime = _runtime(
+            diagnostics if stream == "stdout" else "",
+            diagnostics if stream == "stderr" else "",
+            1,
+        )
+        with (
+            patch("bootstrap_adapter.routes.postgres_observation", return_value=observed),
+            patch("bootstrap_adapter.routes.role_policy_observation", return_value=policy),
+            patch(
+                "bootstrap_adapter.postgres.postgres_binaries",
+                return_value={"psql": "/fixture/psql"},
+            ),
+        ):
+            failed = _postgres_configure_route(_request("configure_postgresql"), runtime)
+
+        repair = str(failed["repair"])
+        _check(
+            repair.startswith("PostgreSQL schema creation failed (exit 1): psql: "),
+            f"long psql {stream} keeps failure context before truncation",
+        )
+        _check(
+            "[truncated," in repair and "chars total]" in repair,
+            f"long psql {stream} reports explicit repair truncation",
+        )
+        _check(
+            len(repair) <= 2048,
+            f"long psql {stream} repair stays within the envelope cap",
+        )
+        jsonschema.Draft7Validator(_SCHEMA).validate(failed)
 
 
 def main() -> int:
@@ -234,7 +331,8 @@ def main() -> int:
         "output without a package-plan heading remains refused",
     )
     _check_failure_envelopes()
-    _check_fresh_postgres_installs_pgvector_after_service_start()
+    _check_fresh_postgres_plans_pgvector_before_apply()
+    _check_postgres_configuration_failure_keeps_psql_diagnostics()
     print("bootstrap_adapter_homebrew_plan_smoke OK")
     return 0
 

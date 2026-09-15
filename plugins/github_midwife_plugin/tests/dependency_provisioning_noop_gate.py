@@ -172,8 +172,8 @@ def main() -> int:
     stopped_with_pgvector = PostgresObservation(True, "/fixture/brew", True, True, 17, False, None)
     _check(
         [item["id"] for item in postgres_install_actions(stopped_with_pgvector)]
-        == ["postgres.start_homebrew_service"],
-        "stopped PostgreSQL does not plan a pgvector package mutation",
+        == ["postgres.start_homebrew_service", "postgres.install_pgvector_formula"],
+        "stopped PostgreSQL plans pgvector while discovery is unknown, before apply approval",
     )
 
     with tempfile.TemporaryDirectory() as temporary:

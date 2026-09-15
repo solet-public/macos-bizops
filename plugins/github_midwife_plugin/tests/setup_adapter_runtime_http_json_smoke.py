@@ -304,7 +304,13 @@ def _finite_identical_pair(payload: JsonValue) -> bool:
 def _qualified_inference_response(model: str) -> JsonObject:
     return {
         "model": model,
-        "choices": [{"message": {"content": '{"action":"qualify"}'}}],
+        "system_fingerprint": "fp-qualification",
+        "choices": [
+            {
+                "message": {"content": "", "reasoning_content": "reasoning preamble"},
+                "finish_reason": "length",
+            }
+        ],
     }
 
 
@@ -567,22 +573,9 @@ def _dimension_controls() -> None:
 def _inference_qualification_controls() -> None:
     runtime = _StaticInferenceRuntime(_qualified_inference_response("fixture-inference"))
     qualification = inference_qualification(_inference_request(), runtime)
-    expected_response_format: JsonObject = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "qualification_action",
-            "strict": True,
-            "schema": {
-                "type": "object",
-                "properties": {"action": {"type": "string"}},
-                "required": ["action"],
-                "additionalProperties": False,
-            },
-        },
-    }
     _check(
         qualification.get("checkpoint_status") == "verified",
-        "strict structured response verifies the inference candidate",
+        "response model identity verifies the inference candidate",
     )
     substituted = inference_qualification(
         _inference_request(),
@@ -595,10 +588,8 @@ def _inference_qualification_controls() -> None:
         "response-model substitution is refused and names requested and returned IDs",
     )
     _check(
-        isinstance(runtime.request_payload, dict)
-        and runtime.request_payload.get("temperature") == 0
-        and runtime.request_payload.get("response_format") == expected_response_format,
-        "inference qualification sends the reviewed strict json_schema request shape",
+        _plain_identity_request_matches(runtime.request_payload),
+        "inference qualification sends the minimal plain identity request shape",
     )
     with tempfile.TemporaryDirectory(prefix="inference-qualification-fallback-") as raw_target:
         target = Path(raw_target)
@@ -607,6 +598,7 @@ def _inference_qualification_controls() -> None:
         config_path.write_text(
             json.dumps({"model": "materialized-inference-model"}), encoding="utf-8"
         )
+
         flow_path = target / "plugins/github_midwife_plugin/knowledge_base/macos_setup_flow.json"
         flow_path.parent.mkdir(parents=True)
         shutil.copyfile(_PLUGIN_ROOT / "knowledge_base/macos_setup_flow.json", flow_path)
@@ -638,6 +630,18 @@ def _inference_qualification_controls() -> None:
             and missing_runtime.request_payload is None,
             "missing materialized inference selection fails closed with the precise repair",
         )
+
+
+def _plain_identity_request_matches(payload: object) -> bool:
+    return (
+        isinstance(payload, dict)
+        and payload.get("temperature") == 0
+        and payload.get("messages") == [{"role": "user", "content": "What model is this?"}]
+        and payload.get("max_tokens") == 8
+        and "response_format" not in payload
+    )
+
+
 def _evidence_output_control() -> None:
     outcome = SystemRuntime().run(
         ("/usr/bin/printf", "%5000s", ""),

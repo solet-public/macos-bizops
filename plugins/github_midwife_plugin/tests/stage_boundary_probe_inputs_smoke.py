@@ -64,7 +64,10 @@ def _capture_boundary_inputs(
         "decisions": {
             "autostart": "enabled",
             "coding_agents": ["codex"],
-        }
+            "embeddings_implementation": "lm_studio",
+            "inference_implementation": "lm_studio",
+        },
+        "public_inputs": {"lm_studio_base_url": "http://127.0.0.1:1234/v1"},
     }
     transaction = cast(
         Transaction,

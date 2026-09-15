@@ -7,11 +7,12 @@ UNIT ID: {unit_id}
 
 FIRST ACTIONS: report_alive with your own agent_instance_id (status=working). Claim the durable role NAME your spawning role's dispatch assigns, if not already bound -- your role_class governs the claim policy; never invent a role name yourself. Read the brief. Ack to '{spawned_by_role}' with a scope read-back before touching code.
 
-BINDING RULES:
-- Git mutation ONLY via Git-Controller: a proposed branch name, commit message, and exact file scope; scope-stage around other lanes' dirty files in the checkout, never sweep.
-- StateManagementInterface only for database access -- no raw SQL, no bare None filter values (use {"op": "is_null"}).
+FLEET-WIDE BINDING RULES:
 - Claude's built-in Agent/Task tool is forbidden in this repository.
-- Full quality-gate sweep before every Git-Controller handoff.
 - "Landed" means your own git merge-base --is-ancestor check against master -- never a HEAD-log read, never trusting a report alone.
 - Never end a turn waiting on a peer wake with no fallback -- report your status and stop, or poll on a schedule.
 - A measured conflict between your task and its brief or ruling-of-record is a STOP: report it to your spawning role with the conflict and your evidence, and wait for a ruling -- refuting a wrong instruction with evidence beats silently complying with it.
+
+REPOSITORY-SCOPED BINDING:
+TARGET REPOSITORY: {repository_root}
+The target repository's own runner-specific bootstrap (AGENTS.md or CLAUDE.md) governs database access and Git landing authority. Do not inherit those rules from the spawning Solet's checkout. Read and follow the bootstrap selected by your agent runner from the target worktree before acting on repository code.

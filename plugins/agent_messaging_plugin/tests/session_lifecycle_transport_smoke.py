@@ -303,9 +303,9 @@ def main() -> int:
     retirement_calls: list[dict[str, object]] = []
 
     def fixture_provision(
-        state: StateManagementInterface, *, role_name: str, agent_instance_id: str,
+        state: StateManagementInterface, *, role_name: str, agent_instance_id: str, repository_root: str,
     ) -> lifecycle_verbs.LaneWorktree:
-        del state
+        del state, repository_root
         worktree = lifecycle_verbs.LaneWorktree(
             repo_root=fixture_root, root=fixture_root, path=fixture_root,
             branch=f"fixture/{role_name}/{agent_instance_id}",

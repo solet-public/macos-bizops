@@ -32,6 +32,7 @@ Project policy: no pytest. Exits 0 on success, 1 on first failure.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -39,9 +40,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
-sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "default_scheduling_plugin" / "src")
-)
+sys.path.insert(0, str(REPO_ROOT / "plugins" / "default_scheduling_plugin" / "src"))
 
 from ananta.core.orchestration.startup_sequence import (  # noqa: E402
     StartupError,
@@ -110,15 +109,81 @@ _check(
 )
 
 
+# ----- Case 1b: scheduler waits for lifecycle + ActionFactory ----------------
+class _FakeSchedulerManager:
+    """Records APScheduler starts without opening a scheduler thread."""
+
+    def __init__(self) -> None:
+        self.start_calls = 0
+        self.listener_registration_calls = 0
+        self.scheduler = types.SimpleNamespace(running=False)
+
+    def start(self) -> None:
+        self.start_calls += 1
+        self.scheduler.running = True
+
+    def register_listeners(self) -> None:
+        self.listener_registration_calls += 1
+
+
+def _configure_with(plugin: SchedulingPlugin, manager: _FakeSchedulerManager) -> None:
+    def _configure() -> None:
+        plugin._scheduler_manager = manager  # type: ignore[assignment]
+
+    plugin._configure_scheduler = _configure  # type: ignore[method-assign]
+
+
+print("\nCase 1b: APScheduler start is gated on lifecycle and ActionFactory")
+
+plugin_lifecycle_first = _fresh_scheduling_plugin()
+manager_lifecycle_first = _FakeSchedulerManager()
+_configure_with(plugin_lifecycle_first, manager_lifecycle_first)
+lifecycle_result = asyncio.run(plugin_lifecycle_first.start_services())
+
+_check(
+    lifecycle_result["action_status"] == "completed" and plugin_lifecycle_first._services_started,
+    "lifecycle startup completes and satisfies readiness before ActionFactory injection",
+)
+_check(
+    manager_lifecycle_first.start_calls == 0 and not manager_lifecycle_first.scheduler.running,
+    "APScheduler does not start while ActionFactory is absent",
+)
+
+plugin_lifecycle_first.set_action_factory(factory)  # type: ignore[arg-type]
+_check(
+    manager_lifecycle_first.start_calls == 1 and manager_lifecycle_first.scheduler.running,
+    "ActionFactory injection starts the waiting APScheduler exactly once",
+)
+
+plugin_factory_first = _fresh_scheduling_plugin()
+manager_factory_first = _FakeSchedulerManager()
+_configure_with(plugin_factory_first, manager_factory_first)
+plugin_factory_first.set_action_factory(factory)  # type: ignore[arg-type]
+_check(
+    manager_factory_first.start_calls == 0,
+    "ActionFactory injection alone does not start APScheduler before lifecycle startup",
+)
+asyncio.run(plugin_factory_first.start_services())
+_check(
+    manager_factory_first.start_calls == 1 and manager_factory_first.scheduler.running,
+    "lifecycle startup starts APScheduler when ActionFactory arrived first",
+)
+
+asyncio.run(plugin_factory_first.start_services())
+plugin_factory_first.set_action_factory(factory)  # type: ignore[arg-type]
+_check(
+    manager_factory_first.start_calls == 1,
+    "repeated lifecycle and injection calls do not start APScheduler twice",
+)
+
+
 # ----- Case 2: startup verifier passes when injection succeeded --------------
 print("\nCase 2: startup verifier silent-passes when injection succeeded")
 
 
 def _make_orch_with_plugin(plugin: SchedulingPlugin) -> Any:
     """Synthesize the minimal orchestrator shape the verifier reads."""
-    plugin_manager = types.SimpleNamespace(
-        plugins={"default_scheduling_plugin": plugin}
-    )
+    plugin_manager = types.SimpleNamespace(plugins={"default_scheduling_plugin": plugin})
     return types.SimpleNamespace(plugin_manager=plugin_manager)
 
 
@@ -158,13 +223,11 @@ _check(
     "verifier raises StartupError (not a different exception class)",
 )
 _check(
-    raised_correct is not None
-    and "_action_executor is None" in str(raised_correct),
+    raised_correct is not None and "_action_executor is None" in str(raised_correct),
     "StartupError message names the failed attribute",
 )
 _check(
-    raised_correct is not None
-    and "default_scheduling_plugin" in str(raised_correct),
+    raised_correct is not None and "default_scheduling_plugin" in str(raised_correct),
     "StartupError message names the affected plugin",
 )
 
@@ -172,9 +235,7 @@ _check(
 # ----- Case 4: verifier is a no-op when plugin not in manifest ---------------
 print("\nCase 4: verifier no-ops when default_scheduling_plugin not in manifest")
 
-orch_no_plugin = types.SimpleNamespace(
-    plugin_manager=types.SimpleNamespace(plugins={})
-)
+orch_no_plugin = types.SimpleNamespace(plugin_manager=types.SimpleNamespace(plugins={}))
 raised_no_plugin: Exception | None = None
 try:
     _verify_action_factory_injected_into_scheduling_plugin(orch_no_plugin)

@@ -21,6 +21,7 @@ Run:
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -35,11 +36,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
-from _real_state_fake import RealShapeState  # noqa: E402
+from _real_state_fake import CapEnforcingState, RealShapeState  # noqa: E402
 from _recorded_lane_worktree_fixture import RecordedLaneWorktreeFixture  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from ananta.services.store import Store, open_store  # noqa: E402
 
+import agent_messaging_plugin.model_dispatch_policy as model_dispatch_policy  # noqa: E402
 import agent_messaging_plugin.overdue_notice as overdue_notice  # noqa: E402
 import agent_messaging_plugin.session_hosts as session_hosts  # noqa: E402
 from agent_messaging_plugin.bridge_sessions import BridgeSessionManager  # noqa: E402
@@ -694,10 +696,20 @@ def test_dispatch_policy_unpaired_notifies_after_ten_minutes_but_not_for_a_pair(
             "created_at": (T0 - timedelta(seconds=601)).isoformat(),
         },
     )
-    latch = NoticeLatch()
-    sent = sweep_unpaired_dispatch_policy(
-        state, now=T0, peer_registry=reg, bridge_manager=mgr, latch=latch,
-    )
+    original_policy_path = model_dispatch_policy._POLICY_PATH  # noqa: SLF001 -- policy fixture
+    policy_source = json.loads(original_policy_path.read_text(encoding="utf-8"))
+    policy_source["budget_vendor_override"]["active"] = False
+    with tempfile.TemporaryDirectory() as raw:
+        fixture_policy_path = Path(raw) / "policy.json"
+        fixture_policy_path.write_text(json.dumps(policy_source), encoding="utf-8")
+        try:
+            model_dispatch_policy._POLICY_PATH = fixture_policy_path  # type: ignore[misc]  # noqa: SLF001
+            latch = NoticeLatch()
+            sent = sweep_unpaired_dispatch_policy(
+                state, now=T0, peer_registry=reg, bridge_manager=mgr, latch=latch,
+            )
+        finally:
+            model_dispatch_policy._POLICY_PATH = original_policy_path  # type: ignore[misc]  # noqa: SLF001
     _check(sent == 1, "lone diagnose producer after ten minutes emits a notice")
     _, events = mgr.get(bridge_id).events_after(-1)
     _check(
@@ -705,6 +717,11 @@ def test_dispatch_policy_unpaired_notifies_after_ten_minutes_but_not_for_a_pair(
         and "pair-1" in events[0].content,
         "unpaired notice carries the pair identity through the normal steward delivery path",
     )
+
+    suppressed = sweep_unpaired_dispatch_policy(
+        state, now=T0, peer_registry=reg, bridge_manager=mgr, latch=NoticeLatch(),
+    )
+    _check(suppressed == 0, "active override suppresses lone diagnose pairing notice")
 
     _spawn_live(
         state, agent_instance_id="agi-partner-producer", lifecycle_state=LIFECYCLE_LIVE,
@@ -718,9 +735,16 @@ def test_dispatch_policy_unpaired_notifies_after_ten_minutes_but_not_for_a_pair(
             "created_at": (T0 - timedelta(seconds=590)).isoformat(),
         },
     )
-    paired = sweep_unpaired_dispatch_policy(
-        state, now=T0, peer_registry=reg, bridge_manager=mgr, latch=NoticeLatch(),
-    )
+    with tempfile.TemporaryDirectory() as raw:
+        fixture_policy_path = Path(raw) / "policy.json"
+        fixture_policy_path.write_text(json.dumps(policy_source), encoding="utf-8")
+        try:
+            model_dispatch_policy._POLICY_PATH = fixture_policy_path  # type: ignore[misc]  # noqa: SLF001
+            paired = sweep_unpaired_dispatch_policy(
+                state, now=T0, peer_registry=reg, bridge_manager=mgr, latch=NoticeLatch(),
+            )
+        finally:
+            model_dispatch_policy._POLICY_PATH = original_policy_path  # type: ignore[misc]  # noqa: SLF001
     _check(paired == 0, "cross-vendor partner in the ten-minute window suppresses the notice")
 
 
@@ -1735,6 +1759,67 @@ def test_pruner_absence_past_grace_window_pruned() -> None:
     _check(
         pruned == 1 and _claim_rows(state) == [],
         "absence past the grace window IS pruned",
+    )
+
+
+def test_pruner_pages_claims_without_a_target_query_state_read() -> None:
+    """More than two provider pages preserve prune and grace-map semantics."""
+
+    class _NoClaimQueryState(CapEnforcingState):
+        def query_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+            if query.get("table") == TABLE_SESSION_ROLE_CLAIM:
+                raise AssertionError("D1 must page session_role_claim, never query_state it")
+            return super().query_state(namespace, query)
+
+    inner = _state()
+    state = _NoClaimQueryState(inner)
+    for index in range(205):
+        session_id = f"sess-terminal-{index:03d}"
+        _seed_claim(state, agent_session_id=session_id, held_role="Some-Lane")
+        inner.write_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {
+                "table": "managed_session",
+                "record": {
+                    "agent_session_id": session_id,
+                    "agent_instance_id": f"agi-{session_id}",
+                    "lifecycle_state": LIFECYCLE_TERMINATED,
+                },
+            },
+        )
+    _seed_claim(state, agent_session_id="sess-absent", held_role="Some-Lane")
+    _spawn_live(inner, agent_instance_id="agi-live-page")
+    inner.update_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": "managed_session", "filters": {"agent_instance_id": "agi-live-page"}},
+        {"agent_session_id": "sess-live-page"},
+    )
+    _seed_claim(state, agent_session_id="sess-live-page", held_role="Some-Lane")
+
+    pruner = SessionRoleClaimPruner(grace_window_s=300, clock=lambda: T0)
+    first_pruned = pruner.sweep(state, peer_registry=_peer_registry())
+    _check(
+        first_pruned == 205 and {row["agent_session_id"] for row in _claim_rows(state)}
+        == {"sess-absent", "sess-live-page"},
+        "D1 pages >200 claims: terminal rows prune while absent-grace and live rows survive",
+    )
+    _check(
+        "sess-absent" in pruner._first_absent_at,
+        "the absent row is tracked for grace even when terminal rows span pages",
+    )
+    inner.delete_records(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {
+            "table": TABLE_SESSION_ROLE_CLAIM,
+            "filters": {"agent_session_id": "sess-absent"},
+            "soft_delete": False,
+        },
+    )
+    pruner.sweep(state, peer_registry=_peer_registry())
+    _check(
+        "sess-absent" not in pruner._first_absent_at
+        and {row["agent_session_id"] for row in _claim_rows(state)} == {"sess-live-page"},
+        "grace-map cleanup forgets an absent claim that vanishes across paged sweeps",
     )
 
 
@@ -3359,6 +3444,7 @@ def main() -> int:
     test_pruner_live_registered_session_never_pruned()
     test_pruner_absence_within_grace_window_not_pruned()
     test_pruner_absence_past_grace_window_pruned()
+    test_pruner_pages_claims_without_a_target_query_state_read()
     test_retire_session_crash_mid_retire_is_redrivable()
     test_registration_within_bound_is_not_marked()
     test_registration_past_bound_marks_field_not_state()

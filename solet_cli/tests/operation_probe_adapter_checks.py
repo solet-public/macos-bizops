@@ -14,22 +14,33 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from solet_manager import operation_executor  # noqa: E402
+from bootstrap_adapter.routes import execute_adapter_request  # noqa: E402
+
+from solet_manager import (
+    operation_executor,  # noqa: E402
+    preview_engine,  # noqa: E402
+)
 from solet_manager.adapters import (  # noqa: E402
     OperationRequest,
     OperationResult,
     PlannedAction,
 )
 from solet_manager.contracts import ContractBundle  # noqa: E402
+from solet_manager.doctor_inference_qualification import (  # noqa: E402
+    collect_inference_pre_probe_timeout_advisories,
+    collect_inference_probe_advisories,
+)
 from solet_manager.errors import StateConflictError  # noqa: E402
-from solet_manager.flow import PlannedOperation  # noqa: E402
+from solet_manager.flow import PlannedOperation, SetupPlan  # noqa: E402
+from solet_manager.inference_probe_policy import (  # noqa: E402
+    ADVISORY_ERROR_KIND,
+    advisory_inference_probe_result,
+)
 from solet_manager.models import CheckpointStatus, CommandResult, ExitCode, JsonValue  # noqa: E402
 from solet_manager.operation_records import operation_probe_request  # noqa: E402
 from solet_manager.paths import ManagerPaths  # noqa: E402
 from solet_manager.release_lock import SeedLock  # noqa: E402
 from solet_manager.transaction import Transaction, load_transaction  # noqa: E402
-
-from bootstrap_adapter.routes import execute_adapter_request  # noqa: E402
 
 _CONTRACTS = Path(__file__).resolve().parents[2] / "plugins/github_midwife_plugin/knowledge_base"
 _STAGE_ID = "system_dependencies"
@@ -100,22 +111,52 @@ def operation_owned_probe_requests_use_probe_identity() -> None:
             "all bootstrap probe triples are exact",
         )
         _require(recorded_owner, "parent-operation journal ownership was exercised")
-        _assert_inference_qualification_projection(bundle, transaction)
+        _assert_model_qualification_projections(bundle, transaction)
 
 
-def _assert_inference_qualification_projection(
+def _assert_model_qualification_projections(
     bundle: ContractBundle,
     transaction: Transaction,
 ) -> None:
-    operation = _operation(bundle, "configure_lm_studio_inference")
-    selected = "qwen/qwen3-30b-a3b-2507"
+    selections = (
+        (
+            "configure_lm_studio_embeddings",
+            "embedding_model",
+            "fixture-embedding-model",
+            "embedding_model_qualification",
+            "setup::models.qualify_embedding",
+        ),
+    )
+    for operation_id, decision_id, selected, probe_id, probe_ref in selections:
+        _assert_model_qualification_projection(
+            bundle,
+            transaction,
+            operation_id=operation_id,
+            decision_id=decision_id,
+            selected=selected,
+            probe_id=probe_id,
+            probe_ref=probe_ref,
+        )
+
+
+def _assert_model_qualification_projection(
+    bundle: ContractBundle,
+    transaction: Transaction,
+    *,
+    operation_id: str,
+    decision_id: str,
+    selected: str,
+    probe_id: str,
+    probe_ref: str,
+) -> None:
+    operation = _operation(bundle, operation_id)
     resolved = replace(
         transaction,
         answers={
             "decisions": {
                 "autostart": "disabled",
                 "coding_agents": ["codex"],
-                "inference_model": selected,
+                decision_id: selected,
             }
         },
     )
@@ -123,32 +164,32 @@ def _assert_inference_qualification_projection(
         resolved,
         bundle,
         operation,
-        probe_id="structured_action_qualification",
+        probe_id=probe_id,
         purpose="post_apply",
         attempt=1,
     )
     _require(
         runner == "hydration"
-        and request.operation_ref == "setup::models.qualify_structured_actions"
+        and request.operation_ref == probe_ref
         and request.public_inputs == {"candidate_id": selected},
-        "inference postcondition projects only the resolved candidate selection",
+        f"{operation_id} postcondition projects only the resolved candidate selection",
     )
     for label, answers in (
         ("missing", {"decisions": {}}),
-        ("invalid", {"decisions": {"inference_model": [selected]}}),
+        ("invalid", {"decisions": {decision_id: [selected]}}),
     ):
         try:
             operation_probe_request(
                 replace(resolved, answers=answers),
                 bundle,
                 operation,
-                probe_id="structured_action_qualification",
+                probe_id=probe_id,
                 purpose="post_apply",
                 attempt=1,
             )
         except StateConflictError:
             continue
-        raise AssertionError(f"{label} inference selection must fail closed")
+        raise AssertionError(f"{label} {decision_id} selection must fail closed")
 
 
 def _assert_pgvector_blocked_evidence(
@@ -207,6 +248,7 @@ def planned_action_drift_uses_operation_route() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         _postgres_route_split_regressions(bundle, root)
+        _approved_inventory_action_regression(bundle, root)
         _true_drift_regression(bundle, root)
         _contract_route_closure_and_probe_purity(bundle, root)
         _post_apply_block_regression(bundle, root)
@@ -224,6 +266,9 @@ class _RouteSplitAdapter:
         pre_apply_revision: str = "approved",
         blocked_postcondition_probe_id: str | None = None,
         preconditions_verified: bool = False,
+        inference_pre_probe_timeout: bool = False,
+        inference_inventory_error_kind: str | None = None,
+        inference_preview_error_kind: str | None = None,
     ) -> None:
         self.operation = operation
         self.blocked_precondition = blocked_precondition
@@ -231,8 +276,13 @@ class _RouteSplitAdapter:
         self.pre_apply_revision = pre_apply_revision
         self.blocked_postcondition_probe_id = blocked_postcondition_probe_id
         self.preconditions_verified = preconditions_verified
+        self.inference_pre_probe_timeout = inference_pre_probe_timeout
+        self.inference_inventory_error_kind = inference_inventory_error_kind
+        self.inference_preview_error_kind = inference_preview_error_kind
         self.requests: list[tuple[str, OperationRequest]] = []
         self.mutated_request_ids: list[str] = []
+        self.apply_calls = 0
+        self.parent_pre_apply_calls = 0
 
     def __call__(
         self,
@@ -244,6 +294,7 @@ class _RouteSplitAdapter:
         self.requests.append((runner, request))
         if request.phase == "apply":
             self.mutated_request_ids.append(request.request_id)
+            self.apply_calls += 1
             return _result(request, CheckpointStatus.APPLIED)
         if request.probe_purpose == "post_apply":
             if request.operation_id == self.blocked_postcondition_probe_id:
@@ -254,6 +305,41 @@ class _RouteSplitAdapter:
                 )
             return _result(request, CheckpointStatus.VERIFIED)
         if request.operation_id == self.operation.operation_id:
+            self.parent_pre_apply_calls += 1
+            if (
+                request.probe_purpose == "preview"
+                and self.inference_preview_error_kind is not None
+            ):
+                return _result(
+                    request,
+                    CheckpointStatus.FAILED,
+                    error_kind=self.inference_preview_error_kind,
+                    timed_out=self.inference_preview_error_kind == "adapter_timeout",
+                    retry_safe=False,
+                    exit_code=None,
+                )
+            if self.inference_pre_probe_timeout and self.parent_pre_apply_calls == 1:
+                return _result(
+                    request,
+                    CheckpointStatus.FAILED,
+                    error_kind="adapter_timeout",
+                    timed_out=True,
+                    retry_safe=False,
+                    exit_code=None,
+                )
+            if (
+                self.inference_inventory_error_kind is not None
+                and self.parent_pre_apply_calls == 2
+            ):
+                return _result(
+                    request,
+                    CheckpointStatus.FAILED,
+                    actions=(_planned_action(self.operation, self.pre_apply_revision),),
+                    error_kind=self.inference_inventory_error_kind,
+                    timed_out=self.inference_inventory_error_kind == "adapter_timeout",
+                    retry_safe=False,
+                    exit_code=None,
+                )
             return _result(
                 request,
                 CheckpointStatus.PENDING,
@@ -400,6 +486,249 @@ def _no_drift_controls(bundle: ContractBundle, root: Path) -> None:
         and any(request.phase == "apply" for _runner, request in connector_adapter.requests),
         "connector operation compares its parent inventory rather than its actionless probe",
     )
+    _inference_probe_policy_regression(bundle, root)
+
+
+def _inference_probe_policy_regression(
+    bundle: ContractBundle,
+    root: Path,
+) -> None:
+    """Every inference-probe consumer records timeout and empty output as advisory."""
+
+    inference = _operation(bundle, "configure_lm_studio_inference")
+    inference = replace(inference, public_inputs={"model": "fixture-inference"})
+    adapter = _RouteSplitAdapter(inference, inference_pre_probe_timeout=True)
+    outcome = _run_pending_case(bundle, root / "inference-pre-probe-timeout", inference, adapter)
+    timeout_attempt = outcome.transaction.operation_attempts[0]
+    advisories = collect_inference_pre_probe_timeout_advisories(outcome.transaction)
+    _require(
+        outcome.terminal_result is None
+        and adapter.apply_calls == 1
+        and outcome.transaction.operation_statuses[inference.operation_id]
+        is CheckpointStatus.VERIFIED,
+        "inference pre-probe timeout keeps the served-model configuration on its apply path",
+    )
+    _require(
+        timeout_attempt["phase"] == "pre_probe"
+        and timeout_attempt["checkpoint_status"] == CheckpointStatus.VERIFIED.value
+        and timeout_attempt["error_kind"] == ADVISORY_ERROR_KIND
+        and timeout_attempt["timed_out"] is True,
+        "inference pre-probe timeout remains durably recorded as an advisory",
+    )
+    _require(
+        len(advisories) == 1
+        and advisories[0]["check_id"] == "doctor::inference_configuration_pre_probe"
+        and advisories[0]["status"] == "warn"
+        and advisories[0]["blocking"] is False
+        and advisories[0]["observed"] == {
+            "checkpoint_status": CheckpointStatus.VERIFIED.value,
+            "error_kind": ADVISORY_ERROR_KIND,
+            "timed_out": True,
+            "duration_ms": 0,
+        },
+        "doctor renders the retained inference pre-probe outcome as a non-blocking advisory",
+    )
+    _all_inference_probe_kinds_are_advisory(bundle, root)
+    _preview_and_inventory_inference_probe_regressions(bundle, root)
+
+
+def _preview_and_inventory_inference_probe_regressions(
+    bundle: ContractBundle,
+    root: Path,
+) -> None:
+    inference = replace(
+        _operation(bundle, "configure_lm_studio_inference"),
+        public_inputs={"model": "fixture-inference"},
+    )
+    transaction = _transaction(bundle, root / "preview-target")
+    preview = SetupPlan(transaction.answers, (inference,), (), ())
+    for error_kind in ("adapter_timeout", "adapter_empty_content"):
+        preview_adapter = _RouteSplitAdapter(
+            inference,
+            inference_preview_error_kind=error_kind,
+        )
+        with patch.object(preview_engine, "invoke_adapter", preview_adapter):
+            preview_results, preview_failures = preview_engine._probe_operations(
+                transaction,
+                bundle,
+                preview,
+                _FixtureRegistry(),
+            )
+        preview_result = preview_results[inference.operation_id]
+        _require(
+            preview_result.checkpoint_status is CheckpointStatus.VERIFIED
+            and preview_result.error_kind == ADVISORY_ERROR_KIND
+            and not preview_failures,
+            f"preview {error_kind} is advisory for the selected served inference model",
+        )
+        inventory_adapter = _RouteSplitAdapter(
+            inference,
+            inference_pre_probe_timeout=True,
+            inference_inventory_error_kind=error_kind,
+        )
+        outcome = _run_pending_case(
+            bundle,
+            root / f"inventory-{error_kind}",
+            inference,
+            inventory_adapter,
+        )
+        _require(
+            outcome.terminal_result is None
+            and inventory_adapter.apply_calls == 1
+            and outcome.transaction.operation_statuses[inference.operation_id]
+            is CheckpointStatus.VERIFIED,
+            f"repeat inventory {error_kind} cannot block inference configuration",
+        )
+
+
+def _all_inference_probe_kinds_are_advisory(bundle: ContractBundle, root: Path) -> None:
+    transaction = _transaction(bundle, root / "policy-target")
+    answers = transaction.answers
+    controls = (
+        ("pre_probe", "setup::models.configure_lm_studio_inference", "pre_apply"),
+        ("post_apply", "setup::models.configure_lm_studio_inference", "post_apply"),
+        ("qualification", "setup::models.qualify_structured_actions", "decision_qualification"),
+        ("representative", "setup::models.qualify_representative_inference", "completion"),
+        ("identity_completion", "service_interface::inference_service.qualify", "completion"),
+        ("identity_stage_entry", "service_interface::inference_service.qualify", "stage_entry"),
+        ("identity_stage_exit", "service_interface::inference_service.qualify", "stage_exit"),
+    )
+    for label, operation_ref, purpose in controls:
+        request = OperationRequest(
+            request_id="00000000-0000-4000-8000-000000000007",
+            operation_id=f"inference.{label}",
+            operation_ref=operation_ref,
+            phase="probe",
+            probe_purpose=purpose,
+            attempt=1,
+            name="operation-probe",
+            target=root / label,
+            flow_id=bundle.flow_id,
+            flow_source_revision=bundle.source_revision,
+            answers_fingerprint="sha256:" + "a" * 64,
+            approval_fingerprint=None,
+            dry_run=True,
+            timeout_seconds=30,
+            public_inputs={},
+        )
+        for error_kind, timed_out in (("adapter_timeout", True), ("adapter_empty_content", False)):
+            observed = advisory_inference_probe_result(
+                answers,
+                request,
+                _result(
+                    request,
+                    CheckpointStatus.FAILED,
+                    error_kind=error_kind,
+                    timed_out=timed_out,
+                    retry_safe=False,
+                    exit_code=None,
+                ),
+            )
+            _require(
+                observed.checkpoint_status is CheckpointStatus.VERIFIED
+                and observed.error_kind == ADVISORY_ERROR_KIND,
+                f"{label} {error_kind} is advisory for the selected served inference model",
+            )
+    exact_refusal = advisory_inference_probe_result(
+        answers,
+        request,
+        _result(request, CheckpointStatus.FAILED, error_kind="inference_model_identity_mismatch"),
+    )
+    embedding = advisory_inference_probe_result(
+        answers,
+        replace(request, operation_ref="setup::models.qualify_embedding"),
+        _result(request, CheckpointStatus.FAILED, error_kind="adapter_timeout"),
+    )
+    _require(
+        exact_refusal.checkpoint_status is CheckpointStatus.FAILED
+        and embedding.checkpoint_status is CheckpointStatus.FAILED,
+        "exact inference identity refusal and embedding qualification remain decisive",
+    )
+    journal_attempts = tuple(
+        {
+            "operation_id": f"inference.{label}",
+            "checkpoint_status": CheckpointStatus.VERIFIED.value,
+            "error_kind": ADVISORY_ERROR_KIND,
+            "timed_out": label.endswith("timeout"),
+            "duration_ms": 0,
+        }
+        for label, _operation_ref, _purpose in controls[:5]
+    )
+    stage_attempts = tuple(
+        {
+            "probe_id": f"inference.{label}",
+            "checkpoint_status": CheckpointStatus.VERIFIED.value,
+            "error_kind": ADVISORY_ERROR_KIND,
+            "timed_out": False,
+            "duration_ms": 0,
+        }
+        for label, _operation_ref, _purpose in controls[5:]
+    )
+    doctor_advisories = collect_inference_probe_advisories(
+        replace(
+            transaction,
+            operation_attempts=journal_attempts,
+            stage_probe_attempts=stage_attempts,
+        )
+    )
+    _require(
+        len(doctor_advisories) == len(controls)
+        and all(
+            item["status"] == "warn" and item["blocking"] is False
+            for item in doctor_advisories
+        ),
+        "doctor exposes every journaled inference probe result as advisory",
+    )
+
+
+def _approved_inventory_action_regression(
+    bundle: ContractBundle,
+    root: Path,
+) -> None:
+    """An approved action must apply even when a declared probe already verifies."""
+
+    cases = (
+        (
+            "embedding-qualified",
+            _operation(bundle, "configure_lm_studio_embeddings"),
+            True,
+            CheckpointStatus.PENDING,
+        ),
+        (
+            "inference-qualified",
+            _operation(bundle, "configure_lm_studio_inference"),
+            True,
+            CheckpointStatus.PENDING,
+        ),
+        (
+            "operation-fallback",
+            _operation(bundle, "open_background_items_settings"),
+            False,
+            CheckpointStatus.PENDING,
+        ),
+        (
+            "embedding-resumed-awaiting-user",
+            _operation(bundle, "configure_lm_studio_embeddings"),
+            True,
+            CheckpointStatus.AWAITING_USER,
+        ),
+    )
+    for label, operation, preconditions_verified, prior_status in cases:
+        adapter = _RouteSplitAdapter(
+            operation,
+            preconditions_verified=preconditions_verified,
+        )
+        _run_pending_case(
+            bundle,
+            root / label,
+            operation,
+            adapter,
+            prior_status=prior_status,
+        )
+        _require(
+            adapter.apply_calls == 1,
+            f"{label} preserves its approved pending inventory action",
+        )
 
 
 def _true_drift_regression(bundle: ContractBundle, root: Path) -> None:
@@ -606,11 +935,14 @@ def _run_pending_case(
     approval: str = "sha256:" + "a" * 64,
     refreshed: str = "sha256:" + "b" * 64,
     result_kind: str | None = None,
+    prior_status: CheckpointStatus = CheckpointStatus.PENDING,
 ) -> operation_executor.OperationOutcome:
     root.mkdir(parents=True)
     transaction = _transaction(bundle, root / "target").bind_operations(
         {operation.operation_id: operation.stage_id}
     ).approve(approval)
+    if prior_status is not CheckpointStatus.PENDING:
+        transaction = transaction.with_operation_status(operation.operation_id, prior_status)
     if result_kind is not None:
         transaction = transaction.with_result_kind(result_kind)
     paths = ManagerPaths(root / "config", root / "state", root / "cache")
@@ -696,6 +1028,9 @@ def _result(
     *,
     actions: tuple[PlannedAction, ...] = (),
     error_kind: str | None = None,
+    timed_out: bool = False,
+    retry_safe: bool = True,
+    exit_code: int | None = 0,
 ) -> OperationResult:
     return OperationResult(
         request_id=request.request_id,
@@ -704,9 +1039,9 @@ def _result(
         probe_purpose=request.probe_purpose,
         checkpoint_status=status,
         error_kind=error_kind,
-        retry_safe=True,
-        exit_code=0,
-        timed_out=False,
+        retry_safe=retry_safe,
+        exit_code=exit_code,
+        timed_out=timed_out,
         duration_ms=0,
         stdout="",
         stderr="",
@@ -749,7 +1084,10 @@ def _transaction(bundle: ContractBundle, target: Path) -> Transaction:
                 "coding_agents": ["codex"],
                 "embedding_model": "fixture-embedding",
                 "inference_model": "fixture-inference",
-            }
+                "embeddings_implementation": "lm_studio",
+                "inference_implementation": "lm_studio",
+            },
+            "public_inputs": {"lm_studio_base_url": "http://localhost:1234/v1"},
         },
         seed=seed,
         flow_id=bundle.flow_id,

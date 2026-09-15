@@ -24,11 +24,10 @@ binary this fleet runs (isolated proof, a dev-checkout workbench evidence
 report, not part of this shipped bundle), that decision DOES force Codex to
 continue the turn. This is exactly why it must be
 synchronous rather than async (an async hook's decision is discarded — Codex
-does not wait for it) and exactly why its bounded park uses
-`solet-bridge wake --max-wait 2400` with a paired 2430-second registration.
-The live stock-Codex 0.149.0 probe established that this synchronous shape
-survives beyond the former 30-second registration and can force continuation;
-it is still finite and never reads or relays peer-message
+does not wait for it). It uses `solet-bridge wake --max-wait 0` with an
+eight-second registration and two-second child bounds, so it observes only
+already-present delivery. This synchronous shape can force continuation and
+never reads or relays peer-message
 CONTENT itself (same discipline as the Claude sibling's `wake_waiter.py`);
 its own two subprocesses are argv-only calls to the launcher-provided
 `AGENT_WAKE_CLI` (`wake`, then `call report_inbox_consumption`), never a
@@ -150,8 +149,8 @@ reporter), because measured live (isolated proof, a dev-checkout workbench
 evidence report, not part of this shipped bundle) an async hook's
 `decision` output is discarded by Codex — only a synchronous hook can gate
 or continue a turn. This is not "a synchronous command hook on Stop would
-hold the turn boundary" being ignored; it is bounded by construction to forty
-minutes (`solet-bridge wake --max-wait 2400`) with a 2430-second registration.
+hold the turn boundary" being ignored; it is bounded by an immediate spool
+observation (`solet-bridge wake --max-wait 0`) with an eight-second registration.
 Multiple matching
 hooks may run concurrently; reporter rows therefore carry both
 `reporter_surface` and a content-generation integer rather than assuming
@@ -272,7 +271,7 @@ this hook's job.
 
 What CHANGED (CDX-06, 2026-08-24): a turn that IS ending no longer walks
 past mail that is already queued. `inbox_consumer.py` checks the session's
-already-armed sidecar watcher (`solet-bridge wake --max-wait 2400`) on every
+already-armed sidecar watcher (`solet-bridge wake --max-wait 0`) on every
 `Stop`, and if it finds something, forces the turn to continue with a nudge
 rather than letting the session go idle unaware.
 Because a real consumer now exists, the wake-hook spool is RE-ARMED for
@@ -355,7 +354,7 @@ self-addressed send is not evidence for them.
 | Bash allow/block and AGENT_ROLE-only authority | `tests/git_controller_gate_smoke.py` |
 | reporter uses the latest positive post-compaction native measurement, refuses identity mismatch, and never invents cache state | development-checkout behavioral smoke for the reporter (not shipped) |
 | `context_status_reporter.py` is the single declared async subprocess exception; every other `Stop` entry carries no `async` key | `tests/manifest_consistency_smoke.py`'s inventory and source contract |
-| `inbox_consumer.py` gates the fleet precondition, checks pending via `wake --max-wait`, reports via `report_inbox_consumption` on every run, decodes decision:block only when pending, and always exits 0 | `plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/inbox_consumer_smoke.py` |
+| `inbox_consumer.py` gates the fleet precondition, observes pending/empty/unknown via zero-wait `wake`, reports only known pending/empty results, never drains the inbox, decodes decision:block only when pending, and always exits 0 | `plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/inbox_consumer_smoke.py` |
 | a synchronous Stop hook's `decision:block` actually forces Codex to continue a turn, and an async hook's decision is discarded, on real codex-0.149.0 | a dev-checkout workbench evidence report (live, isolated, not part of this shipped suite) |
 
 Run all seven with `python3 tests/run_all.py`. These are offline source and

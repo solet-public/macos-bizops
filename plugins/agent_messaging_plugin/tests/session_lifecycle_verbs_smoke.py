@@ -18,6 +18,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -50,6 +51,7 @@ from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
 from ananta.llm.agent_messaging.state_results import require_records  # noqa: E402
 
 import agent_messaging_plugin.lane_worktrees as lane_worktrees  # noqa: E402
+import agent_messaging_plugin.model_dispatch_policy as model_dispatch_policy  # noqa: E402
 import agent_messaging_plugin.session_hosts as session_hosts  # noqa: E402
 import agent_messaging_plugin.session_lifecycle_verbs as lifecycle_verbs  # noqa: E402
 from agent_messaging_plugin.headless_adapter import (  # noqa: E402
@@ -66,6 +68,7 @@ from agent_messaging_plugin.schema import (  # noqa: E402
     LIFECYCLE_SPAWNING,
     LIFECYCLE_TERMINATED,
     TABLE_MANAGED_DISPATCH,
+    TABLE_MANAGED_SESSION,
     WORK_CLASS_ANALYSIS_DELIVERABLE,
 )
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
@@ -346,18 +349,43 @@ def test_model_dispatch_policy_refusals_and_allowances() -> None:
         )
         _check(bool(fixed.get("agent_instance_id")), "fix with gpt-5.6-terra passes")
 
-        same_vendor = None
-        try:
-            spawn_session(
-                state,
-                _spawn_req(
-                    host=_TEST_HOST, lane_id="policy-review-same", dispatch_kind="review",
-                    agent_runtime="codex", model="gpt-5.6-terra", reviewed_report_vendor="codex",
-                ),
-            )
-        except VerbError as exc:
-            same_vendor = exc.code
-        _check(same_vendor == "dispatch_policy_violation", "review by report author vendor refuses")
+        original_policy_path = model_dispatch_policy._POLICY_PATH  # noqa: SLF001 -- policy fixture
+        policy_source = json.loads(original_policy_path.read_text(encoding="utf-8"))
+        policy_source["budget_vendor_override"]["active"] = False
+        with tempfile.TemporaryDirectory() as raw:
+            fixture_policy_path = Path(raw) / "policy.json"
+            fixture_policy_path.write_text(json.dumps(policy_source), encoding="utf-8")
+            try:
+                model_dispatch_policy._POLICY_PATH = fixture_policy_path  # type: ignore[misc]  # noqa: SLF001
+                same_vendor = None
+                try:
+                    spawn_session(
+                        state,
+                        _spawn_req(
+                            host=_TEST_HOST, lane_id="policy-review-same-inactive", dispatch_kind="review",
+                            agent_runtime="codex", model="gpt-5.6-terra", reviewed_report_vendor="codex",
+                        ),
+                    )
+                except VerbError as exc:
+                    same_vendor = exc.code
+                _check(
+                    same_vendor == "dispatch_policy_violation",
+                    "inactive override keeps review by report author vendor refused",
+                )
+            finally:
+                model_dispatch_policy._POLICY_PATH = original_policy_path  # type: ignore[misc]  # noqa: SLF001
+
+        same_vendor = spawn_session(
+            state,
+            _spawn_req(
+                host=_TEST_HOST, lane_id="policy-review-same-active", dispatch_kind="review",
+                agent_runtime="codex", model="gpt-5.6-terra", reviewed_report_vendor="codex",
+            ),
+        )
+        _check(
+            bool(same_vendor.get("agent_instance_id")),
+            "active ruling-scoped override permits review by report author vendor",
+        )
 
         review = spawn_session(
             state,
@@ -2344,7 +2372,7 @@ def test_provision_surfaces_typed_dirty_stale_worktree_warning() -> None:
         git_diagnostic="git worktree remove refused dirty tracked.txt",
     )
     original_root = lifecycle_verbs._resolve_lane_repo_root  # noqa: SLF001
-    original_active = lifecycle_verbs._active_lane_worktree_paths  # noqa: SLF001
+    original_inventory = lifecycle_verbs._active_lane_worktree_inventory  # noqa: SLF001
     original_sweep = lifecycle_verbs.sweep_orphaned_lane_worktrees  # noqa: SLF001
     original_worktree_for = lifecycle_verbs.lane_worktree_for  # noqa: SLF001
     original_provision = lifecycle_verbs.provision_lane_worktree  # noqa: SLF001
@@ -2357,9 +2385,11 @@ def test_provision_surfaces_typed_dirty_stale_worktree_warning() -> None:
     handler = _WarningCapture(level=logging.WARNING)
     lifecycle_verbs.logger.addHandler(handler)  # noqa: SLF001
     try:
-        lifecycle_verbs._resolve_lane_repo_root = lambda: repo_root  # type: ignore[assignment]  # noqa: SLF001
-        lifecycle_verbs._active_lane_worktree_paths = (  # type: ignore[assignment]  # noqa: SLF001
-            lambda _state, _repo: ()
+        lifecycle_verbs._resolve_lane_repo_root = lambda _root="": repo_root  # type: ignore[assignment]  # noqa: SLF001
+        lifecycle_verbs._active_lane_worktree_inventory = (  # type: ignore[assignment]  # noqa: SLF001
+            lambda _state, _repo: lane_worktrees.ActiveLaneWorktreeInventory(
+                paths=(), terminal_paths=(), cleanup_safe=True, incomplete_rows=(),
+            )
         )
         lifecycle_verbs.sweep_orphaned_lane_worktrees = (  # type: ignore[assignment]  # noqa: SLF001
             lambda *_args, **_kwargs: lane_worktrees.LaneWorktreeSweep(
@@ -2381,7 +2411,7 @@ def test_provision_surfaces_typed_dirty_stale_worktree_warning() -> None:
     finally:
         lifecycle_verbs.logger.removeHandler(handler)  # noqa: SLF001
         lifecycle_verbs._resolve_lane_repo_root = original_root  # type: ignore[assignment]  # noqa: SLF001
-        lifecycle_verbs._active_lane_worktree_paths = original_active  # type: ignore[assignment]  # noqa: SLF001
+        lifecycle_verbs._active_lane_worktree_inventory = original_inventory  # type: ignore[assignment]  # noqa: SLF001
         lifecycle_verbs.sweep_orphaned_lane_worktrees = original_sweep  # type: ignore[assignment]  # noqa: SLF001
         lifecycle_verbs.lane_worktree_for = original_worktree_for  # type: ignore[assignment]  # noqa: SLF001
         lifecycle_verbs.provision_lane_worktree = original_provision  # type: ignore[assignment]  # noqa: SLF001
@@ -2395,7 +2425,132 @@ def test_provision_surfaces_typed_dirty_stale_worktree_warning() -> None:
     )
 
 
+def test_active_worktree_inventory_preserves_drift_and_refuses_unknown_owner() -> None:
+    """Durable active rows protect paths; terminal rows alone authorize removal."""
+    with tempfile.TemporaryDirectory() as raw:
+        repo_root = Path(raw).resolve()
+
+        def row(**overrides: object) -> dict[str, object]:
+            record: dict[str, object] = {
+                "agent_instance_id": "agi-inventory",
+                "role_name": "inventory-role",
+                "local_name": "",
+                "lifecycle_state": LIFECYCLE_LIVE,
+                "provisioning_mode": "worktree",
+                "lane_repo_root": str(repo_root),
+            }
+            record.update(overrides)
+            return record
+
+        def inventory(rows: list[dict[str, object]]) -> lane_worktrees.ActiveLaneWorktreeInventory:
+            state = _state()
+            for record in rows:
+                state.write_state(
+                    AGENT_ROLE_BINDING_NAMESPACE,
+                    {"table": TABLE_MANAGED_SESSION, "record": record},
+                )
+            return lifecycle_verbs._active_lane_worktree_inventory(state, repo_root)  # noqa: SLF001
+
+        drift = inventory([
+            row(agent_instance_id="agi-drift", role_name="new-role", local_name="old-local"),
+        ])
+        drift_paths = {
+            lane_worktrees.lane_worktree_for(
+                repo_root, role_name=name, agent_instance_id="agi-drift",
+            ).path
+            for name in ("new-role", "old-local")
+        }
+        _check(
+            drift.cleanup_safe and drift_paths.issubset(drift.paths),
+            "active role/local-name drift preserves both possible lane paths",
+        )
+        protected = inventory([
+            row(agent_instance_id="", role_name="", local_name=""),
+            row(agent_instance_id="agi-bad-root", lane_repo_root=""),
+            row(agent_instance_id="agi-bad-mode", provisioning_mode="unknown"),
+        ])
+        _check(
+            not protected.cleanup_safe and protected.incomplete_rows,
+            "incomplete active ownership disables automatic cleanup",
+        )
+        terminal = inventory([
+            row(
+                agent_instance_id="agi-terminal",
+                role_name="terminal-role",
+                lifecycle_state=LIFECYCLE_TERMINATED,
+            ),
+        ])
+        terminal_path = lane_worktrees.lane_worktree_for(
+            repo_root, role_name="terminal-role", agent_instance_id="agi-terminal",
+        ).path
+        _check(
+            terminal.cleanup_safe and terminal.terminal_paths == (terminal_path,),
+            "only a complete terminal worktree row supplies cleanup eligibility",
+        )
+        supported_modes = inventory([
+            row(
+                agent_instance_id="agi-terminal-supported-mode",
+                role_name="terminal-supported-mode",
+                lifecycle_state=LIFECYCLE_TERMINATED,
+            ),
+            row(
+                agent_instance_id="agi-operator-existing",
+                provisioning_mode="operator_existing_checkout",
+                role_name="",
+            ),
+            row(
+                agent_instance_id="agi-synthetic",
+                provisioning_mode="synthetic_no_worktree",
+                role_name="",
+            ),
+        ])
+        supported_terminal = lane_worktrees.lane_worktree_for(
+            repo_root,
+            role_name="terminal-supported-mode",
+            agent_instance_id="agi-terminal-supported-mode",
+        ).path
+        _check(
+            supported_modes.cleanup_safe
+            and supported_modes.terminal_paths == (supported_terminal,),
+            "supported non-worktree rows preserve unrelated terminal cleanup eligibility",
+        )
+        overlap = inventory([
+            row(agent_instance_id="agi-shared", role_name="shared-role"),
+            row(
+                agent_instance_id="agi-shared",
+                role_name="shared-role",
+                lifecycle_state=LIFECYCLE_TERMINATED,
+            ),
+            row(
+                agent_instance_id="agi-invalid-terminal",
+                lifecycle_state=LIFECYCLE_TERMINATED,
+                local_name="../invalid",
+            ),
+        ])
+        _check(
+            overlap.cleanup_safe
+            and len(overlap.paths) == 1
+            and not overlap.terminal_paths,
+            "active ownership overrides and malformed terminal identity cannot authorize removal",
+        )
+        paged = inventory([
+            row(
+                agent_instance_id=f"agi-page-{index}",
+                role_name=f"page-{index}",
+                lifecycle_state=LIFECYCLE_PARKED,
+            )
+            for index in range(101)
+        ])
+        final_path = lane_worktrees.lane_worktree_for(
+            repo_root, role_name="page-100", agent_instance_id="agi-page-100",
+        ).path
+        _check(
+            paged.cleanup_safe and final_path in paged.paths,
+            "a protected owner beyond the first page remains protected",
+        )
+
 def main() -> int:
+    test_active_worktree_inventory_preserves_drift_and_refuses_unknown_owner()
     test_provision_surfaces_typed_dirty_stale_worktree_warning()
     fixture_temp = tempfile.TemporaryDirectory()
     fixture_root = Path(fixture_temp.name)
@@ -2408,9 +2563,9 @@ def main() -> int:
     cleanup_calls: list[lifecycle_verbs.LaneWorktree] = []
 
     def fixture_provision(
-        state: StateManagementInterface, *, role_name: str, agent_instance_id: str,
+        state: StateManagementInterface, *, role_name: str, agent_instance_id: str, repository_root: str,
     ) -> lifecycle_verbs.LaneWorktree:
-        del state
+        del state, repository_root
         worktree = lifecycle_verbs.LaneWorktree(
             repo_root=fixture_root, root=fixture_root, path=fixture_root,
             branch=f"fixture/{role_name}/{agent_instance_id}",

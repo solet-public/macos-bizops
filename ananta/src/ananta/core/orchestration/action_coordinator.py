@@ -1,4 +1,5 @@
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 from ananta.constants import NOTES_MAX_LENGTH
@@ -407,7 +408,7 @@ class ActionCoordinator:
             )
 
         logger.debug("ActionCoordinator: Calling build_and_populate_registry()")
-        manager.build_and_populate_registry()
+        manager.build_and_populate_registry(populate_discovery=False)
 
         # Verify discovery service was populated
         if discovery_service is not None and isinstance(discovery_service, DiscoveryService):
@@ -423,6 +424,17 @@ class ActionCoordinator:
                 "ActionCoordinator: Failed to get registry data from ProcessRegistryManager"
             )
             self._process_registry = {"processes": {}}
+
+    def populate_discovery_after_registration(self) -> None:
+        """Schedule the inference-dependent discovery rebuild after activation."""
+        manager = self._process_registry_manager
+        if manager is None:
+            raise RuntimeError("Process registry manager unavailable after registration")
+        threading.Thread(
+            target=manager.populate_discovery_after_registration,
+            name="post-registration-discovery-index",
+            daemon=True,
+        ).start()
 
     def _initialize_action_factory(
         self,

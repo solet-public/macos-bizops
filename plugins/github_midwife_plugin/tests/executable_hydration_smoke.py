@@ -28,9 +28,11 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from executable_hydration_plugin_list_support import (  # noqa: E402
+    prepare_claude_receipt_fixture,
     run_genesis_profile_projection,
     run_plugin_list_output_cap,
     run_public_evidence_shape_regression,
+    run_receipt_surface_shape_regression,
     run_session_retrieval_envelope,
 )
 from executable_hydration_structured_output_cap_support import (  # noqa: E402
@@ -38,6 +40,7 @@ from executable_hydration_structured_output_cap_support import (  # noqa: E402
     run_plugin_roster_output_cap,
 )
 from github_midwife_plugin import setup_shell_operations  # noqa: E402
+from github_midwife_plugin.coordination_hook_installation import build_receipt  # noqa: E402
 from github_midwife_plugin.setup_adapter_contract import (  # noqa: E402
     AdapterInputError,
     AdapterRequest,
@@ -53,6 +56,7 @@ from github_midwife_plugin.setup_adapter_runtime import (  # noqa: E402
     bounded_command_outcome,
 )
 from github_midwife_plugin.setup_operations import operation_handlers  # noqa: E402
+from github_midwife_plugin.setup_plugin_operations import _receipt_surfaces  # noqa: E402
 from github_midwife_plugin.setup_shell_operations import _render_json  # noqa: E402
 from readiness_deadline_scenarios import run_scenarios  # noqa: E402
 
@@ -702,6 +706,19 @@ def _fresh_zsh_path_is_unique(target: Path, runtime: FakeRuntime) -> None:
     pre_patch = operation_handlers()[plugin_request.operation_ref](plugin_request, runtime)
     _check(pre_patch["checkpoint_status"] == "pending", "bare/system Python hook is non-green")
 
+    prepare_claude_receipt_fixture(
+        target, runtime, plugin_root=_PLUGIN_ROOT, selector=selector, command_outcome=CommandOutcome,
+    )
+    run_receipt_surface_shape_regression(
+        target,
+        runtime,
+        request=plugin_request,
+        selector=selector,
+        receipt_surfaces=_receipt_surfaces,
+        build_receipt=build_receipt,
+        check=_check,
+    )
+
     plugin_apply = AdapterRequest.from_dict(
         _raw_request(
             target,
@@ -713,7 +730,10 @@ def _fresh_zsh_path_is_unique(target: Path, runtime: FakeRuntime) -> None:
         )
     )
     applied = operation_handlers()[plugin_apply.operation_ref](plugin_apply, runtime)
-    _check(applied["checkpoint_status"] == "applied", "plugin CLI apply reports applied")
+    _check(
+        applied["checkpoint_status"] == "blocked",
+        "post-apply refuses to bless stale cache bytes when CLI readback did not repair them",
+    )
     manifest_text = target_manifest.read_text(encoding="utf-8")
     _check(
         str(target / ".venv/bin/python3") in manifest_text, "hook bound to absolute target Python"

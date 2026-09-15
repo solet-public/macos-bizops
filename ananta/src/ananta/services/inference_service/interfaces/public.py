@@ -94,10 +94,11 @@ class InferenceServiceAPI(ABC):
                 "function_name": "process_error",
             },
             "arguments": {
-                # Keep the model object present so inference validation passes,
-                # but let runtime policy resolve temperature/max_tokens.
-                "model": {},
-                "prompt": {
+                "params": {
+                    # Keep the model object present so inference validation passes,
+                    # but let runtime policy resolve temperature/max_tokens.
+                    "model": {},
+                    "prompt": {
                     "observation": {
                         "process_key": "<<FAILED_PROCESS_KEY>>",
                         "action_result": {
@@ -153,6 +154,7 @@ class InferenceServiceAPI(ABC):
                         },
                         "session_id": "<<SESSION_ID>>",
                         "flow_input": "<<<:service_interface::flow_service::get_flow_input_for_presentation()>>>",
+                    },
                     },
                 },
             },
@@ -214,10 +216,11 @@ class InferenceServiceAPI(ABC):
                 "function_name": "process_results",
             },
             "arguments": {
-                # Keep the model object present so inference validation passes,
-                # but let runtime policy resolve temperature/max_tokens.
-                "model": {},
-                "prompt": {
+                "params": {
+                    # Keep the model object present so inference validation passes,
+                    # but let runtime policy resolve temperature/max_tokens.
+                    "model": {},
+                    "prompt": {
                     "observation": {
                         "action_result": {
                             "action_status": "completed",
@@ -266,6 +269,7 @@ class InferenceServiceAPI(ABC):
                         },
                         "session_id": "<<SESSION_ID>>",
                         "flow_input": "<<<:service_interface::flow_service::get_flow_input_for_presentation()>>>",
+                    },
                     },
                 },
             },

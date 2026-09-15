@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -47,13 +48,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _release_manager_smoke_support as support  # noqa: E402
 from macos_self_deployment_plugin import release_manager as rm_module  # noqa: E402
+from macos_self_deployment_plugin.release_code_collection import (  # noqa: E402
+    ReleaseCodeCollectionError,
+    ReleaseCodeCollector,
+)
 from macos_self_deployment_plugin.release_manager import (  # noqa: E402
+    SELECTED_FILE_MANIFEST_FILENAME,
     STAGING_SUFFIX,
     TREE_STATE_CLEAN,
     TREE_STATE_DIRTY,
     TREE_STATE_UNKNOWN,
     VERSION_FILENAME,
     ReleaseManagerError,
+)
+from macos_self_deployment_plugin.schema_snapshot_producer import (  # noqa: E402
+    _pythonpath_for_tree,
+    build_schema_snapshot_fn,
 )
 
 _GIT_IDENTITY = (
@@ -659,25 +669,466 @@ def _case_pre_clone_unmeasurable_survives_a_later_success(
     )
 
 
+# ---------------------------------------------------------------------------
+# Selected-file collector — ignored nested environments are exclusion evidence,
+# not a second packaging specification. These legs use the real builder and
+# the synthetic Git source; Git-Controller owns their execution.
+# ---------------------------------------------------------------------------
+
+
+def _ignore(source: Path, relative: str) -> None:
+    """Ignore one synthetic nested environment without changing the index."""
+    exclude = source / ".git" / "info" / "exclude"
+    exclude.write_text(exclude.read_text() + f"{relative}/\n")
+
+
+def _make_nested_environment(root: Path, relative: str, *, python_link: bool = False) -> Path:
+    environment = root / relative
+    (environment / "bin").mkdir(parents=True)
+    (environment / "pyvenv.cfg").write_text("home = /opt/python/bin\n")
+    python = environment / "bin" / "python3"
+    if python_link:
+        os.symlink("python-real", python)
+        (environment / "bin" / "python-real").write_text("#!/bin/sh\n")
+    else:
+        python.write_text("#!/bin/sh\n")
+    (environment / "cache.pyc").write_bytes(b"nested cached bytecode")
+    return environment
+
+
+def _case_ignored_environment_is_excluded_and_manifested(
+    rec: support.SmokeRecorder, root: Path
+) -> None:
+    tag = "selected-ignored-environment"
+    source = _make_repo_source(root)
+    relative = "plugins/foo_plugin/src/foo_plugin/.venv_cosyvoice"
+    _ignore(source, relative)
+    _make_nested_environment(source, relative, python_link=True)
+
+    candidate = _build_or_fail(rec, tag, support.make_manager(source, root / "releases"))
+    if candidate is None:
+        return
+    release = root / "releases" / candidate.release_id  # type: ignore[attr-defined]
+    payload = _read_version(root / "releases", candidate.release_id)  # type: ignore[attr-defined]
+    manifest = json.loads((release / SELECTED_FILE_MANIFEST_FILENAME).read_text())
+    selected = manifest.get("selected_files", [])
+    exclusions = manifest.get("exclusions", [])
+    rec.check(
+        not (release / "code" / relative).exists(),
+        f"[{tag}] ignored nested environment is absent from materialized code/",
+    )
+    rec.check(
+        all(relative not in str(row.get("path", "")) for row in selected),
+        f"[{tag}] its cached file and interpreter link are absent from selected files",
+    )
+    rec.check(
+        any(row.get("path") == relative and row.get("reason") == "nested_python_environment"
+            for row in exclusions),
+        f"[{tag}] manifest records positive pyvenv.cfg + interpreter exclusion evidence",
+    )
+    bound = payload.get("selected_file_manifest")
+    rec.check(
+        isinstance(bound, dict)
+        and bound.get("filename") == SELECTED_FILE_MANIFEST_FILENAME
+        and isinstance(bound.get("sha256"), str)
+        and len(str(bound.get("sha256"))) == 64,
+        f"[{tag}] VERSION binds the selected-file manifest SHA-256",
+    )
+
+
+def _case_reserved_name_without_environment_evidence_ships(
+    rec: support.SmokeRecorder, root: Path
+) -> None:
+    tag = "selected-reserved-ordinary-source"
+    source = _make_repo_source(root)
+    ordinary = source / "plugins" / "foo_plugin" / "src" / "foo_plugin" / ".venv_notes"
+    ordinary.mkdir()
+    (ordinary / "readme.py").write_text("# ordinary source, not an environment\n")
+    _git(source, "add", "-A")
+    _git(source, *_GIT_IDENTITY, "commit", "--quiet", "-m", "ordinary reserved name")
+
+    candidate = _build_or_fail(rec, tag, support.make_manager(source, root / "releases"))
+    rec.check(
+        candidate is not None
+        and (root / "releases" / candidate.release_id / "code" / "plugins" / "foo_plugin"
+             / "src" / "foo_plugin" / ".venv_notes" / "readme.py").is_file(),  # type: ignore[attr-defined]
+        f"[{tag}] a similarly named ordinary directory ships without pyvenv evidence",
+    )
+
+
+def _case_links_refuse_before_finalize(rec: support.SmokeRecorder, root: Path) -> None:
+    tag = "selected-links-refuse"
+    source = _make_repo_source(root)
+    link = source / "plugins" / "foo_plugin" / "src" / "foo_plugin" / "escape.py"
+    os.symlink("/etc/hosts", link)
+    exc = _capture(
+        lambda: support.make_manager(source, root / "releases").build_candidate(
+            allow_dirty=True
+        )
+    )
+    rec.check(
+        isinstance(exc, ReleaseManagerError) and "symbolic link" in str(exc),
+        f"[{tag}] retained file link refuses rather than following outside source root",
+    )
+    rec.check(
+        _staging_dirs(root / "releases") == [],
+        f"[{tag}] link refusal leaves no staging or finalized artifact",
+    )
+
+
+def _case_ignored_asset_link_is_excluded_before_traversal(
+    rec: support.SmokeRecorder, root: Path
+) -> None:
+    """Local asset-reorg links are ignored content, not release code."""
+    tag = "selected-ignored-asset-link"
+    source = _make_repo_source(root)
+    asset_dir = source / "plugins" / "foo_plugin" / "assets"
+    library = source / "binary_libraries" / "foo_plugin" / "sample"
+    library.mkdir(parents=True)
+    (library / "payload.bin").write_bytes(b"local asset bytes")
+    asset_dir.mkdir(parents=True)
+    (asset_dir / "sample").symlink_to(
+        "../../../binary_libraries/foo_plugin/sample", target_is_directory=True
+    )
+    _ignore(source, "plugins/foo_plugin/assets")
+    _ignore(source, "binary_libraries")
+
+    candidate = _build_or_fail(rec, tag, support.make_manager(source, root / "releases"))
+    if candidate is None:
+        return
+    release = root / "releases" / candidate.release_id  # type: ignore[attr-defined]
+    manifest = json.loads((release / SELECTED_FILE_MANIFEST_FILENAME).read_text())
+    selected = manifest.get("selected_files", [])
+    exclusions = manifest.get("exclusions", [])
+    rec.check(
+        not (release / "code" / "plugins" / "foo_plugin" / "assets").exists(),
+        f"[{tag}] ignored asset link is absent from materialized code/",
+    )
+    rec.check(
+        all("plugins/foo_plugin/assets" not in str(row.get("path", "")) for row in selected),
+        f"[{tag}] ignored asset link is absent from selected files",
+    )
+    rec.check(
+        any(
+            row.get("path") == "plugins/foo_plugin/assets"
+            and row.get("reason") == "gitignored_path"
+            and row.get("evidence") == {"git_check_ignore": "matched"}
+            for row in exclusions
+        ),
+        f"[{tag}] manifest records the Git-ignore exclusion before link traversal",
+    )
+
+
+def _case_tracked_link_refuses_before_finalize(
+    rec: support.SmokeRecorder, root: Path
+) -> None:
+    """Git tracking never turns a symbolic link into an ignorable artifact."""
+    tag = "selected-tracked-link-refuse"
+    source = _make_repo_source(root)
+    link = source / "plugins" / "foo_plugin" / "src" / "foo_plugin" / "tracked_link.py"
+    link.symlink_to("__init__.py")
+    _git(source, "add", "-A")
+    _git(source, *_GIT_IDENTITY, "commit", "--quiet", "-m", "tracked symbolic link")
+    exc = _capture(
+        lambda: support.make_manager(source, root / "releases").build_candidate()
+    )
+    rec.check(
+        isinstance(exc, ReleaseManagerError) and "symbolic link" in str(exc),
+        f"[{tag}] tracked symbolic link remains fail-closed",
+    )
+    rec.check(
+        _staging_dirs(root / "releases") == [],
+        f"[{tag}] tracked-link refusal leaves no staging or finalized artifact",
+    )
+
+
+def _case_artifact_head_membership_is_complete(
+    rec: support.SmokeRecorder, root: Path
+) -> None:
+    """A tracked path deleted from the retained population is never equal."""
+    tag = "artifact-head-membership"
+    source = _make_repo_source(root)
+    deleted = source / "plugins" / "foo_plugin" / "src" / "foo_plugin" / "__init__.py"
+    deleted.unlink()
+    collector = ReleaseCodeCollector(
+        source_root=source,
+        code_subtrees=("plugins",),
+        cp_binary="/bin/cp",
+        clone_timeout_seconds=10,
+    )
+    equality = collector.manifest_payload(collector.plan())["artifact_to_head_equality"]
+    assert isinstance(equality, dict)
+    mismatches = equality.get("mismatches")
+    rec.check(
+        equality.get("state") == "unequal",
+        f"[{tag}] deleted tracked scoped path ⇒ artifact-to-HEAD is unequal",
+    )
+    rec.check(
+        isinstance(mismatches, list)
+        and {"kind": "missing_from_artifact", "path": "plugins/foo_plugin/src/foo_plugin/__init__.py"}
+        in mismatches,
+        f"[{tag}] mismatch identifies the tracked path missing from artifact",
+    )
+
+
+def _case_artifact_head_executable_mode_is_complete(
+    rec: support.SmokeRecorder, root: Path
+) -> None:
+    """Content identity does not hide a retained executable-bit change."""
+    tag = "artifact-head-executable-mode"
+    source = _make_repo_source(root)
+    retained = source / "solet_cli" / "src" / "solet_manager" / "__init__.py"
+    retained.chmod(0o755)
+    collector = ReleaseCodeCollector(
+        source_root=source,
+        code_subtrees=("solet_cli",),
+        cp_binary="/bin/cp",
+        clone_timeout_seconds=10,
+    )
+    equality = collector.manifest_payload(collector.plan())["artifact_to_head_equality"]
+    assert isinstance(equality, dict)
+    mismatches = equality.get("mismatches")
+    rec.check(
+        equality.get("state") == "unequal",
+        f"[{tag}] content-identical executable-mode change ⇒ artifact-to-HEAD is unequal",
+    )
+    rec.check(
+        isinstance(mismatches, list)
+        and {
+            "kind": "executable_mode_differs",
+            "path": "solet_cli/src/solet_manager/__init__.py",
+            "head_mode": "100644",
+            "artifact_mode": "0755",
+        }
+        in mismatches,
+        f"[{tag}] mismatch identifies Git executable mode versus retained mode",
+    )
+
+
+def _case_tracked_environment_conflict_refuses(
+    rec: support.SmokeRecorder, root: Path
+) -> None:
+    """A clean Git checkout cannot silently exclude tracked environment bytes."""
+    tag = "tracked-environment-conflict"
+    source = _make_repo_source(root)
+    relative = "plugins/foo_plugin/src/foo_plugin/.venv_cosyvoice"
+    _make_nested_environment(source, relative, python_link=False)
+    _git(source, "add", "-A")
+    _git(source, *_GIT_IDENTITY, "commit", "--quiet", "-m", "tracked environment")
+    exc = _capture(_plain_collector(source).plan)
+    rec.check(
+        isinstance(exc, ReleaseCodeCollectionError) and "tracked or staged environment" in str(exc),
+        f"[{tag}] tracked nested environment is an explicit collector conflict",
+    )
+
+
+def _case_staged_environment_conflict_refuses(
+    rec: support.SmokeRecorder, root: Path
+) -> None:
+    """An index-only environment is also too important to omit silently."""
+    tag = "staged-environment-conflict"
+    source = _make_repo_source(root)
+    relative = "plugins/foo_plugin/src/foo_plugin/.venv_cosyvoice"
+    _make_nested_environment(source, relative, python_link=False)
+    _git(source, "add", "-A")
+    exc = _capture(_plain_collector(source).plan)
+    rec.check(
+        isinstance(exc, ReleaseCodeCollectionError) and "tracked or staged environment" in str(exc),
+        f"[{tag}] staged nested environment is an explicit collector conflict",
+    )
+
+
+def _plain_collector(source: Path) -> ReleaseCodeCollector:
+    """Construct a Gitless collector for checks that must not mutate Git."""
+    return ReleaseCodeCollector(
+        source_root=source,
+        code_subtrees=("plugins",),
+        cp_binary="/bin/cp",
+        clone_timeout_seconds=10,
+    )
+
+
+def _make_snapshot_bytecode_fixture(root: Path) -> tuple[Path, Path]:
+    """Build a minimal Git fixture for the real schema-snapshot subprocess.
+
+    The source collector runs by file path while its import resolves from the
+    materialized destination through ``PYTHONPATH`` — the same arrangement as
+    the production schema snapshot. Importing ``foo_plugin`` therefore writes
+    a cache under the destination unless bytecode output is explicitly off.
+    """
+    source = _make_repo_source(root)
+    (source / ".gitignore").write_text(".venv/\n__pycache__/\n")
+    source_python = source / ".venv" / "bin" / "python3"
+    source_python.unlink()
+    source_python.symlink_to(sys.executable)
+    collector_path = (
+        source / "plugins" / "macos_self_deployment_plugin" / "src"
+        / "macos_self_deployment_plugin" / "schema_snapshot_collector.py"
+    )
+    collector_path.parent.mkdir(parents=True)
+    collector_path.write_text("import foo_plugin\nprint('{}')\n")
+    _git(source, "add", "-A")
+    _git(source, *_GIT_IDENTITY, "commit", "--quiet", "-m", "snapshot fixture")
+    return source, collector_path
+
+
+def _run_pre_fix_snapshot_writer(source: Path, collector_path: Path, destination: Path) -> None:
+    """Run the pre-fix producer environment, which permits destination caches."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = _pythonpath_for_tree(destination)
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    result = subprocess.run(
+        [str(source / ".venv" / "bin" / "python3"), str(collector_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(source),
+        check=False,
+        timeout=30,
+    )
+    if result.returncode != 0 or result.stdout.strip() != "{}":
+        raise RuntimeError(
+            f"pre-fix snapshot fixture failed: exit={result.returncode}, stderr={result.stderr!r}"
+        )
+
+
+def _case_snapshot_import_does_not_pollute_materialized_tree(
+    rec: support.SmokeRecorder, root: Path
+) -> None:
+    """The real snapshot producer must not invalidate collector verification."""
+    tag = "snapshot-bytecode"
+    source, collector_path = _make_snapshot_bytecode_fixture(root)
+    collector = _plain_collector(source)
+    plan = collector.plan()
+
+    pre_fix_destination = root / "pre_fix_code"
+    collector.materialize(plan, pre_fix_destination)
+    _run_pre_fix_snapshot_writer(source, collector_path, pre_fix_destination)
+    pre_fix_error = _capture(lambda: collector.verify_materialized(plan, pre_fix_destination))
+    rec.check(
+        isinstance(pre_fix_error, ReleaseCodeCollectionError)
+        and "selected-file set differs" in str(pre_fix_error),
+        f"[{tag}] pre-fix snapshot import writes destination bytecode and reproduces set refusal",
+    )
+
+    fixed_destination = root / "fixed_code"
+    collector.materialize(plan, fixed_destination)
+    snapshot_fn = build_schema_snapshot_fn(
+        solet_name="smoke", app_home=root / "profile", source_root=source,
+    )
+    rec.check(
+        snapshot_fn(fixed_destination) == {},
+        f"[{tag}] real snapshot producer completes against materialized code",
+    )
+    rec.check(
+        not list(fixed_destination.rglob("__pycache__")),
+        f"[{tag}] real snapshot producer leaves no bytecode cache in destination",
+    )
+    rec.check(
+        _capture(lambda: collector.verify_materialized(plan, fixed_destination)) is None,
+        f"[{tag}] materialized selected-file verification still passes after snapshot",
+    )
+
+
+def _case_environment_root_symlink_refuses_without_git(
+    rec: support.SmokeRecorder, root: Path
+) -> None:
+    tag = "environment-root-symlink-nongit"
+    source = support.build_fake_source(root)
+    target = root / "external_environment"
+    (target / "bin").mkdir(parents=True)
+    (target / "pyvenv.cfg").write_text("home = /opt/python/bin\n")
+    (target / "bin" / "python3").write_text("#!/bin/sh\n")
+    link = source / "plugins" / "foo_plugin" / "src" / "foo_plugin" / ".venv_external"
+    link.symlink_to(target, target_is_directory=True)
+    exc = _capture(_plain_collector(source).plan)
+    rec.check(
+        isinstance(exc, ReleaseCodeCollectionError) and "symbolic link" in str(exc),
+        f"[{tag}] environment-root symbolic link refuses without following its target",
+    )
+
+
+def _case_dangling_link_refuses_without_git(
+    rec: support.SmokeRecorder, root: Path
+) -> None:
+    tag = "dangling-link-nongit"
+    source = support.build_fake_source(root)
+    link = source / "plugins" / "foo_plugin" / "src" / "foo_plugin" / "dangling.py"
+    link.symlink_to(root / "does-not-exist")
+    exc = _capture(_plain_collector(source).plan)
+    rec.check(
+        isinstance(exc, ReleaseCodeCollectionError) and "symbolic link" in str(exc),
+        f"[{tag}] dangling symbolic link refuses without target traversal",
+    )
+
+
+def _case_excluded_environment_pth_refuses_without_git(
+    rec: support.SmokeRecorder, root: Path
+) -> None:
+    tag = "excluded-environment-pth-nongit"
+    source = root / "source"
+    source.mkdir(parents=True)
+    relative = "plugins/foo_plugin/src/foo_plugin/.venv_cosyvoice"
+    pth = root / "venv" / "lib" / "python3.13" / "site-packages" / "local.pth"
+    pth.parent.mkdir(parents=True)
+    pth.write_text(f"{source / relative}\n")
+    exc = _capture(
+        lambda: rm_module._repoint_and_validate_pth(
+            root / "venv",
+            source_root=source,
+            final_code_root=root / "artifact" / "code",
+            strict_pth_validation=True,
+            logger=logging.getLogger(tag),
+            excluded_roots=(relative,),
+        )
+    )
+    rec.check(
+        isinstance(exc, ReleaseManagerError) and "excluded nested Python environment" in str(exc),
+        f"[{tag}] editable target into excluded environment refuses before rewrite",
+    )
+
+
+def _run_non_git_matrix(rec: support.SmokeRecorder, scratch: Path) -> None:
+    """Run only matrix legs whose setup and assertion require no Git mutation."""
+    _case_environment_root_symlink_refuses_without_git(rec, scratch / "environment_root_link")
+    _case_dangling_link_refuses_without_git(rec, scratch / "dangling_link")
+    _case_excluded_environment_pth_refuses_without_git(rec, scratch / "excluded_pth")
+
+
 def main() -> int:
     rec = support.SmokeRecorder()
     scratch = support.scratch_root("dirty-gate")
+    non_git_matrix_only = sys.argv[1:] == ["--non-git-matrix"]
     print("=== release_builder_dirty_tree_gate_smoke ===")
     print(f"scratch: {scratch}")
     try:
-        _case_ships_dirty_refuses(rec, scratch / "ships_dirty")
-        _case_non_shipped_dirt_builds(rec, scratch / "non_shipped")
-        _case_positive_attestation(rec, scratch / "positive")
-        _case_override_is_disclosed(rec, scratch / "override")
-        _case_gate_follows_the_clone(rec, scratch / "follows_clone")
-        _case_setup_contracts_ship(rec, scratch / "setup_contracts")
-        _case_untracked_refuses(rec, scratch / "untracked")
-        _case_unattestable_is_not_clean(rec, scratch / "unattestable")
-        _case_torn_snapshot_refuses(rec, scratch / "torn")
-        _case_mid_clone_edit_refuses(rec, scratch / "mid_clone")
-        _case_override_attests_the_post_clone_truth(rec, scratch / "override_post")
-        _case_post_clone_unmeasurable_downgrades(rec, scratch / "post_unmeasurable")
-        _case_pre_clone_unmeasurable_survives_a_later_success(rec, scratch / "pre_unmeas")
+        if non_git_matrix_only:
+            _run_non_git_matrix(rec, scratch / "non_git_matrix")
+        else:
+            _case_ships_dirty_refuses(rec, scratch / "ships_dirty")
+            _case_non_shipped_dirt_builds(rec, scratch / "non_shipped")
+            _case_positive_attestation(rec, scratch / "positive")
+            _case_override_is_disclosed(rec, scratch / "override")
+            _case_gate_follows_the_clone(rec, scratch / "follows_clone")
+            _case_setup_contracts_ship(rec, scratch / "setup_contracts")
+            _case_untracked_refuses(rec, scratch / "untracked")
+            _case_unattestable_is_not_clean(rec, scratch / "unattestable")
+            _case_torn_snapshot_refuses(rec, scratch / "torn")
+            _case_mid_clone_edit_refuses(rec, scratch / "mid_clone")
+            _case_override_attests_the_post_clone_truth(rec, scratch / "override_post")
+            _case_post_clone_unmeasurable_downgrades(rec, scratch / "post_unmeasurable")
+            _case_pre_clone_unmeasurable_survives_a_later_success(rec, scratch / "pre_unmeas")
+            _case_ignored_environment_is_excluded_and_manifested(rec, scratch / "selected_env")
+            _case_reserved_name_without_environment_evidence_ships(rec, scratch / "selected_ordinary")
+            _case_links_refuse_before_finalize(rec, scratch / "selected_links")
+            _case_ignored_asset_link_is_excluded_before_traversal(rec, scratch / "selected_ignored_link")
+            _case_tracked_link_refuses_before_finalize(rec, scratch / "selected_tracked_link")
+            _case_artifact_head_membership_is_complete(rec, scratch / "artifact_head_membership")
+            _case_artifact_head_executable_mode_is_complete(rec, scratch / "artifact_head_mode")
+            _case_tracked_environment_conflict_refuses(rec, scratch / "tracked_environment")
+            _case_staged_environment_conflict_refuses(rec, scratch / "staged_environment")
+            _case_snapshot_import_does_not_pollute_materialized_tree(rec, scratch / "snapshot_bytecode")
+            _run_non_git_matrix(rec, scratch / "non_git_matrix")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     return rec.report("dirty-tree gate")

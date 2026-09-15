@@ -35,6 +35,7 @@ from ananta.llm.agent_messaging.schema import TABLE_AGENT_MESSAGE  # noqa: E402
 from agent_messaging_plugin import rotation_notice_retention as rnr  # noqa: E402
 from agent_messaging_plugin import rotation_self_notice as rsn  # noqa: E402
 from agent_messaging_plugin import rotation_thresholds as rt  # noqa: E402
+from agent_messaging_plugin import session_context_status_store as scss  # noqa: E402
 from agent_messaging_plugin import session_sweep as ss  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.rotation_notice_retention import (  # noqa: E402
@@ -214,10 +215,15 @@ class _FakeState:
         *,
         lifecycle_rows: list[dict[str, Any]] | None = None,
     ) -> None:
-        self._rows = rows
+        self._rows = [dict(row) for row in rows]
+        for index, row in enumerate(self._rows):
+            row.setdefault("id", f"scs-{index:06d}")
+            row.setdefault("created_at", f"2026-08-01T00:00:00.{index:06d}")
         self._lifecycle_rows = lifecycle_rows if lifecycle_rows is not None else []
         self.messages: dict[str, list[dict[str, Any]]] = {}
         self.deletes: list[tuple[Any, Any, Any]] = []
+        self.context_query_state_reads = 0
+        self.context_ordered_reads = 0
 
     def query_state(self, namespace: str, spec: dict[str, Any]) -> dict[str, Any]:
         # The real envelope shape, taken from `state_results.require_records`
@@ -229,6 +235,7 @@ class _FakeState:
         # instead of a hand-rolled row list.
         table = spec.get("table")
         if table == TABLE_SESSION_CONTEXT_STATUS:
+            self.context_query_state_reads += 1
             records = list(self._rows)
         elif table == TABLE_MANAGED_SESSION:
             # The `lifecycle_state` filter is APPLIED, not ignored. The caller
@@ -269,6 +276,9 @@ class _FakeState:
         table = spec.get("table")
         if table == TABLE_MANAGED_SESSION:
             return self._query_managed_sessions(spec)
+        if table == TABLE_SESSION_CONTEXT_STATUS:
+            self.context_ordered_reads += 1
+            return self._query_context_statuses(spec)
         if table != TABLE_AGENT_MESSAGE:
             msg = f"_FakeState.query_ordered does not model table {table!r}"
             raise AssertionError(msg)
@@ -296,6 +306,41 @@ class _FakeState:
         records = self._page_managed_sessions(records, spec)
         return {"action_status": "completed", "data": {"records": records}}
 
+    def _query_context_statuses(self, spec: dict[str, Any]) -> dict[str, Any]:
+        filters = spec.get("filters", {})
+        records = [
+            row for row in self._rows
+            if self._matches_context_filters(row, filters)
+            and (bool(spec.get("include_deleted")) or int(row.get("is_deleted", 0)) == 0)
+        ]
+        return {
+            "action_status": "completed",
+            "data": {"records": self._page_created_rows(records, spec)},
+        }
+
+    @staticmethod
+    def _matches_context_filters(row: dict[str, Any], filters: dict[str, Any]) -> bool:
+        for column, wanted in filters.items():
+            actual = row.get(column)
+            if isinstance(wanted, dict):
+                if wanted.get("op") != "gte" or "value" not in wanted:
+                    raise AssertionError(f"unsupported context filter: {column}={wanted!r}")
+                try:
+                    matches = rsn.to_naive_utc(actual) >= rsn.to_naive_utc(wanted["value"])
+                except (TypeError, ValueError):
+                    # A DATETIME provider cannot return this shape through a
+                    # range predicate; the active-id walk below still carries
+                    # it to the production semantic recheck.
+                    matches = False
+                if not matches:
+                    return False
+            elif isinstance(wanted, list):
+                if actual not in wanted:
+                    return False
+            elif actual != wanted:
+                return False
+        return True
+
     def _select_managed_sessions(
         self,
         spec: dict[str, Any],
@@ -313,11 +358,18 @@ class _FakeState:
         records: list[dict[str, Any]],
         spec: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        return _FakeState._page_created_rows(records, spec)
+
+    @staticmethod
+    def _page_created_rows(
+        records: list[dict[str, Any]],
+        spec: dict[str, Any],
+    ) -> list[dict[str, Any]]:
         order_by = spec.get("order_by")
         expected_order = [["created_at", "asc"], ["id", "asc"]]
         if order_by != expected_order:
             msg = (
-                "_FakeState.query_ordered models managed_session only in "
+                "_FakeState.query_ordered models paged rows only in "
                 f"its paged lifecycle order; got {order_by!r}"
             )
             raise AssertionError(msg)
@@ -1693,7 +1745,7 @@ def test_a_failed_prune_never_costs_the_session_its_notice() -> None:
 
     class _PruneExplodes(_FakeState):
         def query_ordered(self, namespace: str, spec: dict[str, Any]) -> dict[str, Any]:
-            if spec.get("table") == TABLE_MANAGED_SESSION:
+            if spec.get("table") != TABLE_AGENT_MESSAGE:
                 return super().query_ordered(namespace, spec)
             raise RuntimeError("the store is unreachable for the prune read")
 
@@ -2132,6 +2184,85 @@ def test_registered_gauge_silence_is_noticed_after_grace() -> None:
     )
 
 
+def _paged_candidate_rows(cutoff: datetime) -> list[dict[str, Any]]:
+    """Ancient history plus enough fresh rows to cross more than two pages."""
+    ancient = [
+        _row(f"agi-ancient-{index:03d}", current_tokens=350_000, measured_at=_LONG_STALE)
+        for index in range(205)
+    ]
+    fresh = [
+        _row(
+            f"agi-fresh-{index:03d}",
+            current_tokens=120_000,
+            measured_at=(cutoff + timedelta(seconds=index + 1)).replace(tzinfo=None).isoformat(),
+        )
+        for index in range(201)
+    ]
+    boundary = _row(
+        "agi-boundary", current_tokens=350_000, measured_at=cutoff.replace(tzinfo=None).isoformat(),
+    )
+    lifecycle_live = _row("agi-lifecycle-live", current_tokens=350_000, measured_at=_LONG_STALE)
+    operator_live = _row("agi-operator-live", current_tokens=350_000, measured_at=_LONG_STALE)
+    overlap = _row(
+        "agi-overlap", current_tokens=120_000,
+        measured_at=(cutoff + timedelta(seconds=1)).replace(tzinfo=None).isoformat(),
+    )
+    return [*ancient, *fresh, boundary, lifecycle_live, operator_live, overlap]
+
+
+def _assert_paged_candidate_reader(
+    rows: list[dict[str, Any]], cutoff: datetime,
+) -> None:
+    state = _FakeState(rows)
+    candidates = scss.list_session_context_statuses(
+        state,  # type: ignore[arg-type]
+        measured_since=rsn.to_naive_utc(cutoff),
+        active_agent_instance_ids={"agi-lifecycle-live", "agi-operator-live", "agi-overlap"},
+    )
+    candidate_ids = {str(row["agent_instance_id"]) for row in candidates}
+    _check(
+        len(candidates) == 205
+        and "agi-fresh-200" in candidate_ids
+        and {"agi-boundary", "agi-lifecycle-live", "agi-operator-live", "agi-overlap"}
+        <= candidate_ids
+        and not any(identifier.startswith("agi-ancient-") for identifier in candidate_ids),
+        "L4c pages >2 fresh pages, keeps exact naive-UTC boundary and stale active rows, omits ancient dead history",
+    )
+    _check(
+        state.context_ordered_reads >= 4 and state.context_query_state_reads == 0
+        and sum(row["agent_instance_id"] == "agi-overlap" for row in candidates) == 1,
+        "two candidate streams are paged, target query_state is never used, and overlap dedupes by row id",
+    )
+
+
+def _assert_candidate_sweep_semantics(rows: list[dict[str, Any]]) -> None:
+    operator_binding = _FakeBinding(
+        "bridge-operator", agent_instance_id="agi-operator-live", created_at="2026-08-17T20:00:00",
+    )
+    missing_binding = _FakeBinding(
+        "bridge-missing", agent_instance_id="agi-gauge-missing",
+        created_at="2026-08-17T20:00:00",
+    )
+    counts, _bridges, _service = _sweep_full(
+        rows,
+        known={"agi-boundary", "agi-lifecycle-live"},
+        lifecycle_rows=[_lifecycle("agi-lifecycle-live", report_by="2026-08-17T23:05:00")],
+        bindings=[operator_binding, missing_binding],
+    )
+    _check(
+        counts.appended == 3 and counts.gauge_silent == 1,
+        "aware caller clock preserves boundary/live/operator candidates and ancient history does not suppress gauge_silent",
+    )
+
+
+def test_candidate_reader_pages_fresh_or_active_rows_at_the_naive_utc_boundary() -> None:
+    """L4c uses two paged provider reads and never a target ``query_state``."""
+    cutoff = _SWEEP_NOW - timedelta(seconds=rsn.SELF_NOTICE_STALENESS_S)
+    rows = _paged_candidate_rows(cutoff)
+    _assert_paged_candidate_reader(rows, cutoff)
+    _assert_candidate_sweep_semantics(rows)
+
+
 def main() -> int:
     print("rotation self-notice (L4c) smoke\n")
     test_a_live_session_with_an_arrested_gauge_is_still_notified()
@@ -2141,6 +2272,7 @@ def main() -> int:
     test_a_non_live_lifecycle_row_does_not_vouch_for_liveness()
     test_a_fresh_row_never_consults_the_lifecycle_table()
     test_registered_gauge_silence_is_noticed_after_grace()
+    test_candidate_reader_pages_fresh_or_active_rows_at_the_naive_utc_boundary()
     test_one_durability_notice_per_generation()
     test_a_carry_on_verdict_says_nothing_at_all()
     test_an_unresolvable_session_is_counted_not_swallowed()

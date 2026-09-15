@@ -73,6 +73,12 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   lightweight context-status reading on every un-throttled tick, independent
   of the threshold check. Like the heartbeat, it prints nothing to stdout;
   diagnostics are stderr-only. See `SECURITY.md` for the full contract.
+- **Installed-owner receipt guard** (`coordination_owner.py`, imported by the
+  heartbeat, rotation-due, and wake entrypoints) — validates an immutable,
+  owner-qualified installation receipt before any marker, lock, watcher, or
+  bridge side effect. Missing, foreign, stale, corrupt, or undesignated roots
+  refuse explicitly and inertly; the absolute receipt path is supplied as
+  `AGENT_COORDINATION_RECEIPT_PATH`, never guessed from CWD.
 - **Rotation-due notice** (`UserPromptSubmit`, unconditional) — the delivery
   half of the hook above, for the session it cannot deliver to. When the
   watch hook finds no steward to notify (an operator-present session, which

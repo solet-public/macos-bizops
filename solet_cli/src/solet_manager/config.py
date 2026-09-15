@@ -33,7 +33,6 @@ class CreateConfig:
         return {
             "name": self.name,
             "target": str(self.target),
-            "autostart": self.autostart,
         }
 
 

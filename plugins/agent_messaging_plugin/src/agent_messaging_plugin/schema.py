@@ -133,6 +133,15 @@ SESSION_CONTEXT_STATUS_HISTORY_ID_PREFIX = "scxh"
 TABLE_INBOX_CONSUMPTION_STATUS = "inbox_consumption_status"
 INBOX_CONSUMPTION_STATUS_ID_PREFIX = "ics"
 
+# Fleet stewardship records (2026-09-08). These are append-only deployment-native
+# operational telemetry: Phase A records a mechanical liveness pass, while
+# Phase B records one objective assessment per workstream. They are deliberately
+# not project-solet register entities and never replace work-unit state.
+TABLE_FLEET_LIVENESS_RUN = "fleet_liveness_run"
+FLEET_LIVENESS_RUN_ID_PREFIX = "flr"
+TABLE_FLEET_PROGRESS_RUN = "fleet_progress_run"
+FLEET_PROGRESS_RUN_ID_PREFIX = "fpr"
+
 # GAU-21 (2026-08-19) — the DURABLE record that a gauge notice fired. The
 # sweep's notices are appended as in-memory bridge events only: nothing
 # persists them, a restart loses every un-drained one, reading them REMOVES
@@ -1053,6 +1062,15 @@ def get_managed_session_schema() -> TableSchema:
                     "teardown fork in session_lifecycle_verbs."
                 ),
             ),
+            "lane_repo_root": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description=(
+                    "Resolved Git checkout root used for this lane's worktree at spawn. "
+                    "Retirement reads this durable value so it never re-derives a foreign "
+                    "lane from the serving Solet's APP_HOME. Empty rows predate this field "
+                    "and retain the APP_HOME fallback."
+                ),
+            ),
         },
         indexes=[
             IndexDefinition(name="idx_managed_session_lane", columns=["lane_id"]),
@@ -1077,6 +1095,10 @@ def get_managed_dispatch_schema() -> TableSchema:
         "budget_line": "Budget attribution key.",
         "brief_ref": "Exact immutable brief path.",
         "unit_id": "Optional project-solet work-unit identity resolvable by the spawned lane.",
+        "repository_root": (
+            "Optional absolute Git checkout selected for the lane; retained in the immutable "
+            "dispatch contract for retries."
+        ),
         "brief_sha256": "SHA-256 of the exact brief bytes.",
         "expected_path": "Exact expected completion artifact.",
         "completion_contract_sha256": "Digest of the structured completion contract.",
@@ -1563,6 +1585,114 @@ def get_inbox_consumption_status_schema() -> TableSchema:
                 columns=[COL_AGENT_INSTANCE_ID],
                 unique=True,
             ),
+        ],
+    )
+
+
+def get_fleet_liveness_run_schema() -> TableSchema:
+    """Append-only records of the Phase-A fleet liveness procedure."""
+    return TableSchema(
+        table_name=TABLE_FLEET_LIVENESS_RUN,
+        description=(
+            "One complete, deployment-native Phase-A fleet-liveness pass. Structured "
+            "JSON captures the checked population, findings, actions, inbox drain, "
+            "sleep check, and escalations without an unbounded markdown log."
+        ),
+        id_prefix=FLEET_LIVENESS_RUN_ID_PREFIX,
+        columns={
+            "observed_at": ColumnDefinition(
+                type=ColumnType.DATETIME, not_null=True,
+                description="When this liveness pass completed its observation.",
+            ),
+            "checked": ColumnDefinition(
+                type=ColumnType.JSON, not_null=True,
+                description="Structured population and checks performed during the pass.",
+            ),
+            "stuck": ColumnDefinition(
+                type=ColumnType.JSON, not_null=True,
+                description="Structured unhealthy findings; [] is an explicit clear pass.",
+            ),
+            "actions": ColumnDefinition(
+                type=ColumnType.JSON, not_null=True,
+                description="Structured drive/restart/escalation actions taken; [] when none.",
+            ),
+            "outcome": ColumnDefinition(
+                type=ColumnType.TEXT, not_null=True,
+                description="Short truthful result of the whole pass.",
+            ),
+            "role_inbox_drain": ColumnDefinition(
+                type=ColumnType.JSON, not_null=True,
+                description="Coordinator role-inbox drain result, including clear-path evidence.",
+            ),
+            "sleep_check": ColumnDefinition(
+                type=ColumnType.JSON, not_null=True,
+                description="Host-sleep check result and cursor evidence.",
+            ),
+            "escalations": ColumnDefinition(
+                type=ColumnType.JSON, not_null=True,
+                description="Operator or peer escalations raised by this pass; [] when none.",
+            ),
+        },
+        indexes=[
+            IndexDefinition(name="idx_fleet_liveness_run_observed", columns=["observed_at"]),
+        ],
+    )
+
+
+def get_fleet_progress_run_schema() -> TableSchema:
+    """Append-only per-workstream records of the Phase-B progress review."""
+    return TableSchema(
+        table_name=TABLE_FLEET_PROGRESS_RUN,
+        description=(
+            "One Phase-B objective/delta assessment for one stable workstream. "
+            "The workstream index makes trend reads direct rather than prose search."
+        ),
+        id_prefix=FLEET_PROGRESS_RUN_ID_PREFIX,
+        columns={
+            "reviewed_at": ColumnDefinition(
+                type=ColumnType.DATETIME, not_null=True,
+                description="When this workstream assessment was completed.",
+            ),
+            "workstream_id": ColumnDefinition(
+                type=ColumnType.TEXT, not_null=True,
+                description="Stable workstream key used for trend queries (for example WS1).",
+            ),
+            "objective_citation": ColumnDefinition(
+                type=ColumnType.TEXT, not_null=True,
+                description="Current objective or ruling citation assessed by this row.",
+            ),
+            "metrics": ColumnDefinition(
+                type=ColumnType.JSON, not_null=True,
+                description="Raw current metrics, kept structured for the next delta.",
+            ),
+            "delta": ColumnDefinition(
+                type=ColumnType.JSON, not_null=True,
+                description="Measured change from the previous assessment for this stream.",
+            ),
+            "assessment": ColumnDefinition(
+                type=ColumnType.TEXT, not_null=True,
+                description="Evidence-cited honest progress assessment.",
+            ),
+            "recommendation": ColumnDefinition(
+                type=ColumnType.TEXT, not_null=True,
+                description="Recommended next action or explicit no-change result.",
+            ),
+            "independent_critique": ColumnDefinition(
+                type=ColumnType.JSON, not_null=True,
+                description="Critique due/pending/result state and reviewer reference.",
+            ),
+            "escalations": ColumnDefinition(
+                type=ColumnType.JSON, not_null=True,
+                description="Escalations caused by this assessment; [] when none.",
+            ),
+            "phase_a_run_id": ColumnDefinition(
+                type=ColumnType.TEXT, not_null=False,
+                description="Optional cited fleet_liveness_run id consumed by this review.",
+            ),
+        },
+        indexes=[
+            IndexDefinition(name="idx_fleet_progress_run_stream_time", columns=["workstream_id", "reviewed_at"]),
+            IndexDefinition(name="idx_fleet_progress_run_reviewed", columns=["reviewed_at"]),
         ],
     )
 
@@ -2494,7 +2624,7 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
     D1 is land-able alone)."""
     return SchemaDefinition(
         namespace=AGENT_ROLE_BINDING_NAMESPACE,
-        version="1.7.0",
+        version="1.10.0",
         description=(
             "Fleet session-management Phase B, D1 — L0 schema deltas. "
             "+1.1.0: session_context_status (maintenance-verbs M1). "
@@ -2505,7 +2635,10 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             "item 4 tamper canary). +1.6.0: managed_dispatch + append-only "
             "managed_dispatch_event, with additive managed_session dispatch/first-turn/"
             "liveness evidence. +1.7.0: inbox_consumption_status (CDX-06 part "
-            "C, the honesty field)."
+            "C, the honesty field). +1.9.0: managed_session.lane_repo_root and "
+            "managed_dispatch.repository_root retain the foreign lane checkout root. "
+            "+1.10.0: append-only deployment-native Phase-A fleet-liveness and "
+            "Phase-B per-workstream progress records."
         ),
         tables={
             TABLE_SESSION_ROLE_CLAIM: get_session_role_claim_schema(),
@@ -2525,6 +2658,8 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             TABLE_GAUGE_CANARY_REGISTRY: get_gauge_canary_registry_schema(),
             TABLE_INBOX_CONSUMPTION_STATUS: get_inbox_consumption_status_schema(),
             TABLE_GAUGE_CANARY_TAMPER: get_gauge_canary_tamper_schema(),
+            TABLE_FLEET_LIVENESS_RUN: get_fleet_liveness_run_schema(),
+            TABLE_FLEET_PROGRESS_RUN: get_fleet_progress_run_schema(),
         },
     )
 
@@ -2542,6 +2677,8 @@ __all__ = [
     "GAUGE_CANARY_TAMPER_ID_PREFIX",
     "GAUGE_NOTICE_RECORD_ID_PREFIX",
     "HELD_AUTHORIZATION_ID_PREFIX",
+    "FLEET_LIVENESS_RUN_ID_PREFIX",
+    "FLEET_PROGRESS_RUN_ID_PREFIX",
     "INBOX_CONSUMPTION_STATUS_ID_PREFIX",
     "LANE_CHARTER_ID_PREFIX",
     "LIFECYCLE_IDLE",
@@ -2578,6 +2715,8 @@ __all__ = [
     "TABLE_GAUGE_CANARY_REGISTRY",
     "TABLE_GAUGE_CANARY_TAMPER",
     "TABLE_GAUGE_NOTICE_RECORD",
+    "TABLE_FLEET_LIVENESS_RUN",
+    "TABLE_FLEET_PROGRESS_RUN",
     "TABLE_HELD_AUTHORIZATION",
     "TABLE_INBOX_CONSUMPTION_STATUS",
     "TABLE_LANE_CHARTER",
@@ -2598,6 +2737,8 @@ __all__ = [
     "get_gauge_canary_registry_schema",
     "get_gauge_canary_tamper_schema",
     "get_gauge_notice_record_schema",
+    "get_fleet_liveness_run_schema",
+    "get_fleet_progress_run_schema",
     "get_held_authorization_schema",
     "get_lane_charter_schema",
     "get_managed_session_schema",

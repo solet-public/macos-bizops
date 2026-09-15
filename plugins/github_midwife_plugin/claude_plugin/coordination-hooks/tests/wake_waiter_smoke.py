@@ -42,18 +42,53 @@ import json  # noqa: E402
 import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-from _harness import Results, preflight, run_hook  # noqa: E402
+from _harness import Results, preflight  # noqa: E402
+from _harness import run_hook as _run_hook  # noqa: E402
 
 HOOK = "wake_waiter.py"
 WAKE_SIGNAL = 2
 LABEL = "Coordinator-Day"
 MARKER_ENV = "STUB_MARKER"
 NOTE_PREFIX = "[coordination-hooks wake]"
+_PARTIAL_OWNER_FIXTURE_ENV = "COORDINATION_OWNER_PARTIAL_FIXTURE"
+_REPO = Path(__file__).resolve().parents[5]
+_HOOK_ROOT = Path(__file__).resolve().parent.parent / "hooks"
+sys.path.insert(0, str(_REPO / "plugins/github_midwife_plugin/src"))
+
+from github_midwife_plugin.coordination_hook_installation import (  # noqa: E402
+    ReceiptSurface,
+    build_receipt,
+    publish_receipt,
+)
 
 # Strings the stub writes to stdout and stderr. If the hook relayed child output
 # in any form, one of these would surface in its own streams.
 SECRET_STDOUT = "SENSITIVE-STDOUT-b3d1f0-message-body-should-never-appear"
 SECRET_STDERR = "SENSITIVE-STDERR-9a72cc-message-body-should-never-appear"
+
+
+def run_hook(script: str, *, env: dict[str, str] | None = None, **kwargs: object) -> object:
+    requested = dict(env or {})
+    armed = bool(requested.get("AGENT_SESSION_ID"))
+    if armed and not requested.pop(_PARTIAL_OWNER_FIXTURE_ENV, ""):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir()
+            receipt = build_receipt(
+                solet_name="fixture-solet",
+                app_home=home,
+                plugin_selector="coordination-hooks@fixture-solet",
+                default_hook_root=_HOOK_ROOT,
+                surfaces=(ReceiptSurface("plugin_cache", _HOOK_ROOT, Path(sys.executable), _HOOK_ROOT / "hooks.json"),),
+                installation_id="wake-fixture",
+            )
+            requested.update({
+                "AGENT_INSTANCE_ID": "agi-wake-fixture",
+                "AGENT_COORDINATION_RECEIPT_PATH": str(publish_receipt(receipt)),
+                "SOLET_NAME": "fixture-solet",
+            })
+            return _run_hook(script, env=requested, **kwargs)
+    return _run_hook(script, env=requested, **kwargs)
 
 
 def _stub(directory: Path, name: str, *, exit_code: int | None, chatty: bool = False) -> Path:
@@ -101,7 +136,7 @@ def _env(marker: Path, cli: Path | str | None, *, label: str | None = LABEL, tra
     is exactly what it asserted before, now keyed on the variable that is
     actually load-bearing.
     """
-    env = {MARKER_ENV: str(marker)}
+    env = {MARKER_ENV: str(marker), "AGENT_INSTANCE_ID": ""}
     if label is not None:
         env["AGENT_SESSION_ID"] = label
     if cli is not None:
@@ -126,7 +161,8 @@ def check_disarm_matrix(res: Results, work: Path) -> None:
         proc = run_hook(HOOK, env=env)
         res.check(proc.returncode == 0, f"disarmed ({label}) exits 0", f"exit {proc.returncode}")
         res.check(proc.stdout == "", f"disarmed ({label}) writes no stdout", f"got {proc.stdout[:80]!r}")
-        res.check(proc.stderr == "", f"disarmed ({label}) writes no stderr", f"got {proc.stderr[:80]!r}")
+        expected_stderr = "ownership" in proc.stderr if label == "no session label" else proc.stderr == ""
+        res.check(expected_stderr, f"disarmed ({label}) has the expected stderr", f"got {proc.stderr[:80]!r}")
         res.check(not marker.exists(), f"disarmed ({label}) never spawns the CLI", "the stub ran")
 
 

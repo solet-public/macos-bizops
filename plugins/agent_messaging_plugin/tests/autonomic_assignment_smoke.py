@@ -39,6 +39,7 @@ Run from repo root:
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -47,7 +48,7 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _real_state_fake import RealShapeState  # noqa: E402
+from _real_state_fake import CapEnforcingState, RealShapeState  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import SYS_AUTONOMIC_SLOT  # noqa: E402
 from ananta.services.inference_service.schema import (  # noqa: E402
     COL_FLOW_ID,
@@ -111,6 +112,7 @@ class _Harness:
         self.live_providers: set[str] = set()
         self.live_by_session: dict[str, BridgeBinding] = {}
         self.notices: list[tuple[str, str, str]] = []
+        self._queue_ordinal = 0
 
     def add_session(
         self, bridge_id: str, agi: str, sid: str, created_at: str,
@@ -170,12 +172,17 @@ class _Harness:
         except RoleBindingVacantError:
             return None
 
-    def queue_deferred(self, flow_id: str) -> None:
+    def queue_deferred(self, flow_id: str, *, state: str = "deferred") -> None:
+        self._queue_ordinal += 1
         self.state.rows(
             INFERENCE_DEFERRED_VERTEX_NAMESPACE, TABLE_INFERENCE_DEFERRED_VERTEX,
         ).append({
             "role": SYS_AUTONOMIC_SLOT, "flow_id": flow_id,
             "method": "process_error", "agent_instance_id": None, "is_deleted": 0,
+            "state": state, "id": f"dv-{self._queue_ordinal:06d}",
+            "created_at": (datetime(2026, 8, 1, tzinfo=UTC) + timedelta(
+                seconds=self._queue_ordinal,
+            )).isoformat(),
         })
 
     def deferred_flow_ids(self) -> set[str]:
@@ -500,6 +507,52 @@ def _drain_cases() -> None:
     )
 
 
+def _paged_drain_case() -> None:
+    """A first-claim redrive snapshots every matching row before mutation."""
+
+    class _NoQueueQueryState(CapEnforcingState):
+        def query_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+            if query.get("table") == TABLE_INFERENCE_DEFERRED_VERTEX:
+                raise AssertionError("autonomic drain must page the queue, never query_state it")
+            return super().query_state(namespace, query)
+
+    world = _Harness()
+    world.state = _NoQueueQueryState(world.state)
+    for index in range(210):
+        state = "deferred" if index % 2 == 0 else "forwarded"
+        world.queue_deferred(f"flow-redrive-{index:03d}", state=state)
+    for index in range(101):
+        world.queue_deferred(f"flow-failed-{index:03d}", state="failed")
+    resubmitted: list[str] = []
+    assignment = AutonomicAssignment(
+        state_service=lambda: world.state,
+        list_active_bridges=lambda: [],
+        bindings_for_bridge=lambda _bridge_id: [],
+        live_binding_for_session=lambda _session_id: None,
+        has_live_provider=lambda _agent_instance_id: False,
+        send_notice=world._notice,
+        grace_seconds=30,
+        forward_completion=lambda _holder, _row: None,
+        serve_window_seconds=900,
+        resubmit_vertex=lambda flow_id, _row: (resubmitted.append(flow_id) or True),
+        forward_serve_window_seconds=900,
+        forward_attempts_cap=5,
+        terminal_gc_after_seconds=172_800,
+    )
+    drained, remaining = assignment._drain_deferred("paged-smoke")  # noqa: SLF001
+    surviving = world.state.rows(
+        INFERENCE_DEFERRED_VERTEX_NAMESPACE, TABLE_INFERENCE_DEFERRED_VERTEX,
+    )
+    _check(
+        drained == 210 and remaining == 0 and len(resubmitted) == len(set(resubmitted)) == 210,
+        "autonomic pages >200 deferred/forwarded rows and resubmits each exactly once",
+    )
+    _check(
+        len(surviving) == 101 and all(row["state"] == "failed" for row in surviving),
+        "terminal failed rows are provider-filtered out and remain untouched",
+    )
+
+
 def main() -> int:
     print("=== sys:autonomic auto-assignment lifecycle smoke ===")
     _trigger1_cases()
@@ -507,6 +560,7 @@ def main() -> int:
     _selection_cases()
     _manual_set_cases()
     _drain_cases()
+    _paged_drain_case()
     total = _passed + len(_failed)
     print(f"\n{_passed}/{total} checks passed")
     if _failed:

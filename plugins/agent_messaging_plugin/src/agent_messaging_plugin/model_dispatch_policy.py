@@ -9,6 +9,7 @@ spawn after an edit instead of leaving a stale, silently permissive process.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -20,6 +21,10 @@ _DISPATCH_KINDS: Final[frozenset[str]] = frozenset(
 )
 _VENDORS: Final[frozenset[str]] = frozenset({"codex", "claude_code"})
 ModelPair = tuple[str, str]
+_RELAXABLE_VENDOR_KINDS: Final[frozenset[str]] = frozenset({"diagnose", "design", "review"})
+_RULING_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"rul_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}",
+)
 
 
 class DispatchPolicyError(Exception):
@@ -32,11 +37,23 @@ class DispatchPolicyError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class BudgetVendorOverride:
+    """A temporary, ruling-scoped relaxation of vendor pairing requirements."""
+
+    active: bool
+    ruling_ids_by_kind: dict[str, tuple[str, ...]]
+
+    def allows_same_vendor(self, dispatch_kind: str) -> bool:
+        return self.active and dispatch_kind in self.ruling_ids_by_kind
+
+
+@dataclass(frozen=True, slots=True)
 class DispatchPolicy:
     allowed_pairs: dict[str, tuple[tuple[str, str], ...]]
     allow_any_kinds: frozenset[str]
     orchestrator_role_names: frozenset[str]
     orchestrator_models: tuple[str, ...]
+    budget_vendor_override: BudgetVendorOverride | None
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -111,14 +128,55 @@ def _profile_pairs() -> set[ModelPair]:
     return pairs
 
 
-def _policy_sections(raw: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _policy_sections(raw: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], object | None]:
     if raw.get("schema_version") != 1 or not isinstance(raw.get("policy_version"), str):
         raise DispatchPolicyError("dispatch_policy_invalid", "policy schema_version=1 and policy_version are required.")
     kinds = raw.get("dispatch_kinds")
     orchestrator = raw.get("orchestrator")
     if not isinstance(kinds, dict) or set(kinds) != set(_DISPATCH_KINDS) or not isinstance(orchestrator, dict):
         raise DispatchPolicyError("dispatch_policy_invalid", "policy must declare exactly the supported dispatch kinds and orchestrator.")
-    return kinds, orchestrator
+    return kinds, orchestrator, raw.get("budget_vendor_override")
+
+
+def _override_fields(raw_override: object) -> tuple[bool, dict[str, object]]:
+    if not isinstance(raw_override, dict) or set(raw_override) != {"active", "ruling_ids_by_kind"}:
+        raise DispatchPolicyError(
+            "dispatch_policy_invalid",
+            "budget_vendor_override must contain only active and ruling_ids_by_kind.",
+        )
+    active = raw_override.get("active")
+    rulings = raw_override.get("ruling_ids_by_kind")
+    if not isinstance(active, bool) or not isinstance(rulings, dict) or not rulings:
+        raise DispatchPolicyError(
+            "dispatch_policy_invalid",
+            "budget_vendor_override requires boolean active and a non-empty ruling_ids_by_kind object.",
+        )
+    return active, rulings
+
+
+def _parse_override_ruling_ids(kind: str, raw_ids: object) -> tuple[str, ...]:
+    ruling_ids = _non_empty_strings(raw_ids, f"budget_vendor_override.ruling_ids_by_kind.{kind}")
+    if len(set(ruling_ids)) != len(ruling_ids) or any(
+        _RULING_ID_PATTERN.fullmatch(ruling_id) is None for ruling_id in ruling_ids
+    ):
+        raise DispatchPolicyError(
+            "dispatch_policy_invalid",
+            f"budget_vendor_override.ruling_ids_by_kind.{kind} must contain unique full ruling IDs.",
+        )
+    return ruling_ids
+
+
+def _parse_budget_vendor_override(raw_override: object | None) -> BudgetVendorOverride | None:
+    if raw_override is None:
+        return None
+    active, rulings = _override_fields(raw_override)
+    if not set(rulings).issubset(_RELAXABLE_VENDOR_KINDS):
+        raise DispatchPolicyError(
+            "dispatch_policy_invalid",
+            "budget_vendor_override names an unsupported relaxed dispatch kind.",
+        )
+    parsed = {kind: _parse_override_ruling_ids(kind, raw_ids) for kind, raw_ids in rulings.items()}
+    return BudgetVendorOverride(active=active, ruling_ids_by_kind=parsed)
 
 
 def _allowed_rule_keys(kind: str, rule: dict[str, Any]) -> set[str]:
@@ -188,7 +246,7 @@ def _parse_orchestrator(orchestrator: dict[str, Any], profiles: set[ModelPair]) 
 
 def load_dispatch_policy() -> DispatchPolicy:
     """Load and validate the current policy and every named profile pair."""
-    kinds, orchestrator = _policy_sections(_read_json(_POLICY_PATH))
+    kinds, orchestrator, raw_override = _policy_sections(_read_json(_POLICY_PATH))
     profiles = _profile_pairs()
     allowed_pairs, allow_any = _parse_dispatch_rules(kinds, profiles)
     role_names, models = _parse_orchestrator(orchestrator, profiles)
@@ -197,6 +255,7 @@ def load_dispatch_policy() -> DispatchPolicy:
         allow_any_kinds=frozenset(allow_any),
         orchestrator_role_names=frozenset(role_names),
         orchestrator_models=models,
+        budget_vendor_override=_parse_budget_vendor_override(raw_override),
     )
 
 
@@ -228,12 +287,17 @@ def _validate_pair_id(dispatch_kind: str, pair_id: str) -> None:
         )
 
 
-def _validate_review_vendor(agent_runtime: str, reviewed_report_vendor: str) -> None:
+def _validate_review_vendor(
+    policy: DispatchPolicy, agent_runtime: str, reviewed_report_vendor: str,
+) -> None:
     if reviewed_report_vendor not in _VENDORS:
         raise DispatchPolicyError(
             "dispatch_policy_violation", "review requires reviewed_report_vendor=codex or claude_code.",
         )
-    if reviewed_report_vendor == agent_runtime:
+    if reviewed_report_vendor == agent_runtime and not (
+        policy.budget_vendor_override is not None
+        and policy.budget_vendor_override.allows_same_vendor("review")
+    ):
         raise DispatchPolicyError(
             "dispatch_policy_violation",
             f"review requires the other vendor; reviewer={agent_runtime}, report={reviewed_report_vendor}.",
@@ -250,7 +314,7 @@ def validate_spawn_dispatch(
     _validate_allowed_pair(policy, dispatch_kind, agent_runtime, model)
     _validate_pair_id(dispatch_kind, pair_id)
     if dispatch_kind == "review":
-        _validate_review_vendor(agent_runtime, reviewed_report_vendor)
+        _validate_review_vendor(policy, agent_runtime, reviewed_report_vendor)
 
 
 def orchestrator_model_verdict(*, role_label: str, model: str) -> tuple[bool, tuple[str, ...]]:
@@ -264,6 +328,7 @@ def orchestrator_model_verdict(*, role_label: str, model: str) -> tuple[bool, tu
 
 __all__ = [
     "DispatchPolicyError",
+    "BudgetVendorOverride",
     "DispatchPolicy",
     "load_dispatch_policy",
     "orchestrator_model_verdict",

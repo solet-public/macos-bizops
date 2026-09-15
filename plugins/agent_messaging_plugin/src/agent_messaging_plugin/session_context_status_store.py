@@ -11,11 +11,13 @@ still representable here.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
 from ananta.llm.agent_messaging.state_results import require_completed, require_records
+from ananta.services.state_service.bounded_read import iter_table_rows
 
 from .schema import (
     PEER_BINDING_NAMESPACE,
@@ -37,8 +39,15 @@ would discard the evidence before anyone reads it."""
 _COL_AGENT_INSTANCE_ID = "agent_instance_id"
 _COL_AGENT_SESSION_ID = "agent_session_id"
 _COL_IS_DELETED = "is_deleted"
+_COL_MEASURED_AT = "measured_at"
 _COL_RECORDED_AT = "recorded_at"
 _CONFLICT_COLUMNS = ["agent_instance_id"]
+
+_CONTEXT_STATUS_CEILING = 1_000_000
+_CONTEXT_STATUS_CEILING_REASON = (
+    "self-notice needs every fresh gauge plus every current live or peer-bound "
+    "identity; the walk stays paged while this remains a bounded fleet projection"
+)
 
 
 def _as_flag(value: bool | None) -> int | None:
@@ -465,8 +474,11 @@ def read_session_context_status_by_agent_session_id(
 
 def list_session_context_statuses(
     state: StateManagementInterface,
+    *,
+    measured_since: datetime,
+    active_agent_instance_ids: set[str],
 ) -> list[dict[str, Any]]:
-    """Every live gauge snapshot, one row per `agent_instance_id`.
+    """Return self-notice candidates, not the historical gauge table.
 
     THE SCAN THE L4c SELF-NOTICE LEG NEEDS, and the reason it can reach a seat
     at all. Its two sibling legs enumerate `managed_session` and then look the
@@ -475,20 +487,40 @@ def list_session_context_statuses(
     the module docstring), so scanning it directly is the only enumeration that
     includes the sessions whose rotation decision is the expensive one.
 
-    Returns rows as stored, in whatever order the state layer yields them: the
-    caller decides what counts as notable, exactly as
-    `_rotation_due_row` does for the managed-session path. No filtering happens
-    here beyond `is_deleted`, so a future consumer asking a different question
-    of the same rows does not have to defeat this function's opinion first.
+    The candidate union is deliberately narrower than every historical gauge:
+    fresh rows remain eligible for notice, while stale rows remain eligible only
+    when their lifecycle row or current peer binding says the instance is live.
+    The caller retains the in-Python age and lifecycle recheck that decides
+    whether a candidate is actually notable.
     """
-    result = state.query_state(
-        AGENT_ROLE_BINDING_NAMESPACE,
-        {
-            "table": TABLE_SESSION_CONTEXT_STATUS,
-            "filters": {_COL_IS_DELETED: 0},
-        },
-    )
-    return require_records(result)
+    rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    def add(rows_to_add: Iterable[dict[str, object]]) -> None:
+        for row in rows_to_add:
+            row_id = str(row["id"])
+            if row_id not in seen_ids:
+                seen_ids.add(row_id)
+                rows.append(dict(row))
+
+    add(iter_table_rows(
+        state,
+        namespace=AGENT_ROLE_BINDING_NAMESPACE,
+        table=TABLE_SESSION_CONTEXT_STATUS,
+        filters={_COL_MEASURED_AT: {"op": "gte", "value": measured_since}},
+        ceiling=_CONTEXT_STATUS_CEILING,
+        reason=_CONTEXT_STATUS_CEILING_REASON,
+    ))
+    if active_agent_instance_ids:
+        add(iter_table_rows(
+            state,
+            namespace=AGENT_ROLE_BINDING_NAMESPACE,
+            table=TABLE_SESSION_CONTEXT_STATUS,
+            filters={_COL_AGENT_INSTANCE_ID: sorted(active_agent_instance_ids)},
+            ceiling=_CONTEXT_STATUS_CEILING,
+            reason=_CONTEXT_STATUS_CEILING_REASON,
+        ))
+    return rows
 
 
 def read_session_context_status_history(

@@ -4,9 +4,10 @@
   "description": "Process action results and determine next steps or format output for users",
   "embedding_description": "Result-processing inference. Take action results and format user output, then decide next steps or follow-up actions. Provide a prompt with results and context; returns formatted output and continuation actions.",
   "action_definition_template_arguments": {
-    "model": {},
-    "prompt": {
-      "message_rendering": {
+    "params": {
+      "model": {},
+      "prompt": {
+        "message_rendering": {
         "ephemeral": false,
         "history_kind": "output_event",
         "transition_behavior": "living_to_ossified"
@@ -18,7 +19,7 @@
           "_completed_arguments": "<<ACTION_ARGUMENTS>>"
         }
       },
-      "user": {
+        "user": {
         "instructions": [
           "For user-visible communication, first use query_process_registry to resolve the active IO plugin namespace, then invoke plugin::<namespace>::post_message with message in the actions array. Resolve any namespace-specific arguments from the returned schema.",
           "An empty actions array ends the flow silently.",
@@ -83,6 +84,7 @@
           }
         },
         "flow_input": "<<<:service_interface::flow_service::get_flow_input_for_presentation()>>>"
+        }
       }
     }
   }

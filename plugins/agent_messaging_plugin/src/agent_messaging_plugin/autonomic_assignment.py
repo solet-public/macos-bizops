@@ -36,17 +36,17 @@ from ananta.llm.agent_messaging.role_binding import (
     HOLDER_KIND_SESSION,
     SYS_AUTONOMIC_SLOT,
 )
-from ananta.llm.agent_messaging.state_results import require_records
 from ananta.services.inference_service.deferred_vertex_queue import hard_delete_flows
 from ananta.services.inference_service.schema import (
     COL_FLOW_ID,
-    COL_IS_DELETED,
     COL_ROLE,
     COL_STATE,
     INFERENCE_DEFERRED_VERTEX_NAMESPACE,
-    STATE_FAILED,
+    STATE_DEFERRED,
+    STATE_FORWARDED,
     TABLE_INFERENCE_DEFERRED_VERTEX,
 )
+from ananta.services.state_service.bounded_read import iter_table_rows
 
 from .completion_reconcile import CompletionReconciler, live_session_holder_id
 from .forwarded_vertex_reconcile import ForwardedVertexReconciler
@@ -68,6 +68,12 @@ logger = logging.getLogger(__name__)
 # How many undrained flow_ids the loud remainder log enumerates before
 # eliding — keeps the log line bounded while staying auditable.
 _DRAIN_LOG_SAMPLE = 20
+
+_DRAIN_QUEUE_CEILING = 1_000_000
+_DRAIN_QUEUE_CEILING_REASON = (
+    "first-claim snapshot covers every live redrivable sys:autonomic vertex "
+    "before resubmit mutates the queue"
+)
 
 
 class _LiveBridge(Protocol):
@@ -544,14 +550,17 @@ class AutonomicAssignment:
         ``(drained, remaining)``.
         """
         state = self._state()
-        rows = require_records(state.query_state(
-            INFERENCE_DEFERRED_VERTEX_NAMESPACE,
-            {
-                "table": TABLE_INFERENCE_DEFERRED_VERTEX,
-                "filters": {COL_ROLE: SYS_AUTONOMIC_SLOT, COL_IS_DELETED: 0},
+        redrivable = list(iter_table_rows(
+            state,
+            namespace=INFERENCE_DEFERRED_VERTEX_NAMESPACE,
+            table=TABLE_INFERENCE_DEFERRED_VERTEX,
+            filters={
+                COL_ROLE: SYS_AUTONOMIC_SLOT,
+                COL_STATE: [STATE_DEFERRED, STATE_FORWARDED],
             },
+            ceiling=_DRAIN_QUEUE_CEILING,
+            reason=_DRAIN_QUEUE_CEILING_REASON,
         ))
-        redrivable = [row for row in rows if row.get(COL_STATE) != STATE_FAILED]
         drained: list[str] = []
         for row in redrivable:
             flow_id = str(row.get(COL_FLOW_ID) or "")

@@ -10,6 +10,7 @@ from .adapters import AdapterRegistry, OperationRequest, OperationResult, invoke
 from .contracts import ContractBundle, startup_readiness_budget
 from .errors import StateConflictError
 from .flow import unresolved_decision_ids_for_stages
+from .inference_probe_policy import advisory_inference_probe_result
 from .journal_migrations import activation_site_key
 from .models import CheckpointStatus, CommandResult, ExitCode, JsonValue
 from .probe_input_projection import probe_public_inputs
@@ -95,6 +96,8 @@ def _run_boundary_probe(
     answers: dict[str, JsonValue],
     persist_path: Path | None,
 ) -> BoundaryProbeOutcome:
+    if persist_path is not None:
+        write_transaction(persist_path, transaction)
     current = transaction.stage_probe_statuses[stage_id][boundary][probe_id]
     if (
         transaction.probe_activations[activation_site_key(stage_id, boundary, probe_id)]["state"]
@@ -201,7 +204,13 @@ def _invoke_boundary_probe(
         timeout_seconds=timeout_seconds,
         public_inputs=public_inputs,
     )
-    return invoke_adapter(registry, runner=str(definition["runner"]), request=request)
+    result = invoke_adapter(registry, runner=str(definition["runner"]), request=request)
+    if not isinstance(result, OperationResult):
+        return result
+    answers = getattr(transaction, "answers", {})
+    if not isinstance(answers, dict):
+        return result
+    return advisory_inference_probe_result(answers, request, result)
 
 
 def _boundary_probe_ids(
@@ -233,8 +242,8 @@ def _declared_probe_remediation_ids(
     probe = bundle.probes.get(probe_id)
     if probe is None:
         raise StateConflictError(f"boundary probe {probe_id!r} is not declared")
-    declared = probe.get("remediation_operation_refs")
-    if declared is not None:
+    if "remediation_operation_refs" in probe:
+        declared = probe["remediation_operation_refs"]
         if not isinstance(declared, list) or not all(
             isinstance(operation_id, str) for operation_id in declared
         ):

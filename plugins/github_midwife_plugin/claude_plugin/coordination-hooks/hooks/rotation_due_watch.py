@@ -155,6 +155,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+_OWNER_DIRECTORY = str(Path(__file__).resolve().parent)
+if _OWNER_DIRECTORY not in sys.path:
+    sys.path.insert(0, _OWNER_DIRECTORY)
+import coordination_owner  # noqa: E402 -- sibling path follows runtime floor
+
 _MARKER_DIR_ENV = "AGENT_HEARTBEAT_MARKER_DIR"
 _INSTANCE_ID_ENV = "AGENT_INSTANCE_ID"
 _GAUGE_REPORTER_PATH_ENV = "AGENT_CONTEXT_GAUGE_REPORTER_PATH"
@@ -251,19 +256,19 @@ def _is_designated_gauge_reporter() -> bool:
     return Path(__file__).resolve() == Path(designated).expanduser().resolve()
 
 
-def _throttle_marker_path(marker_dir: str, agent_instance_id: str) -> Path:
-    return Path(marker_dir) / f"{agent_instance_id}.rotation_due_check.stamp"
+def _throttle_marker_path(identity_dir: Path, agent_instance_id: str) -> Path:
+    return Path(identity_dir) / "context_watch" / f"{agent_instance_id}.rotation_due_check.stamp"
 
 
-def _latch_marker_path(marker_dir: str, agent_instance_id: str, claude_session_id: str) -> Path:
-    return Path(marker_dir) / f"{agent_instance_id}__{claude_session_id}.rotation_due_latch"
+def _latch_marker_path(identity_dir: Path, agent_instance_id: str, claude_session_id: str) -> Path:
+    return Path(identity_dir) / "context_watch" / f"{agent_instance_id}__{claude_session_id}.rotation_due_latch"
 
 
-def _fallback_marker_path(marker_dir: str, agent_instance_id: str, claude_session_id: str) -> Path:
-    return Path(marker_dir) / f"{agent_instance_id}__{claude_session_id}.rotation_due_selfnotify.json"
+def _fallback_marker_path(identity_dir: Path, agent_instance_id: str, claude_session_id: str) -> Path:
+    return Path(identity_dir) / "context_watch" / f"{agent_instance_id}__{claude_session_id}.rotation_due_selfnotify.json"
 
 
-def _deferred_marker_path(marker_dir: str, agent_instance_id: str, claude_session_id: str) -> Path:
+def _deferred_marker_path(identity_dir: Path, agent_instance_id: str, claude_session_id: str) -> Path:
     """GAU-14 (D2): notes, ONCE per session generation, that this hook stood
     down because the solet's own legs are covering the same condition.
 
@@ -282,7 +287,7 @@ def _deferred_marker_path(marker_dir: str, agent_instance_id: str, claude_sessio
     same hook. It is a fourth marker of an existing shape, not a second source
     of truth for an existing fact.
     """
-    return Path(marker_dir) / f"{agent_instance_id}__{claude_session_id}.rotation_due_deferred"
+    return Path(identity_dir) / "context_watch" / f"{agent_instance_id}__{claude_session_id}.rotation_due_deferred"
 
 
 def is_throttled(marker_path: Path, *, now: float, throttle_seconds: float = _THROTTLE_SECONDS) -> bool:
@@ -572,7 +577,7 @@ def _resolve_steward_role(agent_instance_id: str) -> str | None:
     return role or None
 
 
-def _deliver_notification(*, agent_instance_id: str, claude_session_id: str, content: str, marker_dir: str) -> bool:
+def _deliver_notification(*, agent_instance_id: str, claude_session_id: str, content: str, marker_dir: Path) -> bool:
     """Peer-send to the resolved steward when one exists; otherwise write
     a locally-surfaced marker file. Returns True on any successful
     delivery path (peer-send OR marker write) -- the caller only touches
@@ -611,7 +616,7 @@ def _read_stdin_payload() -> dict[str, Any] | None:
     return payload
 
 
-def _fallback_marker_dir() -> str | None:
+def _fallback_marker_dir() -> str | None:  # pyright: ignore[reportUnusedFunction]
     """A writable stand-in marker root for the managed-but-mis-wired case.
 
     Deliberately the OS temp dir rather than a project-relative path: this
@@ -758,7 +763,7 @@ def _resolve_seat_instance_id() -> str | None:
     return instance_id
 
 
-def _resolve_instance_id() -> str:
+def _resolve_instance_id() -> str:  # pyright: ignore[reportUnusedFunction]
     """This session's own instance id: env first, seat registry second, else "".
 
     Kept as its own function so :func:`_resolve_firing_context` carries exactly
@@ -796,54 +801,14 @@ def _identity_without_env() -> str | None:
     return None
 
 
-def _resolve_firing_context() -> tuple[str, str, str, str] | None:
+def _resolve_firing_context(identity_dir: Path) -> tuple[Path, str, str, str] | None:
     """``(marker_dir, agent_instance_id, transcript_path, claude_session_id)``,
     or ``None`` when this firing should be skipped (missing env, unreadable
     stdin, or a payload missing the fields this hook needs) -- split out of
     :func:`main` to keep it a straight-line dispatcher (radon cc)."""
-    marker_dir = os.environ.get(_MARKER_DIR_ENV, "").strip()
-    agent_instance_id = _resolve_instance_id()
+    agent_instance_id = os.environ.get(_INSTANCE_ID_ENV, "").strip()
     if not agent_instance_id:
         return None
-    if not marker_dir:
-        # MIGRATION-FAIL-OPEN GUARD (2026-08-08), the rotation-side twin of
-        # the one in heartbeat_report_alive.py. An instance id alone proves
-        # this session IS fleet-managed, so a missing marker dir is never
-        # "unmanaged" -- it is managed AND MIS-WIRED: a process's env is
-        # frozen at spawn, so a session started before the
-        # ANANTA_HEARTBEAT_MARKER_DIR -> AGENT_HEARTBEAT_MARKER_DIR rename
-        # landed can never pick the new name up in place.
-        #
-        # The prior combined check (`not marker_dir or not
-        # agent_instance_id`) could not tell the two apart and silently
-        # skipped every firing for the whole running fleet -- warning only
-        # to stderr, which nothing reads. Measured consequence: the
-        # rotation-due signal died fleet-wide the moment that rename
-        # landed, and four sessions ran to the edge of auto-compact with no
-        # notice ever reaching their steward. The heartbeat survived the
-        # identical miswiring ONLY because it had already been given its
-        # own fail-open guard, which masked this one: liveness kept
-        # reporting, so the fleet looked managed.
-        #
-        # Unlike the heartbeat, this hook cannot simply proceed without a
-        # marker dir. The dir carries the LATCH as well as the throttle,
-        # and an unlatched firing would peer_send the steward on EVERY
-        # completed tool call above threshold. So fall back to a temp-dir
-        # marker root instead: throttle and latch both keep working, the
-        # once-per-session notification contract is preserved, and no
-        # deprecated variable name is read and no project path convention
-        # is invented. Losing this dir (reboot, tmp reaping) costs at most
-        # one extra notification per affected session.
-        fallback = _fallback_marker_dir()
-        if fallback is None:
-            return None
-        _warn(
-            f"{_INSTANCE_ID_ENV} is set but {_MARKER_DIR_ENV} is NOT -- this "
-            "is a MANAGED session whose env was frozen at spawn before a "
-            f"wiring-variable rename landed, not an unmanaged one. Using "
-            f"fallback marker root {fallback}: throttle and latch preserved.",
-        )
-        marker_dir = fallback
     payload = _read_stdin_payload()
     if payload is None:
         return None
@@ -852,7 +817,7 @@ def _resolve_firing_context() -> tuple[str, str, str, str] | None:
     if not transcript_path or not claude_session_id:
         _warn("stdin payload carried no transcript_path/session_id -- skipping")
         return None
-    return marker_dir, agent_instance_id, transcript_path, claude_session_id
+    return identity_dir, agent_instance_id, transcript_path, claude_session_id
 
 
 def _cache_arguments(
@@ -1078,7 +1043,7 @@ def _resolve_usage(transcript_path: str) -> tuple[str, int, str | None, Any] | N
 
 
 def _check_and_notify(
-    *, marker_dir: str, agent_instance_id: str, claude_session_id: str,
+    *, marker_dir: Path, agent_instance_id: str, claude_session_id: str,
     latch_path: Path, model: str, current_tokens: int, cache_cold: Any,
     rotation_thresholds: Any, solet_live: bool,
 ) -> None:
@@ -1209,10 +1174,25 @@ def _check_and_notify(
         touch_marker(latch_path)
 
 
+def _verified_identity_directory() -> Path | None:
+    ownership = coordination_owner.verify("context_watch", __file__)
+    if not ownership.eligible:
+        if ownership.managed:
+            coordination_owner.report_refusal(ownership)
+        return None
+    identity_dir = coordination_owner.runtime_identity_directory(ownership)
+    if identity_dir is None:
+        _warn("verified context owner has no receipt-derived runtime state root")
+    return identity_dir
+
+
 def main() -> int:
+    identity_dir = _verified_identity_directory()
+    if identity_dir is None:
+        return 0
     if not _is_designated_gauge_reporter():
         return 0
-    context = _resolve_firing_context()
+    context = _resolve_firing_context(identity_dir)
     if context is None:
         return 0
     marker_dir, agent_instance_id, transcript_path, claude_session_id = context
@@ -1220,7 +1200,6 @@ def main() -> int:
     throttle_path = _throttle_marker_path(marker_dir, agent_instance_id)
     if is_throttled(throttle_path, now=time.time()):
         return 0
-    touch_marker(throttle_path)
 
     resolved = _resolve_usage(transcript_path)
     if resolved is None:
@@ -1244,6 +1223,11 @@ def main() -> int:
         cache_arguments=cache_arguments,
         reading_at=reading_at,
     )
+    if solet_live:
+        try:
+            touch_marker(throttle_path)
+        except OSError as exc:
+            _warn(f"failed to write context throttle marker: {exc}")
 
     latch_path = _latch_marker_path(marker_dir, agent_instance_id, claude_session_id)
     if latch_path.exists():

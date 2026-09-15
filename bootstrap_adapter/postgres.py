@@ -284,7 +284,11 @@ def _first_matching_hba_method(
             if record_type == "local":
                 return method
             continue
-        if record_type in _HOST_HBA_TYPES and address is not None and _hba_address_matches(record_address, address):
+        if (
+            record_type in {"host", connection_type}
+            and address is not None
+            and _hba_address_matches(record_address, address)
+        ):
             return method
     return None
 
@@ -292,8 +296,14 @@ def _first_matching_hba_method(
 def _effective_default_scram(records: Sequence[HbaRecord]) -> bool:
     required_connections = (
         ("local", None),
-        ("host", "127.0.0.1"),
-        ("host", "::1"),
+        ("hostssl", "127.0.0.1"),
+        ("hostnossl", "127.0.0.1"),
+        ("hostgssenc", "127.0.0.1"),
+        ("hostnogssenc", "127.0.0.1"),
+        ("hostssl", "::1"),
+        ("hostnossl", "::1"),
+        ("hostgssenc", "::1"),
+        ("hostnogssenc", "::1"),
     )
     return all(
         _first_matching_hba_method(records, connection_type=connection_type, address=address)
@@ -478,9 +488,11 @@ def postgres_install_actions(observed: PostgresObservation) -> list[dict[str, An
                 "postgres_service_not_running",
             ),
         )
-    # Database unavailability makes extension discovery unknown, not absent.
-    # Starting the service is the only safe next action in that state.
-    if observed.pgvector_available is False:
+    # A stopped service leaves package discovery unknown.  The planned service
+    # start can make that absence observable mid-apply, so unknown must still
+    # schedule the package action before approval rather than expanding it
+    # after the service comes up.
+    if observed.pgvector_available is not True:
         actions.append(
             planned_action(
                 "postgres.install_pgvector_formula",
@@ -491,6 +503,16 @@ def postgres_install_actions(observed: PostgresObservation) -> list[dict[str, An
             ),
         )
     return actions
+
+
+def pgvector_package_available(observed: PostgresObservation) -> bool:
+    """Return only a positive package discovery result as available.
+
+    A stopped service leaves discovery unknown; it must never satisfy the
+    install operation's postcondition merely because no absence was observed.
+    """
+
+    return observed.pgvector_available is True
 
 
 def postgres_configure_actions(
@@ -673,7 +695,9 @@ def run_required(
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AdapterError(f"{label} could not execute") from exc
     if completed.returncode != 0:
-        raise AdapterError(f"{label} failed (exit {completed.returncode})")
+        diagnostics = completed.stderr.strip() or completed.stdout.strip()
+        detail = f": {diagnostics}" if diagnostics else ""
+        raise AdapterError(f"{label} failed (exit {completed.returncode}){detail}")
 
 
 def apply_postgres_configuration(

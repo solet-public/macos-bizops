@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .answer_validation import validate_normalized_answers
+from .contract_reconciliation_chain import resolve_reconciliation_chain
 from .contract_reconciliation_receipts import (
     per_probe_migration_data,
     validate_per_probe_migrations,
@@ -338,26 +339,13 @@ def _select_reconciliation(
     destination_bundle: ContractBundle,
     manifest_path: Path | None,
 ) -> ContractReconciliation:
-    source_candidates = _source_reconciliation_candidates(transaction, manifest_path)
-    _require(
-        bool(source_candidates),
-        StateConflictError(
-            "no release-declared contract reconciliation matches this source identity"
-        ),
-    )
     if source_bundle.flow_id != transaction.flow_id:
         raise StateConflictError("target contract flow_id differs from transaction")
-    destination_digest = destination_bundle.contract_digest
-    candidates = _destination_reconciliation_candidates(source_candidates, destination_digest)
-    if len(candidates) != 1:
-        if not candidates:
-            raise StateConflictError(
-                f"release-declared reconciliation entries exist for this source but none target the installed contract {destination_digest}; a forward-only entry for this destination is needed"
-            )
-        raise StateConflictError(
-            f"contract reconciliation manifest authoring error: multiple entries match source digest {transaction.flow_contract_digest} and installed destination digest {destination_digest}"
-        )
-    selected = candidates[0]
+    selected = resolve_reconciliation_chain(
+        transaction,
+        destination_bundle.contract_digest,
+        load_contract_reconciliations(manifest_path=manifest_path),
+    )
     _validate_selected_flow_ids(selected, transaction, source_bundle, destination_bundle)
     return selected
 
@@ -379,34 +367,6 @@ def _validate_selected_flow_ids(
     _require(
         selected.flow_id == destination_bundle.flow_id,
         StateConflictError("reconciliation destination flow_id differs from destination contract"),
-    )
-
-
-def _source_reconciliation_candidates(
-    transaction: Transaction,
-    manifest_path: Path | None,
-) -> tuple[ContractReconciliation, ...]:
-    """Return declarations pinned to the persisted source contract identity."""
-
-    return tuple(
-        item
-        for item in load_contract_reconciliations(manifest_path=manifest_path)
-        if (
-            item.flow_id == transaction.flow_id
-            and item.source_revision == transaction.flow_source_revision
-            and item.source_digest == transaction.flow_contract_digest
-        )
-    )
-
-
-def _destination_reconciliation_candidates(
-    source_candidates: tuple[ContractReconciliation, ...],
-    destination_digest: str,
-) -> tuple[ContractReconciliation, ...]:
-    """Return source-pinned declarations targeting the observed installed digest."""
-
-    return tuple(
-        item for item in source_candidates if item.destination_digest == destination_digest
     )
 
 

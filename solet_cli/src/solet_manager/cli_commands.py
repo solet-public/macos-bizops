@@ -17,6 +17,7 @@ from .models import CommandResult, ExitCode, JsonValue
 from .paths import ManagerPaths
 from .rendering import render_human
 from .seed_lock_parser import parse_seed_lock
+from .stage_resume import require_named_resume_stage
 
 _SEED_NAME = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
 _SEED_SET_UNAVAILABLE_REPAIR = (
@@ -45,6 +46,12 @@ def run_create_command(
         contract_directory=args.contract_dir,
         seed_lock_path=seed_lock,
     )
+    if args.resume_stage is not None:
+        require_named_resume_stage(
+            paths=paths,
+            config=config,
+            stage_id=args.resume_stage,
+        )
     decisions = dict(config.decisions)
     sources = dict(config.decision_sources)
     preview, decisions, sources = _preview_with_interactive_decisions(
@@ -60,6 +67,14 @@ def run_create_command(
     approval_stop = _approval_stop(args, preview, fingerprint)
     if approval_stop is not None:
         return approval_stop
+    if args.resume_stage is not None:
+        return manager.create(
+            config,
+            approved_fingerprint=fingerprint,
+            decision_selections=decisions,
+            decision_sources=sources,
+            stop_after_stage=args.resume_stage,
+        )
     return manager.create(
         config,
         approved_fingerprint=fingerprint,

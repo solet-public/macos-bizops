@@ -144,6 +144,7 @@ def _restore_env(key: str, val: str | None) -> None:
 
 _APP_HOME_DERIVED_ENV_FAMILY = (
     "APP_HOME", "ANANTA_SESSION_MAPPING_SPOOL_DIR", "AGENT_HEARTBEAT_MARKER_DIR",
+    "AGENT_COORDINATION_RECEIPT_PATH",
 )
 
 
@@ -937,6 +938,11 @@ def test_spawn_env_heartbeat_marker_dir() -> None:
         "AGENT_HEARTBEAT_MARKER_DIR is rooted under APP_HOME's data dir, "
         "in its OWN subdirectory distinct from the mapping spool",
     )
+    _check(
+        env.get("AGENT_COORDINATION_RECEIPT_PATH")
+        == str(app_home / "data/coordination-hooks/claude/installation.v1.json"),
+        "AGENT_COORDINATION_RECEIPT_PATH is rooted under APP_HOME, never the worker cwd",
+    )
     designated_reporter = env.get("AGENT_CONTEXT_GAUGE_REPORTER_PATH", "")
     _check(
         Path(designated_reporter).is_absolute()
@@ -957,6 +963,10 @@ def test_spawn_env_heartbeat_marker_dir() -> None:
         "AGENT_HEARTBEAT_MARKER_DIR" not in env,
         "APP_HOME unset -> the heartbeat marker dir env var is ENTIRELY ABSENT, "
         "never an empty/bogus path",
+    )
+    _check(
+        "AGENT_COORDINATION_RECEIPT_PATH" not in env,
+        "APP_HOME unset -> the ownership receipt env var is entirely absent",
     )
 
 

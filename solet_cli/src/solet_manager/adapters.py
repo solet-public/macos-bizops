@@ -17,7 +17,7 @@ from .adapter_protocol import (
     PlannedAction,
 )
 from .adapter_validation import FORMULA_MARKER, bounded_redacted
-from .errors import AdapterProtocolError
+from .errors import AdapterProtocolError, StateConflictError
 from .models import CheckpointStatus
 
 __all__ = [
@@ -71,6 +71,7 @@ class AdapterRegistry:
 
 _PYTHON_RUNTIME_OPERATION_ID = "install_python_runtime"
 _PYTHON_RUNTIME_OPERATION_REF = "setup::python.install_313"
+_CAPTURE_ROOT_ENV = "SOLET_ADAPTER_ENVELOPE_CAPTURE_ROOT"
 _HOMEBREW_CANDIDATES = (
     "/opt/homebrew/bin/brew",
     "/usr/local/bin/brew",
@@ -90,6 +91,38 @@ def _homebrew_environment() -> dict[str, str]:
     environment = {name: value for name, value in os.environ.items() if name.startswith("HOMEBREW_")}
     environment.update(_HOMEBREW_GUARD_ENV)
     return environment
+
+
+def _capture_path(request: OperationRequest, kind: str) -> Path | None:
+    """Return the explicit receipt path for one adapter envelope.
+
+    Capture is disabled unless a guest harness supplies an absolute root.  The
+    regular create path therefore retains no new artifact or filesystem side
+    effect.
+    """
+
+    root_text = os.environ.get(_CAPTURE_ROOT_ENV)
+    if root_text is None:
+        return None
+    root = Path(root_text)
+    if not root.is_absolute() or kind not in {"request", "result"}:
+        raise StateConflictError("adapter envelope capture root or kind is invalid")
+    return root / f"{request.request_id}-{kind}.json"
+
+
+def _capture_envelope(request: OperationRequest, kind: str, envelope: object) -> None:
+    """Atomically write a guest-requested public adapter envelope."""
+
+    path = _capture_path(request, kind)
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(envelope, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
 
 
 def _homebrew_install_items(lines: list[str], *, kind: str, name: str, approved_closure: tuple[str, ...] = ()) -> list[str] | None:
@@ -362,15 +395,21 @@ def invoke_adapter(
     request: OperationRequest,
 ) -> OperationResult:
     request.validate()
+    request_payload = request.to_dict()
+    _capture_envelope(request, "request", request_payload)
     command = registry.command_for(runner)
     if command is None:
         if registry.base_python is None and _is_python_runtime_bootstrap(request, runner):
-            return _bootstrap_python_runtime(registry, request)
-        return OperationResult.blocked(
+            result = _bootstrap_python_runtime(registry, request)
+            _capture_envelope(request, "result", result.to_dict())
+            return result
+        result = OperationResult.blocked(
             request,
             error_kind="adapter_missing",
             repair=f"Install the reviewed {runner!r} target-local adapter and resume.",
         )
+        _capture_envelope(request, "result", result.to_dict())
+        return result
     started = time.monotonic()
     try:
         completed = subprocess.run(  # noqa: S603 - vector comes from closed registry
@@ -383,17 +422,23 @@ def invoke_adapter(
         )
     except subprocess.TimeoutExpired:
         elapsed = int((time.monotonic() - started) * 1000)
-        return _timeout_result(request, elapsed)
+        result = _timeout_result(request, elapsed)
+        _capture_envelope(request, "result", result.to_dict())
+        return result
     elapsed = int((time.monotonic() - started) * 1000)
     if completed.returncode != 0:
-        return _exit_result(request, completed, elapsed)
+        result = _exit_result(request, completed, elapsed)
+        _capture_envelope(request, "result", result.to_dict())
+        return result
     try:
         raw: object = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
         raise AdapterProtocolError(f"adapter stdout is not one JSON result: {exc}") from exc
     if not isinstance(raw, dict) or not all(isinstance(key, str) for key in raw):
         raise AdapterProtocolError("adapter stdout must be one JSON object")
-    return OperationResult.from_dict(raw, request)
+    result = OperationResult.from_dict(raw, request)
+    _capture_envelope(request, "result", raw)
+    return result
 
 
 def _timeout_result(request: OperationRequest, elapsed: int) -> OperationResult:

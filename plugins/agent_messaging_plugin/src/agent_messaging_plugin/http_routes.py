@@ -59,6 +59,14 @@ from .bridge_sessions import (
     BridgeQueueFullError,
     BridgeSessionManager,
 )
+from .operator_codex_registration import (
+    OperatorClaudeRegistration,
+    OperatorCodexRegistration,
+    OperatorHostQualificationError,
+    claude_operator_tmux_host_ref,
+    register_operator_claude_host,
+    register_operator_codex_host,
+)
 from .peer_dispatch import (
     EVENT_PEER_MESSAGE,
     EVENT_POST_MESSAGE,
@@ -175,6 +183,8 @@ class ProcessCallBody(BaseModel):
 
 
 class PeerRegisterBody(BaseModel):
+    # Explicit local operator launch qualification; omitted by managed workers.
+    operator_tmux_host: str = ""
     agent_id: str
     agent_instance_id: str
     session_label: str = ""
@@ -590,12 +600,17 @@ def _managed_session_registration_backfill(
     agent_instance_id: str,
     agent_id: str,
     agent_session_id: str,
+    session_label: str = "",
 ) -> None:
     """Fleet session-management D1 (§3.2/§5) registration-hook fix: fires the
     ``spawning -> live`` edge and backfills ``agent_session_id``/``agent_id``
     on an existing spawned row. When neither primary nor recovered spawn
     identity resolves, it creates the honest operator inventory row: it has
     identity and joinability, but no fabricated report-by or TTL contract.
+    It is an operator-existing-checkout row, never a provisioned lane
+    worktree. ``model`` and ``effort`` deliberately remain empty here
+    (iss_f2ca1599): the generic registration envelope contains neither and
+    the server cannot truthfully recover the operator's local launcher flags.
     NEVER raises: a fault here is loud but registration MUST still succeed, mirroring
     :func:`_state_table_self_refresh`'s posture.
     """
@@ -627,6 +642,12 @@ def _managed_session_registration_backfill(
                 report_by_seconds=0,
                 ttl_seconds=0,
                 directed_by="registration",
+                provisioning_mode="operator_existing_checkout",
+                # The effective label is what peer_registry accepted for this
+                # registration.  An empty label is legitimate, but cannot be
+                # an honest local identity, so retain the unique registering
+                # instance id rather than minting an empty collision key.
+                local_name=session_label or agent_instance_id,
             ),
         )
         if not backfill_registration(
@@ -877,6 +898,65 @@ def _register_peer_routes(
                 effective_agent_session_id,
             )
             effective_agent_session_id = ""
+        operator_host: dict[str, str] = {}
+        operator_claude_host: dict[str, str] = {}
+        claude_host_ref = body.operator_tmux_host
+        implicit_claude_enrichment = (
+            not claude_host_ref and agent_id == "claude_code"
+        )
+        if implicit_claude_enrichment:
+            try:
+                claude_host_ref = claude_operator_tmux_host_ref(body.session_label)
+            except OperatorHostQualificationError as exc:
+                logger.warning(
+                    "peer/register: Claude operator-host discovery failed; "
+                    "continuing ordinary registration (agi=%s): %s",
+                    agent_instance_id,
+                    exc,
+                )
+        if body.operator_tmux_host or claude_host_ref:
+            try:
+                if agent_id == "codex":
+                    operator_host = register_operator_codex_host(
+                        state_service,
+                        OperatorCodexRegistration(
+                            host_ref=body.operator_tmux_host,
+                            agent_id=agent_id,
+                            agent_instance_id=agent_instance_id,
+                            agent_session_id=effective_agent_session_id,
+                            session_label=body.session_label,
+                            parent_pid=body.parent_pid,
+                            watcher_declared=body.watcher_declared,
+                        ),
+                    )
+                elif agent_id == "claude_code":
+                    operator_claude_host = register_operator_claude_host(
+                        state_service,
+                        OperatorClaudeRegistration(
+                            host_ref=claude_host_ref,
+                            agent_id=agent_id,
+                            agent_instance_id=agent_instance_id,
+                            agent_session_id=effective_agent_session_id,
+                            session_label=body.session_label,
+                            parent_pid=body.parent_pid,
+                            watcher_declared=body.watcher_declared,
+                        ),
+                    )
+                else:
+                    raise OperatorHostQualificationError(
+                        "operator tmux host is supported only for Codex or Claude",
+                    )
+            except (OperatorHostQualificationError, StateOperationError) as exc:
+                if implicit_claude_enrichment:
+                    logger.warning(
+                        "peer/register: Claude operator-host qualification "
+                        "failed; continuing ordinary registration (agi=%s): %s",
+                        agent_instance_id,
+                        exc,
+                    )
+                    operator_claude_host = {}
+                else:
+                    return _validation_error("operator_host_unqualified", str(exc))
         # Import here to avoid a circular import at module load time;
         # models is pulled in via TYPE_CHECKING for the type hints.
         from .models import BridgeBinding  # noqa: PLC0415
@@ -948,6 +1028,7 @@ def _register_peer_routes(
             agent_instance_id=agent_instance_id,
             agent_id=agent_id,
             agent_session_id=effective_agent_session_id,
+            session_label=effective_label,
         )
         # Steady-state re-assert support: answer "do I still hold my configured
         # role?" HERE, on the INFRA route, so the caller never has to ask via the
@@ -993,6 +1074,8 @@ def _register_peer_routes(
                 "parent_pid": body.parent_pid,
                 "bridge_id": bridge_id,
                 "status": "registered",
+                "operator_codex_host": operator_host,
+                "operator_claude_host": operator_claude_host,
                 "self_refresh": self_refresh_action,
                 "autonomic": autonomic_action,
                 "session_role_held": session_role_held,
@@ -1096,6 +1179,7 @@ def _register_peer_routes(
         limit: int = 50,
         include_important: bool = True,
         role_after: str | None = None,
+        observer: bool = False,
     ) -> JSONResponse:
         bridge = bridge_manager.get(bridge_id)
         if bridge is None or bridge.closed:
@@ -1123,6 +1207,9 @@ def _register_peer_routes(
                     # raises AgentMessagingError on a malformed/forged token
                     # (caught below → error response). Fail-closed by design.
                     role_after=role_after,
+                    # Watch/status catch-up observes pending work; it does not
+                    # claim successful display for a model turn.
+                    observer=observer or sender_binding.is_watcher,
                 ),
             )
         except AgentMessagingError as exc:
@@ -1134,8 +1221,8 @@ def _register_peer_routes(
         # entry into the watch output — stamp the surfaced role rows
         # consumed. Watcher-only: an MCP session's consumption authority
         # stays the /peer/drain reconcile.
-        if sender_binding.is_watcher and include_important:
-            _consume_watcher_inbox_page(agent_messaging_service, page)
+        # A watcher is an observer.  Rendering its transport catch-up cannot
+        # create a weak receipt or mutate the strong handover boundary.
         return JSONResponse(
             content=_serialize_peer_inbox(page, sender_binding),
             status_code=200,

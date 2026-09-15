@@ -38,7 +38,7 @@ def operation_request(
         answers_fingerprint=answers_fingerprint or transaction.answers_fingerprint,
         approval_fingerprint=approval,
         dry_run=phase == "probe",
-        timeout_seconds=300 if phase == "apply" else 30,
+        timeout_seconds=operation.apply_timeout_seconds if phase == "apply" else 30,
         public_inputs=operation.public_inputs,
     )
 
@@ -126,6 +126,13 @@ def normalize_apply_result(result: OperationResult) -> OperationResult:
     """Preserve transport failures while rejecting invalid successful states."""
 
     if result.checkpoint_status is CheckpointStatus.APPLIED:
+        return result
+    if (
+        result.checkpoint_status is CheckpointStatus.PENDING
+        and result.timed_out
+        and result.retry_safe
+        and result.error_kind is not None
+    ):
         return result
     transport_statuses = {
         CheckpointStatus.AWAITING_USER,

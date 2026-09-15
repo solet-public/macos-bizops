@@ -121,7 +121,7 @@ def _assert_teardown_error_records_terminal_outcome() -> None:
     def teardown_error(_: LaneWorktree) -> None:
         raise LaneWorktreeError("fixture removal error")
 
-    lifecycle_verbs._resolve_lane_repo_root = lambda: worktree.repo_root  # type: ignore[assignment]  # noqa: SLF001
+    lifecycle_verbs._resolve_lane_repo_root = lambda _root="": worktree.repo_root  # type: ignore[assignment]  # noqa: SLF001
     lifecycle_verbs.lane_worktree_for = lambda *_args, **_kwargs: worktree  # type: ignore[assignment]
     lifecycle_verbs.lane_worktree_disposability = disposable  # type: ignore[assignment]
     lifecycle_verbs.remove_lane_worktree = teardown_error  # type: ignore[assignment]

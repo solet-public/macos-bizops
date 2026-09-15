@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import cast
 
 from .condition_evaluator import condition_is_inactive, condition_refs
@@ -315,6 +316,7 @@ def reconcile_contract_stage_probe_state(
         first_use_migrations,
     )
     rescoped = _scope_operations_to_contract(bundle, transaction)
+    rescoped = _reset_verified_operation_statuses(rescoped, bundle, reconciliation)
     stored = _storage_statuses(normalized)
     stages = derive_stage_statuses(
         dict(rescoped.stages),
@@ -340,6 +342,36 @@ def reconcile_contract_stage_probe_state(
         prior_decision_ids=frozenset(_answer_decisions(transaction.answers)),
     )
     return parsed
+
+
+def _reset_verified_operation_statuses(
+    transaction: Transaction,
+    bundle: ContractBundle,
+    reconciliation: ContractReconciliation,
+) -> Transaction:
+    """Invalidate only declared verified outcomes after a contract postcondition change."""
+
+    undeclared = sorted(set(reconciliation.operation_statuses_to_reset) - set(bundle.operations))
+    if undeclared:
+        raise StateError(
+            "contract reconciliation resets operations absent from the destination contract: "
+            f"{undeclared}"
+        )
+    reset_ids = tuple(
+        operation_id
+        for operation_id in reconciliation.operation_statuses_to_reset
+        if transaction.operation_statuses.get(operation_id) is CheckpointStatus.VERIFIED
+    )
+    if not reset_ids:
+        return transaction
+    statuses = dict(transaction.operation_statuses)
+    for operation_id in reset_ids:
+        statuses[operation_id] = CheckpointStatus.PENDING
+    return replace(
+        transaction,
+        operation_statuses=statuses,
+        result_kind=f"contract_reconciliation_reset:{reconciliation.migration_id}",
+    )
 
 
 def _scope_operations_to_contract(

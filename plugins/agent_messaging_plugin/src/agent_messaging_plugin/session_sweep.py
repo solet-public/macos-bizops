@@ -81,6 +81,7 @@ from ananta.llm.agent_messaging.state_results import (
     require_records,
     require_updated,
 )
+from ananta.services.state_service.bounded_read import iter_table_rows
 
 from . import rotation_thresholds
 from .dispatch_policy_pair_sweep import sweep_unpaired_dispatch_policy
@@ -1156,13 +1157,19 @@ class SessionRoleClaimPruner:
         self, state: StateManagementInterface, *, peer_registry: PeerRegistry,
     ) -> int:
         now = self._clock()
-        result = state.query_state(
-            AGENT_ROLE_BINDING_NAMESPACE,
-            {"table": TABLE_SESSION_ROLE_CLAIM, "filters": {"is_deleted": 0}},
-        )
         pruned = 0
         seen: set[str] = set()
-        for row in require_records(result):
+        for row in iter_table_rows(
+            state,
+            namespace=AGENT_ROLE_BINDING_NAMESPACE,
+            table=TABLE_SESSION_ROLE_CLAIM,
+            filters={},
+            ceiling=1_000_000,
+            reason=(
+                "one live role-claim row per session is required by the pruner; "
+                "135 rows measured on 2026-09-14"
+            ),
+        ):
             agent_session_id = str(row.get("agent_session_id") or "")
             if not agent_session_id:
                 continue

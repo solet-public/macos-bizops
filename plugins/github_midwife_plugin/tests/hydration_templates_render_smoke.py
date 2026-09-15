@@ -273,6 +273,7 @@ def _check_generated_hook_surfaces() -> None:
     _check_marketplace_matches_settings(settings)
     _check_git_controller_export()
     _check_solet_name_export()
+    _check_coordination_receipt_export()
 
 
 _SETTINGS_HOOK_CHECKS: tuple[tuple[str, tuple[str, ...], tuple[str, ...], str], ...] = (
@@ -579,6 +580,17 @@ def _check_solet_name_export() -> None:
         "started the session",
         all(armed.values()),
         f"armed per launcher: {armed}",
+    )
+
+
+def _check_coordination_receipt_export() -> None:
+    """The standalone launcher must bind receipt lookup to profile data, not cwd."""
+    rendered = _render((_TEMPLATES_DIR / "claude_launcher.template").read_text(encoding="utf-8"))
+    expected = "AGENT_COORDINATION_RECEIPT_PATH=\"/Users/example/Workspace/iris/profile/data/coordination-hooks/claude/installation.v1.json\""
+    _check(
+        "Claude launcher exports the fixed profile-data coordination receipt path",
+        expected in rendered,
+        "owner verification must not guess a receipt from the caller cwd",
     )
 
 

@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO_ROOT / "plugins" / "github_midwife_plugin" / "src"))
 sys.path.insert(0, str(_REPO_ROOT / "solet_cli" / "src"))
 
-from github_midwife_plugin import setup_adapter  # noqa: E402
+from github_midwife_plugin import setup_adapter, setup_operations  # noqa: E402
+from github_midwife_plugin.setup_adapter import _ALLOWED_PUBLIC_INPUTS  # noqa: E402
 from github_midwife_plugin.setup_adapter_contract import AdapterRequest  # noqa: E402
+from github_midwife_plugin.setup_adapter_runtime import CommandOutcome  # noqa: E402
 from solet_manager.config import CreateConfig  # noqa: E402
 from solet_manager.contracts import ContractBundle  # noqa: E402
 from solet_manager.operation_records import operation_request  # noqa: E402
@@ -35,6 +40,20 @@ class MissingProfileRuntime:
     def run(self, *args: object, **kwargs: object) -> object:
         del args, kwargs
         raise AssertionError("missing setup_profile must block before subprocess execution")
+
+
+class LaunchagentRuntime:
+    """Hermetic launchctl seam for LaunchAgent preview health tests."""
+
+    def __init__(self, *, home: Path, outcome: CommandOutcome) -> None:
+        self.home = home
+        self.outcome = outcome
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandOutcome:
+        del kwargs
+        self.calls.append(argv)
+        return self.outcome
 
 
 def _check(condition: bool, label: str) -> None:
@@ -98,6 +117,15 @@ def _check_profile_projection_and_guard() -> None:
         request.public_inputs == {"setup_profile": "macos-bizops", "autostart": "enabled"},
         "launchagent request projects selected setup_profile and autostart",
     )
+    adapter_response = setup_adapter.dispatch_request(request, MissingProfileRuntime())
+    adapter_actions = adapter_response.get("planned_actions")
+    _check(
+        adapter_response.get("checkpoint_status") == "pending"
+        and isinstance(adapter_actions, list)
+        and any(action.get("id") == "genesis.install_launchagent" for action in adapter_actions),
+        "flow-declared launchagent inputs pass adapter validation "
+        f"[{adapter_response}]",
+    )
     missing_preview_payload = dict(cast(dict[str, object], request_to_dict(request)))
     missing_preview_payload["public_inputs"] = {}
     preview_response = setup_adapter.dispatch_request(
@@ -135,6 +163,65 @@ def _check_profile_projection_and_guard() -> None:
     )
 
 
+def _check_preview_requires_launchd_health() -> None:
+    request = _launchagent_request()
+    launchctl_command = (
+        "/bin/launchctl",
+        "print",
+        f"gui/{os.getuid()}/local.solet.{request.name}",
+    )
+    broken_runtime = LaunchagentRuntime(
+        home=Path("/tmp/install-launchagent-preview-broken-home"),
+        outcome=CommandOutcome(113, False, 0, "", "Could not find service"),
+    )
+    with patch.object(setup_operations, "genesis_artifacts_valid", return_value=True):
+        broken_response = setup_adapter.dispatch_request(request, broken_runtime)
+    broken_actions = broken_response.get("planned_actions")
+    _check(
+        broken_response.get("checkpoint_status") == "pending"
+        and isinstance(broken_actions, list)
+        and [action.get("id") for action in broken_actions] == ["genesis.install_launchagent"]
+        and broken_runtime.calls == [launchctl_command],
+        "broken launchd service remains an actionable LaunchAgent repair preview",
+    )
+    healthy_runtime = LaunchagentRuntime(
+        home=Path("/tmp/install-launchagent-preview-healthy-home"),
+        outcome=CommandOutcome(
+            0,
+            False,
+            0,
+            "state = running\nlast exit code = 0\nrun count = 1\n",
+            "",
+        ),
+    )
+    with patch.object(setup_operations, "genesis_artifacts_valid", return_value=True):
+        healthy_response = setup_adapter.dispatch_request(request, healthy_runtime)
+    _check(
+        healthy_response.get("checkpoint_status") == "verified"
+        and healthy_response.get("planned_actions") == []
+        and healthy_runtime.calls == [launchctl_command],
+        "healthy launchd service verifies without a redundant LaunchAgent repair",
+    )
+
+
+def _check_flow_parameter_allowlist_drift() -> None:
+    """Keep adapter acceptance aligned with every flow-declared parameter name."""
+
+    flow = json.loads((_KB_ROOT / "macos_setup_flow.json").read_text(encoding="utf-8"))
+    operations = flow["operations"]
+    declared_by_reference: dict[str, set[str]] = {}
+    for operation in operations.values():
+        reference = operation["operation_ref"]
+        declared_by_reference.setdefault(reference, set()).update(operation.get("parameters", {}))
+    for reference, declared in declared_by_reference.items():
+        allowed = _ALLOWED_PUBLIC_INPUTS.get(reference, frozenset())
+        _check(
+            declared <= allowed,
+            "adapter allowlist covers every flow-declared parameter "
+            f"[{reference}: declared={sorted(declared)}, allowed={sorted(allowed)}]",
+        )
+
+
 def request_to_dict(request: AdapterRequest) -> dict[str, object]:
     """Build the closed wire request without reaching a production adapter."""
 
@@ -162,6 +249,8 @@ def request_to_dict(request: AdapterRequest) -> dict[str, object]:
 def main() -> int:
     try:
         _check_profile_projection_and_guard()
+        _check_preview_requires_launchd_health()
+        _check_flow_parameter_allowlist_drift()
     except SmokeFailureError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

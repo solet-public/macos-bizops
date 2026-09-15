@@ -72,6 +72,15 @@ An item with no declared System Settings pane or denial behavior says so explici
 - SYSTEM SETTINGS PANE: Not applicable (no System Settings path declared).
 - GRANT ACTOR: user
 
+### LM Studio background item (`lm_studio_background_items_permission`)
+
+- WHAT: LM Studio background item
+- WHY: Allow the host-shared LM Studio service to start after login.
+- WHEN: Always required.
+- WHAT DENIAL DOES: disable_capability
+- SYSTEM SETTINGS PANE: General > Login Items & Extensions
+- GRANT ACTOR: user
+
 ## Consents
 
 ### Run after login (`background_service_consent`)
@@ -143,6 +152,15 @@ An item with no declared System Settings pane or denial behavior says so explici
 - WHY: Acknowledge that the Jira token inherits user permissions and the plugin includes permanent deletion.
 - WHEN: Optional; no required_when condition is declared.
 - WHAT DENIAL DOES: Decline state: `dormant`. Jira remains not connected.
+- SYSTEM SETTINGS PANE: Not applicable (consent, not a macOS permission entry).
+- GRANT ACTOR: operator (explicit assent)
+
+### Run LM Studio after login (`lm_studio_background_service_consent`)
+
+- WHAT: Run LM Studio after login
+- WHY: Authorize the shared LM Studio login job and explicit model loading.
+- WHEN: When (`embeddings_implementation` equals `lm_studio`) or (`inference_implementation` equals `lm_studio`).
+- WHAT DENIAL DOES: Decline state: `blocked`. LM Studio provisioning remains blocked until the background-service change is approved.
 - SYSTEM SETTINGS PANE: Not applicable (consent, not a macOS permission entry).
 - GRANT ACTOR: operator (explicit assent)
 

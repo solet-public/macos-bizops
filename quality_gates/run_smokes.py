@@ -439,12 +439,12 @@ def _terminate_process_group(process_group: int) -> None:
     while time.monotonic() < deadline:
         try:
             os.killpg(process_group, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             return
         time.sleep(0.02)
     try:
         os.killpg(process_group, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return
 
 

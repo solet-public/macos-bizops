@@ -164,9 +164,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
 
         APP_HOME = getattr(self.orchestrator_ref, "APP_HOME", None)
         if not APP_HOME:
-            raise RuntimeError(
-                f"{self.name}: Application directory not configured - plugin cannot initialize"
-            )
+            raise RuntimeError(f"{self.name}: Application directory not configured - plugin cannot initialize")
 
         self.config_provider = ConfigProvider(self.name, {})
         self.logger = configure_plugin_logging(APP_HOME, self.name, self.config_provider)
@@ -175,18 +173,14 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         # Request state_service via new service binding architecture
         state_service = self.orchestrator_ref.get_service("state_service")
         if not state_service:
-            raise RuntimeError(
-                f"{self.name}: state_service not available - check service_bindings.json"
-            )
+            raise RuntimeError(f"{self.name}: state_service not available - check service_bindings.json")
         # get_service returns object - cast to StateServiceProtocol after validation
         self.set_state_service(cast(StateServiceProtocol, state_service))
 
         # Memory service for memory-driven scheduling
         memory_service = self.orchestrator_ref.get_service("memory_service")
         if not memory_service:
-            raise RuntimeError(
-                f"{self.name}: memory_service not available - check service_bindings.json"
-            )
+            raise RuntimeError(f"{self.name}: memory_service not available - check service_bindings.json")
         self._memory_service = memory_service
 
     def set_action_factory(self, action_factory: ActionFactoryProtocol) -> None:
@@ -194,15 +188,12 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         self.action_factory = action_factory  # pyright: ignore[reportIncompatibleVariableOverride]
         self._action_executor = ActionExecutor(action_factory, self.logger)
         self.logger.debug(f"ActionFactory injected into {self.name}")
+        self._start_scheduler_when_ready()
 
     def set_state_service(self, state_service: StateServiceProtocol) -> None:
         self.state_service = state_service
-        self._repository = ScheduleRepository(
-            state_service=state_service, namespace=self.name, logger=self.logger
-        )
-        self._job_tracker = UniversalJobTracker(
-            state_service=state_service, plugin_name=self.name, logger=self.logger
-        )
+        self._repository = ScheduleRepository(state_service=state_service, namespace=self.name, logger=self.logger)
+        self._job_tracker = UniversalJobTracker(state_service=state_service, plugin_name=self.name, logger=self.logger)
         self.logger.debug(f"State service injected into {self.name}")
 
     def _configure_scheduler(self) -> None:
@@ -224,6 +215,28 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         if self._scheduler_manager:
             self._scheduler_manager.register_listeners()
 
+    def _start_scheduler_when_ready(self) -> bool:
+        """Start APScheduler once lifecycle startup and action injection both completed.
+
+        The platform starts service plugins before ``init_actions`` injects the
+        ActionFactory. Persisted jobs may be due immediately, so starting
+        APScheduler during that interval would let a callback observe an absent
+        ActionExecutor. Either ordering is safe: the lifecycle marks the
+        service started here, and ActionFactory injection retries the same
+        idempotent helper after constructing the executor.
+        """
+        if not self._services_started or not self._action_executor:
+            return False
+
+        if not self._scheduler_manager:
+            raise RuntimeError(f"{self.name}: scheduler manager not configured")
+
+        if self._scheduler_manager.scheduler and self._scheduler_manager.scheduler.running:
+            return True
+
+        self._scheduler_manager.start()
+        return True
+
     @service_lifecycle(operation="start")
     async def start_services(self) -> ActionResult:
         """Start scheduling service - called by platform after Phase 3.
@@ -233,6 +246,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         """
         # Idempotency guard
         if self._services_started:
+            self._start_scheduler_when_ready()
             return {
                 "action_status": "completed",
                 "data": {"message": "Service already running"},
@@ -249,14 +263,17 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             # Register event listeners for monitoring
             self._register_scheduler_listeners()
 
-            # Start scheduler
-            if self._scheduler_manager:
-                self._scheduler_manager.start()
-
-            # Mark as started
+            # Mark the service ready after it has configured and restored its
+            # schedules.  Startup's readiness check runs before init_actions;
+            # SchedulerManager records separately whether callbacks may run.
             self._services_started = True
             self._service_started_at = datetime.datetime.now(UTC).isoformat()
             self._service_error = None
+
+            # APScheduler itself waits until init_actions supplies an
+            # ActionFactory. The same helper is also called by
+            # set_action_factory, covering either ordering.
+            self._start_scheduler_when_ready()
 
             return {
                 "action_status": "completed",
@@ -270,6 +287,8 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             }
 
         except Exception as e:
+            self._services_started = False
+            self._service_started_at = None
             self.logger.critical(f"Failed to start scheduling service: {e}", exc_info=True)
             return {
                 "action_status": "error",
@@ -427,9 +446,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         if self._repository:
             schedule_id = self._repository.save_schedule(schedule_data)
             if not schedule_id:
-                self.logger.error(
-                    "Failed to persist schedule via repository; falling back to in-memory store"
-                )
+                self.logger.error("Failed to persist schedule via repository; falling back to in-memory store")
 
         if schedule_id:
             return schedule_id
@@ -455,9 +472,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
 
         return deleted
 
-    def _update_schedule_status(
-        self, schedule_id: str, status: str, error_message: str | None = None
-    ) -> None:
+    def _update_schedule_status(self, schedule_id: str, status: str, error_message: str | None = None) -> None:
         """Update schedule status using repository.
 
         Args:
@@ -532,11 +547,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             # drop). "pending" (not "failed") on the universal job tracker
             # keeps the row inside asynchronous_jobs.status's allowed set
             # (core_schemas.py CHECK) without a schema change.
-            self.logger.error(
-                f"SCHEDULER-CALLBACK-DEFERRED: {error_msg} — schedule {schedule_id} "
-                "left at its current status; retried on its own next scheduled "
-                "fire instead of being dropped by a future restore"
-            )
+            self.logger.error(f"SCHEDULER-CALLBACK-DEFERRED: {error_msg} — schedule {schedule_id} left at its current status; retried on its own next scheduled fire instead of being dropped by a future restore")
             self._update_universal_schedule_job(schedule_id, {"status": "pending"})
             return
 
@@ -585,15 +596,14 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
 
         if removed_count > 0:
             self.logger.debug(f"Cleaned up {removed_count} completed one-time schedules")
+
     # Text fields (display_name, description, embedding_description) are defined in
     # knowledge_base/processes/create_cron_schedule.json — the builder merges them at startup,
     # overwriting any values set here in the decorator.
     @platform_process(
         name="create_cron_schedule",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         parameters={
             "cron_expression": ParameterMetadata(
                 description="Cron expression defining the schedule (e.g., '*/5 * * * *' for every 5 minutes)",
@@ -602,22 +612,13 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             ),
             "action_definitions": ParameterMetadata(
                 description=(
-                    "Non-empty list of syntactically valid action objects in the "
-                    "canonical {process_key, arguments} shape. Registration validates "
-                    "the shape and scheduled-action policy; execution resolves "
-                    "process_key against processes registered at fire time. Provide "
-                    "exactly one of action_definitions or memory_tag."
+                    "Non-empty list of syntactically valid action objects in the canonical {process_key, arguments} shape. Registration validates the shape and scheduled-action policy; execution resolves process_key against processes registered at fire time. Provide exactly one of action_definitions or memory_tag."
                 ),
                 required=False,
                 type=ParameterType.LIST,
             ),
             "memory_tag": ParameterMetadata(
-                description=(
-                    "Memory tag to read on each run. The scheduled get_memories_by_tag "
-                    "action is terminal: its result is written to the action row and "
-                    "does not start a model turn. Provide exactly one of memory_tag "
-                    "or action_definitions."
-                ),
+                description=("Memory tag to read on each run. The scheduled get_memories_by_tag action is terminal: its result is written to the action row and does not start a model turn. Provide exactly one of memory_tag or action_definitions."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -741,9 +742,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                                         },
                                         {
                                             "process_key": "plugin::<active_io_plugin>::post_message",
-                                            "arguments": {
-                                                "message": "Daily status report has been generated and is available."
-                                            },
+                                            "arguments": {"message": "Daily status report has been generated and is available."},
                                         },
                                     ],
                                 },
@@ -880,7 +879,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                     },
                 },
             ),
-        ]
+        ],
     )
     def create_cron_schedule(
         self,
@@ -905,9 +904,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             tags = normalize_tags(p.get("tags", []))
 
             try:
-                actions_list, legacy_action_name, legacy_action_params = (
-                    ScheduleFactory.parse_actions_from_params(p)
-                )
+                actions_list, legacy_action_name, legacy_action_params = ScheduleFactory.parse_actions_from_params(p)
                 for action_def in actions_list:
                     validate_cron_action_def(action_def)
             except ValueError as e:
@@ -986,9 +983,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
     @platform_process(
         name="execute_in_seconds",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         parameters={
             "seconds": ParameterMetadata(
                 description="Number of seconds to wait before the wake-up fires",
@@ -997,30 +992,18 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             ),
             "action_definitions": ParameterMetadata(
                 description=(
-                    "Non-empty list of syntactically valid action objects in the "
-                    "canonical {process_key, arguments} shape. Registration validates "
-                    "the shape and scheduled-action policy; execution resolves "
-                    "process_key against processes registered at fire time. Provide "
-                    "exactly one of action_definitions or memory_tag."
+                    "Non-empty list of syntactically valid action objects in the canonical {process_key, arguments} shape. Registration validates the shape and scheduled-action policy; execution resolves process_key against processes registered at fire time. Provide exactly one of action_definitions or memory_tag."
                 ),
                 required=False,
                 type=ParameterType.LIST,
             ),
             "memory_tag": ParameterMetadata(
-                description=(
-                    "Memory tag to read after the delay. The scheduled "
-                    "get_memories_by_tag action is terminal: its result is written "
-                    "to the action row and does not start a model turn. Provide "
-                    "exactly one of memory_tag or action_definitions."
-                ),
+                description=("Memory tag to read after the delay. The scheduled get_memories_by_tag action is terminal: its result is written to the action row and does not start a model turn. Provide exactly one of memory_tag or action_definitions."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "content": ParameterMetadata(
-                description=(
-                    "Follow-up instructions to stash as a tagged memory. Content is "
-                    "only valid with memory_tag; action-definition mode rejects it."
-                ),
+                description=("Follow-up instructions to stash as a tagged memory. Content is only valid with memory_tag; action-definition mode rejects it."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -1196,9 +1179,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                                     "actions": [
                                         {
                                             "process_key": "plugin::<active_io_plugin>::post_message",
-                                            "arguments": {
-                                                "message": "Your batch processing should be complete now. Check the results."
-                                            },
+                                            "arguments": {"message": "Your batch processing should be complete now. Check the results."},
                                         }
                                     ],
                                 },
@@ -1253,9 +1234,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                         "actions": [
                             {
                                 "process_key": "plugin::<active_io_plugin>::post_message",
-                                "arguments": {
-                                    "message": "Your requested operation should be complete now."
-                                },
+                                "arguments": {"message": "Your requested operation should be complete now."},
                             }
                         ],
                     },
@@ -1314,7 +1293,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                     },
                 },
             ),
-        ]
+        ],
     )
     def execute_in_seconds(
         self,
@@ -1337,9 +1316,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             # schedule write, then apply the same scheduled-action validator used
             # by recurring registration and both restoration paths.
             try:
-                actions_list, legacy_action_name, legacy_action_params = (
-                    ScheduleFactory.parse_delayed_actions_from_params(p)
-                )
+                actions_list, legacy_action_name, legacy_action_params = ScheduleFactory.parse_delayed_actions_from_params(p)
                 for action_def in actions_list:
                     validate_cron_action_def(action_def)
             except ValueError as e:
@@ -1362,13 +1339,9 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                     tags=[memory_tag],
                     session_id=state.get("session_id"),
                 )
-                self.logger.info(
-                    f"Stashed memory for scheduled recall: tag={memory_tag!r}"
-                )
+                self.logger.info(f"Stashed memory for scheduled recall: tag={memory_tag!r}")
 
-            self.logger.debug(
-                f"Creating delayed execution: {label} in {seconds}s (at {run_at.isoformat()})"
-            )
+            self.logger.debug(f"Creating delayed execution: {label} in {seconds}s (at {run_at.isoformat()})")
 
             # Build ScheduleData using factory
             schedule_data = ScheduleFactory.create_one_time_schedule_data(
@@ -1403,9 +1376,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                     schedule_id,
                 )
 
-            self.logger.debug(
-                f"Successfully scheduled {schedule_id} ({label}) for execution in {seconds}s"
-            )
+            self.logger.debug(f"Successfully scheduled {schedule_id} ({label}) for execution in {seconds}s")
             return build_response(
                 ActionStatus.COMPLETED.value,
                 {
@@ -1438,9 +1409,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
     @platform_process(
         name="clear_scheduled_action",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         parameters={
             "schedule_id": ParameterMetadata(
                 description="Unique identifier of the scheduled job to cancel",
@@ -1454,9 +1423,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             type=ParameterType.OBJECT,
             description="Job cancellation result",
             properties={
-                "schedule_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the cancelled job"
-                ),
+                "schedule_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the cancelled job"),
                 "cancelled": ParameterMetadata(
                     type=ParameterType.BOOLEAN,
                     description="Whether cancellation was successful",
@@ -1557,9 +1524,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                             {
                                 "process_key": "plugin::<active_io_plugin>::post_message",
                                 "reason": "Notify user of job completion",
-                                "arguments": {
-                                    "message": "Your inference job has completed successfully."
-                                },
+                                "arguments": {"message": "Your inference job has completed successfully."},
                             },
                         ]
                     },
@@ -1584,9 +1549,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                             {
                                 "process_key": "plugin::<active_io_plugin>::post_message",
                                 "reason": "Confirm cancellation to user",
-                                "arguments": {
-                                    "message": "Scheduled job 1002 has been cancelled successfully."
-                                },
+                                "arguments": {"message": "Scheduled job 1002 has been cancelled successfully."},
                             },
                         ]
                     },
@@ -1663,7 +1626,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                     },
                 },
             ),
-        ]
+        ],
     )
     def clear_scheduled_action(
         self,
@@ -1699,11 +1662,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             db_deleted = self._delete_schedule(schedule_id) if schedule_exists else False
             cancelled = db_deleted or job_removed
 
-            message = (
-                f"Cleared {schedule_id}"
-                if cancelled
-                else f"Schedule {schedule_id} not found; nothing to clear"
-            )
+            message = f"Cleared {schedule_id}" if cancelled else f"Schedule {schedule_id} not found; nothing to clear"
 
             return build_response(
                 ActionStatus.COMPLETED.value,
@@ -1732,9 +1691,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
     @platform_process(
         name="clear_scheduled_actions_by_tag",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         parameters={
             "tag": ParameterMetadata(
                 description="Tag to match for batch cancellation of scheduled jobs",
@@ -1856,9 +1813,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                             {
                                 "process_key": "plugin::<active_io_plugin>::post_message",
                                 "reason": "Notify user of completion and cleanup",
-                                "arguments": {
-                                    "message": "Inference job completed. Cancelled 3 pending monitoring schedules."
-                                },
+                                "arguments": {"message": "Inference job completed. Cancelled 3 pending monitoring schedules."},
                             },
                         ]
                     },
@@ -1883,9 +1838,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                             {
                                 "process_key": "plugin::<active_io_plugin>::post_message",
                                 "reason": "Confirm cancellation to user",
-                                "arguments": {
-                                    "message": "Cancelled all daily report schedules. Total cancelled: {cleared_count}"
-                                },
+                                "arguments": {"message": "Cancelled all daily report schedules. Total cancelled: {cleared_count}"},
                             },
                         ]
                     },
@@ -1970,7 +1923,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                     },
                 },
             ),
-        ]
+        ],
     )
     def clear_scheduled_actions_by_tag(
         self,
@@ -2033,9 +1986,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
     @platform_process(
         name="get_schedules_by_tag",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         parameters={
             "tag": ParameterMetadata(
                 description="Tag to filter schedules by",
@@ -2087,19 +2038,21 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             matching: list[dict[str, Any]] = []
             for schedule_id, schedule_data in scheduled_actions.items():
                 if tag in schedule_data.get("tags", []):
-                    matching.append({
-                        "schedule_id": schedule_id,
-                        "type": schedule_data.get("type"),
-                        "status": schedule_data.get("status"),
-                        "label": schedule_data.get("label"),
-                        "cron_expression": schedule_data.get("cron_expression"),
-                        "run_at": schedule_data.get("run_at"),
-                        "tags": schedule_data.get("tags", []),
-                        # Useful for debugging heartbeat scope: global schedules should not
-                        # inherit a user session_id.
-                        "session_id": schedule_data.get("session_id"),
-                        "flow_id": schedule_data.get("flow_id"),
-                    })
+                    matching.append(
+                        {
+                            "schedule_id": schedule_id,
+                            "type": schedule_data.get("type"),
+                            "status": schedule_data.get("status"),
+                            "label": schedule_data.get("label"),
+                            "cron_expression": schedule_data.get("cron_expression"),
+                            "run_at": schedule_data.get("run_at"),
+                            "tags": schedule_data.get("tags", []),
+                            # Useful for debugging heartbeat scope: global schedules should not
+                            # inherit a user session_id.
+                            "session_id": schedule_data.get("session_id"),
+                            "flow_id": schedule_data.get("flow_id"),
+                        }
+                    )
 
             return build_response(
                 ActionStatus.COMPLETED.value,
@@ -2126,16 +2079,10 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
     @platform_process(
         name="list_schedules",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         parameters={
             "status": ParameterMetadata(
-                description=(
-                    "Optional status filter; return only schedules in this "
-                    "status (scheduled, running, completed, cancelled, error, "
-                    "paused). Omit to return every schedule."
-                ),
+                description=("Optional status filter; return only schedules in this status (scheduled, running, completed, cancelled, error, paused). Omit to return every schedule."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -2182,24 +2129,23 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
 
             entries: list[dict[str, Any]] = []
             for schedule_id, schedule_data in scheduled_actions.items():
-                if (
-                    status_filter is not None
-                    and schedule_data.get("status") != status_filter
-                ):
+                if status_filter is not None and schedule_data.get("status") != status_filter:
                     continue
-                entries.append({
-                    "schedule_id": schedule_id,
-                    "type": schedule_data.get("type"),
-                    "status": schedule_data.get("status"),
-                    "label": schedule_data.get("label"),
-                    "cron_expression": schedule_data.get("cron_expression"),
-                    "run_at": schedule_data.get("run_at"),
-                    "tags": schedule_data.get("tags", []),
-                    # Useful for debugging heartbeat scope: global schedules
-                    # should not inherit a user session_id.
-                    "session_id": schedule_data.get("session_id"),
-                    "flow_id": schedule_data.get("flow_id"),
-                })
+                entries.append(
+                    {
+                        "schedule_id": schedule_id,
+                        "type": schedule_data.get("type"),
+                        "status": schedule_data.get("status"),
+                        "label": schedule_data.get("label"),
+                        "cron_expression": schedule_data.get("cron_expression"),
+                        "run_at": schedule_data.get("run_at"),
+                        "tags": schedule_data.get("tags", []),
+                        # Useful for debugging heartbeat scope: global schedules
+                        # should not inherit a user session_id.
+                        "session_id": schedule_data.get("session_id"),
+                        "flow_id": schedule_data.get("flow_id"),
+                    }
+                )
 
             return build_response(
                 ActionStatus.COMPLETED.value,
@@ -2229,9 +2175,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
     @platform_process(
         name="ensure_global_heartbeat",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         parameters={
             "cadence_minutes": ParameterMetadata(
                 description="Wake-up interval in minutes (default: 5)",
@@ -2310,17 +2254,11 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             # 1. Check existing schedules with this tag
             schedules = self._load_schedules()
             scheduled_actions = schedules.get("scheduled_actions", {})
-            matching = {
-                sid: data
-                for sid, data in scheduled_actions.items()
-                if tag in data.get("tags", [])
-            }
+            matching = {sid: data for sid, data in scheduled_actions.items() if tag in data.get("tags", [])}
 
             # 2. If exactly one active heartbeat exists with matching cadence, return it
             desired_cron = f"*/{cadence_minutes} * * * *"
-            already_present = check_existing_heartbeat(
-                matching, desired_cron, tag, cadence_minutes
-            )
+            already_present = check_existing_heartbeat(matching, desired_cron, tag, cadence_minutes)
             if already_present is not None:
                 return already_present
 
@@ -2328,9 +2266,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             cleared_count = clear_stale_heartbeats(matching, self._scheduler_manager, self._delete_schedule)
 
             # 4. Create new heartbeat cron schedule
-            actions_list, legacy_action_name, legacy_action_params = (
-                ScheduleFactory.parse_actions_from_params({"memory_tag": memory_tag})
-            )
+            actions_list, legacy_action_name, legacy_action_params = ScheduleFactory.parse_actions_from_params({"memory_tag": memory_tag})
 
             schedule_data = ScheduleFactory.create_cron_schedule_data(
                 cron_expression=desired_cron,
@@ -2357,9 +2293,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             register_heartbeat_job(schedule_id, schedule_data, desired_cron, self._scheduler_manager, self._execute_action)
 
             result_status = "normalized" if cleared_count > 0 else "created"
-            self.logger.info(
-                f"Global heartbeat {result_status}: {schedule_id} ({desired_cron})"
-            )
+            self.logger.info(f"Global heartbeat {result_status}: {schedule_id} ({desired_cron})")
 
             return build_response(
                 ActionStatus.COMPLETED.value,
@@ -2394,9 +2328,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         name="ensure_kb_retrieval_audit_schedule",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         is_discoverable=False,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         parameters={
             "cron_expression": ParameterMetadata(
                 description="Cron expression (UTC). Default: 0 6 * * * (daily 06:00).",
@@ -2405,10 +2337,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 default=KB_RETRIEVAL_AUDIT_CRON,
             ),
             "tag": ParameterMetadata(
-                description=(
-                    "Schedule tag. Default kb_retrieval_audit:edge_sink — deliberately "
-                    "NOT the predecessor's tag, so this never clears the old trigger."
-                ),
+                description=("Schedule tag. Default kb_retrieval_audit:edge_sink — deliberately NOT the predecessor's tag, so this never clears the old trigger."),
                 required=False,
                 type=ParameterType.STRING,
                 default=KB_RETRIEVAL_AUDIT_TAG,
@@ -2496,26 +2425,18 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             # 1. Find existing schedules carrying this tag.
             schedules = self._load_schedules()
             scheduled_actions = schedules.get("scheduled_actions", {})
-            matching = {
-                sid: data
-                for sid, data in scheduled_actions.items()
-                if tag in data.get("tags", [])
-            }
+            matching = {sid: data for sid, data in scheduled_actions.items() if tag in data.get("tags", [])}
 
             # 2. Exactly one, already correct, already pointed at the EDGE_SINK
             #    verb -> nothing to do. Checked against the action's process key
             #    and not only the cron, because a schedule with the right cadence
             #    and the wrong target is the defect being repaired.
-            already_present = self._check_existing_audit_schedule(
-                matching, cron_expression, tag
-            )
+            already_present = self._check_existing_audit_schedule(matching, cron_expression, tag)
             if already_present is not None:
                 return already_present
 
             # 3. Normalize: clear duplicates or a stale/mis-targeted entry.
-            cleared_count = clear_stale_heartbeats(
-                matching, self._scheduler_manager, self._delete_schedule
-            )
+            cleared_count = clear_stale_heartbeats(matching, self._scheduler_manager, self._delete_schedule)
 
             # 4. Create the EDGE_SINK cron. No result_processor_kind: omitting it
             #    is canonical for EDGE_SINK and is what validate_cron_action_def
@@ -2560,10 +2481,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             )
 
             result_status = "normalized" if cleared_count > 0 else "created"
-            message = (
-                f"KB retrieval-audit schedule {result_status}: {schedule_id} "
-                f"({cron_expression}) -> {KB_RETRIEVAL_AUDIT_PROCESS_KEY}"
-            )
+            message = f"KB retrieval-audit schedule {result_status}: {schedule_id} ({cron_expression}) -> {KB_RETRIEVAL_AUDIT_PROCESS_KEY}"
             self.logger.info(message)
 
             return build_response(
@@ -2580,9 +2498,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             )
 
         except Exception as e:
-            self.logger.error(
-                f"Failed to ensure KB retrieval-audit schedule: {e}", exc_info=True
-            )
+            self.logger.error(f"Failed to ensure KB retrieval-audit schedule: {e}", exc_info=True)
             return build_response(
                 ActionStatus.ERROR.value,
                 {},
@@ -2616,18 +2532,11 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             return None
 
         actions = data.get("actions") or []
-        targets = {
-            action.get("name")
-            for action in actions
-            if isinstance(action, dict)
-        }
+        targets = {action.get("name") for action in actions if isinstance(action, dict)}
         if KB_RETRIEVAL_AUDIT_PROCESS_KEY not in targets:
             return None
 
-        message = (
-            f"KB retrieval-audit schedule already present: {schedule_id} "
-            f"({desired_cron}) -> {KB_RETRIEVAL_AUDIT_PROCESS_KEY}"
-        )
+        message = f"KB retrieval-audit schedule already present: {schedule_id} ({desired_cron}) -> {KB_RETRIEVAL_AUDIT_PROCESS_KEY}"
         return build_response(
             ActionStatus.COMPLETED.value,
             {
@@ -2650,69 +2559,45 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         return {
             "create_cron_schedule": EdgeProcessDefinition(
                 name="create_cron_schedule",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "execute_in_seconds": EdgeProcessDefinition(
                 name="execute_in_seconds",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "clear_scheduled_action": EdgeProcessDefinition(
                 name="clear_scheduled_action",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "clear_scheduled_actions_by_tag": EdgeProcessDefinition(
                 name="clear_scheduled_actions_by_tag",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "get_schedules_by_tag": EdgeProcessDefinition(
                 name="get_schedules_by_tag",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "list_schedules": EdgeProcessDefinition(
                 name="list_schedules",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "ensure_global_heartbeat": EdgeProcessDefinition(
                 name="ensure_global_heartbeat",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             # Declared-side half of the EdgeProcessProvider decorated<->declared
             # parity contract. An EDGE process that is decorated but not declared
             # here fails `edge_definition_customizations_smoke` at boot parity.
             "ensure_kb_retrieval_audit_schedule": EdgeProcessDefinition(
                 name="ensure_kb_retrieval_audit_schedule",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
         }

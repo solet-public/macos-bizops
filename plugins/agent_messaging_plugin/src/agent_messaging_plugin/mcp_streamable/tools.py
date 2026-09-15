@@ -115,8 +115,8 @@ _PEER_INBOX_DESCRIPTION: Final[str] = "\n".join(
         "Use an `after` timestamp when polling during an active incident so",
         "old history does not flood the context window.",
         "",
-                "Spans every peer thread targeting you, regardless of which bridge owns",
-                "the thread. Both sections are newest-first; page by echoing the",
+        "Spans every peer thread targeting you, regardless of which bridge owns",
+        "the thread. The instance section is oldest-first; page by echoing the",
                 "previous page's next_after_created_at and stop only when",
                 "instance_exhausted is true. Omit after only for the first page, not a",
                 "full inbox. This signal applies to the existing timestamp-only cursor",
@@ -377,7 +377,7 @@ TOOLS: Final[list[dict[str, Any]]] = [
             "properties": {
                 "after": {
                     "type": "string",
-                    "description": "ISO-8601 backward cursor; omit only for the first page.",
+                    "description": "ISO-8601 forward cursor; omit only for the first page.",
                 },
                 "limit": {
                     "type": "integer",
@@ -392,6 +392,13 @@ TOOLS: Final[list[dict[str, Any]]] = [
                         "addressed to a role you hold). Echo back the previous "
                         "page's next_role_cursor verbatim; omit for the first "
                         "page. Distinct from 'after' (the instance section)."
+                    ),
+                },
+                "observer": {
+                    "type": "boolean",
+                    "description": (
+                        "Read-only observation: preserve pending rows and do not issue "
+                        "display acknowledgements."
                     ),
                 },
             },

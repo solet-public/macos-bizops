@@ -617,7 +617,7 @@ def _doctor_status_cause_is_precise(
             "stage_id": "completion",
             "checkpoint_status": "blocked",
             "kind": "operation",
-            "operation_id": "install_state_projection_matches",
+            "operation_id": "lm_studio_jit_disabled",
         }
     )
 

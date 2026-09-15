@@ -61,6 +61,7 @@ from ananta.error_handling import FrameworkError  # noqa: E402
 from ananta.llm.agent_messaging.state_results import StateOperationError  # noqa: E402
 from ananta.services.inference_service.deferred_vertex_queue import (  # noqa: E402
     attempts_of,
+    deferred_vertices_snapshot,
     forward_with_serve_anchor,
     forwarded_before,
     increment_attempts,
@@ -239,6 +240,48 @@ def _hlp_live_rows_filter() -> RealShapeState:
     return state
 
 
+class _OrderedQuerySpy(RealShapeState):
+    """Makes the smoke prove a page boundary causes a second ordered read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ordered_reads = 0
+
+    def query_ordered(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+        self.ordered_reads += 1
+        return super().query_ordered(namespace, query)
+
+
+def _record_deferred_rows(state: RealShapeState, *, count: int) -> None:
+    ticks = iter(range(count))
+    state.now_iso = lambda: f"2026-07-18T00:00:00.{next(ticks):06d}+00:00"
+    resolution = VertexResolution(
+        VertexRouting.DEFER, None, "sys:autonomic", "agi-absent",
+    )
+    for index in range(count):
+        record_deferred_vertex(
+            state, is_error=False, resolution=resolution, flow_id=f"page-{index}",
+        )
+
+
+def _hlp_paged_reads() -> None:
+    overflow = _OrderedQuerySpy()
+    _record_deferred_rows(overflow, count=101)
+    rows = live_rows_in_state(overflow, state=STATE_DEFERRED)
+    _check(
+        len(rows) == 101 and overflow.ordered_reads == 2,
+        "HLP2a live_rows_in_state pages past 100 rows without a prefix",
+    )
+
+    boundary = _OrderedQuerySpy()
+    _record_deferred_rows(boundary, count=100)
+    snapshot = deferred_vertices_snapshot(boundary)
+    _check(
+        len(snapshot) == 100 and boundary.ordered_reads == 2,
+        "HLP2b snapshot verifies an exact 100-row boundary with a terminal empty page",
+    )
+
+
 def _row_by_flow(state: RealShapeState, flow_id: str) -> dict[str, Any]:
     return next(r for r in _rows(state) if r.get(COL_FLOW_ID) == flow_id)
 
@@ -280,6 +323,7 @@ def test_helpers() -> None:
     print("HLP — forwarded_before / live_rows_in_state / attempts monotone:")
     _hlp_forwarded_before()
     state = _hlp_live_rows_filter()
+    _hlp_paged_reads()
     _hlp_attempts_monotone(state)
     _hlp_terminal_and_attempts_of(state)
 

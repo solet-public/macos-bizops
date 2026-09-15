@@ -16,12 +16,12 @@ from .codex_app_server import _CODE_MODE_HOST_PROBE_SECONDS, CodexAppServerHostD
 from .codex_common import (
     _ANSI_ESCAPE_RE,
     _CODEX_AGENT_ID,
+    _CODEX_COMPOSER_PROMPT,
     _CODEX_IDLE_COMPOSER_PLACEHOLDER,
     _DEFAULT_TMUX_POLL_INTERVAL_SECONDS,
     _DEFAULT_TMUX_STABLE_SAMPLES,
     _DEFAULT_TMUX_VERIFY_TIMEOUT_SECONDS,
     _MIN_TMUX_VERSION,
-    _TMUX_BUSY_MARKERS,
     _codex_config_overrides,
     _codex_home,
     _command_succeeded,
@@ -30,6 +30,7 @@ from .codex_common import (
     _refuse_claude_provider_overlay,
     _toml_string,
     _without_parent_runtime_env,
+    codex_busy_reason,
 )
 from .headless_adapter import (
     _authority_system_prompt,
@@ -197,23 +198,89 @@ class _CodexTmuxDriverChannel:
         2026-08-23, workbench/2026-08-23_dispatch_lane_m_codex_drive_idle_
         detector.md). The placeholder reappears every time the composer goes
         idle, independent of scroll position.
+
+        The placeholder is necessary but NOT sufficient, which is the
+        correction this method carries since 2026-09-09: Codex 0.153.4 renders
+        the empty-composer placeholder WHILE A TURN IS RUNNING as well (live
+        capture, a lane 12m into a turn showed the placeholder and its
+        ``Working (...)`` status line on screen together). The placeholder
+        tracks an empty composer, not an idle session, so readiness is the
+        conjunction of the placeholder and the ABSENCE of a busy status line;
+        see :func:`codex_busy_reason` for why that second half matches the
+        status line's shape rather than any bare word it contains.
         """
         deadline = self._now_fn() + self._verify_timeout_seconds
+        busy_reason: str | None = None
+        saw_composer = False
+        saw_prompt = False
+        captured_any = False
         while self._now_fn() <= deadline:
             current = self._capture_styled()
             if current is not None:
+                captured_any = True
                 visible = self._visible_text(current)
-                if (
-                    _CODEX_IDLE_COMPOSER_PLACEHOLDER in visible
-                    and not any(marker in visible for marker in _TMUX_BUSY_MARKERS)
-                ):
+                composer = _CODEX_IDLE_COMPOSER_PLACEHOLDER in visible
+                saw_composer = saw_composer or composer
+                saw_prompt = saw_prompt or _CODEX_COMPOSER_PROMPT in visible
+                reason = codex_busy_reason(visible)
+                if reason is not None:
+                    busy_reason = reason
+                if composer and reason is None:
                     return current
             self._sleep_fn(self._poll_interval_seconds)
         from .session_hosts import DriverChannelSendError  # noqa: PLC0415
 
-        raise DriverChannelSendError(
-            f"Codex tmux pane {self._session!r} never reached an idle prompt; "
-            "text was not pasted.",
+        raise DriverChannelSendError(self._not_ready_detail(
+            busy_reason=busy_reason,
+            saw_composer=saw_composer,
+            saw_prompt=saw_prompt,
+            captured_any=captured_any,
+        ))
+
+    def _not_ready_detail(
+        self, *, busy_reason: str | None, saw_composer: bool, saw_prompt: bool,
+        captured_any: bool,
+    ) -> str:
+        """Say WHY the pane was not driveable, not merely that it was not.
+
+        Every readiness timeout used to raise the same sentence -- "never
+        reached an idle prompt" -- whether the pane was wedged, gone, or a
+        perfectly healthy lane simply working on its previous turn. That
+        conflation is what made a busy lane read as a broken one: a
+        ``drive_session`` issued straight after ``spawn_session`` is racing the
+        bootstrap turn that ``spawn_session`` itself just delivered, so the
+        pane is busy BY CONSTRUCTION for as long as that turn runs (measured
+        live 2026-09-09: a lane 12m into a turn, against this check's 10s
+        budget) and the caller was told delivery had failed.
+        """
+        budget = f"{self._verify_timeout_seconds:g}s"
+        if busy_reason is not None:
+            return (
+                f"Codex tmux pane {self._session!r} was still mid-turn after {budget} "
+                f"({busy_reason!r}); text was not pasted. The pane is healthy and busy, "
+                "not wedged -- retry once the turn ends, or queue the text instead of "
+                "driving it."
+            )
+        if not captured_any:
+            return (
+                f"Codex tmux pane {self._session!r} could not be captured within "
+                f"{budget}; text was not pasted."
+            )
+        if not saw_composer and saw_prompt:
+            return (
+                f"Codex tmux pane {self._session!r} never reached an idle prompt within "
+                f"{budget}: its composer already holds other text; text was not pasted. "
+                "Driving would have appended to someone else's draft, so nothing was sent."
+            )
+        if not saw_composer:
+            return (
+                f"Codex tmux pane {self._session!r} never reached an idle prompt within "
+                f"{budget}: no Codex composer was on screen at all (is this pane running "
+                "Codex?); text was not pasted."
+            )
+        return (
+            f"Codex tmux pane {self._session!r} never reached an idle prompt within "
+            f"{budget}; text was not pasted."
         )
 
     def _wait_until_stable(self, baseline: str | None) -> str:

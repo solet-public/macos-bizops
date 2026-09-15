@@ -810,7 +810,11 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         # prepare_for_readiness runs before any plugin's start_services
         # (where port-binding happens), so this is the canonical cold-
         # start safety net for the crash-mid-drain window per Slice 1.5.
-        stale_runtime_cleanup.cleanup_and_restore(solet_name)
+        # Scrub first, before any port binding.  Restoration must wait until
+        # the router's mgmt socket is known live below: a mid-flow router
+        # restart can otherwise land between this scrub and the one-shot
+        # restore probe, leaving the canonical bridge pointer absent.
+        stale_runtime_cleanup.cleanup_stale_runtime_files(solet_name)
 
         # §4.6 startup reconcile: if a prior cutover/rollback died mid-swap,
         # forward-complete the durable current/previous symlinks to the
@@ -822,6 +826,10 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
 
         socket_path = _router_socket_path(solet_name)
         _wait_for_router_socket(socket_path)
+        # The bounded wait above establishes the same liveness condition the
+        # restore requires, so this re-materializes the router-owned pointer
+        # after a restart instead of losing the pre-wait one-shot race.
+        stale_runtime_cleanup.restore_router_owned_bridge_port_file_if_router_live(solet_name)
         self._router_client = RouterClient(socket_path)
 
         self._self_color = os.environ.get(ENV_SOLET_COLOR, "") or COLOR_BLUE
@@ -920,6 +928,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
                 "current_release_lookup": current_release_lookup,
                 "logger": logger,
                 "set_color_active": self._set_color_active,
+                "post_registration_callback": self._start_post_registration_work,
                 "streamable_port_lookup": streamable_port_lookup,
             }
             if budget_override is not None:
@@ -927,6 +936,14 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
             heartbeat_lifecycle.run(**kwargs)
 
         return _run
+
+    def _start_post_registration_work(self) -> None:
+        """Release inference-dependent startup work after router activation."""
+        from ananta.core.orchestration.startup_sequence import start_post_registration_work
+
+        orch = getattr(self, "orchestrator_ref", None)
+        if orch is not None:
+            start_post_registration_work(orch)
 
     def set_sigterm_callback_for_smoke(
         self, callback: heartbeat_lifecycle.SigtermCallback,

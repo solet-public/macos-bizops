@@ -68,12 +68,18 @@ plugins/macos_self_deployment_plugin/tests/blg02_manifest_capture_smoke.py
 plugins/macos_self_deployment_plugin/tests/preflight_refusal_smoke.py
 plugins/macos_self_deployment_plugin/tests/release_manager_crash_consistency_smoke.py
 plugins/macos_self_deployment_plugin/tests/release_builder_dirty_tree_gate_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_code_collection_offline_gate_smoke.py
+plugins/macos_self_deployment_plugin/tests/isolated_candidate_boot_offline_gate_smoke.py
 plugins/macos_self_deployment_plugin/tests/supervisor_smoke.py
 plugins/macos_self_deployment_plugin/tests/backstop_loop_integration_smoke.py
 plugins/macos_self_deployment_plugin/tests/drain_sigterm_exit_smoke.py
 plugins/macos_self_deployment_plugin/tests/router_socket_wait_smoke.py
+plugins/macos_self_deployment_plugin/tests/prepare_readiness_restore_race_smoke.py
 plugins/macos_self_deployment_plugin/tests/router_socket_ownership_smoke.py
 plugins/macos_self_deployment_plugin/tests/readiness_arming_smoke.py
+# r38 C2: router authority is the only release boundary for deferred local
+# inference work; a merely registered inactive color cannot start it.
+plugins/macos_self_deployment_plugin/tests/cold_boot_post_registration_release_smoke.py
 plugins/macos_self_deployment_plugin/tests/runtime_attestation_smoke.py
 plugins/macos_self_deployment_plugin/tests/surface_digest_smoke.py
 plugins/macos_self_deployment_plugin/tests/reconciliation_cutover_smoke.py
@@ -81,6 +87,11 @@ plugins/macos_self_deployment_plugin/tests/reconciliation_provenance_smoke.py
 plugins/default_scheduling_plugin/tests/scheduler_context_not_arguments_smoke.py
 plugins/github_midwife_plugin/tests/target_reconciliation_smoke.py
 solet_cli/tests/cutover_overlay_smoke.py
+solet_cli/tests/stage_contract_activation_agreement_smoke.py
+# Named stage resume: a preserved journal may run only its singleton frontier
+# and a successful bounded execution must not advance successor stages.
+solet_cli/tests/stage_resume_cli_smoke.py
+solet_cli/tests/stage_resume_execution_smoke.py
 # LaunchAgent plist render contract (Option-B supervisor KeepAlive, out-of-tree
 # CWD, and the §39.2 Homebrew-inclusive PATH the daemon needs to see tmux at
 # all). Pure render assertions -- no launchctl, no filesystem mutation outside
@@ -641,6 +652,8 @@ plugins/agent_messaging_plugin/tests/tmux_driver_channel_smoke.py
 # exactly their own assertions, 2026-08-04).
 plugins/agent_messaging_plugin/tests/session_lifecycle_verbs_smoke.py
 plugins/agent_messaging_plugin/tests/managed_dispatch_smoke.py
+plugins/agent_messaging_plugin/tests/managed_dispatch_cli_actor_smoke.py
+plugins/agent_messaging_plugin/tests/managed_dispatch_persisted_utc_smoke.py
 plugins/agent_messaging_plugin/tests/role_provisioning_smoke.py
 
 # Declarative model-dispatch policy — fail-closed loading and profile
@@ -1628,7 +1641,10 @@ plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/shipped_git
 
 # iss_e53f7b08 — Git-Controller authorization intake and pre-merge frontier
 # reconfirmation. The standalone smoke proves first-party acceptance, refusal,
-# stale-role refusal, exact path equality, and STOP timing.
+# stale-role refusal, exact path equality, and STOP timing. iss_4f67d9ad also
+# pins the register-backed review PASS/CLEAR verdict, absent-ruling refusal,
+# docs-only ruling exception (with no review citations), and unreachable
+# register fail-closed behavior.
 
 # Fleet session-management Phase B, §6 permission-mode design (2026-08-03) —
 # .claude/hooks/headless_tool_allowlist_gate.py, a PreToolUse mechanism for a
@@ -2180,6 +2196,7 @@ ananta/tests/llm/core_slice4/core_slice4_schema_manager_unit_smoke.py
 # ='session' (not the legacy agent_role_binding) + REL-05 owed-delivery columns
 # (consumed / escalated / emit_count / last_emitted_at).
 ananta/tests/llm/agent_messaging/role_inbox_smoke.py
+ananta/tests/llm/agent_messaging/role_read_receipts_smoke.py
 # Control #5: keyset scan must advance past a capped raw prefix before applying
 # the Python-only cap/window filter, so a newer eligible role message is reachable.
 ananta/tests/llm/agent_messaging/role_drain_cap_starvation_smoke.py
@@ -3049,6 +3066,7 @@ plugins/default_scheduling_plugin/tests/action_executor_deferred_fire_smoke.py
 # process -- a shipped instruction that cannot execute is the defect this lane
 # closed. Hermetic: in-memory stores, no bridge, no DB.
 plugins/agent_messaging_plugin/tests/peer_inbox_process_smoke.py
+plugins/agent_messaging_plugin/tests/role_read_page_delivery_smoke.py
 
 # Instance-section exhaustion is an additive signal over the legacy oldest-first
 # timestamp cursor. Pins default and forward paging, empty, and exact 100/101
@@ -4062,6 +4080,7 @@ plugins/github_midwife_plugin/tests/permissions_manifest_smoke.py
 # historical R15 identity from two pinned Git objects, then proves the closed
 # reader's released and legacy receipt outcomes remain reconstructible.
 # Offline except for the checkout's own repository history.
+solet_cli/tests/reconciliation_operation_status_reset_smoke.py
 # Reconciliation re-grounding fixtures (1.55 / iss_79283a66): prove the
 # snapshot-derived b15 fixture corpus stays provenance-complete and pin R-A's
 # digest-only destination identity, including the legacy resume refusal.
@@ -4164,6 +4183,12 @@ solet_cli/tests/rollback_repair_smoke.py
 
 solet_cli/homebrew/tests/release_payload_smoke.py
 
+# Stage-resume Tart contracts: the host-to-guest source transport and the
+# flow-derived individual adapter receipt exchange stay offline and no-Tart.
+solet_cli/homebrew/tests/tart_stage_resume_contract_smoke.py
+solet_cli/homebrew/tests/tart_stage_resume_exchange_smoke.py
+solet_cli/homebrew/tests/tart_stage_resume_guest_smoke.py
+
 # Release staging closure (2026-08-23): proves the staging script builds a
 # byte-reproducible payload archive from a committed tree -- deterministic
 # ordering and zeroed mtimes -- and that its rendered metadata cross-binds the
@@ -4225,6 +4250,12 @@ plugins/zuora_plugin/tests/smoke_async_jobs.py
 # exits 1 at the foreign-first assertion. Offline: virtual clock and in-process
 # fakes only, no live solet, no network. Measured cost 5.5s, 72/72 checks.
 plugins/github_midwife_plugin/tests/executable_hydration_smoke.py
+
+# R3 receipt-qualified Claude coordination ownership: validates complete
+# receipt/owner/cache contract, real shipped heartbeat entrypoint refusal
+# behavior, and interrupted atomic receipt publication without a live solet.
+plugins/github_midwife_plugin/tests/installation_hook_ownership_smoke.py
+
 # Flow precondition disposition (2026-09-01): verifies entry-boundary wiring,
 # conditional session roots, the Salesforce envelope predicate, Keychain
 # diagnostic demotion, auth-flow cleanup, and R4 tracked-debt closure.
@@ -4235,6 +4266,11 @@ plugins/github_midwife_plugin/tests/model_discovery_adapter_loopback_smoke.py
 # Proves the mandatory shared-dirt red/green pair, exact-path teardown that preserves
 # lane branches, orphan sweep bounds, shared-venv symlinking, and root-anchored imports.
 plugins/agent_messaging_plugin/tests/lane_worktrees_smoke.py
+
+# Cross-repository lane roots (iss_ea1ae2d4): an explicit foreign checkout
+# provisions under that checkout and its persisted resolved root drives
+# retirement; absent/relative overrides fail loud. Hermetic state/worktree seams.
+plugins/agent_messaging_plugin/tests/lane_worktree_repository_root_smoke.py
 
 # D3 lane retirement (2026-08-29): disposability is adjudicated before host
 # termination, and a post-termination teardown error records retained_error
@@ -4593,6 +4629,11 @@ ananta/tests/platform/io_interface_shadow_docs_smoke.py
 # history must survive. Offline: captured b15 fixture and patched boundaries.
 solet_cli/tests/create_execution_operation_scope_smoke.py
 
+# Every prose action in a manager repair directive must correspond to a parser
+# registered verb; transaction.py carries one dated migration exception until
+# the accompanying abandon verb lands.
+solet_cli/tests/repair_text_verb_gate_smoke.py
+
 # Wave 2/B: offline macOS self-deployment coverage measured green.
 plugins/macos_self_deployment_plugin/tests/autostart_seed_smoke.py
 plugins/macos_self_deployment_plugin/tests/cwd_out_of_tree_smoke.py
@@ -4619,6 +4660,11 @@ plugins/agent_messaging_plugin/tests/claude_queue_transcript_smoke.py
 plugins/agent_messaging_plugin/tests/context_rotation_calculation_smoke.py
 plugins/agent_messaging_plugin/tests/drive_on_delivery_detail_smoke.py
 plugins/agent_messaging_plugin/tests/driver_texts_smoke.py
+# State-backed replacement for the two fleet operational markdown logs:
+# append-only Phase-A/Phase-B structured records, workstream filtering,
+# tie-safe newest-first pagination, required clear-path evidence, and plugin
+# transport registration. Offline recording state fake; no database or bridge.
+plugins/agent_messaging_plugin/tests/fleet_check_run_smoke.py
 plugins/agent_messaging_plugin/tests/fleet_status_smoke.py
 plugins/agent_messaging_plugin/tests/forwarder_native_notification_smoke.py
 # Tier 1 reconnect cursor repair: 404 recipient/caller discrimination,
@@ -4639,6 +4685,24 @@ plugins/agent_messaging_plugin/tests/role_drain_serialization_smoke.py
 # malformed empty-string/zero values fail before the engine; explicit false may act.
 # Offline recording fakes never invoke launchctl or process control.
 plugins/macos_self_deployment_plugin/tests/dry_run_default_safety_smoke.py
+
+# A configured but not-yet-running LM Studio leaves the inference plugin
+# explicitly unready, retries at a bounded rate, and never crashes platform
+# boot. Offline provider fake; no network.
+plugins/default_inference_plugin/tests/boot_optional_dependency_smoke.py
+
+# Cold first-boot knowledge hydration must not delay the runtime action poller
+# or router-registration deadline. Event fixture; no wall-clock sleep.
+ananta/tests/core/orchestration/cold_boot_knowledge_hydration_deferral_smoke.py
+
+# r28 fourth target-readiness mechanism: an identity-seeding startup fatal
+# stops already-started async lifecycle workers before CPython finalization.
+ananta/tests/core/plugins/startup_failure_lifecycle_shutdown_smoke.py
+
+# r38 C2: embedding configuration registers without contacting LM Studio;
+# qualification begins only once the router activates the process and stays
+# visibly pending while the local server is unavailable.
+plugins/openai_embeddings_plugin/tests/startup_qualification_smoke.py
 
 # Batch 4a dark-smoke accounting: excluded paths have one canonical marker here.
 # not registered: plugins/agent_messaging_plugin/tests/v10_live_smoke_driver.py Class C live-agent choreography driver (iss_a5524d6f)
@@ -4678,3 +4742,14 @@ plugins/macos_self_deployment_plugin/tests/dry_run_default_safety_smoke.py
 # not shipped: solet_cli/tests/contract_reconciliation_schema_smoke.py requires solet_cli/tools/generate_contract_reconciliation_manifest_schema.py; **/tools/ is a pruned operator-tooling class (generator_tooling)
 # not shipped: solet_cli/tests/contract_reconciliation_smoke.py requires repository history for its pinned fixture Git objects; a born clone is a git-archive extract with no .git (repository_hygiene)
 # not shipped: ananta/tests/llm/session_ledger/codex_cloud_backfill_smoke.py requires plugins/codex_cloud_session_source_plugin/src/codex_cloud_session_source_plugin; that plugin is in no capability bundle (unshipped_plugin_subject)
+
+# LM Studio provisioning, singleton login and passive diagnostics
+plugins/github_midwife_plugin/tests/lm_studio_provisioning_smoke.py
+plugins/github_midwife_plugin/tests/lm_studio_login_item_smoke.py
+solet_cli/tests/lm_studio_diagnostics_smoke.py
+
+# Operator Codex launch registration and failure boundaries (iss_4aa69cb2).
+plugins/agent_messaging_plugin/tests/operator_codex_launcher_smoke.py
+
+# Main-seat goal keeper Stop hook (iss_273bffe3, rul_367d8bd6): refuses a turn end
+# once on an Operator hand-off or an unreported open seat goal; inert elsewhere.

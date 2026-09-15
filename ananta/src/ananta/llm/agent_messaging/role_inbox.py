@@ -191,6 +191,12 @@ def project_role_entry(record: dict[str, object]) -> PeerInboxEntry:
             "sender_transport_principal": sender_transport_principal,
             "sender_identity_trust": sender_identity_trust,
             "important": bool(record.get("important", False)),
+            # These are envelope facts, not client-supplied pagination data.
+            # Wake reconciliation needs the exact durable row identity.
+            "recipient_key": str(record.get("recipient_key", "")),
+            "delivery_external_id": str(record.get("external_id", "")),
+            "role_created_at": normalize_sort_value(record.get(_COL_CREATED_AT)),
+            "role_row_id": str(record.get(_COL_ID, "")),
         },
     )
     return PeerInboxEntry(

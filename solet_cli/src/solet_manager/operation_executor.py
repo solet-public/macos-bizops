@@ -18,6 +18,7 @@ from .flow import (
     current_frontier_stage_ids,
     reconcile_stage_probe_activation,
 )
+from .inference_probe_policy import advisory_inference_probe_result
 from .models import CheckpointStatus, CommandResult, ExitCode, InstanceRecord, JsonValue
 from .operation_records import (
     attempt_record,
@@ -54,6 +55,7 @@ def run_operations(
     paths: ManagerPaths,
     instance_registry: InstanceRegistry,
     refresh_preview: Callable[[], CommandResult],
+    stop_after_stage: str | None = None,
 ) -> CommandResult:
     registry = AdapterRegistry(
         target=Path(transaction.target),
@@ -80,9 +82,12 @@ def run_operations(
         registry=registry,
         paths=paths,
         refresh_preview=refresh_preview,
+        stage_ids=(stop_after_stage,) if stop_after_stage is not None else None,
     )
     if boundary_outcome.terminal_result is not None:
         return boundary_outcome.terminal_result
+    if stop_after_stage is not None:
+        return _stage_limited_result(stop_after_stage, boundary_outcome.transaction, paths)
     frontier_outcome = _advance_read_only_frontiers(
         bundle=bundle,
         transaction=boundary_outcome.transaction,
@@ -201,10 +206,14 @@ def _run_pending_operation(
         approval=None,
         attempt=attempt,
     )
-    inventory = invoke_adapter(
-        registry,
-        runner=operation.runner,
-        request=inventory_request,
+    inventory = advisory_inference_probe_result(
+        transaction.answers,
+        inventory_request,
+        invoke_adapter(
+            registry,
+            runner=operation.runner,
+            request=inventory_request,
+        ),
     )
     drift = _planned_action_drift(
         operation,
@@ -219,11 +228,20 @@ def _run_pending_operation(
             refresh_preview,
         )
     stop = _pre_apply_stop(bundle, operation, probe, updated)
-    if stop is not None or probe.checkpoint_status in {
-        CheckpointStatus.VERIFIED,
-        CheckpointStatus.DECLINED,
-        CheckpointStatus.NOT_APPLICABLE,
-    }:
+    inventory_has_approved_pending_action = (
+        transaction.operation_statuses.get(operation.operation_id)
+        in {CheckpointStatus.PENDING, CheckpointStatus.AWAITING_USER}
+        and bool(inventory.planned_actions)
+    )
+    if stop is not None or (
+        not inventory_has_approved_pending_action
+        and probe.checkpoint_status
+        in {
+            CheckpointStatus.VERIFIED,
+            CheckpointStatus.DECLINED,
+            CheckpointStatus.NOT_APPLICABLE,
+        }
+    ):
         return OperationOutcome(updated, stop)
     return _apply_operation(
         bundle=bundle,
@@ -260,7 +278,11 @@ def _invoke_operation_probe(
                 purpose=purpose,
                 attempt=attempt,
             )
-            result = invoke_adapter(registry, runner=runner, request=request)
+            result = advisory_inference_probe_result(
+                transaction.answers,
+                request,
+                invoke_adapter(registry, runner=runner, request=request),
+            )
             if result.checkpoint_status is not CheckpointStatus.VERIFIED:
                 return result
         if result is None:
@@ -275,7 +297,11 @@ def _invoke_operation_probe(
         approval=None,
         attempt=attempt,
     )
-    return invoke_adapter(registry, runner=operation.runner, request=request)
+    return advisory_inference_probe_result(
+        transaction.answers,
+        request,
+        invoke_adapter(registry, runner=operation.runner, request=request),
+    )
 
 
 def _record_operation_result(
@@ -376,7 +402,9 @@ def _probe_remediates_operation(
     definition = bundle.probes.get(probe_id)
     if definition is None:
         raise StateConflictError(f"declared precondition probe {probe_id!r} is unavailable")
-    remediation_refs = definition.get("remediation_operation_refs")
+    if "remediation_operation_refs" not in definition:
+        return False
+    remediation_refs = definition["remediation_operation_refs"]
     if not isinstance(remediation_refs, list) or not all(
         isinstance(item, str) for item in remediation_refs
     ):
@@ -479,13 +507,18 @@ def _finish_operation_stages(
     registry: AdapterRegistry,
     paths: ManagerPaths,
     refresh_preview: Callable[[], CommandResult],
+    stage_ids: tuple[str, ...] | None = None,
 ) -> OperationOutcome:
-    stage_ids = tuple(dict.fromkeys(item.stage_id for item in plan.operations))
+    selected_stage_ids = (
+        stage_ids
+        if stage_ids is not None
+        else tuple(dict.fromkeys(item.stage_id for item in plan.operations))
+    )
     updated, _observations, failures = run_stage_boundaries(
         bundle=bundle,
         transaction=transaction,
         registry=registry,
-        stage_ids=stage_ids,
+        stage_ids=selected_stage_ids,
         boundary="exit",
         answers=transaction.answers,
         persist_path=paths.transaction_path(transaction.name),
@@ -497,6 +530,29 @@ def _finish_operation_stages(
         transaction=updated,
         paths=paths,
         refresh_preview=refresh_preview,
+    )
+
+
+def _stage_limited_result(
+    stage_id: str,
+    transaction: Transaction,
+    paths: ManagerPaths,
+) -> CommandResult:
+    """Persist and report one verified stage without advancing its successor."""
+
+    stage_status = transaction.stages.get(stage_id)
+    if stage_status not in {CheckpointStatus.VERIFIED, CheckpointStatus.NOT_APPLICABLE}:
+        raise StateConflictError(
+            f"stage-limited execution ended without a completed stage: {stage_id!r}"
+        )
+    updated = transaction.with_result_kind("stage_resume_completed")
+    write_transaction(paths.transaction_path(updated.name), updated)
+    return CommandResult(
+        kind="stage_resume",
+        status="stage_completed",
+        message=f"Named stage {stage_id!r} completed; successor stages were not advanced.",
+        exit_code=ExitCode.OK,
+        data={"stage_id": stage_id, "transaction": updated.to_dict()},
     )
 
 

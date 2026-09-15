@@ -4,15 +4,13 @@
 the fleet delegation contract rendered into every spawn's
 ``--append-system-prompt``.
 
-Proves: every named placeholder resolves; the literal
-``{"op": "is_null"}`` JSON example in the BINDING RULES section survives
-rendering untouched (confirms plain ``str.replace`` is used, not
-``str.format``, which would misparse it); the seat's two approved edits
-hold (the opening sentence says "a worker of class", never "claiming
-role"; FIRST ACTIONS never instructs claiming the role_class string as a
-role name); and the RED-FIRST render-time guard the seat's approval
-explicitly required -- an unresolved ``{placeholder}`` in the template
-file must never ship into a live system prompt.
+Proves: every named placeholder resolves; a target repository root reaches
+the repository-scoped binding and displaces origin-specific bindings; the seat's
+two approved edits hold (the opening sentence says "a worker of class", never
+"claiming role"; FIRST ACTIONS never instructs claiming the role_class string
+as a role name); and the RED-FIRST render-time guard the seat's approval
+explicitly required -- an unresolved ``{placeholder}`` in the template file
+must never ship into a live system prompt.
 
 Run:
     .venv/bin/python3 plugins/agent_messaging_plugin/tests/authority_contract_smoke.py
@@ -76,16 +74,38 @@ def test_all_placeholders_resolve() -> None:
         _check(f"{{{name}}}" not in text, f"no unresolved {{{name}}} remains")
 
 
-def test_json_example_survives_literally() -> None:
-    """RED-FIRST for the str.format() trap: the template's own BINDING
-    RULES text contains a literal {"op": "is_null"} JSON example -- if
-    rendering used str.format() instead of plain substitution, this would
-    raise a ValueError (unexpected '"' in field name) rather than render
-    cleanly."""
-    text = _render()
+def test_target_repository_scopes_bindings() -> None:
+    text = _render(repository_root="/workspace/project-solet")
     _check(
-        '{"op": "is_null"}' in text,
-        "the literal JSON example survives rendering byte-for-byte",
+        "TARGET REPOSITORY: /workspace/project-solet" in text,
+        "resolved target repository root reaches the authority contract",
+    )
+    _check(
+        "AGENTS.md or CLAUDE.md" in text and "Do not inherit" in text,
+        "contract delegates repository-specific rules to the target bootstrap",
+    )
+    _check(
+        all(rule in text for rule in (
+            "Agent/Task tool is forbidden",
+            "git merge-base --is-ancestor",
+            "waiting on a peer wake with no fallback",
+            "conflict between your task and its brief",
+        )),
+        "fleet-wide conduct rules remain present for every target repository",
+    )
+    _check(
+        "StateManagementInterface only for database access" not in text,
+        "origin database binding is absent from the generic authority contract",
+    )
+    from_worktree = _authority_system_prompt(
+        {
+            "agent_instance_id": "agi-contract-worktree",
+            "worktree_path": "/workspace/project-solet-lane",
+        },
+    )
+    _check(
+        "TARGET REPOSITORY: /workspace/project-solet-lane" in from_worktree,
+        "spawned target worktree scopes bindings when no explicit root is present",
     )
 
 
@@ -191,6 +211,7 @@ def test_optional_unit_id_reaches_the_authority_contract() -> None:
             "brief_ref": request.brief_ref,
             "unit_id": request.unit_id,
             "spawned_by_role": "Test-Dispatcher",
+            "repository_root": "/fixture/project-solet",
         },
     )
     _check(
@@ -213,6 +234,7 @@ def test_optional_unit_id_reaches_the_authority_contract() -> None:
             "brief_ref": absent_request.brief_ref,
             "unit_id": absent_request.unit_id,
             "spawned_by_role": "Test-Dispatcher",
+            "repository_root": "",
         },
     )
     legacy_template = authority_contract._TEMPLATE_PATH.read_text().replace(  # noqa: SLF001
@@ -224,6 +246,7 @@ def test_optional_unit_id_reaches_the_authority_contract() -> None:
         "lane_id": absent_request.lane_id,
         "brief_ref": absent_request.brief_ref,
         "spawned_by_role": "Test-Dispatcher",
+        "repository_root": "",
     }
     for name, value in legacy_values.items():
         legacy_template = legacy_template.replace("{" + name + "}", value)
@@ -268,7 +291,7 @@ def test_render_is_deterministic() -> None:
 
 def main() -> int:
     test_all_placeholders_resolve()
-    test_json_example_survives_literally()
+    test_target_repository_scopes_bindings()
     test_edit_1_worker_of_class_not_claiming_role()
     test_edit_2_first_actions_never_claims_the_class_string()
     test_edit_3_tier_statement_replaces_never_wait_clause()

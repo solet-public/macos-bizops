@@ -30,7 +30,7 @@ from discovered_decision_barrier_scenarios import (
     _set_invoke_adapter,
     _stable_result,
 )
-from discovered_decision_projection_scenarios import MODEL_SELECTIONS
+from discovered_decision_projection_scenarios import MODEL_BASE_URL, MODEL_SELECTIONS
 from discovered_decision_support import _prepare
 from solet_manager.config import CreateConfig
 from solet_manager.create import CreateManager
@@ -88,6 +88,8 @@ def _terminal_arm(root: Path, selections: dict[str, str]) -> JsonObject:
     _set_invoke_adapter(adapter)
     before = _artifact_census(fixture_root, paths, config.name)
     frontiers, planned_actions, result = _terminal_steps(manager, config, selections)
+    completion_requests = [request for request in adapter.requests if request.probe_purpose == "completion" and request.operation_ref.startswith("setup::lm_studio.")]
+    _check(len(completion_requests) == 8 and all(request.public_inputs.get("lm_studio_base_url") == MODEL_BASE_URL for request in completion_requests), "all eight terminal LM Studio probes receive the retained reviewed URL through the real manager runner")
     after = _artifact_census(fixture_root, paths, config.name)
     apply_requests = [request for request in adapter.requests if request.phase == "apply"]
     canonical_trace = [_canonical_request(request) for request in apply_requests]
@@ -342,9 +344,21 @@ def _assert_matrix(matrix: JsonObject) -> None:
     )
     _assert_refusal_cases(
         matrix,
-        ("conditional_inference_empty", "conditional_inference_unqualified"),
+        ("conditional_inference_empty",),
         "inference_model",
         "conditional model barrier",
+    )
+    unqualified_inference = cast(JsonObject, matrix["conditional_inference_unqualified"])
+    _check(
+        all(
+            (
+                unqualified_inference["status"] == "preview_ready",
+                unqualified_inference["decision_ids"] == [],
+                unqualified_inference["inference_probed"] is True,
+                unqualified_inference["zero_effect_after_models"] is True,
+            )
+        ),
+        "served inference stays eligible when qualification is unavailable",
     )
     inverse = cast(JsonObject, matrix["inverse_inference_none"])
     _check(

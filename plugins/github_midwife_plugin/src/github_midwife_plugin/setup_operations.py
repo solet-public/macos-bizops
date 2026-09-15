@@ -10,6 +10,7 @@ from typing import cast
 
 import yaml
 
+from .launchagent_status import launchagent_health
 from .setup_adapter_contract import (
     AdapterRequest,
     JsonObject,
@@ -66,11 +67,13 @@ _SOLET_RESULT_ENVELOPE_KEYS = frozenset(
 def operation_handlers() -> dict[str, OperationHandler]:
     """Return the closed registry of target-local mutation handlers."""
 
+    from .lm_studio_provisioning import operation_handlers as lm_studio_handlers
     from .setup_plugin_operations import plugin_install
     from .setup_session_operations import session_source
     from .setup_shell_operations import shell
 
     return {
+        **lm_studio_handlers(),
         "setup::tmux.install": _tmux,
         "setup::coding_agents.install_codex": _coding_agent_cli,
         "setup::coding_agents.install_claude": _coding_agent_cli,
@@ -278,7 +281,10 @@ def _genesis(request: AdapterRequest, runtime: Runtime) -> JsonObject:
             "operation_input_missing",
             "Resolve the selected autostart topology before running genesis.",
         )
-    satisfied = genesis_artifacts_valid(request, runtime) and (not autostart or plist.is_file())
+    artifacts_valid = genesis_artifacts_valid(request, runtime)
+    satisfied = artifacts_valid and (
+        not autostart or _launchagent_running(request, runtime)
+    )
     if request.phase == "probe":
         if satisfied:
             return _verified(request, "genesis_artifacts", "genesis artifacts are present", str(marker))
@@ -303,9 +309,21 @@ def _genesis(request: AdapterRequest, runtime: Runtime) -> JsonObject:
             "SOLET_ASSUME_YES": "1",
             "SOLET_PROFILE": setup_profile,
             "SOLET_AUTOSTART": "enabled" if autostart else "disabled",
+            "SOLET_OPERATION_REF": request.operation_ref,
         },
     )
     return _apply_outcome(request, outcome, "genesis_failed")
+
+
+def _launchagent_running(request: AdapterRequest, runtime: Runtime) -> bool:
+    """Require launchd health before a LaunchAgent repair preview verifies."""
+
+    outcome = runtime.run(
+        ("/bin/launchctl", "print", f"gui/{os.getuid()}/local.solet.{request.name}"),
+        timeout_seconds=10,
+    )
+    healthy, _observed, _error_kind = launchagent_health(outcome)
+    return healthy
 
 
 def _genesis_actions(

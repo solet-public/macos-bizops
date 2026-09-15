@@ -206,11 +206,13 @@ _PROCESS_RESULTS_TEMPLATE: dict[str, Any] = {
     "name": "process_results_template",
     "process_key": "service_interface::inference_service::process_results",
     "arguments": {
-        "prompt": {
-            # the recorded (process_error) decode shape carries an observation —
-            # the fresh re-entry MUST strip it (fresh input, not replay).
-            "observation": {"result": "the recorded failed action result"},
-            "user": {"instructions": ["stale recorded instructions"]},
+        "params": {
+            "prompt": {
+                # the recorded (process_error) decode shape carries an observation —
+                # the fresh re-entry MUST strip it (fresh input, not replay).
+                "observation": {"result": "the recorded failed action result"},
+                "user": {"instructions": ["stale recorded instructions"]},
+            },
         },
     },
 }
@@ -272,7 +274,7 @@ def test_resubmit_fresh_decode() -> None:
     # initial vertex with the observation stripped (never the recorded decode).
     ok = AgentMessagingPlugin._resubmit_vertex(fake, "flow-x", "process_error")  # noqa: SLF001
     submitted = submit.submitted[0] if submit.submitted else {}
-    prompt = submitted.get("arguments", {}).get("prompt", {})
+    prompt = submitted.get("arguments", {}).get("params", {}).get("prompt", {})
     _check(
         ok is True
         and len(submit.submitted) == 1
@@ -285,12 +287,13 @@ def test_resubmit_fresh_decode() -> None:
     )
     _check(
         builder.calls == [("sess-1", "flow-x")],
-        "S3b compilation context built for the SAME (session, flow) — fresh decode of current state",
+        "S3b compilation context built for the SAME (session, flow) — "
+        "fresh decode of current state",
     )
 
     # the deep-copy did not mutate the shared template (no replay leak).
     _check(
-        "observation" in _PROCESS_RESULTS_TEMPLATE["arguments"]["prompt"],
+        "observation" in _PROCESS_RESULTS_TEMPLATE["arguments"]["params"]["prompt"],
         "S3c the shared template is untouched (fresh action is a deep copy)",
     )
 

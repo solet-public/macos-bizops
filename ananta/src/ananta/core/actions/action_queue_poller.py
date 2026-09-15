@@ -907,14 +907,20 @@ class ActionQueuePoller:
             ACTION_PATH_LIVENESS.record_poll_cycle(queue_depth=0, dispatched=0)
             return
 
-        # CRITICAL: Mark ALL actions as 'processing' IMMEDIATELY after query
-        # This prevents race conditions where concurrent poll cycles pick up the same actions
-        for action in queued_actions:
-            self._mark_action_processing(action.id)
-
-        # Process each action (now safely claimed)
+        # Claim and execute ONE row at a time.  Claiming a fetched batch up
+        # front used to prevent a concurrent poller from seeing its rows, but
+        # it also meant that a stall in the first handler stranded every later
+        # row in ``processing`` without ever entering its handler.  The claim
+        # below is a conditional update (id + status=queued), so it preserves
+        # the concurrent-poller exclusion without claiming work we have not
+        # actually begun.
         dispatched = 0
         for action in queued_actions:
+            if not self._mark_action_processing(action.id):
+                # A competing poller or a cancellation transitioned the row
+                # after our bounded queue read.  This poller did not acquire
+                # it, so it must never execute it.
+                continue
             try:
                 await self._process_action(action)
                 self.total_actions_processed += 1
@@ -1595,19 +1601,50 @@ class ActionQueuePoller:
             self._resolve_job_result_ref(action)
             self._inject_session_id_if_missing(action)
 
-    def _mark_action_processing(self, action_id: str) -> None:
-        """Mark action as currently being processed.
+    def _mark_action_processing(self, action_id: str) -> bool:
+        """Atomically claim one queued action, returning whether this poller won.
 
-        Faithful identity update (``WHERE id =``) — the serial poll loop has
-        already claimed this row out of ``_get_queued_actions``. A zero-affected
-        result is tolerated (log-and-continue): a status write that misses a
-        deleted/cancelled row must never raise inside the drain loop.
+        The ``id`` plus ``status='queued'`` predicate is the state-interface
+        compare-and-set: only one concurrent poller can transition a row to
+        ``processing``.  A zero-row result is an expected lost claim (another
+        poller, cancellation, or deletion won the transition), not a reason to
+        execute a stale fetched row.  Any malformed or failed state-service
+        result is raised rather than silently treated as a lost claim.
         """
-        self.state_service.update_state(
+        result = self.state_service.update_state(
             namespace="core",
-            query={"table": "action_events", "filters": {"id": action_id}},
+            query={
+                "table": "action_events",
+                "filters": {
+                    "id": action_id,
+                    "status": ActionStatus.QUEUED.value,
+                },
+            },
             updates={"status": ActionStatus.PROCESSING.value},
         )
+        if result.get("action_status") not in _COMPLETED_READ_STATUSES:
+            raise RuntimeError(
+                f"Failed to claim queued action {action_id}: "
+                f"state-service status={result.get('action_status')!r}"
+            )
+        data = result.get("data")
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Failed to claim queued action {action_id}: missing data envelope")
+        inner = data.get("result")
+        if not isinstance(inner, dict):
+            raise RuntimeError(
+                f"Failed to claim queued action {action_id}: missing result envelope"
+            )
+        updated = inner.get("updated")
+        if isinstance(updated, bool) or not isinstance(updated, int):
+            raise RuntimeError(
+                f"Failed to claim queued action {action_id}: invalid updated count {updated!r}"
+            )
+        if updated > 1:
+            raise RuntimeError(
+                f"Claim of action {action_id} updated {updated} rows (expected at most one)"
+            )
+        return updated == 1
 
     def _update_action_status_to_completed(self, action_id: str) -> None:
         """Complete the action AND clear any ``error_message`` a prior attempt left.
@@ -1957,17 +1994,14 @@ class ActionQueuePoller:
     def _inject_context_field_into_template(
         self, template_data: dict[str, object], field_name: str, field_value: str | None
     ) -> None:
-        """Inject a context field into template data and its arguments."""
+        """Inject action context into template metadata, never process arguments."""
         if not field_value or field_name in template_data:
             return
 
         template_data[field_name] = field_value
-        arguments = template_data.get("arguments")
-        if isinstance(arguments, dict):
-            arguments[field_name] = field_value
 
     def _inject_skip_semantic_recall_into_template(self, template_data: dict[str, object]) -> None:
-        """Inject skip_semantic_recall=True into template arguments.
+        """Inject skip_semantic_recall=True into template metadata.
 
         Result processor actions should skip semantic recall because:
         1. They present action results, not respond to new user queries
@@ -1977,9 +2011,6 @@ class ActionQueuePoller:
         See: knowledge_base/2026-02-05_claude_memory_system_refactor_v2.md
         """
         template_data[SKIP_SEMANTIC_RECALL_KEY] = True
-        arguments = template_data.get("arguments")
-        if isinstance(arguments, dict):
-            arguments[SKIP_SEMANTIC_RECALL_KEY] = True
 
     def _prepare_template_data_and_context(
         self,
@@ -2593,8 +2624,11 @@ class ActionQueuePoller:
 
         arguments = template_copy.get("arguments", {})
         if isinstance(arguments, dict):
+            params = arguments.get("params")
+            if not isinstance(params, dict):
+                raise ValueError("process_error template must declare an object arguments.params")
             # Only specify model name - inference plugin provides temperature/max_tokens from config
-            arguments["model"] = {
+            params["model"] = {
                 "name": self.inference_model_name,
             }
             template_copy["arguments"] = arguments
@@ -3513,18 +3547,12 @@ class ActionQueuePoller:
         flow_id: str | None,
         context_id: str | None,
     ) -> None:
-        """Inject session_id, flow_id, and context_id into template and its arguments."""
+        """Inject session_id, flow_id, and context_id into template metadata."""
         if session_id and CONTEXT_KEY_SESSION_ID not in template:
             template[CONTEXT_KEY_SESSION_ID] = session_id
-            args = template.get("arguments")
-            if isinstance(args, dict):
-                args[CONTEXT_KEY_SESSION_ID] = session_id
 
         if flow_id and CONTEXT_KEY_FLOW_ID not in template:
             template[CONTEXT_KEY_FLOW_ID] = flow_id
-            args = template.get("arguments")
-            if isinstance(args, dict):
-                args[CONTEXT_KEY_FLOW_ID] = flow_id
 
         if context_id and "context_id" not in template:
             template["context_id"] = context_id

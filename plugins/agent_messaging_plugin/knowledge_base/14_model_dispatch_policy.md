@@ -25,8 +25,8 @@ unknown policy model refuses rather than choosing a fallback.
 
 | Dispatch kind | Required assignment |
 | --- | --- |
-| `diagnose` / `design` | Two producers: codex `gpt-5.6-sol` and claude_code `claude-opus-5`, sharing a `pair_id` |
-| `review` | codex `gpt-5.6-terra` or claude_code `claude-sonnet-5`, but the reviewer must be the other vendor than `reviewed_report_vendor` |
+| `diagnose` / `design` | Two producers from different vendors, sharing a `pair_id`, unless the active, ruling-cited `budget_vendor_override` relaxes pairing for that kind |
+| `review` | codex `gpt-5.6-terra` or claude_code `claude-sonnet-5`, and normally the reviewer must be the other vendor than `reviewed_report_vendor`; an active, ruling-cited override may permit same-vendor review |
 | `fix` | codex `gpt-5.6-terra` |
 | `infrastructure` | Any runtime/model pair; it remains recorded on the ledger |
 
@@ -55,8 +55,12 @@ for `review` and must be `codex` or `claude_code`.
 `managed_session` records `dispatch_kind`, `reviewed_report_vendor`, and
 `pair_id`. `session_sweep.py` sends a `dispatch_policy_unpaired` notice to the
 spawning role when a live diagnose/design producer has no live other-vendor
-partner with the same `pair_id` within ten minutes of spawn. The notice is a
-delivery reminder, not a synthetic second producer.
+partner with the same `pair_id` within ten minutes of spawn. An active
+`budget_vendor_override` suppresses that notice only for the kinds it names.
+The JSON object is optional but, when present, must contain a boolean `active`
+and a non-empty `ruling_ids_by_kind` mapping of `diagnose`, `design`, and/or
+`review` to full ruling IDs; malformed entries refuse policy loading. The
+notice is a delivery reminder, not a synthetic second producer.
 
 ## Scope boundary
 

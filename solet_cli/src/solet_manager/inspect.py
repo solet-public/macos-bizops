@@ -24,6 +24,7 @@ from .existing_solet_diagnostics import (
     inspect_process_input_projection,
     roll_up_active_checks,
 )
+from .lm_studio_diagnostics import inspect_lm_studio
 from .models import CommandResult, JsonValue
 
 
@@ -121,6 +122,8 @@ def inspect_target(target: Path) -> CommandResult:
                 _registered_service_binding_coverage_check(resolved_target),
             )
         )
+    if resolved_target.is_dir():
+        checks += inspect_lm_studio(resolved_target)
     rollup = roll_up_active_checks(checks)
     data: dict[str, JsonValue] = {
         "target": str(resolved_target),

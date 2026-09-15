@@ -18,6 +18,8 @@ import inspect
 import json
 import logging
 import os
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,6 +54,10 @@ logger = logging.getLogger(__name__)
 # the VaultService layer. No other call site reads this constant; the
 # flip is a single-line change.
 VAULT_KEYS_GATE_MODE: str = "fail"
+
+_KNOWLEDGE_HYDRATION_MAX_ATTEMPTS = 3
+_KNOWLEDGE_HYDRATION_RETRY_INITIAL_SECONDS = 1.0
+_KNOWLEDGE_HYDRATION_RETRY_MAX_SECONDS = 4.0
 
 
 def _get_build_marker() -> str:
@@ -1281,6 +1287,10 @@ def _health_report(orch: Any) -> None:
             error = f" ({plugin.readiness_error or 'Unknown error'})"
         logger.info(f"{name}: {status}{error}")
 
+    hydration_status = getattr(orch, "knowledge_hydration_status", None)
+    if hydration_status is not None:
+        logger.info("knowledge-base hydration: %s", hydration_status)
+
 
 def _seed_identity_memories(orch: Any) -> None:
     """Seed identity memories from config if not already seeded.
@@ -1516,11 +1526,14 @@ def _handle_clean_restart(orch: Any) -> None:
 
 
 def _auto_install_knowledge_bases(orch: Any) -> None:
-    """Auto-install knowledge bases after clean restart has completed.
+    """Start knowledge-base hydration after clean restart has completed.
 
     Runs AFTER handle_clean_restart so that embeddings aren't purged
-    immediately after creation. Accesses the knowledge plugin directly
-    through plugin_manager.
+    immediately after creation. The installation itself is background work:
+    first-boot ingestion must not delay the runtime's router-registration
+    heartbeat or make setup's target-health wait expire while the child is
+    otherwise live. Accesses the knowledge plugin directly through
+    plugin_manager.
 
     Skipped when ``SOLET_PROBE_MODE=1``: the L2 probe shares the live
     Postgres per Architect's 2026-05-30 design §3.2, so install
@@ -1560,7 +1573,113 @@ def _auto_install_knowledge_bases(orch: Any) -> None:
         # symmetrically (no manifest → no filter).
         from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
         manifest_plugin_set = load_manifest_plugin_set(orch.APP_HOME)
-        plugin.auto_install_knowledge_bases(manifest_plugin_set=manifest_plugin_set)
+        hydration_thread = threading.Thread(
+            target=_run_auto_install_knowledge_bases,
+            args=(orch, plugin, manifest_plugin_set),
+            name="knowledge-base-auto-install",
+            daemon=True,
+        )
+        hydration_thread.start()
+
+
+def _run_auto_install_knowledge_bases(
+    orch: Any,
+    plugin: Any,
+    manifest_plugin_set: set[str] | None,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Retry optional KB hydration without withdrawing startup readiness."""
+    retry_seconds = _KNOWLEDGE_HYDRATION_RETRY_INITIAL_SECONDS
+    for attempt in range(1, _KNOWLEDGE_HYDRATION_MAX_ATTEMPTS + 1):
+        orch.knowledge_hydration_status = {"state": "pending", "attempt": attempt}
+        try:
+            plugin.auto_install_knowledge_bases(manifest_plugin_set=manifest_plugin_set)
+        except Exception as exc:
+            if attempt == _KNOWLEDGE_HYDRATION_MAX_ATTEMPTS:
+                orch.knowledge_hydration_status = {
+                    "state": "failed",
+                    "attempt": attempt,
+                    "error": str(exc),
+                }
+                logger.exception(
+                    "Knowledge-base auto-install failed after %d attempts; "
+                    "startup readiness remains available",
+                    attempt,
+                )
+                return
+            logger.warning(
+                "Knowledge-base auto-install attempt %d/%d failed: %s; retrying in %.1fs",
+                attempt,
+                _KNOWLEDGE_HYDRATION_MAX_ATTEMPTS,
+                exc,
+                retry_seconds,
+            )
+            sleep(retry_seconds)
+            retry_seconds = min(
+                retry_seconds * 2,
+                _KNOWLEDGE_HYDRATION_RETRY_MAX_SECONDS,
+            )
+        else:
+            orch.knowledge_hydration_status = {"state": "complete", "attempt": attempt}
+            logger.info("Knowledge-base auto-install completed on attempt %d", attempt)
+            return
+
+
+def _defer_inference_dependent_startup_work(orch: Any) -> None:
+    """Declare work that must wait until this process is router-active."""
+    orch.post_registration_work_status = {"state": "pending"}
+
+
+def start_post_registration_work(orch: Any) -> None:
+    """Start inference-dependent startup work exactly once after activation."""
+    lock = getattr(orch, "_post_registration_work_lock", None)
+    if lock is None:
+        lock = threading.Lock()
+        orch._post_registration_work_lock = lock
+    with lock:
+        if getattr(orch, "_post_registration_work_started", False):
+            return
+        orch._post_registration_work_started = True
+        threading.Thread(
+            target=_run_post_registration_work,
+            args=(orch,),
+            name="post-registration-startup-work",
+            daemon=True,
+        ).start()
+
+
+def _run_post_registration_work(orch: Any) -> None:
+    """Sequence local-model work after activation without delaying router health."""
+    try:
+        plugins = orch.plugin_manager.plugins
+        embeddings = plugins.get("openai_embeddings_plugin")
+        if embeddings is not None:
+            start_qualification = getattr(embeddings, "start_post_registration_qualification", None)
+            wait_qualification = getattr(embeddings, "wait_for_post_registration_qualification", None)
+            if not callable(start_qualification) or not callable(wait_qualification):
+                raise RuntimeError("embedding plugin lacks post-registration qualification hooks")
+            start_qualification()
+            wait_qualification()
+
+        action_coordinator = getattr(orch, "action_coordinator", None)
+        if action_coordinator is not None:
+            action_coordinator.populate_discovery_after_registration()
+        _seed_identity_memories(orch)
+        _reindex_orphaned_memories(orch)
+        _auto_install_knowledge_bases(orch)
+
+        inference = plugins.get("default_inference_plugin")
+        if inference is not None:
+            start_inference = getattr(inference, "start_post_registration_work", None)
+            if not callable(start_inference):
+                raise RuntimeError("inference plugin lacks post-registration hook")
+            start_inference()
+    except Exception as exc:
+        orch.post_registration_work_status = {"state": "failed", "error": str(exc)}
+        logger.exception("Post-registration startup work failed")
+    else:
+        orch.post_registration_work_status = {"state": "started"}
 
 
 def _auto_register_declared_pulling_sources(service: Any) -> None:
@@ -1757,15 +1876,9 @@ STARTUP_SEQUENCE = [
     ),
     StartupStep("handle_clean_restart", _handle_clean_restart, ["create_service_wrappers"]),
     StartupStep(
-        "auto_install_knowledge_bases",
-        _auto_install_knowledge_bases,
+        "defer_inference_dependent_startup_work",
+        _defer_inference_dependent_startup_work,
         ["handle_clean_restart"],
-    ),
-    StartupStep(
-        "seed_identity_memories", _seed_identity_memories, ["handle_clean_restart"]
-    ),
-    StartupStep(
-        "reindex_orphaned_memories", _reindex_orphaned_memories, ["seed_identity_memories"]
     ),
     StartupStep(
         "inject_at_command_processor", _inject_at_command_processor, ["create_service_wrappers"]

@@ -86,8 +86,9 @@ class RecordedLaneWorktreeFixture:
         *,
         role_name: str,
         agent_instance_id: str,
+        repository_root: str,
     ) -> lifecycle_verbs.LaneWorktree:
-        del state
+        del state, repository_root
         path = self.root / "worktrees" / agent_instance_id
         path.mkdir(parents=True, exist_ok=True)
         # Adapters validate only the worktree checkout marker before invoking

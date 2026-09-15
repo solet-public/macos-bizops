@@ -297,9 +297,20 @@ def run_public(
     command: list[str],
     *,
     timeout: int = PROBE_TIMEOUT_SECONDS,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    input: str | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
     try:
-        return runtime.run(command, capture_output=True, text=True, timeout=timeout)
+        return runtime.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            env=env,
+            input=input,
+        )
     except (OSError, subprocess.TimeoutExpired):
         return None
 

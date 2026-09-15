@@ -88,6 +88,7 @@ from .headless_adapter import (
     _managed_policy_remedy,
     _permission_state_report,
     _pid_alive,
+    _resolve_coordination_receipt_path,
     _resolve_heartbeat_marker_dir,
     _resolve_local_label,
     _resolve_session_mapping_spool_dir,
@@ -293,6 +294,9 @@ def _env_pairs(
     heartbeat_dir = _resolve_heartbeat_marker_dir()
     if heartbeat_dir is not None:
         pairs += ["-e", f"AGENT_HEARTBEAT_MARKER_DIR={heartbeat_dir}"]
+    receipt_path = _resolve_coordination_receipt_path()
+    if receipt_path is not None:
+        pairs += ["-e", f"AGENT_COORDINATION_RECEIPT_PATH={receipt_path}"]
     return pairs
 
 
@@ -1440,6 +1444,7 @@ class TmuxHostDriver:
             # "nameSource":"derived" with an auto-name. --name populates the
             # guard's file in interactive mode.
             "--name", label,
+            "--remote-control", label,
             "--permission-mode", permission_mode,
             "--setting-sources", "project",
             "--settings", settings_json,

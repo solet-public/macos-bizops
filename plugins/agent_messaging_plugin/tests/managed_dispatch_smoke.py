@@ -231,6 +231,7 @@ def _spawn_request(spec: DispatchSpec) -> SpawnSessionRequest:
         lane_id=spec.lane_id,
         brief_ref=spec.brief_ref,
         unit_id=spec.unit_id,
+        repository_root=spec.repository_root,
         work_class=spec.work_class,
         budget_line=spec.budget_line,
         agent_runtime=spec.agent_runtime,
@@ -905,6 +906,7 @@ def test_review_f2_prepared_contract_rejects_every_altered_spawn_field() -> None
             role_class="project",
             lane_id="coordination-fixture",
             brief_ref=str(row["brief_ref"]),
+            repository_root="/different-checkout",
             work_class="production_mutation",
             budget_line="coordination-fixture-budget",
             dispatch_id="mdp-fixture",
@@ -942,6 +944,7 @@ def test_review_f2_prepared_contract_rejects_every_altered_spawn_field() -> None
             "transport",
             "allow_askuserquestion",
             "local_name",
+            "repository_root",
             "degraded_hooks_acknowledged",
         }
         _check(required <= mismatches, "F2 every altered spawn/lineage field mismatches")
@@ -1480,7 +1483,7 @@ def test_review_fixture_15_current_version_rejections_are_audited_and_replayed()
         )
 
 
-def test_review_f8_local_name_is_in_discoverable_invocation_schema() -> None:
+def test_review_f8_spawn_root_is_in_discoverable_invocation_schema() -> None:
     metadata = AgentMessagingPlugin.spawn_session._platform_process_metadata  # type: ignore[attr-defined]  # noqa: SLF001
     schema = InvocationSchemaGenerator().generate(
         "plugin::agent_messaging_plugin::spawn_session",
@@ -1490,6 +1493,14 @@ def test_review_f8_local_name_is_in_discoverable_invocation_schema() -> None:
     properties = cast(dict[str, Any], arguments["properties"])
     _check("local_name" in metadata.parameters, "F8 local_name is discoverable ParameterMetadata")
     _check("local_name" in properties, "F8 live invocation-schema construction carries local_name")
+    _check(
+        "repository_root" in metadata.parameters,
+        "foreign lane repository_root is discoverable ParameterMetadata",
+    )
+    _check(
+        "repository_root" in properties,
+        "live invocation-schema construction carries repository_root",
+    )
     _check(arguments["additionalProperties"] is False, "F8 invocation arguments stay closed")
 
 
@@ -1544,7 +1555,7 @@ def main() -> int:
             test_review_f5_watchdog_is_operational_and_deduplicated()
             test_review_f6_expired_retry_gets_fresh_bounded_deadlines()
             test_review_f7_failed_start_is_identified_supervised_and_replaced()
-            test_review_f8_local_name_is_in_discoverable_invocation_schema()
+            test_review_f8_spawn_root_is_in_discoverable_invocation_schema()
             test_28_degraded_hooks_acknowledged_is_in_discoverable_schema()
             test_review_fixture_15_competing_event_orders_converge()
             test_review_fixture_15_current_version_rejections_are_audited_and_replayed()

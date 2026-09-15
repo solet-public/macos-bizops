@@ -22,7 +22,7 @@
   "context.warm_temperature": 0.0,
   "context.warming_enabled": true,
   "max_tokens": 32768,
-  "model": "qwen/qwen3-14b",
+  "model": "qwen3-14b",
   "temperature": 0.1,
   "timeout_seconds": 600
 }

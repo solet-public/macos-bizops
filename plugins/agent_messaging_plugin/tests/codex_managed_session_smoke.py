@@ -1191,6 +1191,153 @@ def test_tmux_channel_refuses_two_enter_noops() -> None:
     _check(raised, "a pane that never stabilizes past its own baseline fails loud")
 
 
+LIVE_CODEX_BUSY_STATUS_LINE = (
+    "\u2022 Working (12m 07s \u00b7 esc to interrupt) \u00b7 Checking peer inbox before ending turn"
+)
+"""Verbatim from a real pane, ``tmux capture-pane -p`` on
+``fleet-lane-cdx-fix-lm-studio-provisioning-2026-09-08-f0f3ca54`` (Codex
+0.153.4) at 2026-09-09T04:0xZ, while that lane was 12 minutes into a turn."""
+
+
+def _idle_pane(transcript: str) -> str:
+    """An idle pane: some transcript, then Codex's empty-composer placeholder.
+
+    The placeholder is NOT an idle signal by itself -- 0.153.4 renders it
+    while working too (see :func:`test_ready_gate_reads_the_status_line_not_
+    the_placeholder`), which is why these fixtures carry a transcript and a
+    status line separately rather than toggling one string.
+    """
+    return f"{transcript}\n\n\u203a Ask Codex to do anything\n\n  gpt-5.6-terra high"
+
+
+def test_idle_pane_is_driveable_though_its_transcript_says_working() -> None:
+    """RED-FIRST (2026-09-09, iss_af7f6968): the permanent-wedge half.
+
+    The readiness check used to reject a pane if the bare substring
+    ``Working`` appeared ANYWHERE in the visible pane. That word is ordinary
+    English and ordinary transcript text, so a genuinely idle, healthy pane
+    became permanently undriveable the moment it happened to display it --
+    silently, while the lane stayed registered, kept heartbeating, and read
+    ``live``. The transcript line below is not invented: it is this lane's own
+    dispatch brief, which every worker on this unit is told to read.
+
+    FAILING MUTATION: put the bare substring back -- match ``"Working"``
+    against the visible pane instead of :data:`_CODEX_BUSY_STATUS_RE`. The
+    pane below never stops containing that word, so readiness can never be
+    satisfied and ``insert`` raises instead of pasting.
+    """
+    idle = _idle_pane("**Working dir:** ~/Workspace/example")
+    composed = _idle_pane("**Working dir:** ~/Workspace/example").replace(
+        "\u203a Ask Codex to do anything", "\u203a dispatch text",
+    )
+    run = _PaneRun([idle, idle, composed, composed, "\u203a dispatch text submitted"])
+    clock = _Clock()
+    channel = _CodexTmuxDriverChannel(
+        tmux_bin="tmux", session="codex-working-in-transcript", run_fn=run,
+        sleep_fn=clock.sleep, now_fn=clock.now,
+        stable_samples=1, verify_timeout_seconds=2.0,
+    )
+    pasted = ""
+    try:
+        channel.insert("dispatch text")
+        pasted = "ok"
+    except DriverChannelSendError as exc:
+        pasted = f"RAISED: {exc}"
+    _check(
+        pasted == "ok",
+        "an idle pane whose transcript merely contains the word 'Working' is "
+        "still driveable (no permanent wedge)",
+    )
+    literal = [c for c in run.calls if "send-keys" in c and "-l" in c]
+    _check(
+        [c[-1] for c in literal] == ["dispatch text"],
+        "the wedge fix still actually pastes the text, rather than passing by "
+        "never attempting the send",
+    )
+
+
+def test_ready_gate_reads_the_status_line_not_the_placeholder() -> None:
+    """CONTROL for the test above -- the true-positive that must NOT be lost.
+
+    Narrowing a busy check is the risky direction, so this pins the other
+    side: a genuinely busy pane must still refuse the paste. It also pins the
+    measurement that forced the redesign -- Codex 0.153.4 renders its idle
+    composer placeholder AND its busy status line AT THE SAME TIME, so the
+    placeholder alone can never decide readiness and the status line is
+    load-bearing.
+
+    FAILING MUTATION: drop the busy check from ``_wait_until_ready`` (return
+    on the placeholder alone). The fixture below shows the placeholder on
+    every capture, so readiness passes immediately and text is pasted into a
+    pane that is 12 minutes into someone else's turn.
+    """
+    busy = _idle_pane(f"prior output\n{LIVE_CODEX_BUSY_STATUS_LINE}")
+    _check(
+        "\u203a Ask Codex to do anything" in busy,
+        "the live busy fixture really does show the idle placeholder too "
+        "(the measurement this redesign rests on)",
+    )
+    run = _PaneRun([busy])
+    clock = _Clock()
+    channel = _CodexTmuxDriverChannel(
+        tmux_bin="tmux", session="codex-mid-turn", run_fn=run,
+        sleep_fn=clock.sleep, now_fn=clock.now,
+        stable_samples=1, verify_timeout_seconds=2.0,
+    )
+    failure = ""
+    try:
+        channel.insert("must not paste")
+    except DriverChannelSendError as exc:
+        failure = str(exc)
+    _check(bool(failure), "a genuinely mid-turn pane still refuses the paste")
+    _check(
+        [c for c in run.calls if "send-keys" in c] == [],
+        "a mid-turn refusal sends no keystrokes at all",
+    )
+
+
+def test_busy_pane_failure_says_busy_not_broken() -> None:
+    """RED-FIRST (2026-09-09): the half that blocked Project-Solet-Main.
+
+    ``spawn_session`` delivers the bootstrap first turn itself, so a
+    ``drive_session`` issued straight afterwards races a pane that is busy BY
+    CONSTRUCTION for as long as that turn runs -- minutes, against a 10s
+    readiness budget. Every readiness timeout used to raise the same sentence
+    whatever the cause, so a healthy lane working normally was reported to the
+    caller as a delivery failure indistinguishable from a wedged or dead pane.
+    PS-Main read that as 9/9 broken dispatch.
+
+    FAILING MUTATION: collapse ``_not_ready_detail`` back to the single
+    message ``"never reached an idle prompt; text was not pasted."`` -- the
+    busy status line then appears nowhere in the error and the caller cannot
+    tell a busy lane from a broken one.
+    """
+    busy = _idle_pane(f"prior output\n{LIVE_CODEX_BUSY_STATUS_LINE}")
+    run = _PaneRun([busy])
+    clock = _Clock()
+    channel = _CodexTmuxDriverChannel(
+        tmux_bin="tmux", session="codex-mid-turn", run_fn=run,
+        sleep_fn=clock.sleep, now_fn=clock.now,
+        stable_samples=1, verify_timeout_seconds=2.0,
+    )
+    failure = ""
+    try:
+        channel.insert("must not paste")
+    except DriverChannelSendError as exc:
+        failure = str(exc)
+    _check("still mid-turn" in failure, "a busy pane is reported as busy, not as unreachable")
+    _check(
+        "esc to interrupt" in failure,
+        "the busy report quotes the real status line it measured, so a steward "
+        "can see WHAT the pane was doing",
+    )
+    _check(
+        "retry" in failure,
+        "the busy report tells the caller the lane is healthy and the send is "
+        "worth retrying",
+    )
+
+
 def test_tmux_channel_ready_check_survives_banner_scroll() -> None:
     """RED-FIRST (Lane M, 2026-08-23, workbench/2026-08-23_dispatch_lane_m_
     codex_drive_idle_detector.md): live-measured against a real running Codex
@@ -1260,7 +1407,7 @@ def test_headless_watch_transport_watcher_keeps_spool() -> None:
     invocation must NOT carry --no-spool. codex-0147-dead-spool-retirement
     (2026-08-13) disabled it because stock Codex then had no Stop-hook
     consumer at all; the plugin now ships ``inbox_consumer.py``, a
-    SYNCHRONOUS Stop hook that drains this exact spool on every turn
+    SYNCHRONOUS Stop hook that observes this exact spool at every turn
     boundary, so an armed spool is no longer dead weight. Named failing
     mutation: re-adding ``--no-spool`` to ``_start_watcher``'s argv reds
     this leg."""
@@ -1569,6 +1716,9 @@ def main() -> int:
         test_tmux_channel_enter_waits_for_baseline_change,
         test_tmux_channel_refuses_two_enter_noops,
         test_tmux_channel_ready_check_survives_banner_scroll,
+        test_idle_pane_is_driveable_though_its_transcript_says_working,
+        test_ready_gate_reads_the_status_line_not_the_placeholder,
+        test_busy_pane_failure_says_busy_not_broken,
         test_real_tmux_parked_composer_requires_interrupt_before_drive,
         test_headless_watch_transport_watcher_keeps_spool,
         test_tmux_watch_transport_pane_command_keeps_spool,

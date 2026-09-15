@@ -199,6 +199,8 @@ def _is_unrecorded_operation_transition(
 ) -> bool:
     """Recognize exact executor transitions that deliberately precede an attempt."""
 
+    if _is_contract_reconciliation_reset(transaction, disagreements):
+        return True
     if len(disagreements) != 1:
         return False
     operation_id, latest = disagreements[0]
@@ -211,6 +213,23 @@ def _is_unrecorded_operation_transition(
         current is CheckpointStatus.APPLYING
         and transaction.result_kind is None
         and latest.get("checkpoint_status") == CheckpointStatus.AWAITING_USER.value
+    )
+
+
+def _is_contract_reconciliation_reset(
+    transaction: JournalTransaction,
+    disagreements: list[tuple[str, dict[str, JsonValue]]],
+) -> bool:
+    """Permit only reconciliation's declared verified-to-pending invalidation."""
+
+    marker = transaction.result_kind
+    if not isinstance(marker, str) or not marker.startswith("contract_reconciliation_reset:"):
+        return False
+    migration_id = marker.removeprefix("contract_reconciliation_reset:")
+    return bool(migration_id) and all(
+        transaction.operation_statuses[operation_id] is CheckpointStatus.PENDING
+        and attempt.get("checkpoint_status") == CheckpointStatus.VERIFIED.value
+        for operation_id, attempt in disagreements
     )
 
 

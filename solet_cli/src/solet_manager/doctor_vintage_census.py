@@ -33,6 +33,7 @@ _LAUNCHCTL_LAST_EXIT = re.compile(
     r"(?m)^\s*last exit (?:code|status)\s*=\s*([^\n]+?)\s*$"
 )
 _LAUNCHCTL_RUNS = re.compile(r"(?m)^\s*(?:runs|run count)\s*=\s*([^\n]+?)\s*$")
+_LAUNCHCTL_NEVER_EXITED = "(never exited)"
 
 
 def collect_doctor_advisories(
@@ -261,8 +262,8 @@ def _launchctl_observation(label: str, runner: LaunchctlRunner) -> dict[str, Jso
             "query_error": error or None,
         }
     state = _field(_LAUNCHCTL_STATE, output)
-    last_exit = _integer_field(_LAUNCHCTL_LAST_EXIT, output)
     runs = _integer_field(_LAUNCHCTL_RUNS, output)
+    last_exit = _last_exit_field(state, runs, output)
     if state is None or last_exit is None or runs is None:
         return {
             "label": label,
@@ -293,6 +294,18 @@ def _field(pattern: re.Pattern[str], output: str) -> str | None:
 
 def _integer_field(pattern: re.Pattern[str], output: str) -> int | None:
     value = _field(pattern, output)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _last_exit_field(state: str | None, runs: int | None, output: str) -> int | str | None:
+    value = _field(_LAUNCHCTL_LAST_EXIT, output)
+    if value == _LAUNCHCTL_NEVER_EXITED and state == "running" and runs == 1:
+        return value
     if value is None:
         return None
     try:

@@ -190,8 +190,43 @@ def main() -> int:
     _check_homebrew_contract(operation_source)
     _check_salesforce_contract(flow, operation_source, doctor_source)
     _check_stage_and_debt(flow, operation_source)
-    print("provisioning_pair_gate OK: 17 checks passed")
+    _check_lm_studio_contract(flow)
+    print("provisioning_pair_gate OK: coding, Salesforce and seven LM Studio provisioning pairs passed")
     return 0
+
+
+def _check_lm_studio_contract(flow: dict[str, object]) -> None:
+    expected = ["install_lm_studio", "start_lm_studio_server", "pull_lm_studio_embedding_model", "load_lm_studio_embedding_model", "pull_lm_studio_inference_model", "load_lm_studio_inference_model", "install_lm_studio_login_agent"]
+    expected_probes = ["lm_studio_cli_available", "lm_studio_server_ready", "lm_studio_embedding_artifact_present", "lm_studio_embedding_model_served", "lm_studio_inference_artifact_present", "lm_studio_inference_model_served", "lm_studio_login_agent_valid", "lm_studio_jit_disabled"]
+    refs = flow["stages"]["system_dependencies"]["operation_refs"]
+    _check(refs[refs.index("install_tmux") + 1:] == expected, "LM Studio must bootstrap before models entry")
+    operations = flow["operations"]
+    for operation_id in expected:
+        operation = operations[operation_id]
+        _check(operation["runner"] == "bootstrap" and operation["implementation_status"] == "implemented", "LM Studio operations must use the pre-venv bootstrap adapter")
+        _check(operation["requires_confirmation"] and "system_change_consent" in operation["consent_refs"], "host mutation requires consent")
+        _check(set(operation["parameters"]) == {"embeddings_implementation", "inference_implementation"}, "only existing implementation decisions activate provisioning")
+        for probe_id in operation["idempotency"]["postcondition_probe_refs"]:
+            _check(probe_id in flow["completion"]["required_probe_refs"], "every provisioning postcondition must also gate completion")
+    probes = flow["probes"]
+    for probe_id in expected_probes:
+        probe = probes[probe_id]
+        _check(probe["runner"] == "bootstrap" and probe["implementation_status"] == "implemented", "LM Studio probes must use the pre-venv bootstrap adapter")
+    _check_lm_studio_pair_policies(flow)
+
+
+def _check_lm_studio_pair_policies(flow: dict[str, object]) -> None:
+    operations = flow["operations"]
+    for role in ("embedding", "inference"):
+        decision = "embeddings_implementation" if role == "embedding" else "inference_implementation"
+        condition = {"decision_ref": decision, "operator": "equals", "value": "lm_studio"}
+        pull = operations[f"pull_lm_studio_{role}_model"]
+        load = operations[f"load_lm_studio_{role}_model"]
+        _check(pull["required_when"] == condition and load["required_when"] == condition, "each model pair must follow its own implementation selection")
+        _check(pull["apply_timeout_seconds"] == 900 and "apply_timeout_seconds" not in load, "only long pulls receive the reviewed deadline")
+    login = operations["install_lm_studio_login_agent"]
+    _check("lm_studio_background_service_consent" in login["consent_refs"] and login["permission_refs"] == ["lm_studio_background_items_permission"], "shared login job requires separate background assent")
+    _check(operations["start_lm_studio_server"]["idempotency"]["postcondition_probe_refs"] == ["lm_studio_server_ready", "lm_studio_jit_disabled"], "server readiness and JIT-disabled are separate postconditions")
 
 
 if __name__ == "__main__":

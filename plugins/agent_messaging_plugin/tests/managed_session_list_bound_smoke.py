@@ -19,9 +19,9 @@ WHAT THIS FILE PINS THAT A SMALLER FIXTURE CANNOT
 ==================================================
 Two properties, neither visible below the page boundary:
 
-1. **Bounded refusal past page 1.** The fixture holds 250 rows at a page size of
-   100, so both the explicit whole-ledger helper's completeness and the public
-   verb's over-limit refusal are observable.
+1. **Cursor continuation past 250 rows.** The fixture holds more than 250 rows
+   at a provider page size of 100, so a public roster can prove it neither
+   refuses nor silently truncates an operator-scale backlog.
 2. **The soft-delete override survives.** The old code seeded ``{is_deleted: 0}``
    and let a caller's ``filters`` OVERWRITE it, so ``is_deleted: 1`` returned
    soft-deleted rows. ``iter_table_rows`` expresses that as ``include_deleted``,
@@ -78,11 +78,11 @@ def _check(condition: object, label: str) -> None:
         print(f"  FAIL  {label}")
 
 
-#: Comfortably over MAX_READ_ROWS (100) so the walk must page more than once.
-#: The live table was 106 — barely over — which is precisely why the refusal
-#: surprised everyone; 250 makes a lost page a wrong number rather than a
-#: near-miss.
-_LIVE_ROWS = 250
+#: Comfortably over both MAX_READ_ROWS (100) and list_sessions' former 250-row
+#: refusal so the cursor walk must cross multiple provider pages and public
+#: pages.  The live table was 106 when the original provider bound appeared;
+#: the operator-host backlog now exceeds 250.
+_LIVE_ROWS = 301
 _DELETED_ROWS = 30
 
 
@@ -165,7 +165,7 @@ class _FakeState:
         del namespace
         self.query_ordered_calls += 1
         limit = int(query["limit"])
-        if limit > MAX_READ_ROWS:
+        if limit > MAX_READ_ROWS and not query.get("unbounded"):
             raise _CapRefusedError(f"limit {limit} over the {MAX_READ_ROWS} ceiling")
         rows = _ordered_page(
             self._rows,
@@ -258,19 +258,38 @@ def test_list_sessions_requires_a_filter() -> None:
         )
 
 
-def test_list_sessions_refuses_over_limit_without_rows() -> None:
-    """RED MUTATION: restore the 1,000,000-row ceiling and this test must fail."""
-    code = None
-    returned_rows: list[dict[str, Any]] = []
-    try:
-        returned_rows = list_sessions(
-            _state(), {"lane_id": "lane-a"}, limit=50,  # type: ignore[arg-type]
-        )["sessions"]
-    except VerbError as exc:
-        code = exc.code
+def test_list_sessions_pages_past_former_hard_limit() -> None:
+    """A >250-row filtered roster is enumerated, not refused or truncated."""
+    state = _state()
+    ids: list[str] = []
+    cursor: dict[str, str] | None = None
+    pages = 0
+    while True:
+        page = list_sessions(
+            state,
+            {"lane_id": "lane-a"},
+            limit=50,  # type: ignore[arg-type]
+            after_created_at=(cursor or {}).get("created_at"),
+            after_id=(cursor or {}).get("id"),
+        )
+        pages += 1
+        rows = page["sessions"]
+        ids.extend(str(row["id"]) for row in rows)
+        _check(page["returned"] == len(rows), "each page reports its exact returned count")
+        if not page["truncated"]:
+            _check(page["next_cursor"] is None, "the final page has no continuation cursor")
+            break
+        next_cursor = page["next_cursor"]
+        _check(
+            isinstance(next_cursor, dict)
+            and isinstance(next_cursor.get("created_at"), str)
+            and isinstance(next_cursor.get("id"), str),
+            "every non-final page supplies both immutable cursor components",
+        )
+        cursor = cast("dict[str, str]", next_cursor)
     _check(
-        code == "result_over_limit" and returned_rows == [],
-        "a filtered match set above limit refuses with result_over_limit and returns no rows",
+        pages > 5 and len(ids) == _LIVE_ROWS and len(set(ids)) == _LIVE_ROWS,
+        "a filtered roster above the former 250-row ceiling drains completely without duplicates",
     )
 
 
@@ -278,7 +297,7 @@ def test_list_sessions_returns_exact_under_limit_rows() -> None:
     state = _state()
     expected_ids = [f"ms-{idx:04d}" for idx in range(_LIVE_ROWS) if idx % 3 == 0]
     rows = list_sessions(
-        state, {"lifecycle_state": "retired"}, limit=100,  # type: ignore[arg-type]
+        state, {"lifecycle_state": "retired"}, limit=150,  # type: ignore[arg-type]
     )["sessions"]
     _check(
         [row["id"] for row in rows] == expected_ids,

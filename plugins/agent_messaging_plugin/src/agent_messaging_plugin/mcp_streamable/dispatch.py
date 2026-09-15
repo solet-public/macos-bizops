@@ -827,10 +827,14 @@ def _tool_peer_inbox(
         raise JsonRpcError(
             _INVALID_PARAMS, "peer_inbox.role_after must be a string",
         )
+    observer_raw = arguments.get("observer", False)
+    if not isinstance(observer_raw, bool):
+        raise JsonRpcError(_INVALID_PARAMS, "peer_inbox.observer must be a boolean")
     page = context.agent_messaging_service.peer_inbox(
         PeerInboxRequest(
             recipient_agent_id=session.agent_id,
             recipient_agent_instance_id=session.agent_instance_id,
+            recipient_agent_session_id=session.agent_session_id,
             after_created_at=after_dt,
             limit=max(1, min(limit_raw, 100)),
             # A4 (2026-08-04): include_important retired from the tool schema
@@ -841,6 +845,7 @@ def _tool_peer_inbox(
             # Opaque role-section cursor; the service validates + fails closed
             # on a malformed token (→ AgentMessagingError → JsonRpcError).
             role_after=role_after_raw,
+            observer=observer_raw,
         ),
     )
     context.peer_registry.touch_binding(session.agent_instance_id)

@@ -28,6 +28,7 @@ from click.testing import CliRunner, Result
 import agent_messaging_plugin.local_cli.cli as cli_mod
 import agent_messaging_plugin.local_cli.spool as spool_mod
 import agent_messaging_plugin.local_cli.wake as wake_mod
+import agent_messaging_plugin.local_cli.wake_role_receipts as receipt_mod
 
 _FLEET_ENV = {
     "AGENT_SESSION_LABEL": "Worker-A",
@@ -41,6 +42,7 @@ _BARE_ENV = {
     "AGENT_SESSION_LABEL": "",
     "AGENT_SESSION_ID": "",
 }
+_MANAGED_INSTANCE_ID = _MANAGED_FLEET_ENV["AGENT_INSTANCE_ID"]
 
 
 def _invoke_wake(
@@ -57,6 +59,75 @@ def _invoke_wake(
 
 def _tmp_spool() -> Path:
     return Path(tempfile.mkdtemp(prefix="wake-smoke-")) / "testling.agi.spool"
+
+
+class _FakeBridgeClient:
+    """Bridge boundary double: reconciliation still validates its response."""
+
+    response: dict[str, object] = {}
+    failure: Exception | None = None
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+    def __enter__(self) -> _FakeBridgeClient:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def call_and_wait(
+        self, process: str, arguments: dict[str, object], **_kwargs: object,
+    ) -> dict[str, object]:
+        type(self).calls.append((process, arguments))
+        if type(self).failure is not None:
+            raise type(self).failure
+        return type(self).response
+
+
+def _receipt_response(
+    results: list[dict[str, object]], *, instance_id: str = _MANAGED_INSTANCE_ID,
+) -> dict[str, object]:
+    return {
+        "result": {
+            "action_status": "completed",
+            "data": {"agent_instance_id": instance_id, "results": results},
+        },
+    }
+
+
+def _reconciliation_lines() -> list[str]:
+    return [
+        json.dumps({"watch": "event", "event": {"meta": {
+            "recipient_kind": "role", "recipient_key": "R", "role_row_id": "served-live",
+        }}}),
+        json.dumps({"watch": "inbox", "section": "role_entries", "entry": {
+            "message": {"metadata": {
+                "recipient_kind": "role", "recipient_key": "R", "role_row_id": "served-catchup",
+            }},
+        }}),
+        json.dumps({"watch": "event", "event": {"meta": {
+            "recipient_kind": "role", "recipient_key": "R", "role_row_id": "unserved",
+        }}}),
+        json.dumps({"watch": "event", "event": {"content": "direct survives"}}),
+        "not-json",
+        json.dumps({"watch": "event", "event": {"meta": {"recipient_kind": "role"}}}),
+        json.dumps({"watch": "event", "event": {"content": "new append"}}),
+    ]
+
+
+def _run_reconciliation_wake(
+    spool: Path, response: dict[str, object], *, failure: Exception | None = None,
+) -> Result:
+    _FakeBridgeClient.calls = []
+    _FakeBridgeClient.response = response
+    _FakeBridgeClient.failure = failure
+    with (
+        patch.object(receipt_mod, "BridgeClient", _FakeBridgeClient),
+        patch.object(receipt_mod, "resolve_base_url", lambda: "http://test"),
+    ):
+        return _invoke_wake(spool, env=_MANAGED_FLEET_ENV)
 
 
 def test_wake_is_a_no_op_outside_fleet_sessions() -> None:
@@ -82,6 +153,96 @@ def test_wake_fires_on_pending_spool_content() -> None:
     assert "Worker-A" in result.stderr
     offset = spool_mod.spool_offset_path(spool)
     assert int(offset.read_text().strip()) == len(line) + 1
+
+
+def test_wake_reconciles_only_exact_served_role_rows_before_emission() -> None:
+    """Actual BridgeClient reconciliation removes only exact served rows."""
+    spool = _tmp_spool()
+    lines = _reconciliation_lines()
+    spool.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    result = _run_reconciliation_wake(spool, _receipt_response([
+        {"recipient_key": "R", "role_row_id": "served-live", "served": True},
+        {"recipient_key": "R", "role_row_id": "served-catchup", "served": True},
+        {"recipient_key": "R", "role_row_id": "unserved", "served": False},
+    ]))
+    assert result.exit_code == wake_mod.WAKE_EXIT_SIGNAL, result.output
+    assert "served-live" not in result.stderr and "served-catchup" not in result.stderr
+    assert "unserved" in result.stderr and "direct survives" in result.stderr
+    assert "not-json" in result.stderr
+    assert "new append" in result.stderr
+    assert _FakeBridgeClient.calls[0][0] == receipt_mod._PROCESS  # noqa: SLF001
+    assert int(spool_mod.spool_offset_path(spool).read_text().strip()) == spool.stat().st_size
+
+
+def test_wake_all_served_advances_offset_without_model_wake() -> None:
+    spool = _tmp_spool()
+    lines = _reconciliation_lines()[:2]
+    spool.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    result = _run_reconciliation_wake(spool, _receipt_response([
+        {"recipient_key": "R", "role_row_id": "served-live", "served": True},
+        {"recipient_key": "R", "role_row_id": "served-catchup", "served": True},
+    ]))
+    assert result.exit_code == 0, result.output
+    assert not result.stderr
+    assert int(spool_mod.spool_offset_path(spool).read_text().strip()) == spool.stat().st_size
+
+
+def test_wake_reconciliation_failures_preserve_every_line_and_warn() -> None:
+    for label, response, failure in (
+        ("missing", _receipt_response([
+            {"recipient_key": "R", "role_row_id": "served-live", "served": True},
+        ]), None),
+        ("foreign", _receipt_response([], instance_id="agi-foreign"), None),
+        ("lookup", {}, RuntimeError("transport down")),
+    ):
+        spool = _tmp_spool()
+        lines = _reconciliation_lines()
+        spool.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        result = _run_reconciliation_wake(spool, response, failure=failure)
+        assert result.exit_code == wake_mod.WAKE_EXIT_SIGNAL, (label, result.output)
+        assert "wake receipt lookup failed" in result.stderr, (label, result.stderr)
+        for line in lines:
+            assert line in result.stderr, (label, line, result.stderr)
+        assert int(spool_mod.spool_offset_path(spool).read_text().strip()) == spool.stat().st_size
+
+
+def test_wake_survivor_write_or_flush_failure_does_not_advance_offset() -> None:
+    class BrokenOutput:
+        def __init__(self, failure: str) -> None:
+            self.failure = failure
+
+        def write(self, _value: str) -> None:
+            if self.failure == "write":
+                raise RuntimeError("survivor write failed")
+
+        def flush(self) -> None:
+            if self.failure == "flush":
+                raise RuntimeError("survivor flush failed")
+
+    response = _receipt_response([
+        {"recipient_key": "R", "role_row_id": "served-live", "served": True},
+        {"recipient_key": "R", "role_row_id": "served-catchup", "served": True},
+        {"recipient_key": "R", "role_row_id": "unserved", "served": False},
+    ])
+    for failure in ("write", "flush"):
+        spool = _tmp_spool()
+        lines = _reconciliation_lines()
+        spool.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _FakeBridgeClient.calls = []
+        _FakeBridgeClient.response = response
+        _FakeBridgeClient.failure = None
+        with (
+            patch.object(receipt_mod, "BridgeClient", _FakeBridgeClient),
+            patch.object(receipt_mod, "resolve_base_url", lambda: "http://test"),
+            patch(
+                "click.utils._default_text_stderr",
+                lambda failure=failure: BrokenOutput(failure),
+            ),
+        ):
+            result = _invoke_wake(spool, env=_MANAGED_FLEET_ENV)
+        offset = spool_mod.spool_offset_path(spool)
+        assert result.exit_code != wake_mod.WAKE_EXIT_SIGNAL, (failure, result.output)
+        assert not offset.exists() or int(offset.read_text().strip()) == 0, failure
 
 
 def test_wake_commits_the_offset_only_after_the_packet_is_emitted() -> None:

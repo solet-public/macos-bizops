@@ -22,7 +22,7 @@ def _no_op_runner(
 
 
 def check_pg_hba_scram_oracle(root: Path, *, check: Check, now: datetime) -> None:
-    """Prove comments and earlier matching trust entries cannot satisfy SCRAM."""
+    """Prove comments, transport-specific rules, and trust cannot satisfy SCRAM."""
 
     from bootstrap_adapter.models import AdapterError, AdapterRuntime, RolePolicyObservation
     from bootstrap_adapter.postgres import (
@@ -90,3 +90,33 @@ def check_pg_hba_scram_oracle(root: Path, *, check: Check, now: datetime) -> Non
         _inspect_pg_hba(preempted_scram) == (True, False, False),
         "RED-FIRST pg_hba oracle rejects first-match trust before SCRAM",
     )
+
+    ssl_only_scram = root / "ssl-only-scram-pg_hba.conf"
+    ssl_only_scram.write_text(
+        "local all all scram-sha-256\n"
+        "hostssl all all 127.0.0.1/32 scram-sha-256\n"
+        "hostssl all all ::1/128 scram-sha-256\n"
+        "hostnossl all all 127.0.0.1/32 trust\n"
+        "hostnossl all all ::1/128 trust\n"
+    )
+    ssl_only_scram.chmod(0o600)
+    check(
+        _inspect_pg_hba(ssl_only_scram) == (True, False, False),
+        "RED-FIRST hostssl SCRAM cannot verify passwordless hostnossl traffic",
+    )
+
+    for connection_type in ("hostgssenc", "hostnogssenc"):
+        gss_preempted_scram = root / f"{connection_type}-preempted-pg_hba.conf"
+        gss_preempted_scram.write_text(
+            "local all all scram-sha-256\n"
+            f"{connection_type} all all 127.0.0.1/32 trust\n"
+            "hostssl all all 127.0.0.1/32 scram-sha-256\n"
+            "hostnossl all all 127.0.0.1/32 scram-sha-256\n"
+            "hostssl all all ::1/128 scram-sha-256\n"
+            "hostnossl all all ::1/128 scram-sha-256\n"
+        )
+        gss_preempted_scram.chmod(0o600)
+        check(
+            _inspect_pg_hba(gss_preempted_scram) == (True, False, False),
+            f"RED-FIRST {connection_type} trust cannot hide behind later hostssl SCRAM",
+        )

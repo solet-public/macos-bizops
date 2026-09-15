@@ -85,7 +85,7 @@ ignore = [
 # when a test under it imports both ananta and the plugin's own
 # package and the import-block ordering trips ruff isort under the
 # root-config invocation.
-known-first-party = ["agent_messaging_plugin", "default_blob_storage_plugin", "secrets_manager_vault_plugin"]
+known-first-party = ["agent_messaging_plugin", "default_blob_storage_plugin", "default_inference_plugin", "secrets_manager_vault_plugin"]
 
 [tool.mypy]
 python_version = "3.13"

@@ -83,7 +83,7 @@ def _validate_decision_registry(
             decision_id, definition, bundle.stages
         )
         reachable.update(
-            _validate_decision_options(decision_id, definition, bundle.decisions)
+            _validate_decision_options(decision_id, definition, bundle.decisions, stage_order)
         )
         _check_condition_stage(
             definition.get("required_when"),
@@ -93,6 +93,7 @@ def _validate_decision_registry(
             stage_order=stage_order,
         )
         _validate_discovered_decision(decision_id, definition, bundle.probes)
+    _validate_available_when_dependency_cycles(bundle.decisions)
     unreachable = sorted(set(bundle.decisions) - reachable)
     if unreachable:
         raise ContractError(
@@ -117,6 +118,7 @@ def _validate_decision_options(
     decision_id: str,
     definition: dict[str, JsonValue],
     decisions: dict[str, dict[str, JsonValue]],
+    stage_order: dict[str, int],
 ) -> set[str]:
     source = definition.get("option_source")
     options = source.get("options") if isinstance(source, dict) else None
@@ -128,6 +130,7 @@ def _validate_decision_options(
             raise ContractError(
                 f"decision {decision_id!r} option {option_id!r} must be an object"
             )
+        _validate_option_availability(decision_id, option_id, option, decisions, stage_order)
         followups = _optional_string_tuple(
             option.get("followup_decision_refs"),
             f"decisions.{decision_id}.options.{option_id}.followup_decision_refs",
@@ -140,6 +143,58 @@ def _validate_decision_options(
             )
         reachable.update(followups)
     return reachable
+
+
+def _validate_option_availability(
+    decision_id: str,
+    option_id: str,
+    option: dict[str, JsonValue],
+    decisions: dict[str, dict[str, JsonValue]],
+    stage_order: dict[str, int],
+) -> None:
+    if "available_when" not in option:
+        return
+    condition = option["available_when"]
+    label = f"decision {decision_id!r} option {option_id!r} available_when"
+    _validate_option_condition(condition, label)
+    if decision_id in _condition_decision_refs(condition):
+        raise ContractError(f"{label} cannot depend on its own decision")
+    _check_condition_stage(
+        condition,
+        use_stage=str(decisions[decision_id]["resolution_stage_ref"]),
+        use_label=label,
+        decisions=decisions,
+        stage_order=stage_order,
+    )
+
+
+def _validate_option_condition(condition: JsonValue, label: str) -> None:
+    """Accept only the closed decision expressions supported by the evaluator."""
+
+    if not isinstance(condition, dict):
+        raise ContractError(f"{label} must be a decision condition object")
+    if set(condition) in ({"all"}, {"any"}):
+        children = next(iter(condition.values()))
+        if not isinstance(children, list) or not children:
+            raise ContractError(f"{label} compound must contain a non-empty array")
+        for child in children:
+            _validate_option_condition(child, label)
+        return
+    if set(condition) == {"not"}:
+        _validate_option_condition(condition["not"], label)
+        return
+    _validate_option_condition_leaf(condition, label)
+
+
+def _validate_option_condition_leaf(condition: dict[str, JsonValue], label: str) -> None:
+    if set(condition) != {"decision_ref", "operator", "value"}:
+        raise ContractError(f"{label} must contain only decision_ref, operator, and value")
+    if not isinstance(condition["decision_ref"], str):
+        raise ContractError(f"{label} decision_ref must be a string")
+    if condition["operator"] not in ("equals", "not_equals", "contains", "not_contains"):
+        raise ContractError(f"{label} has an unsupported operator")
+    if not isinstance(condition["value"], (str, bool, int, float)):
+        raise ContractError(f"{label} value must be a string, boolean, or number")
 
 
 def _validate_discovered_decision(
@@ -416,6 +471,50 @@ def _assert_decision_available(
             f"{use_label} at stage {use_stage!r} uses later decision "
             f"{decision_id!r} from stage {resolution_stage!r}"
         )
+
+
+def _validate_available_when_dependency_cycles(
+    decisions: dict[str, dict[str, JsonValue]],
+) -> None:
+    """Reject option availability that requires its own unresolved closure."""
+
+    dependencies = {
+        decision_id: _available_when_dependencies(definition)
+        for decision_id, definition in decisions.items()
+    }
+    visited: set[str] = set()
+    active: list[str] = []
+
+    def visit(decision_id: str) -> None:
+        if decision_id in active:
+            cycle = active[active.index(decision_id) :] + [decision_id]
+            raise ContractError(
+                "available_when decision dependency cycle: " + " -> ".join(cycle)
+            )
+        if decision_id in visited:
+            return
+        active.append(decision_id)
+        for prerequisite in dependencies[decision_id]:
+            visit(prerequisite)
+        active.pop()
+        visited.add(decision_id)
+
+    for decision_id in decisions:
+        visit(decision_id)
+
+
+def _available_when_dependencies(
+    definition: dict[str, JsonValue],
+) -> tuple[str, ...]:
+    source = definition.get("option_source")
+    options = source.get("options") if isinstance(source, dict) else None
+    if not isinstance(options, dict):
+        return ()
+    dependencies: list[str] = []
+    for option in options.values():
+        if isinstance(option, dict) and "available_when" in option:
+            dependencies.extend(_condition_decision_refs(option["available_when"]))
+    return tuple(dict.fromkeys(dependencies))
 
 
 def _condition_decision_refs(value: JsonValue) -> tuple[str, ...]:

@@ -558,10 +558,11 @@ def test_inbox_catchup_consumption() -> None:
     row = _row(state, TABLE_AGENT_ROLE_MESSAGE, "agm-r2")
     _check(
         len(default_catchup["role_entries"]) == 1
-        and row["consumed"] is True
-        and row["delivered"] is True,
-        "A3: the omitted include_important default is catch-up and consumes the"
-        " surfaced role row",
+        and default_catchup["role_read_page_token"] is None
+        and row["consumed"] is False
+        and row["delivered"] is False,
+        "A3: the watcher's omitted include_important default is observer-only"
+        " and does not consume the surfaced role row",
     )
     catchup = client.get(
         f"/api/v1/bridge/{watcher_bridge}/peer/inbox"
@@ -570,10 +571,11 @@ def test_inbox_catchup_consumption() -> None:
     row = _row(state, TABLE_AGENT_ROLE_MESSAGE, "agm-r2")
     _check(
         len(catchup["role_entries"]) == 1
-        and row["consumed"] is True
-        and row["delivered"] is True,
-        "A3: the watcher's include_important catch-up read consumes the"
-        " surfaced role row",
+        and catchup["role_read_page_token"] is None
+        and row["consumed"] is False
+        and row["delivered"] is False,
+        "A3: the watcher's include_important catch-up read remains unconsumed"
+        " until a rendered page is acknowledged",
     )
 
 

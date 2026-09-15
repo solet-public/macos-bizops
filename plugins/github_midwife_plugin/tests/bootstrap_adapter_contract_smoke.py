@@ -12,14 +12,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any
-from unittest.mock import patch
 
 import jsonschema
 from bootstrap_adapter_hba_oracle_support import check_pg_hba_scram_oracle
+from bootstrap_adapter_lm_studio_contract_support import check_lm_studio_routes
 from bootstrap_adapter_operation_contract_support import (
     check_absolute_homebrew_fallback,
     check_homebrew_install_route,
     check_python_install_route,
+)
+from bootstrap_adapter_physical_memory_contract_support import (
+    check_physical_memory_guard,
+    check_python_guard,
 )
 from bootstrap_adapter_plan_contract_support import check_homebrew_operation_plan
 
@@ -315,32 +319,6 @@ def _check_interrupted_resume(module: ModuleType, root: Path) -> None:
     _check(closed["checkpoint_status"] == "verified", "resumed closure verifies on post-probe")
 
 
-class _Version39(tuple[int, int, int, str, int]):
-    @property
-    def major(self) -> int:
-        return self[0]
-
-    @property
-    def minor(self) -> int:
-        return self[1]
-
-    @property
-    def micro(self) -> int:
-        return self[2]
-
-
-def _check_python_guard(module: ModuleType, root: Path) -> None:
-    request = _request(
-        root,
-        operation_id="python_version_valid",
-        operation_ref="bootstrap::python.probe_version",
-        purpose="stage_exit",
-    )
-    with patch.object(module.sys, "version_info", _Version39((3, 9, 6, "final", 0))):
-        result = _execute(module, request, lambda *_a, **_k: _completed(), lambda _name: None)
-    _check(result["checkpoint_status"] == "blocked", "Python 3.9 cannot silently verify")
-
-
 def _git_runner(expected: str, *, wrong: bool) -> Any:
     def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         joined = " ".join(command)
@@ -430,8 +408,9 @@ def _check_postgres_plans(module: ModuleType, root: Path) -> None:
         == {
             "postgres.install_homebrew_formula",
             "postgres.start_homebrew_service",
+            "postgres.install_pgvector_formula",
         },
-        "PostgreSQL install preview never infers pgvector absence from a stopped service",
+        "PostgreSQL install preview schedules pgvector when a stopped service leaves discovery unknown",
     )
     _check(
         all(
@@ -783,7 +762,30 @@ def main() -> int:
             _check_dependency_closure_install_order(module, root)
             _check_dependency_closure_failure_detail(module, root)
             _check_interrupted_resume(module, root)
-            _check_python_guard(module, root)
+            check_python_guard(
+                module=module,
+                root=root,
+                request_factory=_request,
+                execute=_execute,
+                completed=_completed,
+                check=_check,
+            )
+            check_physical_memory_guard(
+                module=module,
+                root=root,
+                request_factory=_request,
+                execute=_execute,
+                completed=_completed,
+                check=_check,
+            )
+            check_lm_studio_routes(
+                module=module,
+                root=root,
+                repository_root=_ROOT,
+                request_factory=_request,
+                execute=_execute,
+                check=_check,
+            )
             check_python_install_route(
                 module=module,
                 root=root,

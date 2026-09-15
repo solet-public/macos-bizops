@@ -9,6 +9,85 @@ from pathlib import Path
 from typing import Any
 
 
+def prepare_claude_receipt_fixture(
+    target: Path, runtime: Any, *, plugin_root: Path, selector: str, command_outcome: Any,
+) -> None:
+    """Materialize installer probe state from the plugin's shipped hook bytes."""
+    cache_root = runtime.home / ".claude/plugins/cache/iris/coordination-hooks/0.8.2"
+    shutil.copytree(plugin_root / "claude_plugin/coordination-hooks", cache_root)
+    shutil.copytree(
+        plugin_root / "claude_plugin/coordination-hooks",
+        target / "plugins/github_midwife_plugin/claude_plugin/coordination-hooks",
+        dirs_exist_ok=True,
+    )
+    interpreter = target / ".venv/bin/python3"
+    interpreter.parent.mkdir(parents=True, exist_ok=True)
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    (target / "profile").mkdir(exist_ok=True)
+    registry = runtime.home / ".claude/plugins/installed_plugins.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(json.dumps({"plugins": {selector: [{"installPath": str(cache_root)}]}}), encoding="utf-8")
+    runtime.responses[("/fixture/claude", "plugin", "list", "--json")] = command_outcome(
+        0, False, 1, json.dumps([{"id": selector, "enabled": True}]), "",
+    )
+
+
+def run_receipt_surface_shape_regression(
+    target: Path,
+    runtime: Any,
+    *,
+    request: Any,
+    selector: str,
+    receipt_surfaces: Callable[[Any, Path], tuple[Any, ...]],
+    build_receipt: Callable[..., dict[str, object]],
+    check: Callable[[object, str], None],
+) -> None:
+    """Exercise strict receipt surfaces for born-clone and checkout shapes."""
+    cache_root = runtime.home / ".claude/plugins/cache/iris/coordination-hooks/0.8.2/hooks"
+    shipped_root = target / "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks"
+    checkout_root = target / ".claude/hooks"
+    check(
+        not checkout_root.exists(),
+        "killing regression born clone has no repository-root Claude hooks",
+    )
+    born_receipt = build_receipt(
+        solet_name="iris",
+        app_home=target / "profile",
+        plugin_selector=selector,
+        default_hook_root=cache_root,
+        surfaces=receipt_surfaces(request, cache_root.parent),
+        installation_id="born-clone-receipt-fixture",
+    )
+    born_surfaces = born_receipt["surfaces"]
+    check(isinstance(born_surfaces, list), "born-clone receipt has surfaces")
+    born_checkout = next(surface for surface in born_surfaces if surface["kind"] == "checkout")
+    check(
+        born_checkout["hook_root"] == str(shipped_root.resolve()),
+        "born-clone checkout receipt names the plugin-owned shipped hook root",
+    )
+    check(
+        born_receipt["default_hook_root"] == str(cache_root.resolve()),
+        "born-clone plugin cache remains the receipt default surface",
+    )
+
+    shutil.copytree(shipped_root, checkout_root)
+    checkout_receipt = build_receipt(
+        solet_name="iris",
+        app_home=target / "profile",
+        plugin_selector=selector,
+        default_hook_root=cache_root,
+        surfaces=receipt_surfaces(request, cache_root.parent),
+        installation_id="development-checkout-receipt-fixture",
+    )
+    checkout_surfaces = checkout_receipt["surfaces"]
+    check(isinstance(checkout_surfaces, list), "development receipt has surfaces")
+    development_checkout = next(surface for surface in checkout_surfaces if surface["kind"] == "checkout")
+    check(
+        development_checkout["hook_root"] == str(checkout_root.resolve()),
+        "existing checkout-root Claude hooks remain the development receipt surface",
+    )
+
+
 def run_plugin_list_output_cap(
     target: Path,
     runtime: Any,
@@ -23,6 +102,11 @@ def run_plugin_list_output_cap(
     """Exercise the production capped capture path with closed fake vectors."""
 
     from github_midwife_plugin import setup_plugin_operations
+    from github_midwife_plugin.coordination_hook_installation import (
+        ReceiptSurface,
+        build_receipt,
+        publish_receipt,
+    )
     from github_midwife_plugin.installation_plugin_doctor import (
         selected_hooks,
         selected_plugins,
@@ -41,6 +125,21 @@ def run_plugin_list_output_cap(
             ),
             encoding="utf-8",
         )
+    interpreter = target / ".venv/bin/python3"
+    interpreter.parent.mkdir(parents=True, exist_ok=True)
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    profile = target / "profile"
+    profile.mkdir(exist_ok=True)
+    publish_receipt(build_receipt(
+        solet_name="iris",
+        app_home=profile,
+        plugin_selector=selector,
+        default_hook_root=claude_root / "hooks",
+        installation_id="plugin-list-fixture",
+        surfaces=(ReceiptSurface(
+            "plugin_cache", claude_root / "hooks", interpreter, claude_root / "hooks/hooks.json",
+        ),),
+    ))
     registry = runtime.home / ".claude/plugins/installed_plugins.json"
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(
@@ -231,6 +330,65 @@ def run_genesis_profile_projection(
         runtime.command_environments[-1].get("SOLET_AUTOSTART") == "enabled",
         "genesis adapter passes the resolved autostart decision",
     )
+
+    launchagent_request = request(
+        target,
+        operation_id="install_launchagent",
+        operation_ref="genesis::autostart.install",
+        phase="apply",
+        probe_purpose=None,
+        approval_fingerprint="sha256:" + "c" * 64,
+        dry_run=False,
+        public_inputs={
+            "setup_profile": "macos-bizops",
+            "autostart": "enabled",
+        },
+    )
+    launchagent_response = dispatch_request(launchagent_request, runtime)
+    check(
+        launchagent_response["checkpoint_status"] == "applied",
+        "launchagent adapter apply succeeds",
+    )
+    check(
+        runtime.command_environments[-1].get("SOLET_OPERATION_REF")
+        == "genesis::autostart.install",
+        "launchagent apply transports its operation scope to genesis",
+    )
+
+    invalid_launchagent_inputs = (
+        {},
+        {"setup_profile": "", "autostart": "enabled"},
+        {"setup_profile": None, "autostart": "enabled"},
+        {"setup_profile": 7, "autostart": "enabled"},
+        {"setup_profile": "macos-bizops", "autostart": "unexpected"},
+    )
+    for phase, probe_purpose, approval_fingerprint, dry_run in (
+        ("probe", "preview", None, True),
+        ("probe", "pre_apply", None, True),
+        ("apply", None, "sha256:" + "c" * 64, False),
+    ):
+        for public_inputs in invalid_launchagent_inputs:
+            commands_before = len(runtime.commands)
+            invalid_launchagent_request = request(
+                target,
+                operation_id="install_launchagent",
+                operation_ref="genesis::autostart.install",
+                phase=phase,
+                probe_purpose=probe_purpose,
+                approval_fingerprint=approval_fingerprint,
+                dry_run=dry_run,
+                public_inputs=public_inputs,
+            )
+            invalid_launchagent_response = dispatch_request(invalid_launchagent_request, runtime)
+            check(
+                invalid_launchagent_response["checkpoint_status"] == "blocked"
+                and invalid_launchagent_response["error_kind"] == "adapter_protocol_error",
+                "launchagent adapter rejects malformed profile and autostart inputs",
+            )
+            check(
+                len(runtime.commands) == commands_before,
+                "launchagent adapter blocks malformed inputs before invoking a command",
+            )
 
     missing_profile = request(
         target,

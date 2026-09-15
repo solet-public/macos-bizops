@@ -59,9 +59,18 @@ _HANDLER_FALLBACK_PUBLIC_INPUTS = {
     "setup::models.qualify_representative_inference": frozenset({"candidate_id"}),
 }
 _REQUIRED_OPERATION_PROJECTIONS = {
+    **dict.fromkeys(
+        (f"setup::lm_studio.{suffix}" for suffix in (
+            "cli_available", "server_ready", "embedding_artifact_present", "embedding_model_served",
+            "inference_artifact_present", "inference_model_served", "login_agent_valid", "jit_disabled",
+        )),
+        frozenset({"embeddings_implementation", "inference_implementation", "lm_studio_base_url"}),
+    ),
     "genesis::solet.verify": frozenset({"autostart"}),
     "genesis::autostart.verify": frozenset({"autostart"}),
+    "setup::models.qualify_embedding": frozenset({"candidate_id"}),
     "setup::models.qualify_structured_actions": frozenset({"candidate_id"}),
+    "setup::models.qualify_representative_inference": frozenset({"candidate_id"}),
 }
 
 _SINGULAR_REF_REGISTRIES = {
@@ -177,8 +186,8 @@ def _check_probe_expectation_advisory_contract(flow: dict[str, Any]) -> None:
         if "expectation" in definition
     ]
     _check(
-        "all 54 probe expectations are declared advisory documentation",
-        len(declared) == 54
+        "all 64 probe expectations are declared advisory documentation",
+        len(declared) == 64
         and any(
             gap["id"] == "probe_expectations_advisory_only"
             for gap in flow["known_gaps"]
@@ -201,6 +210,35 @@ def _check_probe_expectation_advisory_contract(flow: dict[str, Any]) -> None:
         ).read_text(encoding="utf-8"),
         str(readers),
     )
+
+
+def _check_static_option_conditions(validator: Draft7Validator, flow: dict[str, Any]) -> None:
+    """Validate availability conditions as expressions over resolved decisions.
+
+    Fact-dependent options would require probes before the selection that
+    activates those probes. Compound expressions must keep the same
+    decision-only leaf restriction recursively, including under negation.
+    """
+
+    leaf = {"decision_ref": "setup_profile", "operator": "equals", "value": "free"}
+    fact = {"fact_ref": "host_memory_mb", "operator": "equals", "value": 24576}
+    cases: list[tuple[object, bool]] = [
+        (leaf, True),
+        ({"all": [leaf, {"any": [leaf, {"not": leaf}]}]}, True),
+        (None, False),
+        ({}, False),
+        ({"all": []}, False),
+        ({**leaf, "operator": "matches"}, False),
+        ({**leaf, "fallback": True}, False),
+        ({"not": leaf, "any": [leaf]}, False),
+        (fact, False),
+        ({"all": [leaf, {"not": fact}]}, False),
+    ]
+    mutated = copy.deepcopy(flow)
+    options = mutated["decisions"]["inference_implementation"]["option_source"]["options"]
+    for condition, accepted in cases:
+        options["none"]["available_when"] = condition
+        _check(f"static option condition schema [{condition}]", validator.is_valid(mutated) == accepted, str(condition))
 
 
 def _iter_refs(flow: dict[str, Any]) -> Iterator[tuple[str, str, str]]:
@@ -300,8 +338,8 @@ def _check_decision_options(flow: dict[str, Any]) -> None:
         str(embedding_source["candidate_contract"]),
     )
     _check(
-        "inference candidates require structured-action qualification",
-        "structured_action_qualification" in inference_source["candidate_contract"]["qualification_probe_refs"],
+        "inference candidates are eligible when discovered as served",
+        inference_source["candidate_contract"]["qualification_probe_refs"] == [],
         str(inference_source["candidate_contract"]),
     )
 
@@ -971,8 +1009,12 @@ def _projection_transaction(flow: dict[str, Any]) -> Transaction:
             "decisions": {
                 "autostart": "enabled",
                 "coding_agents": ["codex"],
+                "embedding_model": "fixture-embedding-model",
                 "inference_model": "fixture-inference-model",
-            }
+                "embeddings_implementation": "lm_studio",
+                "inference_implementation": "lm_studio",
+            },
+            "public_inputs": {"lm_studio_base_url": "http://127.0.0.1:1234/v1"},
         },
         seed=seed,
         flow_id=str(flow["flow_id"]),
@@ -1050,6 +1092,7 @@ def main() -> int:
         schema = _load_json(_SCHEMA_PATH)
         flow = _load_json(_FLOW_PATH)
         validator = _check_schema_validation(schema, flow)
+        _check_static_option_conditions(validator, flow)
         _check_probe_expectation_advisory_contract(flow)
         _check_cross_references(flow)
         _check_decision_options(flow)

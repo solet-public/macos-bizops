@@ -70,6 +70,7 @@ def execute_create(
     decision_selections: dict[str, JsonValue] | None = None,
     decision_source: str = "flag",
     decision_sources: dict[str, str] | None = None,
+    stage_limit: str | None = None,
 ) -> CommandResult:
     """Start or resume only after the current exact preview was approved."""
 
@@ -119,6 +120,7 @@ def execute_create(
             selections=selections,
             decision_source=decision_source,
             sources=sources,
+            stage_limit=stage_limit,
         )
 
 
@@ -145,6 +147,7 @@ def _execute_locked_create(
     selections: dict[str, JsonValue],
     decision_source: str,
     sources: dict[str, str],
+    stage_limit: str | None,
 ) -> CommandResult:
     transaction = _load_or_create_transaction(
         paths=paths,
@@ -166,6 +169,10 @@ def _execute_locked_create(
         resume_compatibility=True,
     )
     approved_frontier = _approved_frontier(locked_preview)
+    if stage_limit is not None and approved_frontier != (stage_limit,):
+        raise StateConflictError(
+            "--resume-stage no longer matches the preview's sole executable frontier"
+        )
     answers = _approved_answers(locked_preview, bundle)
     assert_decision_revision_allowed(transaction, answers, bundle)
     transaction = reconcile_stage_probe_activation(
@@ -227,6 +234,7 @@ def _execute_locked_create(
         paths=paths,
         instance_registry=registry,
         refresh_preview=refresh_preview,
+        stop_after_stage=stage_limit,
     )
 
 

@@ -586,6 +586,20 @@ def _resolve_heartbeat_marker_dir() -> Path | None:
     return Path(app_home) / "data" / "heartbeat_marker"
 
 
+def _resolve_coordination_receipt_path() -> Path | None:
+    """The owner receipt is declared from APP_HOME, never inferred from cwd."""
+    app_home = os.environ.get("APP_HOME", "").strip()
+    if not app_home:
+        return None
+    return Path(app_home) / "data/coordination-hooks/claude/installation.v1.json"
+
+
+def _add_coordination_receipt_env(env: dict[str, str]) -> None:
+    receipt_path = _resolve_coordination_receipt_path()
+    if receipt_path is not None:
+        env["AGENT_COORDINATION_RECEIPT_PATH"] = str(receipt_path)
+
+
 def _authority_system_prompt(spec: Mapping[str, object]) -> str:
     """T2 authority-template (seat's design ruling 2026-08-05) -- renders
     the delegation contract for THIS spawn from the caller-supplied spec.
@@ -601,6 +615,9 @@ def _authority_system_prompt(spec: Mapping[str, object]) -> str:
         brief_ref=str(spec.get("brief_ref") or ""),
         spawned_by_role=str(spec.get("spawned_by_role") or ""),
         unit_id=str(spec.get("unit_id") or ""),
+        repository_root=str(
+            spec.get("repository_root") or spec.get("worktree_path") or "",
+        ),
     )
 
 
@@ -1055,6 +1072,7 @@ class HeadlessHostDriver:
         heartbeat_dir = _resolve_heartbeat_marker_dir()
         if heartbeat_dir is not None:
             env["AGENT_HEARTBEAT_MARKER_DIR"] = str(heartbeat_dir)
+        _add_coordination_receipt_env(env)
         return _with_worktree_pythonpath(env, cwd or self._cwd)
 
     def _hook_settings_json(

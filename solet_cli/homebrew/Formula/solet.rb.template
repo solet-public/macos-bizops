@@ -65,6 +65,17 @@ class Solet < Formula
         "profile": "{{SEED_PROFILE}}"
       }
     JSON
+    # This installed receipt distinguishes a worktree-payload experiment from
+    # a published manager/seed pair.  It is deliberately independent of the
+    # seed lock: the latter authenticates the seed, while this records how the
+    # manager archive itself reached this keg.
+    (libexec/"share"/"solet"/"install-source.json").write <<~JSON
+      {
+        "schema_version": 1,
+        "mode": "{{INSTALL_MODE}}",
+        "source_commit": "{{MANAGER_SOURCE_COMMIT}}"
+      }
+    JSON
     # `install_symlink` records a path, not bytes — safe for a source build,
     # where __dir__ resolves to this tap. Do NOT add a `bottle do...end`
     # block without re-solving seed discovery first: a bottle builder's
@@ -99,6 +110,7 @@ class Solet < Formula
     assert_match '"status": "preview_ready"', preview
     assert_match '"dry_run_writes": 0', preview
     assert_path_exists libexec/"share"/"solet"/"seed.lock.json"
+    assert_path_exists libexec/"share"/"solet"/"install-source.json"
     assert_path_exists libexec/"share"/"solet"/"contracts"/"macos_setup_flow.json"
     refute_path_exists testpath/"Solets"/"brew-test"
   end

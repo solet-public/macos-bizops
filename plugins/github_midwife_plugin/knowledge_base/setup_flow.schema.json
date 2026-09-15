@@ -517,6 +517,20 @@
         }
       ]
     },
+    "decision_condition": {
+      "description": "The closed condition grammar restricted recursively to resolved decisions.",
+      "allOf": [
+        { "$ref": "#/definitions/condition" },
+        {
+          "not": { "required": ["fact_ref"] },
+          "properties": {
+            "all": { "items": { "$ref": "#/definitions/decision_condition" } },
+            "any": { "items": { "$ref": "#/definitions/decision_condition" } },
+            "not": { "$ref": "#/definitions/decision_condition" }
+          }
+        }
+      ]
+    },
     "requirement_registry": {
       "type": "object",
       "minProperties": 1,
@@ -804,6 +818,10 @@
             "planned",
             "unavailable"
           ]
+        },
+        "available_when": {
+          "$ref": "#/definitions/decision_condition",
+          "description": "Decision-only condition for selecting this option; every referenced decision must be resolved before evaluation."
         },
         "unavailable_reason": {
           "$ref": "#/definitions/non_empty_string"
@@ -1743,6 +1761,12 @@
         "idempotency"
       ],
       "properties": {
+        "apply_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 900,
+          "description": "Apply budget in seconds; absent means 300. Probe budgets remain 30 seconds."
+        },
         "name": {
           "$ref": "#/definitions/non_empty_string"
         },

@@ -24,9 +24,11 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import github_midwife_plugin.command_launcher as command_launcher  # noqa: E402
 from github_midwife_plugin.command_launcher import (  # noqa: E402
     CONSOLE_SCRIPT_NAME,
     CommandLauncherError,
@@ -131,6 +133,128 @@ def _check_equivalent_mcp_table_format_is_idempotent(root: Path, clone: Path) ->
     )
 
 
+def _check_quote_path_is_valid_toml(root: Path) -> None:
+    clone = _make_clone(root, name='quote"clone')
+    config_path = root / "quote-config.toml"
+    result = install_command_launcher_at_birth(
+        name="quotehum", clone_root=clone, bin_dir=root / "quote-bin", codex_config_path=config_path,
+    )
+    parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    _check(
+        "a quote-containing clone path is escaped into valid Codex TOML",
+        result.mcp_status == "installed"
+        and parsed["mcp_servers"]["quotehum"]["command"]
+        == str(clone / ".venv" / "bin" / "python3"),
+        repr(result),
+    )
+
+
+def _check_atomic_config_failures_preserve_existing_bytes(root: Path) -> None:
+    clone = _make_clone(root, name="atomic_clone")
+    original = '[existing]\nvalue = "preserve-me"\n'
+
+    def assert_failure_preserves(
+        label: str,
+        config_path: Path,
+        patch_target: object,
+        patch_attribute: str,
+        replacement: object,
+    ) -> None:
+        config_path.write_text(original, encoding="utf-8")
+        with patch.object(patch_target, patch_attribute, replacement):
+            try:
+                install_command_launcher_at_birth(
+                    name="atomichum", clone_root=clone, bin_dir=root / f"{label}-bin",
+                    codex_config_path=config_path,
+                )
+                raise SmokeFailureError(f"{label} did not raise")
+            except CommandLauncherError:
+                _check(
+                    f"{label} leaves the existing config byte-identical",
+                    config_path.read_text(encoding="utf-8") == original,
+                    repr(config_path.read_text(encoding="utf-8")),
+                )
+
+    partial_config = root / "partial-config.toml"
+    original_os_write = command_launcher.os.write
+    first_write = True
+
+    def write_partial_then_fail(descriptor: int, content: bytes) -> int:
+        nonlocal first_write
+        if first_write:
+            first_write = False
+            return original_os_write(descriptor, content[:17])
+        raise OSError("injected ENOSPC after partial temporary write")
+
+    assert_failure_preserves(
+        "partial write failure", partial_config, command_launcher.os, "write", write_partial_then_fail
+    )
+
+    fsync_config = root / "fsync-config.toml"
+
+    def fsync_fail(_descriptor: int) -> None:
+        raise OSError("injected fsync failure")
+
+    assert_failure_preserves("fsync failure", fsync_config, command_launcher.os, "fsync", fsync_fail)
+
+    parse_config = root / "parse-config.toml"
+    original_read_text = Path.read_text
+
+    def read_corrupt_temporary(path: Path, *args: object, **kwargs: object) -> str:
+        if path.parent == parse_config.parent and path.name.startswith(f".{parse_config.name}."):
+            return "not valid = [toml"
+        return original_read_text(path, *args, **kwargs)
+
+    assert_failure_preserves("temporary parse failure", parse_config, Path, "read_text", read_corrupt_temporary)
+
+    replace_config = root / "replace-config.toml"
+
+    def replace_fail(_source: object, _target: object) -> None:
+        raise OSError("injected replace failure")
+
+    assert_failure_preserves("replace failure", replace_config, command_launcher.os, "replace", replace_fail)
+
+
+def _check_atomic_config_success_preserves_mode_and_non_bmp(root: Path) -> None:
+    clone = _make_clone(root, name="rocket-😀")
+    config_path = root / "mode-config.toml"
+    config_path.write_text('[existing]\nvalue = "preserve-me"\n', encoding="utf-8")
+    config_path.chmod(0o640)
+    result = install_command_launcher_at_birth(
+        name="atomichum", clone_root=clone, bin_dir=root / "atomic-success-bin", codex_config_path=config_path,
+    )
+    parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    _check(
+        "atomic replacement preserves unrelated config, target mode, and parses a non-BMP path",
+        result.mcp_status == "installed"
+        and parsed["existing"]["value"] == "preserve-me"
+        and parsed["mcp_servers"]["atomichum"]["command"] == str(clone / ".venv" / "bin" / "python3")
+        and config_path.stat().st_mode & 0o777 == 0o640,
+        repr(result),
+    )
+
+
+def _check_symlinked_config_is_refused(root: Path) -> None:
+    clone = _make_clone(root, name="symlink_clone")
+    target = root / "operator-config.toml"
+    target.write_text('[existing]\nvalue = "preserve-me"\n', encoding="utf-8")
+    config_path = root / "symlink-config.toml"
+    config_path.symlink_to(target)
+    try:
+        install_command_launcher_at_birth(
+            name="symlinkhum", clone_root=clone, bin_dir=root / "symlink-bin", codex_config_path=config_path,
+        )
+        raise SmokeFailureError("symlinked config did not raise")
+    except CommandLauncherError as exc:
+        _check(
+            "a symlinked config is refused without replacing the operator target",
+            "symlinked" in str(exc)
+            and config_path.is_symlink()
+            and target.read_text(encoding="utf-8") == '[existing]\nvalue = "preserve-me"\n',
+            str(exc),
+        )
+
+
 def _check_stale_symlink_repoint(root: Path, clone: Path, bin_dir: Path, target: Path) -> None:
     other_clone = _make_clone(root, name="other_clone")
     launcher = bin_dir / "testhum"
@@ -227,6 +351,10 @@ def main() -> int:
             clone, bin_dir, config_path, target = _check_fresh_install(root)
             _check_self_generated_config_is_idempotent(clone, bin_dir, config_path, target)
             _check_equivalent_mcp_table_format_is_idempotent(root, clone)
+            _check_quote_path_is_valid_toml(root)
+            _check_atomic_config_failures_preserve_existing_bytes(root)
+            _check_atomic_config_success_preserves_mode_and_non_bmp(root)
+            _check_symlinked_config_is_refused(root)
             _check_stale_symlink_repoint(root, clone, bin_dir, target)
             _check_failure_modes(root)
     except SmokeFailureError as exc:

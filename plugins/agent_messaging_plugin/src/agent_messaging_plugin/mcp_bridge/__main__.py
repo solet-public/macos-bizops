@@ -483,6 +483,13 @@ TOOLS: Final[list[Tool]] = [
                         "page. Distinct from 'after' (the instance section)."
                     ),
                 },
+                "observer": {
+                    "type": "boolean",
+                    "description": (
+                        "Read-only observation: preserve pending rows and do not issue "
+                        "display acknowledgements."
+                    ),
+                },
             },
             "additionalProperties": False,
         },
@@ -721,6 +728,7 @@ async def _tool_peer_inbox(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
         limit=a.get("limit"),
         include_important=True,
         role_after=a.get("role_after"),
+        observer=bool(a.get("observer", False)),
     )
 
 

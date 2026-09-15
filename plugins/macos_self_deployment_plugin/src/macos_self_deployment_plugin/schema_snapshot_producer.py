@@ -102,6 +102,10 @@ def build_schema_snapshot_fn(
         env["APP_HOME"] = str(app_home)
         env["EXPECT_ROOT"] = str(code_root.resolve())
         env["PYTHONPATH"] = _pythonpath_for_tree(code_root)
+        # The collector imports the staged tree through PYTHONPATH. Its
+        # imports must not add CPython cache artifacts to that tree between
+        # release-code materialization and exact-population verification.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         if manifest_override is not None:
             env["MANIFEST_PLUGIN_OVERRIDE"] = json.dumps(sorted(manifest_override))
         else:

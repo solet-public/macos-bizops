@@ -25,6 +25,7 @@ _MOVING_RELEASE_NAMES = frozenset({"head", "main", "master", "latest"})
 _REQUIRED = frozenset(
     {
         "formula_revision",
+        "install_mode",
         "manager_url",
         "manager_source_repository",
         "manager_source_ref",
@@ -50,8 +51,10 @@ def main() -> int:
     args = _parser().parse_args()
     metadata = _load_metadata(args.metadata)
     substitutions = {
+        "INSTALL_MODE": metadata["install_mode"],
         "MANAGER_URL": metadata["manager_url"],
         "MANAGER_SHA256": metadata["release_archive_sha256"],
+        "MANAGER_SOURCE_COMMIT": metadata["manager_source_commit"],
         "REVISION_LINE": _revision_line(metadata["formula_revision"]),
         "SEED_REPOSITORY": metadata["seed_repository"],
         "SEED_RELEASE_TAG": metadata["seed_release_tag"],
@@ -103,7 +106,7 @@ def _load_metadata(path: Path) -> dict[str, object]:
     _require_int(raw, "formula_revision")
     _require_seed_repository(raw)
     _require_release_tag(raw)
-    _require_manager_release_url(raw)
+    _require_install_source(raw)
     _require_repository(raw, "manager_source_repository")
     _require_pattern(raw, "manager_source_ref", _GIT_ID)
     _require_pattern(raw, "release_archive_sha256", _SHA256)
@@ -155,10 +158,25 @@ def _require_release_tag(raw: dict[str, object]) -> str:
     return release_tag
 
 
-def _require_manager_release_url(
-    raw: dict[str, object],
-) -> None:
-    parsed = _parse_github_url(_require_string(raw, "manager_url"), "manager_url")
+def _require_install_source(raw: dict[str, object]) -> None:
+    mode = _require_string(raw, "install_mode")
+    url = _require_string(raw, "manager_url")
+    if mode == "dev":
+        _require_local_payload_url(url)
+        return
+    if mode != "release":
+        raise SystemExit("install_mode must be exactly 'dev' or 'release'")
+    _require_manager_release_url(url)
+
+
+def _require_local_payload_url(value: str) -> None:
+    parsed = urlsplit(value)
+    if parsed.scheme != "file" or parsed.netloc or not parsed.path.startswith("/") or parsed.query or parsed.fragment:
+        raise SystemExit("dev manager_url must be an absolute, unambiguous file:// payload URL")
+
+
+def _require_manager_release_url(value: str) -> None:
+    parsed = _parse_github_url(value, "manager_url")
     parts = parsed.path.split("/")
     if len(parts) != 7 or parts[3:5] != ["releases", "download"]:
         raise SystemExit(

@@ -55,6 +55,36 @@ class _Handler(BaseHTTPRequestHandler):
         del format, args
 
 
+class _TimeoutHonouringRuntime:
+    """Return a valid response only when the probe supplies enough time."""
+
+    def __init__(self, response: JsonObject, minimum_timeout_seconds: int) -> None:
+        self.response = response
+        self.minimum_timeout_seconds = minimum_timeout_seconds
+        self.requested_timeout_seconds: int | None = None
+
+    def http_json(
+        self,
+        url: str,
+        *,
+        timeout_seconds: int,
+        payload: JsonObject | None = None,
+    ) -> tuple[int, JsonObject | None]:
+        del url, payload
+        self.requested_timeout_seconds = timeout_seconds
+        if timeout_seconds < self.minimum_timeout_seconds:
+            raise TimeoutError("fixture response exceeded the supplied timeout")
+        return 200, self.response
+
+    def run(self, *args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("inference qualification must not invoke a subprocess")
+
+    def atomic_write(self, path: Path, content: str, *, mode: int) -> None:
+        del path, content, mode
+        raise AssertionError("inference qualification must not write")
+
+
 def _request(base_url: str) -> AdapterRequest:
     return AdapterRequest(
         request_id="00000000-0000-4000-8000-000000000006",
@@ -71,6 +101,74 @@ def _request(base_url: str) -> AdapterRequest:
         dry_run=True,
         timeout_seconds=20,
         public_inputs={"candidate_id": "requested-X", "lm_studio_base_url": base_url},
+    )
+
+
+def _qualified_response(model: str) -> JsonObject:
+    return {
+        "model": model,
+        "system_fingerprint": "fp-qualification",
+        "choices": [
+            {
+                "message": {"content": "", "reasoning_content": "reasoning preamble"},
+                "finish_reason": "length",
+            }
+        ],
+        "usage": {"reasoning_tokens": 186},
+    }
+
+
+def _evidence_observed(result: JsonObject, evidence_id: str) -> object:
+    evidence = result.get("evidence")
+    if not isinstance(evidence, list):
+        return None
+    for item in evidence:
+        if isinstance(item, dict) and item.get("id") == evidence_id:
+            return item.get("observed")
+    return None
+
+
+def _timeout_and_evidence_controls(request: AdapterRequest) -> bool:
+    delayed_runtime = _TimeoutHonouringRuntime(
+        _qualified_response("requested-X"), minimum_timeout_seconds=21
+    )
+    delayed = inference_qualification(request, delayed_runtime)
+    timed_out = inference_qualification(
+        request,
+        _TimeoutHonouringRuntime(_qualified_response("requested-X"), minimum_timeout_seconds=181),
+    )
+    identity_only = inference_qualification(
+        request,
+        _TimeoutHonouringRuntime(
+            {
+                "model": "requested-X",
+                "choices": [],
+            },
+            minimum_timeout_seconds=1,
+        ),
+    )
+    return all(
+        (
+            delayed.get("checkpoint_status") == "verified",
+            delayed_runtime.requested_timeout_seconds == 180,
+            delayed.get("duration_ms") is not None,
+            _evidence_observed(delayed, "inference_qualification_elapsed_seconds") is not None,
+            _evidence_observed(delayed, "inference_qualification_reasoning_tokens") == 186,
+            timed_out.get("checkpoint_status") != "verified",
+            "timed out" in str(timed_out.get("repair")),
+            _evidence_observed(timed_out, "inference_qualification_elapsed_seconds") is not None,
+            identity_only.get("checkpoint_status") == "verified",
+        )
+    )
+
+
+def _qualification_request_controls() -> bool:
+    return all(
+        payload.get("messages")
+        == [{"role": "user", "content": "What model is this?"}]
+        and payload.get("max_tokens") == 8
+        and "response_format" not in payload
+        for payload in _Handler.requests
     )
 
 
@@ -96,8 +194,14 @@ def main() -> int:
         and "requested-X" in repair
         and "served-Y" in repair
         and [payload.get("model") for payload in _Handler.requests] == ["requested-X", "requested-X"]
+        and _qualification_request_controls()
+        and _timeout_and_evidence_controls(request)
     )
-    print("PASS served-model identity and substitution refusal" if passed else "FAIL served-model identity")
+    print(
+        "PASS served-model identity, timeout budget, and substitution refusal"
+        if passed
+        else "FAIL served-model identity"
+    )
     return 0 if passed else 1
 
 

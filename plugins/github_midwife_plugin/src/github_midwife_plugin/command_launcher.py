@@ -23,8 +23,12 @@ not this phase's — this phase only creates the launcher in a well-known dir.
 
 from __future__ import annotations
 
+import os
+import stat
+import tempfile
 import tomllib
 from dataclasses import dataclass
+from json import dumps as json_dumps
 from pathlib import Path
 
 from .constants import NAME_PATTERN, is_valid_solet_name
@@ -70,7 +74,7 @@ def _mcp_block(name: str, clone_root: Path) -> str:
     python = clone_root / ".venv" / "bin" / "python3"
     return (
         f"[mcp_servers.{name}]\n"
-        f'command = "{python}"\n'
+        f"command = {_toml_basic_string(str(python))}\n"
         'args = ["-m", "agent_messaging_plugin.mcp_bridge"]\n'
         'env_vars = ["CODEX_THREAD_ID"]\n\n'
         f"[mcp_servers.{name}.env]\n"
@@ -78,6 +82,14 @@ def _mcp_block(name: str, clone_root: Path) -> str:
         'AGENT_IDENTITY = "codex"\n'
         'AGENT_SESSION_LABEL = "Codex-Ambient"\n'
     )
+
+
+def _toml_basic_string(value: str) -> str:
+    """Encode a string using TOML's JSON-compatible basic-string escapes."""
+    # TOML basic strings accept UTF-8 Unicode scalars, while JSON's ASCII-only
+    # encoding represents supplementary-plane characters as surrogate pairs.
+    # TOML rejects those pairs because they are not Unicode scalars.
+    return json_dumps(value, ensure_ascii=False)
 
 
 def _mcp_server_table(name: str, clone_root: Path) -> dict[str, object]:
@@ -131,11 +143,76 @@ def _read_mcp_config(config_path: Path, name: str, clone_root: Path) -> _McpConf
     return _McpConfigRead(content=content, already_installed=False, reason="Codex MCP bridge installed")
 
 
-def _append_mcp_block(config_path: Path, content: str, name: str, clone_root: Path) -> None:
+def _write_all(descriptor: int, content: bytes) -> None:
+    """Write every byte or fail loud rather than publishing a partial file."""
+    offset = 0
+    while offset < len(content):
+        written = os.write(descriptor, content[offset:])
+        if written <= 0:
+            raise OSError("could not write complete Codex MCP configuration")
+        offset += written
+
+
+def _fsync_directory(directory_path: Path) -> None:
+    directory_descriptor = os.open(directory_path, os.O_RDONLY)
     try:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        separator = "" if not content or content.endswith("\n\n") else "\n"
-        config_path.write_text(content + separator + _mcp_block(name, clone_root), encoding="utf-8")
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+
+
+def _replace_mcp_config_atomically(config_path: Path, updated_content: str) -> None:
+    """Publish validated configuration without mutating the current target first."""
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    if config_path.is_symlink():
+        raise CommandLauncherError(
+            f"refusing to atomically replace symlinked Codex config {config_path}"
+        )
+    if config_path.exists() and not config_path.is_file():
+        raise CommandLauncherError(
+            f"refusing to atomically replace non-file Codex config {config_path}"
+        )
+
+    existing_mode = stat.S_IMODE(config_path.stat().st_mode) if config_path.exists() else None
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{config_path.name}.", dir=config_path.parent)
+    temporary: Path | None = Path(temporary_name)
+    try:
+        try:
+            if existing_mode is not None:
+                os.fchmod(descriptor, existing_mode)
+            _write_all(descriptor, updated_content.encode("utf-8"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        try:
+            tomllib.loads(temporary.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise CommandLauncherError(
+                f"could not verify temporary Codex MCP config {config_path}: {exc}"
+            ) from exc
+        os.replace(temporary, config_path)
+        temporary = None
+        _fsync_directory(config_path.parent)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                # Cleanup must not hide a write, validation, or replacement failure.
+                pass
+
+
+def _append_mcp_block(config_path: Path, content: str, name: str, clone_root: Path) -> None:
+    separator = "" if not content or content.endswith("\n\n") else "\n"
+    updated_content = content + separator + _mcp_block(name, clone_root)
+    try:
+        tomllib.loads(updated_content)
+    except tomllib.TOMLDecodeError as exc:  # pragma: no cover - local block is covered by smoke.
+        raise CommandLauncherError(
+            f"generated Codex MCP configuration for {config_path} is invalid TOML: {exc}"
+        ) from exc
+    try:
+        _replace_mcp_config_atomically(config_path, updated_content)
     except OSError as exc:
         raise CommandLauncherError(
             f"could not write Codex MCP config {config_path}: {exc}"

@@ -344,6 +344,99 @@ def test_inbox_reports_incomplete_loudly_on_a_role_section_fault() -> None:
     assert payload["role_section_error"] == "boom", payload
 
 
+def _ack_pages_handler(
+    *, fail_first_ack: bool = False, timeline: list[str] | None = None,
+) -> tuple[Handler, list[str]]:
+    """Real process-call transport with two issued role page tokens."""
+    calls: list[str] = []
+    pages = [
+        _role_addressed_inbox_page(role_entries=[_entry("role-1", "2026-09-12T00:00:01")]),
+        _role_addressed_inbox_page(role_entries=[_entry("role-2", "2026-09-12T00:00:02")]),
+    ]
+    for index, page in enumerate(pages):
+        page["role_read_page_token"] = f"page-{index}"
+        page["next_role_cursor"] = f"r-{index + 1}" if index == 0 else None
+
+    pending: dict[str, dict[str, Any]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/bridge/open":
+            return httpx.Response(200, json={"bridge_id": "agc-ack", "session_id": "s"})
+        if path.endswith("/close"):
+            return httpx.Response(200, json={"status": "closed"})
+        if path.endswith("/process/call"):
+            body = json.loads(request.content)
+            key = body["process_key"]
+            arguments = body["arguments"]
+            action = f"ae-{len(pending)}"
+            if key == cli_mod.PEER_INBOX_PROCESS_KEY:
+                page = pages[1] if arguments.get("role_after") == "r-1" else pages[0]
+                pending[action] = {"action_status": "completed", "data": page}
+            else:
+                calls.append(str(arguments["page_token"]))
+                if timeline is not None:
+                    timeline.append(f"ack:{arguments['page_token']}")
+                pending[action] = (
+                    {"action_status": "failed", "error": "ack down"}
+                    if fail_first_ack and len(calls) == 1
+                    else {"action_status": "completed", "data": {"status": "acked"}}
+                )
+            return httpx.Response(200, json={"status": "queued", "action_id": action})
+        if "/process/result/" in path:
+            action = path.rsplit("/", 1)[-1]
+            return httpx.Response(200, json={"status": "completed", "result": pending[action]})
+        return httpx.Response(404, json={"detail": path})
+    return handler, calls
+
+
+def test_inbox_flushes_complete_output_before_all_page_acks() -> None:
+    order: list[str] = []
+    handler, acks = _ack_pages_handler(timeline=order)
+    original_emit = cli_mod._emit
+    with (
+        patch.dict(os.environ, {"AGENT_SESSION_ID": "ases-ack-test"}),
+        patch.object(
+            cli_mod, "_emit", lambda value: (order.append("emit"), original_emit(value))[1],
+        ),
+        patch.object(cli_mod, "_flush_inbox_output", lambda: order.append("flush")),
+    ):
+        result = _invoke(["inbox"], handler)
+    assert result.exit_code == 0, result.output
+    assert acks == ["page-0", "page-1"]
+    assert order == ["emit", "flush", "ack:page-0", "ack:page-1"], order
+
+
+def test_inbox_emit_or_flush_failure_makes_zero_ack_calls() -> None:
+    for failure in ("emit", "flush"):
+        handler, acks = _ack_pages_handler()
+        target = cli_mod
+        attribute = "_emit" if failure == "emit" else "_flush_inbox_output"
+        with (
+            patch.dict(os.environ, {"AGENT_SESSION_ID": "ases-ack-test"}),
+            patch.object(target, attribute, side_effect=RuntimeError(failure)),
+        ):
+            result = _invoke(["inbox"], handler)
+        assert result.exit_code != 0
+        assert acks == [], failure
+
+
+def test_inbox_ack_failure_is_loud_only_after_output() -> None:
+    handler, acks = _ack_pages_handler(fail_first_ack=True)
+    with patch.dict(os.environ, {"AGENT_SESSION_ID": "ases-ack-test"}):
+        result = _invoke(["inbox"], handler)
+    assert result.exit_code != 0 and "acknowledgement failed" in result.output
+    assert '"complete": true' in result.output and acks == ["page-0"]
+
+
+def test_inbox_observer_never_acknowledges_issued_pages() -> None:
+    handler, acks = _ack_pages_handler()
+    with patch.dict(os.environ, {"AGENT_SESSION_ID": "ases-ack-test"}):
+        result = _invoke(["inbox", "--observer"], handler)
+    assert result.exit_code == 0, result.output
+    assert acks == []
+
+
 def test_not_running_maps_to_connection_error() -> None:
     def boom(_name: str | None = None) -> str:
         raise client_mod.SoletNotRunningError("down")

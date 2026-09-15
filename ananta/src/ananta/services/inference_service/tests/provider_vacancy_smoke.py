@@ -37,6 +37,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
+from _deferred_vertex_queue_fake import query_ordered_rows  # noqa: E402
+
 from ananta.error_handling import FrameworkError  # noqa: E402
 from ananta.services.inference_service import (  # noqa: E402
     VACANT_PROVIDER_TOKEN,
@@ -149,7 +151,12 @@ class _FakeState:
             row for row in self.deferred_rows
             if not all(row.get(col) == record.get(col) for col in conflict)
         ]
-        self.deferred_rows.append({**record, "is_deleted": 0})
+        self.deferred_rows.append({
+            **record,
+            "is_deleted": 0,
+            "created_at": f"2026-09-15T00:00:00.{len(self.deferred_rows):06d}+00:00",
+            "id": f"deferred-{len(self.deferred_rows)}",
+        })
         return {"action_status": "completed", "data": {"result": {"upserted": 1}}}
 
     def query_state(self, namespace: str, filters: dict[str, object]) -> dict[str, object]:
@@ -161,6 +168,11 @@ class _FakeState:
             if all(row.get(key) == value for key, value in want.items())
         ]
         return {"action_status": "completed", "data": {"records": rows}}
+
+    def query_ordered(self, namespace: str, data: dict[str, object]) -> dict[str, object]:
+        """Model the bounded-read helper's ordered live-row pages."""
+        del namespace
+        return query_ordered_rows(self.deferred_rows, data)
 
     def update_state(
         self, namespace: str, query: dict[str, object], updates: dict[str, object],

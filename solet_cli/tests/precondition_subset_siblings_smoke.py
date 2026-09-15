@@ -43,17 +43,14 @@ _CASES = (
     ),
     (
         "configure_lm_studio_embeddings",
-        ("embedding_request_succeeds",),
+        ("embedding_model_qualification",),
         (),
-        "embedding_request_succeeds",
-    ),
-    (
-        "configure_lm_studio_inference",
-        ("structured_action_qualification",),
-        (),
-        "structured_action_qualification",
+        "embedding_model_qualification",
     ),
 )
+_LEGACY_PRECONDITION_OVERRIDES = {
+    "configure_lm_studio_embeddings": ("embedding_request_succeeds",),
+}
 
 
 def _check(condition: bool, label: str) -> None:
@@ -172,10 +169,11 @@ def main() -> int:
     legacy_flow = json.loads(_LEGACY_FLOW.read_text(encoding="utf-8"))
     normalized = contracts._normalize_legacy_resume_flow_v1(_LEGACY_DIGEST, legacy_flow)
     for operation_id, expected, _narrow, _blocked in _CASES:
+        legacy_expected = _LEGACY_PRECONDITION_OVERRIDES.get(operation_id, expected)
         _check(
             normalized["operations"][operation_id]["idempotency"]["precondition_probe_refs"]
-            == list(expected),
-            f"digest-pinned legacy resume strengthens {operation_id} to the full predicate",
+            == list(legacy_expected),
+            f"digest-pinned legacy resume preserves {operation_id} precondition semantics",
         )
     print("precondition_subset_siblings_smoke: 16/16 checks passed")
     return 0

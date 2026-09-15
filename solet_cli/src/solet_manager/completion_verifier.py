@@ -6,6 +6,7 @@ import uuid
 
 from .adapters import AdapterRegistry, OperationRequest, invoke_adapter
 from .contracts import ContractBundle, startup_readiness_budget
+from .inference_probe_policy import advisory_inference_probe_result
 from .models import JsonValue
 from .operation_records import attempt_record, next_attempt
 from .paths import ManagerPaths
@@ -72,10 +73,9 @@ def _run_completion_probe(
         timeout_seconds=timeout_seconds,
         public_inputs=public_inputs,
     )
-    result = invoke_adapter(
-        registry,
-        runner=str(definition["runner"]),
-        request=request,
+    result = advisory_inference_probe_result(
+        transaction.answers, request,
+        invoke_adapter(registry, runner=str(definition["runner"]), request=request),
     )
     updated = transaction.with_completion_result(
         probe_id,

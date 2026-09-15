@@ -77,6 +77,7 @@ def assert_decision_revision_allowed(
             bundle,
             sequences,
             attempted,
+            transaction.operation_stages,
         )
     ]
     if blocked:
@@ -115,16 +116,53 @@ def _decision_change_is_blocked(
     bundle: ContractBundle,
     sequences: dict[str, int],
     attempted: set[str],
+    operation_stages: dict[str, str],
 ) -> bool:
     definition = bundle.decisions.get(decision_id)
     if definition is None:
         return True
-    resolution_stage = definition.get("resolution_stage_ref")
-    if not isinstance(resolution_stage, str):
-        return True
-    return any(
-        sequences[stage_id] >= sequences[resolution_stage] for stage_id in attempted
+    consuming_sequences = _consuming_stage_sequences(
+        decision_id,
+        bundle,
+        sequences,
+        operation_stages,
     )
+    if not consuming_sequences:
+        return False
+    frontier = min(consuming_sequences)
+    return any(
+        sequences[stage_id] >= frontier for stage_id in attempted
+    )
+
+
+def _consuming_stage_sequences(
+    decision_id: str,
+    bundle: ContractBundle,
+    sequences: dict[str, int],
+    operation_stages: dict[str, str],
+) -> tuple[int, ...]:
+    """Return the declared stages of operations that consume one decision."""
+
+    consuming: list[int] = []
+    for operation_id, stage_id in operation_stages.items():
+        operation = bundle.operations.get(operation_id)
+        if operation is None or stage_id not in sequences:
+            raise StateConflictError(
+                f"retained operation binding {operation_id!r} has no declared stage"
+            )
+        if _references_decision(operation.get("parameters"), decision_id):
+            consuming.append(sequences[stage_id])
+    return tuple(consuming)
+
+
+def _references_decision(value: JsonValue | None, decision_id: str) -> bool:
+    if isinstance(value, dict):
+        if value.get("decision_ref") == decision_id:
+            return True
+        return any(_references_decision(item, decision_id) for item in value.values())
+    if isinstance(value, list):
+        return any(_references_decision(item, decision_id) for item in value)
+    return False
 
 
 def read_only_auto_advance_is_pure(

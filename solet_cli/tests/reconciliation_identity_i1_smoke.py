@@ -197,6 +197,7 @@ def _check_manifest_destination_shape() -> None:
             },
             "stage_probe_mappings": [],
             "first_use_inactive_probe_migrations": [],
+            "operation_statuses_to_reset": [],
         },
         "fourth migration is the missing install_postgresql pre-probe reconciliation identity",
     )
@@ -248,6 +249,7 @@ def _check_manifest_destination_shape() -> None:
                 },
             ],
             "first_use_inactive_probe_migrations": [],
+            "operation_statuses_to_reset": [],
         },
         "fifth migration maps the launch-agent probes after models owns them",
     )
@@ -274,10 +276,14 @@ def _check_manifest_destination_shape() -> None:
             },
             "stage_probe_mappings": [],
             "first_use_inactive_probe_migrations": [],
+            "operation_statuses_to_reset": [],
         },
         "sixth migration pins the four precondition-subset sibling repairs",
     )
-    _check(isinstance(migrations, list) and len(migrations) == 8, "eight shipped migrations")
+    _check(
+        isinstance(migrations, list) and len(migrations) == 20,
+        "twenty shipped migrations including direct LM Studio pgvector reconciliation",
+    )
     _check(
         all(
             isinstance(item, dict)
@@ -287,7 +293,7 @@ def _check_manifest_destination_shape() -> None:
         ),
         "shipped destination identities are digest-only",
     )
-    _check(len(load_contract_reconciliations()) == 8, "digest-only manifest parses")
+    _check(len(load_contract_reconciliations()) == 20, "digest-only manifest parses")
 
 
 def _check_digest_tool() -> None:

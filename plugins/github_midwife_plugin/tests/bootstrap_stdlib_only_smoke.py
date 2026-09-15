@@ -212,6 +212,7 @@ def _check_bootstrap_is_stdlib_only() -> None:
         "protocol.py",
         "dependency.py",
         "homebrew.py",
+        "lm_studio.py",
         "postgres.py",
         "routes.py",
     }

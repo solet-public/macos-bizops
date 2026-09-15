@@ -46,6 +46,7 @@ from .spool import (
     spool_offset_path,
     watch_pairing_path,
 )
+from .wake_role_receipts import reconcile_role_receipts
 
 # Claude Code hook contract: exit 2 is the wake/block signal for BOTH the
 # asyncRewake background shape and the synchronous block-stop shape.
@@ -69,6 +70,8 @@ class WakeTarget:
     spool: Path
     offset_file: Path
     lock_file: Path
+    agent_session_id: str = ""
+    agent_instance_id: str = ""
 
 
 @click.command(name="wake")
@@ -105,6 +108,16 @@ def wake(spool_override: Path | None, max_wait_s: float) -> None:
         if delivery is None:
             return
         lines, new_offset = delivery
+        lines, warning = reconcile_role_receipts(
+            agent_session_id=target.agent_session_id,
+            agent_instance_id=target.agent_instance_id,
+            lines=lines,
+        )
+        if warning:
+            click.echo(f"solet-bridge wake: {warning}", err=True)
+        if not lines:
+            _write_offset(target.offset_file, new_offset)
+            return
         # D5 / REL-05 symmetry: EMIT FIRST, THEN COMMIT. The offset flip is this
         # path's `/peer/delivered`, and REL-05 already ruled emit-before-flip on
         # the MCP half -- so both delivery halves are now confirm-then-commit.
@@ -179,6 +192,8 @@ def _resolve_target(spool_override: Path | None) -> WakeTarget | None:
         spool=spool,
         offset_file=spool_offset_path(spool),
         lock_file=spool_lock_path(spool),
+        agent_session_id=session_id,
+        agent_instance_id=instance_id,
     )
 
 
@@ -332,8 +347,8 @@ def _compose_wake_packet(target: WakeTarget, lines: list[str]) -> str:
     if overflow > 0:
         body.append(f"(+{overflow} more line(s) in {target.spool})")
     footer = (
-        "Act on these now — they are real peer/role messages, already "
-        "delivered and consumed server-side. Durable copies: "
+        "Act on these now — they are durably persisted/transport-delivered, "
+        "not proof that any model consumed them. Durable copies: "
         f"`{target.solet_name} call "
         "plugin::agent_messaging_plugin::peer_inbox "
         '\'{"agent_session_id": "\'"$AGENT_SESSION_ID"\'"}\'`. '

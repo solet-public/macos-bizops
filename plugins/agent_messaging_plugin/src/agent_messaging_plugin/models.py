@@ -28,6 +28,17 @@ from typing import Final, Protocol
 # client and server can never drift.
 WATCH_AGENT_INSTANCE_PREFIX: Final[str] = "agi-watch-"
 
+# iss_c93a9b2f: a bridge queue can hold up to ``max_pending_events`` (200)
+# messages before a sender gets BridgeQueueFullError, but nothing previously
+# bounded how many of those ``events_after`` hands back IN ONE CALL — a role
+# holder that fell behind could have its full backlog (up to 200) dispatched
+# to the MCP client back-to-back in a single long-poll response, which
+# contributed to killing a session under real fleet load. This is a page-size
+# bound on ONE call, not a change to total eventual delivery: anything past
+# the limit stays in ``pending_events`` (unacked) and is returned on the very
+# next poll, since the long-poll loop re-calls immediately on success.
+EVENTS_AFTER_PAGE_LIMIT: Final[int] = 25
+
 
 class NativeWakeAdapter(Protocol):
     """Protocol for plugins that surface a native MCP wake channel.
@@ -328,9 +339,18 @@ class BridgeSessionState:
             return event
 
     def events_after(
-        self, after: int,
+        self, after: int, *, limit: int | None = EVENTS_AFTER_PAGE_LIMIT,
     ) -> tuple[list[QueuedEvent], list[QueuedEvent]]:
         """Return ``(acked, pending)`` for a client cursor.
+
+        ``limit`` bounds only what is RETURNED as ``pending`` this call —
+        ``self.pending_events`` still ends this call holding every row with
+        ``cursor > after`` (unchanged from before this parameter existed), so
+        a row past the limit stays legitimately un-acked and is handed back
+        on the caller's next poll (oldest-first, since ``pending_events`` is
+        append-ordered and never reordered). ``None`` restores the old
+        unbounded behavior for callers that need it (none currently do; kept
+        so this is additive, not a breaking signature change).
 
         ``acked`` are the events the client's ``after`` cursor acknowledges
         (cursor <= after) — they were returned by an earlier call and the
@@ -344,7 +364,10 @@ class BridgeSessionState:
             self.pending_events = [
                 e for e in self.pending_events if e.cursor > after
             ]
-            return acked, list(self.pending_events)
+            pending = list(self.pending_events)
+            if limit is not None:
+                pending = pending[:limit]
+            return acked, pending
 
     def pending_event_count(self) -> int:
         with self._events_lock:
@@ -352,6 +375,7 @@ class BridgeSessionState:
 
 
 __all__ = [
+    "EVENTS_AFTER_PAGE_LIMIT",
     "WATCH_AGENT_INSTANCE_PREFIX",
     "BridgeBinding",
     "BridgeSessionState",

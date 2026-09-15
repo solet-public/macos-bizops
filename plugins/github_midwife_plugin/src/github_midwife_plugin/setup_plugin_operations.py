@@ -7,6 +7,14 @@ import shlex
 from pathlib import Path
 from typing import cast
 
+from .coordination_hook_installation import (
+    ReceiptSurface,
+    build_receipt,
+    hook_root_matches_expected,
+    publish_receipt,
+    receipt_matches_hook_root,
+    receipt_path,
+)
 from .setup_adapter_contract import AdapterRequest, JsonObject, JsonValue, planned_action, result
 from .setup_adapter_runtime import CommandOutcome, Runtime, read_json_object, resolve_executable
 from .setup_operations import (
@@ -32,6 +40,21 @@ def plugin_install(request: AdapterRequest, runtime: Runtime) -> JsonObject:
         return _plugin_install_probe(
             request, runtime, cli, executable, marketplace, selector, manifest
         )
+    return _apply_plugin_install(
+        request, runtime, is_claude, cli, executable, marketplace, selector, manifest,
+    )
+
+
+def _apply_plugin_install(
+    request: AdapterRequest,
+    runtime: Runtime,
+    is_claude: bool,
+    cli: str,
+    executable: str,
+    marketplace: str,
+    selector: str,
+    manifest: Path,
+) -> JsonObject:
     patch_error = _patch_hook_manifest(manifest, request.target, runtime)
     if patch_error is not None:
         return _blocked(request, "hook_manifest_invalid", patch_error)
@@ -50,6 +73,12 @@ def plugin_install(request: AdapterRequest, runtime: Runtime) -> JsonObject:
     installed = runtime.run(
         install_vector, timeout_seconds=request.timeout_seconds, cwd=request.target
     )
+    if is_claude and installed.ok:
+        receipt_error = _publish_claude_receipt(
+            request, runtime, executable, marketplace, selector,
+        )
+        if receipt_error is not None:
+            return _blocked(request, "coordination_receipt_invalid", receipt_error)
     return _apply_outcome(request, installed, f"{cli}_plugin_install_failed")
 
 
@@ -69,12 +98,15 @@ def _plugin_install_probe(
     rows = plugin_list_rows(cli, listed)
     visible = rows is not None and any(plugin_row_visible(cli, row, selector) for row in rows)
     interpreter_ok = _manifest_has_absolute_python(manifest, request.target)
-    if visible and interpreter_ok:
+    receipt_ok = not is_claude_plugin(cli) or _claude_receipt_is_current(
+        request, runtime, executable, marketplace, selector,
+    )
+    if visible and interpreter_ok and receipt_ok:
         return _verified(request, f"{cli}_plugin", f"{cli} plugin is visible and bound", str(manifest))
     if request.probe_purpose == "post_apply":
         return _blocked(
             request,
-            "plugin_not_visible" if not visible else "hook_manifest_invalid",
+            "plugin_not_visible" if not visible else "coordination_receipt_invalid",
             post_apply_repair(list_vector, listed, selector, visible),
         )
     return result(
@@ -91,7 +123,7 @@ def _plugin_actions(
     selector: str,
     manifest: Path,
 ) -> list[JsonObject]:
-    return [
+    actions = [
         planned_action(
             action_id=f"{cli}.patch_hook_interpreter",
             title=f"Bind every {cli} Python hook to target Python 3.13",
@@ -114,6 +146,117 @@ def _plugin_actions(
             evidence_ref="plugin_not_visible",
         ),
     ]
+    if is_claude_plugin(cli):
+        actions.append(planned_action(
+            action_id="claude.publish_coordination_receipt",
+            title="Publish verified coordination hook ownership receipt",
+            mutation_kind="coordination_receipt_write",
+            target=str(receipt_path(request.target / "profile")),
+            evidence_ref="coordination_receipt_missing_or_drifted",
+        ))
+    return actions
+
+
+def _publish_claude_receipt(
+    request: AdapterRequest,
+    runtime: Runtime,
+    executable: str,
+    marketplace: str,
+    selector: str,
+) -> str | None:
+    """Publish only after the supported CLI/registry readback identifies cache bytes."""
+    root = _selected_claude_cache_root(runtime, executable, marketplace, selector)
+    if isinstance(root, str):
+        return root
+    intended = request.target / "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks"
+    if not hook_root_matches_expected(root / "hooks", intended):
+        return "selected Claude cache bytes do not match the intended coordination hook source"
+    try:
+        publish_receipt(build_receipt(
+            solet_name=request.name,
+            app_home=request.target / "profile",
+            plugin_selector=selector,
+            default_hook_root=root / "hooks",
+            surfaces=_receipt_surfaces(request, root),
+        ))
+    except (OSError, ValueError) as exc:
+        return f"could not verify/publish coordination receipt: {exc}"
+    return None
+
+
+def is_claude_plugin(cli: str) -> bool:
+    return cli == "claude"
+
+
+def _claude_receipt_is_current(
+    request: AdapterRequest,
+    runtime: Runtime,
+    executable: str,
+    marketplace: str,
+    selector: str,
+) -> bool:
+    root = _selected_claude_cache_root(runtime, executable, marketplace, selector)
+    if not isinstance(root, Path):
+        return False
+    intended = request.target / "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks"
+    return hook_root_matches_expected(root / "hooks", intended) and receipt_matches_hook_root(
+        receipt_path(request.target / "profile"),
+        root / "hooks",
+        solet_name=request.name,
+        app_home=request.target / "profile",
+        plugin_selector=selector,
+        interpreter=request.target / ".venv/bin/python3",
+    )
+
+
+def _selected_claude_cache_root(
+    runtime: Runtime, executable: str, marketplace: str, selector: str,
+) -> Path | str:
+    listed = runtime.run(plugin_list_vector("claude", marketplace, executable), timeout_seconds=10)
+    rows = plugin_list_rows("claude", listed)
+    if rows is None or not any(plugin_row_visible("claude", row, selector) for row in rows):
+        return "supported Claude plugin-list readback did not confirm the selected installation"
+    entries = _claude_registry_entries(runtime, selector)
+    if entries is None:
+        return "Claude installed-plugin registry has no selected installation path"
+    roots = _registry_roots(entries)
+    if len(roots) != 1:
+        return "Claude installed-plugin registry is ambiguous or missing selected cache root"
+    return roots[0].resolve()
+
+
+def _claude_registry_entries(runtime: Runtime, selector: str) -> list[JsonValue] | None:
+    registry = read_json_object(runtime.home / ".claude/plugins/installed_plugins.json")
+    plugins = registry.get("plugins") if registry is not None else None
+    entries = plugins.get(selector) if isinstance(plugins, dict) else None
+    return cast(list[JsonValue], entries) if isinstance(entries, list) else None
+
+
+def _registry_roots(entries: list[JsonValue]) -> list[Path]:
+    roots = [
+        Path(value)
+        for row in entries
+        if isinstance(row, dict)
+        for value in [row.get("installPath")]
+        if isinstance(value, str) and Path(value).is_dir()
+    ]
+    return roots
+
+
+def _receipt_surfaces(request: AdapterRequest, root: Path) -> tuple[ReceiptSurface, ReceiptSurface]:
+    interpreter = request.target / ".venv/bin/python3"
+    cache = ReceiptSurface("plugin_cache", root / "hooks", interpreter, root / "hooks/hooks.json")
+    shipped_checkout_root = (
+        request.target / "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks"
+    )
+    checkout_root = request.target / ".claude/hooks"
+    checkout = ReceiptSurface(
+        "checkout",
+        checkout_root if checkout_root.is_dir() else shipped_checkout_root,
+        interpreter,
+        shipped_checkout_root / "hooks.json",
+    )
+    return cache, checkout
 
 
 def plugin_list_vector(cli: str, marketplace: str, executable: str) -> tuple[str, ...]:

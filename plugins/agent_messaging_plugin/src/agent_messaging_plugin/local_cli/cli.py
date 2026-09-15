@@ -133,6 +133,7 @@ class WatchIdentity:
     agent_id: str
     agent_session_id: str
     agent_instance_id: str
+    operator_tmux_host: str = ""
 
 
 def _invoked_name() -> str:
@@ -403,7 +404,8 @@ def health() -> None:
     "--limit", type=int, default=WATCH_INBOX_DRAIN_LIMIT, show_default=True,
     help="Page size per fetch.",
 )
-def inbox(limit: int) -> None:
+@click.option("--observer", is_flag=True, help="Observe pending inbox state without display acknowledgement.")
+def inbox(limit: int, observer: bool) -> None:
     """Read THIS session's full durable inbox — BOTH sections, merged.
 
     MSG-04: `peer_inbox` returns two independently-paged sections —
@@ -440,11 +442,15 @@ def inbox(limit: int) -> None:
         )
 
     fault: dict[str, str] = {}
+    page_tokens: list[str] = []
 
     def _fn(client: BridgeClient) -> dict[str, Any]:
-        def _fetch(after: str | None, role_after: str | None) -> dict[str, Any]:
+        def _fetch(
+            after: str | None, role_after: str | None, *, observe: bool,
+        ) -> dict[str, Any]:
             data = _one_shot_peer_inbox_page(
                 client, agent_session_id, limit, after=after, role_after=role_after,
+                observer=observe,
             )
             status = data.get("role_section_status")
             if status == "error" and "role" not in fault:
@@ -452,13 +458,16 @@ def inbox(limit: int) -> None:
                     data.get("role_section_error")
                     or "role section reported an error with no message",
                 )
+            token = data.get("role_read_page_token")
+            if not observe and isinstance(token, str) and token:
+                page_tokens.append(token)
             return data
 
         direct_entries, _, direct_exhausted = _drain_instance_section(
-            _fetch, "", seeding=False,
+            lambda after, role_after: _fetch(after, role_after, observe=True), "", seeding=False,
         )
         role_entries, _, role_exhausted = _drain_role_section(
-            _fetch, "", seeding=False,
+            lambda after, role_after: _fetch(after, role_after, observe=observer), "", seeding=False,
         )
         merged = sorted(
             [{**entry, "section": "direct"} for entry in direct_entries]
@@ -479,6 +488,20 @@ def inbox(limit: int) -> None:
 
     payload = _run(_fn)
     _emit(payload)
+    # Output is the boundary.  A partial write or flush failure raises before
+    # this point, preserving all pending pages for a later retry.
+    _flush_inbox_output()
+    if not observer:
+        for token in page_tokens:
+            try:
+                _run(
+                    lambda client, page_token=token: _one_shot_ack_role_read_page(
+                        client, agent_session_id, page_token,
+                    ),
+                )
+            except SystemExit:
+                click.echo("solet-bridge inbox: output succeeded but role page acknowledgement failed.", err=True)
+                raise
     if not payload.get("complete", False):
         click.echo(
             "solet-bridge inbox: DID NOT fully drain — treat this as a PARTIAL read, "
@@ -486,6 +509,11 @@ def inbox(limit: int) -> None:
             err=True,
         )
         raise SystemExit(int(ExitCodes.EXTERNAL_ERROR))
+
+
+def _flush_inbox_output() -> None:
+    """Flush the CLI's displayed inbox before issuing any page receipt ACK."""
+    sys.stdout.flush()
 
 
 @cli.command()
@@ -547,6 +575,7 @@ def inbox(limit: int) -> None:
         "the displaced session stops receiving the role's deliveries."
     ),
 )
+@click.option("--operator-tmux-host", default="", help="Qualify this operator Codex tmux host before arming.")
 def watch(
     role: str | None,
     agent_id: str,
@@ -555,6 +584,7 @@ def watch(
     no_claim: bool,
     exit_with_parent: int | None,
     takeover: bool,
+    operator_tmux_host: str,
 ) -> None:
     """Hold this session's REGISTERED PRESENCE and stream its messages (no MCP).
 
@@ -570,7 +600,7 @@ def watch(
     separately established durable role binding remains, so role-addressed
     messages queue for the next start.
     """
-    identity = _resolve_watch_identity(role, agent_id)
+    identity = _resolve_watch_identity(role, agent_id, operator_tmux_host=operator_tmux_host)
     try:
         solet_name = resolve_solet_name()
         # W1 (§34.3): become the session's singleton BEFORE any network traffic,
@@ -694,7 +724,9 @@ def _parent_is_gone(parent_pid: int | None) -> bool:
     return False
 
 
-def _resolve_watch_identity(role: str | None, agent_id: str) -> WatchIdentity:
+def _resolve_watch_identity(
+    role: str | None, agent_id: str, *, operator_tmux_host: str = "",
+) -> WatchIdentity:
     """Build the watcher's stable identity from the launcher-exported env.
 
     The session id carrier must be per-logical-session (the launcher's
@@ -743,6 +775,7 @@ def _resolve_watch_identity(role: str | None, agent_id: str) -> WatchIdentity:
         agent_id=agent_id,
         agent_session_id=session_id,
         agent_instance_id=resolved_instance_id,
+        operator_tmux_host=operator_tmux_host,
     )
 
 
@@ -815,6 +848,8 @@ def _arm_and_stream(
     # wake hook reading the sidecar — census D4.
     _emit_line({
         "watch": "armed",
+        "agent_instance_id": identity.agent_instance_id,
+        "agent_session_id": identity.agent_session_id,
         "role": identity.role,
         "claim": claim,
         "spool": None if spool is None else str(spool),
@@ -839,6 +874,7 @@ def _register_without_claim(
         session_label=identity.role,
         agent_session_id=identity.agent_session_id,
         watcher_declared=True,
+        operator_tmux_host=identity.operator_tmux_host,
     )
     return {"claimed": False, "reason": "managed_registration_only"}
 
@@ -871,6 +907,7 @@ def _register_and_claim(
             session_label=identity.role,
             agent_session_id=identity.agent_session_id,
             watcher_declared=True,
+            operator_tmux_host=identity.operator_tmux_host,
         )
         return client.peer_claim_role(name=identity.role, takeover=takeover)
     except RoleClaimRejectedError as rejection:
@@ -962,6 +999,7 @@ def _drain_inbox(client: BridgeClient, spool: Path | None, marks_path: Path) -> 
         limit=WATCH_INBOX_DRAIN_LIMIT,
         after=after,
         role_after=role_after,
+        observer=True,
     )
     fresh_instance, next_after, _ = _drain_instance_section(
         fetch_page, instance_after,
@@ -989,6 +1027,7 @@ def _inbox_section(page: dict[str, Any], section: str) -> list[Any]:
 
 
 PEER_INBOX_PROCESS_KEY: Final[str] = "plugin::agent_messaging_plugin::peer_inbox"
+PEER_ACK_ROLE_READ_PAGE_PROCESS_KEY: Final[str] = "plugin::agent_messaging_plugin::peer_ack_role_read_page"
 
 
 def _one_shot_peer_inbox_page(
@@ -998,6 +1037,7 @@ def _one_shot_peer_inbox_page(
     *,
     after: str | None,
     role_after: str | None,
+    observer: bool = False,
 ) -> dict[str, Any]:
     """Fetch one ``peer_inbox`` page through the no-MCP platform process.
 
@@ -1016,6 +1056,7 @@ def _one_shot_peer_inbox_page(
             "limit": limit,
             **({"after": after} if after else {}),
             **({"role_after": role_after} if role_after else {}),
+            **({"observer": True} if observer else {}),
         },
         reason="solet-bridge inbox: one-shot both-section drain (MSG-04)",
     )
@@ -1028,6 +1069,24 @@ def _one_shot_peer_inbox_page(
     data = outcome.get("data")
     if not isinstance(data, dict):
         raise BridgeCallError(f"{PEER_INBOX_PROCESS_KEY} returned no data: {outcome!r}")
+    return data
+
+
+def _one_shot_ack_role_read_page(
+    client: BridgeClient, agent_session_id: str, page_token: str,
+) -> dict[str, Any]:
+    """Acknowledge only after the dedicated inbox command flushed stdout."""
+    dispatched = client.call_and_wait(
+        PEER_ACK_ROLE_READ_PAGE_PROCESS_KEY,
+        {"agent_session_id": agent_session_id, "page_token": page_token},
+        reason="solet-bridge inbox: acknowledge flushed role page",
+    )
+    outcome = dispatched.get("result")
+    if not isinstance(outcome, dict) or outcome.get("action_status") != "completed":
+        raise BridgeCallError(f"{PEER_ACK_ROLE_READ_PAGE_PROCESS_KEY} did not complete: {dispatched!r}")
+    data = outcome.get("data")
+    if not isinstance(data, dict):
+        raise BridgeCallError(f"{PEER_ACK_ROLE_READ_PAGE_PROCESS_KEY} returned no data")
     return data
 
 
@@ -1243,6 +1302,7 @@ def _stream_events(
                 session_label=identity.role,
                 agent_session_id=identity.agent_session_id,
                 watcher_declared=True,
+                operator_tmux_host=identity.operator_tmux_host,
             )
             last_register = time.monotonic()
 

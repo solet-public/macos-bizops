@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -94,6 +95,16 @@ from .validation import validate_action_parameters
 # Knowledge base containing the openings catalog (plan template guidance)
 _GUIDANCE_KB_NAME = "prospection_and_goal_directed_planning"
 _GUIDANCE_EXAMPLES_SUBDIR = "examples"
+_LM_STUDIO_RETRY_INITIAL_SECONDS = 2.0
+_LM_STUDIO_RETRY_MAX_SECONDS = 60.0
+# Keep this aligned with the established Qwen completion budget.  The pre-warm
+# prompt normally emits a very small schema-valid response, but a reasoning
+# capable model can spend its output budget before producing that response.
+_GRAMMAR_PREWARM_MAX_TOKENS = 2048
+_GRAMMAR_PREWARM_PROMPT = (
+    "Return the shortest valid response permitted by the response schema. "
+    "Use empty strings, empty arrays, and empty objects wherever the schema permits them."
+)
 
 
 if TYPE_CHECKING:
@@ -159,14 +170,33 @@ class Plugin(
         self._synthesized_delivery_attachment: str | None = None
         self._synthesized_delivery_session_id: str | None = None
 
+        # LM Studio is provisioned separately from the platform and can come
+        # up after the platform. Keep its retry worker local to this plugin; it is a
+        # daemon because this non-LifecycleManaged plugin has no stop hook.
+        self._availability_retry_thread: threading.Thread | None = None
+        self._availability_retry_lock = threading.Lock()
+        self._prewarm_retry_thread: threading.Thread | None = None
+        self._prewarm_retry_lock = threading.Lock()
+
     def get_readiness_error(self) -> str | None:
         return self.readiness_error
+
+    def _require_ready_for_inference(self) -> None:
+        """Reject every direct provider path while LM Studio is still unavailable."""
+        if self.is_ready():
+            return
+        error_message = self.get_readiness_error() or "LM Studio is not ready"
+        raise InferenceServiceUnavailableError(
+            error_message,
+            details={"plugin": self.name, "readiness_error": error_message},
+        )
 
     def prepare_for_readiness(self) -> None:
         """Initialize plugin and LM Studio provider.
 
-        Fail-fast: If orchestrator not available or LM Studio unavailable, raise immediately.
-        All initialization happens here - no lazy initialization in action methods.
+        Fail fast for invalid platform wiring and configuration. A configured
+        but not-yet-running LM Studio is boot-optional: the plugin enters an
+        explicit unready state and retries in the background.
         """
         # Get APP_HOME from orchestrator (injected before prepare_for_readiness)
         if not self.orchestrator_ref:
@@ -217,33 +247,89 @@ class Plugin(
             f"LM Studio provider initialized: {lm_studio_url}, model={lm_studio_model}"
         )
 
-        # Validate availability (fail-fast). No silent mock fallback: if the
-        # configured backend is unreachable, the plugin must refuse to load.
+        # The inference server is deliberately not contacted before router
+        # registration.  Cold guests load both models asynchronously and an
+        # early probe/pre-warm competes with the embeddings model that setup
+        # needs to qualify first.
+        self.set_ready()
+
+    def start_post_registration_work(self) -> None:
+        """Begin optional inference validation only after router activation."""
+        assert self.logger is not None
         result = self.validate_availability()
         if result.get("action_status") == ActionStatus.ERROR.value:
-            error_details: dict[str, object] = {
-                "action_status": result.get("action_status", ActionStatus.ERROR.value),
-                "data": result.get("data", {}),
-                "error": result.get("error"),
-            }
-            raise InferenceServiceUnavailableError(
-                f"LM Studio not available at {lm_studio_url}",
-                details=error_details,
-            )
-
-        self.logger.debug("LM Studio provider validation successful")
-
-        # Pre-warm: compile the canonical action schema grammar in LM Studio.
-        # Grammar compilation costs ~60-170s on first use.  By sending a
-        # throwaway request at startup we shift that cost out of the user's
-        # first interaction.  max_tokens=1 keeps the response instant once
-        # the grammar is compiled.
-        self._prewarm_canonical_grammars()
-
-        # Note: Context components are initialized via set_memory_service() injection
-        # which is called after service wrappers are created in startup sequence
-
+            assert self.config_provider is not None
+            endpoint = str(self.config_provider.get("base_url"))
+            error_message = f"LM Studio not available at {endpoint} after router registration"
+            self.set_error(error_message)
+            self.logger.warning("%s — waiting", error_message)
+            self._start_availability_retry()
+            return
         self.set_ready()
+        self._start_prewarm_retry()
+
+    def _start_availability_retry(self) -> None:
+        """Start one daemon worker that waits for LM Studio without restart storms."""
+        with self._availability_retry_lock:
+            if (
+                self._availability_retry_thread is not None
+                and self._availability_retry_thread.is_alive()
+            ):
+                return
+            retry_thread = threading.Thread(
+                target=self._retry_availability_until_ready,
+                name=f"{self.name}-availability-retry",
+                daemon=True,
+            )
+            self._availability_retry_thread = retry_thread
+            retry_thread.start()
+
+    def _start_prewarm_retry(self) -> None:
+        """Compile optional grammars off the startup path, retrying failures."""
+        with self._prewarm_retry_lock:
+            if self._prewarm_retry_thread is not None and self._prewarm_retry_thread.is_alive():
+                return
+            retry_thread = threading.Thread(
+                target=self._retry_prewarm_until_complete,
+                name=f"{self.name}-grammar-prewarm",
+                daemon=True,
+            )
+            self._prewarm_retry_thread = retry_thread
+            retry_thread.start()
+
+    def _retry_prewarm_until_complete(self) -> None:
+        """Retry grammar compilation without withdrawing startup readiness."""
+        retry_seconds = _LM_STUDIO_RETRY_INITIAL_SECONDS
+        while True:
+            try:
+                self._prewarm_canonical_grammars()
+            except InferenceError as exc:
+                self.logger.warning("LM Studio pre-warm failed: %s — retrying", exc)
+                time.sleep(retry_seconds)
+                retry_seconds = min(retry_seconds * 2, _LM_STUDIO_RETRY_MAX_SECONDS)
+            else:
+                return
+
+    def _retry_availability_until_ready(self) -> None:
+        """Retry availability indefinitely with a bounded request rate."""
+        retry_seconds = _LM_STUDIO_RETRY_INITIAL_SECONDS
+        while True:
+            time.sleep(retry_seconds)
+            result = self.validate_availability()
+            if result.get("action_status") == ActionStatus.COMPLETED.value:
+                try:
+                    self._prewarm_canonical_grammars()
+                except InferenceError as exc:
+                    error_message = f"LM Studio pre-warm failed after becoming available: {exc}"
+                    self.set_error(error_message)
+                    self.logger.warning("%s — retrying", error_message)
+                else:
+                    self.set_ready()
+                    self.logger.info(
+                        "LM Studio is serving the configured model; inference plugin is ready"
+                    )
+                    return
+            retry_seconds = min(retry_seconds * 2, _LM_STUDIO_RETRY_MAX_SECONDS)
 
     # Common step-narrowed schema shapes to pre-warm alongside canonical schemas.
     # Each entry is a list of process keys that produces a distinct grammar.
@@ -295,9 +381,9 @@ class Plugin(
         start = time.time()
 
         request = InferenceRequest(
-            [{"role": "user", "content": "Say OK."}],
+            [{"role": "user", "content": _GRAMMAR_PREWARM_PROMPT}],
             temperature=0.0,
-            max_tokens=1,
+            max_tokens=_GRAMMAR_PREWARM_MAX_TOKENS,
             response_schema=schema,
             context_metadata={"purpose": "grammar_prewarm"},
         )
@@ -306,13 +392,13 @@ class Plugin(
             self.provider.generate_completion(request)
         except InferenceError as exc:
             elapsed = time.time() - start
-            self.logger.info(
-                "PRE-WARM: %s compiled in %.1fs (%s)",
+            self.logger.warning(
+                "PRE-WARM: %s failed in %.1fs (%s)",
                 label,
                 elapsed,
                 type(exc).__name__,
             )
-            return
+            raise
 
         elapsed = time.time() - start
         self.logger.info("PRE-WARM: %s compiled in %.1fs", label, elapsed)
@@ -1975,6 +2061,8 @@ class Plugin(
 
         Delegates to provider.
         """
+        self._require_ready_for_inference()
+
         if not self.provider:
             raise InferenceServiceUnavailableError(
                 "LM Studio provider not initialized. Call prepare_for_readiness first.",
@@ -2200,6 +2288,8 @@ class Plugin(
         Raises:
             PluginError: If completion fails or context loading fails.
         """
+        self._require_ready_for_inference()
+
         if not self.provider:
             raise PluginError(
                 message="Cannot generate completion: provider not initialized",
@@ -2299,6 +2389,8 @@ Summary:"""
         Raises:
             PluginError: If the provider call fails (network, timeout, etc).
         """
+        self._require_ready_for_inference()
+
         if not self.provider:
             raise PluginError(
                 message="Cannot warm cache: provider not initialized",

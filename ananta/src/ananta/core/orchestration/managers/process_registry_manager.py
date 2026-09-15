@@ -110,7 +110,7 @@ class ProcessRegistryManager(IProcessRegistryManager):
                     exc_info=True,
                 )
 
-    def build_and_populate_registry(self) -> None:
+    def build_and_populate_registry(self, *, populate_discovery: bool = True) -> None:
         logger.debug("ProcessRegistryManager.build_and_populate_registry() called")
         try:
             raw_registry = build_process_registry(self.plugin_manager)
@@ -122,7 +122,8 @@ class ProcessRegistryManager(IProcessRegistryManager):
 
             self._process_registry = {"processes": processes_obj}
             self._log_registry_stats(processes_obj)
-            self._populate_discovery_service(processes_obj)
+            if populate_discovery:
+                self._populate_discovery_service(processes_obj)
 
         except Exception as e:
             raise FrameworkError(
@@ -131,6 +132,15 @@ class ProcessRegistryManager(IProcessRegistryManager):
                 details={"error": str(e)},
                 severity=ErrorSeverity.CRITICAL,
             ) from e
+
+    def populate_discovery_after_registration(self) -> None:
+        """Build process vectors only after the router has activated this process."""
+        if self._process_registry is None:
+            raise RuntimeError("Process registry is unavailable for deferred discovery population")
+        processes_obj = self._process_registry.get("processes")
+        if not isinstance(processes_obj, dict):
+            raise TypeError("Process registry has invalid processes data")
+        self._populate_discovery_service(processes_obj)
 
     async def persist_registry(self) -> None:
         try:

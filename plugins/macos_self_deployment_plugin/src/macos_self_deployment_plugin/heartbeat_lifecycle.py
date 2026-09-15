@@ -75,6 +75,7 @@ CurrentReleaseLookup = Callable[[], str | None]
 # stub so the test runner survives.
 SigtermCallback = Callable[[str], None]
 SetColorActive = Callable[[bool], None]
+PostRegistrationCallback = Callable[[], None]
 
 
 class PollerGateReactivation:
@@ -122,6 +123,7 @@ def run(
     sigterm_callback: SigtermCallback,
     logger: logging.Logger,
     set_color_active: SetColorActive,
+    post_registration_callback: PostRegistrationCallback | None = None,
     pending_finisher_file: Path | None = None,
     current_release_lookup: CurrentReleaseLookup | None = None,
     budget_seconds: float = DEFAULT_TRANSIENT_STATE_BUDGET_SECONDS,
@@ -177,6 +179,12 @@ def run(
         "%s: first register accepted; entering steady-state heartbeat",
         PLUGIN_NAME,
     )
+    _notify_post_registration_if_active(
+        client=client,
+        self_instance_id=self_instance_id,
+        logger=logger,
+        callback=post_registration_callback,
+    )
     _run_steady_state_heartbeat(
         client=client,
         port=port,
@@ -188,6 +196,7 @@ def run(
         logger=logger,
         set_color_active=set_color_active,
         streamable_port_lookup=streamable_port_lookup,
+        post_registration_callback=post_registration_callback,
     )
 
 
@@ -304,6 +313,7 @@ def _process_heartbeat_response(
     streamable_port_lookup: PortLookup | None,
     streamable_delivered: bool,
     poller_gate_reactivation: PollerGateReactivation,
+    post_registration_callback: PostRegistrationCallback | None,
 ) -> bool:
     """Act on one heartbeat response; return the updated ``streamable_delivered``.
 
@@ -331,6 +341,12 @@ def _process_heartbeat_response(
         self_color=self_color,
         self_instance_id=self_instance_id,
         logger=logger,
+    )
+    _notify_post_registration_if_active(
+        client=client,
+        self_instance_id=self_instance_id,
+        logger=logger,
+        callback=post_registration_callback,
     )
     _observe_poller_gate_reactivation(
         client=client,
@@ -381,6 +397,7 @@ def _run_steady_state_heartbeat(
     logger: logging.Logger,
     set_color_active: SetColorActive,
     streamable_port_lookup: PortLookup | None = None,
+    post_registration_callback: PostRegistrationCallback | None = None,
 ) -> None:
     """Heartbeat every ``DEFAULT_HEARTBEAT_INTERVAL_SECONDS``; re-register on miss.
 
@@ -435,6 +452,7 @@ def _run_steady_state_heartbeat(
                 streamable_port_lookup=streamable_port_lookup,
                 streamable_delivered=streamable_delivered,
                 poller_gate_reactivation=poller_gate_reactivation,
+                post_registration_callback=post_registration_callback,
             )
         if pending_finisher_file is not None and current_release_lookup is not None:
             _run_pending_finisher_backstop(
@@ -446,6 +464,25 @@ def _run_steady_state_heartbeat(
             )
         if stop_event.wait(DEFAULT_HEARTBEAT_INTERVAL_SECONDS):
             break
+
+
+def _notify_post_registration_if_active(
+    *,
+    client: RouterClient,
+    self_instance_id: str,
+    logger: logging.Logger,
+    callback: PostRegistrationCallback | None,
+) -> None:
+    """Run the idempotent startup release only once router names this instance active."""
+    if callback is None:
+        return
+    try:
+        snapshot = client.status()
+    except RouterClientError as exc:
+        logger.warning("%s: post-registration status check failed: %s", PLUGIN_NAME, exc)
+        return
+    if snapshot.get("active_instance_id") == self_instance_id:
+        callback()
 
 
 # ---------------------------------------------------------------------
