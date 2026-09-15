@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -50,6 +51,24 @@ _SETTINGS_URLS = {
     "macos::settings.background_items": "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
     "macos::settings.files_and_folders": "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
 }
+_TMUX_RETURN_KEY_BLOCK = (
+    "# BEGIN SOLET TERMINAL RETURN KEYS\n"
+    "set -s extended-keys on\n"
+    'set -as terminal-features "xterm*:extkeys"\n'
+    "# END SOLET TERMINAL RETURN KEYS\n"
+)
+_ITERM_RETURN_KEY_PROFILE = {
+    "Profiles": [
+        {
+            "Name": "Solet Claude Code Return keys",
+            "Guid": "A2C5A9EE-4C24-4BCB-8266-CDB03CBA5E43",
+            "Option Key Sends": 2,
+        }
+    ]
+}
+_ITERM_RETURN_KEY_PROFILE_RELATIVE = Path(
+    "Library/Application Support/iTerm2/DynamicProfiles/solet-claude-return-keys.json"
+)
 _GENESIS_COMPLETED_STEPS = tuple(step_name for step_name, _runner in GENESIS_STEP_RUNNERS)
 _SOLET_RESULT_ENVELOPE_KEYS = frozenset(
     {
@@ -61,6 +80,20 @@ _SOLET_RESULT_ENVELOPE_KEYS = frozenset(
         "provider_type",
         "data",
     }
+)
+_FAILURE_STDERR_DIAGNOSTIC_LIMIT = 1024
+_CREDENTIAL_KEY_NAME = (
+    r"[a-z0-9_-]*(?:password|passwd|secret|token|key|bearer|credential)[a-z0-9_-]*"
+)
+_CREDENTIAL_VALUE = re.compile(
+    r"""(?ix)
+    (?P<label>\b""" + _CREDENTIAL_KEY_NAME + r"""\b)
+    (?P<separator>\s*(?:=|:)\s*)
+    (?P<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)
+    """
+)
+_AUTHORIZATION_BEARER_VALUE = re.compile(
+    r"(?i)(?P<label>\bauthorization\b)(?P<separator>\s*:\s*bearer\s+)(?P<value>\S+)"
 )
 
 
@@ -75,6 +108,7 @@ def operation_handlers() -> dict[str, OperationHandler]:
     return {
         **lm_studio_handlers(),
         "setup::tmux.install": _tmux,
+        "setup::terminal.configure_return_keys": _terminal_return_keys,
         "setup::coding_agents.install_codex": _coding_agent_cli,
         "setup::coding_agents.install_claude": _coding_agent_cli,
         "setup::coding_agents.install_node": _coding_agent_cli,
@@ -110,6 +144,84 @@ def _tmux(request: AdapterRequest, runtime: Runtime) -> JsonObject:
         executable_name="tmux",
         acquisition=HomebrewAcquisition("formula", "tmux"),
     )
+
+
+def _terminal_return_keys(request: AdapterRequest, runtime: Runtime) -> JsonObject:
+    """Offer persistent tmux and iTerm2 configuration for Claude Code newlines."""
+
+    tmux_path = runtime.home / ".tmux.conf"
+    profile_path = runtime.home / _ITERM_RETURN_KEY_PROFILE_RELATIVE
+    tmux_current = _read_user_text(tmux_path)
+    tmux_desired = _merge_terminal_return_key_block(tmux_current)
+    profile_desired = json.dumps(_ITERM_RETURN_KEY_PROFILE, indent=2) + "\n"
+    tmux_changed = tmux_desired != tmux_current
+    profile_changed = _read_user_text(profile_path) != profile_desired
+    if request.phase == "probe":
+        if not tmux_changed and not profile_changed:
+            return _verified(
+                request,
+                "terminal_return_keys",
+                "managed tmux and iTerm2 Return-key configuration is current",
+                str(tmux_path),
+            )
+        actions: list[JsonObject] = []
+        if tmux_changed:
+            actions.append(
+                planned_action(
+                    action_id="terminal.merge_tmux_return_key_block",
+                    title="Merge the managed tmux modified-Return block",
+                    mutation_kind="file_write",
+                    target=str(tmux_path),
+                    evidence_ref="tmux_return_key_config_drift",
+                )
+            )
+        if profile_changed:
+            actions.append(
+                planned_action(
+                    action_id="terminal.write_iterm_option_return_profile",
+                    title="Write the iTerm2 Option+Return dynamic profile",
+                    mutation_kind="file_write",
+                    target=str(profile_path),
+                    evidence_ref="iterm_option_return_profile_drift",
+                )
+            )
+        return result(
+            request,
+            status="pending",
+            actions=actions,
+            repair=("Approve the managed tmux block and iTerm2 profile. Restart iTerm2, then select the Solet Claude Code Return keys profile before opening a new seat."),
+        )
+    if tmux_changed:
+        runtime.atomic_write(tmux_path, tmux_desired, mode=0o644)
+    if profile_changed:
+        runtime.atomic_write(profile_path, profile_desired, mode=0o644)
+    return result(
+        request,
+        status="applied",
+        repair=("Restart iTerm2, then select the Solet Claude Code Return keys profile. Use backslash followed by Return as a fallback newline chord."),
+    )
+
+
+def _read_user_text(path: Path) -> str:
+    """Read user-owned config without blindly overwriting an unreadable file."""
+
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        raise RuntimeError(f"cannot read managed terminal configuration {path}: {exc}") from exc
+
+
+def _merge_terminal_return_key_block(existing: str) -> str:
+    begin = "# BEGIN SOLET TERMINAL RETURN KEYS"
+    end = "# END SOLET TERMINAL RETURN KEYS"
+    start = existing.find(begin)
+    finish = existing.find(end)
+    if start >= 0 and finish >= start:
+        return existing[:start] + _TMUX_RETURN_KEY_BLOCK + existing[finish + len(end) :].lstrip("\n")
+    separator = "" if not existing or existing.endswith("\n") else "\n"
+    return existing + separator + _TMUX_RETURN_KEY_BLOCK
 
 
 def _homebrew_provisioner(
@@ -283,7 +395,8 @@ def _genesis(request: AdapterRequest, runtime: Runtime) -> JsonObject:
         )
     artifacts_valid = genesis_artifacts_valid(request, runtime)
     satisfied = artifacts_valid and (
-        not autostart or _launchagent_running(request, runtime)
+        not autostart
+        or (_launchagent_running(request, runtime) and plist.is_file())
     )
     if request.phase == "probe":
         if satisfied:
@@ -706,10 +819,17 @@ def _failed_outcome(
 
 
 def command_failure_reason(outcome: CommandOutcome) -> JsonObject:
-    """Return the closed, stream-free diagnosis for a failed command."""
+    """Return bounded, redacted failure metadata for a failed command.
+
+    The adapter's top-level command streams intentionally remain closed because
+    arbitrary child-process output can include credentials. A nonzero command
+    can nevertheless be the only diagnosis when a target dies before writing a
+    public marker, so expose a small stderr-only diagnostic here after removing
+    conventional ``name=value`` and ``name: value`` secret forms.
+    """
 
     outcome_class = "executable_missing" if outcome.executable_missing else "timeout" if outcome.timed_out else "launch_error" if outcome.launch_error is not None else "nonzero_exit"
-    return {
+    reason: JsonObject = {
         "outcome_class": outcome_class,
         "exit_code": outcome.returncode,
         "duration_ms": max(0, outcome.duration_ms),
@@ -719,6 +839,28 @@ def command_failure_reason(outcome: CommandOutcome) -> JsonObject:
         "stdout_truncated": outcome.stdout_truncated,
         "stderr_truncated": outcome.stderr_truncated,
     }
+    if outcome.stderr:
+        diagnostic, diagnostic_truncated = _public_stderr_diagnostic(outcome)
+        reason["stderr_diagnostic"] = diagnostic
+        reason["stderr_diagnostic_truncated"] = diagnostic_truncated
+    return reason
+
+
+def _public_stderr_diagnostic(outcome: CommandOutcome) -> tuple[str, bool]:
+    """Bound and redact one failed command's stderr for the public reason."""
+
+    encoded = outcome.stderr.encode("utf-8")
+    captured = encoded[:_FAILURE_STDERR_DIAGNOSTIC_LIMIT]
+    diagnostic = captured.decode("utf-8", errors="ignore")
+    return (
+        _CREDENTIAL_VALUE.sub(
+            r"\g<label>\g<separator><redacted>",
+            _AUTHORIZATION_BEARER_VALUE.sub(
+                r"\g<label>\g<separator><redacted>", diagnostic
+            ),
+        ),
+        outcome.stderr_truncated or len(encoded) > len(captured),
+    )
 
 
 def _blocked(request: AdapterRequest, error_kind: str, repair: str) -> JsonObject:

@@ -72,6 +72,7 @@ _AUTOSTART_ENV_VAR = "SOLET_AUTOSTART"
 _OPERATION_REF_ENV_VAR = "SOLET_OPERATION_REF"
 _FULL_GENESIS_OPERATION_REF = "genesis::solet.run"
 _AUTOSTART_INSTALL_OPERATION_REF = "genesis::autostart.install"
+_STALE_VAULT_PRECHECK_ARGUMENT = "--check-vault-stale-state"
 _PROVENANCE_FILENAME = "PROVENANCE.json"
 _PROFILE_TEMPLATE_BY_BUNDLE = {
     "macos_free_minimal": "macos-free-solet",
@@ -557,27 +558,16 @@ def _check_for_stale_vault_master(
             "state": "existing_passphrase",
         }
 
-    checker = getattr(keychain, "exists", None)
-    if checker is None:
-        if keychain is not None:
-            return {
-                "step_name": "vault_stale_check",
-                "status": "completed",
-                "state": "injected_keychain_without_master_probe",
-            }
-        checker = SystemKeychain().exists
-    try:
-        master_exists = bool(checker(MASTER_KEY_ACCOUNT))
-    except Exception as exc:  # pragma: no cover - host keychain backend failures are environment-specific.
-        raise GenesisError(f"vault stale-keychain check failed: {exc}") from exc
+    master_exists = _vault_master_key_exists(keychain)
+    if master_exists is None:
+        return {
+            "step_name": "vault_stale_check",
+            "status": "completed",
+            "state": "injected_keychain_without_master_probe",
+        }
 
     if master_exists:
-        raise GenesisError(
-            f"stale macOS Keychain vault state for solet {name!r}: "
-            f"service {name}-vault account {MASTER_KEY_ACCOUNT!r} already exists "
-            "but genesis just created a fresh vault passphrase file. Use a real "
-            "teardown path or delete that Keychain item before re-birthing this name."
-        )
+        raise GenesisError(_stale_vault_master_message(name, after_passphrase_seed=True))
     if pending_stale_check:
         clear_vault_passphrase_stale_check_pending(clone_root)
     return {
@@ -585,6 +575,51 @@ def _check_for_stale_vault_master(
         "status": "completed",
         "state": "no_existing_master_key",
     }
+
+
+def vault_stale_state_precheck(
+    name: str,
+    keychain: PerCredentialKeychain | None = None,
+) -> None:
+    """Fail before birth when this name already owns a vault master-key item.
+
+    This is deliberately a non-destructive precheck rather than automatic
+    Keychain deletion: the item can belong to a live solet with the same name,
+    and only a lifecycle-aware teardown can establish that deleting it is safe.
+    """
+
+    master_exists = _vault_master_key_exists(keychain)
+    if master_exists is None:
+        raise GenesisError("vault stale-keychain precheck requires a master-key capable backend")
+    if master_exists:
+        raise GenesisError(_stale_vault_master_message(name, after_passphrase_seed=False))
+
+
+def _vault_master_key_exists(keychain: PerCredentialKeychain | None) -> bool | None:
+    checker = getattr(keychain, "exists", None)
+    if checker is None:
+        if keychain is not None:
+            return None
+        checker = SystemKeychain().exists
+    try:
+        return bool(checker(MASTER_KEY_ACCOUNT))
+    except Exception as exc:  # pragma: no cover - host keychain backend failures are environment-specific.
+        raise GenesisError(f"vault stale-keychain check failed: {exc}") from exc
+
+
+def _stale_vault_master_message(name: str, *, after_passphrase_seed: bool) -> str:
+    timing = (
+        "but genesis just created a fresh vault passphrase file"
+        if after_passphrase_seed
+        else "and would conflict with a fresh vault passphrase during genesis"
+    )
+    return (
+        f"stale macOS Keychain vault state for solet {name!r}: "
+        f"service {name}-vault account {MASTER_KEY_ACCOUNT!r} already exists {timing}. "
+        f"Before re-birthing, run SOLET_NAME={name} .venv/bin/python3 -m "
+        f"github_midwife_plugin.genesis {_STALE_VAULT_PRECHECK_ARGUMENT}; "
+        "then use a lifecycle-aware teardown if it remains stale."
+    )
 
 
 def _write_genesis_marker(
@@ -633,7 +668,20 @@ def main() -> int:
         )
         return 2
 
+    arguments = sys.argv[1:]
     try:
+        if arguments == [_STALE_VAULT_PRECHECK_ARGUMENT]:
+            vault_stale_state_precheck(name)
+            print(
+                f"vault stale-keychain precheck OK: service {name}-vault "
+                f"account {MASTER_KEY_ACCOUNT} is absent"
+            )
+            return 0
+        if arguments:
+            raise GenesisError(
+                f"unsupported genesis arguments: {arguments!r}; expected "
+                f"{_STALE_VAULT_PRECHECK_ARGUMENT!r} or no arguments"
+            )
         clone_root = _resolve_clone_root()
         operation_ref = _operation_ref_from_environment()
         if operation_ref == _AUTOSTART_INSTALL_OPERATION_REF:

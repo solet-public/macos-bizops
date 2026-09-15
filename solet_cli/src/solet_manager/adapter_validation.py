@@ -12,6 +12,7 @@ from .errors import AdapterProtocolError
 from .models import JsonValue
 
 STREAM_LIMIT_BYTES = 8192
+FAILURE_STDERR_DIAGNOSTIC_LIMIT = 1024
 FORMULA_MARKER = "/Cellar/solet/"
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{1,127}$")
 DIGEST_PATTERN = re.compile(r"^(sha256:[0-9a-f]{64}|none)$")
@@ -195,7 +196,7 @@ def validate_reason(value: JsonValue) -> dict[str, JsonValue] | None:
         return None
     if not isinstance(value, dict):
         raise TypeError("reason must be an object or null")
-    required = {
+    legacy_required = {
         "outcome_class",
         "exit_code",
         "duration_ms",
@@ -205,12 +206,17 @@ def validate_reason(value: JsonValue) -> dict[str, JsonValue] | None:
         "stdout_truncated",
         "stderr_truncated",
     }
-    if set(value) != required:
+    diagnostic_required = legacy_required | {
+        "stderr_diagnostic",
+        "stderr_diagnostic_truncated",
+    }
+    fields = set(value)
+    if fields != legacy_required and fields != diagnostic_required:
         raise ValueError("reason does not match the closed diagnostic shape")
     outcome_class = value["outcome_class"]
     if outcome_class not in {"executable_missing", "launch_error", "timeout", "nonzero_exit"}:
         raise ValueError("reason outcome_class is invalid")
-    return {
+    validated: dict[str, JsonValue] = {
         "outcome_class": outcome_class,
         "exit_code": optional_int(value["exit_code"], "reason exit_code", minimum=0, maximum=255),
         "duration_ms": bounded_integer(value["duration_ms"], "reason duration_ms", minimum=0),
@@ -220,3 +226,14 @@ def validate_reason(value: JsonValue) -> dict[str, JsonValue] | None:
         "stdout_truncated": boolean(value["stdout_truncated"], "reason stdout_truncated"),
         "stderr_truncated": boolean(value["stderr_truncated"], "reason stderr_truncated"),
     }
+    if fields == diagnostic_required:
+        validated["stderr_diagnostic"] = public_string(
+            value["stderr_diagnostic"],
+            "reason stderr_diagnostic",
+            maximum=FAILURE_STDERR_DIAGNOSTIC_LIMIT,
+        )
+        validated["stderr_diagnostic_truncated"] = boolean(
+            value["stderr_diagnostic_truncated"],
+            "reason stderr_diagnostic_truncated",
+        )
+    return validated

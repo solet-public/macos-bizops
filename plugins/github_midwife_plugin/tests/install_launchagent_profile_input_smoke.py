@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import patch
 
@@ -60,6 +61,32 @@ def _check(condition: bool, label: str) -> None:
     _CHECKS.append(label)
     if not condition:
         raise SmokeFailureError(label)
+
+
+def _action_ids(actions: object) -> list[object]:
+    if not isinstance(actions, list):
+        return []
+    return [cast(dict[str, object], action).get("id") for action in actions if isinstance(action, dict)]
+
+
+def _is_launchagent_repair(
+    response: dict[str, object], runtime: LaunchagentRuntime, launchctl_command: tuple[str, ...]
+) -> bool:
+    return (
+        response.get("checkpoint_status") == "pending"
+        and _action_ids(response.get("planned_actions")) == ["genesis.install_launchagent"]
+        and runtime.calls == [launchctl_command]
+    )
+
+
+def _is_verified_launchagent(
+    response: dict[str, object], runtime: LaunchagentRuntime, launchctl_command: tuple[str, ...]
+) -> bool:
+    return (
+        response.get("checkpoint_status") == "verified"
+        and response.get("planned_actions") == []
+        and runtime.calls == [launchctl_command]
+    )
 
 
 def _launchagent_request() -> AdapterRequest:
@@ -127,17 +154,19 @@ def _check_profile_projection_and_guard() -> None:
         f"[{adapter_response}]",
     )
     missing_preview_payload = dict(cast(dict[str, object], request_to_dict(request)))
-    missing_preview_payload["public_inputs"] = {}
+    missing_preview_payload["public_inputs"] = {"autostart": "enabled"}
     preview_response = setup_adapter.dispatch_request(
         AdapterRequest.from_dict(missing_preview_payload),
         MissingProfileRuntime(),
     )
     preview_actions = preview_response.get("planned_actions")
     _check(
-        preview_response.get("checkpoint_status") == "pending"
-        and isinstance(preview_actions, list)
-        and any(action.get("id") == "genesis.install_launchagent" for action in preview_actions),
-        "preview without setup_profile remains actionable",
+        preview_response.get("checkpoint_status") == "blocked"
+        and preview_response.get("error_kind") == "adapter_protocol_error"
+        and preview_actions == []
+        and preview_response.get("repair")
+        == "Use only the exact flow-declared public inputs for this callable.",
+        "preview without setup_profile blocks before subprocess execution",
     )
     missing_payload = dict(cast(dict[str, object], request_to_dict(request)))
     missing_payload.update(
@@ -147,7 +176,7 @@ def _check_profile_projection_and_guard() -> None:
             "approval_fingerprint": "sha256:" + "c" * 64,
             "dry_run": False,
             "target": str(Path(sys.executable).parents[2]),
-            "public_inputs": {},
+            "public_inputs": {"autostart": "enabled"},
         }
     )
     response = setup_adapter.dispatch_request(
@@ -156,10 +185,10 @@ def _check_profile_projection_and_guard() -> None:
     )
     _check(
         response.get("checkpoint_status") == "blocked"
-        and response.get("error_kind") == "operation_input_missing"
+        and response.get("error_kind") == "adapter_protocol_error"
         and response.get("repair")
-        == "Resolve the selected setup profile before running genesis.",
-        "missing setup_profile blocks before subprocess execution",
+        == "Use only the exact flow-declared public inputs for this callable.",
+        "apply without setup_profile blocks before subprocess execution",
     )
 
 
@@ -176,32 +205,38 @@ def _check_preview_requires_launchd_health() -> None:
     )
     with patch.object(setup_operations, "genesis_artifacts_valid", return_value=True):
         broken_response = setup_adapter.dispatch_request(request, broken_runtime)
-    broken_actions = broken_response.get("planned_actions")
     _check(
-        broken_response.get("checkpoint_status") == "pending"
-        and isinstance(broken_actions, list)
-        and [action.get("id") for action in broken_actions] == ["genesis.install_launchagent"]
-        and broken_runtime.calls == [launchctl_command],
+        _is_launchagent_repair(broken_response, broken_runtime, launchctl_command),
         "broken launchd service remains an actionable LaunchAgent repair preview",
     )
-    healthy_runtime = LaunchagentRuntime(
-        home=Path("/tmp/install-launchagent-preview-healthy-home"),
-        outcome=CommandOutcome(
-            0,
-            False,
-            0,
-            "state = running\nlast exit code = 0\nrun count = 1\n",
-            "",
-        ),
+    healthy_outcome = CommandOutcome(
+        0,
+        False,
+        0,
+        "state = running\nlast exit code = 0\nrun count = 1\n",
+        "",
     )
-    with patch.object(setup_operations, "genesis_artifacts_valid", return_value=True):
-        healthy_response = setup_adapter.dispatch_request(request, healthy_runtime)
-    _check(
-        healthy_response.get("checkpoint_status") == "verified"
-        and healthy_response.get("planned_actions") == []
-        and healthy_runtime.calls == [launchctl_command],
-        "healthy launchd service verifies without a redundant LaunchAgent repair",
-    )
+    with TemporaryDirectory(prefix="install-launchagent-preview-") as temporary_home:
+        home = Path(temporary_home)
+        missing_plist_runtime = LaunchagentRuntime(home=home, outcome=healthy_outcome)
+        with patch.object(setup_operations, "genesis_artifacts_valid", return_value=True):
+            missing_plist_response = setup_adapter.dispatch_request(request, missing_plist_runtime)
+        _check(
+            _is_launchagent_repair(
+                missing_plist_response, missing_plist_runtime, launchctl_command
+            ),
+            "running launchd service without a persistent plist remains an actionable repair preview",
+        )
+        plist = home / "Library" / "LaunchAgents" / f"local.solet.{request.name}.plist"
+        plist.parent.mkdir(parents=True)
+        plist.write_text("<plist />", encoding="utf-8")
+        healthy_runtime = LaunchagentRuntime(home=home, outcome=healthy_outcome)
+        with patch.object(setup_operations, "genesis_artifacts_valid", return_value=True):
+            healthy_response = setup_adapter.dispatch_request(request, healthy_runtime)
+        _check(
+            _is_verified_launchagent(healthy_response, healthy_runtime, launchctl_command),
+            "healthy launchd service with a persistent plist verifies without a redundant repair",
+        )
 
 
 def _check_flow_parameter_allowlist_drift() -> None:

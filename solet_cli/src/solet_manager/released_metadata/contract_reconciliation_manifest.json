@@ -338,7 +338,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:9cd3ad3e3e331a7a68d2510d224d1b75334fc0d3c633df642050f8e370105021"
+        "flow_contract_digest": "sha256:3c11ed6160768640de96b3d60feebff4fe78386d2e4c4fdd4df075da15dd7801"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": [],
@@ -355,7 +355,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:9cd3ad3e3e331a7a68d2510d224d1b75334fc0d3c633df642050f8e370105021"
+        "flow_contract_digest": "sha256:3c11ed6160768640de96b3d60feebff4fe78386d2e4c4fdd4df075da15dd7801"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": [],
@@ -375,7 +375,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:9cd3ad3e3e331a7a68d2510d224d1b75334fc0d3c633df642050f8e370105021"
+        "flow_contract_digest": "sha256:3c11ed6160768640de96b3d60feebff4fe78386d2e4c4fdd4df075da15dd7801"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": []
@@ -392,7 +392,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:9cd3ad3e3e331a7a68d2510d224d1b75334fc0d3c633df642050f8e370105021"
+        "flow_contract_digest": "sha256:3c11ed6160768640de96b3d60feebff4fe78386d2e4c4fdd4df075da15dd7801"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": []
@@ -409,7 +409,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:9cd3ad3e3e331a7a68d2510d224d1b75334fc0d3c633df642050f8e370105021"
+        "flow_contract_digest": "sha256:3c11ed6160768640de96b3d60feebff4fe78386d2e4c4fdd4df075da15dd7801"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": []

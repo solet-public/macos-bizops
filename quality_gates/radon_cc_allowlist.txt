@@ -60,3 +60,22 @@ ananta/tests/llm/session_ledger/polling_driver_migration_live_smoke.py::test_pol
 # as the burn-down unit rather than extending this tracked-debt register.
 solet_cli/tests/discovered_decision_scenarios.py::_verified_scenario  # legacy: 2026-09-03 W2-1
 solet_cli/tests/discovered_decision_scenarios.py::_future_model_carrier_scenario  # legacy: 2026-09-03 W2-1
+
+# Added 2026-09-15 (Main-seat decision under rul_367d8bd6 standing seat authority
+# -- not one of the 4 operator-reserved categories; follows the 2026-08-28
+# precedent immediately above: pre-existing, byte-identical debt surfaced
+# by an unrelated landing, ratified by the fleet authority actually handling
+# that landing rather than requiring a fresh human sign-off each time).
+# Surfaced during R35 final assembly (unt_907393d3): PassiveManagerState.validate
+# is unchanged from Unit B's own independently-verified source hash
+# (35c5771d1827da213df8564f3f27585c4e5e2a75429ba8753d661bc92b7ad923) --
+# not introduced or touched by this candidate. Independently read the
+# function before deciding: a clean sequence of ~6 independent early-return
+# guard clauses (unique-registry-owner check, transaction-identity-match
+# check, per-phase precondition checks) -- mechanically refactorable via
+# extract-method, deferred per the same Task #74 burn-down pattern as every
+# other entry here rather than forced into an assembly-only lane's charter.
+# Recorded as an open decision on iss_d2f03248, disclosed to the Operator,
+# reversible if overruled. Remediation contract: extract per-guard-clause
+# helpers; removal is the burn-down unit.
+solet_cli/src/solet_manager/release_observer.py::validate  # owner: fleet-coordinator-seat reason: iss_d2f03248 pre-existing debt surfaced by R35 assembly expires: 2026-12-15

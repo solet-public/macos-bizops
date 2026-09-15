@@ -29,6 +29,7 @@ from .identity_reconciliation import IdentityReconciliationManager
 from .lifecycle import LifecycleManager
 from .models import MANAGER_VERSION, CommandResult, ExitCode
 from .paths import ManagerPaths
+from .release_observer_cli import add_release_proof_parser, run_release_proof
 from .rendering import render_human, render_json
 from .rollback_repair import RollbackRepairExecutor
 
@@ -161,6 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_identity_mode.add_argument("--yes", action="store_true")
     reconcile_identity.add_argument("--approval-fingerprint")
     reconcile_identity.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    add_release_proof_parser(commands)
     return parser
 
 
@@ -168,8 +170,8 @@ def run(argv: Sequence[str] | None = None) -> CommandResult:
     args = build_parser().parse_args(argv)
     if args.command in {"create", "reconcile-contract", "reconcile-adapter", "reconcile-identity"}:
         _validate_approval_carrier(args)
-    if args.command == "inspect":
-        return run_inspect_command(args)
+    if args.command in {"inspect", "release-proof"}:
+        return _run_read_only_command(args)
     paths = ManagerPaths.resolve(explicit_home=args.home)
     if args.command in {"list", "list-seeds"}:
         return _run_inventory_command(args, paths)
@@ -204,6 +206,13 @@ def _run_reconcile_contract(args: argparse.Namespace, paths: ManagerPaths) -> Co
         dry_run=args.dry_run,
         approved_fingerprint=args.approval_fingerprint,
     )
+
+
+def _run_read_only_command(args: argparse.Namespace) -> CommandResult:
+    if args.command == "inspect":
+        return run_inspect_command(args)
+    paths = ManagerPaths.resolve(explicit_home=args.home)
+    return run_release_proof(args, paths.state_dir, args.seed_lock)
 
 
 def _run_reconciliation_command(args: argparse.Namespace, paths: ManagerPaths) -> CommandResult:

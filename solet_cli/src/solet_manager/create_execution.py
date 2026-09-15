@@ -37,7 +37,7 @@ from .paths import ManagerPaths
 from .plan_builder import remediation_plan
 from .preview_engine import setup_preview
 from .registry import InstanceRegistry
-from .release_lock import load_seed_lock
+from .release_lock import SeedLock, load_seed_lock
 from .resume_rules import (
     assert_decision_revision_allowed,
     merge_decision_inputs,
@@ -259,6 +259,17 @@ def _load_or_create_transaction(
             target=config.target,
             input_fingerprint=input_fingerprint,
         )
+        installed_seed = load_seed_lock(seed_lock_path)
+        if transaction.seed != installed_seed:
+            raise StateConflictError(
+                "retained transaction seed does not match the installed seed lock: "
+                f"transaction={_seed_label(transaction.seed)}; "
+                f"installed={_seed_label(installed_seed)}",
+                repair=(
+                    "Resume using the manager seed recorded by this transaction. "
+                    "A different installed seed cannot reuse this transaction."
+                ),
+            )
         return transaction
     seed = load_seed_lock(seed_lock_path)
     bundle = ContractBundle.load(
@@ -289,13 +300,18 @@ def _load_or_create_transaction(
         stage_probe_statuses=initial_stage_probe_statuses(bundle, plan.answers),
         probe_activations=initial_probe_activations(bundle, plan.answers),
     ).approve(approved_fingerprint)
-    if registry.get(config.name) is not None:
-        raise StateConflictError(
-            f"verified registry entry {config.name!r} exists without its transaction"
-        )
+    orphaned_record = registry.get(config.name)
+    if orphaned_record is not None:
+        registry.discard_orphan(orphaned_record)
     write_transaction(paths.transaction_path(config.name), created)
     registry.add(_provisional_record(created))
     return created
+
+
+def _seed_label(seed: SeedLock) -> str:
+    """Return an actionable immutable seed identifier for a resume conflict."""
+
+    return f"{seed.repository}@{seed.source_ref()} ({seed.commit})"
 
 
 def _ordered_stage_ids(bundle: ContractBundle) -> tuple[str, ...]:

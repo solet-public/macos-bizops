@@ -4,6 +4,100 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-09-15 — Cold first boot reaches active color; installing on a fresh Mac is validated end to end
+
+**This release fixes a cold-first-boot defect that could leave a brand-new
+install never reaching an active router color inside its startup-readiness
+window**, and is the first release whose fresh-install path is validated end
+to end on a clean 24 GB virtual machine — through `solet create`, `solet
+doctor` and `solet` health — after two earlier releases (r37, r38) were
+measured against a base VM that turned out to silently resume a stale
+transaction from an older seed, so their fresh-install ladders never actually
+ran the code under test. The install path itself is unchanged from the
+2026-09-08 release:
+
+```console
+brew install solet-public/tap/solet
+solet create <name>
+```
+
+Read the tap's README first (https://github.com/solet-public/homebrew-tap);
+it carries the full stage-by-stage guide and the current *Known gaps* list.
+The same guidance ships in this tree as
+`plugins/github_midwife_plugin/knowledge_base/09_homebrew_install_troubleshooting_runbook.md`.
+
+### What is in it
+
+- **Solet Manager `manager-v0.1.0-r39`** (`solet 0.1.0_25`), pinned to seed
+  release `release-2026-09-15-0551603bd674`.
+- **Fixed: a cold first boot now registers active before any
+  inference-dependent work runs** (`iss_7f240dbe`, commit `0551603bd`). The
+  embeddings plugin's readiness probe could crash-loop against a
+  not-yet-serving LM Studio, and grammar pre-warm plus knowledge-base rebuild
+  both ran before router registration and competed with it, so a cold
+  install_launchagent restart could miss the 120 second startup-readiness
+  budget entirely. That work now runs as deferred background work after
+  registration. Measured on the validation run below: 1.145 seconds from
+  restart to active color.
+- **Fixed: the inference qualification probe is advisory, not a hard
+  blocker** (`iss_2e36a62e`, commit `257df2cb8`, shipped in r38). A slow or
+  failing `qwen3-14b` probe answer no longer stops the install with
+  `decision_qualification_failed`.
+- **Fixed: `install_launchagent` no longer refuses its own flow-declared
+  inputs at the adapter gate** (`iss_d0f9e899`, commit `3f8774534`).
+- **Fixed: managed tmux-hosted Claude Code seats now preserve newline key
+  chords** (`iss_42ba8b2c`). The spawn path enables tmux extended-key
+  reporting (`extended-keys` and `xterm*:extkeys`); setup offers the matching
+  `~/.tmux.conf` block and an iTerm2 dynamic profile where Option+Return sends
+  Escape then Return. Restart iTerm2 and select **Solet Claude Code Return
+  keys** before opening a new seat. Shift+Return additionally needs iTerm2 CSI
+  u reporting or Claude Code's `/terminal-setup` mapping. If neither chord is
+  available, type backslash followed by Return for a newline.
+- **Fresh-install validation is real again.** The base VM clone used for the
+  r37 and r38 ladders carried a stale manager transaction file pinned to an
+  older seed, so `solet create` silently resumed that old transaction instead
+  of installing fresh — both releases' "the fix works on a clean machine"
+  claims were built on a guest that was never actually running the new code.
+  r39 is measured on a guest independently verified clean of that residue
+  (and two further residue classes found while chasing it down: a stale
+  `~/.config/solet` instance registry, and stale login-Keychain vault items
+  from a prior install of the same name) before `brew install` ran. On that
+  guest: `brew install` 15 s, `genesis` 43 s, `models` 0.4 s after selection,
+  `coding_agents` 3 s, completion probes 15 s, `solet doctor` verified,
+  bridge healthy.
+
+### What is NOT in it, stated plainly
+
+- **Updating an existing solet to r39 is not supported and not proven.**
+  That is round two. `solet create <name>` on a machine that once held a
+  solet of that name can silently do the wrong thing instead of failing
+  cleanly: it can resume a stale transaction pinned to the old seed
+  (`iss_50db7d43`), refuse with `state_conflict` against a stale instance
+  registry (`iss_6e520a72`), or have genesis refuse to re-birth the name over
+  leftover login-Keychain vault entries while the manager drops the failing
+  command's own stderr (`iss_74d70ef6`). The tap README's new *Reinstalling
+  on a machine that had a solet* section gives the manual sweep to run before
+  trying a name again; there is no automated or supported upgrade path yet.
+- **The `models` stage still needs LM Studio and both models provisioned by
+  hand on a machine with neither present.** An automated `install_lm_studio`
+  operation exists in the manager now (commit `43c6ae5c5`), but r39's own
+  validation guest had LM Studio already present in the base image, so that
+  automation is not yet independently proven from a bare machine.
+- Everything else in the previous release's "What is NOT in it" still
+  applies unless listed as fixed above: LM Studio is not started at login by
+  anything this release installs, a blocked `solet create` still cannot be
+  abandoned or have its decisions changed on the same name, `doctor`'s
+  declared expectation values are documentation rather than independently
+  evaluated, and bootstrap-era solets are not adopted by the manager.
+
+### Updating an existing solet from this release
+
+Solets created from an earlier seed with `bootstrap.py` keep updating through
+the seed-update runbook in their own knowledge base (fast-forward pull,
+restart); the manager still does not adopt them. A solet created by the
+manager itself has no supported update path in this release — see *What is
+NOT in it* above.
+
 ## 2026-09-08 — The Homebrew install path: `brew install solet-public/tap/solet`, then `solet create`
 
 **This release is the install path.** Since the 2026-08-20 release the seed

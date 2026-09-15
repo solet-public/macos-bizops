@@ -385,6 +385,52 @@ def _resolve_bin(explicit: str | None, which_name: str, default: str) -> str:
     return shutil.which(which_name) or default
 
 
+def _configure_server_options(tmux_bin: str, session_name: str, run_fn: Any) -> None:
+    """Set every server-global terminal capability a managed pane needs.
+
+    A newly-created server has no opportunity to obtain these values from a
+    user's shell. In particular, tmux's default extended-key handling strips
+    the modifier from Return before Claude Code can distinguish a newline
+    chord from submit. Apply the options after ``new-session`` has made the
+    server exist, and refuse the spawn if either setting cannot be installed.
+    """
+    from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
+
+    commands = (
+        [tmux_bin, "set", "-g", "allow-passthrough", "on"],
+        [tmux_bin, "set", "-s", "extended-keys", "on"],
+        [tmux_bin, "set", "-as", "terminal-features", "xterm*:extkeys"],
+    )
+    try:
+        for command in commands:
+            outcome = run_fn(command, capture_output=True, text=True, timeout=5)
+            if outcome.returncode != 0:
+                raise HostCannotSpawnError(
+                    "tmux server capability setup failed "
+                    f"(exit {outcome.returncode}): {outcome.stderr.strip()}"
+                )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _abort_unconfigured_session(tmux_bin, session_name, run_fn)
+        raise HostCannotSpawnError(f"tmux server capability setup raised: {exc}") from exc
+    except HostCannotSpawnError:
+        _abort_unconfigured_session(tmux_bin, session_name, run_fn)
+        raise
+
+
+def _abort_unconfigured_session(tmux_bin: str, session_name: str, run_fn: Any) -> None:
+    """Best-effort cleanup when a just-created pane lacks required keys."""
+
+    try:
+        run_fn(
+            [tmux_bin, "kill-session", "-t", session_name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.warning("could not remove unconfigured tmux session %r", session_name)
+
+
 DEFAULT_CLEARED_COMPOSER_SIGNATURE = "\u276f"
 """The rendered EMPTY-composer row of a Claude Code TUI, stripped.
 
@@ -1560,14 +1606,7 @@ class TmuxHostDriver:
             "sh", "-c", pane_command,
         ]
         self._launch_new_session(new_session_cmd)
-        # allow-passthrough is a SERVER-global option with no meaning until a
-        # server exists — set it right after this call guarantees one, per
-        # FINDINGS requirement 1, rather than depending on pre-existing
-        # server state (which spawn's own verify_config cannot observe).
-        self._run_fn(
-            [self._tmux_bin, "set", "-g", "allow-passthrough", "on"],
-            capture_output=True, text=True, timeout=5,
-        )
+        _configure_server_options(self._tmux_bin, session_name, self._run_fn)
         if _needs_dev_channels_confirmation(claude_cmd):
             self._confirm_dev_channels_prompt(session_name)
         return session_name

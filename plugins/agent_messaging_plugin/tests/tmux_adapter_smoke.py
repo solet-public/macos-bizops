@@ -504,6 +504,14 @@ def test_spawn_command_and_env_wiring() -> None:
             len(allow_passthrough_calls) == 1 and allow_passthrough_calls[0][-1] == "on",
             "allow-passthrough is set to 'on' exactly once, after session creation",
         )
+        _check(
+            [driver._tmux_bin, "set", "-s", "extended-keys", "on"] in calls,
+            "every managed tmux spawn enables extended-key modifier reporting",
+        )
+        _check(
+            [driver._tmux_bin, "set", "-as", "terminal-features", "xterm*:extkeys"] in calls,
+            "every managed tmux spawn declares xterm extended-key capability",
+        )
 
 
 def _fake_lane_worktree(root: Path, name: str) -> Path:

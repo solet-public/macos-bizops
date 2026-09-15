@@ -4057,6 +4057,7 @@ plugins/macos_self_deployment_plugin/tests/blue_green_router/blg04_streamable_pr
 # choices, permits alternatives to activate different plugins, and refuses
 # health-only completion.  Offline: checked-in JSON plus jsonschema only.
 plugins/github_midwife_plugin/tests/setup_flow_schema_smoke.py
+plugins/github_midwife_plugin/tests/terminal_return_keys_setup_smoke.py
 
 # permission-surface contract drift gate (2026-09-02): verifies that Genesis's
 # unconditional Codex MCP config append stays declared and previewed, every
@@ -4128,6 +4129,9 @@ solet_cli/tests/inspect_command_smoke.py
 # subject. All temporary directories and fixture state; none touches a live
 # Solet, a registry, or the network.
 solet_cli/tests/adapter_protocol_smoke.py
+# iss_7ae46f24: failed Genesis apply with its public stderr diagnostic must
+# parse, journal the apply attempt, and reload without corrupting state.
+solet_cli/tests/genesis_failed_apply_reason_smoke.py
 solet_cli/tests/cli_approval_smoke.py
 solet_cli/tests/discovered_decision_lifecycle_smoke.py
 solet_cli/tests/journal_resume_round_trip_smoke.py
@@ -4136,6 +4140,9 @@ solet_cli/tests/preview_resume_activation_smoke.py
 solet_cli/tests/existing_solet_diagnostic_smoke.py
 solet_cli/tests/git_mutation_control_plan_smoke.py
 solet_cli/tests/manager_foundation_smoke.py
+# iss_6e520a72: apply replaces a stale registry entry with no journal, while
+# a live same-name transaction with incompatible identity still refuses.
+solet_cli/tests/stale_instances_registry_smoke.py
 # PostgreSQL installer pre-probe (iss_754a42bc / iss_6bdb8358, 2026-09-06):
 # a present binary must not skip the service-start and pgvector installer actions.
 # Offline synthetic probe results plus a digest-pinned legacy contract fixture only.
@@ -4499,6 +4506,7 @@ solet_cli/tests/doctor_router_identity_census_smoke.py
 # that equal timestamps do not PROVE equal values. Offline: constructed attribute
 # mappings only; `security` is never executed.
 solet_cli/tests/doctor_credential_copy_census_smoke.py
+solet_cli/tests/doctor_terminal_return_keys_smoke.py
 
 # Plugin version source agreement, FORK-NEUTRAL (D-8-u4 iss_1e3a1558,
 # 2026-09-05): plugin_install converges to the wrong fixed point -- probe success
@@ -4535,6 +4543,12 @@ solet_cli/tests/managed_tree_smoke.py
 # under live lanes. This hermetic smoke makes the stock-install stand-in delete
 # the parent, then proves the wrapper restores the live version as a real
 # directory (not a compat symlink) and leaves the fresh hook current.
+
+# iss_b53c5f8e (2026-09-15) — source green did not establish which versioned
+# Codex cache an enabled marketplace plugin executes.  The hermetic smoke
+# proves the host-acceptance command refuses a disabled selection, a cached
+# 2400-second future-wait hook, and a 2430-second Stop manifest; the separate
+# post-install acceptance invocation checks the actual enabled cache.
 
 # Wave 2/F: offline blue-green and schema-snapshot coverage measured green.
 plugins/macos_self_deployment_plugin/tests/blue_green_router/router_smoke.py

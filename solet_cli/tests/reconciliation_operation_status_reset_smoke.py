@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 import sys
 import tempfile
@@ -31,7 +30,16 @@ _HISTORICAL_FIXTURES = (
 )
 _MIGRATION_ID = "macos-repository-setup-pgvector-package-postcondition-v1"
 _SOURCE_DIGEST = "sha256:c2a0386e86e0378e694f1793732fac223ec70ff3358e856b54ccf588e51024a4"
-_DESTINATION_DIGEST = "sha256:9cd3ad3e3e331a7a68d2510d224d1b75334fc0d3c633df642050f8e370105021"
+_DESTINATION_DIGEST = "sha256:3c11ed6160768640de96b3d60feebff4fe78386d2e4c4fdd4df075da15dd7801"
+_ACTIVE_DESTINATION_MIGRATION_IDS = frozenset(
+    {
+        "macos-repository-setup-pgvector-package-postcondition-v1",
+        "macos-repository-setup-pre-ram-preflight-pgvector-package-postcondition-v1",
+        "macos-lm-studio-provisioning-to-pgvector-package-from-92634d2b-v1",
+        "macos-lm-studio-provisioning-to-pgvector-package-from-2b9eb957-v1",
+        "macos-lm-studio-provisioning-to-pgvector-package-from-73af1c9d-v1",
+    }
+)
 _SOURCE_BUNDLE_COMMITS = {
     "sha256:515ab65fcf6d82756b3ffc6bf42f782ddc33b69907b5d32a372b019bea6a8e72": (
         "8f12bbd0f"
@@ -118,70 +126,6 @@ def _verified_result() -> OperationResult:
     )
 
 
-def _write_destination_contract(path: Path) -> None:
-    flow_path = path / "macos_setup_flow.json"
-    flow = json.loads(flow_path.read_text(encoding="utf-8"))
-    del flow["decisions"]["inference_implementation"]["option_source"]["options"]["none"][
-        "available_when"
-    ]
-    schema_path = path / "setup_flow.schema.json"
-    schema_path.write_text(
-        schema_path.read_text(encoding="utf-8")
-        .replace(
-            '    "decision_condition": {\n'
-            '      "description": "The closed condition grammar restricted recursively to resolved decisions.",\n'
-            '      "allOf": [\n'
-            '        { "$ref": "#/definitions/condition" },\n'
-            '        {\n'
-            '          "not": { "required": ["fact_ref"] },\n'
-            '          "properties": {\n'
-            '            "all": { "items": { "$ref": "#/definitions/decision_condition" } },\n'
-            '            "any": { "items": { "$ref": "#/definitions/decision_condition" } },\n'
-            '            "not": { "$ref": "#/definitions/decision_condition" }\n'
-            '          }\n'
-            '        }\n'
-            '      ]\n'
-            '    },\n',
-            "",
-        )
-        .replace(
-            '        "available_when": {\n'
-            '          "$ref": "#/definitions/decision_condition",\n'
-            '          "description": "Decision-only condition for selecting this option; every referenced decision must be resolved before evaluation."\n'
-            '        },\n',
-            "",
-        ),
-        encoding="utf-8",
-    )
-    flow["dependencies"]["pgvector_package"]["probe_refs"] = [
-        "pgvector_package_available"
-    ]
-    flow["operations"]["install_postgresql"]["idempotency"][
-        "postcondition_probe_refs"
-    ] = ["postgres_binary_version_valid", "pgvector_package_available"]
-    package_probe = {
-        "name": "pgvector package is available",
-        "description": "Confirms the running PostgreSQL server advertises the vector extension package before configuration attempts to activate it in the target database.",
-        "probe_ref": "bootstrap::postgres.probe_pgvector_package",
-        "runner": "bootstrap",
-        "implementation_status": "implemented",
-        "level": "readiness",
-        "expectation": {"operator": "truthy"},
-        "remediation_operation_refs": ["install_postgresql"],
-    }
-    probes: dict[str, object] = {}
-    for probe_id, probe in flow["probes"].items():
-        if probe_id == "postgres_role_policy_valid":
-            probes["pgvector_package_available"] = package_probe
-        probes[probe_id] = probe
-    flow["probes"] = probes
-    flow["known_gaps"][0]["summary"] = (
-        "All 64 declared probe expectation values are advisory documentation and are not "
-        "evaluated against observed probe values."
-    )
-    flow_path.write_text(json.dumps(flow, indent=2) + "\n", encoding="utf-8")
-
-
 def _historical_contract(source_revision: str, digest: str) -> ContractBundle:
     """Load a digest-pinned source bundle from a checked-in fixture."""
 
@@ -208,6 +152,11 @@ def _assert_grown_postconditions_reset(destination: ContractBundle) -> None:
         if item.destination_digest == destination.contract_digest
     ]
     _check(active_bridges, "the active contract has declared reconciliation bridges")
+    _check(
+        {migration.migration_id for migration in active_bridges}
+        == _ACTIVE_DESTINATION_MIGRATION_IDS,
+        "all five historical reconciliation bridges pin the active candidate destination",
+    )
     for migration in active_bridges:
         if migration.source_digest not in _SOURCE_BUNDLE_COMMITS:
             raise AssertionError(f"missing historical bundle commit for {migration.source_digest}")
@@ -223,6 +172,15 @@ def _assert_grown_postconditions_reset(destination: ContractBundle) -> None:
 
 
 def main() -> int:
+    active_destination = ContractBundle.load(
+        source_revision="candidate",
+        directory=_CONTRACTS,
+        expected_digest=_DESTINATION_DIGEST,
+    )
+    _check(
+        active_destination.contract_digest == _DESTINATION_DIGEST,
+        "destination pin is computed from unmodified active contract bundle bytes",
+    )
     migration = next(
         item for item in load_contract_reconciliations() if item.migration_id == _MIGRATION_ID
     )
@@ -237,7 +195,6 @@ def main() -> int:
         source = _historical_contract(migration.source_revision, _SOURCE_DIGEST)
         destination_path = root / "destination"
         shutil.copytree(_CONTRACTS, destination_path)
-        _write_destination_contract(destination_path)
         destination = ContractBundle.load(
             source_revision=migration.source_revision,
             directory=destination_path,

@@ -15,6 +15,7 @@ import json
 import shutil
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -26,10 +27,11 @@ from solet_manager.adapters import AdapterRegistry
 from solet_manager.config import CreateConfig
 from solet_manager.contracts import ContractBundle, contract_filenames
 from solet_manager.create_execution import _approve_frontier, _load_or_create_transaction
+from solet_manager.errors import StateConflictError
 from solet_manager.flow import initial_probe_activations
 from solet_manager.models import CheckpointStatus, JsonValue
 from solet_manager.paths import ManagerPaths
-from solet_manager.transaction import Transaction
+from solet_manager.transaction import Transaction, canonical_sha256
 
 _FIXTURES_ROOT = Path(__file__).parent / "fixtures"
 _ROOT = _FIXTURES_ROOT / "reconciliation_identity"
@@ -156,6 +158,54 @@ def _check_fresh_transaction_receives_activation_carrier(
     )
 
 
+def _check_stale_seed_transaction_is_refused(source: Transaction) -> None:
+    """A retained journal may resume only under its exact installed seed lock."""
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        paths = ManagerPaths.resolve(explicit_home=root / "manager-home")
+        config = CreateConfig(name="stale-seed", target=root / "target", autostart=True)
+        retained = replace(
+            source,
+            name=config.name,
+            target=str(config.target),
+            input_fingerprint=canonical_sha256(config.to_identity_dict()),
+        )
+        installed_seed = replace(
+            retained.seed,
+            commit="f" * 40,
+            tree_hash="e" * 40,
+            archive_sha256="d" * 64,
+        )
+        with (
+            patch("solet_manager.create_execution.load_transaction", return_value=retained),
+            patch("solet_manager.create_execution.load_seed_lock", return_value=installed_seed),
+        ):
+            try:
+                _load_or_create_transaction(
+                    paths=paths,
+                    contract_directory=None,
+                    seed_lock_path=root / "installed-seed.lock.json",
+                    registry=MagicMock(),
+                    config=config,
+                    approved_fingerprint="sha256:" + "f" * 64,
+                    selections={},
+                    decision_source="flag",
+                    sources={},
+                )
+            except StateConflictError as exc:
+                message = str(exc)
+                repair = exc.repair
+            else:
+                raise AssertionError("red: stale transaction silently resumed under new seed")
+    _check(retained.seed.commit in message, "conflict names the retained transaction seed")
+    _check(installed_seed.commit in message, "conflict names the installed seed lock")
+    _check(
+        repair is not None and "cannot reuse" in repair,
+        "conflict gives stale-transaction repair guidance",
+    )
+
+
 def main() -> int:
     _check_fixture_contract_bundle_completeness(_FIXTURES_ROOT)
     _check_fixture_completeness_mutations_are_red()
@@ -175,6 +225,7 @@ def main() -> int:
         "fixture-3 lacks an in-plan verified operation to preserve",
     )
     _check_fresh_transaction_receives_activation_carrier(bundle, source)
+    _check_stale_seed_transaction_is_refused(source)
 
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)

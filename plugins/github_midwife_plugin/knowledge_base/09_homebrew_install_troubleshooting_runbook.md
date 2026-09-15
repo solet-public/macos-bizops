@@ -88,6 +88,37 @@ The stages, in sequence, with what each installs or verifies:
 | `session_sources` | register which local coding-agent histories may be indexed | `session_sources_retrievable` |
 | `completion` | end-to-end verification | `knowledge_retrieval_succeeds`, `install_state_projection_matches` |
 
+## Claude Code newlines in a managed tmux seat
+
+This applies when the `execution_topology` decision is **Managed fleet**. A
+normal Return submits a Claude Code prompt. Newlines require a modified Return
+chord, and two independent host settings must preserve that chord:
+
+1. tmux must contain both of these lines in `~/.tmux.conf`:
+
+   ```tmux
+   set -s extended-keys on
+   set -as terminal-features "xterm*:extkeys"
+   ```
+
+2. iTerm2 must send Option as Escape. Setup offers a managed dynamic profile
+   named **Solet Claude Code Return keys** with **Option Key Sends = Esc+ (2)**.
+   Approve that preview, restart iTerm2, then select that profile before
+   opening a new managed seat.
+
+The tmux spawn path sets the same server options for every managed worker, so
+the user configuration also covers manually started tmux servers. Run
+`solet doctor <name> --json` after setup: its advisories report the tmux block
+and the iTerm2 dynamic profile separately; an unreadable artifact is
+`unknown`, never a pass.
+
+With both settings, **Option+Return** sends Escape then Return, which Claude
+Code treats as a newline. **Shift+Return** also requires iTerm2 CSI u modifier
+reporting or the mapping installed by Claude Code `/terminal-setup`; do not
+assume it works merely because Option+Return does. On any terminal where a
+modified Return chord is unavailable, type **backslash then Return** as the
+portable newline fallback.
+
 ## Where everything lives
 
 - `~/Solets/<name>`: the instance, holding the seed clone with its own

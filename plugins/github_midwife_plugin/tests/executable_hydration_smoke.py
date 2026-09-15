@@ -27,6 +27,9 @@ _SRC = _PLUGIN_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from executable_hydration_failure_diagnostic_support import (  # noqa: E402
+    run_genesis_diagnostic_regression,
+)
 from executable_hydration_plugin_list_support import (  # noqa: E402
     prepare_claude_receipt_fixture,
     run_genesis_profile_projection,
@@ -498,7 +501,7 @@ def _operation_counterexamples(target: Path, runtime: FakeRuntime) -> None:
         True,
         30_000,
         "public-but-suppressed",
-        "secret-value-must-not-escape",
+        "secret=secret-value-must-not-escape",
     )
     timed_out = handlers[timed_out_apply.operation_ref](timed_out_apply, runtime)
     runtime.responses[("/usr/bin/which", "tmux")] = CommandOutcome(1, False, 1, "", "")
@@ -859,7 +862,11 @@ def _coding_agent_cli_preconditions(target: Path) -> None:
         (CommandOutcome(None, True, 9, "", ""), "timeout"),
         (
             bounded_command_outcome(
-                returncode=17, timed_out=False, duration_ms=10, stdout="ok", stderr=private
+                returncode=17,
+                timed_out=False,
+                duration_ms=10,
+                stdout="ok",
+                stderr=f"token={private}",
             ),
             "nonzero_exit",
         ),
@@ -870,9 +877,17 @@ def _coding_agent_cli_preconditions(target: Path) -> None:
         _check(reason["duration_ms"] == outcome.duration_ms, f"{expected} reason keeps duration")
         _check(
             private not in json.dumps(failed, sort_keys=True),
-            f"{expected} reason excludes private streams",
+            f"{expected} reason redacts private stream values",
         )
         _check(failed["stdout"] == failed["stderr"] == "", f"{expected} preserves closed streams")
+
+    run_genesis_diagnostic_regression(
+        target=target,
+        runtime=runtime,
+        raw_request=_raw_request,
+        handlers=operation_handlers(),
+        check=_check,
+    )
 
     marketplace_runtime = FakeRuntime(target / "marketplace-nonzero")
     manifest = (
@@ -883,7 +898,7 @@ def _coding_agent_cli_preconditions(target: Path) -> None:
     marketplace_runtime.responses[
         ("/fixture/codex", "plugin", "marketplace", "add", str(target))
     ] = bounded_command_outcome(
-        returncode=17, timed_out=False, duration_ms=13, stdout="visible", stderr=private
+        returncode=17, timed_out=False, duration_ms=13, stdout="visible", stderr=f"token={private}"
     )
     failed_marketplace = operation_handlers()["hydration::codex.install_plugin"](
         AdapterRequest.from_dict(

@@ -201,19 +201,40 @@
       ]
     },
     "failure_reason": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["outcome_class", "exit_code", "duration_ms", "timed_out", "stdout_bytes", "stderr_bytes", "stdout_truncated", "stderr_truncated"],
-      "properties": {
-        "outcome_class": {"enum": ["executable_missing", "launch_error", "timeout", "nonzero_exit"]},
-        "exit_code": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 255}]},
-        "duration_ms": {"type": "integer", "minimum": 0},
-        "timed_out": {"type": "boolean"},
-        "stdout_bytes": {"type": "integer", "minimum": 0},
-        "stderr_bytes": {"type": "integer", "minimum": 0},
-        "stdout_truncated": {"type": "boolean"},
-        "stderr_truncated": {"type": "boolean"}
-      }
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outcome_class", "exit_code", "duration_ms", "timed_out", "stdout_bytes", "stderr_bytes", "stdout_truncated", "stderr_truncated"],
+          "properties": {
+            "outcome_class": {"enum": ["executable_missing", "launch_error", "timeout", "nonzero_exit"]},
+            "exit_code": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 255}]},
+            "duration_ms": {"type": "integer", "minimum": 0},
+            "timed_out": {"type": "boolean"},
+            "stdout_bytes": {"type": "integer", "minimum": 0},
+            "stderr_bytes": {"type": "integer", "minimum": 0},
+            "stdout_truncated": {"type": "boolean"},
+            "stderr_truncated": {"type": "boolean"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outcome_class", "exit_code", "duration_ms", "timed_out", "stdout_bytes", "stderr_bytes", "stdout_truncated", "stderr_truncated", "stderr_diagnostic", "stderr_diagnostic_truncated"],
+          "properties": {
+            "outcome_class": {"enum": ["executable_missing", "launch_error", "timeout", "nonzero_exit"]},
+            "exit_code": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 255}]},
+            "duration_ms": {"type": "integer", "minimum": 0},
+            "timed_out": {"type": "boolean"},
+            "stdout_bytes": {"type": "integer", "minimum": 0},
+            "stderr_bytes": {"type": "integer", "minimum": 0},
+            "stdout_truncated": {"type": "boolean"},
+            "stderr_truncated": {"type": "boolean"},
+            "stderr_diagnostic": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "stderr_diagnostic_truncated": {"type": "boolean"}
+          }
+        }
+      ]
     },
     "public_value": {
       "anyOf": [

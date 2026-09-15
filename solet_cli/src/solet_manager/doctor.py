@@ -22,6 +22,7 @@ from .doctor_residue_census import collect_residue_advisories
 from .doctor_router_identity_census import collect_router_identity_advisories
 from .doctor_secret_exposure_census import collect_secret_exposure_advisories
 from .doctor_seed_integrity_census import collect_seed_integrity_advisories
+from .doctor_terminal_return_keys import collect_terminal_return_key_advisories
 from .doctor_vintage_census import collect_doctor_advisories
 from .errors import StateConflictError
 from .journal_rollup import _FINAL_STAGE_STATUSES
@@ -80,6 +81,7 @@ class InstallationDoctor:
         advisories.extend(collect_credential_copy_advisories(record))
         advisories.extend(collect_plugin_version_skew_advisories(record))
         advisories.extend(collect_lm_studio_advisories(record))
+        advisories.extend(collect_terminal_return_key_advisories(record))
         advisories.extend(
             collect_inference_qualification_advisories(
                 bundle,

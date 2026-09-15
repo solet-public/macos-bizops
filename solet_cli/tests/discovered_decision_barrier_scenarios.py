@@ -446,7 +446,22 @@ def _inactive_inference_case(root: Path) -> JsonObject:
         stage_probe_statuses=initial_stage_probe_statuses(bundle, plan.answers),
     )
     write_transaction(paths.transaction_path(name), transaction)
-    manager = CreateManager(paths=paths, contract_directory=None, seed_lock_path=root / "unused.seed.lock.json")
+    seed_lock = root / "free.seed.lock.json"
+    seed_lock.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "repository": seed.repository,
+                "release_tag": seed.release_tag,
+                "commit": seed.commit,
+                "tree_hash": seed.tree_hash,
+                "archive_sha256": seed.archive_sha256,
+                "profile": seed.profile,
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = CreateManager(paths=paths, contract_directory=None, seed_lock_path=seed_lock)
     trace: list[JsonObject] = []
     adapter = PersistentArtifactAdapter(fixture_root, event_trace=trace)
     _set_invoke_adapter(adapter)

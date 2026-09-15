@@ -50,6 +50,9 @@ from github_midwife_plugin.genesis import (  # noqa: E402
     run_autostart_install,
     run_genesis,
 )
+from github_midwife_plugin.genesis import (
+    main as genesis_main,
+)
 from github_midwife_plugin.setup_adapter_contract import AdapterRequest  # noqa: E402
 from github_midwife_plugin.setup_adapter_runtime import SystemRuntime  # noqa: E402
 from github_midwife_plugin.setup_operations import genesis_artifacts_valid  # noqa: E402
@@ -254,6 +257,12 @@ class _FakeLaunchctl:
 class _FakeStaleMasterKeychain(FakeKeychain):
     def exists(self, account: str) -> bool:
         return account == "master-key"
+
+
+class _FakeCleanMasterKeychain(FakeKeychain):
+    def exists(self, account: str) -> bool:
+        del account
+        return False
 
 
 def _run_sandboxed_genesis(
@@ -738,6 +747,37 @@ def _check_stale_vault_master_fails_before_autostart(root: Path) -> None:
     )
 
 
+def _check_stale_vault_precheck_is_scriptable() -> None:
+    """The operator can detect residue before a new genesis creates state."""
+
+    stale_stdout = io.StringIO()
+    stale_stderr = io.StringIO()
+    with patch("github_midwife_plugin.genesis.SystemKeychain", return_value=_FakeStaleMasterKeychain()), \
+         patch.object(sys, "argv", ["genesis", "--check-vault-stale-state"]), \
+         patch.dict("os.environ", {"SOLET_NAME": "testhum4"}), \
+         redirect_stdout(stale_stdout), redirect_stderr(stale_stderr):
+        stale_exit = genesis_main()
+    _check(
+        "the stale-vault precheck fails before genesis",
+        stale_exit == 1
+        and "service testhum4-vault account 'master-key' already exists" in stale_stderr.getvalue(),
+        stale_stderr.getvalue(),
+    )
+
+    clean_stdout = io.StringIO()
+    with patch("github_midwife_plugin.genesis.SystemKeychain", return_value=_FakeCleanMasterKeychain()), \
+         patch.object(sys, "argv", ["genesis", "--check-vault-stale-state"]), \
+         patch.dict("os.environ", {"SOLET_NAME": "testhum4"}), \
+         redirect_stdout(clean_stdout):
+        clean_exit = genesis_main()
+    _check(
+        "the clean precheck is scriptable and names its checked Keychain item",
+        clean_exit == 0
+        and "service testhum4-vault account master-key is absent" in clean_stdout.getvalue(),
+        clean_stdout.getvalue(),
+    )
+
+
 def _run_stale_vault_genesis(
     root: Path,
     clone: Path,
@@ -900,6 +940,7 @@ def main() -> int:
             _check_vault_passphrase_failure_writes_failed_marker(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_stale_vault_master_fails_before_autostart(Path(tmp))
+        _check_stale_vault_precheck_is_scriptable()
         with tempfile.TemporaryDirectory() as tmp:
             _check_spine_failure_surfaces_as_genesis_error(Path(tmp))
     except SmokeFailureError as exc:

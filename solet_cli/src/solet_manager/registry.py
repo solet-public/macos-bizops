@@ -81,6 +81,17 @@ class InstanceRegistry:
         records[record.name] = record
         self._write(records)
 
+    def discard_orphan(self, expected: InstanceRecord) -> None:
+        """Remove a record only when the caller proved its journal is absent."""
+
+        records = self._read()
+        if records.get(expected.name) != expected:
+            raise StateConflictError(
+                f"registry changed before orphan reconciliation for {expected.name!r}"
+            )
+        del records[expected.name]
+        self._write(records)
+
     def reconcile_contract(
         self,
         *,

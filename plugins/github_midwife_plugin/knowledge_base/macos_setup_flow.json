@@ -3050,6 +3050,28 @@
         ]
       }
     },
+    "configure_terminal_return_keys": {
+      "name": "Configure modified Return keys for Claude Code",
+      "description": "Offer the managed tmux extended-key block and iTerm2 Option+Return dynamic profile for newline input in managed seats.",
+      "operation_ref": "setup::terminal.configure_return_keys",
+      "runner": "hydration",
+      "implementation_status": "adapter_required",
+      "risk": "medium",
+      "requires_confirmation": true,
+      "consent_refs": [
+        "system_change_consent"
+      ],
+      "required_when": {
+        "decision_ref": "execution_topology",
+        "operator": "equals",
+        "value": "fleet"
+      },
+      "idempotency": {
+        "mode": "append_once",
+        "precondition_probe_refs": [],
+        "postcondition_probe_refs": []
+      }
+    },
     "install_codex_cli": {
       "name": "Install Codex CLI",
       "description": "Install the operator-selected Codex client with Homebrew when it is absent.",
@@ -4921,6 +4943,7 @@
         "install_node",
         "install_postgresql",
         "configure_postgresql",
+        "configure_terminal_return_keys",
         "install_tmux",
         "install_lm_studio",
         "start_lm_studio_server",
