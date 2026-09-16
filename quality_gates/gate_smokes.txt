@@ -651,6 +651,7 @@ plugins/agent_messaging_plugin/tests/tmux_driver_channel_smoke.py
 # mutation-proven: send removed / un-park removed / re-arm removed red
 # exactly their own assertions, 2026-08-04).
 plugins/agent_messaging_plugin/tests/session_lifecycle_verbs_smoke.py
+plugins/agent_messaging_plugin/tests/workbench_brief_snapshot_smoke.py
 plugins/agent_messaging_plugin/tests/managed_dispatch_smoke.py
 plugins/agent_messaging_plugin/tests/managed_dispatch_cli_actor_smoke.py
 plugins/agent_messaging_plugin/tests/managed_dispatch_persisted_utc_smoke.py
@@ -4767,3 +4768,6 @@ plugins/agent_messaging_plugin/tests/operator_codex_launcher_smoke.py
 
 # Main-seat goal keeper Stop hook (iss_273bffe3, rul_367d8bd6): refuses a turn end
 # once on an Operator hand-off or an unreported open seat goal; inert elsewhere.
+
+# Landing-wave.v1 read-only composition, global staged equality, and one-sweep receipt.
+quality_gates/tests/landing_wave_smoke.py

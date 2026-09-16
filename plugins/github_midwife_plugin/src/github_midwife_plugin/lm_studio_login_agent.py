@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import shlex
@@ -36,8 +37,39 @@ def render_login_agent(home: Path, models: dict[str, ModelArtifact]) -> tuple[st
     lines = ["#!/bin/sh", "set -eu", *_loaded_state_function(), require_jit_off, shlex.join((lms, "daemon", "up")), shlex.join((lms, "server", "start", "--port", "1234", "--bind", "127.0.0.1")), require_jit_off]
     for role in ("embeddings", "inference"):
         model = models[role]
-        path = shlex.quote(str(model.path(home)))
-        lines.extend((f'if [ -f {path} ] && [ "$(/usr/bin/stat -f %z {path})" = {model.size_bytes} ]; then', f'  state=$(model_state {shlex.quote(model.api_identifier)}) || exit 1', '  case "$state" in', "    loaded) ;;", "    not-loaded) " + shlex.join((lms, *model.load_argv)) + " ;;", "    *) exit 1 ;;", "  esac", "fi"))
+        artifact = model.path(home)
+        source = {
+            "type": "huggingface",
+            "owner": model.repository.split("/", 1)[0],
+            "repo": model.repository.split("/", 1)[1],
+            "file": model.filename,
+        }
+        validation_argv = shlex.join(
+            (
+                str(home),
+                str(artifact),
+                str(home / ".lmstudio/.internal/model-data.json"),
+                str(model.size_bytes),
+                f"{model.repository}/{model.filename}",
+                json.dumps(source, sort_keys=True, separators=(",", ":")),
+            )
+        )
+        identifier = shlex.quote(model.api_identifier)
+        lines.extend(
+            (
+                f"model_artifact_present {validation_argv} || exit 1",
+                f"state=$(model_state {identifier}) || exit 1",
+                'case "$state" in',
+                "  loaded) ;;",
+                "  not-loaded)",
+                "    " + shlex.join((lms, *model.load_argv)),
+                f"    state=$(model_state {identifier}) || exit 1",
+                '    [ "$state" = loaded ] || exit 1',
+                "    ;;",
+                "  *) exit 1 ;;",
+                "esac",
+            )
+        )
     lines.extend(("attempt=0", "while [ \"$attempt\" -lt 30 ]; do", "  if /usr/bin/curl --fail --silent --max-time 2 http://127.0.0.1:1234/v1/models >/dev/null; then exit 0; fi", "  attempt=$((attempt + 1))", "  /bin/sleep 1", "done", "exit 1", ""))
     plist = {
         "Label": LABEL,
@@ -55,14 +87,52 @@ def render_login_agent(home: Path, models: dict[str, ModelArtifact]) -> tuple[st
 
 
 def _loaded_state_function() -> tuple[str, ...]:
-    """A bounded passive read; exact response identity and state are mandatory."""
+    """Render bounded collection reads plus exact local artifact validation."""
+
+    collection_parser = "\n".join(
+        (
+            "import json",
+            "import sys",
+            "identifier = sys.argv[1]",
+            "payload = json.load(sys.stdin)",
+            "rows = payload.get('data') if isinstance(payload, dict) else None",
+            "if not isinstance(rows, list): raise ValueError('LM Studio collection data is invalid')",
+            "states = {}",
+            "for row in rows:",
+            "    model_id = row.get('id') if isinstance(row, dict) else None",
+            "    state = row.get('state') if isinstance(row, dict) else None",
+            "    if not isinstance(model_id, str) or not model_id or model_id in states or state not in ('loaded', 'not-loaded'):",
+            "        raise ValueError('LM Studio collection row is invalid')",
+            "    states[model_id] = state",
+            "print(states.get(identifier, 'not-loaded'))",
+        )
+    )
+    artifact_parser = "\n".join(
+        (
+            "import json",
+            "import sys",
+            "from pathlib import Path",
+            "home, artifact, metadata = (Path(value) for value in sys.argv[1:4])",
+            "size, key, source = int(sys.argv[4]), sys.argv[5], json.loads(sys.argv[6])",
+            "artifact.relative_to(home)",
+            "if not artifact.is_file() or any(part.is_symlink() for part in (artifact, *artifact.parents) if part != home and home in part.parents): raise ValueError('LM Studio artifact is unsafe')",
+            "if artifact.stat().st_size != size or artifact.open('rb').read(4) != b'GGUF': raise ValueError('LM Studio artifact is incomplete')",
+            "payload = json.loads(metadata.read_text(encoding='utf-8'))",
+            "rows = payload.get('json') if isinstance(payload, dict) else None",
+            "matching = [row for row in rows if isinstance(row, list) and len(row) == 2 and row[0] == key] if isinstance(rows, list) else []",
+            "if len(matching) != 1 or not isinstance(matching[0][1], dict) or matching[0][1].get('source') != source: raise ValueError('LM Studio artifact provenance is invalid')",
+        )
+    )
+    collection_command = shlex.join(("/usr/bin/python3", "-c", collection_parser))
+    artifact_command = shlex.join(("/usr/bin/python3", "-c", artifact_parser))
 
     return (
+        "model_artifact_present() {",
+        f"  {artifact_command} \"$@\"",
+        "}",
         "model_state() {",
-        '  response=$(/usr/bin/curl --fail --silent --show-error --max-time 2 --max-filesize 1048576 "http://127.0.0.1:1234/api/v0/models/$1") || return 1',
-        '  identifier=$(printf %s "$response" | /usr/bin/plutil -extract id raw -o - -) || return 1',
-        '  [ "$identifier" = "$1" ] || return 1',
-        '  printf %s "$response" | /usr/bin/plutil -extract state raw -o - -',
+        '  response=$(/usr/bin/curl --fail --silent --show-error --max-time 2 --max-filesize 1048576 "http://127.0.0.1:1234/api/v0/models") || return 1',
+        f'  printf %s "$response" | {collection_command} "$1"',
         "}",
     )
 

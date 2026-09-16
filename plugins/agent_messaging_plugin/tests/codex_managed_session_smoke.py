@@ -179,7 +179,7 @@ def _composite_spec(
         agent_runtime=agent_runtime,
         allowed_hosts=[host],
         host=host,
-        visibility="headless",
+        visibility="visible" if host == "tmux" else "headless",
         local_name=f"{dispatch_id}-Builder",
         report_by_seconds=900,
         ttl_seconds=14400,

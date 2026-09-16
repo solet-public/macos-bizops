@@ -40,6 +40,7 @@ from executable_hydration_plugin_list_support import (  # noqa: E402
 )
 from executable_hydration_structured_output_cap_support import (  # noqa: E402
     run_knowledge_output_cap,
+    run_knowledge_readiness_poll,
     run_plugin_roster_output_cap,
 )
 from github_midwife_plugin import setup_shell_operations  # noqa: E402
@@ -1529,6 +1530,9 @@ def _adapter_and_doctor_red_boundary(target: Path, runtime: FakeRuntime) -> None
     _check(
         failed_kb["checkpoint_status"] != "verified",
         "green process with empty KB retrieval is non-green",
+    )
+    run_knowledge_readiness_poll(
+        target, runtime, request=_request, check=_check, command_outcome=CommandOutcome
     )
     run_knowledge_output_cap(
         target,

@@ -61,12 +61,12 @@ def main() -> int:
         "operator.spawn() refuses with HostCannotSpawnError (degenerate, never spawns)",
     )
 
-    headless_driver, headless_host = resolve_host_driver(None)  # falls to DEFAULT_HOST='headless'
+    tmux_driver, tmux_host = resolve_host_driver(None)  # falls to DEFAULT_HOST='tmux'
     _check(
-        headless_host == "headless",
-        "no override + no env -> default 'headless' -> now a REGISTERED driver "
-        "(was HostMechanismMissingError before the headless driver landed)",
+        tmux_host == "tmux",
+        "no override + no env -> safe default 'tmux' -> a REGISTERED driver",
     )
+    headless_driver, headless_host = resolve_host_driver("headless")
     os.environ.pop("FLEET_HEADLESS_PERMISSION_MODE", None)
     headless_cannot_spawn = False
     try:

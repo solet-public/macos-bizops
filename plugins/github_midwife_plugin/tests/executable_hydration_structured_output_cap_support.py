@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -20,6 +21,83 @@ def _public_observed_values(evidence: Any) -> dict[str, Any] | None:
         if "=" in item
         for key, value in [item.split("=", maxsplit=1)]
     }
+
+
+def _assert_evidence_digest(result: Any, check: Callable[[object, str], None]) -> None:
+    evidence = result["evidence"][0]
+    observed = evidence["observed"]
+    expected_digest = "sha256:" + hashlib.sha256(
+        json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    check(
+        isinstance(observed, bool) and evidence["digest"] == expected_digest,
+        "knowledge readiness evidence keeps a public scalar observation with a matching digest",
+    )
+
+
+def _assert_pre_call_timeout(
+    timeout_probe: Any,
+    runtime: Any,
+    wait_for_knowledge: Callable[..., Any],
+    check: Callable[[object, str], None],
+) -> None:
+    class PreCallDriftClock:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def monotonic(self) -> float:
+            self.calls += 1
+            return 0.0 if self.calls == 1 else 0.001
+
+        def sleep(self, seconds: float) -> None:
+            raise AssertionError(f"pre-call timeout must not sleep: {seconds}")
+
+    command_count = len(runtime.commands)
+    clock = PreCallDriftClock()
+    timeout = wait_for_knowledge(
+        timeout_probe, runtime, monotonic=clock.monotonic, sleep=clock.sleep
+    )
+    check(
+        timeout["checkpoint_status"] == "blocked"
+        and timeout["error_kind"] == "knowledge_retrieval_timeout"
+        and len(runtime.commands) == command_count,
+        "pre-call subsecond budget is a timeout, not a malformed response",
+    )
+
+
+def _assert_parent_budget_cap(
+    target: Path,
+    runtime: Any,
+    request: Callable[..., Any],
+    check: Callable[[object, str], None],
+    nonempty: Any,
+    vector: tuple[str, ...],
+    wait_for_knowledge: Callable[..., Any],
+) -> None:
+    class TimeoutRecordingRuntime:
+        def __init__(self, base: Any) -> None:
+            self.home = base.home
+            self._base = base
+            self.timeouts: list[int] = []
+
+        def run(self, *args: Any, **kwargs: Any) -> Any:
+            self.timeouts.append(kwargs["timeout_seconds"])
+            return self._base.run(*args, **kwargs)
+
+    probe = request(
+        target,
+        operation_id="knowledge_retrieval_succeeds",
+        operation_ref="service_interface::knowledge_service.search",
+        probe_purpose="stage_exit",
+        timeout_seconds=120,
+    )
+    runtime.response_sequences[vector] = [nonempty]
+    capped_runtime = TimeoutRecordingRuntime(runtime)
+    result = wait_for_knowledge(probe, capped_runtime)
+    check(
+        result["checkpoint_status"] == "verified" and capped_runtime.timeouts == [60],
+        "knowledge poll caps a 120-second parent budget to a 60-second governed call",
+    )
 
 
 def run_knowledge_output_cap(
@@ -56,7 +134,19 @@ def run_knowledge_output_cap(
                 "result": {
                     "success": True,
                     "error": None,
-                    "data": {"count": 1, "results": [{"content": "x" * 25_022}]},
+                    "data": {
+                        "count": 1,
+                        "results": [
+                            {
+                                "content": "x" * 25_022,
+                                "knowledge_base": "fixture",
+                                "file_path": "fixture.md",
+                                "score": 1.0,
+                                "tier": "semantic",
+                                "memory_id": "fixture-memory",
+                            }
+                        ],
+                    },
                 }
             }
         ),
@@ -71,6 +161,176 @@ def run_knowledge_output_cap(
         runtime.command_output_limits[-1] == structured_output_limit,
         "structured knowledge output_limit reaches the production cap",
     )
+
+
+def run_knowledge_readiness_poll(
+    target: Path,
+    runtime: Any,
+    *,
+    request: Callable[..., Any],
+    check: Callable[[object, str], None],
+    command_outcome: Any,
+) -> None:
+    """Exercise successful-empty, malformed, and deadline-bound retrieval states."""
+
+    from github_midwife_plugin.installation_state_doctor import _wait_for_knowledge_retrieval
+
+    class Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+            self.sleeps: list[float] = []
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    class SlowRuntime:
+        def __init__(self, base: Any, clock: Clock) -> None:
+            self.home = base.home
+            self._base = base
+            self._clock = clock
+
+        def run(self, *args: Any, **kwargs: Any) -> Any:
+            self._clock.now += 0.75
+            return self._base.run(*args, **kwargs)
+
+    probe = request(
+        target,
+        operation_id="knowledge_retrieval_succeeds",
+        operation_ref="service_interface::knowledge_service.search",
+        probe_purpose="stage_exit",
+        timeout_seconds=4,
+    )
+    vector = (
+        str(target / ".venv/bin/solet-bridge"),
+        "call",
+        "service_interface::knowledge_service::search",
+        '{"query":"session start orientation","top_k":1}',
+    )
+    empty = command_outcome(
+        0, False, 1, '{"result":{"success":true,"data":{"count":0,"results":[]}}}', ""
+    )
+    result_row = {
+        "content": "fixture result",
+        "knowledge_base": "fixture",
+        "file_path": "fixture.md",
+        "score": 1.0,
+        "tier": "semantic",
+        "memory_id": "fixture-memory",
+    }
+    nonempty = command_outcome(
+        0,
+        False,
+        1,
+        json.dumps({"result": {"success": True, "data": {"count": 1, "results": [result_row]}}}),
+        "",
+    )
+    runtime.response_sequences[vector] = [empty, nonempty]
+    clock = Clock()
+    result = _wait_for_knowledge_retrieval(
+        probe, runtime, monotonic=clock.monotonic, sleep=clock.sleep
+    )
+    check(
+        result["checkpoint_status"] == "verified" and clock.sleeps == [0.5],
+        "stage-exit knowledge readiness polls until measured retrieval is nonempty",
+    )
+    _assert_evidence_digest(result, check)
+    invalid_envelopes = (
+        ("missing fields", '{"result":{"success":true,"data":{}}}'),
+        (
+            "count mismatch with no rows",
+            '{"result":{"success":true,"data":{"count":1,"results":[]}}}',
+        ),
+        (
+            "count mismatch with a row",
+            '{"result":{"success":true,"data":{"count":0,"results":[{}]}}}',
+        ),
+        (
+            "non-object row",
+            '{"result":{"success":true,"data":{"count":1,"results":["not-an-object"]}}}',
+        ),
+        (
+            "row missing canonical fields",
+            '{"result":{"success":true,"data":{"count":1,"results":[{}]}}}',
+        ),
+        (
+            "successful envelope with an error",
+            json.dumps(
+                {
+                    "result": {
+                        "success": True,
+                        "error": {"message": "boom"},
+                        "data": {"count": 1, "results": [result_row]},
+                    }
+                }
+            ),
+        ),
+    )
+    for label, envelope in invalid_envelopes:
+        runtime.response_sequences[vector] = [
+            command_outcome(0, False, 1, envelope, ""),
+            empty,
+        ]
+        malformed_clock = Clock()
+        malformed = _wait_for_knowledge_retrieval(
+            probe, runtime, monotonic=malformed_clock.monotonic, sleep=malformed_clock.sleep
+        )
+        check(
+            malformed["error_kind"] == "knowledge_retrieval_protocol_invalid"
+            and not malformed_clock.sleeps
+            and len(runtime.response_sequences[vector]) == 1,
+            f"{label} successful knowledge envelope fails immediately without a retry",
+        )
+    runtime.response_sequences[vector] = [
+        command_outcome(
+            1,
+            True,
+            1,
+            json.dumps({"result": {"success": True, "data": {"count": 1, "results": [result_row]}}}),
+            "",
+        ),
+        empty,
+    ]
+    timed_out_clock = Clock()
+    timed_out = _wait_for_knowledge_retrieval(
+        probe, runtime, monotonic=timed_out_clock.monotonic, sleep=timed_out_clock.sleep
+    )
+    check(
+        timed_out["checkpoint_status"] == "blocked"
+        and timed_out["error_kind"] == "knowledge_retrieval_timeout"
+        and not timed_out_clock.sleeps
+        and len(runtime.response_sequences[vector]) == 1,
+        "governed knowledge process timeout is an immediate timeout, not a protocol error",
+    )
+    timeout_probe = request(
+        target,
+        operation_id="knowledge_retrieval_succeeds",
+        operation_ref="service_interface::knowledge_service.search",
+        probe_purpose="stage_exit",
+        timeout_seconds=1,
+    )
+    runtime.response_sequences[vector] = [empty, empty]
+    deadline_clock = Clock()
+    deadline = _wait_for_knowledge_retrieval(
+        timeout_probe,
+        SlowRuntime(runtime, deadline_clock),
+        monotonic=deadline_clock.monotonic,
+        sleep=deadline_clock.sleep,
+    )
+    check(
+        deadline["checkpoint_status"] == "blocked"
+        and deadline_clock.now == 1.0
+        and len(runtime.response_sequences[vector]) == 1,
+        "knowledge poll never starts a governed call beyond its remaining deadline",
+    )
+    _assert_pre_call_timeout(timeout_probe, runtime, _wait_for_knowledge_retrieval, check)
+    _assert_parent_budget_cap(
+        target, runtime, request, check, nonempty, vector, _wait_for_knowledge_retrieval
+    )
+    runtime.response_sequences.pop(vector)
 
 
 def run_plugin_roster_output_cap(

@@ -4,6 +4,53 @@ Newest release first. Earlier releases follow below the divider.
 
 ---
 
+## 2026-09-15 — r40: diagnosable genesis recovery and persistent-autostart proof
+
+**Solet Manager `manager-v0.1.0-r40`** (`solet 0.1.0_26`) is pinned to
+public seed release `release-2026-09-15-da73ac6cc1e4` of
+`solet-public/macos-bizops`, built from source pin
+`da73ac6cc1e4106864293faa766b301d91c750ca`. It was validated end to end on a
+fresh 24 GB macOS guest: every required setup checkpoint completed, `solet
+doctor` verified 24/24 checks, and target-local bridge health was healthy.
+The published seed's artifact-keyed born-clone gate passed 586 of 601 checks;
+the remaining 15 were classified environment-dependent skips, with no failures
+or missing entries.
+
+### What is in it
+
+- **Fixed: genesis now preserves its actionable failure diagnostic.** An
+  interrupted or inconsistent setup journal no longer becomes an opaque
+  `corrupt_state` failure; r40 reports the underlying condition so the
+  documented, narrowly-scoped repair can be chosen. This does not make it
+  safe to overwrite a prior instance's state or Keychain entries.
+- **Fixed: LaunchAgent readiness proves persistence as well as liveness.**
+  The manager requires both a healthy launchd service and its persistent plist
+  on disk before calling autostart reboot-ready. A manually loaded but
+  non-persistent job can no longer pass that acceptance claim.
+- **Fresh-install validation uses the released r40 payload.** The manager,
+  Formula revision 26, public seed, and transport bytes were bound and checked
+  together before the clean-guest ladder ran; the final transaction verified
+  every required completion probe.
+
+### What is NOT in it, stated plainly
+
+- **Updating an existing solet is not supported or proven.** It remains round
+  two. A stale transaction, instance registry, or Keychain vault can still
+  block or misdirect a reused instance name; follow the tap README's
+  *Reinstalling on a machine that had a solet* sweep before reusing one.
+- **Known install-time transient:** `iss_b7b01bcc` tracks pgvector dependency
+  reconciliation that can leave the formula absent while the extension remains
+  registered. If completion reports a vector-library load failure, run `brew
+  install pgvector` and resume the same reviewed `solet create` transaction;
+  do not drop or recreate the extension.
+- The previous release's outstanding limits still apply unless explicitly
+  fixed above: no automated supported manager upgrade path, no abandon/change
+  decision command for a blocked transaction, and no manager adoption of
+  bootstrap-era solets.
+
+Read the tap README first (https://github.com/solet-public/homebrew-tap) for
+the current install guide, known gaps, and reinstall guidance.
+
 ## 2026-09-15 — Cold first boot reaches active color; installing on a fresh Mac is validated end to end
 
 **This release fixes a cold-first-boot defect that could leave a brand-new

@@ -11,3 +11,4 @@ dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["solet_setup_contracts*"]

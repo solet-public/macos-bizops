@@ -55,6 +55,7 @@ from ananta.llm.agent_messaging.state_results import (
     require_updated,
 )
 
+from . import workbench_brief_snapshot
 from .driver_texts import render_driver_text
 from .lane_worktrees import (
     DirtyStaleWorktreeSkippedWarning,
@@ -95,6 +96,10 @@ from .schema import (
     LIFECYCLE_RETIRED,
     LIFECYCLE_SPAWNING,
     LIFECYCLE_TERMINATED,
+    SESSION_HOST_HEADLESS,
+    SESSION_HOST_TMUX,
+    SESSION_VISIBILITY_HEADLESS,
+    SESSION_VISIBILITY_VISIBLE,
     TABLE_MANAGED_SESSION,
     TABLE_SESSION_DEPENDENCY,
     WORK_CLASS_ANALYSIS_DELIVERABLE,
@@ -150,6 +155,7 @@ if TYPE_CHECKING:
     from .session_hosts import DriverChannel, HostDriver
 
 logger = logging.getLogger(__name__)
+VerbError = workbench_brief_snapshot.VerbError
 
 _VALID_SPAWN_ROLE_CLASSES = frozenset(
     {ROLE_CLASS_EPHEMERAL, ROLE_CLASS_PROJECT, ROLE_CLASS_PRINCIPAL},
@@ -208,13 +214,13 @@ _FALLBACK_NO_BRIEF_CLAUSE = (
 )
 _FALLBACK_NO_SPAWNER = "whoever spawned you (your row records no spawning role)"
 
-
 def build_fallback_first_turn(
     *,
     spawned_by_role: str,
     role_class: str,
     role_name: str,
     brief_ref: str,
+    brief_snapshot: workbench_brief_snapshot.BriefSnapshot | None = None,
 ) -> str:
     """Render the JSON-defined fallback first turn for one spawn (SPN-01).
 
@@ -225,7 +231,7 @@ def build_fallback_first_turn(
     made-up binding reads as addressable while routing nowhere, which is
     strictly worse than a lane that says it has no name.
     """
-    return render_driver_text(
+    fallback = render_driver_text(
         "spawn.fallback_first_turn",
         role_instruction=_role_instruction(role_class=role_class, role_name=role_name),
         brief_clause=(
@@ -235,6 +241,7 @@ def build_fallback_first_turn(
         ),
         spawned_by_role=spawned_by_role or _FALLBACK_NO_SPAWNER,
     )
+    return fallback if brief_snapshot is None else fallback + workbench_brief_snapshot.render(brief_snapshot)
 
 
 # Charter-rider provenance framing (phase-3 incident finding, 2026-08-06,
@@ -336,16 +343,6 @@ def _frame_charter_provenance(
         role_instruction=_role_instruction(role_class=role_class, role_name=role_name),
         charter_text=charter.charter_text,
     )
-
-
-class VerbError(Exception):
-    """A stable error token + message for the L1 verb surface — the
-    ``@platform_process`` shim maps this straight to ``_failure_result``."""
-
-    def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        self.message = message
-        super().__init__(f"{code}: {message}")
 
 
 def _role_row(state: StateManagementInterface, name: str) -> dict[str, Any] | None:
@@ -750,6 +747,35 @@ def _require_dispatch_host_allowed(
         )
 
 
+_VISIBLE_HOSTS: Final[frozenset[str]] = frozenset({SESSION_HOST_TMUX})
+_HEADLESS_HOSTS: Final[frozenset[str]] = frozenset({SESSION_HOST_HEADLESS})
+
+
+def _require_visibility_matches_host(visibility: str, resolved_host: str) -> None:
+    """Refuse a descriptive visibility label that disagrees with the host.
+
+    ``visible`` is the persisted visibility vocabulary and means a tmux-hosted
+    worker. ``tmux`` is accepted as the explicit spelling used by callers of
+    the spawn API. An omitted visibility has no asserted topology to check.
+    """
+    if resolved_host not in _VISIBLE_HOSTS | _HEADLESS_HOSTS:
+        return
+    expected_hosts = {
+        SESSION_VISIBILITY_VISIBLE: _VISIBLE_HOSTS,
+        "tmux": _VISIBLE_HOSTS,
+        SESSION_VISIBILITY_HEADLESS: _HEADLESS_HOSTS,
+    }.get(visibility)
+    if expected_hosts is not None and resolved_host in expected_hosts:
+        return
+    if not visibility:
+        return
+    expected = " or ".join(sorted(expected_hosts)) if expected_hosts else "a declared visibility"
+    raise VerbError(
+        "visibility_host_mismatch",
+        f"visibility {visibility!r} requires {expected}; resolved host is {resolved_host!r}.",
+    )
+
+
 def _record_dispatch_first_turn(
     state: StateManagementInterface,
     req: SpawnSessionRequest,
@@ -1007,6 +1033,7 @@ def _resolve_spawn_host(
     except HostMechanismMissingError as exc:
         raise VerbError("host_mechanism_missing", exc.remedy) from exc
     _require_dispatch_host_allowed(dispatch_row, resolved_host)
+    _require_visibility_matches_host(req.visibility, resolved_host)
     return driver, resolved_host
 
 
@@ -1054,6 +1081,10 @@ def spawn_session(
     # W6: resolved BEFORE the host lookup so a refused second spawn costs
     # nothing and, like the role validation above, fails BEFORE dispatch.
     local_name = _resolve_and_guard_local_name(state, req)
+    charter = resolve_lane_charter(state, req.lane_id)
+    brief_snapshot = workbench_brief_snapshot._workbench_brief_snapshot(
+        req.brief_ref, req.repository_root, dispatch_row, has_charter=charter is not None,
+    )
 
     driver, resolved_host = _resolve_spawn_host(req, dispatch_row)
 
@@ -1135,6 +1166,8 @@ def spawn_session(
         role_class=req.role_class,
         role_name=req.role_name,
         brief_ref=req.brief_ref,
+        charter=charter,
+        brief_snapshot=brief_snapshot,
         agent_runtime=req.agent_runtime,
         resolved_host=resolved_host,
         host_ref=host_ref,
@@ -1183,6 +1216,8 @@ def _dispatch_first_turn(
     role_class: str,
     role_name: str,
     brief_ref: str,
+    charter: LaneCharterRecord | None,
+    brief_snapshot: workbench_brief_snapshot.BriefSnapshot | None,
     agent_runtime: str,
     resolved_host: str,
     host_ref: str,
@@ -1197,7 +1232,6 @@ def _dispatch_first_turn(
     ``(first_turn_source, first_turn_delivered, first_turn_error)``; NEVER
     raises — a delivery fault here must never block the spawn itself
     (ordering-ruling guard (b)), only be logged + surfaced to the caller."""
-    charter = resolve_lane_charter(state, lane_id)
     if charter is not None:
         first_turn_text = _frame_charter_provenance(
             charter,
@@ -1213,6 +1247,7 @@ def _dispatch_first_turn(
             role_class=role_class,
             role_name=role_name,
             brief_ref=brief_ref,
+            brief_snapshot=brief_snapshot,
         )
         first_turn_source = FIRST_TURN_SOURCE_FALLBACK
     first_turn_delivered = False

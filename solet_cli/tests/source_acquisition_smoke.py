@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -50,6 +51,29 @@ class FakeGit:
         self.provenance_bundle = provenance_bundle or seed.profile
         self.fetch_result = fetch_result
         self.commands: list[tuple[str, ...]] = []
+        origin_id = "123e4567-e89b-12d3-a456-426614174001"
+        manifest_sha256 = "d" * 64
+        seed_id = str(uuid.uuid5(uuid.UUID(origin_id), f"{seed.commit}:{manifest_sha256}::"))
+        self.provenance_bytes = (
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "seed_id": seed_id,
+                    "origin_id": origin_id,
+                    "source_commit": seed.commit,
+                    "manifest_sha256": manifest_sha256,
+                    "bundle": {"name": self.provenance_bundle, "platform": "local"},
+                    "source_date": "2026-09-15T00:00:00+00:00",
+                    "lineage": [],
+                    "ancestry": [],
+                    "signature": None,
+                },
+                indent=2,
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+            + "\n"
+        )
 
     def __call__(self, command: Sequence[str], cwd: Path | None, _timeout: int) -> RunResult:
         cmd = tuple(command)
@@ -58,6 +82,9 @@ class FakeGit:
         if fetch_result is not None:
             return fetch_result
         self._write_provenance(cmd, cwd)
+        provenance_result = self._provenance_result(cmd)
+        if provenance_result is not None:
+            return provenance_result
         revision_result = self._revision_result(cmd)
         if revision_result is not None:
             return revision_result
@@ -72,14 +99,23 @@ class FakeGit:
     def _write_provenance(self, command: tuple[str, ...], cwd: Path | None) -> None:
         if command[:2] != ("git", "checkout") or cwd is None:
             return
-        (cwd / "PROVENANCE.json").write_text(
-            json.dumps({
-                "source_commit": "d" * 40,
-                "signature": None,
-                "bundle": {"name": self.provenance_bundle, "platform": "local"},
-            }),
-            encoding="utf-8",
-        )
+        (cwd / "PROVENANCE.json").write_text(self.provenance_bytes, encoding="utf-8")
+
+    def _provenance_result(self, command: tuple[str, ...]) -> RunResult | None:
+        if command == ("git", "show", "HEAD:PROVENANCE.json"):
+            return RunResult(0, self.provenance_bytes, "")
+        if command == ("git", "show", "-s", "--format=%B", "HEAD"):
+            stamp = json.loads(self.provenance_bytes)
+            return RunResult(
+                0,
+                "Seed bundle (factory-sealed)\n\n"
+                f"Seed-Id: {stamp['seed_id']}\nOrigin-Id: {stamp['origin_id']}\n"
+                f"Manifest-SHA256: {stamp['manifest_sha256']}\n"
+                f"Assembled-Ref: {stamp['source_commit']}\n"
+                "License-Policy: public_apache\nMinted-At: 2026-09-15T00:00:00+00:00\n",
+                "",
+            )
+        return None
 
     def _revision_result(self, command: tuple[str, ...]) -> RunResult | None:
         if self._tag_commit_command(command) or command[:3] == (
@@ -203,12 +239,8 @@ def _capture_fetch_failure(
 
 
 def _check_repository_classification(root: Path) -> None:
-    private_seed = _seed_at(
-        f"https://github.com/{_FIXTURE_OWNER}/fixture-private-repo.git"
-    )
-    missing_seed = _seed_at(
-        f"https://github.com/{_FIXTURE_OWNER}/fixture-missing-repo.git"
-    )
+    private_seed = _seed_at(f"https://github.com/{_FIXTURE_OWNER}/fixture-private-repo.git")
+    missing_seed = _seed_at(f"https://github.com/{_FIXTURE_OWNER}/fixture-missing-repo.git")
     ambiguous_fetch = (
         "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
     )
@@ -308,9 +340,7 @@ def _check_non_access_false_positive(root: Path) -> None:
     _check(missing_ref_error.repair is None, "missing ref retains generic recovery")
     _check(not missing_ref_probe.commands, "missing ref performs no repository probe")
 
-    private_seed = _seed_at(
-        f"https://github.com/{_FIXTURE_OWNER}/fixture-private-repo.git"
-    )
+    private_seed = _seed_at(f"https://github.com/{_FIXTURE_OWNER}/fixture-private-repo.git")
     private_missing_ref_probe = FakeRepositoryProbe(
         private_seed.repository,
         http_status=200,
@@ -337,9 +367,7 @@ def _check_non_access_false_positive(root: Path) -> None:
         "missing ref in private repo performs no repository probe",
     )
 
-    missing_seed = _seed_at(
-        f"https://github.com/{_FIXTURE_OWNER}/fixture-missing-repo.git"
-    )
+    missing_seed = _seed_at(f"https://github.com/{_FIXTURE_OWNER}/fixture-missing-repo.git")
     missing_transport_probe = FakeRepositoryProbe(missing_seed.repository, http_status=404)
     missing_transport_error = _capture_fetch_failure(
         missing_seed,
@@ -396,9 +424,7 @@ def _check_pre_fetch_failures(root: Path) -> None:
 
 
 def _check_private_stderr_redaction(root: Path) -> None:
-    seed = _seed_at(
-        f"https://github.com/{_FIXTURE_OWNER}/fixture-private-repo.git"
-    )
+    seed = _seed_at(f"https://github.com/{_FIXTURE_OWNER}/fixture-private-repo.git")
     probe = FakeRepositoryProbe(seed.repository, http_status=200, visibility="private")
     secret_markers = (
         "ghp_DO_NOT_COPY",
@@ -527,8 +553,7 @@ def _check_tagless_acquisition(root: Path) -> None:
     )
     _check(
         not any(
-            "refs/tags/" in command or "refs/heads/main" in command
-            for command in fake.commands
+            "refs/tags/" in command or "refs/heads/main" in command for command in fake.commands
         ),
         "tagless seed never relies on an advertised tag or moving head",
     )
@@ -592,7 +617,10 @@ def main() -> int:
             "existing 0755 target parent accepted unchanged",
         )
         _check(
-            any(f"refs/tags/{seed.release_tag}:refs/tags/{seed.release_tag}" in command for command in fake.commands),
+            any(
+                f"refs/tags/{seed.release_tag}:refs/tags/{seed.release_tag}" in command
+                for command in fake.commands
+            ),
             "fetches exact tag ref",
         )
         _check(
@@ -603,7 +631,9 @@ def main() -> int:
             ("git", "remote", "add", "origin", seed.repository) in fake.commands,
             "retains locked origin",
         )
-        _check(("git", "branch", "--force", "main", seed.commit) in fake.commands, "pins local main")
+        _check(
+            ("git", "branch", "--force", "main", seed.commit) in fake.commands, "pins local main"
+        )
         _check((target / "PROVENANCE.json").is_file(), "provenance retained")
 
         _check_unreadable_seed_refusal(
@@ -620,7 +650,9 @@ def main() -> int:
 
         missing_parent = root / "created-parent"
         mismatch_target = missing_parent / "bad-commit"
-        _check_identity_failure(seed, mismatch_target, root / "cache2", FakeGit(seed, commit="e" * 40))
+        _check_identity_failure(
+            seed, mismatch_target, root / "cache2", FakeGit(seed, commit="e" * 40)
+        )
         _check(
             stat.S_IMODE(missing_parent.stat().st_mode) == 0o700,
             "missing target parent created 0700",
@@ -642,7 +674,7 @@ def main() -> int:
             seed,
             provenance_target,
             root / "cache-provenance",
-        FakeGit(seed, provenance_bundle="samantha-standard"),
+            FakeGit(seed, provenance_bundle="samantha-standard"),
             replace_runner=forbidden_replace,
         )
         _check(
@@ -693,7 +725,9 @@ def main() -> int:
             _check(True, "target-parent identity swap detected before finalization")
         else:
             _check(False, "target-parent identity swap detected before finalization")
-        _check(not race_target.exists(), "target-parent race never installs at the replacement path")
+        _check(
+            not race_target.exists(), "target-parent race never installs at the replacement path"
+        )
 
     print(f"source_acquisition_smoke OK: {_CHECKS} checks passed")
     return 0
@@ -721,7 +755,10 @@ def _check_identity_failure(
         _check(False, f"identity mismatch refused for {target.name}")
     _check(not target.exists(), f"identity mismatch never creates final target {target.name}")
     _check(
-        any(path.name.startswith(f".{target.name}.solet-acquire-") for path in target.parent.iterdir()),
+        any(
+            path.name.startswith(f".{target.name}.solet-acquire-")
+            for path in target.parent.iterdir()
+        ),
         f"failed private sibling staging retained for {target.name}",
     )
 

@@ -63,6 +63,21 @@ class CandidateTree:
 
 
 @dataclass(frozen=True)
+class FrozenEntry:
+    """One verified final entry supplied by a landing-wave manifest.
+
+    ``data=None`` is an explicit deletion and therefore cannot also carry a
+    mode.  The public type deliberately contains bytes, not a source worktree
+    path: composition has already frozen those bytes before this materializer
+    runs, so it cannot silently reread a dirty lane.
+    """
+
+    path: str
+    data: bytes | None
+    mode: str | None
+
+
+@dataclass(frozen=True)
 class _GitBlob:
     path: str
     object_id: str
@@ -651,6 +666,75 @@ def materialize_candidate_tree(
     manifest.write_bytes(_manifest_bytes(paths))
     validated = validate_candidate_manifest(snapshot_root, manifest)
     return CandidateTree(root=snapshot_root, manifest=manifest, paths=validated)
+
+
+def _frozen_entry_contents(
+    entries: Sequence[FrozenEntry], paths: Sequence[str]
+) -> dict[str, _Content | None]:
+    """Translate closed public frozen entries into the internal overlay form."""
+    by_path = {entry.path: entry for entry in entries}
+    if len(by_path) != len(entries):
+        raise CandidatePathError("frozen-entry composition contains duplicate paths")
+    contents: dict[str, _Content | None] = {}
+    for path in paths:
+        entry = by_path[path]
+        if entry.data is None:
+            if entry.mode is not None:
+                raise CandidateOverlayError(f"deleted frozen entry has a mode: {path!r}")
+            contents[path] = None
+            continue
+        if entry.mode not in _SUPPORTED_MODES:
+            raise CandidateOverlayError(
+                f"frozen entry has an unsupported mode at {path!r}: {entry.mode!r}"
+            )
+        contents[path] = _Content(data=entry.data, mode=entry.mode)
+    return contents
+
+
+def materialize_frozen_entries(
+    repo_root: Path,
+    destination: Path,
+    entries: Sequence[FrozenEntry],
+    *,
+    base_ref: str,
+) -> CandidateTree:
+    """Materialize a pinned base plus immutable final entry bytes.
+
+    This is the composition primitive for a landing wave.  It performs no Git
+    mutation and does not inspect source worktrees; callers must have already
+    verified source quiescence, hashes, modes, and base-entry equality.
+    """
+    root = repo_root.resolve()
+    if not root.is_dir():
+        raise CandidatePathError(f"repository root is not a directory: {root}")
+    if str(destination) != str(destination.resolve()):
+        raise CandidatePathError(
+            "candidate destination must already be its own physical path: "
+            f"{destination} resolves to {destination.resolve()}"
+        )
+    if not entries:
+        raise CandidatePathError("frozen-entry composition requires at least one entry")
+    paths = _validated_scope(tuple(entry.path for entry in entries))
+    contents = _frozen_entry_contents(entries, paths)
+
+    snapshot_root = destination / "tree"
+    snapshot_root.mkdir(parents=True)
+    base_paths = _materialize_git_blobs(
+        root,
+        snapshot_root,
+        _git_tree_blobs(root, base_ref),
+        source=f"committed base {base_ref!r}",
+    )
+    expected = _apply_content_overlay(snapshot_root, base_paths, contents)
+    actual = _snapshot_paths(snapshot_root)
+    _assert_snapshot_matches(expected, actual, source="frozen-entry candidate path set")
+    manifest = destination / "candidate-manifest.txt"
+    manifest.write_bytes(_manifest_bytes(actual))
+    return CandidateTree(
+        root=snapshot_root,
+        manifest=manifest,
+        paths=validate_candidate_manifest(snapshot_root, manifest),
+    )
 
 
 @contextmanager

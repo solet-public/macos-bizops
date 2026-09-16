@@ -104,7 +104,7 @@ def main() -> int:
     check_singleton()
     check_loopback()
     check_executed_helper()
-    print("lm_studio_login_item_smoke: singleton, drift, no teardown, executed helper duplicate-load refusal, string JIT refusal, explicit loading and unknown-state controls passed")
+    print("lm_studio_login_item_smoke: singleton, drift, no teardown, collection-only cold boot with per-item 400, exact post-load readback, string JIT refusal, and invalid-state controls passed")
     return 0
 
 
@@ -116,13 +116,16 @@ def check_executed_helper() -> None:
             write_artifact(runtime.home, model)
         assert disable_jit(runtime)
         helper, responses, trace = _fixture_helper(runtime, models)
-        for state in ("loaded", "not-loaded", "unknown", "wrong-id", "missing-state"):
+        for state in ("loaded", "not-loaded", "empty", "unknown", "missing-state"):
             responses.write_text(json.dumps(_helper_payload(models, state)))
             trace.write_text("")
             completed = subprocess.run(("/bin/sh", str(helper)), capture_output=True, text=True, check=False, timeout=10)
             commands = [json.loads(line) for line in trace.read_text().splitlines()]
             loads = [command for command in commands if command[0] == "load"]
-            _check_helper_state(state, completed.returncode, loads, models)
+            _check_helper_state(state, completed.returncode, loads, models, completed.stderr)
+        helper_text = helper.read_text()
+        assert "/api/v0/models/$1" not in helper_text
+        assert 'http://127.0.0.1:1234/api/v0/models"' in helper_text
         _check_string_jit_refusal(runtime, models, helper, responses, trace)
 
 
@@ -135,19 +138,18 @@ def _check_string_jit_refusal(runtime: FixtureRuntime, models: dict[str, ModelAr
 
 
 def _helper_payload(models: dict[str, ModelArtifact], state: str) -> dict[str, JsonObject]:
-    rows: dict[str, JsonObject] = {model.api_identifier: {"id": model.api_identifier, "state": state} for model in models.values()}
-    for row in rows.values():
-        if state == "wrong-id":
-            row.update({"id": "wrong-model", "state": "loaded"})
-        elif state == "missing-state":
-            row.pop("state")
-    return rows
+    states: dict[str, str] = {model.api_identifier: state for model in models.values()}
+    if state == "empty":
+        states = {}
+    if state == "missing-state":
+        return {"rows": [{"id": model.api_identifier} for model in models.values()]}
+    return {"states": states}
 
 
-def _check_helper_state(state: str, code: int, loads: list[list[str]], models: dict[str, ModelArtifact]) -> None:
+def _check_helper_state(state: str, code: int, loads: list[list[str]], models: dict[str, ModelArtifact], stderr: str) -> None:
     if state == "loaded":
-        assert code == 0 and loads == [], "bootstrap must not create duplicate model instances"
-    elif state == "not-loaded":
+        assert code == 0 and loads == [], f"bootstrap must not create duplicate model instances: {stderr}"
+    elif state in ("not-loaded", "empty"):
         assert code == 0 and loads == [list(model.load_argv) for model in models.values()]
     else:
         assert code != 0 and loads == [], "unknown state cannot trigger speculative loading"
@@ -158,8 +160,23 @@ def _fixture_helper(runtime: FixtureRuntime, models: dict[str, ModelArtifact]) -
     lms, curl = cli_path(runtime.home), runtime.home / "curl-fixture"
     lms.parent.mkdir(parents=True, exist_ok=True)
     header = f"#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\n"
-    lms.write_text(header + f"output=Path({str(trace)!r})\noutput.write_text(output.read_text() + json.dumps(sys.argv[1:]) + '\\n')\n")
-    curl.write_text(header + f"rows=json.loads(Path({str(responses)!r}).read_text())\nidentifier=sys.argv[-1].rsplit('/',1)[-1]\nprint(json.dumps(rows.get(identifier, {{'data':[]}})))\n")
+    lms.write_text(
+        header
+        + f"responses=Path({str(responses)!r})\noutput=Path({str(trace)!r})\n"
+        + "payload=json.loads(responses.read_text())\n"
+        + "if sys.argv[1:2] == ['load']:\n    payload.setdefault('states', {})[sys.argv[2]] = 'loaded'\n    responses.write_text(json.dumps(payload))\n"
+        + "output.write_text(output.read_text() + json.dumps(sys.argv[1:]) + '\\n')\n"
+    )
+    curl.write_text(
+        header
+        + f"payload=json.loads(Path({str(responses)!r}).read_text())\nurl=sys.argv[-1]\n"
+        + "if url.endswith('/api/v0/models'):\n"
+        + "    rows=payload.get('rows')\n"
+        + "    if rows is None:\n        rows=[{'id': identifier, 'state': state} for identifier, state in payload.get('states', {}).items()]\n"
+        + "    print(json.dumps({'data': rows}))\n"
+        + "elif '/api/v0/models/' in url:\n    print('per-item endpoint is unavailable during cold start', file=sys.stderr)\n    raise SystemExit(22)\n"
+        + "else:\n    print(json.dumps({'data': []}))\n"
+    )
     lms.chmod(0o700)
     curl.chmod(0o700)
     _, text = render_login_agent(runtime.home, models)

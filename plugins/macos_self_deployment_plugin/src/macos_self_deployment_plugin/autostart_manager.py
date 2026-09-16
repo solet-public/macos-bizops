@@ -402,6 +402,7 @@ class AutostartManager:
             f'  <key>WorkingDirectory</key>\n  <string>{_xml_escape(str(working_dir))}</string>\n'
             '  <key>EnvironmentVariables</key>\n  <dict>\n'
             f'    <key>SOLET_NAME</key>\n    <string>{_xml_escape(self._solet_name)}</string>\n'
+            '    <key>FLEET_SESSION_HOST</key>\n    <string>tmux</string>\n'
             # §39.2: without this key the daemon gets launchd's bare PATH and
             # cannot see Homebrew binaries (tmux) even when installed. See
             # AUTOSTART_PATH_ENV for why it is a fixed literal.

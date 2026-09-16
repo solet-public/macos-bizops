@@ -14,6 +14,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import cast
 
+from solet_setup_contracts.provenance_v1 import (
+    ProvenanceV1Error,
+    parse_provenance_v1,
+    verify_seal_trailers,
+)
+
 from .errors import SourceError, SourceIdentityError
 from .release_lock import SeedLock
 from .state_io import ensure_private_directory
@@ -112,7 +118,7 @@ def materialize_locked_seed(
     _initialize_staging(seed, staging, runner)
     _fetch_and_verify_identity(seed, staging, runner, repository_probe_runner)
     _checkout_verified_seed(seed, staging, runner)
-    _verify_provenance_identity(staging / "PROVENANCE.json", seed.profile)
+    _verify_provenance_identity(staging, seed.profile, runner)
     _verify_origin_and_main(seed, staging, runner)
     _finalize_staging(staging, target, parent_identity, replace_runner)
     return target
@@ -145,7 +151,9 @@ def _fetch_and_verify_identity(
     _verify_fetched_commit(seed, commit)
     tree = _run_checked(runner, ("git", "rev-parse", f"{seed.commit}^{{tree}}"), staging).strip()
     if tree != seed.tree_hash:
-        raise SourceIdentityError(f"commit tree {tree!r} differs from locked tree {seed.tree_hash!r}")
+        raise SourceIdentityError(
+            f"commit tree {tree!r} differs from locked tree {seed.tree_hash!r}"
+        )
 
 
 def _fetch_locked_commit(
@@ -204,7 +212,9 @@ def _finalize_staging(
     try:
         (replace_runner or _atomic_sibling_replace)(staging, target, parent_identity)
     except OSError as exc:
-        raise SourceError(f"verified staging checkout could not be atomically installed at {target}: {exc}") from exc
+        raise SourceError(
+            f"verified staging checkout could not be atomically installed at {target}: {exc}"
+        ) from exc
 
 
 def _atomic_sibling_replace(
@@ -234,31 +244,61 @@ def _verify_origin_and_main(seed: SeedLock, checkout: Path, runner: CommandRunne
     origin = _run_checked(runner, ("git", "remote", "get-url", "origin"), checkout).strip()
     main = _run_checked(runner, ("git", "rev-parse", "main^{commit}"), checkout).strip()
     if origin != seed.repository or main != seed.commit:
-        raise SourceIdentityError(f"materialized checkout identity drifted: origin={origin!r}, main={main!r}")
+        raise SourceIdentityError(
+            f"materialized checkout identity drifted: origin={origin!r}, main={main!r}"
+        )
 
 
-def _verify_provenance_identity(path: Path, expected_profile: str) -> None:
+def _verify_provenance_identity(
+    checkout: Path, expected_profile: str, runner: CommandRunner
+) -> None:
+    """Bind checked-out bytes and HEAD trailers through the shared strict verifier."""
     try:
-        raw: object = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise SourceIdentityError(f"seed provenance is missing or malformed at {path}: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise SourceIdentityError("seed provenance must be one JSON object")
-    provenance = cast(dict[str, object], raw)
-    bundle = provenance.get("bundle")
-    bundle_dict = cast(dict[str, object], bundle) if isinstance(bundle, dict) else None
-    bundle_name = bundle_dict.get("name") if bundle_dict is not None else None
-    if bundle_name != expected_profile:
+        committed = _run_checked(runner, ("git", "show", "HEAD:PROVENANCE.json"), checkout).encode(
+            "utf-8"
+        )
+        working = (checkout / "PROVENANCE.json").read_bytes()
+    except (OSError, SourceError) as exc:
+        raise SourceIdentityError(f"seed provenance is missing from committed HEAD: {exc}") from exc
+    if working != committed:
+        raise SourceIdentityError(
+            "working PROVENANCE.json differs byte-for-byte from committed HEAD"
+        )
+    try:
+        stamp = parse_provenance_v1(committed)
+    except ProvenanceV1Error as exc:
+        raise SourceIdentityError(f"seed provenance is malformed: {exc}") from exc
+    if stamp.bundle_name != expected_profile:
         raise SourceIdentityError(
             "seed provenance bundle/profile identity mismatch: "
-            f"bundle={bundle_name!r}, locked_profile={expected_profile!r}"
+            f"bundle={stamp.bundle_name!r}, locked_profile={expected_profile!r}"
         )
-    source_commit = provenance.get("source_commit")
-    if not isinstance(source_commit, str) or len(source_commit) != 40:
-        raise SourceIdentityError("seed provenance source_commit is missing or invalid")
-    signature = provenance.get("signature")
-    if signature is not None:
-        raise SourceIdentityError("seed provenance v1 signature must be null; no signature claim is supported")
+    message = _run_checked(runner, ("git", "show", "-s", "--format=%B", "HEAD"), checkout)
+    try:
+        verify_seal_trailers(stamp, _trailer_values(message))
+    except ProvenanceV1Error as exc:
+        raise SourceIdentityError(f"seed seal trailers are malformed: {exc}") from exc
+
+
+def _trailer_values(message: str) -> dict[str, list[str]]:
+    values: dict[str, list[str]] = {
+        "Subject": [message.splitlines()[0]] if message.splitlines() else []
+    }
+    for line in message.splitlines()[1:]:
+        if ": " not in line:
+            continue
+        key, value = line.split(": ", 1)
+        if key in {
+            "Seed-Id",
+            "Origin-Id",
+            "Manifest-SHA256",
+            "Assembled-Ref",
+            "License-Policy",
+            "Minted-At",
+            "Lineage-Parent",
+        }:
+            values.setdefault(key, []).append(value)
+    return values
 
 
 def _run_checked(
@@ -272,7 +312,9 @@ def _run_checked(
         raise SourceError(f"could not run {command[0]} {command[1]}: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-500:]
-        raise SourceError(f"{command[0]} {command[1]} failed with exit {result.returncode}: {detail}")
+        raise SourceError(
+            f"{command[0]} {command[1]} failed with exit {result.returncode}: {detail}"
+        )
     return result.stdout
 
 

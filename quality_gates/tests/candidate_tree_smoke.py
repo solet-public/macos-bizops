@@ -471,6 +471,44 @@ def _check_staged_snapshot() -> int:
     return 4
 
 
+def _check_frozen_entry_composition() -> int:
+    """A wave materializes frozen bytes, modes, and deletion without a source reread."""
+    with TemporaryDirectory() as temporary:
+        root = Path(temporary) / "repo"
+        root.mkdir()
+        _git(root, "init", "-q")
+        _write(root, "delete.txt", "base delete\n")
+        _write(root, "replace.txt", "base replace\n")
+        _git(root, "add", "delete.txt", "replace.txt")
+        _git(
+            root,
+            "-c",
+            "user.name=Candidate Smoke",
+            "-c",
+            "user.email=candidate@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        )
+        destination = (Path(temporary) / "frozen").resolve()
+        tree = candidate_tree.materialize_frozen_entries(
+            root,
+            destination,
+            (
+                candidate_tree.FrozenEntry("delete.txt", None, None),
+                candidate_tree.FrozenEntry("replace.txt", b"frozen bytes\n", "100755"),
+                candidate_tree.FrozenEntry("new-link", b"replace.txt", "120000"),
+            ),
+            base_ref="HEAD",
+        )
+        assert not (tree.root / "delete.txt").exists()
+        assert (tree.root / "replace.txt").read_bytes() == b"frozen bytes\n"
+        assert (tree.root / "replace.txt").stat().st_mode & 0o111
+        assert (tree.root / "new-link").is_symlink()
+        assert os.readlink(tree.root / "new-link") == "replace.txt"
+    return 6
+
+
 def _check_nested_identity_candidate() -> int:
     bare = "biz" + "ops"
     cases = {
@@ -564,6 +602,7 @@ def main() -> int:
     check_count += _check_external_aggregation_symlink()
     check_count += _check_tracked_generated_artifact_refused()
     check_count += _check_staged_snapshot()
+    check_count += _check_frozen_entry_composition()
     check_count += _check_nested_identity_candidate()
     check_count += _check_delivery_order()
     print(f"candidate_tree_smoke OK: {check_count} checks passed")

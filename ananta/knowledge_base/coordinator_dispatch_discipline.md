@@ -229,6 +229,17 @@ evidence back to `active` with a concrete repair action. Never complete from a
 draft file, routing receipt, path existence, worker self-assertion, stale
 attempt, stale causal version, or coordinator status query.
 
+Once the coordinator has independently verified a worker's completion (or, for
+the lighter `spawn_session` + `peer_send` lane pattern, has verified a
+completion report with nothing further outstanding), it promptly retires or
+terminates that worker's session in the same turn that accepts completion, not
+in a later separate check. Retiring a worker's own session is tier-1 and stays
+seat-native: the coordinator/seat calls `retire_session` or `terminate_session`,
+never the worker on itself. This closes the measured 2026-09-15/16 gap in which
+19 of 21 fleet lanes finished their work and correctly reported it, then sat
+idle (some over an hour) until an external session noticed and retired them by
+hand (iss_8e9e78d3).
+
 After accepted dispatch completion, request Git-Controller landing separately
 with the exact scoped paths and the registered gate evidence. Later ancestry,
 deployment, publication, and cold-host proof remain distinct boundaries.
@@ -266,6 +277,29 @@ cannot bypass the composite.
 This discipline tracks work; it never broadens authority. Operator-only actions
 remain seat-native, Git mutation remains Git-Controller-only, and the worker
 continues safe in-scope work while a separable ruling is pending.
+
+## 11. Landing-wave cut and send loop
+
+For eligible, reviewed, scope-disjoint units, the coordinator may request a
+deterministic `landing-wave.v1` plan. It first verifies every offer, source
+base, exact path set, scope conflict edge, portable path collision, review, and
+unit state; unknown or stale inputs are blockers, never empty sets. The plan
+contains the ordered member/offer tuples, one pinned base, one supplied
+integration worktree and branch, and the canonical manifest digest.
+
+After `prepare` reserves that exact plan, the coordinator sends its one framed
+payload through this solet's `peer_send_by_name` to the repository's closed
+mutating role. A charter, worker statement, register event, relayed message, or
+collection of per-unit messages is not a wave authorization. Any offer/base/
+membership change requires a fresh plan, manifest, and direct first-party
+message.
+
+The controller records the one sweep, each required staged/hook proof, common
+merge, and atomic completion receipt. A failed member commit leaves master
+unchanged and preserves the integration branch; a post-merge record failure is
+reported as such, never described as a rollback. Coordinators report physical
+sweeps separately from member commits and merges: throughput is verified units
+per completed sweep, not the number of landing rows.
 
 ## Related mechanisms
 

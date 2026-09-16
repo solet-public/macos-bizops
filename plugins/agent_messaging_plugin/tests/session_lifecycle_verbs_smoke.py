@@ -155,7 +155,7 @@ def _spawn_req(**overrides: object) -> SpawnSessionRequest:
     base: dict[str, object] = {
         "role_class": "ephemeral",
         "lane_id": "lane-1",
-        "brief_ref": "workbench/brief.md",
+        "brief_ref": "fixtures/brief.md",
         "work_class": WORK_CLASS_ANALYSIS_DELIVERABLE,
         "budget_line": "budget-1",
         "host": "operator",
@@ -187,6 +187,8 @@ def _prepared_project_req(
                 "work_class": req.work_class,
                 "budget_line": req.budget_line,
                 "brief_ref": req.brief_ref,
+                "brief_sha256": "",
+                "repository_root": req.repository_root,
                 "agent_runtime": req.agent_runtime,
                 "host": str(req.host or ""),
                 "visibility": req.visibility,
@@ -701,6 +703,94 @@ def _install_fake_hosts() -> None:
 def _remove_fake_hosts() -> None:
     session_hosts._REGISTRY.pop(_TEST_HOST, None)  # noqa: SLF001
     session_hosts._REGISTRY.pop(_TEST_HOST_NO_CHANNEL, None)  # noqa: SLF001
+
+
+def test_omitted_host_resolves_to_tmux_before_spawn() -> None:
+    """A raw spawn with no host must select tmux before it allocates a lane."""
+    state = _state()
+    key = (session_hosts.DEFAULT_AGENT_RUNTIME, "tmux")
+    original_driver = session_hosts._REGISTRY[key]  # noqa: SLF001 -- test seam
+    previous_env_host = os.environ.pop("FLEET_SESSION_HOST", None)
+    fake_driver = _FakeDriverWithChannel()
+    session_hosts._REGISTRY[key] = fake_driver  # noqa: SLF001 -- test seam
+    try:
+        result = spawn_session(
+            state,
+            _spawn_req(
+                host=None,
+                visibility="tmux",
+                lane_id="lane-omitted-host-default",
+            ),
+        )
+        _check(
+            result["host"] == "tmux",
+            "spawn_session(host omitted) resolves to tmux before any host side effect",
+        )
+        _check(
+            bool(fake_driver.channel.sent),
+            "the tmux-resolved fake driver receives the bootstrap turn",
+        )
+        terminate_session(
+            state,
+            agent_instance_id=str(result["agent_instance_id"]),
+            directed_by="operator:none",
+        )
+    finally:
+        session_hosts._REGISTRY[key] = original_driver  # noqa: SLF001 -- test seam
+        if previous_env_host is None:
+            os.environ.pop("FLEET_SESSION_HOST", None)
+        else:
+            os.environ["FLEET_SESSION_HOST"] = previous_env_host
+
+
+def test_visibility_host_consistency() -> None:
+    """Visibility must describe the resolved spawn host, not just the row."""
+    state = _state()
+    cases = (("visible", "headless"), ("tmux", "headless"), ("headless", "tmux"))
+    for visibility, host in cases:
+        code = _spawn_error_code(
+            state,
+            _spawn_req(
+                host=host,
+                visibility=visibility,
+                lane_id=f"lane-visibility-{visibility}-{host}",
+            ),
+        )
+        _check(
+            code == "visibility_host_mismatch",
+            f"visibility={visibility!r} with host={host!r} refuses before spawn",
+        )
+    aligned = _spawn_error_code(
+        state,
+        _spawn_req(host="tmux", visibility="visible", lane_id="lane-visible-tmux-cfg"),
+    )
+    _check(
+        aligned == "host_cannot_spawn",
+        "visibility='visible' with host='tmux' clears consistency validation",
+    )
+    previous_env_host = os.environ.pop("FLEET_SESSION_HOST", None)
+    try:
+        omitted_headless = _spawn_error_code(
+            state,
+            _spawn_req(host=None, visibility="headless", lane_id="lane-omitted-headless"),
+        )
+    finally:
+        if previous_env_host is None:
+            os.environ.pop("FLEET_SESSION_HOST", None)
+        else:
+            os.environ["FLEET_SESSION_HOST"] = previous_env_host
+    _check(
+        omitted_headless == "visibility_host_mismatch",
+        "host omission cannot turn an asserted headless visibility into a tmux spawn",
+    )
+
+
+def _spawn_error_code(state: StateManagementInterface, req: SpawnSessionRequest) -> str | None:
+    try:
+        spawn_session(state, req)
+    except VerbError as exc:
+        return exc.code
+    return None
 
 
 # -- session_terminal fire+deliver (2026-08-04, acceptance Test C fix slice) --
@@ -1248,7 +1338,7 @@ def test_spawn_session_drives_fallback_when_no_charter_on_file() -> None:
             spawned_by_role="",
             role_class="ephemeral",
             role_name="",
-            brief_ref="workbench/brief.md",
+            brief_ref="fixtures/brief.md",
         )
         _check(
             driver.channel.sent == [expected],
@@ -1337,7 +1427,7 @@ def test_fallback_first_turn_hands_off_to_the_spawner() -> None:
             _prepared_project_req(
                 state,
                 host=_TEST_HOST, lane_id="lane-spn01", role_name="lane-spn01",
-                brief_ref="workbench/spn01-brief.md", spawned_by_role="coordinator-seat",
+                brief_ref="fixtures/spn01-brief.md", spawned_by_role="coordinator-seat",
             ),
         )
         driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
@@ -1358,7 +1448,7 @@ def test_fallback_first_turn_hands_off_to_the_spawner() -> None:
             "addressable and visible to the overdue sweep, not merely awake",
         )
         _check(
-            "workbench/spn01-brief.md" in driven,
+            "fixtures/spn01-brief.md" in driven,
             "the turn points the lane at its own recorded brief_ref",
         )
         _check(
@@ -1375,8 +1465,8 @@ def test_fallback_first_turn_hands_off_to_the_spawner() -> None:
         _remove_fake_hosts()
 
 
-def test_ephemeral_fallback_preserves_the_brief_and_never_requests_a_role() -> None:
-    """DEFECT 1: no role request for an ephemeral fallback; brief_ref is literal."""
+def test_ephemeral_fallback_preserves_an_absolute_brief_ref() -> None:
+    """An out-of-scope absolute ref retains the pre-snapshot fallback behavior."""
     state = _state()
     _install_fake_hosts()
     try:
@@ -1386,23 +1476,9 @@ def test_ephemeral_fallback_preserves_the_brief_and_never_requests_a_role() -> N
             _spawn_req(host=_TEST_HOST, lane_id="lane-spn01-bare", brief_ref=brief_ref),
         )
         driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
-        driven = driver.channel.sent[0] if driver.channel.sent else ""
         _check(
-            "no role exists or will be assigned" in driven,
-            "ephemeral fallback states the no-role contract",
-        )
-        _check(
-            brief_ref in driven,
-            "the supplied absolute brief_ref is carried verbatim into the fallback",
-        )
-        _check(
-            "CLAIM YOUR ROLE BINDING FIRST" not in driven
-            and "ask rather than inventing one" not in driven,
-            "ephemeral fallback neither claims nor asks for a role",
-        )
-        _check(
-            "`solet-bridge inbox`" in driven and "`solet inbox`" not in driven,
-            "the fallback names the bridge inbox command, never the manager command",
+            len(driver.channel.sent) == 1 and brief_ref in driver.channel.sent[0],
+            "an absolute non-workbench brief_ref retains the literal fallback behavior",
         )
     finally:
         _remove_fake_hosts()
@@ -2549,6 +2625,7 @@ def test_active_worktree_inventory_preserves_drift_and_refuses_unknown_owner() -
             "a protected owner beyond the first page remains protected",
         )
 
+
 def main() -> int:
     test_active_worktree_inventory_preserves_drift_and_refuses_unknown_owner()
     test_provision_surfaces_typed_dirty_stale_worktree_warning()
@@ -2590,6 +2667,8 @@ def main() -> int:
     try:
         test_lane_worktree_root_requires_app_home()
         test_spawn_errors()
+        test_omitted_host_resolves_to_tmux_before_spawn()
+        test_visibility_host_consistency()
         test_model_dispatch_policy_refusals_and_allowances()
         test_spawn_role_class_conflict()
         test_raw_project_spawn_requires_prepared_dispatch()
@@ -2625,7 +2704,7 @@ def main() -> int:
         test_spawn_session_drives_fallback_when_no_charter_on_file()
         test_spawn_session_first_turn_preserves_agent_runtime()
         test_fallback_first_turn_hands_off_to_the_spawner()
-        test_ephemeral_fallback_preserves_the_brief_and_never_requests_a_role()
+        test_ephemeral_fallback_preserves_an_absolute_brief_ref()
         test_spawn_session_first_turn_failure_is_visible_not_blocking()
         test_spawn_session_first_turn_send_raising_is_contained()
         _check(

@@ -15,7 +15,7 @@ verify_config) and every module/file NAME are unchanged (``session_hosts.py``,
 the identifiers and prose inside them moved).
 
 Selection is DECLARED, never probed (C3): ``FLEET_SESSION_HOST`` env var (or
-a per-spawn override), default ``headless`` per §5. Every registered driver
+a per-spawn override), default ``tmux``. Every registered driver
 is still config-gated fail-closed — an unconfigured environment (missing
 binary, no ``SOLET_NAME``, no permission mode, no ``.mcp.json``, or for
 ``tmux`` an unsupported tmux version) gets ``host_cannot_spawn`` with the
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 _ENV_FLEET_SESSION_HOST = "FLEET_SESSION_HOST"
-DEFAULT_HOST = "headless"
+DEFAULT_HOST = "tmux"
 
 OPERATOR_HOST = "operator"
 SYNTHETIC_HOST = "synthetic"

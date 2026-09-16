@@ -14,6 +14,9 @@ _HOMEBREW_GUARD_ENV = {
     "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK": "1",
     "HOMEBREW_NO_INSTALL_UPGRADE": "1",
 }
+_HOMEBREW_INSTALL_MUTATION_ENV = {
+    "HOMEBREW_NO_INSTALL_CLEANUP": "1",
+}
 _OUTPUT_LIMIT = 16_384
 _PACKAGE_ITEM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._+/-]*$")
 _PACKAGE_HEADER = re.compile(
@@ -133,6 +136,28 @@ def _homebrew_plan_is_exact(output: str, *, kind: str, package: str) -> bool:
     return _dependency_closure_is_exact(package, dependency_blocks)
 
 
+def _homebrew_package_is_installed(
+    runtime: AdapterRuntime,
+    brew: str,
+    package_args: tuple[str, ...],
+    label: str,
+    environment: dict[str, str],
+) -> bool:
+    """Confirm that a failed install request already reached its desired state."""
+
+    try:
+        completed = runtime.run(
+            [brew, "list", "--versions", *package_args],
+            capture_output=True,
+            text=True,
+            timeout=INSTALL_TIMEOUT_SECONDS,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AdapterError(f"{label} installed-state check could not execute") from exc
+    return completed.returncode == 0 and bool(completed.stdout.strip())
+
+
 def run_homebrew_install_required(
     runtime: AdapterRuntime,
     brew: str,
@@ -160,22 +185,39 @@ def run_homebrew_install_required(
     if dry_run.returncode != 0 or not _homebrew_plan_is_exact(
         f"{dry_run.stdout}\n{dry_run.stderr}", kind=kind, package=package
     ):
+        if _homebrew_package_is_installed(
+            runtime,
+            brew,
+            package_args,
+            label,
+            environment,
+        ):
+            return
         raise HomebrewInstallError(
             f"{label} dry-run proposed an unapproved package mutation",
             stdout=dry_run.stdout,
             stderr=dry_run.stderr,
         )
+    mutation_environment = {**environment, **_HOMEBREW_INSTALL_MUTATION_ENV}
     try:
         completed = runtime.run(
             [brew, "install", *package_args],
             capture_output=True,
             text=True,
             timeout=INSTALL_TIMEOUT_SECONDS,
-            env=environment,
+            env=mutation_environment,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AdapterError(f"{label} could not execute") from exc
     if completed.returncode != 0:
+        if _homebrew_package_is_installed(
+            runtime,
+            brew,
+            package_args,
+            label,
+            environment,
+        ):
+            return
         raise HomebrewInstallError(
             f"{label} failed (exit {completed.returncode})",
             stdout=completed.stdout,

@@ -3,7 +3,8 @@
 Builds the deterministic manager-payload archive (the public-distribution
 ``LICENSE`` and ``NOTICE``, ``solet_cli/``, and the birth-spine setup
 contracts), computes its checksum, resolves the seed's own git identity at the
-given ref, records the manager source identity, writes ``release_metadata.json``, and then calls the existing
+given ref, records the manager source identity, writes ``release_metadata.json``,
+and then calls the existing
 ``render_release_payload.py`` to produce the real ``Formula/solet.rb`` and
 ``solet_cli/homebrew/seed.lock.json``.
 
@@ -39,6 +40,9 @@ from pathlib import Path
 _GIT_TIMEOUT_S = 30
 
 _PAYLOAD_SOURCE_PATHS = ("LICENSE", "NOTICE", "solet_setup_contracts", "solet_cli")
+_FORMULA_ONLY_CONTRACT_PATHS = (
+    "plugins/github_midwife_plugin/knowledge_base/existing_install_flow.schema.json",
+)
 _DIGESTED_CONTRACT_PATHS = (
     "plugins/github_midwife_plugin/knowledge_base/macos_setup_flow.json",
     "plugins/github_midwife_plugin/knowledge_base/setup_flow.schema.json",
@@ -89,11 +93,10 @@ def main() -> int:
         None if args.dev_mode else _require_manager_release_tag(args.manager_release_tag)
     )
     manager_ref = _require_manager_ref(args.manager_ref)
-    manager_source_repository = _require_manager_source_repository(
-        args.manager_source_repository
-    )
+    manager_source_repository = _require_manager_source_repository(args.manager_source_repository)
     _require_paths_present(manager_checkout)
     seed_identity = _resolve_identity(seed_checkout, args.release_tag, "seed release tag")
+    seed_provenance = _seed_provenance_at_commit(seed_checkout, seed_identity.commit)
     manager_identity = _resolve_identity(manager_checkout, manager_ref, "manager ref")
     _require_manager_checkout_pinned(manager_checkout, manager_identity, manager_ref)
     _require_manager_checkout_clean(manager_checkout)
@@ -109,9 +112,7 @@ def main() -> int:
     payload_dir = output_root / "payload"
     payload_dir.mkdir(parents=True, exist_ok=True)
     payload_path = payload_dir / asset_name
-    payload_sha256 = _build_payload_archive(
-        manager_checkout, manager_identity.commit, payload_path
-    )
+    payload_sha256 = _build_payload_archive(manager_checkout, manager_identity.commit, payload_path)
 
     install_mode = "dev" if args.dev_mode else "release"
     manager_url = (
@@ -136,6 +137,14 @@ def main() -> int:
         "seed_commit": seed_identity.commit,
         "seed_tree_hash": seed_identity.tree_hash,
         "seed_profile": args.seed_profile,
+        "seed_channel_id": args.seed_channel_id,
+        "seed_provenance": seed_provenance,
+        "existing_install_contract": {
+            "flow_id": "existing-install",
+            "flow_schema_version": 1,
+            "bundle_digest": contract_digest,
+        },
+        "allowed_repository_migrations": [],
     }
     metadata_path = output_root / "release_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
@@ -152,9 +161,7 @@ def main() -> int:
     return 0
 
 
-def _emit_lock_only(
-    checkout: Path, output_root: Path, args: argparse.Namespace
-) -> int:
+def _emit_lock_only(checkout: Path, output_root: Path, args: argparse.Namespace) -> int:
     """Bare seed.lock.json for a seed that ships no Homebrew payload of its
     own — no manager archive, no Formula. `archive_sha256` is OMITTED, not
     null: absence means "this seed has no separate payload archive," never
@@ -189,6 +196,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--release-tag", required=True)
     parser.add_argument("--seed-repository", required=True, help="HTTPS GitHub .git URL")
     parser.add_argument("--seed-profile", required=True)
+    parser.add_argument("--seed-channel-id", default="stable")
     parser.add_argument(
         "--manager-repository",
         help="public GitHub HTTPS .git URL that will host the manager asset",
@@ -250,17 +258,13 @@ def _require_seed_repository(repository: str) -> None:
 
 def _require_manager_repository(repository: str | None) -> str:
     if repository is None or _SEED_REPOSITORY.fullmatch(repository) is None:
-        raise SystemExit(
-            "--manager-repository must be an explicit GitHub HTTPS .git URL"
-        )
+        raise SystemExit("--manager-repository must be an explicit GitHub HTTPS .git URL")
     return repository
 
 
 def _require_manager_source_repository(repository: str | None) -> str:
     if repository is None or _SEED_REPOSITORY.fullmatch(repository) is None:
-        raise SystemExit(
-            "--manager-source-repository must be an explicit GitHub HTTPS .git URL"
-        )
+        raise SystemExit("--manager-source-repository must be an explicit GitHub HTTPS .git URL")
     return repository
 
 
@@ -281,6 +285,50 @@ def _require_profile(profile: str) -> None:
         raise SystemExit(f"--seed-profile has an invalid identity shape: {profile!r}")
 
 
+def _seed_provenance_at_commit(checkout: Path, commit: str) -> dict[str, object]:
+    """Read descriptor facts only from the pinned seed commit, never its worktree."""
+    content = _git_blob(checkout, commit, "PROVENANCE.json", "seed artifact")
+    try:
+        raw: object = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"seed artifact commit {commit} has malformed PROVENANCE.json: {exc}"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise SystemExit("seed artifact PROVENANCE.json must be an object")
+    bundle = raw.get("bundle")
+    required = frozenset(
+        {
+            "schema_version",
+            "seed_id",
+            "origin_id",
+            "source_commit",
+            "manifest_sha256",
+            "bundle",
+            "source_date",
+            "lineage",
+            "ancestry",
+            "signature",
+        }
+    )
+    if frozenset(raw) != required or not isinstance(bundle, dict):
+        raise SystemExit("seed artifact PROVENANCE.json does not match the closed v1 shape")
+    try:
+        return {
+            "schema_version": 1,
+            "provenance_sha256": hashlib.sha256(content).hexdigest(),
+            "seed_id": raw["seed_id"],
+            "origin_id": raw["origin_id"],
+            "manifest_sha256": raw["manifest_sha256"],
+            "bundle_name": bundle["name"],
+            "platform": bundle["platform"],
+            "source_commit": raw["source_commit"],
+            "source_date": raw["source_date"],
+        }
+    except KeyError as exc:
+        raise SystemExit("seed artifact PROVENANCE.json lacks a required descriptor fact") from exc
+
+
 def _owner_repo(seed_repository: str) -> str:
     return seed_repository.removeprefix("https://github.com/").removesuffix(".git")
 
@@ -299,9 +347,7 @@ def _require_paths_present(checkout: Path) -> None:
         if not (checkout / path).exists()
     ]
     if missing:
-        raise SystemExit(
-            "seed checkout is missing required payload paths: " + ", ".join(missing)
-        )
+        raise SystemExit("seed checkout is missing required payload paths: " + ", ".join(missing))
 
 
 def _resolve_identity(checkout: Path, ref: str, label: str) -> _GitIdentity:
@@ -427,7 +473,15 @@ def _build_payload_archive(checkout: Path, commit: str, destination: Path) -> st
     the checkout's own working-tree state.
     """
     tar_bytes = subprocess.run(
-        ["git", "archive", "--format=tar", commit, *_PAYLOAD_SOURCE_PATHS, *_CONTRACT_PATHS],
+        [
+            "git",
+            "archive",
+            "--format=tar",
+            commit,
+            *_PAYLOAD_SOURCE_PATHS,
+            *_CONTRACT_PATHS,
+            *_FORMULA_ONLY_CONTRACT_PATHS,
+        ],
         cwd=checkout,
         check=True,
         capture_output=True,

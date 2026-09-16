@@ -19,6 +19,10 @@ class SeedLock:
     tree_hash: str
     archive_sha256: str | None
     profile: str
+    channel_id: str | None = None
+    provenance: dict[str, object] | None = None
+    existing_install_contract: dict[str, object] | None = None
+    allowed_repository_migrations: tuple[dict[str, str], ...] = ()
 
     def source_ref(self) -> str:
         """Return the immutable source reference carried into the setup flow."""
@@ -47,6 +51,10 @@ def load_seed_lock(path: Path) -> SeedLock:
         fields.tree_hash,
         fields.archive_sha256,
         fields.profile,
+        fields.channel_id,
+        fields.provenance,
+        fields.existing_install_contract,
+        fields.allowed_repository_migrations,
     )
 
 

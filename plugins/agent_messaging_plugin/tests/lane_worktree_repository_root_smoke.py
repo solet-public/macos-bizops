@@ -159,6 +159,9 @@ def _assert_spawn_session_wires_resolved_root() -> None:
     with tempfile.TemporaryDirectory() as raw:
         foreign_root = (Path(raw) / "foreign").resolve()
         (foreign_root / ".git").mkdir(parents=True)
+        brief = foreign_root / "workbench" / "foreign.md"
+        brief.parent.mkdir()
+        brief.write_text("foreign source brief\n", encoding="utf-8")
         original_provision = lifecycle_verbs._provision_spawn_worktree  # noqa: SLF001
         original_host_spawn = lifecycle_verbs._spawn_host_in_lane_worktree  # noqa: SLF001
         original_first_turn = lifecycle_verbs._dispatch_first_turn  # noqa: SLF001

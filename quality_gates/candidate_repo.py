@@ -63,8 +63,10 @@ if str(_REPO_ROOT) not in sys.path:
 from quality_gates.candidate_tree import (  # noqa: E402
     CandidateTree,
     CandidateTreeError,
+    FrozenEntry,
     Rename,
     materialize_candidate_tree,
+    materialize_frozen_entries,
     materialize_staged_tree,
     read_rename_file,
     read_scope_file,
@@ -540,6 +542,34 @@ def provision_candidate_venv(repo_root: Path, candidate_root: Path) -> Path:
     _install_console_scripts(shared_venv, candidate_venv, source_root, candidate_root)
     _assert_venv_spelling(candidate_root, candidate_venv, repo_root, source_root)
     return candidate_venv
+
+
+def prepare_wave_integration_candidate(
+    repo_root: Path,
+    destination: Path,
+    entries: tuple[FrozenEntry, ...],
+    *,
+    base_ref: str,
+    with_venv: bool = True,
+) -> tuple[CandidateTree, SharedRepoProof]:
+    """Prepare a composed wave candidate without rereading any source lane.
+
+    The caller supplies final bytes already frozen by ``landing_wave``.  This
+    preserves the candidate repository's private-venv/origin proof while
+    keeping source overlay acquisition out of an integration path.
+    """
+    root = _assert_physical(repo_root.resolve(), label="repository root")
+    out = _assert_physical(destination, label="candidate destination")
+    if out.exists() and any(out.iterdir()):
+        raise CandidateRepoError(f"candidate destination is not empty: {out}")
+    out.mkdir(parents=True, exist_ok=True)
+    before = measure_shared_repo(root)
+    candidate = materialize_frozen_entries(root, out, entries, base_ref=base_ref)
+    if with_venv:
+        provision_candidate_venv(root, candidate.root)
+    after = measure_shared_repo(root)
+    assert_shared_repo_untouched(before, after)
+    return candidate, after
 
 
 def build(

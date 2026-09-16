@@ -208,6 +208,10 @@ def test_environment_variables_carry_homebrew_path() -> None:
         env.get("SOLET_NAME") == "example",
         f"SOLET_NAME still rendered alongside PATH (got {env.get('SOLET_NAME')!r})",
     )
+    _check(
+        env.get("FLEET_SESSION_HOST") == "tmux",
+        "FLEET_SESSION_HOST is pinned to tmux for LaunchAgent-spawned sessions",
+    )
 
 
 def test_path_is_not_an_ambient_capture() -> None:

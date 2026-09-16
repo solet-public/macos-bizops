@@ -10,5 +10,9 @@
   "seed_release_tag": "release-2026-08-21",
   "seed_commit": "0123456789abcdef0123456789abcdef01234567",
   "seed_tree_hash": "89abcdef0123456789abcdef0123456789abcdef",
-  "seed_profile": "macos-bizops"
+  "seed_profile": "macos-bizops",
+  "seed_channel_id": "stable",
+  "seed_provenance": {"schema_version": 1, "provenance_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "seed_id": "123e4567-e89b-12d3-a456-426614174000", "origin_id": "123e4567-e89b-12d3-a456-426614174001", "manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "bundle_name": "macos-bizops", "platform": "local", "source_commit": "0123456789abcdef0123456789abcdef01234567", "source_date": "2026-09-15T00:00:00+00:00"},
+  "existing_install_contract": {"flow_id": "existing-install", "flow_schema_version": 1, "bundle_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+  "allowed_repository_migrations": []
 }

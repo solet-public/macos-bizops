@@ -646,6 +646,31 @@ def _check_provisioning_never_writes_the_shared_index() -> int:
     return 4
 
 
+def _check_wave_candidate_never_rereads_source_overlay() -> int:
+    """Composed integration preparation consumes supplied bytes, never live lane bytes."""
+    with TemporaryDirectory() as temporary:
+        workspace = Path(temporary).resolve()
+        repo = workspace / "repo"
+        repo.mkdir()
+        base_ref = _build_fixture_repo(repo)
+        _write(repo, _OVERLAY, "dirty source bytes that must not be read\n")
+        candidate, proof = candidate_repo.prepare_wave_integration_candidate(
+            repo,
+            workspace / "candidate",
+            (
+                candidate_repo.FrozenEntry(
+                    _OVERLAY, b"frozen manifest bytes\n", "100644"
+                ),
+            ),
+            base_ref=base_ref,
+            with_venv=False,
+        )
+        assert (candidate.root / _OVERLAY).read_bytes() == b"frozen manifest bytes\n"
+        assert proof.head == _git(repo, "rev-parse", "HEAD").strip()
+        assert (repo / _OVERLAY).read_bytes() == b"dirty source bytes that must not be read\n"
+    return 3
+
+
 def main() -> int:
     check_count = _check_inherited_index_is_replaced()
     check_count += _check_linked_worktree_is_measurable()
@@ -658,6 +683,7 @@ def main() -> int:
     check_count += _check_pointer_guard_accepts_rehomed_prefix_sibling()
     check_count += _check_venv_intruder_guard_can_still_fail()
     check_count += _check_provisioning_never_writes_the_shared_index()
+    check_count += _check_wave_candidate_never_rereads_source_overlay()
     check_count += _check_shared_repo_drift_is_fatal()
     print(f"candidate_repo_smoke OK: {check_count} checks passed")
     return 0

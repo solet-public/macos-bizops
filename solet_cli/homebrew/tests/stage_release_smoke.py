@@ -49,6 +49,7 @@ from solet_setup_contracts.selected_source_record import (  # noqa: E402
 )
 
 _CONTRACT_ARCHIVE_ROOT = "plugins/github_midwife_plugin/knowledge_base"
+_FORMULA_ONLY_CONTRACT_EXTENSIONS = frozenset({"existing_install_flow.schema.json"})
 _CONTRACT_SOURCE = _REPOSITORY_ROOT / _CONTRACT_ARCHIVE_ROOT
 _CANONICAL_SEED_REPOSITORY = "https://github.com/solet-public/macos-bizops.git"
 _CANONICAL_SEED_PROFILE = "macos-bizops"
@@ -124,6 +125,29 @@ def _build_seed_fixture(root: Path) -> tuple[Path, Path, str]:
     contracts.mkdir(parents=True)
     for name in contract_filenames():
         (contracts / name).write_bytes((_CONTRACT_SOURCE / name).read_bytes())
+    (contracts / "existing_install_flow.schema.json").write_bytes(
+        (_CONTRACT_SOURCE / "existing_install_flow.schema.json").read_bytes()
+    )
+    (checkout / "PROVENANCE.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "seed_id": "123e4567-e89b-12d3-a456-426614174000",
+                "origin_id": "123e4567-e89b-12d3-a456-426614174001",
+                "source_commit": "a" * 40,
+                "manifest_sha256": "b" * 64,
+                "bundle": {"name": _CANONICAL_SEED_PROFILE, "platform": "local"},
+                "source_date": "2026-09-15T00:00:00+00:00",
+                "lineage": [],
+                "ancestry": [],
+                "signature": None,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     _run_git(checkout, "init", "-q")
     _run_git(checkout, "add", "-A")
@@ -260,8 +284,7 @@ def _check_metadata(
         "manager source tree hash resolved from the manager checkout",
     )
     _check(
-        metadata["manager_url"]
-        == "https://github.com/solet-public/homebrew-tap/releases/download/"
+        metadata["manager_url"] == "https://github.com/solet-public/homebrew-tap/releases/download/"
         f"{_MANAGER_RELEASE_TAG}/solet-0.1.0.tar.gz",
         "manager_url carries the independent public manager repository and tag",
     )
@@ -281,9 +304,7 @@ def _missing_archive_install_paths(
     )
 
 
-def _check_archive(
-    archive_path: Path, metadata: dict[str, object], formula: str
-) -> str:
+def _check_archive(archive_path: Path, metadata: dict[str, object], formula: str) -> str:
     real_sha256 = hashlib.sha256(archive_path.read_bytes()).hexdigest()
     _check(
         metadata["release_archive_sha256"] == real_sha256,
@@ -306,8 +327,7 @@ def _check_archive(
     missing_install_paths = _missing_archive_install_paths(names, install_paths)
     _check(
         not missing_install_paths,
-        "payload carries every Formula buildpath install: "
-        + ", ".join(missing_install_paths),
+        "payload carries every Formula buildpath install: " + ", ".join(missing_install_paths),
     )
     _check(
         "solet_cli/homebrew/seed.lock.json" not in names,
@@ -315,20 +335,18 @@ def _check_archive(
         "or the checksum would describe an archive that contains its own checksum",
     )
     _check(
-        distributed_license is not None
-        and distributed_license == _FIXTURE_LICENSE,
+        distributed_license is not None and distributed_license == _FIXTURE_LICENSE,
         "payload carries the fixture LICENSE byte-for-byte",
     )
     _check(
-        distributed_notice is not None
-        and distributed_notice == _FIXTURE_NOTICE,
+        distributed_notice is not None and distributed_notice == _FIXTURE_NOTICE,
         "payload carries the fixture NOTICE byte-for-byte",
     )
     return real_sha256
 
 
 def _check_contract_shipment_parity(archive_members: set[str]) -> None:
-    expected = set(contract_filenames())
+    expected = set(contract_filenames()) | _FORMULA_ONLY_CONTRACT_EXTENSIONS
     archive_prefix = f"{_CONTRACT_ARCHIVE_ROOT}/"
     archived = {
         member.removeprefix(archive_prefix)
@@ -349,6 +367,8 @@ def _check_contract_shipment_parity(archive_members: set[str]) -> None:
 def _check_contract_consumer_parity() -> None:
     for consumer in _CONTRACT_FILENAME_CONSUMERS:
         expected = set(consumer.authority())
+        if consumer.path.name == "solet.rb.template":
+            expected |= _FORMULA_ONLY_CONTRACT_EXTENSIONS
         _check(
             consumer.extractor(consumer.path) == expected,
             f"{consumer.path.relative_to(_REPOSITORY_ROOT)} exactly matches "
@@ -357,9 +377,7 @@ def _check_contract_consumer_parity() -> None:
 
 
 def _extract_stage_contract_filenames(path: Path) -> set[str]:
-    return _contract_filenames_from_paths(
-        _extract_module_tuple_strings(path, "_CONTRACT_PATHS")
-    )
+    return _contract_filenames_from_paths(_extract_module_tuple_strings(path, "_CONTRACT_PATHS"))
 
 
 def _extract_stage_digested_contract_filenames(path: Path) -> set[str]:
@@ -408,9 +426,7 @@ def _tuple_string_literals(
             nested = tuples.get(name)
             if nested is None or name in resolving:
                 raise AssertionError(f"red: contract tuple star cannot resolve local {name}")
-            values.extend(
-                _tuple_string_literals(nested, tuples, resolving=resolving | {name})
-            )
+            values.extend(_tuple_string_literals(nested, tuples, resolving=resolving | {name}))
             continue
         raise AssertionError("red: contract tuple contains a non-literal or unresolved path")
     return values
@@ -424,7 +440,9 @@ def _extract_formula_contract_filenames(path: Path) -> set[str]:
 def _contract_filenames_from_paths(paths: list[str]) -> set[str]:
     prefix = f"{_CONTRACT_ARCHIVE_ROOT}/"
     if not all(path.startswith(prefix) for path in paths):
-        raise AssertionError("red: contract consumer path is outside the shipped contracts directory")
+        raise AssertionError(
+            "red: contract consumer path is outside the shipped contracts directory"
+        )
     return {path.removeprefix(prefix) for path in paths}
 
 
@@ -480,7 +498,11 @@ def _module_string_constants(tree: ast.Module) -> dict[str, str]:
             continue
         target = assignment.targets[0]
         value = assignment.value
-        if isinstance(target, ast.Name) and isinstance(value, ast.Constant) and isinstance(value.value, str):
+        if (
+            isinstance(target, ast.Name)
+            and isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+        ):
             constants[target.id] = value.value
     return constants
 
@@ -545,7 +567,9 @@ def _check_extracted_contract_bundle(
             "missing manifest is refused at ContractBundle load",
         )
     else:
-        raise AssertionError("red: r21-style manifest omission reached preflight instead of load refusal")
+        raise AssertionError(
+            "red: r21-style manifest omission reached preflight instead of load refusal"
+        )
 
 
 def _check_manifest_matches_flow(contracts: Path) -> None:
@@ -624,15 +648,12 @@ def _check_archive_guard_rejects_pre_fix_omission() -> None:
 def _check_rendered_outputs(output_root: Path, real_sha256: str) -> None:
     formula = (output_root / "Formula" / "solet.rb").read_text(encoding="utf-8")
     lock = json.loads(
-        (output_root / "solet_cli" / "homebrew" / "seed.lock.json").read_text(
-            encoding="utf-8"
-        )
+        (output_root / "solet_cli" / "homebrew" / "seed.lock.json").read_text(encoding="utf-8")
     )
     _check(str(real_sha256) in formula, "rendered formula carries the real checksum")
     _check(lock["archive_sha256"] == real_sha256, "rendered lock carries the real checksum")
     _check(
-        "Pathname(__dir__)" in formula
-        and "buildpath" not in formula.split("seed.lock")[0][-80:],
+        "Pathname(__dir__)" in formula and "buildpath" not in formula.split("seed.lock")[0][-80:],
         "formula installs the lock from the tap directory, not the downloaded payload",
     )
 
@@ -655,7 +676,8 @@ def _check_staged_metadata_is_rerenderable(output_root: Path) -> None:
     _check(result.returncode == 0, f"staged metadata re-renders: {result.stderr}")
     for relative_path in ("Formula/solet.rb", "solet_cli/homebrew/seed.lock.json"):
         _check(
-            (output_root / relative_path).read_bytes() == (rerender_root / relative_path).read_bytes(),
+            (output_root / relative_path).read_bytes()
+            == (rerender_root / relative_path).read_bytes(),
             f"re-rendered {relative_path} is byte-identical",
         )
 
@@ -695,7 +717,8 @@ def _check_dev_mode_stage(
     formula = (output / "Formula" / "solet.rb").read_text(encoding="utf-8")
     receipt = _install_source_receipt(formula)
     _check(
-        receipt == {
+        receipt
+        == {
             "schema_version": 1,
             "mode": "dev",
             "source_commit": manager_ref,
@@ -741,8 +764,7 @@ def _check_lock_only(
         lock["repository"] == _OTHER_SEED_REPOSITORY
         and lock["profile"] == _OTHER_SEED_PROFILE
         and lock["release_tag"] == _RELEASE_TAG,
-        "--lock-only lock carries the given (repository, profile, tag), "
-        "not the canonical seed's",
+        "--lock-only lock carries the given (repository, profile, tag), not the canonical seed's",
     )
     _check(
         lock["commit"] == expected_commit and lock["tree_hash"] == expected_tree,

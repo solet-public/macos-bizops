@@ -523,9 +523,7 @@ def _require_contract_files(
     *,
     origin: Literal["production", "explicit", "explicit_development"],
 ) -> None:
-    missing = tuple(
-        name for name in _CONTRACT_FILENAMES if not (directory / name).is_file()
-    )
+    missing = tuple(name for name in _CONTRACT_FILENAMES if not (directory / name).is_file())
     if not missing:
         return
     rendered_missing = ", ".join(missing)
@@ -535,7 +533,8 @@ def _require_contract_files(
         else "Pass a reviewed development contract directory containing the complete bundle."
     )
     raise ContractError(
-        f"{origin} setup contract directory is incomplete at {directory}; missing: {rendered_missing}",
+        f"{origin} setup contract directory is incomplete at {directory}; "
+        f"missing: {rendered_missing}",
         repair=repair,
     )
 
@@ -585,9 +584,7 @@ def _normalize_legacy_resume_flow_v1(
     normalized_operations = cast(
         dict[str, dict[str, dict[str, JsonValue]]], normalized["operations"]
     )
-    normalized_decisions = cast(
-        dict[str, dict[str, dict[str, JsonValue]]], normalized["decisions"]
-    )
+    normalized_decisions = cast(dict[str, dict[str, dict[str, JsonValue]]], normalized["decisions"])
     normalized_operations["install_python_runtime"]["idempotency"]["postcondition_probe_refs"] = [
         "python_version_valid"
     ]
@@ -604,9 +601,10 @@ def _normalize_legacy_resume_flow_v1(
         "postgres_ready",
         "pgvector_ready",
     ]
-    normalized_operations["install_shell_integration"]["idempotency"][
-        "precondition_probe_refs"
-    ] = ["fresh_shell_path_valid", "fresh_shell_python_valid"]
+    normalized_operations["install_shell_integration"]["idempotency"]["precondition_probe_refs"] = [
+        "fresh_shell_path_valid",
+        "fresh_shell_python_valid",
+    ]
     normalized_operations["configure_lm_studio_embeddings"]["idempotency"][
         "precondition_probe_refs"
     ] = ["embedding_request_succeeds"]
@@ -616,9 +614,11 @@ def _normalize_legacy_resume_flow_v1(
     normalized_operations["configure_lm_studio_inference"]["idempotency"][
         "postcondition_probe_refs"
     ] = []
-    normalized_decisions["inference_model"]["option_source"]["candidate_contract"][
-        "qualification_probe_refs"
-    ] = []
+    candidate_contract = cast(
+        dict[str, JsonValue],
+        normalized_decisions["inference_model"]["option_source"]["candidate_contract"],
+    )
+    candidate_contract["qualification_probe_refs"] = []
     normalized_operations["open_background_items_settings"]["idempotency"][
         "postcondition_probe_refs"
     ] = []
@@ -630,32 +630,29 @@ def _is_known_legacy_resume_shape(flow: dict[str, JsonValue]) -> bool:
     probes = flow.get("probes")
     if not isinstance(operations, dict) or not isinstance(probes, dict):
         return False
-    return (
-        all(
-            _operation_has_postconditions(operations, operation_id, expected)
-            for operation_id, expected in (
-                ("install_python_runtime", ["python_version_valid", "fresh_shell_python_valid"]),
-                ("install_postgresql", ["postgres_binary_version_valid", "pgvector_ready"]),
-                (
-                    "configure_postgresql",
-                    ["postgres_ready", "postgres_role_policy_valid", "pgvector_ready"],
-                ),
-                ("install_shell_integration", ["fresh_shell_path_valid", "fresh_shell_python_valid"]),
-                ("configure_lm_studio_embeddings", ["embedding_request_succeeds"]),
-                ("configure_lm_studio_inference", ["structured_action_qualification"]),
-                ("open_background_items_settings", ["launchagent_running"]),
-            )
+    return all(
+        _operation_has_postconditions(operations, operation_id, expected)
+        for operation_id, expected in (
+            ("install_python_runtime", ["python_version_valid", "fresh_shell_python_valid"]),
+            ("install_postgresql", ["postgres_binary_version_valid", "pgvector_ready"]),
+            (
+                "configure_postgresql",
+                ["postgres_ready", "postgres_role_policy_valid", "pgvector_ready"],
+            ),
+            ("install_shell_integration", ["fresh_shell_path_valid", "fresh_shell_python_valid"]),
+            ("configure_lm_studio_embeddings", ["embedding_request_succeeds"]),
+            ("configure_lm_studio_inference", ["structured_action_qualification"]),
+            ("open_background_items_settings", ["launchagent_running"]),
         )
-        and all(
-            _probe_has_remediations(probes, probe_id, expected)
-            for probe_id, expected in (
-                (
-                    "fresh_shell_python_valid",
-                    ["install_python_runtime", "install_shell_integration"],
-                ),
-                ("pgvector_ready", ["install_postgresql", "configure_postgresql"]),
-                ("launchagent_running", ["install_launchagent"]),
-            )
+    ) and all(
+        _probe_has_remediations(probes, probe_id, expected)
+        for probe_id, expected in (
+            (
+                "fresh_shell_python_valid",
+                ["install_python_runtime", "install_shell_integration"],
+            ),
+            ("pgvector_ready", ["install_postgresql", "configure_postgresql"]),
+            ("launchagent_running", ["install_launchagent"]),
         )
     )
 

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TypeGuard
 
@@ -41,6 +44,11 @@ _QUALIFIED_SOURCE_KINDS = {
     "codex_local": "codex_local",
     "claude_local": "claude_code_local",
 }
+_KNOWLEDGE_READINESS_POLL_INITIAL_SECONDS = 0.5
+_KNOWLEDGE_READINESS_POLL_MAX_SECONDS = 5.0
+_KNOWLEDGE_RESULT_REQUIRED_FIELDS = frozenset(
+    {"content", "knowledge_base", "file_path", "score", "tier", "memory_id"}
+)
 
 
 def partition_session_roots(roots: list[Path]) -> tuple[list[Path], list[Path]]:
@@ -479,19 +487,158 @@ def _read_text(path: Path) -> str:
 
 
 def knowledge(request: AdapterRequest, runtime: Runtime) -> JsonObject:
-    outcome = _solet_call(
-        request,
-        runtime,
-        "service_interface::knowledge_service::search",
-        {"query": "session start orientation", "top_k": 1},
-    )
+    if request.probe_purpose == "stage_exit":
+        return _wait_for_knowledge_retrieval(request, runtime)
+    return _knowledge_probe(request, runtime)
+
+
+def _wait_for_knowledge_retrieval(
+    request: AdapterRequest,
+    runtime: Runtime,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> JsonObject:
+    """Poll the measured retrieval result until indexing is observable or exhausted.
+
+    Bridge health proves only that the target is reachable.  The completion
+    boundary additionally requires a corpus result, so an empty *successful*
+    retrieval is retried with bounded backoff inside the already-approved probe
+    timeout. Transport and protocol failures remain immediate failures.
+    """
+
+    deadline = monotonic() + request.timeout_seconds
+    delay = _KNOWLEDGE_READINESS_POLL_INITIAL_SECONDS
+    attempts = 0
+    last_outcome: CommandOutcome | None = None
+    while True:
+        remaining = deadline - monotonic()
+        call_timeout = min(60, math.floor(remaining))
+        if call_timeout < 1:
+            if last_outcome is None:
+                return _knowledge_timeout_failure(request, attempts, remaining)
+            return _knowledge_probe_result(request, last_outcome, attempts)
+        outcome = _knowledge_call(request, runtime, timeout_seconds=call_timeout)
+        last_outcome = outcome
+        attempts += 1
+        if outcome.stdout_truncated or outcome.stderr_truncated:
+            return truncated_solet_call_output(
+                request,
+                "service_interface::knowledge_service::search",
+                outcome,
+            )
+        state = _knowledge_state(outcome)
+        if state != "empty":
+            return _knowledge_probe_result(request, outcome, attempts)
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return _knowledge_probe_result(request, outcome, attempts)
+        sleep(min(delay, remaining))
+        delay = min(delay * 2, _KNOWLEDGE_READINESS_POLL_MAX_SECONDS)
+
+
+def _knowledge_probe(request: AdapterRequest, runtime: Runtime) -> JsonObject:
+    outcome = _knowledge_call(request, runtime)
     if outcome.stdout_truncated or outcome.stderr_truncated:
         return truncated_solet_call_output(
             request,
             "service_interface::knowledge_service::search",
             outcome,
         )
-    return nonempty_process_probe(request, outcome, "knowledge_retrieval")
+    return _knowledge_probe_result(request, outcome, 1)
+
+
+def _knowledge_call(
+    request: AdapterRequest,
+    runtime: Runtime,
+    *,
+    timeout_seconds: int | None = None,
+) -> CommandOutcome:
+    outcome = _solet_call(
+        request,
+        runtime,
+        "service_interface::knowledge_service::search",
+        {"query": "session start orientation", "top_k": 1},
+        timeout_seconds=timeout_seconds,
+    )
+    return outcome
+
+
+def _knowledge_state(outcome: CommandOutcome) -> str:
+    if not _call_succeeded(outcome):
+        return "failed"
+    payload = _call_payload(outcome)
+    data_shape = (payload.get("count"), payload.get("results"))
+    if not _valid_knowledge_payload(data_shape):
+        return "malformed"
+    count, results = data_shape
+    return "nonempty" if count > 0 or bool(results) else "empty"
+
+
+def _valid_knowledge_payload(
+    data_shape: tuple[object, object],
+) -> TypeGuard[tuple[int, list[object]]]:
+    count, results = data_shape
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        return False
+    if not isinstance(results, list) or count != len(results):
+        return False
+    return all(
+        isinstance(row, dict) and _KNOWLEDGE_RESULT_REQUIRED_FIELDS <= row.keys()
+        for row in results
+    )
+
+
+def _knowledge_probe_result(
+    request: AdapterRequest,
+    outcome: CommandOutcome,
+    attempts: int,
+) -> JsonObject:
+    if outcome.timed_out:
+        return _knowledge_timeout_failure(request, attempts)
+    state = _knowledge_state(outcome)
+    if state in {"failed", "malformed"}:
+        return _knowledge_protocol_failure(request, attempts)
+    base = nonempty_process_probe(request, outcome, "knowledge_retrieval")
+    evidence_items = base.get("evidence")
+    if isinstance(evidence_items, list) and evidence_items and isinstance(evidence_items[0], dict):
+        evidence_items[0]["summary"] = (
+            f"knowledge retrieval verified after {attempts} measured indexing readiness poll(s)"
+            if state == "nonempty"
+            else f"knowledge retrieval remained empty through {attempts} measured indexing readiness poll(s)"
+        )
+    return base
+
+
+def _knowledge_protocol_failure(request: AdapterRequest, attempts: int) -> JsonObject:
+    return _boolean_probe(
+        request,
+        "knowledge_retrieval",
+        False,
+        [f"attempts={attempts}", "data_shape=missing_valid_count_results"],
+        "service_interface::knowledge_service::search",
+        "Repair the knowledge-service result envelope before retrying setup.",
+        error_kind="knowledge_retrieval_protocol_invalid",
+    )
+
+
+def _knowledge_timeout_failure(
+    request: AdapterRequest,
+    attempts: int,
+    remaining_seconds: float | None = None,
+) -> JsonObject:
+    observed = [f"attempts={attempts}"]
+    if remaining_seconds is not None:
+        observed.append(f"remaining_seconds={remaining_seconds:.6f}")
+    return _boolean_probe(
+        request,
+        "knowledge_retrieval",
+        False,
+        observed,
+        "service_interface::knowledge_service::search",
+        "Increase the knowledge readiness budget or retry after indexing is available.",
+        error_kind="knowledge_retrieval_timeout",
+    )
 
 
 def journal_resume(request: AdapterRequest, runtime: Runtime) -> JsonObject:

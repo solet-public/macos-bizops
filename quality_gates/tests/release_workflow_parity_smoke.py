@@ -7,6 +7,7 @@ payload correctly excludes this checkout's CI workflow.
 
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 import sys
@@ -73,13 +74,9 @@ def _build_seed_fixture(root: Path, checkout_name: str = "seed-checkout") -> Pat
     for name in ("LICENSE", "NOTICE"):
         (checkout / name).write_bytes((_REPOSITORY / name).read_bytes())
     (checkout / "solet_cli" / "homebrew").mkdir(parents=True)
-    (checkout / "solet_cli" / "pyproject.toml").write_text(
-        '[project]\nname = "solet-cli"\nversion = "0.1.0"\n', encoding="utf-8"
-    )
+    (checkout / "solet_cli" / "pyproject.toml").write_text('[project]\nname = "solet-cli"\nversion = "0.1.0"\n', encoding="utf-8")
     (checkout / "solet_cli" / "src.marker").write_text("manager source\n", encoding="utf-8")
-    (checkout / "solet_cli" / "homebrew" / "seed.lock.json.template").write_text(
-        "{}\n", encoding="utf-8"
-    )
+    (checkout / "solet_cli" / "homebrew" / "seed.lock.json.template").write_text("{}\n", encoding="utf-8")
     (checkout / "solet_setup_contracts").mkdir()
     (checkout / "solet_setup_contracts" / "pyproject.toml").write_text(
         '[project]\nname = "solet-setup-contracts"\nversion = "0.1.0"\n',
@@ -89,6 +86,27 @@ def _build_seed_fixture(root: Path, checkout_name: str = "seed-checkout") -> Pat
     contracts.mkdir(parents=True)
     for relative_path in _CONTRACT_PATHS:
         (checkout / relative_path).write_text("{}\n", encoding="utf-8")
+    (contracts / "existing_install_flow.schema.json").write_text("{}\n", encoding="utf-8")
+    (checkout / "PROVENANCE.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "seed_id": "123e4567-e89b-12d3-a456-426614174000",
+                "origin_id": "123e4567-e89b-12d3-a456-426614174001",
+                "source_commit": "a" * 40,
+                "manifest_sha256": "b" * 64,
+                "bundle": {"name": "macos-bizops", "platform": "local"},
+                "source_date": "2026-09-15T00:00:00+00:00",
+                "lineage": [],
+                "ancestry": [],
+                "signature": None,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     _run_git(checkout, "init", "-q")
     _run_git(checkout, "add", "-A")
     _run_git(checkout, "commit", "-q", "-m", "seed fixture")
@@ -100,15 +118,11 @@ def _workflow_stage_argv(workspace: Path, output_root: Path) -> list[str]:
     """Materialize the real workflow staging command for the local fixture."""
     workflow = _WORKFLOW.read_text(encoding="utf-8")
     _check(
-        "Immutable tag on this repository" in workflow
-        and "repository: ${{ github.repository }}" in workflow
-        and "https://github.com/${{ github.repository }}.git" in workflow,
+        "Immutable tag on this repository" in workflow and "repository: ${{ github.repository }}" in workflow and "https://github.com/${{ github.repository }}.git" in workflow,
         "workflow uses static dispatch-description text and runtime context where evaluated",
     )
     _check(
-        "seed_profile:" in workflow
-        and 'default: "macos-bizops"' in workflow
-        and '--seed-profile "${{ inputs.seed_profile }}"' in workflow,
+        "seed_profile:" in workflow and 'default: "macos-bizops"' in workflow and '--seed-profile "${{ inputs.seed_profile }}"' in workflow,
         "workflow parameterizes the required seed profile",
     )
     lines = workflow.splitlines()
@@ -148,16 +162,11 @@ def _workflow_stage_argv(workspace: Path, output_root: Path) -> list[str]:
     return [
         sys.executable,
         str(_SCRIPT),
-        *(
-            {"manager-checkout": str(workspace / "manager-checkout"), "seed-checkout": str(workspace / "seed-checkout")}.get(value, value)
-            for value in argv[2:]
-        ),
+        *({"manager-checkout": str(workspace / "manager-checkout"), "seed-checkout": str(workspace / "seed-checkout")}.get(value, value) for value in argv[2:]),
     ]
 
 
-def _required_line_index(
-    lines: list[str], expected: str, *, start: int, label: str
-) -> int:
+def _required_line_index(lines: list[str], expected: str, *, start: int, label: str) -> int:
     index = next(
         (position for position in range(start, len(lines)) if lines[position].strip() == expected),
         None,
@@ -219,9 +228,7 @@ def _check_manager_root_layout_is_red(root: Path, source_checkout: Path) -> None
         text=True,
     )
     _check(
-        result.returncode != 0
-        and "--manager-checkout must be clean before staging" in result.stderr
-        and "?? seed-checkout/" in result.stderr,
+        result.returncode != 0 and "--manager-checkout must be clean before staging" in result.stderr and "?? seed-checkout/" in result.stderr,
         f"pre-r3 manager-root workspace is red for the nested seed checkout: {result.stderr}",
     )
 
